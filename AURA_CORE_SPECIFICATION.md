@@ -71,6 +71,7 @@ Aura recognizes that "Developer Experience" for an AI agent is different than fo
 *   **Semantic Error Diagnostics**: The "Intent Poisoning" error was upgraded from a generic alert to a proactive debugging tool. It now explicitly lists the missing logic nodes and provides an example commit message to resolve the block instantly.
 *   **Flexible CLI Parsing**: The command parser was rewritten to be more resilient, supporting both positional and flag-based arguments (e.g., `verify-env --target production`) to reduce "human-error" crashes.
 *   **Lightweight Development Mode**: Introduced a `--dev` flag for `secure-init`. For solo developers, this bypasses the enterprise-grade 2-of-3 Multi-Sig protocols and socket listeners, generating a fast local AES key instead to reduce setup friction.
+*   **Sovereign Allowlist (Request Access)**: To solve the "Semantic Sentinel" false-positive problem (e.g., flagging legitimate `Authorization` headers), a node-level allowlist was implemented. Developers can now use the `aura request-access <identifier>` protocol to explicitly authorize specific logic nodes to contain high-entropy strings, maintaining security without blocking production workflows.
 
 ---
 
