@@ -10,26 +10,32 @@
     </style>
 </head>
 <body class="min-h-screen flex flex-col items-center justify-center p-4">
-    <div class="max-w-3xl text-center space-y-8">
+    <div class="max-w-3xl text-center space-y-8 relative">
+        <div class="absolute -top-12 left-1/2 -translate-x-1/2 bg-blue-500/20 text-blue-300 px-4 py-1 rounded-full text-xs font-mono font-bold tracking-widest uppercase border border-blue-500/30">
+            v0.2.0-alpha (The Amnesia Release)
+        </div>
         <h1 class="text-6xl font-extrabold bg-clip-text text-transparent bg-gradient-to-r from-cyan-400 to-blue-500">
             Aura Semantic Engine
         </h1>
         <p class="text-xl text-slate-400 leading-relaxed">
-            The mathematical version control system for the AGI era.<br/>
+            The open-source, mathematical version control system for the AGI era.<br/>
             Track logic, not lines. Stop AI hallucinations before they merge.
         </p>
         
-        <div class="bg-slate-900 border border-slate-700 p-6 rounded-xl font-mono text-left text-sm text-cyan-300 shadow-2xl inline-block mt-8">
-            <span class="text-slate-500"># Install the Local Engine (macOS/Linux)</span><br/>
+        <div class="bg-slate-900 border border-slate-700 p-6 rounded-xl font-mono text-left text-sm text-cyan-300 shadow-2xl inline-block mt-8 w-full max-w-lg">
+            <span class="text-slate-500"># Install the Open Core Engine (macOS/Linux)</span><br/>
             <span class="text-pink-500">curl</span> -fsSL https://auravcs.com/install.sh | <span class="text-yellow-400">bash</span><br/><br/>
             <span class="text-slate-500"># Inside any Git repository</span><br/>
             <span class="text-green-400">aura</span> init
         </div>
         
-        <div class="mt-12 flex justify-center gap-4 text-sm text-slate-500">
-            <a href="https://github.com/AuraLabs" class="hover:text-cyan-400 transition-colors">GitHub</a>
+        <div class="mt-12 flex justify-center gap-6 text-sm text-slate-400 font-medium">
+            <a href="https://github.com/Naridon-Inc/aura" class="hover:text-cyan-400 transition-colors flex items-center gap-2">
+                <svg viewBox="0 0 24 24" width="16" height="16" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round" class="css-i6dzq1"><path d="M9 19c-5 1.5-5-2.5-7-3m14 6v-3.87a3.37 3.37 0 0 0-.94-2.61c3.14-.35 6.44-1.54 6.44-7A5.44 5.44 0 0 0 20 4.77 5.07 5.07 0 0 0 19.91 1S18.73.65 16 2.48a13.38 13.38 0 0 0-7 0C6.27.65 5.09 1 5.09 1A5.07 5.07 0 0 0 5 4.77a5.44 5.44 0 0 0-1.5 3.78c0 5.42 3.3 6.61 6.44 7A3.37 3.37 0 0 0 9 18.13V22"></path></svg>
+                GitHub (Apache 2.0)
+            </a>
             <span>•</span>
-            <a href="/dashboard.html" class="hover:text-cyan-400 transition-colors">Team Dashboard</a>
+            <a href="/enterprise" class="hover:text-cyan-400 transition-colors">Aura Cloud (Enterprise)</a>
             <span>•</span>
             <a href="https://api.auravcs.com/health" class="hover:text-green-400 transition-colors">API Status</a>
         </div>
