@@ -65,6 +65,13 @@ Before any metadata is sent to an embedding API, Aura's `redact.rs` module perfo
 *   **Regex Pass**: Removes IPs, Emails, and API Keys.
 *   **Information Theory Pass**: Calculates the Shannon Entropy of every string. If a string has high entropy (indicating a cryptographic key or secret), it is automatically replaced with `[REDACTED_HIGH_ENTROPY]`.
 
+### 3.6 High-Fidelity DX & UX (Autonomous Interaction)
+Aura recognizes that "Developer Experience" for an AI agent is different than for a human.
+*   **Non-Interactive Configuration**: Added the `aura config set <key> <value>` protocol. This allows AI agents to configure Aura’s security posture (Strict Mode, Dev Mode) autonomously without being blocked by TTY/Interactive terminal menus.
+*   **Semantic Error Diagnostics**: The "Intent Poisoning" error was upgraded from a generic alert to a proactive debugging tool. It now explicitly lists the missing logic nodes and provides an example commit message to resolve the block instantly.
+*   **Flexible CLI Parsing**: The command parser was rewritten to be more resilient, supporting both positional and flag-based arguments (e.g., `verify-env --target production`) to reduce "human-error" crashes.
+*   **Lightweight Development Mode**: Introduced a `--dev` flag for `secure-init`. For solo developers, this bypasses the enterprise-grade 2-of-3 Multi-Sig protocols and socket listeners, generating a fast local AES key instead to reduce setup friction.
+
 ---
 
 ## 4. The Development Timeline: Phases of Evolution
@@ -98,13 +105,22 @@ Aura is designed with "Sovereign Defaults." Every feature—from encryption to t
 
 ## 6. The Verdict: Aura vs. The Competition
 
-| Dimension | Legacy Git | Entire.io | **Aura** |
+| Dimension | Legacy Git | Entire CLI | **Aura** |
 | :--- | :--- | :--- | :--- |
 | **Unit of Change** | Text Line | Chat Session | **AST Logic Node** |
+| **Orchestration** | None | 0/100 | **85/100 (Native GSD)** |
+| **Rewind Mechanic**| Manual Diff | 100/100 (Session Memory) | **90/100 (Surgical Project)** |
 | **Understanding** | Zero | Metadata | **Deep Semantic Meaning** |
 | **Review Process** | Manual Diff | Audit Log | **Blast Radius Visualization** |
 | **Privacy** | Public/Cloud | SaaS Silo | **Sovereign Local Vault** |
-| **Conflict Handling** | Manual | Manual | **Autonomous Arbitration** |
+
+### The "Rewind" Nuance: Project vs. Session
+While Aura is the ultimate architectural "God Tool," there is a nuanced distinction between Aura and tools like **Entire CLI** when it comes to the "Rewind" mechanic.
+
+*   **Entire CLI (The Session Time Machine)**: Entire is obsessively focused on the *AI's conversational context*. When an AI hallucinates for 20 minutes, `entire rewind` not only restores the filesystem but physically wipes the AI's internal chat history (`.entire/metadata/`). It erases the AI's memory of the mistake, scoring a 100/100 for immediate, localized session recovery.
+*   **Aura (The Project Time Machine)**: Aura tracks the *Codebase's Logic Structure*. `aura snapshot` and `aura rewind` guarantee the AST (Abstract Syntax Tree) is perfectly sound when rolling back massive, multi-file structural changes. While it scores a 90/100 for rewind because it doesn't aggressively wipe the host AI's conversational transcript in the exact same way Entire does, it excels at surgical, long-term codebase recovery (e.g., reverting a single function 3 months later without touching surrounding code).
+
+If a team must choose a single foundational layer, **Aura is the victor** because it combines the orchestration of GSD with robust snapshot mechanics, powered by a deterministic semantic engine.
 
 ---
 
