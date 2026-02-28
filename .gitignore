@@ -1,0 +1,10 @@
+# Aura Sovereign Vault: Ignore Rules
+node_modules/
+dist/
+target/
+*.log
+*.zip
+*.tar.gz
+*.pem
+.env
+.DS_Store

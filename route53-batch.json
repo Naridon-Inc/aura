@@ -1,0 +1,23 @@
+{
+  "Comment": "CREATE A records for auravcs.com and api.auravcs.com",
+  "Changes": [
+    {
+      "Action": "UPSERT",
+      "ResourceRecordSet": {
+        "Name": "auravcs.com",
+        "Type": "A",
+        "TTL": 300,
+        "ResourceRecords": [{"Value": "51.102.104.41"}]
+      }
+    },
+    {
+      "Action": "UPSERT",
+      "ResourceRecordSet": {
+        "Name": "api.auravcs.com",
+        "Type": "A",
+        "TTL": 300,
+        "ResourceRecords": [{"Value": "51.102.104.41"}]
+      }
+    }
+  ]
+}
