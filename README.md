@@ -68,7 +68,7 @@ $ aura execute
 
 ---
 
-## 🆕 What's New in v0.1.1-alpha (The "Superb" Patch)
+## 🆕 What's New in v0.2.0-alpha (The "Amnesia" Release)
 
 This release transforms Aura from a backend security prototype into a full-stack, AI-native infrastructure.
 
