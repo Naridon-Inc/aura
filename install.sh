@@ -6,26 +6,9 @@ set -e
 
 echo ""
 echo "========================================================"
-echo "    Aura Semantic Engine : v4.0 Alpha (Closed Beta)     "
+echo "    Aura Semantic Engine : v0.2.0-alpha (Open Source)   "
 echo "========================================================"
 echo ""
-
-echo "Aura is currently in a gated preview for design partners."
-echo "Please enter your cryptographic invite token to continue."
-echo ""
-read -p "Invite Token: " AURA_TOKEN
-
-# Simple mock validation for the beta feel
-if [ -z "$AURA_TOKEN" ] || [ ${#AURA_TOKEN} -lt 16 ]; then
-    echo ""
-    echo "❌ Error: Invalid or expired invite token."
-    echo "To request access to the private beta, please visit: https://auravcs.com"
-    exit 1
-fi
-
-echo ""
-echo "🔐 Token verified. Authenticating with Sovereign Vault..."
-sleep 1.5
 
 # Detect OS and Architecture
 OS="$(uname -s)"
@@ -34,7 +17,7 @@ ARCH="$(uname -m)"
 echo "✨ Installing Aura Semantic Engine..."
 
 VERSION="v0.2.0-alpha"
-REPO="AuraLabs/aura"
+REPO="Naridon-Inc/aura"
 
 # Map architecture
 case "$ARCH" in
@@ -87,7 +70,7 @@ else
     # Clone and build
     TMP_DIR=$(mktemp -d)
     git clone https://github.com/${REPO}.git "$TMP_DIR"
-    cd "$TMP_DIR"
+    cd "$TMP_DIR/aura"
     cargo install --path . --locked
     echo "✓ Aura compiled and installed successfully to ~/.cargo/bin/aura"
     
@@ -98,5 +81,4 @@ fi
 
 echo ""
 echo "🚀 Aura is ready!"
-echo "Run 'aura login --token $AURA_TOKEN' to authenticate your local daemon."
 echo "Run 'aura init' inside any Git repository to begin tracking semantic AI decisions."
