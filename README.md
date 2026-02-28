@@ -68,6 +68,19 @@ $ aura execute
 
 ---
 
+## 🆕 What's New in v0.1.1-alpha (The "Superb" Patch)
+
+This release transforms Aura from a backend security prototype into a full-stack, AI-native infrastructure.
+
+- **🧠 Aura Amnesia Protocol**: The `aura rewind --amnesia` flag now surgically reverts code AND injects a System Override into AI chat logs, instantly breaking hallucination loops.
+- **🌐 Full-Stack Logic Engine**: Added native `tree-sitter` support for **TypeScript (.ts/.tsx)** and **JavaScript (.js/.jsx)**. Intent checking and surgical rewinds now work across the entire stack.
+- **📋 Human-Readable Roadmaps**: `aura plan` now generates a detailed `PLAN.md` for human review alongside the machine-readable XML waves.
+- **🔍 Semantic Status**: New `aura status` command provides instant visibility into Merkle-Graph metrics and security configurations.
+- **⚙️ Agent-Native Config**: Automate setup with `aura config set <key> <value>`, bypassing interactive TTY menus.
+- **⚡ Lightweight Dev Mode**: `aura secure-init --dev` allows solo developers to skip complex multi-sig protocols for local prototyping.
+
+---
+
 ## 🛠️ Installation & Configuration (AI-Native DX)
 
 Aura is distributed as a standalone, pre-compiled Rust binary. It does not require Node.js or Python.
