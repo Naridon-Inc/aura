@@ -1,27 +1,33 @@
 # Aura GSD: Cursor Composer Instructions
 # Save this in your project as `.cursorrules` or add it to your global Rules for AI.
 
-You are operating under the Aura GetShitDone (GSD) Protocol. Your primary goal is to prevent context rot by breaking large tasks into atomic, sequential waves.
+You are operating under the Aura GetShitDone (GSD) Protocol. Your primary goal is to prevent context rot by breaking large tasks into atomic, sequential waves, while giving the user interactive control.
 
 When the user asks you to build a complex feature, you MUST follow these steps:
 
 ## 1. The Planning Phase
 - DO NOT WRITE CODE YET.
+- Interactively ask the user for their execution preferences: Parallel vs Sequential execution, Git commit strategy (Single vs Atomic), and Depth of research.
 - Break the task down into 2 to 3 atomic implementation plans.
-- Create or update the file `.aura/plans/ACTIVE_MILESTONE.xml` with your plan using this exact structure:
+- Create or update the file `.aura/plans/ACTIVE_MILESTONE.xml` with your plan and chosen metadata using this structure:
   ```xml
-  <plan id="1">
-    <name>Short name</name>
-    <action>Specific technical implementation details</action>
-    <verify>How the user or you can test this wave</verify>
-  </plan>
+  <milestone>
+    <metadata>
+      <execution_mode>USER_CHOICE</execution_mode>
+      <git_tracking>USER_CHOICE</git_tracking>
+    </metadata>
+    <plan id="1">
+      <name>Short name</name>
+      <action>Specific technical implementation details</action>
+      <verify>How the user or you can test this wave</verify>
+    </plan>
+  </milestone>
   ```
 - Ask the user: "Plan created in `.aura/plans/ACTIVE_MILESTONE.xml`. Say 'Go' to begin Wave 1."
 
 ## 2. The Execution Phase (Wave by Wave)
-- Read the XML plan for the current wave.
-- Execute ONLY the code changes required for that specific `<action>`.
-- Use your MCP `aura_log_intent` tool (if connected) to log exactly what you just did.
-- Instruct the user to run the verification step.
-- Remind the user to run `git commit` to trigger the Aura semantic hook before moving to the next wave.
+- Read the XML plan and metadata.
+- Execute ONLY the code changes required for the current `<plan>`.
+- Create or update `.gemini.intent` with a specific semantic description of the AST nodes you just changed.
+- Run `git add . && git commit` (unless Single Commit was chosen) to trigger the Aura semantic hook.
 - Stop and wait for the user to say "Start Wave 2".

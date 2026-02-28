@@ -51,21 +51,24 @@ $ aura rewind retry_logic
 ```
 
 ### 3. Native GSD (GetShitDone) Orchestration
-To prevent "Context Rot" (where an AI gets confused during a massive task), Aura forces the LLM to behave like a disciplined engineer. 
+To prevent "Context Rot" (where an AI gets confused during a massive task), Aura forces the LLM to behave like a disciplined engineer with an **interactive planning workflow**.
 
 ```bash
 $ aura plan "Build a new Stripe billing module"
+> 📋 Configuring Milestone...
+> ? Run plans in parallel? (Parallel/Sequential) [Parallel]
+> ? Git tracking strategy? (Single/Atomic) [Atomic Commits]
 > ✓ Synthesized 3 atomic XML execution plans.
 
 $ aura execute
 > 🌊 Wave 1: Executing Plan 1 in isolated context...
 > 🛡️ Gatekeeper: Verified AST safety.
-> ✓ Auto-committed micro-state.
+> ✓ Auto-committed micro-state (Checkpoint: 6af8d339).
 ```
 
 ---
 
-## 🛠️ Installation (Zero Configuration)
+## 🛠️ Installation & Configuration (AI-Native DX)
 
 Aura is distributed as a standalone, pre-compiled Rust binary. It does not require Node.js or Python.
 
@@ -76,6 +79,17 @@ curl -fsSL https://auravcs.com/install.sh | bash
 Inside any existing Git repository, simply run:
 ```bash
 aura init
+```
+
+### ⚙️ Autonomous Configuration
+Aura is built for both humans and AI agents. You can configure it interactively via `aura config` or non-interactively using:
+```bash
+# For solo developers: Bypass heavy enterprise protocols
+aura config set dev-mode true
+aura secure-init --dev
+
+# For security: Enable strict architectural enforcement
+aura config set strict-mode true
 ```
 *Aura hooks into your Git workflow instantly. You just `git commit` exactly as you always have. Aura handles the math.*
 
