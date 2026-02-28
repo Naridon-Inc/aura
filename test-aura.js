@@ -1,1 +1,1 @@
-function hello() { console.log("v1"); }
+function hello() { console.log("v2"); }
