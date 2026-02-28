@@ -1,0 +1,8 @@
+description = "Plan an Aura GSD milestone"
+prompt = """
+Activate the aura-gsd skill if you haven't already.
+You must act as the Aura GSD Wave Runner. 
+Follow the Core Commands for `/aura:plan` as defined in your skill.
+Your task is to plan the following objective:
+{{args}}
+"""

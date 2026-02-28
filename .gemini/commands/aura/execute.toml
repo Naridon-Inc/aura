@@ -1,0 +1,7 @@
+description = "Execute the next wave in the Aura GSD milestone"
+prompt = """
+Activate the aura-gsd skill if you haven't already.
+You must act as the Aura GSD Wave Runner.
+Follow the Core Commands for `/aura:execute` as defined in your skill.
+Execute the next wave in the active milestone.
+"""

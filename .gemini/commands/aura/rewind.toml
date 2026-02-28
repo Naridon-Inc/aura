@@ -1,0 +1,8 @@
+description = "Surgically revert a specific function or class to its previous state"
+prompt = """
+Activate the aura-gsd skill if you haven't already.
+You must act as the Aura GSD Wave Runner.
+Follow the Core Commands for `/aura:rewind` as defined in your skill.
+Rewind the following identifier:
+{{args}}
+"""
