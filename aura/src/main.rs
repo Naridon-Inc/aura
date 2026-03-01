@@ -194,16 +194,16 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
-    /// 🚀 Initialize Aura in this repository with an interactive setup wizard
+    /// Initialize Aura in this repository with an interactive setup wizard
     Init,
-    /// 🧠 Plan a massive architectural objective using the native GSD Orchestrator
+    /// Plan a massive architectural objective using the native GSD Orchestrator
     Plan {
         /// The architectural objective to break down
         prompt: String,
     },
-    /// ⚡ Execute the currently planned milestone in atomic, AST-verified waves
+    /// Execute the currently planned milestone in atomic, AST-verified waves
     Execute,
-    /// ⏪ Surgically revert a specific function or class to a previous safe state
+    /// Surgically revert a specific function or class to a previous safe state
     Rewind {
         /// The name of the function or class to revert (e.g., "calculate_tax")
         identifier: String,
@@ -213,21 +213,21 @@ enum Commands {
         #[arg(long)]
         amnesia: bool,
     },
-    /// 📦 Generate a dense, token-optimized XML context block to pass to another AI agent
+    /// Generate a dense, token-optimized XML context block to pass to another AI agent
     Handover {
         /// The target agent (e.g., "cursor", "aider")
         agent: String,
     },
-    /// 🔍 View current gatekeeper status, semantic checkpoints, and configuration
+    /// View current gatekeeper status, semantic checkpoints, and configuration
     Status,
-    /// 🛡️  Audit the Git history for unsanctioned code pushed without AI intent verification
+    /// Audit the Git history for unsanctioned code pushed without AI intent verification
     Audit,
-    /// 🔐 Whitelist a specific logic node (e.g. Auth headers) for high-entropy secrets
+    /// Whitelist a specific logic node (e.g. Auth headers) for high-entropy secrets
     RequestAccess {
         /// The name of the function/class to exempt from Gatekeeper scrutiny
         identifier: String,
     },
-    /// ⚙️  Manage global Aura configuration (telemetry, api keys)
+    /// Manage global Aura configuration (telemetry, api keys)
     Config {
         #[command(subcommand)]
         sub: Option<ConfigSubcommands>,
