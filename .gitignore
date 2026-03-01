@@ -8,3 +8,5 @@ target/
 *.pem
 .env
 .DS_Store
+aura-cloud/
+reference/
