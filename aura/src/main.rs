@@ -172,7 +172,21 @@ fn perform_update() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 #[derive(Parser)]
-#[command(name = "aura", about = "AI-Native Semantic Version Control (Git-Native Edition)", version = CURRENT_VERSION)]
+#[command(
+    name = "aura", 
+    about = "🌌 Aura: The Semantic Time Machine for AI-Native Engineering
+Version: v0.2.0-alpha (Open Source)
+Doc: https://auravcs.com
+
+Aura tracks mathematical logic instead of textual lines, allowing you to mathematically
+verify AI intent, surgically rewind hallucinations, and coordinate massive code generation.", 
+    version = CURRENT_VERSION,
+    styles = clap::builder::Styles::styled()
+        .header(clap::builder::styling::AnsiColor::Cyan.on_default().bold())
+        .usage(clap::builder::styling::AnsiColor::Cyan.on_default().bold())
+        .literal(clap::builder::styling::AnsiColor::Blue.on_default().bold())
+        .placeholder(clap::builder::styling::AnsiColor::Cyan.on_default())
+)]
 struct Cli {
     #[command(subcommand)]
     command: Commands,
@@ -180,113 +194,104 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
-    /// Start the continuous semantic tracker daemon (The "DVR")
-    Daemon,
-    /// Initialize Aura in this repository with an interactive setup wizard
+    /// 🚀 Initialize Aura in this repository with an interactive setup wizard
     Init,
-    /// Check for and install updates to the Aura CLI
-    Update,
-    /// Extract AST metadata and stage AI chat history (Runs in pre-commit)
-    CaptureContext,
-    /// Injects the Aura-Checkpoint Trailer into the commit message (Runs in commit-msg)
-    InjectTrailer {
-        /// The path to the commit message file
-        commit_msg_file: String,
+    /// 🧠 Plan a massive architectural objective using the native GSD Orchestrator
+    Plan {
+        /// The architectural objective to break down
+        prompt: String,
     },
-    /// Persists the checkpoint permanently into the hidden branch (Runs in post-commit)
-    PersistCheckpoint,
-    /// Query the Local Brain to understand why past agents wrote the code
-    Ask {
-        /// The query string for semantic search
-        #[arg(default_value = "recent")]
-        query: String,
-    },
-    /// Generate a dense, token-optimized XML context block for passing to another agent
-    Handover {
-        /// The target agent (e.g., "cursor", "aider")
-        agent: String,
-    },
-    /// Surgically revert a specific function or class to its previous state
+    /// ⚡ Execute the currently planned milestone in atomic, AST-verified waves
+    Execute,
+    /// ⏪ Surgically revert a specific function or class to a previous safe state
     Rewind {
         /// The name of the function or class to revert (e.g., "calculate_tax")
         identifier: String,
         /// The file containing the logic block
         file_path: String,
-        /// Inject a System Override into the local AI chat history to wipe its memory of the hallucination
+        /// Wipe the local AI chat history of this hallucination
         #[arg(long)]
         amnesia: bool,
     },
-    /// Start the local Web Dashboard to view the Semantic AI History
-    Dashboard,
-    /// Visualize the Semantic Logic Graph (Merkle-DAG) using petgraph
-    Map,
-    /// Start the Model Context Protocol (MCP) stdio server for native AI Agent integration
-    Mcp,
-    /// Create a project-wide safety snapshot before massive AI refactoring (The Sledgehammer)
-    Snapshot {
-        /// A description of what the AI is about to attempt
-        description: String,
+    /// 📦 Generate a dense, token-optimized XML context block to pass to another AI agent
+    Handover {
+        /// The target agent (e.g., "cursor", "aider")
+        agent: String,
     },
-    /// Restore the entire project to a previous snapshot
-    Restore {
-        /// The snapshot ID to restore
-        snapshot_id: String,
-    },
-    /// Verify the semantic safety of the current project against a target deployment environment constraints file
-    VerifyEnv {
-        /// The target environment to simulate deployment for (e.g., 'production')
-        #[arg(short, long)]
-        target: Option<String>,
-        /// The target environment as a positional argument
-        #[arg(trailing_var_arg = true)]
-        pos_target: Vec<String>,
-    },
-    /// Authenticate with Aura Cloud to sync local logic graphs to the SaaS Enterprise layer
-    Login {
-        /// Your Aura Cloud API Token
-        token: String,
-    },
-    /// Sync cross-repo semantic graphs to enable external DependencyURIs
-    Sync {
-        /// The URL of the remote repository to sync
-        repo_url: String,
-    },
-    /// The Autonomous Arbitrator: Resolve semantic merge conflicts locally
-    Arbitrate {
-        /// The file containing the conflict
-        file_path: String,
-    },
-    /// Generate a Virtual Workspace with Logic Stubs for restricted code
-    GenerateStubs,
-    /// Initialize the Secure Key Exchange and Multi-Sig protocols
-    SecureInit {
-        /// Bypass Enterprise Multi-Sig and generate a fast local AES key for solo developers
-        #[arg(long)]
-        dev: bool,
-    },
-    /// Semantic Compaction: Prune implicit history to prevent repo bloat
-    Gc,
-    /// Orchestrate a massive project using native GSD meta-prompting (Avoid context rot)
-    Plan {
-        /// The architectural objective to break down
-        prompt: String,
-    },
-    /// Execute the currently planned milestone in atomic, AST-verified waves
-    Execute,
-    /// Display the current status of the Aura Semantic Engine
+    /// 🔍 View current gatekeeper status, semantic checkpoints, and configuration
     Status,
-    /// Audit the Git repository for unauthorized commits that bypassed the Semantic Gatekeeper
+    /// 🛡️  Audit the Git history for unsanctioned code pushed without AI intent verification
     Audit,
-    /// Request an override access for a specific logic node that triggered the Semantic Sentinel (e.g., hardcoded headers)
+    /// 🔐 Whitelist a specific logic node (e.g. Auth headers) for high-entropy secrets
     RequestAccess {
-        /// The name of the function or class to allowlist (e.g., "handleJoinLeague")
+        /// The name of the function/class to exempt from Gatekeeper scrutiny
         identifier: String,
     },
-    /// Manage global Aura configuration (e.g., Strict Mode, API Keys)
+    /// ⚙️  Manage global Aura configuration (telemetry, api keys)
     Config {
         #[command(subcommand)]
         sub: Option<ConfigSubcommands>,
     },
+    
+    // --- Internal / Hidden Commands ---
+    
+    /// (Internal) Extract AST metadata and stage AI chat history
+    #[command(hide = true)]
+    CaptureContext,
+    /// (Internal) Injects the Aura-Checkpoint Trailer into the commit message
+    #[command(hide = true)]
+    InjectTrailer { commit_msg_file: String },
+    /// (Internal) Persists the checkpoint permanently into the hidden branch
+    #[command(hide = true)]
+    PersistCheckpoint,
+    /// (Internal) Start the continuous semantic tracker daemon
+    #[command(hide = true)]
+    Daemon,
+    /// (Internal) Query the Local Brain to understand why past agents wrote code
+    #[command(hide = true)]
+    Ask { #[arg(default_value = "recent")] query: String },
+    /// (Internal) Start the local Web Dashboard
+    #[command(hide = true)]
+    Dashboard,
+    /// (Internal) Visualize the Semantic Logic Graph
+    #[command(hide = true)]
+    Map,
+    /// (Internal) Run an autonomous conflict resolution arbitration
+    #[command(hide = true)]
+    Arbitrate { file_path: String },
+    /// (Internal) Create compiler-safe dummy logic for Enterprise RBAC
+    #[command(hide = true)]
+    GenerateStubs,
+    /// (Internal) Semantic Compaction: Prune implicit history
+    #[command(hide = true)]
+    Gc,
+    /// (Internal) Check for and install updates to the Aura CLI
+    #[command(hide = true)]
+    Update,
+    /// (Internal) Start MCP server
+    #[command(hide = true)]
+    Mcp,
+    /// (Internal) Take project snapshot
+    #[command(hide = true)]
+    Snapshot { description: String },
+    /// (Internal) Restore project snapshot
+    #[command(hide = true)]
+    Restore { snapshot_id: String },
+    /// (Internal) Verify semantic safety
+    #[command(hide = true)]
+    VerifyEnv { 
+        #[arg(short, long)] target: Option<String>,
+        #[arg(trailing_var_arg = true)] pos_target: Vec<String>,
+    },
+    /// (Internal) Login to Aura Cloud
+    #[command(hide = true)]
+    Login { token: String },
+    /// (Internal) Sync with Aura Cloud
+    #[command(hide = true)]
+    Sync { repo_url: String },
+    /// (Internal) Initialize secure key exchange
+    #[command(hide = true)]
+    SecureInit { #[arg(long)] dev: bool },
 }
 
 #[derive(Subcommand)]
