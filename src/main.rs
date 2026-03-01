@@ -521,23 +521,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     ConfigManager::save(&current_config)?;
                     println!("{} Key securely saved to ~/.config/AuraLabs/Aura/credentials.json", "✓".green().bold());
                 }
-            }
+                }
 
-            // 3. SaaS Tethering
-            println!();
-            let tether = Confirm::with_theme(&ColorfulTheme::default())
-                .with_prompt("Would you like to tether to Aura Cloud for team collaboration and Cross-Repo tracing?")
-                .default(false)
-                .interact()?;
-            
-            if tether {
-                println!("  {} Run `aura login <token>` to complete SaaS tethering after setup.", "↳".dimmed());
-            }
-
-            // 4. Install Hooks
-            println!("\n{:-^80}\n", " SECURING REPOSITORY ".bold().blue());
-            println!("  {} Installing Semantic Git Hooks...", "⚙️ ".cyan());
-            if let Err(e) = HookInstaller::enable() {
+                // 4. Install Hooks
+                println!("\n{:-^80}\n", " SECURING REPOSITORY ".bold().blue());
+                println!("  {} Installing Semantic Git Hooks...", "⚙️ ".cyan());            if let Err(e) = HookInstaller::enable() {
                 println!("  {} {}", "✗".red().bold(), e);
                 return Ok(());
             }
