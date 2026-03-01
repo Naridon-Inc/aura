@@ -70,7 +70,7 @@ else
     # Clone and build
     TMP_DIR=$(mktemp -d)
     git clone https://github.com/${REPO}.git "$TMP_DIR"
-    cd "$TMP_DIR/aura"
+    cd "$TMP_DIR"
     cargo install --path . --locked
     echo "✓ Aura compiled and installed successfully to ~/.cargo/bin/aura"
     
