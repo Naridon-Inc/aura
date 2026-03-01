@@ -212,8 +212,8 @@ impl GsdEngine {
         let start_xml = text_str.find("<plan").unwrap_or(0);
         let end_xml = text_str.rfind("</plan>").map(|i| i + 7).unwrap_or(text_str.len());
         
-        let mut cleaned_xml = String::new();
-        let mut markdown_plan = String::new();
+        let cleaned_xml: String;
+        let mut markdown_plan: String;
 
         if start_xml < end_xml && start_xml != 0 {
             // We found valid XML tags
