@@ -8,11 +8,11 @@ axum = "0.8.8"
 bincode = "1"
 clap = { version = "4.5.60", features = ["derive"] }
 colored = "3.1.1"
-git2 = "0.20.4"
+git2 = { version = "0.20.4", features = ["vendored-openssl", "vendored-libgit2"] }
 indicatif = "0.18.4"
 notify = "8.2.0"
 petgraph = "0.8.3"
-reqwest = { version = "0.13.2", features = ["blocking", "json"] }
+reqwest = { version = "0.13.2", default-features = false, features = ["blocking", "json", "rustls-tls"] }
 age = "0.11.1"
 rusqlite = { version = "0.38.0", features = ["bundled"] }
 serde = { version = "1.0.228", features = ["derive"] }
