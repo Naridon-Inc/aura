@@ -20,6 +20,7 @@ pub async fn start_dashboard() {
     let app = Router::new()
         .route("/", get(serve_html))
         .route("/api/checkpoints", get(api_checkpoints))
+        .route("/api/plan", get(api_plan))
         .route("/api/webhook/rollback", post(webhook_rollback));
 
     let addr = SocketAddr::from(([127, 0, 0, 1], 8090));
@@ -44,6 +45,13 @@ async fn api_checkpoints() -> impl IntoResponse {
     let repo = Repository::open(".").unwrap();
     let checkpoints = CheckpointStore::get_all_checkpoints(&repo).unwrap_or_default();
     Json(checkpoints)
+}
+
+async fn api_plan() -> impl IntoResponse {
+    match std::fs::read_to_string(".aura/plans/PLAN.md") {
+        Ok(content) => Json(serde_json::json!({ "status": "ok", "content": content })),
+        Err(_) => Json(serde_json::json!({ "status": "empty", "content": "" })),
+    }
 }
 
 async fn webhook_rollback(ExtractJson(payload): ExtractJson<WebhookPayload>) -> impl IntoResponse {

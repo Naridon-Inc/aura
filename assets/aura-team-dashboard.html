@@ -152,24 +152,30 @@
 
         function App() {
             const [checkpoints, setCheckpoints] = useState([]);
-            const [view, setView] = useState('feed');
+            const [plan, setPlan] = useState(null);
+            const [view, setView] = useState('plan');
             const [loading, setLoading] = useState(false);
 
-            const fetchCheckpoints = async () => {
+            const fetchData = async () => {
                 setLoading(true);
                 try {
                     const res = await fetch('/api/checkpoints');
                     if (res.ok) {
                         const data = await res.json();
-                        
-                        // Filter out implicit background scans to keep UX focused on explicit intent
                         const explicitData = data.filter(cp => 
                             !cp.intent.startsWith('Automatically tracked') && 
                             !cp.intent.startsWith('No semantic logic changes')
                         );
-                        
                         explicitData.sort((a, b) => b.timestamp - a.timestamp);
                         setCheckpoints(explicitData);
+                    }
+                    
+                    const planRes = await fetch('/api/plan');
+                    if (planRes.ok) {
+                        const planData = await planRes.json();
+                        if (planData.status === 'ok') {
+                            setPlan(planData.content);
+                        }
                     }
                 } catch (e) {
                     console.error("Aura Daemon offline", e);
@@ -178,7 +184,7 @@
                 }
             };
 
-            useEffect(() => { fetchCheckpoints(); }, []);
+            useEffect(() => { fetchData(); }, []);
 
             return (
                 <div className="flex h-screen w-full">
@@ -196,6 +202,7 @@
 
                         <nav className="space-y-2 flex-1">
                             {[
+                                { id: 'plan', icon: 'ListChecks', label: 'Active Plan' },
                                 { id: 'feed', icon: 'Activity', label: 'Semantic Feed' },
                                 { id: 'gatekeeper', icon: 'ShieldCheck', label: 'Gatekeeper' },
                                 { id: 'graph', icon: 'Network', label: 'Merkle Graph' },
@@ -216,9 +223,9 @@
                             <div className="space-y-4">
                                 <div className="p-4 block-card">
                                     <div className="text-[9px] font-black text-zinc-700 uppercase mb-2">System Version</div>
-                                    <div className="text-xs font-bold text-white">AURA_OS v0.2.2</div>
+                                    <div className="text-xs font-bold text-white">AURA_OS v0.2.4</div>
                                 </div>
-                                <button onClick={fetchCheckpoints} className="w-full btn-secondary py-3 text-xs">
+                                <button onClick={fetchData} className="w-full btn-secondary py-3 text-xs">
                                     SYNC_SYSTEM
                                 </button>
                             </div>
@@ -247,6 +254,66 @@
 
                         {/* CONTENT VIEW */}
                         <div className="flex-1 p-10 max-w-5xl w-full mx-auto">
+                            {view === 'plan' && (
+                                <div className="space-y-8">
+                                    {!plan ? (
+                                        <div className="p-20 border-2 border-dashed border-zinc-900 text-center">
+                                            <Icon name="Compass" className="w-10 h-10 text-zinc-800 mb-4 mx-auto animate-pulse" />
+                                            <div className="text-xs font-black text-zinc-700 uppercase tracking-widest mb-2">No Active Milestone Found</div>
+                                            <div className="text-[10px] text-zinc-500">Run `aura plan "My Feature"` in the terminal to generate an orchestration plan.</div>
+                                        </div>
+                                    ) : (
+                                        <div className="block-border p-8 bg-zinc-950/20">
+                                            <div className="flex items-center gap-3 mb-8 pb-6 border-b-2 border-zinc-900">
+                                                <div className="p-3 bg-zinc-900">
+                                                    <Icon name="Map" className="w-6 h-6 text-white" />
+                                                </div>
+                                                <div>
+                                                    <h2 className="text-2xl font-black text-white uppercase tracking-tighter italic">Active Orchestration Plan</h2>
+                                                    <p className="text-[10px] font-bold text-zinc-500 uppercase tracking-widest mt-1">GSD Engine Coordinates</p>
+                                                </div>
+                                            </div>
+                                            <div className="space-y-4">
+                                                {plan.split('\n').map((line, i) => {
+                                                    if (line.trim().startsWith('#')) {
+                                                        const level = (line.match(/^#+/) || [''])[0].length;
+                                                        const text = line.replace(/^#+\s*/, '').replace(/\*\*/g, '');
+                                                        if (level === 1 || level === 2) return <h3 key={i} className="text-lg font-black text-white uppercase tracking-tight mt-6 mb-2 border-b border-zinc-900 pb-2">{text}</h3>;
+                                                        return <h4 key={i} className="text-sm font-bold text-zinc-300 mt-4 mb-2">{text}</h4>;
+                                                    }
+                                                    if (line.trim().startsWith('- [x]') || line.trim().startsWith('- [X]')) {
+                                                        return (
+                                                            <div key={i} className="flex items-start gap-3 p-3 bg-emerald-950/20 border-l-2 border-emerald-500 text-sm">
+                                                                <Icon name="CheckSquare" className="w-5 h-5 text-emerald-500 shrink-0 mt-0.5" />
+                                                                <span className="text-emerald-500 font-bold line-through opacity-80">{line.substring(5).replace(/\*\*/g, '').trim()}</span>
+                                                            </div>
+                                                        );
+                                                    }
+                                                    if (line.trim().startsWith('- [ ]')) {
+                                                        return (
+                                                            <div key={i} className="flex items-start gap-3 p-3 bg-zinc-900/50 border-l-2 border-zinc-700 text-sm">
+                                                                <Icon name="Square" className="w-5 h-5 text-zinc-600 shrink-0 mt-0.5" />
+                                                                <span className="text-zinc-300 font-bold">{line.substring(5).replace(/\*\*/g, '').trim()}</span>
+                                                            </div>
+                                                        );
+                                                    }
+                                                    if (line.trim().startsWith('- ')) {
+                                                        return (
+                                                            <div key={i} className="flex items-start gap-2 pl-2 text-sm text-zinc-400 my-1">
+                                                                <div className="w-1.5 h-1.5 rounded-full bg-zinc-700 mt-1.5 shrink-0" />
+                                                                <span>{line.substring(2).replace(/\*\*/g, '').trim()}</span>
+                                                            </div>
+                                                        );
+                                                    }
+                                                    if (line.trim() === '') return null;
+                                                    return <p key={i} className="text-sm text-zinc-500 leading-relaxed my-2">{line.replace(/\*\*/g, '')}</p>;
+                                                })}
+                                            </div>
+                                        </div>
+                                    )}
+                                </div>
+                            )}
+
                             {view === 'feed' && (
                                 <div className="space-y-8">
                                     {checkpoints.length === 0 && !loading && (
