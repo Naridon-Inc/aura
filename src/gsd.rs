@@ -29,31 +29,31 @@ impl GsdEngine {
         let model_string = match labor {
             CognitiveLabor::Architect => config.model_architect.clone().unwrap_or_else(|| {
                 match provider.as_str() {
-                    "anthropic" => "claude-4-6-opus-202602".to_string(),
-                    "openai" => "gpt-5.2-pro".to_string(),
-                    _ => "gemini-3-1-pro-ultra".to_string(),
+                    "anthropic" => "claude-3-7-sonnet-20250219".to_string(),
+                    "openai" => "gpt-4o".to_string(),
+                    _ => "gemini-2.5-pro".to_string(),
                 }
             }),
             CognitiveLabor::Researcher => config.model_researcher.clone().unwrap_or_else(|| {
                 match provider.as_str() {
-                    "anthropic" => "claude-3-5-haiku".to_string(), // Haiku 4.6 isn't listed, falling back to fastest known
-                    "openai" => "gpt-5.2-mini".to_string(),
+                    "anthropic" => "claude-3-5-haiku-20241022".to_string(),
+                    "openai" => "gpt-4o-mini".to_string(),
                     "mercury" => "mercury-2-reasoning".to_string(),
-                    _ => "gemini-3-flash".to_string(),
+                    _ => "gemini-2.5-flash".to_string(),
                 }
             }),
             CognitiveLabor::Auditor => config.model_auditor.clone().unwrap_or_else(|| {
                 match provider.as_str() {
-                    "anthropic" => "claude-4-6-opus-202602".to_string(),
-                    "openai" => "gpt-5.2-strict".to_string(),
-                    _ => "gemini-3-deep-think".to_string(),
+                    "anthropic" => "claude-3-7-sonnet-20250219".to_string(),
+                    "openai" => "o3-mini".to_string(),
+                    _ => "gemini-2.5-pro".to_string(),
                 }
             }),
             CognitiveLabor::Arbitrator => config.model_arbitrator.clone().unwrap_or_else(|| {
                 match provider.as_str() {
-                    "anthropic" => "claude-4-6-opus-fast".to_string(),
-                    "openai" => "gpt-5.3-codex".to_string(),
-                    _ => "gemini-3-1-pro".to_string(),
+                    "anthropic" => "claude-3-7-sonnet-20250219".to_string(),
+                    "openai" => "o3-mini".to_string(),
+                    _ => "gemini-2.5-flash".to_string(),
                 }
             }),
         };
@@ -150,6 +150,11 @@ impl GsdEngine {
                     if let Ok(json_res) = res.json::<serde_json::Value>() {
                         if let Some(text) = json_res["candidates"][0]["content"]["parts"][0]["text"].as_str() {
                             return Some(text.to_string());
+                        } else {
+                            // Print API errors for debugging
+                            if let Some(err) = json_res.get("error") {
+                                println!("{} API Error: {}", "⚠️".yellow(), err);
+                            }
                         }
                     }
                 }
@@ -271,65 +276,77 @@ impl GsdEngine {
         let final_research = research_data.lock().unwrap().join("\n");
         println!("  {} Research complete. {} specialized insights gathered.", "✓".green(), domains.len());
 
-        // --- DISCOVERY PHASE (GSD Logic) ---
-        println!("\n{} {}", "🤔".bold(), "Aura Architect: Analyzing Gray Areas...".cyan());
+        // --- DISCOVERY PHASE (Aura Discuss) ---
+        println!("\n{} {}", "🤔".bold(), "Aura Architect: Establishing Phase Context...".cyan());
         
         let discovery_prompt = format!(
-            "You are the Aura Architect. Analyze the following objective and context to identify 3 critical 'Gray Areas' (implementation decisions, UX choices, or edge cases) that require the user's input before a flawless plan can be generated.\n\
+            "CRITICAL: You are the Aura Architect in 'Discovery Mode'. \n\
+            Your task is to analyze the following objective and the AST graph to identify 3 critical implementation 'Gray Areas' (e.g., UI, UX, Architecture, Edge Cases).\n\
             \n\
             <objective>\n{}\n</objective>\n\
             \n\
+            <ast_context>\n{}\n</ast_context>\n\
+            \n\
             <specialized_research>\n{}\n</specialized_research>\n\
             \n\
-            OUTPUT INSTRUCTIONS:\n\
-            Output ONLY a numbered list of 3 specific, concise questions for the user. Do NOT generate a plan. Do NOT output any conversational filler.",
-            prompt, final_research
+            OUTPUT RULES:\n\
+            1. Output exactly 3 Gray Areas.\n\
+            2. Format each Gray Area as exactly 3 lines:\n\
+               Line 1: The Question (e.g., 'How should the new parser handle legacy AST nodes?')\n\
+               Line 2: Option A (Annotated with AST context, e.g., 'Convert them (reuses existing `LegacyAdapter` module)')\n\
+               Line 3: Option B (e.g., 'Drop them (requires writing a new fallback handler)')\n\
+            3. Do NOT output Markdown, XML, or conversational text. Just the 9 lines.",
+            prompt, ast_context, final_research
         );
 
-        let mut answers = String::new();
+        let mut user_decisions = String::new();
         if let Some(questions_str) = Self::generate_content(&discovery_prompt, "", 0.3, CognitiveLabor::Architect) {
-            use dialoguer::Input;
+            use dialoguer::Select;
             use dialoguer::theme::ColorfulTheme;
 
             println!("\n{}\n", "The Architect needs your input on these critical decisions:".bold().yellow());
             
-            let questions: Vec<&str> = questions_str.lines()
-                .filter(|line| !line.trim().is_empty() && line.chars().next().unwrap_or(' ').is_numeric())
-                .collect();
-                
-            if questions.is_empty() {
-                println!("{}\n", questions_str.yellow());
-                let single_answer: String = Input::with_theme(&ColorfulTheme::default())
-                    .with_prompt("Your answer (or press enter to skip)")
-                    .allow_empty(true)
-                    .interact_text()
-                    .unwrap_or_default();
-                answers = single_answer;
-            } else {
-                for q in questions {
-                    let clean_q = q.trim().trim_start_matches(|c: char| c.is_numeric() || c == '.' || c == ' ');
-                    println!("\n{} {}", "Q:".bold().cyan(), clean_q.bold());
-                    let answer: String = Input::with_theme(&ColorfulTheme::default())
-                        .with_prompt("A")
-                        .allow_empty(true)
-                        .interact_text()
-                        .unwrap_or_default();
+            let lines: Vec<&str> = questions_str.lines().filter(|l| !l.trim().is_empty()).collect();
+            
+            // Group every 3 lines into a Question and 2 Options
+            for chunk in lines.chunks(3) {
+                if chunk.len() == 3 {
+                    let question = chunk[0].trim_start_matches(|c: char| c.is_numeric() || c == '.' || c == ' ');
+                    let opt_a = chunk[1].trim_start_matches("- ").trim();
+                    let opt_b = chunk[2].trim_start_matches("- ").trim();
                     
-                    let final_ans = if answer.trim().is_empty() { "Developer Discretion (AI chooses)".to_string() } else { answer };
-                    answers.push_str(&format!("Question: {}\nDecision: {}\n\n", clean_q, final_ans));
+                    let options = vec![opt_a, opt_b, "Developer Discretion (AI chooses)"];
+                    
+                    let selection = Select::with_theme(&ColorfulTheme::default())
+                        .with_prompt(question)
+                        .default(0)
+                        .items(&options)
+                        .interact()
+                        .unwrap_or(2);
+                        
+                    user_decisions.push_str(&format!("Question: {}\nDecision: {}\n\n", question, options[selection]));
                 }
             }
+        } else {
+            println!("  {} Discovery Phase failed to retrieve options from the LLM. Using AI discretion.", "⚠️".yellow());
+            user_decisions.push_str("Use developer discretion for all implementation details.");
         }
+
+        // Save Context
+        let _ = fs::create_dir_all(".aura/plans");
+        let context_content = format!("# Phase Context\n\n**Objective:** {}\n\n## Implementation Decisions\n{}", prompt, user_decisions);
+        let _ = fs::write(".aura/plans/CONTEXT.md", &context_content);
+        println!("  {} Phase decisions captured in .aura/plans/CONTEXT.md", "✓".green());
 
         // --- PLANNING PHASE ---
         println!("\n  {} Synthesizing atomic execution waves based on your decisions...", "↳".dimmed());
         
         let system_prompt = format!(
-            "You are the Aura Architect. Use the provided research, AST context, and the USER'S DECISIONS to generate a flawless execution plan.\n\
+            "You are the Aura Architect. Use the provided research, AST context, and the locked user decisions to generate a flawless execution plan.\n\
             \n\
             <objective>\n{}\n</objective>\n\
             \n\
-            <user_decisions>\n{}\n</user_decisions>\n\
+            <locked_decisions>\n{}\n</locked_decisions>\n\
             \n\
             <ast_context>\n{}\n</ast_context>\n\
             \n\
@@ -343,7 +360,7 @@ impl GsdEngine {
             Generate the plan with TWO sections separated by '===AURA_SPLIT==='.\n\
             1. The first section must be valid Markdown explaining the waves.\n\
             2. The second section must be valid XML wrapped in <plan></plan> tags.", 
-            prompt, answers, ast_context, final_research, exec_choice, git_choice
+            prompt, user_decisions, ast_context, final_research, exec_choice, git_choice
         );
 
         if let Some(text_str) = Self::generate_content(&system_prompt, "", 0.2, CognitiveLabor::Architect) {
