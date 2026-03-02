@@ -271,70 +271,82 @@ impl GsdEngine {
         let final_research = research_data.lock().unwrap().join("\n");
         println!("  {} Research complete. {} specialized insights gathered.", "✓".green(), domains.len());
 
-        println!("  {} Synthesizing atomic execution waves...", "↳".dimmed());
+        // --- DISCOVERY PHASE (GSD Logic) ---
+        println!("\n{} {}", "🤔".bold(), "Aura Architect: Analyzing Gray Areas...".cyan());
+        
+        let discovery_prompt = format!(
+            "You are the Aura Architect. Analyze the following objective and context to identify 3 critical 'Gray Areas' (implementation decisions, UX choices, or edge cases) that require the user's input before a flawless plan can be generated.\n\
+            \n\
+            <objective>\n{}\n</objective>\n\
+            \n\
+            <specialized_research>\n{}\n</specialized_research>\n\
+            \n\
+            OUTPUT INSTRUCTIONS:\n\
+            Output ONLY a numbered list of 3 specific, concise questions for the user. Do NOT generate a plan. Do NOT output any conversational filler.",
+            prompt, final_research
+        );
+
+        let mut answers = String::new();
+        if let Some(questions_str) = Self::generate_content(&discovery_prompt, "", 0.3, CognitiveLabor::Architect) {
+            use dialoguer::Input;
+            use dialoguer::theme::ColorfulTheme;
+
+            println!("\n{}\n", "The Architect needs your input on these critical decisions:".bold().yellow());
+            
+            let questions: Vec<&str> = questions_str.lines()
+                .filter(|line| !line.trim().is_empty() && line.chars().next().unwrap_or(' ').is_numeric())
+                .collect();
+                
+            if questions.is_empty() {
+                println!("{}\n", questions_str.yellow());
+                let single_answer: String = Input::with_theme(&ColorfulTheme::default())
+                    .with_prompt("Your answer (or press enter to skip)")
+                    .allow_empty(true)
+                    .interact_text()
+                    .unwrap_or_default();
+                answers = single_answer;
+            } else {
+                for q in questions {
+                    let clean_q = q.trim().trim_start_matches(|c: char| c.is_numeric() || c == '.' || c == ' ');
+                    println!("\n{} {}", "Q:".bold().cyan(), clean_q.bold());
+                    let answer: String = Input::with_theme(&ColorfulTheme::default())
+                        .with_prompt("A")
+                        .allow_empty(true)
+                        .interact_text()
+                        .unwrap_or_default();
+                    
+                    let final_ans = if answer.trim().is_empty() { "Developer Discretion (AI chooses)".to_string() } else { answer };
+                    answers.push_str(&format!("Question: {}\nDecision: {}\n\n", clean_q, final_ans));
+                }
+            }
+        }
+
+        // --- PLANNING PHASE ---
+        println!("\n  {} Synthesizing atomic execution waves based on your decisions...", "↳".dimmed());
         
         let system_prompt = format!(
-            "You are the Aura Architect. Use the provided research and AST context to generate a flawless execution plan.\n\
+            "You are the Aura Architect. Use the provided research, AST context, and the USER'S DECISIONS to generate a flawless execution plan.\n\
             \n\
-            <ast_context>\n\
-            {}\n\
-            </ast_context>\n\
+            <objective>\n{}\n</objective>\n\
             \n\
-            <specialized_research>\n\
-            {}\n\
-            </specialized_research>\n\
+            <user_decisions>\n{}\n</user_decisions>\n\
+            \n\
+            <ast_context>\n{}\n</ast_context>\n\
+            \n\
+            <specialized_research>\n{}\n</specialized_research>\n\
             \n\
             The user has requested the following execution parameters:\n\
             - Execution Mode: {}\n\
             - Git Strategy: {}\n\
             \n\
-            If this is the initial prompt and you need clarification, output ONLY your questions. \n\
-            Otherwise, generate the plan with TWO sections separated by '===AURA_SPLIT==='.\n\
-            \n\
-            Request: {}", ast_context, final_research, exec_choice, git_choice, prompt
+            OUTPUT INSTRUCTIONS:\n\
+            Generate the plan with TWO sections separated by '===AURA_SPLIT==='.\n\
+            1. The first section must be valid Markdown explaining the waves.\n\
+            2. The second section must be valid XML wrapped in <plan></plan> tags.", 
+            prompt, answers, ast_context, final_research, exec_choice, git_choice
         );
 
         if let Some(text_str) = Self::generate_content(&system_prompt, "", 0.2, CognitiveLabor::Architect) {
-            if !text_str.contains("<plan") {
-                println!("\n{} {}", "💬".bold(), "Aura Architect requires clarification:".cyan());
-                
-                use dialoguer::Input;
-                use dialoguer::theme::ColorfulTheme;
-                
-                let mut answers = String::new();
-                let questions: Vec<&str> = text_str.lines()
-                    .filter(|line| !line.trim().is_empty() && line.chars().next().unwrap_or(' ').is_numeric())
-                    .collect();
-                    
-                if questions.is_empty() {
-                    println!("{}\n", text_str.yellow());
-                    let single_answer: String = Input::with_theme(&ColorfulTheme::default())
-                        .with_prompt("Your answer")
-                        .interact_text()
-                        .unwrap_or_default();
-                    answers = single_answer;
-                } else {
-                    for q in questions {
-                        let clean_q = q.trim().trim_start_matches(|c: char| c.is_numeric() || c == '.' || c == ' ');
-                        println!("\n{}", clean_q.yellow());
-                        let answer: String = Input::with_theme(&ColorfulTheme::default())
-                            .with_prompt("Answer")
-                            .interact_text()
-                            .unwrap_or_default();
-                        answers.push_str(&format!("Q: {}\nA: {}\n\n", clean_q, answer));
-                    }
-                }
-                    
-                println!("\n  {} Synthesizing atomic execution waves...", "↳".dimmed());
-                
-                let follow_up = format!("User Answers:\n{}\n\nGenerate the final plan now.", answers);
-                
-                if let Some(final_text) = Self::generate_content(&system_prompt, &follow_up, 0.2, CognitiveLabor::Architect) {
-                    Self::parse_and_save_plan(&final_text);
-                    return;
-                }
-                return;
-            }
             Self::parse_and_save_plan(&text_str);
         }
     }
