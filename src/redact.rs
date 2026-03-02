@@ -37,20 +37,31 @@ impl Redactor {
 
     /// PASS 2: Scrub tokens with high Shannon Entropy (cryptographic keys, base64 payloads).
     fn scrub_high_entropy(text: &str) -> String {
-        let mut tokens: Vec<String> = text.split_whitespace().map(|s| s.to_string()).collect();
+        // IMPROVEMENT: Split by common code delimiters to avoid treating long lines as single tokens
+        let mut result = text.to_string();
+        let delimiters = [' ', '\t', '\n', '\r', '(', ')', '{', '}', '[', ']', ',', ';', ':', '=', '+', '-', '*', '/'];
+        
+        // We temporarily replace delimiters with spaces for easy tokenization
+        let mut tokenizable = text.to_string();
+        for d in delimiters {
+            tokenizable = tokenizable.replace(d, " ");
+        }
 
-        for token in tokens.iter_mut() {
-            // Only analyze tokens of significant length (e.g., > 12 chars)
-            if token.len() > 12 {
+        let tokens: Vec<&str> = tokenizable.split_whitespace().collect();
+
+        for token in tokens {
+            // Only analyze tokens of significant length (e.g., > 20 chars for real secrets)
+            if token.len() > 20 {
                 let entropy = Self::calculate_shannon_entropy(token);
-                // Threshold: 4.5 bits/char is a strong indicator of random data/keys.
-                if entropy > 4.5 {
-                    *token = "[REDACTED_HIGH_ENTROPY]".to_string();
+                // Threshold: 5.2 bits/char is a more reliable indicator for random keys in code.
+                // Standard code density usually sits between 4.0 and 4.8.
+                if entropy > 5.2 {
+                    result = result.replace(token, "[REDACTED_HIGH_ENTROPY]");
                 }
             }
         }
 
-        tokens.join(" ")
+        result
     }
 
     /// Calculates Shannon Entropy in bits per character.
