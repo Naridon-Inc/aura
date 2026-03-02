@@ -82,10 +82,9 @@ fn check_for_updates() -> Option<String> {
     let client = reqwest::blocking::Client::builder()
         .user_agent("aura-cli-updater")
         .build().ok()?;
-    
-    let res = client.get("https://api.github.com/repos/AuraLabs/aura/releases/latest")
-        .send().ok()?;
-    
+
+    let res = client.get("https://api.github.com/repos/Naridon-Inc/aura/releases/latest")
+        .send().ok()?;    
     let json: serde_json::Value = res.json().ok()?;
     let latest_version = json["tag_name"].as_str()?.trim_start_matches('v').to_string();
     
@@ -137,7 +136,7 @@ fn perform_update() -> Result<(), Box<dyn std::error::Error>> {
             
             let bin_ext = if cfg!(target_os = "windows") { ".exe" } else { "" };
             let asset_name = format!("aura-{}-{}{}", asset_os, asset_arch, bin_ext);
-            let download_url = format!("https://github.com/AuraLabs/aura/releases/download/v{}/{}", new_version, asset_name);
+            let download_url = format!("https://github.com/Naridon-Inc/aura/releases/download/v{}/{}", new_version, asset_name);
             
             println!("{} Downloading binary from {}...", "⬇️ ".bold(), download_url.dimmed());
             
