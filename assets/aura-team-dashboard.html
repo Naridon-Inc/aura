@@ -161,8 +161,15 @@
                     const res = await fetch('/api/checkpoints');
                     if (res.ok) {
                         const data = await res.json();
-                        data.sort((a, b) => b.timestamp - a.timestamp);
-                        setCheckpoints(data);
+                        
+                        // Filter out implicit background scans to keep UX focused on explicit intent
+                        const explicitData = data.filter(cp => 
+                            !cp.intent.startsWith('Automatically tracked') && 
+                            !cp.intent.startsWith('No semantic logic changes')
+                        );
+                        
+                        explicitData.sort((a, b) => b.timestamp - a.timestamp);
+                        setCheckpoints(explicitData);
                     }
                 } catch (e) {
                     console.error("Aura Daemon offline", e);
