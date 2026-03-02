@@ -62,17 +62,28 @@ impl Default for AuraConfig {
 pub struct ConfigManager;
 
 impl ConfigManager {
-    /// Returns the path to the global ~/.config/aura/credentials.json
-    fn get_config_path() -> Option<PathBuf> {
-        if let Some(proj_dirs) = ProjectDirs::from("com", "AuraLabs", "Aura") {
-            let config_dir = proj_dirs.config_dir();
-            if !config_dir.exists() {
-                let _ = fs::create_dir_all(config_dir);
-            }
-            Some(config_dir.join("credentials.json"))
-        } else {
-            None
+    /// Returns the path to the global ~/.aura/credentials.json
+    pub fn get_config_path() -> Option<PathBuf> {
+        let home = std::env::var("HOME").ok()
+            .or_else(|| std::env::var("USERPROFILE").ok())?;
+        
+        let aura_dir = PathBuf::from(home).join(".aura");
+        if !aura_dir.exists() {
+            let _ = fs::create_dir_all(&aura_dir);
         }
+        
+        // Migrate legacy config if it exists
+        let new_path = aura_dir.join("credentials.json");
+        if !new_path.exists() {
+            if let Some(proj_dirs) = ProjectDirs::from("com", "AuraLabs", "Aura") {
+                let legacy_path = proj_dirs.config_dir().join("credentials.json");
+                if legacy_path.exists() {
+                    let _ = fs::copy(&legacy_path, &new_path);
+                }
+            }
+        }
+
+        Some(new_path)
     }
 
     /// Load the global configuration from disk
