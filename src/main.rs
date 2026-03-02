@@ -34,6 +34,63 @@ use textwrap;
 use dialoguer::{theme::ColorfulTheme, MultiSelect, Password, Confirm};
 use config::ConfigManager;
 
+// Anonymous Telemetry & Crash Reporting
+fn track_event(event_name: &str, metadata: Option<&str>) {
+    let config = ConfigManager::load();
+    if !config.telemetry_enabled {
+        return;
+    }
+
+    let os = std::env::consts::OS;
+    let arch = std::env::consts::ARCH;
+    let version = CURRENT_VERSION;
+    let payload = serde_json::json!({
+        "event": event_name,
+        "os": os,
+        "arch": arch,
+        "version": version,
+        "metadata": metadata.unwrap_or("none")
+    });
+
+    // Fire and forget in a background thread so it never blocks the user
+    thread::spawn(move || {
+        let client = reqwest::blocking::Client::builder().timeout(Duration::from_secs(3)).build().unwrap();
+        let _ = client.post("http://51.102.104.41:8080/telemetry")
+            .json(&payload)
+            .send();
+    });
+}
+
+fn setup_crash_reporter() {
+    std::panic::set_hook(Box::new(|info| {
+        let config = ConfigManager::load();
+        
+        let msg = match info.payload().downcast_ref::<&'static str>() {
+            Some(s) => *s,
+            None => match info.payload().downcast_ref::<String>() {
+                Some(s) => &s[..],
+                None => "Box<dyn Any>",
+            },
+        };
+
+        if config.telemetry_enabled {
+            // Synchronous block to ensure it sends before the process dies
+            let os = std::env::consts::OS;
+            let payload = serde_json::json!({
+                "event": "crash",
+                "os": os,
+                "version": CURRENT_VERSION,
+                "metadata": msg
+            });
+            let client = reqwest::blocking::Client::builder().timeout(Duration::from_secs(2)).build().unwrap();
+            let _ = client.post("http://51.102.104.41:8080/telemetry").json(&payload).send();
+        }
+
+        println!("\n{} {} {}", "💥".bold(), "Aura encountered a fatal anomaly:".bold().red(), msg);
+        println!("  {} If this persists, please report it at https://github.com/Naridon-Inc/aura/issues", "↳".dimmed());
+    }));
+}
+
 // Real Vector Embeddings via Gemini API or OpenAI API
 // Generates a true mathematical vector representing the semantic meaning.
 fn generate_embedding(text: &str) -> Option<Vec<f32>> {
@@ -327,14 +384,30 @@ enum ConfigSubcommands {
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+    setup_crash_reporter();
     let cli = Cli::parse();
-    
+
     // KILL SHOT FIX: Passive Update Detection
     // Check for updates in the background once every 24 hours
     run_passive_update_check();
 
-    match &cli.command {
-        Commands::Daemon => {
+    // Log telemetry (non-blocking)
+    let cmd_name = match &cli.command {
+        Commands::Init => "init",
+        Commands::Plan { .. } => "plan",
+        Commands::Execute => "execute",
+        Commands::Rewind { .. } => "rewind",
+        Commands::Handover { .. } => "handover",
+        Commands::Status => "status",
+        Commands::Audit => "audit",
+        Commands::RequestAccess { .. } => "request-access",
+        Commands::Prove { .. } => "prove",
+        Commands::Config { .. } => "config",
+        _ => "internal_command"
+    };
+    track_event("cli_execution", Some(cmd_name));
+
+    match &cli.command {        Commands::Daemon => {
             println!("Initializing Aura (Agentic VCS) Core Engine...\n");
             
             let parser = SemanticParser::new()?;
