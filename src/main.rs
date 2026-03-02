@@ -34,30 +34,59 @@ use textwrap;
 use dialoguer::{theme::ColorfulTheme, MultiSelect, Password, Confirm};
 use config::ConfigManager;
 
-// Real Vector Embeddings via Gemini API (Text-Embedding-004)
-// Generates a true 768-dimensional mathematical vector representing the semantic meaning.
+// Real Vector Embeddings via Gemini API or OpenAI API
+// Generates a true mathematical vector representing the semantic meaning.
 fn generate_embedding(text: &str) -> Option<Vec<f32>> {
-    let api_key = std::env::var("GEMINI_API_KEY").ok()?;
-    let url = format!("https://generativelanguage.googleapis.com/v1beta/models/text-embedding-004:embedContent?key={}", api_key);
-    
     let client = reqwest::blocking::Client::new();
-    let body = serde_json::json!({
-        "model": "models/text-embedding-004",
-        "content": {
-            "parts": [{ "text": text }]
-        }
-    });
 
-    if let Ok(res) = client.post(&url).json(&body).send() {
-        if let Ok(json) = res.json::<serde_json::Value>() {
-            if let Some(values) = json["embedding"]["values"].as_array() {
-                let vec: Vec<f32> = values.iter().filter_map(|v| v.as_f64().map(|f| f as f32)).collect();
-                if !vec.is_empty() {
-                    return Some(vec);
+    // Try OpenAI First (if configured)
+    if let Some(openai_key) = ConfigManager::get_api_key("openai") {
+        let body = serde_json::json!({
+            "model": "text-embedding-3-small",
+            "input": text
+        });
+
+        if let Ok(res) = client.post("https://api.openai.com/v1/embeddings")
+            .bearer_auth(openai_key)
+            .header("content-type", "application/json")
+            .json(&body)
+            .send() 
+        {
+            if let Ok(json) = res.json::<serde_json::Value>() {
+                if let Some(data) = json["data"].as_array() {
+                    if let Some(embedding) = data.get(0).and_then(|d| d["embedding"].as_array()) {
+                        let vec: Vec<f32> = embedding.iter().filter_map(|v| v.as_f64().map(|f| f as f32)).collect();
+                        if !vec.is_empty() {
+                            return Some(vec);
+                        }
+                    }
                 }
             }
         }
     }
+
+    // Fallback to Gemini
+    if let Some(gemini_key) = ConfigManager::get_api_key("gemini") {
+        let url = format!("https://generativelanguage.googleapis.com/v1beta/models/text-embedding-004:embedContent?key={}", gemini_key);
+        let body = serde_json::json!({
+            "model": "models/text-embedding-004",
+            "content": {
+                "parts": [{ "text": text }]
+            }
+        });
+
+        if let Ok(res) = client.post(&url).json(&body).send() {
+            if let Ok(json) = res.json::<serde_json::Value>() {
+                if let Some(values) = json["embedding"]["values"].as_array() {
+                    let vec: Vec<f32> = values.iter().filter_map(|v| v.as_f64().map(|f| f as f32)).collect();
+                    if !vec.is_empty() {
+                        return Some(vec);
+                    }
+                }
+            }
+        }
+    }
+
     None
 }
 
@@ -72,7 +101,7 @@ fn capture_env_fingerprint() -> Option<String> {
     ecosystem::Ecosystem::fingerprint()
 }
 
-const CURRENT_VERSION: &str = "0.2.1-alpha";
+const CURRENT_VERSION: &str = "0.2.2-alpha";
 
 fn check_for_updates() -> Option<String> {
     let client = reqwest::blocking::Client::builder()
@@ -890,10 +919,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     });
                 } else {
                     println!("{} Failed to initialize embedding model.", "✗".red());
-                    println!("  {} {}", "ℹ️ ".blue(), "Required: Gemini API Key".bold());
-                    println!("    To use semantic search, Aura needs a Gemini API key.");
-                    println!("    1. Export it: `export GEMINI_API_KEY=your_key_here` (Preferred)");
-                    println!("    2. Set it globally: `aura config set api-key your_key_here`\n");
+                    println!("  {} {}", "ℹ️ ".blue(), "Required: API Key (Gemini or OpenAI)".bold());
+                    println!("    To use semantic search, Aura needs an API key to generate vector embeddings.");
+                    println!("    1. Export it: `export GEMINI_API_KEY=...` or `export OPENAI_API_KEY=...`");
+                    println!("    2. Or set it via the CLI: `aura config` -> `Update API Keys`\n");
                     return Ok(());
                 }
             }
