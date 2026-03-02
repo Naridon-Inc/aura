@@ -288,15 +288,6 @@ enum Commands {
         #[arg(short, long)] target: Option<String>,
         #[arg(trailing_var_arg = true)] pos_target: Vec<String>,
     },
-    /// (Internal) Login to Aura Cloud
-    #[command(hide = true)]
-    Login { token: String },
-    /// (Internal) Sync with Aura Cloud
-    #[command(hide = true)]
-    Sync { repo_url: String },
-    /// (Internal) Initialize secure key exchange
-    #[command(hide = true)]
-    SecureInit { #[arg(long)] dev: bool },
 }
 
 #[derive(Subcommand)]
@@ -714,20 +705,29 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             if agent_id != "Aura Continuous Daemon" && !staged_nodes.is_empty() {
                 // Reject the default fallback string explicitly
                 if intent.starts_with("Automatically tracked") || intent == "No semantic logic changes detected in staged files." {
-                    spinner.println(format!("{} Intent Poisoning Detected: Missing Explicit Intent.", "🚨".red().bold()));
-                    spinner.println(format!("  {} {}", "Why:".bold(), "The AI agent modified logic nodes but failed to provide an explicit semantic explanation."));
-                    spinner.println(format!("  {} Aura requires all logic changes to be explicitly acknowledged to maintain the Merkle-Graph integrity.", "↳".dimmed()));
+                    let config = ConfigManager::load();
                     
-                    let mut identified_nodes = Vec::new();
-                    for node in &staged_nodes {
-                        if let Some(ref ident) = node.identifier {
-                            identified_nodes.push(ident.clone());
+                    if config.strict_gatekeeper_mode {
+                        spinner.println(format!("{} Intent Poisoning Detected: Missing Explicit Intent.", "🚨".red().bold()));
+                        spinner.println(format!("  {} {}", "Why:".bold(), "The AI agent modified logic nodes but failed to provide an explicit semantic explanation."));
+                        spinner.println(format!("  {} Aura requires all logic changes to be explicitly acknowledged to maintain the Merkle-Graph integrity.", "↳".dimmed()));
+                        
+                        let mut identified_nodes = Vec::new();
+                        for node in &staged_nodes {
+                            if let Some(ref ident) = node.identifier {
+                                identified_nodes.push(ident.clone());
+                            }
                         }
+                        spinner.println(format!("  {} Identified modified nodes: {}", "↳".dimmed(), identified_nodes.join(", ").yellow().bold()));
+                        spinner.println(format!("\n  {} {}", "How to Fix:".bold().green(), "Update your commit message to explain WHY you changed these nodes."));
+                        spinner.println(format!("  {} To bypass this security requirement, run: {}", "💡".blue(), "aura config set strict-mode false".italic()));
+                        spinner.println(format!("\n{} Commit halted.", "✗".red().bold()));
+                        std::process::exit(1);
+                    } else {
+                        spinner.println(format!("{} Intent Poisoning Warning.", "⚠️".yellow().bold()));
+                        spinner.println(format!("  {} Missing explicit semantic intent for modified nodes.", "↳".dimmed()));
+                        spinner.println(format!("  {} Proceeding anyway because strict mode is disabled.", "↳".dimmed().italic()));
                     }
-                    spinner.println(format!("  {} Identified modified nodes: {}", "↳".dimmed(), identified_nodes.join(", ").yellow().bold()));
-                    spinner.println(format!("\n  {} {}", "How to Fix:".bold().green(), "Update your commit message to explain WHY you changed these nodes."));
-                    spinner.println(format!("\n{} Commit halted.", "✗".red().bold()));
-                    std::process::exit(1);
                 }
 
                 let intent_lower = intent.to_lowercase();
@@ -1209,41 +1209,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 println!("{} AST logic perfectly conforms to {} constraints. Safe to deploy.", "✓".green().bold(), env_target);
             }
         }
-        Commands::Login { token } => {
-            println!("{} {}", "☁️ ".bold(), "Aura Cloud: Authenticating with SaaS Enterprise Layer...".bold().cyan());
-            
-            // Simulate API Handshake
-            thread::sleep(Duration::from_millis(800));
-            
-            let home_dir = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
-            let config_dir = format!("{}/.aura", home_dir);
-            fs::create_dir_all(&config_dir)?;
-            
-            let config_file = format!("{}/config.json", config_dir);
-            let config_json = serde_json::json!({
-                "saas_token": token,
-                "sync_enabled": true,
-                "endpoint": "http://51.102.104.41/v1"
-            });
-            
-            fs::write(config_file, serde_json::to_string_pretty(&config_json)?)?;
-            
-            println!("{} Authentication successful.", "✓".green().bold());
-            println!("  {} The local daemon is now tethered to Aura Cloud.", "↳".dimmed());
-            println!("  {} Cross-Repo Merkle-Graphs and Sovereign Logic RBAC are active.", "↳".dimmed());
-        }
-        Commands::Sync { repo_url } => {
-            GlobalSync::sync_remote(repo_url);
-        }
         Commands::Arbitrate { file_path } => {
             Arbitrator::resolve_conflict(file_path);
         }
         Commands::GenerateStubs => {
             StubEngine::generate_stubs();
-        }
-        Commands::SecureInit { dev } => {
-            let config = ConfigManager::load();
-            VaultSecurity::initialize(*dev || config.dev_mode);
         }
         Commands::Gc => {
             println!("{} {}", "🧹".bold(), "Aura Semantic Compaction: Analyzing history...".bold().cyan());
