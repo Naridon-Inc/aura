@@ -7,8 +7,6 @@ mod server;
 mod mcp;
 mod arbitrator;
 mod stub;
-mod sync;
-mod security;
 pub mod config;
 mod ecosystem;
 mod lsp;
@@ -22,8 +20,6 @@ use watcher::ContinuousTracker;
 use mcp::McpServer;
 use arbitrator::Arbitrator;
 use stub::StubEngine;
-use sync::GlobalSync;
-use security::VaultSecurity;
 use git2::Repository;
 use std::fs::{self, OpenOptions};
 use std::path::Path;
@@ -566,6 +562,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
             let repo = Repository::open(".")?;
             let mut parser = SemanticParser::new()?;
+            let config = ConfigManager::load();
             
             let index = repo.index()?;
             let mut staged_nodes = Vec::new();
@@ -578,20 +575,23 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     if let Ok(ast_nodes) = parser.parse_file(&source_code, ext) {
                         for node in ast_nodes {
                             if node.contains_secret {
-                                let config = ConfigManager::load();
                                 let ident = node.identifier.clone().unwrap_or_else(|| "Anonymous".to_string());
                                 
-                                if config.strict_gatekeeper_mode {
-                                    spinner.println(format!("{} Semantic Sentinel: High-Entropy Secret detected in {} (Hash: {}). Commit halted!", "🚨".red().bold(), ident.yellow(), node.content_hash[0..8].to_string()));
-                                    spinner.println(format!("  {} If this is a legitimate requirement (e.g., an Authorization header), you must request access.", "ℹ️ ".blue()));
-                                    spinner.println(format!("  {} Run: {} {} {}", "↳".dimmed(), "aura request-access".cyan(), ident, "to allowlist this node."));
-                                    spinner.println(format!("  {} To bypass all security blocks, run: {}", "💡".blue(), "aura config set strict-mode false".italic()));
-                                    std::process::exit(1);
-                                } else {
-                                    spinner.println(format!("{} Semantic Sentinel Warning.", "⚠️".yellow().bold()));
-                                    spinner.println(format!("  {} High-entropy pattern detected in node '{}'.", "↳".dimmed(), ident.yellow()));
-                                    spinner.println(format!("  {} Proceeding anyway because strict mode is disabled.", "↳".dimmed().italic()));
-                                }
+                                // KILL SHOT FIX: Check allowlist and Dev Mode bypass
+                                let is_allowed = config.secret_allowlist.contains(&ident) || config.dev_mode;
+                                
+                                if !is_allowed {
+                                    if config.strict_gatekeeper_mode {
+                                        let config_path = ConfigManager::get_config_path().map(|p| p.to_string_lossy().to_string()).unwrap_or_else(|| "unknown".to_string());
+                                        spinner.println(format!("{} Semantic Sentinel: High-Entropy Secret detected in {} (Hash: {}). Commit halted!", "🚨".red().bold(), ident.yellow(), node.content_hash[0..8].to_string()));
+                                        spinner.println(format!("  {} If this is legitimate, run: {} {} {}", "↳".dimmed(), "aura request-access".cyan(), ident, "to allowlist this node."));
+                                        spinner.println(format!("  {} To bypass all blocks globally, run: {}", "💡".blue(), "aura config set strict-mode false".italic()));
+                                        spinner.println(format!("  {} (Using config: {})", "🔍".dimmed(), config_path.dimmed()));
+                                        std::process::exit(1);
+                                    } else {
+                                        spinner.println(format!("{} Semantic Sentinel Warning.", "⚠️".yellow().bold()));
+                                        spinner.println(format!("  {} High-entropy pattern detected in node '{}'. Proceeding (Strict Mode is OFF).", "↳".dimmed(), ident.yellow()));
+                                    }                                }
                             }
                             staged_nodes.push(node);
                         }
