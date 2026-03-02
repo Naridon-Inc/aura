@@ -101,7 +101,7 @@ fn capture_env_fingerprint() -> Option<String> {
     ecosystem::Ecosystem::fingerprint()
 }
 
-const CURRENT_VERSION: &str = "0.2.2-alpha";
+const CURRENT_VERSION: &str = "0.2.3-alpha";
 
 fn check_for_updates() -> Option<String> {
     let client = reqwest::blocking::Client::builder()
@@ -611,11 +611,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 
                                 if !is_allowed {
                                     if config.strict_gatekeeper_mode {
+                                        spinner.finish_and_clear();
                                         let config_path = ConfigManager::get_config_path().map(|p| p.to_string_lossy().to_string()).unwrap_or_else(|| "unknown".to_string());
-                                        spinner.println(format!("{} Semantic Sentinel: High-Entropy Secret detected in {} (Hash: {}). Commit halted!", "🚨".red().bold(), ident.yellow(), node.content_hash[0..8].to_string()));
-                                        spinner.println(format!("  {} If this is legitimate, run: {} {} {}", "↳".dimmed(), "aura request-access".cyan(), ident, "to allowlist this node."));
-                                        spinner.println(format!("  {} To bypass all blocks globally, run: {}", "💡".blue(), "aura config set strict-mode false".italic()));
-                                        spinner.println(format!("  {} (Using config: {})", "🔍".dimmed(), config_path.dimmed()));
+                                        println!("{} Semantic Sentinel: High-Entropy Secret detected in {} (Hash: {}). Commit halted!", "🚨".red().bold(), ident.yellow(), node.content_hash[0..8].to_string());
+                                        println!("  {} If this is legitimate, run: {} {} {}", "↳".dimmed(), "aura request-access".cyan(), ident, "to allowlist this node.");
+                                        println!("  {} To bypass all blocks globally, run: {}", "💡".blue(), "aura config set strict-mode false".italic());
+                                        println!("  {} (Using config: {})", "🔍".dimmed(), config_path.dimmed());
                                         std::process::exit(1);
                                     } else {
                                         spinner.println(format!("{} Semantic Sentinel Warning.", "⚠️".yellow().bold()));
@@ -737,9 +738,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     let config = ConfigManager::load();
                     
                     if config.strict_gatekeeper_mode {
-                        spinner.println(format!("{} Intent Poisoning Detected: Missing Explicit Intent.", "🚨".red().bold()));
-                        spinner.println(format!("  {} {}", "Why:".bold(), "The AI agent modified logic nodes but failed to provide an explicit semantic explanation."));
-                        spinner.println(format!("  {} Aura requires all logic changes to be explicitly acknowledged to maintain the Merkle-Graph integrity.", "↳".dimmed()));
+                        spinner.finish_and_clear();
+                        println!("{} Intent Poisoning Detected: Missing Explicit Intent.", "🚨".red().bold());
+                        println!("  {} {}", "Why:".bold(), "The AI agent modified logic nodes but failed to provide an explicit semantic explanation.");
+                        println!("  {} Aura requires all logic changes to be explicitly acknowledged to maintain the Merkle-Graph integrity.", "↳".dimmed());
                         
                         let mut identified_nodes = Vec::new();
                         for node in &staged_nodes {
@@ -747,10 +749,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 identified_nodes.push(ident.clone());
                             }
                         }
-                        spinner.println(format!("  {} Identified modified nodes: {}", "↳".dimmed(), identified_nodes.join(", ").yellow().bold()));
-                        spinner.println(format!("\n  {} {}", "How to Fix:".bold().green(), "Update your commit message to explain WHY you changed these nodes."));
-                        spinner.println(format!("  {} To bypass this security requirement, run: {}", "💡".blue(), "aura config set strict-mode false".italic()));
-                        spinner.println(format!("\n{} Commit halted.", "✗".red().bold()));
+                        println!("  {} Identified modified nodes: {}", "↳".dimmed(), identified_nodes.join(", ").yellow().bold());
+                        println!("\n  {} {}", "How to Fix:".bold().green(), "Update your commit message to explain WHY you changed these nodes.");
+                        println!("  {} To bypass this security requirement, run: {}", "💡".blue(), "aura config set strict-mode false".italic());
+                        println!("\n{} Commit halted.", "✗".red().bold());
                         std::process::exit(1);
                     } else {
                         spinner.println(format!("{} Intent Poisoning Warning.", "⚠️".yellow().bold()));
@@ -781,16 +783,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                 if !aligned {
                     if config.strict_gatekeeper_mode {
-                        spinner.println(format!("{} Intent Poisoning Detected: Logic Mismatch.", "🚨".red().bold()));
-                        spinner.println(format!("  {} {}", "Why:".bold(), "The semantic intent (commit message or agent history) does not mathematically align with the AST nodes you modified."));
-                        spinner.println(format!("  {} Aura requires all logic changes to be explicitly acknowledged to maintain the Merkle-Graph integrity.", "↳".dimmed()));
-                        spinner.println(format!("  {} Identified modified nodes: {}", "↳".dimmed(), identified_nodes.join(", ").yellow().bold()));
+                        spinner.finish_and_clear();
+                        println!("{} Intent Poisoning Detected: Logic Mismatch.", "🚨".red().bold());
+                        println!("  {} {}", "Why:".bold(), "The semantic intent (commit message or agent history) does not mathematically align with the AST nodes you modified.");
+                        println!("  {} Aura requires all logic changes to be explicitly acknowledged to maintain the Merkle-Graph integrity.", "↳".dimmed());
+                        println!("  {} Identified modified nodes: {}", "↳".dimmed(), identified_nodes.join(", ").yellow().bold());
                         
-                        spinner.println(format!("\n  {} {}", "How to Fix:".bold().green(), "Update your commit message to include the EXACT names of the functions or classes listed above."));
-                        spinner.println(format!("  {} Example: {} 'Refactored {}'", "↳".dimmed(), "git commit -m".cyan(), identified_nodes.first().unwrap_or(&"logic".to_string())));
-                        spinner.println(format!("  {} If this is intentional and you wish to bypass this check, run: {}", "💡".blue(), "aura config set strict-mode false".italic()));
+                        println!("\n  {} {}", "How to Fix:".bold().green(), "Update your commit message to include the EXACT names of the functions or classes listed above.");
+                        println!("  {} Example: {} 'Refactored {}'", "↳".dimmed(), "git commit -m".cyan(), identified_nodes.first().unwrap_or(&"logic".to_string()));
+                        println!("  {} If this is intentional and you wish to bypass this check, run: {}", "💡".blue(), "aura config set strict-mode false".italic());
                         
-                        spinner.println(format!("\n{} Commit halted.", "✗".red().bold()));
+                        println!("\n{} Commit halted.", "✗".red().bold());
                         std::process::exit(1);
                     } else {
                         spinner.println(format!("{} Intent Mismatch Warning.", "⚠️".yellow().bold()));
