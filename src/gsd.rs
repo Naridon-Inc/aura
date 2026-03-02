@@ -407,9 +407,36 @@ impl GsdEngine {
         
         let _ = fs::create_dir_all(".aura/plans");
         let _ = fs::write(".aura/plans/ACTIVE_MILESTONE.xml", &cleaned_xml);
-        let _ = fs::write("PLAN.md", format!("# Aura Execution Plan\n\n{}", markdown_plan));
+        let _ = fs::write(".aura/plans/PLAN.md", format!("# Aura Execution Plan\n\n{}", markdown_plan));
         
-        println!("{} Milestone locked and saved.", "✓".green().bold());
+        println!("{} Milestone locked and saved to .aura/plans/PLAN.md", "✓".green().bold());
+
+        // Display a brief summary to the user
+        println!("\n{:-^80}\n", " EXECUTION PLAN SUMMARY ".bold().blue());
+        
+        // Extract wave titles or action summaries for the user
+        for line in markdown_plan.lines() {
+            if line.starts_with("### Wave") || (line.starts_with("- ") && line.len() < 80) {
+                println!("{}", line.yellow());
+            }
+        }
+        println!("\n{:-^80}\n", "-".dimmed());
+
+        use dialoguer::Confirm;
+        use dialoguer::theme::ColorfulTheme;
+
+        let start_execution = Confirm::with_theme(&ColorfulTheme::default())
+            .with_prompt("Do you want to begin executing this plan now?")
+            .default(true)
+            .interact()
+            .unwrap_or(false);
+
+        if start_execution {
+            println!("\n");
+            Self::execute_wave();
+        } else {
+            println!("\n{} Execution paused. You can start it later by running `aura execute`.", "⏸️".blue());
+        }
     }
 
     /// Step 2: The Executor (Wave Runner)
