@@ -101,7 +101,7 @@ fn capture_env_fingerprint() -> Option<String> {
     ecosystem::Ecosystem::fingerprint()
 }
 
-const CURRENT_VERSION: &str = "0.2.4-alpha";
+const CURRENT_VERSION: &str = "0.2.5-alpha";
 
 fn check_for_updates() -> Option<String> {
     let client = reqwest::blocking::Client::builder()
