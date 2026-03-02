@@ -507,25 +507,43 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
             }
 
-            // 2. Global API Key Vault
+            // 2. Global AI Provider & API Key Vault
             let mut current_config = ConfigManager::load();
-            if current_config.gemini_api_key.is_none() {
-                println!("\n{}", "Aura uses local ML for semantic tracking.".italic().dimmed());
+            let provider = ConfigManager::get_active_provider();
+            
+            if ConfigManager::get_api_key(&provider).is_none() {
+                println!("\n{} Aura requires an LLM backend for planning and arbitration.", "ℹ️ ".blue());
+                println!("  {} Current Provider: {}", "↳".dimmed(), provider.yellow());
+
                 let api_key = Password::with_theme(&ColorfulTheme::default())
-                    .with_prompt("To enable the Autonomous Arbitrator, please provide a Gemini API Key (It never leaves your machine)")
+                    .with_prompt(format!("Please provide your {} API Key (Securely vaulted locally)", provider))
                     .allow_empty_password(true)
                     .interact()?;
                 
                 if !api_key.is_empty() {
-                    current_config.gemini_api_key = Some(api_key);
+                    match provider.as_str() {
+                        "anthropic" => current_config.anthropic_api_key = Some(api_key),
+                        "openai" => current_config.openai_api_key = Some(api_key),
+                        "mercury" => current_config.mercury_api_key = Some(api_key),
+                        _ => current_config.gemini_api_key = Some(api_key),
+                    }
                     ConfigManager::save(&current_config)?;
-                    println!("{} Key securely saved to ~/.config/AuraLabs/Aura/credentials.json", "✓".green().bold());
+                    println!("{} Key securely vaulted.", "✓".green().bold());
                 }
-                }
+            }
 
-                // 4. Install Hooks
-                println!("\n{:-^80}\n", " SECURING REPOSITORY ".bold().blue());
-                println!("  {} Installing Semantic Git Hooks...", "⚙️ ".cyan());            if let Err(e) = HookInstaller::enable() {
+            // 3. Install Hooks
+            println!("\n{:-^80}\n", " SECURING REPOSITORY ".bold().blue());
+
+            // Husky Detection
+            if std::path::Path::new(".husky").exists() {
+                println!("{} {}", "⚠️".yellow().bold(), "Husky detected in this project.".bold());
+                println!("  {} Husky overrides standard Git hooks. To enable Aura protection, manually add", "↳".dimmed());
+                println!("  {} the following line to your {} file:", "↳".dimmed(), ".husky/pre-commit".cyan());
+                println!("\n    {}\n", "aura capture-context".green().italic());
+            }
+
+            println!("  {} Installing Semantic Git Hooks...", "⚙️ ".cyan());            if let Err(e) = HookInstaller::enable() {
                 println!("  {} {}", "✗".red().bold(), e);
                 return Ok(());
             }
@@ -570,11 +588,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     if let Ok(ast_nodes) = parser.parse_file(&source_code, ext) {
                         for node in ast_nodes {
                             if node.contains_secret {
+                                let config = ConfigManager::load();
                                 let ident = node.identifier.clone().unwrap_or_else(|| "Anonymous".to_string());
-                                spinner.println(format!("{} Semantic Sentinel: High-Entropy Secret detected in {} (Hash: {}). Commit halted!", "🚨".red().bold(), ident.yellow(), node.content_hash[0..8].to_string()));
-                                spinner.println(format!("  {} If this is a legitimate requirement (e.g., an Authorization header), you must request access.", "ℹ️ ".blue()));
-                                spinner.println(format!("  {} Run: {} {} {}", "↳".dimmed(), "aura request-access".cyan(), ident, "to allowlist this node."));
-                                std::process::exit(1);
+                                
+                                if config.strict_gatekeeper_mode {
+                                    spinner.println(format!("{} Semantic Sentinel: High-Entropy Secret detected in {} (Hash: {}). Commit halted!", "🚨".red().bold(), ident.yellow(), node.content_hash[0..8].to_string()));
+                                    spinner.println(format!("  {} If this is a legitimate requirement (e.g., an Authorization header), you must request access.", "ℹ️ ".blue()));
+                                    spinner.println(format!("  {} Run: {} {} {}", "↳".dimmed(), "aura request-access".cyan(), ident, "to allowlist this node."));
+                                    spinner.println(format!("  {} To bypass all security blocks, run: {}", "💡".blue(), "aura config set strict-mode false".italic()));
+                                    std::process::exit(1);
+                                } else {
+                                    spinner.println(format!("{} Semantic Sentinel Warning.", "⚠️".yellow().bold()));
+                                    spinner.println(format!("  {} High-entropy pattern detected in node '{}'.", "↳".dimmed(), ident.yellow()));
+                                    spinner.println(format!("  {} Proceeding anyway because strict mode is disabled.", "↳".dimmed().italic()));
+                                }
                             }
                             staged_nodes.push(node);
                         }
