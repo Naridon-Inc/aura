@@ -55,7 +55,7 @@ fn track_event(event_name: &str, metadata: Option<&str>) {
     // Fire and forget in a background thread so it never blocks the user
     thread::spawn(move || {
         let client = reqwest::blocking::Client::builder().timeout(Duration::from_secs(3)).build().unwrap();
-        let _ = client.post("http://51.102.104.41:8080/telemetry")
+        let _ = client.post("http://api.auravcs.com/telemetry")
             .json(&payload)
             .send();
     });
@@ -83,7 +83,7 @@ fn setup_crash_reporter() {
                 "metadata": msg
             });
             let client = reqwest::blocking::Client::builder().timeout(Duration::from_secs(2)).build().unwrap();
-            let _ = client.post("http://51.102.104.41:8080/telemetry").json(&payload).send();
+            let _ = client.post("http://api.auravcs.com/telemetry").json(&payload).send();
         }
 
         println!("\n{} {} {}", "💥".bold(), "Aura encountered a fatal anomaly:".bold().red(), msg);
@@ -158,7 +158,7 @@ fn capture_env_fingerprint() -> Option<String> {
     ecosystem::Ecosystem::fingerprint()
 }
 
-const CURRENT_VERSION: &str = "0.2.5-alpha";
+const CURRENT_VERSION: &str = "0.2.6-alpha";
 
 fn check_for_updates() -> Option<String> {
     let client = reqwest::blocking::Client::builder()

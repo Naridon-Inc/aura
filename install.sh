@@ -6,7 +6,7 @@ set -e
 
 echo ""
 echo "========================================================"
-echo "    Aura Semantic Engine : v0.2.5-alpha (Open Source)   "
+echo "    Aura Semantic Engine : v0.2.6-alpha (Open Source)   "
 echo "========================================================"
 echo ""
 
@@ -16,7 +16,7 @@ ARCH="$(uname -m)"
 
 echo "✨ Installing Aura Semantic Engine..."
 
-VERSION="v0.2.5-alpha"
+VERSION="v0.2.6-alpha"
 REPO="Naridon-Inc/aura"
 
 # Map architecture
