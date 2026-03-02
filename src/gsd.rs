@@ -292,41 +292,76 @@ impl GsdEngine {
             OUTPUT RULES:\n\
             1. Output exactly 3 Gray Areas.\n\
             2. Format each Gray Area as exactly 3 lines:\n\
-               Line 1: The Question (e.g., 'How should the new parser handle legacy AST nodes?')\n\
-               Line 2: Option A (Annotated with AST context, e.g., 'Convert them (reuses existing `LegacyAdapter` module)')\n\
-               Line 3: Option B (e.g., 'Drop them (requires writing a new fallback handler)')\n\
-            3. Do NOT output Markdown, XML, or conversational text. Just the 9 lines.",
+               Line 1: The Question (e.g., 'How should the parser handle legacy AST nodes?')\n\
+               Line 2: A short, punchy option with context in parentheses (e.g., 'Convert them (Reuses existing LegacyAdapter module)')\n\
+               Line 3: Another short option (e.g., 'Drop them (Requires writing a new fallback handler)')\n\
+            3. Do NOT output 'Option A' or 'Option B'. Just the text.\n\
+            4. Do NOT output Markdown, XML, or conversational text. Just the 9 lines.",
             prompt, ast_context, final_research
         );
 
         let mut user_decisions = String::new();
         if let Some(questions_str) = Self::generate_content(&discovery_prompt, "", 0.3, CognitiveLabor::Architect) {
-            use dialoguer::Select;
+            use dialoguer::{Select, Input, Confirm};
             use dialoguer::theme::ColorfulTheme;
 
-            println!("\n{}\n", "The Architect needs your input on these critical decisions:".bold().yellow());
+            println!("\n{:-^80}", " AURA ARCHITECT: DISCOVERY PHASE ".bold().cyan());
+            println!("{}\n", "The Architect needs your input on these critical decisions:".italic().dimmed());
             
             let lines: Vec<&str> = questions_str.lines().filter(|l| !l.trim().is_empty()).collect();
+            let chunks: Vec<&[&str]> = lines.chunks(3).filter(|c| c.len() == 3).collect();
+            let total_steps = chunks.len();
             
-            // Group every 3 lines into a Question and 2 Options
-            for chunk in lines.chunks(3) {
-                if chunk.len() == 3 {
-                    let question = chunk[0].trim_start_matches(|c: char| c.is_numeric() || c == '.' || c == ' ');
-                    let opt_a = chunk[1].trim_start_matches("- ").trim();
-                    let opt_b = chunk[2].trim_start_matches("- ").trim();
-                    
-                    let options = vec![opt_a, opt_b, "Developer Discretion (AI chooses)"];
-                    
-                    let selection = Select::with_theme(&ColorfulTheme::default())
-                        .with_prompt(question)
-                        .default(0)
-                        .items(&options)
-                        .interact()
-                        .unwrap_or(2);
-                        
-                    user_decisions.push_str(&format!("Question: {}\nDecision: {}\n\n", question, options[selection]));
+            for (i, chunk) in chunks.iter().enumerate() {
+                let question = chunk[0].trim_start_matches(|c: char| c.is_numeric() || c == '.' || c == ' ');
+                let opt_a = chunk[1].trim_start_matches("- ").trim();
+                let opt_b = chunk[2].trim_start_matches("- ").trim();
+                
+                // Stepped UI Box
+                println!("┌──────────────────────────────────────────────────────────────────────────────");
+                println!("│ {} {}/{} {}", "Step".cyan().bold(), i + 1, total_steps, "Decision Required".cyan().bold());
+                println!("├──────────────────────────────────────────────────────────────────────────────");
+                for line in textwrap::wrap(question, 74) {
+                    println!("│ {}", line.yellow().bold());
                 }
+                println!("└──────────────────────────────────────────────────────────────────────────────");
+                
+                let mut options = vec![opt_a.to_string(), opt_b.to_string(), "Type a custom answer...".to_string(), "Developer Discretion (AI chooses)".to_string()];
+                
+                let selection = Select::with_theme(&ColorfulTheme::default())
+                    .with_prompt("Select an approach")
+                    .default(0)
+                    .items(&options)
+                    .interact()
+                    .unwrap_or(3);
+                    
+                let final_ans = if selection == 2 {
+                    Input::with_theme(&ColorfulTheme::default())
+                        .with_prompt("Enter your custom approach")
+                        .interact_text()
+                        .unwrap_or_else(|_| "Developer Discretion".to_string())
+                } else {
+                    options[selection].clone()
+                };
+                
+                println!("  {} {}\n", "↳ Locked:".green(), final_ans.dimmed());
+                user_decisions.push_str(&format!("Question: {}\nDecision: {}\n\n", question, final_ans));
             }
+
+            println!("{:-^80}\n", " FINAL REVIEW ".bold().magenta());
+            println!("{}", user_decisions.cyan());
+            
+            let proceed = Confirm::with_theme(&ColorfulTheme::default())
+                .with_prompt("Lock in these decisions and generate the architecture plan?")
+                .default(true)
+                .interact()
+                .unwrap_or(true);
+                
+            if !proceed {
+                println!("{} Planning cancelled by user.", "✗".red());
+                return;
+            }
+            
         } else {
             println!("  {} Discovery Phase failed to retrieve options from the LLM. Using AI discretion.", "⚠️".yellow());
             user_decisions.push_str("Use developer discretion for all implementation details.");
