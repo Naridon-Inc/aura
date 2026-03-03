@@ -1,4 +1,5 @@
-use std::fs;
+use std::fs::{self, OpenOptions};
+use std::io::Write;
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 
@@ -21,37 +22,66 @@ impl HookInstaller {
 
         // 1. The Pre-Commit Hook (Scrapes intent and ASTs)
         let pre_commit_path = hooks_dir.join("pre-commit");
-        let pre_commit_script = format!(r#"#!/bin/sh
+        let pre_commit_script = format!(r#"
+# --- AURA SEMANTIC ENGINE ---
 echo "[Aura] Analyzing staged files semantically..."
 {} capture-context
 if [ $? -ne 0 ]; then
     echo "[Aura] Semantic analysis failed. Commit aborted."
     exit 1
 fi
+# ----------------------------
 "#, aura_path);
-        fs::write(&pre_commit_path, pre_commit_script)?;
-        Self::make_executable(&pre_commit_path)?;
+        Self::append_hook_safely(&pre_commit_path, &pre_commit_script, "capture-context")?;
 
         // 2. The Commit-Msg Hook (Injects the Trailer)
         let commit_msg_path = hooks_dir.join("commit-msg");
-        let commit_msg_script = format!(r#"#!/bin/sh
+        let commit_msg_script = format!(r#"
+# --- AURA SEMANTIC ENGINE ---
 {} inject-trailer "$1"
+# ----------------------------
 "#, aura_path);
-        fs::write(&commit_msg_path, commit_msg_script)?;
-        Self::make_executable(&commit_msg_path)?;
+        Self::append_hook_safely(&commit_msg_path, &commit_msg_script, "inject-trailer")?;
 
         // 3. The Post-Commit Hook (Saves to the hidden branch)
         let post_commit_path = hooks_dir.join("post-commit");
-        let post_commit_script = format!(r#"#!/bin/sh
+        let post_commit_script = format!(r#"
+# --- AURA SEMANTIC ENGINE ---
 {} persist-checkpoint
+# ----------------------------
 "#, aura_path);
-        fs::write(&post_commit_path, post_commit_script)?;
-        Self::make_executable(&post_commit_path)?;
+        Self::append_hook_safely(&post_commit_path, &post_commit_script, "persist-checkpoint")?;
 
-        println!("✓ Hooks installed (Aura is now parasitic to Git)");
-        println!("✓ Project configured with pre-commit, commit-msg, and post-commit hooks");
+        println!("✓ Hooks installed safely (Aura is parasitic to Git)");
+        println!("✓ Project configured with non-destructive semantic hooks");
         println!("Ready.");
 
+        Ok(())
+    }
+
+    fn append_hook_safely(path: &Path, script: &str, signature: &str) -> Result<(), Box<dyn std::error::Error>> {
+        let mut needs_shebang = true;
+        
+        if path.exists() {
+            let content = fs::read_to_string(path)?;
+            if content.contains(signature) {
+                // Already installed
+                return Ok(());
+            }
+            if content.starts_with("#!") {
+                needs_shebang = false;
+            }
+        }
+
+        let mut file = OpenOptions::new().create(true).append(true).open(path)?;
+        
+        if needs_shebang {
+            writeln!(file, "#!/bin/sh")?;
+        }
+        
+        writeln!(file, "{}", script)?;
+        
+        Self::make_executable(path)?;
         Ok(())
     }
 

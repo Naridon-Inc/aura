@@ -159,7 +159,7 @@ fn capture_env_fingerprint() -> Option<String> {
     ecosystem::Ecosystem::fingerprint()
 }
 
-const CURRENT_VERSION: &str = "0.3.0-alpha";
+const CURRENT_VERSION: &str = "0.3.1-alpha";
 
 fn check_for_updates() -> Option<String> {
     let client = reqwest::blocking::Client::builder()
@@ -327,6 +327,17 @@ enum Commands {
         #[arg(long)]
         verbose: bool,
     },
+    /// Autonomously resolve architectural invariant violations using the Shadow Branch loop
+    Fix {
+        /// The base branch to review against to find the violations
+        #[arg(short, long, default_value = "master")]
+        base: String,
+    },
+    /// Manage Architectural Invariant Policy Packs
+    Policy {
+        #[command(subcommand)]
+        sub: PolicySubcommands,
+    },
     
     // --- Internal / Hidden Commands ---
     
@@ -398,6 +409,15 @@ enum ConfigSubcommands {
         key: String,
         /// The value to set
         value: String,
+    },
+}
+
+#[derive(Subcommand)]
+enum PolicySubcommands {
+    /// Add a standard architectural policy pack to your production.aura.json
+    Add {
+        /// The name of the pack (e.g., 'security', 'payments', 'web-app')
+        pack_name: String,
     },
 }
 
@@ -1157,7 +1177,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
             };
 
-            let current_node_info = parser.extract_node_source(&current_source, ext, identifier)?;
+            let current_node_info = parser.retrieve_node_source(&current_source, ext, identifier)?;
             let current_range = match current_node_info {
                 Some((_, range)) => range,
                 None => {
@@ -1186,7 +1206,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let past_source = std::str::from_utf8(blob.content())?;
 
             // 3. Extract the old AST node source
-            let past_node_info = parser.extract_node_source(past_source, ext, identifier)?;
+            let past_node_info = parser.retrieve_node_source(past_source, ext, identifier)?;
             let past_node_source = match past_node_info {
                 Some((src, _)) => src,
                 None => {
@@ -1640,7 +1660,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
         Commands::PrReview { base, json, verbose } => {
-            pr::PrReviewEngine::run_review(base, *json, *verbose)?;
+            crate::pr::PrReviewEngine::run_review(base, *json, *verbose)?;
+        }
+        Commands::Fix { base } => {
+            Arbitrator::auto_fix_violations(base)?;
+        }
+        Commands::Policy { sub } => {
+            match sub {
+                PolicySubcommands::Add { pack_name } => {
+                    crate::pr::PrReviewEngine::add_policy_pack(&pack_name)?;
+                }
+            }
         }
     }
 
