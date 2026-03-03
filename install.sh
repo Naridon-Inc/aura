@@ -6,7 +6,7 @@ set -e
 
 echo ""
 echo "========================================================"
-echo "    Aura Semantic Engine : v0.2.0-alpha (Open Source)   "
+echo "    Aura Semantic Engine : v0.2.13-alpha (Open Source)  "
 echo "========================================================"
 echo ""
 
@@ -16,7 +16,7 @@ ARCH="$(uname -m)"
 
 echo "✨ Installing Aura Semantic Engine..."
 
-VERSION="v0.2.0-alpha"
+VERSION="v0.2.13-alpha"
 REPO="Naridon-Inc/aura"
 
 # Map architecture
@@ -70,7 +70,7 @@ else
     # Clone and build
     TMP_DIR=$(mktemp -d)
     git clone https://github.com/${REPO}.git "$TMP_DIR"
-    cd "$TMP_DIR/aura"
+    cd "$TMP_DIR"
     cargo install --path . --locked
     echo "✓ Aura compiled and installed successfully to ~/.cargo/bin/aura"
     
