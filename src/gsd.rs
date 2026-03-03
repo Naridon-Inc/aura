@@ -327,14 +327,31 @@ impl GsdEngine {
                 }
                 println!("└──────────────────────────────────────────────────────────────────────────────");
                 
-                let mut options = vec![opt_a.to_string(), opt_b.to_string(), "Type a custom answer...".to_string(), "Developer Discretion (AI chooses)".to_string()];
+                let options = vec![opt_a.to_string(), opt_b.to_string(), "Type a custom answer...".to_string(), "Developer Discretion (AI chooses)".to_string()];
                 
-                let selection = Select::with_theme(&ColorfulTheme::default())
-                    .with_prompt("Select an approach")
+                // BULLETPROOF UI: Try interactive Select first, but provide a numeric fallback
+                let selection = match Select::with_theme(&ColorfulTheme::default())
+                    .with_prompt("Select an approach (Use arrows or type number)")
                     .default(0)
                     .items(&options)
-                    .interact()
-                    .unwrap_or(3);
+                    .interact_opt() 
+                {
+                    Ok(Some(s)) => s,
+                    _ => {
+                        // Fallback for non-interactive terminals or broken escape codes
+                        println!("  {} Terminal interaction limited. Please enter a number:", "⚠️".yellow());
+                        for (idx, opt) in options.iter().enumerate() {
+                            println!("    {}. {}", idx + 1, opt);
+                        }
+                        let input: String = Input::with_theme(&ColorfulTheme::default())
+                            .with_prompt("Choice (1-4)")
+                            .interact_text()
+                            .unwrap_or_else(|_| "4".to_string());
+                        
+                        let val = input.parse::<usize>().unwrap_or(4);
+                        if val >= 1 && val <= options.len() { val - 1 } else { 3 }
+                    }
+                };
                     
                 let final_ans = if selection == 2 {
                     Input::with_theme(&ColorfulTheme::default())
