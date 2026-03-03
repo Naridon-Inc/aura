@@ -158,7 +158,7 @@ fn capture_env_fingerprint() -> Option<String> {
     ecosystem::Ecosystem::fingerprint()
 }
 
-const CURRENT_VERSION: &str = "0.2.11-alpha";
+const CURRENT_VERSION: &str = "0.2.12-alpha";
 
 fn check_for_updates() -> Option<String> {
     let client = reqwest::blocking::Client::builder()
@@ -254,15 +254,12 @@ fn perform_update() -> Result<(), Box<dyn std::error::Error>> {
 
 #[derive(Parser)]
 #[command(
-    name = "aura", 
+    name = "aura",
     about = "🌌 Aura: The Semantic Time Machine for AI-Native Engineering
-Version: v0.2.0-alpha (Open Source)
-Doc: https://auravcs.com
 
-Aura tracks mathematical logic instead of textual lines, allowing you to mathematically
-verify AI intent, surgically rewind hallucinations, and coordinate massive code generation.", 
-    version = CURRENT_VERSION,
-    styles = clap::builder::Styles::styled()
+    Aura tracks mathematical logic instead of textual lines, allowing you to mathematically
+    verify AI intent, surgically rewind hallucinations, and coordinate massive code generation.",
+    version = CURRENT_VERSION,    styles = clap::builder::Styles::styled()
         .header(clap::builder::styling::AnsiColor::Cyan.on_default().bold())
         .usage(clap::builder::styling::AnsiColor::Cyan.on_default().bold())
         .literal(clap::builder::styling::AnsiColor::Blue.on_default().bold())
@@ -276,7 +273,11 @@ struct Cli {
 #[derive(Subcommand)]
 enum Commands {
     /// Initialize Aura in this repository with an interactive setup wizard
-    Init,
+    Init {
+        /// Force a baseline scan of the entire project (bypasses intent check)
+        #[arg(long)]
+        force_baseline: bool,
+    },
     /// Plan a massive architectural objective using the native GSD Orchestrator
     Plan {
         /// The architectural objective to break down
@@ -318,7 +319,11 @@ enum Commands {
     
     /// (Internal) Extract AST metadata and stage AI chat history
     #[command(hide = true)]
-    CaptureContext,
+    CaptureContext {
+        /// Bypass all intent verification checks for this capture
+        #[arg(long)]
+        force: bool,
+    },
     /// (Internal) Injects the Aura-Checkpoint Trailer into the commit message
     #[command(hide = true)]
     InjectTrailer { commit_msg_file: String },
@@ -419,7 +424,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         Commands::Update => {
             perform_update()?;
         }
-        Commands::Init => {
+        Commands::Init { force_baseline } => {
             println!("{}", r#"
       █████        ███      ███  ███████████         █████      
      ███░░███     ░███     ░███ ░░███░░░░░███       ███░░███     
@@ -434,6 +439,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
             println!("\n{} {}\n", "✨".bold(), "AI-Native Semantic Version Control".bold().cyan());
             
+            let repo = Repository::open(".")?;
+            let index = repo.index()?;
+            let file_count = index.len();
+            
+            if file_count > 1000 && !*force_baseline {
+                println!("{} {}", "⚠️".yellow().bold(), "Large repository detected!".bold());
+                println!("  {} Your project has {} files. Initializing Aura may trigger", "↳".dimmed(), file_count);
+                println!("  {} 'Intent Poisoning' on your next commit as it baselines the logic.", "↳".dimmed());
+                println!("  {} Recommendation: Run {} to baseline without blocks.", "↳".dimmed(), "aura init --force-baseline".cyan().italic());
+                println!();
+            }
+
             let intro_text = textwrap::fill(
                 "Aura is a parasitic engine that wraps standard Git. It tracks the mathematical logic of your codebase (ASTs) rather than text diffs, allowing you to intercept, secure, and semantically rewind AI agent decisions.",
                 80
@@ -631,9 +648,42 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 println!("\n    {}\n", "aura capture-context".green().italic());
             }
 
-            println!("  {} Installing Semantic Git Hooks...", "⚙️ ".cyan());            if let Err(e) = HookInstaller::enable() {
+            println!("  {} Installing Semantic Git Hooks...", "⚙️ ".cyan());
+            if let Err(e) = HookInstaller::enable() {
                 println!("  {} {}", "✗".red().bold(), e);
                 return Ok(());
+            }
+
+            if *force_baseline {
+                println!("  {} Establishing Merkle-Graph baseline (Force Mode)...", "🧠".cyan());
+
+                let mut parser = SemanticParser::new()?;
+                let mut staged_nodes = Vec::new();
+
+                // Scan all files in index for the baseline
+                for entry in index.iter() {
+                    let path_str = String::from_utf8_lossy(&entry.path).to_string();
+                    let ext = if path_str.ends_with(".rs") { "rs" } else if path_str.ends_with(".py") { "py" } else if path_str.ends_with(".ts") || path_str.ends_with(".tsx") { "ts" } else if path_str.ends_with(".js") || path_str.ends_with(".jsx") { "js" } else { continue };
+                    if let Ok(source_code) = fs::read_to_string(&path_str) {
+                        if let Ok(ast_nodes) = parser.parse_file(&source_code, ext) {
+                            staged_nodes.extend(ast_nodes);
+                        }
+                    }
+                }
+
+                let id = format!("{:x}", Uuid::new_v4().to_string().replace("-", ""));
+                let checkpoint = CheckpointData {
+                    id: id.clone(),
+                    timestamp: SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs(),
+                    agent_id: "Aura Initializer".to_string(),
+                    intent: "[Aura Baseline] Initialized Merkle-Graph for existing codebase.".to_string(),
+                    ast_nodes: staged_nodes,
+                    env_fingerprint: capture_env_fingerprint(),
+                };
+
+                CheckpointStore::stage(&checkpoint)?;
+                CheckpointStore::commit_staged(&repo)?;
+                println!("    {} Baseline established successfully (ID: {}).", "✓".green(), id.cyan());
             }
 
             println!("\n{} {}\n", "🚀".bold(), "Aura is now protecting your repository.".bold().green());
@@ -650,7 +700,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             
             println!("\n{}\n", "Welcome to the age of Agentic Engineering.".bold().blue());
         }
-        Commands::CaptureContext => {
+        Commands::CaptureContext { force } => {
             let spinner = ProgressBar::new_spinner();
             spinner.set_style(
                 ProgressStyle::default_spinner()
@@ -658,14 +708,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     .template("{spinner:.cyan} {msg}")
                     .unwrap(),
             );
-            
+
             spinner.set_message(format!("{}", "Analyzing staged files semantically...".bold()));
             spinner.enable_steady_tick(Duration::from_millis(80));
 
             let repo = Repository::open(".")?;
             let mut parser = SemanticParser::new()?;
             let config = ConfigManager::load();
-            
+
             let index = repo.index()?;
             let mut staged_nodes = Vec::new();
 
@@ -678,10 +728,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         for node in ast_nodes {
                             if node.contains_secret {
                                 let ident = node.identifier.clone().unwrap_or_else(|| "Anonymous".to_string());
-                                
+
                                 // KILL SHOT FIX: Check allowlist and Dev Mode bypass
-                                let is_allowed = config.secret_allowlist.contains(&ident) || config.dev_mode;
-                                
+                                let is_allowed = config.secret_allowlist.contains(&ident) || config.dev_mode || *force;
+
                                 if !is_allowed {
                                     if config.strict_gatekeeper_mode {
                                         spinner.finish_and_clear();
@@ -694,7 +744,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     } else {
                                         spinner.println(format!("{} Semantic Sentinel Warning.", "⚠️".yellow().bold()));
                                         spinner.println(format!("  {} High-entropy pattern detected in node '{}'. Proceeding (Strict Mode is OFF).", "↳".dimmed(), ident.yellow()));
-                                    }                                }
+                                    }
+                                }
                             }
                             staged_nodes.push(node);
                         }
@@ -805,7 +856,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
             // Intent Verification (Logic Alignment): Prevent "Intent Poisoning"
             // Ensure the AI's text intent actually aligns with the code it modified.
-            if agent_id != "Aura Continuous Daemon" && !staged_nodes.is_empty() {
+            if !force && agent_id != "Aura Continuous Daemon" && !staged_nodes.is_empty() {
                 // Reject the default fallback string explicitly
                 if intent.starts_with("Automatically tracked") || intent == "No semantic logic changes detected in staged files." {
                     let config = ConfigManager::load();
