@@ -63,7 +63,7 @@ impl StubEngine {
                                                 println!("  {} Stripping proprietary logic from '{}' (RBAC Restricted)", "↳".dimmed(), ident.yellow());
                                                 
                                                 // Extract the full source of the node to replace it
-                                                if let Ok(Some((node_src, _))) = parser.extract_node_source(&source_code, ext, ident) {
+                                                if let Ok(Some((node_src, _))) = parser.retrieve_node_source(&source_code, ext, ident) {
                                                     // Generate a stub based on language
                                                     let stub = if ext == "py" {
                                                         format!("def {}(*args, **kwargs):\n    pass  # AURA STUB: Logic restricted by Sovereign Vault", ident)

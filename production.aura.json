@@ -1,9 +1,11 @@
 {
-  "target": "production",
-  "description": "Production constraints to prevent AI agents from deploying dangerous logic.",
-  "forbidden_dependencies": [
-    "print",
-    "sqlite3.connect",
-    "connect_local_db"
-  ]
+  "forbidden_imports": [],
+  "forbidden_calls": ["std::process::exit"],
+  "layer_rules": [
+    {
+      "from": "parser",
+      "cannot_call": "checkpoint"
+    }
+  ],
+  "protected_nodes": ["extract_dependencies", "diff_nodes"]
 }

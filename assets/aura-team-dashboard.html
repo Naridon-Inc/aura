@@ -153,6 +153,7 @@
         function App() {
             const [checkpoints, setCheckpoints] = useState([]);
             const [plan, setPlan] = useState(null);
+            const [metrics, setMetrics] = useState(null);
             const [view, setView] = useState('plan');
             const [loading, setLoading] = useState(false);
 
@@ -176,6 +177,11 @@
                         if (planData.status === 'ok') {
                             setPlan(planData.content);
                         }
+                    }
+
+                    const metricsRes = await fetch('/api/metrics');
+                    if (metricsRes.ok) {
+                        setMetrics(await metricsRes.json());
                     }
                 } catch (e) {
                     console.error("Aura Daemon offline", e);
@@ -204,6 +210,7 @@
                             {[
                                 { id: 'plan', icon: 'ListChecks', label: 'Active Plan' },
                                 { id: 'feed', icon: 'Activity', label: 'Semantic Feed' },
+                                { id: 'metrics', icon: 'BarChart2', label: 'Dev Metrics' },
                                 { id: 'gatekeeper', icon: 'ShieldCheck', label: 'Gatekeeper' },
                                 { id: 'graph', icon: 'Network', label: 'Merkle Graph' },
                                 { id: 'settings', icon: 'Settings', label: 'Config' }
@@ -311,6 +318,50 @@
                                             </div>
                                         </div>
                                     )}
+                                </div>
+                            )}
+
+                            {view === 'metrics' && metrics && (
+                                <div className="space-y-8">
+                                    <div className="flex items-center gap-3 mb-8 pb-6 border-b-2 border-zinc-900">
+                                        <div className="p-3 bg-zinc-900">
+                                            <Icon name="BarChart2" className="w-6 h-6 text-white" />
+                                        </div>
+                                        <div>
+                                            <h2 className="text-2xl font-black text-white uppercase tracking-tighter italic">Dev Metrics & Insights</h2>
+                                            <p className="text-[10px] font-bold text-zinc-500 uppercase tracking-widest mt-1">Logic Node Churn Analysis</p>
+                                        </div>
+                                    </div>
+                                    
+                                    <div className="grid grid-cols-2 gap-6">
+                                        <div className="block-border p-6 bg-zinc-950/20">
+                                            <div className="text-[10px] font-black text-zinc-600 uppercase tracking-widest mb-4">Total Checkpoints Tracked</div>
+                                            <div className="text-4xl font-black text-white">{metrics.total_checkpoints}</div>
+                                        </div>
+                                        
+                                        <div className="block-border p-6 bg-zinc-950/20">
+                                            <div className="text-[10px] font-black text-zinc-600 uppercase tracking-widest mb-4">Most Churned Logic Node</div>
+                                            <div className="text-xl font-bold text-emerald-500">{metrics.top_churned_nodes[0]?.[0] || 'N/A'}</div>
+                                            <div className="text-[10px] text-zinc-500 mt-2">{metrics.top_churned_nodes[0]?.[1] || 0} modifications detected</div>
+                                        </div>
+                                    </div>
+
+                                    <div className="block-border p-6 mt-8">
+                                        <div className="text-[10px] font-black text-zinc-600 uppercase tracking-widest mb-6">Top 10 AI-Modified Functions/Classes</div>
+                                        <div className="space-y-3">
+                                            {metrics.top_churned_nodes.map((node, i) => (
+                                                <div key={i} className="flex items-center justify-between p-3 bg-zinc-900/30">
+                                                    <div className="flex items-center gap-3">
+                                                        <div className="text-xs font-black text-zinc-500 w-4">{i + 1}.</div>
+                                                        <div className="text-sm font-bold text-zinc-300">{node[0]}</div>
+                                                    </div>
+                                                    <div className="text-xs font-black text-zinc-500 bg-zinc-900 px-3 py-1 rounded-full">
+                                                        {node[1]} edits
+                                                    </div>
+                                                </div>
+                                            ))}
+                                        </div>
+                                    </div>
                                 </div>
                             )}
 
