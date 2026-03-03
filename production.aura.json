@@ -1,0 +1,11 @@
+{
+  "forbidden_imports": ["sqlite3"],
+  "forbidden_calls": ["eval", "unsafe_exec"],
+  "layer_rules": [
+    {
+      "from": "frontend",
+      "cannot_call": "database"
+    }
+  ],
+  "protected_nodes": ["calculator_logic", "authenticate_user"]
+}
