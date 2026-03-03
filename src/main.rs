@@ -11,6 +11,7 @@ pub mod config;
 mod ecosystem;
 mod lsp;
 mod gsd;
+mod pr;
 
 use clap::{Parser, Subcommand};
 use parser::SemanticParser;
@@ -158,7 +159,7 @@ fn capture_env_fingerprint() -> Option<String> {
     ecosystem::Ecosystem::fingerprint()
 }
 
-const CURRENT_VERSION: &str = "0.2.13-alpha";
+const CURRENT_VERSION: &str = "0.3.0-alpha";
 
 fn check_for_updates() -> Option<String> {
     let client = reqwest::blocking::Client::builder()
@@ -313,6 +314,12 @@ enum Commands {
     Config {
         #[command(subcommand)]
         sub: Option<ConfigSubcommands>,
+    },
+    /// Perform a high-fidelity semantic review of code changes against a base branch
+    PrReview {
+        /// The base branch to compare against (e.g., "main", "master")
+        #[arg(short, long, default_value = "master")]
+        base: String,
     },
     
     // --- Internal / Hidden Commands ---
@@ -1625,6 +1632,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     println!("Exiting configuration.");
                 }
             }
+        }
+        Commands::PrReview { base } => {
+            pr::PrReviewEngine::run_review(base)?;
         }
     }
 
