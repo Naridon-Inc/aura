@@ -398,7 +398,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Log telemetry (non-blocking)
     let cmd_name = match &cli.command {
-        Commands::Init => "init",
+        Commands::Init { .. } => "init",
         Commands::Plan { .. } => "plan",
         Commands::Execute => "execute",
         Commands::Rewind { .. } => "rewind",
@@ -671,20 +671,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     }
                 }
 
-                let id = format!("{:x}", Uuid::new_v4().to_string().replace("-", ""));
+                let id = Uuid::new_v4().to_string().replace("-", "");
                 let checkpoint = CheckpointData {
                     id: id.clone(),
                     timestamp: SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs(),
                     agent_id: "Aura Initializer".to_string(),
                     intent: "[Aura Baseline] Initialized Merkle-Graph for existing codebase.".to_string(),
                     ast_nodes: staged_nodes,
+                    intent_vector: None,
                     env_fingerprint: capture_env_fingerprint(),
                 };
 
-                CheckpointStore::stage(&checkpoint)?;
+                CheckpointStore::stage_checkpoint(&checkpoint)?;
                 CheckpointStore::commit_staged(&repo)?;
-                println!("    {} Baseline established successfully (ID: {}).", "✓".green(), id.cyan());
-            }
+                println!("    {} Baseline established successfully (ID: {}).", "✓".green(), id.cyan());            }
 
             println!("\n{} {}\n", "🚀".bold(), "Aura is now protecting your repository.".bold().green());
             

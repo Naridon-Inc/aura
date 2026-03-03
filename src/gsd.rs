@@ -507,7 +507,6 @@ impl GsdEngine {
         // Simple XML extraction
         let mut waves = Vec::new();
         let mut current_action = String::new();
-        let mut current_verify = String::new();
         
         for line in plans_xml.lines() {
             if line.contains("<action>") {
@@ -518,13 +517,12 @@ impl GsdEngine {
             if line.contains("<verify>") {
                 let start = line.find("<verify>").unwrap() + 8;
                 let end = line.find("</verify>").unwrap_or(line.len());
-                current_verify = line[start..end].to_string();
+                let current_verify = line[start..end].to_string();
                 
                 // Once we have both action and verify, push the wave
                 if !current_action.is_empty() {
-                    waves.push((current_action.clone(), current_verify.clone()));
+                    waves.push((current_action.clone(), current_verify));
                     current_action.clear();
-                    current_verify.clear();
                 }
             }
         }
@@ -541,7 +539,8 @@ impl GsdEngine {
                 .unwrap()
                 .progress_chars("=>-"));
 
-            pb.set_message(format!("Action: {}", textwrap::shorten(action, 60)));
+            let short_action = if action.len() > 60 { format!("{}...", &action[..57]) } else { action.clone() };
+            pb.set_message(format!("Action: {}", short_action));
             
             // Simulate AI Coding
             for _ in 0..60 {
@@ -549,7 +548,8 @@ impl GsdEngine {
                 std::thread::sleep(std::time::Duration::from_millis(30));
             }
             
-            pb.set_message(format!("Verification: {}", textwrap::shorten(verify, 60)));
+            let short_verify = if verify.len() > 60 { format!("{}...", &verify[..57]) } else { verify.clone() };
+            pb.set_message(format!("Verification: {}", short_verify));
             
             // Simulate AST Check
             for _ in 0..40 {
