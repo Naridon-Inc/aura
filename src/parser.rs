@@ -2,6 +2,7 @@ use crate::models::{AstNode, SemanticHash, DependencyUri};
 use crate::lsp::LspClient;
 use crate::ecosystem::Ecosystem;
 use std::collections::hash_map::DefaultHasher;
+use std::collections::HashSet;
 use std::hash::{Hash, Hasher};
 use tree_sitter::{Node, Parser};
 
@@ -50,42 +51,54 @@ impl SemanticParser {
         Ok(extracted_nodes)
     }
 
-    /// Diffs two sets of logical nodes to identify semantic changes
+    /// Diffs two sets of logical nodes to identify semantic changes (including renames/moves)
     pub fn diff_nodes(old_nodes: &[AstNode], new_nodes: &[AstNode]) -> Vec<(String, String)> {
         let mut changes = Vec::new();
+        let mut matched_old_indices = HashSet::new();
+        let mut matched_new_indices = HashSet::new();
 
-        // 1. Check for Added or Modified nodes
-        for new_node in new_nodes {
-            let ident = new_node.identifier.clone().unwrap_or_else(|| "anonymous".to_string());
-            
-            let mut found = false;
-            for old_node in old_nodes {
-                if old_node.identifier == new_node.identifier && old_node.kind == new_node.kind {
-                    found = true;
+        // Pass 1: Direct Match by Identifier (Name)
+        for (new_idx, new_node) in new_nodes.iter().enumerate() {
+            for (old_idx, old_node) in old_nodes.iter().enumerate() {
+                if !matched_old_indices.contains(&old_idx) && old_node.identifier == new_node.identifier && old_node.kind == new_node.kind {
+                    matched_old_indices.insert(old_idx);
+                    matched_new_indices.insert(new_idx);
+                    
                     if old_node.content_hash != new_node.content_hash {
-                        changes.push((ident.clone(), "modified".to_string()));
+                        changes.push((new_node.identifier.clone().unwrap_or_else(|| "anonymous".to_string()), "modified".to_string()));
                     }
                     break;
                 }
             }
-            if !found {
-                changes.push((ident, "added".to_string()));
-            }
         }
 
-        // 2. Check for Deleted nodes
-        for old_node in old_nodes {
-            let ident = old_node.identifier.clone().unwrap_or_else(|| "anonymous".to_string());
+        // Pass 2: Structural Match for Renames (Match by node_id)
+        for (new_idx, new_node) in new_nodes.iter().enumerate() {
+            if matched_new_indices.contains(&new_idx) { continue; }
             
-            let mut found = false;
-            for new_node in new_nodes {
-                if new_node.identifier == old_node.identifier && new_node.kind == old_node.kind {
-                    found = true;
+            for (old_idx, old_node) in old_nodes.iter().enumerate() {
+                if !matched_old_indices.contains(&old_idx) && old_node.node_id == new_node.node_id {
+                    matched_old_indices.insert(old_idx);
+                    matched_new_indices.insert(new_idx);
+                    
+                    let old_name = old_node.identifier.clone().unwrap_or_else(|| "anonymous".to_string());
+                    let new_name = new_node.identifier.clone().unwrap_or_else(|| "anonymous".to_string());
+                    changes.push((format!("{} -> {}", old_name, new_name), "renamed".to_string()));
                     break;
                 }
             }
-            if !found {
-                changes.push((ident, "deleted".to_string()));
+        }
+
+        // Pass 3: Unmatched nodes are Added or Deleted
+        for (new_idx, new_node) in new_nodes.iter().enumerate() {
+            if !matched_new_indices.contains(&new_idx) {
+                changes.push((new_node.identifier.clone().unwrap_or_else(|| "anonymous".to_string()), "added".to_string()));
+            }
+        }
+
+        for (old_idx, old_node) in old_nodes.iter().enumerate() {
+            if !matched_old_indices.contains(&old_idx) {
+                changes.push((old_node.identifier.clone().unwrap_or_else(|| "anonymous".to_string()), "deleted".to_string()));
             }
         }
 
@@ -165,13 +178,15 @@ impl SemanticParser {
             content.hash(&mut hasher);
             let content_hash: SemanticHash = format!("ast_{:x}", hasher.finish());
 
-            // KILL SHOT FIX: Two-Stage Confidence Identity
-            // Stage 1: Normalize code (strip names/whitespace) to generate a structural skeleton hash
-            let normalized_code = content.replace(|c: char| c.is_whitespace(), "");
-            // For a true implementation, we'd use tree-sitter to strip only identifiers.
-            // For MVP, we'll hash the skeleton + kind to create a high-confidence structural identity.
+            // KILL SHOT FIX: Two-Stage Rename-Proof Identity
+            // Stage 1: Generate Structural ID by masking the identifier name
+            let mut skeleton = content.replace(|c: char| c.is_whitespace(), "");
+            if let Some(ref id) = identifier {
+                skeleton = skeleton.replace(id, "__ASL_IDENTIFIER__");
+            }
+            
             let mut id_hasher = DefaultHasher::new();
-            format!("{}_{}", kind, normalized_code).hash(&mut id_hasher);
+            format!("{}_{}", kind, skeleton).hash(&mut id_hasher);
             let node_id = format!("node_{:x}", id_hasher.finish());
 
             let mut dependencies = Vec::new();

@@ -1,0 +1,6 @@
+{
+  "description": "To restrict logic, add function or class names to 'restricted_nodes'. Current policy: DENY ALL (Restrictive).",
+  "policy_name": "Default Restrictive",
+  "restricted_nodes": [],
+  "version": "1.0"
+}

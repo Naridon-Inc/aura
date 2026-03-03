@@ -112,6 +112,24 @@ impl McpServer {
                                     },
                                     "required": ["intent"]
                                 }
+                            },
+                            {
+                                "name": "aura_pr_review",
+                                "description": "Perform a high-fidelity semantic review of code changes against a base branch. Detects logical renames, layer violations, and cross-branch conflicts.",
+                                "inputSchema": {
+                                    "type": "object",
+                                    "properties": {
+                                        "base": { "type": "string", "description": "The base branch to compare against (default: master)." }
+                                    }
+                                }
+                            },
+                            {
+                                "name": "aura_status",
+                                "description": "Check the current semantic status of the repository, including active checkpoints and logic nodes tracked.",
+                                "inputSchema": {
+                                    "type": "object",
+                                    "properties": {}
+                                }
                             }
                         ]
                     }
@@ -126,6 +144,8 @@ impl McpServer {
                 let result = match name {
                     "aura_read_history" => Self::tool_read_history(args),
                     "aura_log_intent" => Self::tool_log_intent(args),
+                    "aura_pr_review" => Self::tool_pr_review(args),
+                    "aura_status" => Self::tool_status(args),
                     _ => json!({ "isError": true, "content": [{ "type": "text", "text": "Unknown tool" }] })
                 };
 
@@ -174,4 +194,45 @@ Intent: {}", latest.agent_id, latest.intent);
         
         json!({ "content": [{ "type": "text", "text": "Intent successfully logged to Aura. It will be bound to the AST logic on your next git commit." }] })
     }
+
+    fn tool_pr_review(args: Value) -> Value {
+        let base = args["base"].as_str().unwrap_or("master");
+        match crate::pr::PrReviewEngine::run_review(base, true, false) {
+            Ok(Some(report_json)) => {
+                json!({ "content": [{ "type": "text", "text": report_json }] })
+            }
+            Ok(None) => {
+                json!({ "content": [{ "type": "text", "text": "No changes detected." }] })
+            }
+            Err(e) => {
+                json!({ "isError": true, "content": [{ "type": "text", "text": format!("PR Review failed: {}", e) }] })
+            }
+        }
+    }
+
+    fn tool_status(_args: Value) -> Value {
+        let repo = match Repository::open(".") {
+            Ok(r) => r,
+            Err(_) => return json!({ "isError": true, "content": [{ "type": "text", "text": "Not a git repository." }] }),
+        };
+
+        let config = crate::config::ConfigManager::load();
+        let checkpoints = CheckpointStore::get_all_checkpoints(&repo).unwrap_or_default();
+        
+        let mut tracked_count = 0;
+        if let Some(latest) = checkpoints.first() {
+            tracked_count = latest.ast_nodes.len();
+        }
+
+        let status_json = json!({
+            "strict_mode": config.strict_gatekeeper_mode,
+            "dev_mode": config.dev_mode,
+            "latest_checkpoint_id": checkpoints.first().map(|c| c.id.clone()),
+            "logic_nodes_tracked": tracked_count,
+            "total_checkpoints": checkpoints.len()
+        });
+
+        json!({ "content": [{ "type": "text", "text": serde_json::to_string_pretty(&status_json).unwrap() }] })
+    }
 }
+
