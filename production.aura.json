@@ -1,0 +1,9 @@
+{
+  "target": "production",
+  "description": "Production constraints to prevent AI agents from deploying dangerous logic.",
+  "forbidden_dependencies": [
+    "print",
+    "sqlite3.connect",
+    "connect_local_db"
+  ]
+}

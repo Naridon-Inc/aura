@@ -320,6 +320,12 @@ enum Commands {
         /// The base branch to compare against (e.g., "main", "master")
         #[arg(short, long, default_value = "master")]
         base: String,
+        /// Output the review report as a machine-readable JSON string
+        #[arg(long)]
+        json: bool,
+        /// Show the full list of undocumented nodes instead of bucketing them
+        #[arg(long)]
+        verbose: bool,
     },
     
     // --- Internal / Hidden Commands ---
@@ -1633,8 +1639,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
             }
         }
-        Commands::PrReview { base } => {
-            pr::PrReviewEngine::run_review(base)?;
+        Commands::PrReview { base, json, verbose } => {
+            pr::PrReviewEngine::run_review(base, *json, *verbose)?;
         }
     }
 
