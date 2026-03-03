@@ -252,7 +252,7 @@ impl SemanticParser {
 
     /// Finds a specific node by its identifier and returns its full source code string and byte range.
     /// Used for Semantic Rewind.
-    pub fn extract_node_source(&mut self, source_code: &str, ext: &str, target_identifier: &str) -> Result<Option<(String, std::ops::Range<usize>)>, Box<dyn std::error::Error>> {
+    pub fn retrieve_node_source(&mut self, source_code: &str, ext: &str, target_identifier: &str) -> Result<Option<(String, std::ops::Range<usize>)>, Box<dyn std::error::Error>> {
         let tree = match ext {
             "py" => self.python_parser.parse(source_code, None).ok_or("Failed to parse Python tree")?,
             "rs" => self.rust_parser.parse(source_code, None).ok_or("Failed to parse Rust tree")?,

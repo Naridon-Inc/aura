@@ -40,6 +40,59 @@ struct ReviewReport {
 pub struct PrReviewEngine;
 
 impl PrReviewEngine {
+    pub fn add_policy_pack(pack_name: &str) -> Result<(), Box<dyn std::error::Error>> {
+        println!("{} {} {}", "📦".bold(), "Aura Policy Marketplace: Installing".bold().cyan(), pack_name.yellow());
+
+        let mut rules = if let Ok(json) = fs::read_to_string("production.aura.json") {
+            serde_json::from_str::<InvariantRules>(&json).unwrap_or_else(|_| InvariantRules {
+                forbidden_imports: vec![],
+                forbidden_calls: vec![],
+                layer_rules: vec![],
+                protected_nodes: vec![],
+            })
+        } else {
+            InvariantRules {
+                forbidden_imports: vec![],
+                forbidden_calls: vec![],
+                layer_rules: vec![],
+                protected_nodes: vec![],
+            }
+        };
+
+        match pack_name.to_lowercase().as_str() {
+            "security" => {
+                rules.forbidden_calls.extend(vec!["eval".to_string(), "unsafe_exec".to_string(), "child_process.exec".to_string()]);
+                rules.protected_nodes.extend(vec!["authenticate".to_string(), "verify_token".to_string(), "hash_password".to_string()]);
+                println!("  {} Enforcing strict execution limits and auth node protection.", "↳".dimmed());
+            }
+            "payments" => {
+                rules.layer_rules.push(LayerRule { from: "ui".to_string(), cannot_call: "stripe".to_string() });
+                rules.protected_nodes.extend(vec!["process_payment".to_string(), "issue_refund".to_string()]);
+                println!("  {} Enforcing PCI isolation (UI cannot call Stripe directly).", "↳".dimmed());
+            }
+            "web-app" => {
+                rules.layer_rules.push(LayerRule { from: "components".to_string(), cannot_call: "database".to_string() });
+                rules.forbidden_imports.extend(vec!["fs".to_string(), "child_process".to_string()]);
+                println!("  {} Enforcing client-server separation (Components cannot call DB or FS).", "↳".dimmed());
+            }
+            _ => {
+                println!("{} Unknown policy pack '{}'. Available: security, payments, web-app", "✗".red(), pack_name);
+                return Ok(());
+            }
+        }
+
+        // Deduplicate
+        rules.forbidden_calls.sort(); rules.forbidden_calls.dedup();
+        rules.forbidden_imports.sort(); rules.forbidden_imports.dedup();
+        rules.protected_nodes.sort(); rules.protected_nodes.dedup();
+
+        let updated_json = serde_json::to_string_pretty(&rules)?;
+        fs::write("production.aura.json", updated_json)?;
+        
+        println!("{} Policy Pack '{}' merged into production.aura.json successfully.", "✓".green().bold(), pack_name);
+        Ok(())
+    }
+
     pub fn run_review(base_branch: &str, json_output: bool, verbose: bool) -> Result<Option<String>, Box<dyn std::error::Error>> {
         if !json_output {
             println!("\n{} {} {}", "🔍".bold(), "Aura Semantic pr-review:".bold().cyan(), base_branch.yellow());
@@ -254,24 +307,50 @@ impl PrReviewEngine {
             }
         }
 
+        // Feature 3: Omni-Graph Federation (Cross-Repo Blast Radius)
+        let mut omni_graph_impact = Vec::new();
+        // In the Enterprise version, this is guarded by a token check. For MVP, we simulate the federated query.
+        if !modified_nodes.is_empty() {
+            let client = reqwest::blocking::Client::builder().timeout(std::time::Duration::from_secs(3)).build().unwrap_or_default();
+            let modified_ids: Vec<String> = modified_nodes.iter().map(|(_, n)| n.node_id.clone()).collect();
+            let payload = serde_json::json!({ "modified_nodes": modified_ids });
+            
+            // Try to query the central Sovereign Vault for cross-repo dependencies
+            if let Ok(res) = client.post("http://api.auravcs.com/graph/query").json(&payload).send() {
+                if let Ok(json) = res.json::<serde_json::Value>() {
+                    if let Some(impacts) = json["impacted_repos"].as_array() {
+                        for impact in impacts {
+                            let repo_name = impact["repo"].as_str().unwrap_or("unknown_repo");
+                            let node_name = impact["node"].as_str().unwrap_or("unknown_node");
+                            omni_graph_impact.push(format!("Repo '{}' relies on this logic in '{}'", repo_name, node_name));
+                        }
+                    }
+                }
+            }
+        }
+
         let mut risk_score = (modified_nodes.len() * 2) + (tainted_nodes.len() * 5);
         if !unverified_nodes.is_empty() { risk_score += 20; }
         if !invariant_violations.is_empty() { risk_score += 50; }
         risk_score += conflicts.len() * 15;
+        if !omni_graph_impact.is_empty() { risk_score += 100; }
 
         let risk_label = if risk_score > 60 { "CRITICAL" } else if risk_score > 20 { "MODERATE" } else { "LOW" };
 
         if json_output {
-            let report = ReviewReport {
+            let mut report = serde_json::to_value(&ReviewReport {
                 base_branch: base_branch.to_string(),
                 total_changes: total_changes.len(),
-                unverified_nodes: unverified_by_kind,
-                invariant_violations,
-                blast_radius: tainted_nodes.into_iter().collect(),
-                cross_branch_conflicts: conflicts,
+                unverified_nodes: unverified_by_kind.clone(),
+                invariant_violations: invariant_violations.clone(),
+                blast_radius: tainted_nodes.iter().cloned().collect(),
+                cross_branch_conflicts: conflicts.clone(),
                 risk_score,
                 risk_label: risk_label.to_string(),
-            };
+            })?;
+            
+            // Inject Omni-Graph data dynamically
+            report["omni_graph_impact"] = serde_json::json!(omni_graph_impact);
             return Ok(Some(serde_json::to_string_pretty(&report)?));
         }
 
@@ -293,7 +372,7 @@ impl PrReviewEngine {
             println!("{} Undocumented changes: {}", "🚨".red().bold(), summary.join(", "));
             
             if verbose {
-                for node in unverified_nodes {
+                for node in &unverified_nodes {
                     println!("  {} {}", "↳".dimmed(), node.red());
                 }
             } else {
@@ -318,22 +397,69 @@ impl PrReviewEngine {
         }
 
         if !tainted_nodes.is_empty() {
-            println!("\n{} {}: {} downstream logic blocks affected.", "☢️ ".bold(), "Blast Radius".yellow().bold(), tainted_nodes.len());
+            println!("\n{} {}: {} local downstream blocks affected.", "☢️ ".bold(), "Local Blast Radius".yellow().bold(), tainted_nodes.len());
             for node in tainted_nodes.iter().take(5) {
                 println!("  {} {}", "↳".dimmed(), node.yellow());
             }
         }
 
+        if !omni_graph_impact.is_empty() {
+            println!("\n{} {}:", "🌐".bold(), "OMNI-GRAPH ALERT (Cross-Repo Taint)".red().bold().blink());
+            for impact in &omni_graph_impact {
+                println!("  {} {}", "❗".red(), impact.red());
+            }
+        }
+
         if !conflicts.is_empty() {
             println!("\n{} {}:", "⚔️ ".bold(), "Cross-Branch Conflicts".yellow().bold());
-            for conflict in conflicts {
+            for conflict in &conflicts {
                 println!("  • {}", conflict.yellow());
             }
         }
 
         println!("\n{:-^80}", "-".dimmed());
+        
+        // DX-Friendly Verdict & Action Items
+        println!("{} {}", "⚖️ ".bold(), "Aura Verdict & Next Steps".bold().cyan());
+        
         let color_label = if risk_score > 60 { "CRITICAL".red().bold() } else if risk_score > 20 { "MODERATE".yellow().bold() } else { "LOW".green().bold() };
-        println!("{} {}: {}", "📊".bold(), "Overall Architectural Risk".bold(), color_label);
+        println!("  {} {}: {}", "Risk Level".bold(), "Overall Architectural Risk", color_label);
+        
+        if risk_score > 60 {
+            println!("  {} {}", "Verdict".bold(), "MERGE BLOCKED. High probability of semantic collision or policy violation.".red());
+        } else if risk_score > 20 {
+            println!("  {} {}", "Verdict".bold(), "PROCEED WITH CAUTION. The code is logically sound, but the merge may be heavy due to overlap.".yellow());
+        } else {
+            println!("  {} {}", "Verdict".bold(), "SAFE TO MERGE. No architectural violations or cross-branch conflicts detected.".green());
+        }
+
+        println!("\n  {}", "Suggested Actions:".bold());
+        let mut no_actions = true;
+
+        if !invariant_violations.is_empty() {
+            println!("    {} Run {} to have the Sovereign Arbitrator automatically fix the policy violations.", "↳".dimmed(), "aura fix".cyan().bold());
+            no_actions = false;
+        }
+        
+        if !tainted_nodes.is_empty() {
+            println!("    {} Run {} to visually inspect the blast radius and ensure downstream functions aren't broken.", "↳".dimmed(), "aura map".cyan().bold());
+            no_actions = false;
+        }
+
+        if !conflicts.is_empty() {
+            println!("    {} Coordinate with the owners of the overlapping branches to prevent blind logic overwrites during merge.", "↳".dimmed());
+            no_actions = false;
+        }
+        
+        if !unverified_nodes.is_empty() {
+            println!("    {} Update your latest commit message with an explicit intent mentioning the undocumented nodes.", "↳".dimmed());
+            no_actions = false;
+        }
+
+        if no_actions {
+            println!("    {} None! You are good to go.", "↳".dimmed());
+        }
+
         println!("{:-^80}\n", "-".dimmed());
 
         Ok(None)
