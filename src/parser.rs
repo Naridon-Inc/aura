@@ -50,6 +50,48 @@ impl SemanticParser {
         Ok(extracted_nodes)
     }
 
+    /// Diffs two sets of logical nodes to identify semantic changes
+    pub fn diff_nodes(old_nodes: &[AstNode], new_nodes: &[AstNode]) -> Vec<(String, String)> {
+        let mut changes = Vec::new();
+
+        // 1. Check for Added or Modified nodes
+        for new_node in new_nodes {
+            let ident = new_node.identifier.clone().unwrap_or_else(|| "anonymous".to_string());
+            
+            let mut found = false;
+            for old_node in old_nodes {
+                if old_node.identifier == new_node.identifier && old_node.kind == new_node.kind {
+                    found = true;
+                    if old_node.content_hash != new_node.content_hash {
+                        changes.push((ident.clone(), "modified".to_string()));
+                    }
+                    break;
+                }
+            }
+            if !found {
+                changes.push((ident, "added".to_string()));
+            }
+        }
+
+        // 2. Check for Deleted nodes
+        for old_node in old_nodes {
+            let ident = old_node.identifier.clone().unwrap_or_else(|| "anonymous".to_string());
+            
+            let mut found = false;
+            for new_node in new_nodes {
+                if new_node.identifier == old_node.identifier && new_node.kind == old_node.kind {
+                    found = true;
+                    break;
+                }
+            }
+            if !found {
+                changes.push((ident, "deleted".to_string()));
+            }
+        }
+
+        changes
+    }
+
     fn extract_dependencies(&self, node: &Node, source_code: &str, dependencies: &mut Vec<DependencyUri>) {
         let kind = node.kind();
         
