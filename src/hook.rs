@@ -16,32 +16,35 @@ impl HookInstaller {
         let hooks_dir = git_dir.join("hooks");
         fs::create_dir_all(&hooks_dir)?;
 
+        let current_exe = std::env::current_exe().unwrap_or_else(|_| std::path::PathBuf::from("aura"));
+        let aura_path = current_exe.to_string_lossy();
+
         // 1. The Pre-Commit Hook (Scrapes intent and ASTs)
         let pre_commit_path = hooks_dir.join("pre-commit");
-        let pre_commit_script = r#"#!/bin/sh
+        let pre_commit_script = format!(r#"#!/bin/sh
 echo "[Aura] Analyzing staged files semantically..."
-~/.cargo/bin/aura capture-context
+{} capture-context
 if [ $? -ne 0 ]; then
     echo "[Aura] Semantic analysis failed. Commit aborted."
     exit 1
 fi
-"#;
+"#, aura_path);
         fs::write(&pre_commit_path, pre_commit_script)?;
         Self::make_executable(&pre_commit_path)?;
 
         // 2. The Commit-Msg Hook (Injects the Trailer)
         let commit_msg_path = hooks_dir.join("commit-msg");
-        let commit_msg_script = r#"#!/bin/sh
-~/.cargo/bin/aura inject-trailer "$1"
-"#;
+        let commit_msg_script = format!(r#"#!/bin/sh
+{} inject-trailer "$1"
+"#, aura_path);
         fs::write(&commit_msg_path, commit_msg_script)?;
         Self::make_executable(&commit_msg_path)?;
 
         // 3. The Post-Commit Hook (Saves to the hidden branch)
         let post_commit_path = hooks_dir.join("post-commit");
-        let post_commit_script = r#"#!/bin/sh
-~/.cargo/bin/aura persist-checkpoint
-"#;
+        let post_commit_script = format!(r#"#!/bin/sh
+{} persist-checkpoint
+"#, aura_path);
         fs::write(&post_commit_path, post_commit_script)?;
         Self::make_executable(&post_commit_path)?;
 
