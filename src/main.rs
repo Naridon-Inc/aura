@@ -884,6 +884,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
             for entry in index.iter() {
                 let path_str = String::from_utf8_lossy(&entry.path).to_string();
+
+                // Skip build artifacts, dependencies, and generated files
+                if path_str.contains("node_modules/") || path_str.contains(".next/")
+                    || path_str.contains("target/") || path_str.contains("dist/")
+                    || path_str.contains("build/") || path_str.contains(".cache/")
+                    || path_str.contains("__pycache__/") || path_str.contains(".aura/")
+                    || path_str.contains(".git/") || path_str.contains("vendor/")
+                    || path_str.contains(".turbo/") || path_str.contains(".vercel/")
+                    || path_str.contains("coverage/") || path_str.contains(".output/") {
+                    continue;
+                }
+
                 let ext = if path_str.ends_with(".rs") { "rs" } else if path_str.ends_with(".py") { "py" } else if path_str.ends_with(".ts") || path_str.ends_with(".tsx") { "ts" } else if path_str.ends_with(".js") || path_str.ends_with(".jsx") { "js" } else { continue };
 
                 if let Ok(source_code) = fs::read_to_string(&path_str) {
@@ -1536,6 +1548,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
             for entry in index.iter() {
                 let path_str = String::from_utf8_lossy(&entry.path).to_string();
+
+                // Skip build artifacts, dependencies, and generated files
+                if path_str.contains("node_modules/") || path_str.contains(".next/")
+                    || path_str.contains("target/") || path_str.contains("dist/")
+                    || path_str.contains("build/") || path_str.contains(".cache/")
+                    || path_str.contains("__pycache__/") || path_str.contains(".aura/")
+                    || path_str.contains(".git/") || path_str.contains("vendor/")
+                    || path_str.contains(".turbo/") || path_str.contains(".vercel/")
+                    || path_str.contains("coverage/") || path_str.contains(".output/") {
+                    continue;
+                }
+
                 let ext = if path_str.ends_with(".rs") { "rs" } else if path_str.ends_with(".py") { "py" } else if path_str.ends_with(".ts") || path_str.ends_with(".tsx") { "ts" } else if path_str.ends_with(".js") || path_str.ends_with(".jsx") { "js" } else { continue };
 
                 if let Ok(source_code) = fs::read_to_string(&path_str) {
