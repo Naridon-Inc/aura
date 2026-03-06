@@ -164,6 +164,45 @@ impl GsdEngine {
         None
     }
 
+    /// Strip markdown code fences from LLM output
+    pub fn strip_markdown_fences(text: &str) -> String {
+        let mut result = String::new();
+        let mut in_fence = false;
+        for line in text.lines() {
+            let trimmed = line.trim();
+            if trimmed.starts_with("```") {
+                in_fence = !in_fence;
+                continue;
+            }
+            if !in_fence || !trimmed.is_empty() {
+                result.push_str(line);
+                result.push('\n');
+            }
+        }
+        result.trim().to_string()
+    }
+
+    /// Extract a JSON object from text (finds first { ... } block)
+    pub fn extract_json_object(text: &str) -> String {
+        let trimmed = text.trim();
+        if let Some(start) = trimmed.find('{') {
+            let mut depth = 0;
+            for (i, ch) in trimmed[start..].char_indices() {
+                match ch {
+                    '{' => depth += 1,
+                    '}' => {
+                        depth -= 1;
+                        if depth == 0 {
+                            return trimmed[start..start + i + 1].to_string();
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+        trimmed.to_string()
+    }
+
     /// Step 1: The Orchestrator / Planner
     pub fn plan_milestone(prompt: &str) {
         println!("{} {} {}", "🧠".bold(), "Aura Orchestrator: Planning Milestone for".bold().cyan(), prompt.yellow());

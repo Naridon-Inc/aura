@@ -13,6 +13,9 @@ mod lsp;
 mod gsd;
 mod pr;
 mod toon;
+pub mod orchestrate;
+mod symphony;
+mod linear;
 
 use clap::{Parser, Subcommand};
 use parser::SemanticParser;
@@ -389,16 +392,26 @@ enum Commands {
     #[command(hide = true)]
     Restore { snapshot_id: String },
     /// Mathematically prove if the codebase supports a specific behavioral goal
-    Prove { 
+    Prove {
         /// The goal to verify (e.g., "users can log in via Google")
         #[arg(short, long)]
-        goal: String 
+        goal: String
     },
     /// (Internal) Verify semantic safety
     #[command(hide = true)]
-    VerifyEnv { 
+    VerifyEnv {
         #[arg(short, long)] target: Option<String>,
         #[arg(trailing_var_arg = true)] pos_target: Vec<String>,
+    },
+    /// Run multi-agent orchestration (Duo Mode) — Claude Code + Gemini CLI in parallel
+    Orchestrate {
+        #[command(subcommand)]
+        sub: OrchestrateSubcommands,
+    },
+    /// Run Linear-driven development workflows with AI agents
+    Symphony {
+        #[command(subcommand)]
+        sub: SymphonySubcommands,
     },
 }
 
@@ -420,6 +433,58 @@ enum PolicySubcommands {
         /// The name of the pack (e.g., 'security', 'payments', 'web-app')
         pack_name: String,
     },
+}
+
+#[derive(Subcommand)]
+enum OrchestrateSubcommands {
+    /// Start a new orchestration session with an objective
+    Run {
+        /// The objective to accomplish (e.g., "add user authentication")
+        objective: String,
+        /// Assignment strategy: smart, round-robin, or manual
+        #[arg(short, long, default_value = "smart")]
+        strategy: String,
+        /// Base branch for validation
+        #[arg(short, long, default_value = "master")]
+        base: String,
+        /// Use Duo Mode (parallel multi-agent relay) instead of sequential waves
+        #[arg(long)]
+        duo: bool,
+    },
+    /// Show status of the active orchestration session
+    Status,
+    /// Pause the active orchestration session
+    Pause,
+    /// Resume a paused orchestration session
+    Resume {
+        #[arg(short, long, default_value = "master")]
+        base: String,
+    },
+    /// Cancel the active orchestration session
+    Cancel,
+    /// List all orchestration sessions
+    List,
+}
+
+#[derive(Subcommand)]
+enum SymphonySubcommands {
+    /// Start a Symphony run — pull Linear issues and execute with AI agents
+    Run {
+        /// Linear team key (e.g., "ENG")
+        #[arg(short, long)]
+        team: String,
+        /// Maximum number of issues to process
+        #[arg(short, long, default_value = "5")]
+        limit: usize,
+        /// Only process issues with this label
+        #[arg(short = 'L', long)]
+        label: Option<String>,
+        /// Base branch for validation
+        #[arg(short, long, default_value = "master")]
+        base: String,
+    },
+    /// Show Symphony configuration and status
+    Status,
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -1721,6 +1786,65 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             match sub {
                 PolicySubcommands::Add { pack_name } => {
                     crate::pr::PrReviewEngine::add_policy_pack(&pack_name)?;
+                }
+            }
+        }
+        Commands::Orchestrate { sub } => {
+            match sub {
+                OrchestrateSubcommands::Run { objective, strategy, base, duo } => {
+                    let strat = match strategy.as_str() {
+                        "round-robin" => orchestrate::AssignmentStrategy::RoundRobin,
+                        "smart" | _ => orchestrate::AssignmentStrategy::Smart,
+                    };
+                    if *duo {
+                        orchestrate::run_duo(&objective, &base)?;
+                    } else {
+                        orchestrate::run(&objective, strat, &base)?;
+                    }
+                }
+                OrchestrateSubcommands::Status => {
+                    let summary = orchestrate::get_status_summary()?;
+                    println!("{}", summary);
+                }
+                OrchestrateSubcommands::Pause => {
+                    let session = orchestrate::pause_session()?;
+                    println!("Paused session {}", &session.id[..8]);
+                }
+                OrchestrateSubcommands::Resume { base } => {
+                    orchestrate::resume_session(&base)?;
+                }
+                OrchestrateSubcommands::Cancel => {
+                    let session = orchestrate::cancel_session()?;
+                    println!("Cancelled session {}", &session.id[..8]);
+                }
+                OrchestrateSubcommands::List => {
+                    let sessions = orchestrate::list_sessions()?;
+                    if sessions.is_empty() {
+                        println!("No orchestration sessions found.");
+                    } else {
+                        for s in &sessions {
+                            let passed = s.waves.iter().filter(|w| w.status == orchestrate::WaveStatus::Passed).count();
+                            println!("{} | {:?} | {}/{} waves | {}",
+                                &s.id[..8], s.status, passed, s.waves.len(), s.objective);
+                        }
+                    }
+                }
+            }
+        }
+        Commands::Symphony { sub } => {
+            match sub {
+                SymphonySubcommands::Run { team: _, limit: _, label: _, base: _ } => {
+                    // Symphony reads config from WORKFLOW.md
+                    let workflow_path = ".aura/WORKFLOW.md";
+                    if !Path::new(workflow_path).exists() {
+                        eprintln!("No WORKFLOW.md found. Create .aura/WORKFLOW.md to configure Symphony.");
+                        eprintln!("See: aura symphony status");
+                    } else {
+                        symphony::start(workflow_path)?;
+                    }
+                }
+                SymphonySubcommands::Status => {
+                    symphony::status()?;
                 }
             }
         }
