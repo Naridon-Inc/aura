@@ -1,37 +1,123 @@
 ---
 name: aura-gsd
-description: The Advanced Native GSD Orchestration Engine for Aura. Optimized for the Gemini CLI with interactive planning and execution modes.
+description: Aura Semantic Engine v0.5.0 — AI-native version control with multi-agent orchestration, semantic PR review, surgical rewind, and durable snapshots.
 ---
 
-# Aura GSD: The Sovereign Architect
+# Aura Semantic Engine (v0.5.0)
 
-You are the Aura GSD Wave Runner. Your purpose is to eliminate context rot and provide mathematical architectural governance using the Aura Semantic Engine. You combine the strictness of Aura with the interactive, multi-stage planning of the "normal" GSD build system.
+You have access to the **Aura Semantic Engine** — an AI-native version control meta-layer on top of Git. Aura tracks the mathematical logic (AST Merkle-Graph) of the codebase, not text diffs. Use it to plan, verify, recover, and coordinate.
 
-## Core Commands
+## Essential Workflow
 
-### `/aura:plan <objective>`
-1. **Native Orchestration:** You MUST invoke the Aura Rust binary to handle the planning process. Do not attempt to write the XML or markdown plans manually.
-2. **Execute:** Run `aura plan "<objective>"`. The Aura engine will intercept the process, query the local AST Merkle-Graph, and guide the user through interactive prompts to generate the `ACTIVE_MILESTONE.xml` and `PLAN.md` files.
-3. **Review:** Once the command completes, read the generated `PLAN.md` to understand the architectural roadmap.
-4. **Halt:** Present a brief summary of the generated plan to the user. Do not write code until the user says "Go".
+### Before Editing Files
+Take a durable snapshot so the user can recover if something goes wrong:
+```bash
+aura snapshot "pre-edit safety snapshot"
+```
 
-### `/aura:execute`
-1. **Load:** Read the `.aura/plans/ACTIVE_MILESTONE.xml` to determine the execution mode and the next uncompleted `<plan>`.
-2. **Isolate:** Forget previous code context. Focus ONLY on the current atomic plan(s).
-3. **Write:** Synthesize the logic nodes.
-4. **Handshake:** Create or update `.gemini.intent` with a precise semantic explanation of the AST nodes you changed. The Aura `PreCommit` hook will validate this.
-5. **Finalize:** Run `git add .` and `git commit` following the user's chosen `git_tracking` setting. Ensure the commit message explicitly references the AST nodes modified to satisfy the strict Aura semantic hook.
-6. **Wait:** Halt for user approval before moving to the next wave or completing the milestone.
+### Before Committing
+1. Log your intent:
+```bash
+echo "[Gemini CLI] Refactored auth middleware to support JWT" > .gemini.intent
+```
+2. Check for violations:
+```bash
+aura pr-review --base main
+```
+3. Commit normally — the Aura pre-commit hook validates intent against AST changes.
 
-### `/aura:rewind <identifier>`
-1. **Action:** Call the Aura CLI `rewind` tool or standard `git revert` to revert the specific logic block if the previous execution failed.
+## All Commands
 
-## Operational Rules
-- **NEVER Fall Back to Manual GSD:** You are strictly forbidden from bypassing Aura. Do not use `.planning/ROADMAP.md` or `.gemini/get-shit-done` scripts. You MUST use the native `aura plan` and `aura execute` commands for all orchestration. If a command fails, report the error and wait for the human to fix the engine.
-- **Interactive First:** Never assume the execution parameters. Always trigger the `ask_user` tool first before running `aura plan`.
-- **Atomicity:** Follow the chosen execution mode. One wave = One atomic change.
-- **Verification:** Always run the `<verify>` command before committing.
-- **Invisibility:** Do not leave garbage files in the repo. Use `.aura/plans/` for state tracking.
-- **Tone:** You are a senior systems architect. Be brief, technical, and precise.
+### Planning & Execution
+```bash
+aura plan "migrate from REST to GraphQL"   # Decompose into atomic waves
+aura execute                                 # Execute next wave
+```
+Creates `.aura/plans/ACTIVE_MILESTONE.xml` with atomic steps. One wave = one atomic change. Wait for user approval between waves.
 
-*Aura is watching. Software is logic. Track the truth.*
+### Surgical Rewind
+```bash
+aura rewind <function_name> <file_path>
+aura rewind calculate_tax src/billing.rs --amnesia
+```
+Reverts a single function/class to its previous safe state. Searches durable snapshots first, then 50 commits of git history. `--amnesia` wipes AI memory of the bad code.
+
+### Semantic PR Review
+```bash
+aura pr-review --base main                  # Human-readable report
+aura pr-review --base main --json           # Machine-readable
+aura pr-review --base main --verbose        # Full node details
+```
+Detects: logical renames, layer violations, forbidden calls, undocumented nodes, cross-branch conflicts. Outputs risk score 0-100.
+
+### Mathematical Proof
+```bash
+aura prove --goal "users can log in via Google"
+```
+Traces logic paths in the AST to mathematically verify behavioral goals.
+
+### Autonomous Fix
+```bash
+aura fix --base main
+```
+Shadow-branch loop that auto-resolves architectural invariant violations.
+
+### Multi-Agent Orchestration (Duo Mode)
+Run Claude Code and Gemini CLI in parallel on the same codebase:
+```bash
+aura orchestrate run "add auth and write tests" --duo
+aura orchestrate status                     # Check progress
+aura orchestrate pause                      # Pause execution
+aura orchestrate resume                     # Resume from pause
+aura orchestrate cancel                     # Abort session
+aura orchestrate list                       # View all sessions
+```
+Smart assignment: complex refactors go to Claude, everything else to Gemini. Agents relay context between rounds.
+
+### Symphony (Linear Integration)
+Execute Linear issues with AI agents:
+```bash
+aura symphony run --team ENG
+aura symphony status
+```
+
+### Handover Context
+```bash
+aura handover gemini                        # Compressed AST context
+```
+90%+ smaller than reading raw files. Use when switching agents or reducing context.
+
+### Policy Packs
+```bash
+aura policy add security                    # No plaintext secrets, no eval()
+aura policy add payments                    # PCI-DSS patterns
+aura policy add web-app                     # XSS, CSRF, injection prevention
+```
+
+### Status & Audit
+```bash
+aura status                                 # View checkpoints and config
+aura audit                                  # Find commits that bypassed verification
+```
+
+### Snapshots
+```bash
+aura snapshot "description"                 # Take a project snapshot
+aura restore <snapshot_id>                  # Restore from snapshot
+```
+
+## MCP Tools (When Running as MCP Server)
+- `aura_read_history` — Search semantic logic history
+- `aura_log_intent` — Log architectural intent before commits
+- `aura_pr_review` — Run semantic PR review
+- `aura_status` — Check repository status
+- `aura_snapshot` — Snapshot a file before editing
+- `aura_snapshot_list` — List recoverable snapshots
+
+## Rules
+- **Snapshot first** before large edits
+- **Atomic waves** for complex tasks — use `aura plan` + `aura execute`
+- **Verify before commit** — run `aura pr-review`
+- **Log intent** — always write `.gemini.intent` before committing
+- **Never bypass** — do not use `--no-verify` on git commits
+- **One wave at a time** — halt for user approval between waves
