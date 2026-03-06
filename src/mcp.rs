@@ -190,18 +190,26 @@ impl McpServer {
     }
 
     fn tool_read_history(_args: Value) -> Value {
-        // Simplified read: just return the latest checkpoint
         let repo = match Repository::open(".") {
             Ok(r) => r,
             Err(_) => return json!({ "content": [{ "type": "text", "text": "Not a git repository." }] }),
         };
 
         if let Ok(checkpoints) = CheckpointStore::get_all_checkpoints(&repo) {
-            if let Some(latest) = checkpoints.first() {
-                let text = format!("Latest Architectural Intent:
-Agent: {}
-Intent: {}", latest.agent_id, latest.intent);
-                return json!({ "content": [{ "type": "text", "text": text }] });
+            if !checkpoints.is_empty() {
+                // Build structured data, encode as TOON for token efficiency
+                let entries: Vec<Value> = checkpoints.iter().take(10).map(|c| {
+                    json!({
+                        "id": &c.id[..8],
+                        "agent": c.agent_id,
+                        "intent": c.intent,
+                        "nodes": c.ast_nodes.len(),
+                        "ts": c.timestamp
+                    })
+                }).collect();
+                let data = json!({ "history": entries });
+                let toon_text = crate::toon::encode(&data);
+                return json!({ "content": [{ "type": "text", "text": toon_text }] });
             }
         }
 
@@ -222,7 +230,13 @@ Intent: {}", latest.agent_id, latest.intent);
         let base = args["base"].as_str().unwrap_or("master");
         match crate::pr::PrReviewEngine::run_review(base, true, false) {
             Ok(Some(report_json)) => {
-                json!({ "content": [{ "type": "text", "text": report_json }] })
+                // Try to parse the JSON report and re-encode as TOON for token savings
+                if let Ok(parsed) = serde_json::from_str::<Value>(&report_json) {
+                    let toon_text = crate::toon::encode(&parsed);
+                    json!({ "content": [{ "type": "text", "text": toon_text }] })
+                } else {
+                    json!({ "content": [{ "type": "text", "text": report_json }] })
+                }
             }
             Ok(None) => {
                 json!({ "content": [{ "type": "text", "text": "No changes detected." }] })
@@ -247,7 +261,7 @@ Intent: {}", latest.agent_id, latest.intent);
             tracked_count = latest.ast_nodes.len();
         }
 
-        let status_json = json!({
+        let status_data = json!({
             "strict_mode": config.strict_gatekeeper_mode,
             "dev_mode": config.dev_mode,
             "latest_checkpoint_id": checkpoints.first().map(|c| c.id.clone()),
@@ -255,7 +269,8 @@ Intent: {}", latest.agent_id, latest.intent);
             "total_checkpoints": checkpoints.len()
         });
 
-        json!({ "content": [{ "type": "text", "text": serde_json::to_string_pretty(&status_json).unwrap() }] })
+        let toon_text = crate::toon::encode(&status_data);
+        json!({ "content": [{ "type": "text", "text": toon_text }] })
     }
 
     fn tool_snapshot(args: Value) -> Value {
@@ -285,13 +300,19 @@ Intent: {}", latest.agent_id, latest.intent);
             return json!({ "content": [{ "type": "text", "text": "No snapshots found. Use aura_snapshot before editing files." }] });
         }
 
-        let mut text = format!("Found {} snapshots:\n\n", snapshots.len());
-        for (i, snap) in snapshots.iter().take(20).enumerate() {
-            text.push_str(&format!("{}. {} (trigger: {}, agent: {}, ts: {})\n",
-                i + 1, snap.file_path, snap.trigger, snap.agent_id, snap.timestamp));
-        }
+        // TOON tabular format — massively fewer tokens than JSON for uniform arrays
+        let entries: Vec<Value> = snapshots.iter().take(20).map(|s| {
+            json!({
+                "file": s.file_path,
+                "trigger": s.trigger,
+                "agent": s.agent_id,
+                "ts": s.timestamp
+            })
+        }).collect();
+        let data = json!({ "count": snapshots.len(), "snapshots": entries });
+        let toon_text = crate::toon::encode(&data);
 
-        json!({ "content": [{ "type": "text", "text": text }] })
+        json!({ "content": [{ "type": "text", "text": toon_text }] })
     }
 }
 
