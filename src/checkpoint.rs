@@ -2,6 +2,7 @@ use git2::{Repository, Signature};
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::Path;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::models::AstNode;
 
@@ -16,6 +17,171 @@ pub struct CheckpointData {
     pub intent_vector: Option<Vec<f32>>,
     #[serde(default)]
     pub env_fingerprint: Option<String>,
+}
+
+/// A durable file-level snapshot stored on disk in .aura/snapshots/
+/// This survives regardless of git state — even if no commit exists.
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct FileSnapshot {
+    pub file_path: String,
+    pub content: String,
+    pub timestamp: u64,
+    pub trigger: String,  // "mcp_edit", "watcher", "pre_commit", "manual"
+    pub agent_id: String,
+}
+
+pub struct SnapshotStore;
+
+impl SnapshotStore {
+    const SNAPSHOT_DIR: &'static str = ".aura/snapshots";
+    const MAX_SNAPSHOTS_PER_FILE: usize = 50;
+    const MAX_TOTAL_SNAPSHOTS: usize = 500;
+
+    /// Ensure the snapshot directory exists
+    fn ensure_dir() {
+        let _ = fs::create_dir_all(Self::SNAPSHOT_DIR);
+    }
+
+    /// Take a durable snapshot of a file before it gets modified.
+    /// Returns the snapshot ID (filename) on success.
+    pub fn snapshot_file(file_path: &str, trigger: &str, agent_id: &str) -> Result<String, String> {
+        Self::ensure_dir();
+
+        let content = fs::read_to_string(file_path)
+            .map_err(|e| format!("Cannot snapshot {}: {}", file_path, e))?;
+
+        let timestamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as u64;
+
+        let snapshot = FileSnapshot {
+            file_path: file_path.to_string(),
+            content,
+            timestamp,
+            trigger: trigger.to_string(),
+            agent_id: agent_id.to_string(),
+        };
+
+        // Filename: sanitized_path__timestamp.json
+        let safe_name = file_path.replace('/', "__").replace('\\', "__");
+        let filename = format!("{}__{}.json", safe_name, timestamp);
+        let snap_path = format!("{}/{}", Self::SNAPSHOT_DIR, filename);
+
+        let json = serde_json::to_string(&snapshot)
+            .map_err(|e| format!("Serialize error: {}", e))?;
+
+        // Atomic write
+        let tmp_path = format!("{}.tmp", snap_path);
+        fs::write(&tmp_path, &json).map_err(|e| format!("Write error: {}", e))?;
+        fs::rename(&tmp_path, &snap_path).map_err(|e| format!("Rename error: {}", e))?;
+
+        // Prune old snapshots for this file
+        Self::prune_file_snapshots(file_path);
+
+        Ok(filename)
+    }
+
+    /// Get all snapshots for a specific file, sorted newest first
+    pub fn get_snapshots_for_file(file_path: &str) -> Vec<FileSnapshot> {
+        Self::ensure_dir();
+        let safe_name = file_path.replace('/', "__").replace('\\', "__");
+
+        let mut snapshots = Vec::new();
+        if let Ok(entries) = fs::read_dir(Self::SNAPSHOT_DIR) {
+            for entry in entries.flatten() {
+                let name = entry.file_name().to_string_lossy().to_string();
+                if name.starts_with(&safe_name) && name.ends_with(".json") {
+                    if let Ok(content) = fs::read_to_string(entry.path()) {
+                        if let Ok(snap) = serde_json::from_str::<FileSnapshot>(&content) {
+                            snapshots.push(snap);
+                        }
+                    }
+                }
+            }
+        }
+
+        snapshots.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
+        snapshots
+    }
+
+    /// Get all snapshots across all files, sorted newest first
+    pub fn get_all_snapshots() -> Vec<FileSnapshot> {
+        Self::ensure_dir();
+        let mut snapshots = Vec::new();
+
+        if let Ok(entries) = fs::read_dir(Self::SNAPSHOT_DIR) {
+            for entry in entries.flatten() {
+                if entry.path().extension().map(|e| e == "json").unwrap_or(false) {
+                    if let Ok(content) = fs::read_to_string(entry.path()) {
+                        if let Ok(snap) = serde_json::from_str::<FileSnapshot>(&content) {
+                            snapshots.push(snap);
+                        }
+                    }
+                }
+            }
+        }
+
+        snapshots.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
+        snapshots
+    }
+
+    /// Find the most recent snapshot of a file that contains a specific function/identifier
+    pub fn find_snapshot_with_node(file_path: &str, identifier: &str) -> Option<FileSnapshot> {
+        let snapshots = Self::get_snapshots_for_file(file_path);
+        for snap in snapshots {
+            // Quick check: does the snapshot content contain the identifier?
+            if snap.content.contains(identifier) {
+                return Some(snap);
+            }
+        }
+        None
+    }
+
+    /// Prune old snapshots for a file, keeping only MAX_SNAPSHOTS_PER_FILE
+    fn prune_file_snapshots(file_path: &str) {
+        let safe_name = file_path.replace('/', "__").replace('\\', "__");
+        let mut entries: Vec<_> = Vec::new();
+
+        if let Ok(dir) = fs::read_dir(Self::SNAPSHOT_DIR) {
+            for entry in dir.flatten() {
+                let name = entry.file_name().to_string_lossy().to_string();
+                if name.starts_with(&safe_name) && name.ends_with(".json") {
+                    entries.push(entry.path());
+                }
+            }
+        }
+
+        if entries.len() > Self::MAX_SNAPSHOTS_PER_FILE {
+            // Sort by name (which includes timestamp) — oldest first
+            entries.sort();
+            let to_remove = entries.len() - Self::MAX_SNAPSHOTS_PER_FILE;
+            for path in entries.iter().take(to_remove) {
+                let _ = fs::remove_file(path);
+            }
+        }
+    }
+
+    /// Global prune to keep total snapshots under MAX_TOTAL_SNAPSHOTS
+    pub fn prune_global() {
+        let mut entries: Vec<_> = Vec::new();
+
+        if let Ok(dir) = fs::read_dir(Self::SNAPSHOT_DIR) {
+            for entry in dir.flatten() {
+                if entry.path().extension().map(|e| e == "json").unwrap_or(false) {
+                    entries.push(entry.path());
+                }
+            }
+        }
+
+        if entries.len() > Self::MAX_TOTAL_SNAPSHOTS {
+            entries.sort();
+            let to_remove = entries.len() - Self::MAX_TOTAL_SNAPSHOTS;
+            for path in entries.iter().take(to_remove) {
+                let _ = fs::remove_file(path);
+            }
+        }
+    }
 }
 
 pub struct CheckpointStore;
