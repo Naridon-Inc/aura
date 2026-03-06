@@ -561,7 +561,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             println!("{:-^80}\n", " INITIALIZATION WIZARD ".bold().blue());
 
             // 1. Agent Selection
-            let agents = &["Cursor", "Claude Desktop", "Gemini CLI", "Aider", "OpenCode"];
+            let agents = &["Claude Code", "Gemini CLI", "Cursor", "Claude Desktop", "Aider", "OpenCode"];
             let selections = MultiSelect::with_theme(&ColorfulTheme::default())
                 .with_prompt("Which AI Agents will be working in this repository? (Use space to select MULTIPLE, Enter to confirm)")
                 .items(&agents[..])
@@ -570,6 +570,49 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             // Automated MCP Injection
             for &idx in &selections {
                 match agents[idx] {
+                    "Claude Code" => {
+                        println!("  {} Auto-configuring Claude Code MCP server...", "⚙️ ".cyan());
+
+                        // Claude Code uses .mcp.json in the project root for MCP servers
+                        let mcp_config_path = std::path::Path::new(".mcp.json");
+                        let mut mcp_config: serde_json::Value = if mcp_config_path.exists() {
+                            fs::read_to_string(mcp_config_path).ok()
+                                .and_then(|s| serde_json::from_str(&s).ok())
+                                .unwrap_or_else(|| serde_json::json!({"mcpServers": {}}))
+                        } else {
+                            serde_json::json!({"mcpServers": {}})
+                        };
+
+                        if mcp_config.get("mcpServers").is_none() {
+                            mcp_config["mcpServers"] = serde_json::json!({});
+                        }
+                        mcp_config["mcpServers"]["aura-vcs"] = serde_json::json!({
+                            "command": "aura",
+                            "args": ["mcp"]
+                        });
+                        if fs::write(mcp_config_path, serde_json::to_string_pretty(&mcp_config).unwrap_or_default()).is_ok() {
+                            println!("    {} Aura MCP server registered in .mcp.json for Claude Code.", "✓".green());
+                        }
+
+                        // Also inject CLAUDE.md with Aura instructions
+                        let claude_md_path = std::path::Path::new("CLAUDE.md");
+                        let aura_block = include_str!("../integrations/claude-md-block.md");
+                        if claude_md_path.exists() {
+                            // Append if not already present
+                            if let Ok(existing) = fs::read_to_string(claude_md_path) {
+                                if !existing.contains("AURA_START") {
+                                    let updated = format!("{}\n\n{}", existing, aura_block);
+                                    let _ = fs::write(claude_md_path, updated);
+                                    println!("    {} Aura instructions appended to CLAUDE.md.", "✓".green());
+                                } else {
+                                    println!("    {} CLAUDE.md already has Aura instructions.", "✓".green());
+                                }
+                            }
+                        } else {
+                            let _ = fs::write(claude_md_path, aura_block);
+                            println!("    {} Created CLAUDE.md with Aura instructions.", "✓".green());
+                        }
+                    },
                     "Claude Desktop" => {
                         println!("  {} Auto-configuring Claude Desktop MCP server...", "⚙️ ".cyan());
                         let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
@@ -674,36 +717,57 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         let hook_js = include_str!("../assets/gemini-hooks/aura-intent.js");
                         let _ = fs::write(hooks_dir.join("aura-intent.js"), hook_js);
 
-                        // Inject settings.json to enable the hook
-                        let settings = serde_json::json!({
-                            "hooks": {
-                                "SessionStart": [
+                        // Inject settings.json with MCP server + hooks
+                        // Read existing settings to avoid overwriting user config
+                        let settings_path = gemini_project_dir.join("settings.json");
+                        let mut settings: serde_json::Value = if settings_path.exists() {
+                            fs::read_to_string(&settings_path).ok()
+                                .and_then(|s| serde_json::from_str(&s).ok())
+                                .unwrap_or_else(|| serde_json::json!({}))
+                        } else {
+                            serde_json::json!({})
+                        };
+
+                        // Inject MCP server (same as Claude Code setup)
+                        if settings.get("mcpServers").is_none() {
+                            settings["mcpServers"] = serde_json::json!({});
+                        }
+                        settings["mcpServers"]["aura-vcs"] = serde_json::json!({
+                            "command": "aura",
+                            "args": ["mcp"]
+                        });
+
+                        // Inject hooks (preserve existing ones)
+                        if settings.get("hooks").is_none() {
+                            settings["hooks"] = serde_json::json!({});
+                        }
+                        settings["hooks"]["SessionStart"] = serde_json::json!([
+                            {
+                                "matcher": "*",
+                                "hooks": [
                                     {
-                                        "matcher": "*",
-                                        "hooks": [
-                                            {
-                                                "name": "Aura Status",
-                                                "type": "command",
-                                                "command": "node .gemini/hooks/aura-intent.js"
-                                            }
-                                        ]
-                                    }
-                                ],
-                                "AfterAgent": [
-                                    {
-                                        "matcher": "*",
-                                        "hooks": [
-                                            {
-                                                "name": "Aura Intent Capture",
-                                                "type": "command",
-                                                "command": "node .gemini/hooks/aura-intent.js"
-                                            }
-                                        ]
+                                        "name": "Aura Status",
+                                        "type": "command",
+                                        "command": "node .gemini/hooks/aura-intent.js"
                                     }
                                 ]
                             }
-                        });
-                        let _ = fs::write(gemini_project_dir.join("settings.json"), serde_json::to_string_pretty(&settings).unwrap_or_default());
+                        ]);
+                        settings["hooks"]["AfterAgent"] = serde_json::json!([
+                            {
+                                "matcher": "*",
+                                "hooks": [
+                                    {
+                                        "name": "Aura Intent Capture",
+                                        "type": "command",
+                                        "command": "node .gemini/hooks/aura-intent.js"
+                                    }
+                                ]
+                            }
+                        ]);
+
+                        let _ = fs::write(&settings_path, serde_json::to_string_pretty(&settings).unwrap_or_default());
+                        println!("    {} Aura MCP server registered in Gemini CLI.", "✓".green());
                         
                         println!("    {} Aura Semantic Engine is now natively powering your Gemini sessions.", "✓".green());
                     },
