@@ -1,0 +1,41 @@
+# Aura — Mandatory Agent Workflow
+
+You have access to the `aura` CLI. These commands are NOT optional. Use them as described below.
+
+## HARD RULES — Follow These, No Exceptions
+
+### Before you write ANY code
+1. Run `aura status` to see what's tracked (logic nodes, checkpoints).
+2. If the task involves 3+ files or a new feature, run `aura plan "objective"`. Review the gray areas, lock decisions, then follow the wave plan. Do NOT skip this — it prevents you from building on wrong assumptions.
+
+### While writing code
+3. Before editing a file, think about which specific functions need to change. Run `aura prove --goal "what you're trying to achieve"` to understand the existing logic paths.
+4. Run `aura pr-review --base main` periodically to catch layer violations and bugs as you go.
+5. Before every commit, run `aura log-intent "1-2 sentence description of WHY"`. The gatekeeper matches your words to AST changes.
+
+### After completing work
+6. Run `aura pr-review --base main`. Fix any invariant violations or security issues it finds.
+7. Run `aura prove --goal "user-facing behavior"`. If it returns warnings, investigate.
+8. If the review found violations, run `aura fix` to auto-resolve them.
+
+### When context is getting large
+9. Run `aura handover cursor`. It generates a compressed XML payload. Ask the user to start fresh with this payload — saves ~90% of tokens.
+
+## Command Quick Reference
+
+| Trigger | Command | What it does |
+|---------|---------|-------------|
+| Planning a feature | `aura plan "objective"` | Gray areas + locked wave plan |
+| Executing a plan | `aura execute` or `aura execute --auto` | Run waves (--auto skips confirmations) |
+| Something broke | `aura rewind <function> <file>` | Revert one function to last safe state |
+| Verify a feature | `aura prove --goal "..."` | Mathematical proof via AST tracing |
+| Before a commit | `aura log-intent "why"` | Bind reasoning to AST changes |
+| Before a merge | `aura pr-review --base main` | Semantic diff + bug/security scan |
+| Auto-fix violations | `aura fix` | Shadow branch auto-correction |
+| Screenshot to code | `aura design-copy img.png` | Gemini vision generates React/HTML/Vue |
+| Context too big | `aura handover <agent>` | Compress to XML handover payload |
+
+## What NOT to do
+- Do NOT skip `aura plan` for multi-file features — that's how you end up rewriting code 3 times.
+- Do NOT commit without `aura log-intent` — the gatekeeper will flag unverified commits.
+- Do NOT ignore `aura pr-review` output — it catches real bugs that compilers miss.

@@ -1,11 +1,23 @@
 {
-  "forbidden_imports": ["sqlite3"],
-  "forbidden_calls": ["eval", "unsafe_exec"],
+  "forbidden_imports": [
+    "sqlite3"
+  ],
+  "forbidden_calls": [
+    "child_process.exec",
+    "eval",
+    "unsafe_exec"
+  ],
   "layer_rules": [
     {
       "from": "frontend",
       "cannot_call": "database"
     }
   ],
-  "protected_nodes": ["calculator_logic", "authenticate_user"]
+  "protected_nodes": [
+    "authenticate",
+    "authenticate_user",
+    "calculator_logic",
+    "hash_password",
+    "verify_token"
+  ]
 }
