@@ -1,4 +1,4 @@
-use crate::checkpoint::{CheckpointData, CheckpointStore};
+use crate::checkpoint::{CheckpointData, CheckpointStore, SnapshotStore};
 use crate::parser::SemanticParser;
 use git2::Repository;
 use notify::{Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
@@ -70,6 +70,10 @@ impl ContinuousTracker {
                 println!("\n[Aura Daemon] Detected file activity: {:?}", path.file_name().unwrap());
                 
                 if let Ok(source_code) = fs::read_to_string(&path) {
+                    // Durable snapshot BEFORE processing — survives even without git commits
+                    let _ = SnapshotStore::snapshot_file(
+                        &path_str, "watcher", "Aura Continuous Daemon"
+                    );
                     self.process_semantic_update(&source_code, ext);
                 }
             }

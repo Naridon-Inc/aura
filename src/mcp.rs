@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::io::{self, BufRead, Write};
-use crate::checkpoint::CheckpointStore;
+use crate::checkpoint::{CheckpointStore, SnapshotStore};
 use git2::Repository;
 
 /// Basic JSON-RPC 2.0 structures for the Model Context Protocol (MCP)
@@ -130,6 +130,27 @@ impl McpServer {
                                     "type": "object",
                                     "properties": {}
                                 }
+                            },
+                            {
+                                "name": "aura_snapshot",
+                                "description": "IMPORTANT: Call this BEFORE modifying any file. Takes a durable snapshot of a file so it can be recovered with `aura rewind` even without a git commit. This is your safety net against AI hallucinations destroying work.",
+                                "inputSchema": {
+                                    "type": "object",
+                                    "properties": {
+                                        "file_path": { "type": "string", "description": "Path to the file to snapshot before editing." }
+                                    },
+                                    "required": ["file_path"]
+                                }
+                            },
+                            {
+                                "name": "aura_snapshot_list",
+                                "description": "List all durable file snapshots. Shows files that have been snapshotted and can be recovered with `aura rewind`.",
+                                "inputSchema": {
+                                    "type": "object",
+                                    "properties": {
+                                        "file_path": { "type": "string", "description": "Optional: filter snapshots for a specific file." }
+                                    }
+                                }
                             }
                         ]
                     }
@@ -146,6 +167,8 @@ impl McpServer {
                     "aura_log_intent" => Self::tool_log_intent(args),
                     "aura_pr_review" => Self::tool_pr_review(args),
                     "aura_status" => Self::tool_status(args),
+                    "aura_snapshot" => Self::tool_snapshot(args),
+                    "aura_snapshot_list" => Self::tool_snapshot_list(args),
                     _ => json!({ "isError": true, "content": [{ "type": "text", "text": "Unknown tool" }] })
                 };
 
@@ -233,6 +256,42 @@ Intent: {}", latest.agent_id, latest.intent);
         });
 
         json!({ "content": [{ "type": "text", "text": serde_json::to_string_pretty(&status_json).unwrap() }] })
+    }
+
+    fn tool_snapshot(args: Value) -> Value {
+        let file_path = match args["file_path"].as_str() {
+            Some(p) => p,
+            None => return json!({ "isError": true, "content": [{ "type": "text", "text": "file_path is required." }] }),
+        };
+
+        match SnapshotStore::snapshot_file(file_path, "mcp_pre_edit", "MCP Agent") {
+            Ok(snap_id) => {
+                json!({ "content": [{ "type": "text", "text": format!("Snapshot saved: {}. File '{}' can now be recovered with `aura rewind`.", snap_id, file_path) }] })
+            }
+            Err(e) => {
+                json!({ "isError": true, "content": [{ "type": "text", "text": format!("Snapshot failed: {}", e) }] })
+            }
+        }
+    }
+
+    fn tool_snapshot_list(args: Value) -> Value {
+        let snapshots = if let Some(file_path) = args["file_path"].as_str() {
+            SnapshotStore::get_snapshots_for_file(file_path)
+        } else {
+            SnapshotStore::get_all_snapshots()
+        };
+
+        if snapshots.is_empty() {
+            return json!({ "content": [{ "type": "text", "text": "No snapshots found. Use aura_snapshot before editing files." }] });
+        }
+
+        let mut text = format!("Found {} snapshots:\n\n", snapshots.len());
+        for (i, snap) in snapshots.iter().take(20).enumerate() {
+            text.push_str(&format!("{}. {} (trigger: {}, agent: {}, ts: {})\n",
+                i + 1, snap.file_path, snap.trigger, snap.agent_id, snap.timestamp));
+        }
+
+        json!({ "content": [{ "type": "text", "text": text }] })
     }
 }
 

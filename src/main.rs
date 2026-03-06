@@ -1158,12 +1158,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         Commands::Rewind { identifier, file_path, amnesia } => {
             println!("\n{} {} {}", "⏪".bold(), "Aura Semantic Time Machine: Rewinding".bold().cyan(), identifier.bold().yellow());
-            
+
             let repo = Repository::open(".")?;
             let mut parser = SemanticParser::new()?;
-            
+
             // Determine file extension
-            let ext = if file_path.ends_with(".rs") { "rs" } else if file_path.ends_with(".py") { "py" } else if file_path.ends_with(".ts") || file_path.ends_with(".tsx") { "ts" } else if file_path.ends_with(".js") || file_path.ends_with(".jsx") { "js" } else { 
+            let ext = if file_path.ends_with(".rs") { "rs" } else if file_path.ends_with(".py") { "py" } else if file_path.ends_with(".ts") || file_path.ends_with(".tsx") { "ts" } else if file_path.ends_with(".js") || file_path.ends_with(".jsx") { "js" } else {
                 println!("Unsupported file extension.");
                 return Ok(());
             };
@@ -1186,34 +1186,85 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
             };
 
-            // 2. Fetch the previous state from Git HEAD~1
-            // In a full implementation, we could let the user specify exactly which checkpoint UUID they want.
-            // For this MVP, we grab the version from the parent of the last commit.
-            let head_commit = repo.head()?.peel_to_commit()?;
-            let parent_commit = head_commit.parent(0)?;
-            let head_tree = parent_commit.tree()?;
-            
-            let tree_entry = match head_tree.get_path(Path::new(file_path)) {
-                Ok(entry) => entry,
-                Err(_) => {
-                    println!("{} File not found in previous commit.", "✗".red());
-                    return Ok(());
+            // 2. Search for previous state — try THREE sources in order:
+            //    a) Durable file snapshots (.aura/snapshots/) — survives even without commits
+            //    b) Full git history (walk ALL commits, not just HEAD~1)
+            //    c) Fall back to HEAD~1 as last resort
+
+            let mut past_node_source: Option<String> = None;
+
+            // Strategy A: Check durable snapshots first
+            println!("  {} Searching durable snapshots...", "↳".dimmed());
+            let snapshots = checkpoint::SnapshotStore::get_snapshots_for_file(file_path);
+            for snap in &snapshots {
+                if let Ok(Some((src, _))) = parser.retrieve_node_source(&snap.content, ext, identifier) {
+                    // Make sure it's actually different from current
+                    if let Some((current_src, _)) = parser.retrieve_node_source(&current_source, ext, identifier)? {
+                        if src != current_src {
+                            println!("  {} Found in snapshot from {} (trigger: {})",
+                                "✓".green(), snap.timestamp, snap.trigger);
+                            past_node_source = Some(src);
+                            break;
+                        }
+                    }
                 }
-            };
+            }
 
-            let object = tree_entry.to_object(&repo)?;
-            let blob = object.as_blob().unwrap();
-            let past_source = std::str::from_utf8(blob.content())?;
+            // Strategy B: Walk full git history (up to 50 commits back)
+            if past_node_source.is_none() {
+                println!("  {} Searching git history (up to 50 commits)...", "↳".dimmed());
+                let mut commit = match repo.head().and_then(|r| r.peel_to_commit()) {
+                    Ok(c) => c,
+                    Err(_) => {
+                        println!("{} No git history available.", "✗".red());
+                        return Ok(());
+                    }
+                };
 
-            // 3. Extract the old AST node source
-            let past_node_info = parser.retrieve_node_source(past_source, ext, identifier)?;
-            let past_node_source = match past_node_info {
-                Some((src, _)) => src,
+                for depth in 0..50 {
+                    let parent = match commit.parent(0) {
+                        Ok(p) => p,
+                        Err(_) => break,
+                    };
+
+                    let tree = parent.tree()?;
+                    if let Ok(entry) = tree.get_path(Path::new(file_path)) {
+                        let obj = entry.to_object(&repo)?;
+                        if let Some(blob) = obj.as_blob() {
+                            if let Ok(past_source) = std::str::from_utf8(blob.content()) {
+                                if let Ok(Some((src, _))) = parser.retrieve_node_source(past_source, ext, identifier) {
+                                    // Make sure it's different from current
+                                    if let Some((current_src, _)) = parser.retrieve_node_source(&current_source, ext, identifier)? {
+                                        if src != current_src {
+                                            println!("  {} Found in commit ~{} ({})",
+                                                "✓".green(), depth + 1, &parent.id().to_string()[..8]);
+                                            past_node_source = Some(src);
+                                            break;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    commit = parent;
+                }
+            }
+
+            let past_node_source = match past_node_source {
+                Some(s) => s,
                 None => {
-                    println!("{} Function '{}' did not exist in the previous commit.", "✗".red(), identifier);
+                    println!("{} No previous version of '{}' found in snapshots or git history.", "✗".red(), identifier);
+                    println!("  {} Tip: Aura auto-snapshots files before AI edits. If no snapshot exists,", "↳".dimmed());
+                    println!("  {} the function may have been created in this session without a prior state.", "↳".dimmed());
                     return Ok(());
                 }
             };
+
+            // Snapshot the current state BEFORE we rewind (safety net)
+            if let Err(e) = checkpoint::SnapshotStore::snapshot_file(file_path, "pre_rewind", "aura-rewind") {
+                eprintln!("  {} Warning: Could not snapshot current state: {}", "⚠️".yellow(), e);
+            }
 
             // 4. Perform the Semantic Surgery
             let mut new_source = current_source.clone();
