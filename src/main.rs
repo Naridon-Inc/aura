@@ -12,6 +12,7 @@ mod ecosystem;
 mod lsp;
 mod gsd;
 mod pr;
+mod toon;
 
 use clap::{Parser, Subcommand};
 use parser::SemanticParser;
