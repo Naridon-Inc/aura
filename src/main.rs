@@ -167,7 +167,7 @@ fn capture_env_fingerprint() -> Option<String> {
     ecosystem::Ecosystem::fingerprint()
 }
 
-const CURRENT_VERSION: &str = "0.5.5";
+const CURRENT_VERSION: &str = "0.5.6";
 
 fn check_for_updates() -> Option<String> {
     let client = reqwest::blocking::Client::builder()
@@ -696,6 +696,40 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             println!("    {} Recommended GitHub Copilot extensions in .vscode/extensions.json", "✓".green());
                         }
 
+                        // Add VS Code task to auto-start the Aura watcher daemon
+                        let tasks_path = vscode_dir.join("tasks.json");
+                        let mut tasks: serde_json::Value = if tasks_path.exists() {
+                            fs::read_to_string(&tasks_path).ok()
+                                .and_then(|s| serde_json::from_str(&s).ok())
+                                .unwrap_or_else(|| serde_json::json!({"version": "2.0.0", "tasks": []}))
+                        } else {
+                            serde_json::json!({"version": "2.0.0", "tasks": []})
+                        };
+
+                        if let Some(task_list) = tasks.get_mut("tasks").and_then(|t| t.as_array_mut()) {
+                            // Only add if not already present
+                            let already_exists = task_list.iter().any(|t| {
+                                t.get("label").and_then(|l| l.as_str()) == Some("Aura Semantic Watcher")
+                            });
+                            if !already_exists {
+                                task_list.push(serde_json::json!({
+                                    "label": "Aura Semantic Watcher",
+                                    "type": "shell",
+                                    "command": "aura daemon",
+                                    "isBackground": true,
+                                    "problemMatcher": [],
+                                    "runOptions": { "runOn": "folderOpen" },
+                                    "presentation": {
+                                        "reveal": "silent",
+                                        "panel": "dedicated",
+                                        "close": true
+                                    }
+                                }));
+                                let _ = fs::write(&tasks_path, serde_json::to_string_pretty(&tasks).unwrap_or_default());
+                                println!("    {} Aura watcher daemon will auto-start when VS Code opens this project.", "✓".green());
+                            }
+                        }
+
                         println!("    {} Aura Semantic Engine is now available in VS Code via MCP.", "✓".green());
                         println!("    {} Use Copilot Chat (Agent mode) to access Aura tools.", "💡".blue());
                     },
@@ -935,18 +969,36 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 CheckpointStore::commit_staged(&repo)?;
                 println!("    {} Baseline established successfully (ID: {}).", "✓".green(), id.cyan());            }
 
+            // Auto-start the watcher daemon in the background
+            println!("  {} Starting Aura watcher daemon...", "⚙️ ".cyan());
+            match std::process::Command::new("aura")
+                .arg("daemon")
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .spawn()
+            {
+                Ok(child) => {
+                    println!("    {} Watcher daemon running (PID: {}). Every file save is now tracked.", "✓".green(), child.id());
+                    println!("    {} Snapshots stored in {}. Rewind will work even without commits.", "↳".dimmed(), ".aura/snapshots/".cyan());
+                }
+                Err(_) => {
+                    println!("    {} Could not auto-start daemon. Run {} manually in a separate terminal.", "⚠️".yellow(), "aura daemon".cyan());
+                }
+            }
+
             println!("\n{} {}\n", "🚀".bold(), "Aura is now protecting your repository.".bold().green());
-            
+
             let final_instructions = vec![
                 format!("{} Code normally. Aura automatically intercepts `{}`.", "1.".cyan().bold(), "git commit".italic()),
-                format!("{} Ask questions natively via `{}`.", "2.".cyan().bold(), "aura ask".italic()),
-                format!("{} Rewind AI hallucinations safely via `{}`.", "3.".cyan().bold(), "aura rewind".italic()),
+                format!("{} Every file save is tracked by the watcher daemon for `{}`.", "2.".cyan().bold(), "aura rewind".italic()),
+                format!("{} Run `{}` to verify semantic integrity before pushing.", "3.".cyan().bold(), "aura pr-review --base main".italic()),
             ];
-            
+
             for inst in final_instructions {
                 println!("   {}", inst);
             }
-            
+
             println!("\n{}\n", "Welcome to the age of Agentic Engineering.".bold().blue());
         }
         Commands::CaptureContext { force } => {
