@@ -167,7 +167,7 @@ fn capture_env_fingerprint() -> Option<String> {
     ecosystem::Ecosystem::fingerprint()
 }
 
-const CURRENT_VERSION: &str = "0.5.4";
+const CURRENT_VERSION: &str = "0.5.5";
 
 fn check_for_updates() -> Option<String> {
     let client = reqwest::blocking::Client::builder()
@@ -1003,8 +1003,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                         println!("  {} (Using config: {})", "🔍".dimmed(), config_path.dimmed());
                                         std::process::exit(1);
                                     } else {
-                                        spinner.println(format!("{} Semantic Sentinel Warning.", "⚠️".yellow().bold()));
-                                        spinner.println(format!("  {} High-entropy pattern detected in node '{}'. Proceeding (Strict Mode is OFF).", "↳".dimmed(), ident.yellow()));
+                                        spinner.finish_and_clear();
+                                        println!("{} Semantic Sentinel Warning.", "⚠️".yellow().bold());
+                                        println!("  {} High-entropy pattern detected in node '{}'.", "↳".dimmed(), ident.yellow());
+                                        println!("  {} Strict mode is OFF. You can enable it with: {}", "💡".blue(), "aura config set strict-mode true".italic());
+                                        let should_continue = dialoguer::Confirm::with_theme(&ColorfulTheme::default())
+                                            .with_prompt("Continue with commit?")
+                                            .default(true)
+                                            .interact()
+                                            .unwrap_or(true);
+                                        if !should_continue {
+                                            println!("{} Commit cancelled. Review and fix the flagged node, then try again.", "✗".red().bold());
+                                            std::process::exit(1);
+                                        }
                                     }
                                 }
                             }
@@ -1140,9 +1151,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         println!("\n{} Commit halted.", "✗".red().bold());
                         std::process::exit(1);
                     } else {
-                        spinner.println(format!("{} Intent Poisoning Warning.", "⚠️".yellow().bold()));
-                        spinner.println(format!("  {} Missing explicit semantic intent for modified nodes.", "↳".dimmed()));
-                        spinner.println(format!("  {} Proceeding anyway because strict mode is disabled.", "↳".dimmed().italic()));
+                        spinner.finish_and_clear();
+                        println!("{} Intent Poisoning Warning.", "⚠️".yellow().bold());
+                        println!("  {} Missing explicit semantic intent for modified nodes.", "↳".dimmed());
+                        println!("  {} Strict mode is OFF. You can enable it with: {}", "💡".blue(), "aura config set strict-mode true".italic());
+                        let should_continue = dialoguer::Confirm::with_theme(&ColorfulTheme::default())
+                            .with_prompt("Continue with commit?")
+                            .default(true)
+                            .interact()
+                            .unwrap_or(true);
+                        if !should_continue {
+                            println!("{} Commit cancelled. Add semantic intent to your commit message and try again.", "✗".red().bold());
+                            std::process::exit(1);
+                        }
                     }
                 }
 
@@ -1181,9 +1202,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         println!("\n{} Commit halted.", "✗".red().bold());
                         std::process::exit(1);
                     } else {
-                        spinner.println(format!("{} Intent Mismatch Warning.", "⚠️".yellow().bold()));
-                        spinner.println(format!("  {} The AI modified nodes without explicit documentation: {}", "↳".dimmed(), identified_nodes.join(", ").yellow()));
-                        spinner.println(format!("  {} Proceeding anyway because strict mode is disabled.", "↳".dimmed().italic()));
+                        spinner.finish_and_clear();
+                        println!("{} Intent Mismatch Warning.", "⚠️".yellow().bold());
+                        println!("  {} The AI modified nodes without explicit documentation: {}", "↳".dimmed(), identified_nodes.join(", ").yellow());
+                        println!("  {} Strict mode is OFF. You can enable it with: {}", "💡".blue(), "aura config set strict-mode true".italic());
+                        let should_continue = dialoguer::Confirm::with_theme(&ColorfulTheme::default())
+                            .with_prompt("Continue with commit?")
+                            .default(true)
+                            .interact()
+                            .unwrap_or(true);
+                        if !should_continue {
+                            println!("{} Commit cancelled. Update your commit message to reference the modified nodes.", "✗".red().bold());
+                            std::process::exit(1);
+                        }
                     }
                 } else {
                     spinner.println(format!("{} Intent mathematically aligned with AST modifications.", "🛡️ ".green()));
