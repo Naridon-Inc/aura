@@ -12,6 +12,13 @@ pub struct SemanticParser {
     rust_parser: Parser,
     ts_parser: Parser,
     js_parser: Parser,
+    go_parser: Parser,
+    java_parser: Parser,
+    csharp_parser: Parser,
+    ruby_parser: Parser,
+    cpp_parser: Parser,
+    c_parser: Parser,
+    php_parser: Parser,
     lsp_client: Option<LspClient>,
 }
 
@@ -22,16 +29,42 @@ impl SemanticParser {
 
         let mut rust_parser = Parser::new();
         rust_parser.set_language(&tree_sitter_rust::LANGUAGE.into())?;
-        
+
         let mut ts_parser = Parser::new();
         ts_parser.set_language(&tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into())?;
-        
+
         let mut js_parser = Parser::new();
         js_parser.set_language(&tree_sitter_javascript::LANGUAGE.into())?;
-        
+
+        let mut go_parser = Parser::new();
+        go_parser.set_language(&tree_sitter_go::LANGUAGE.into())?;
+
+        let mut java_parser = Parser::new();
+        java_parser.set_language(&tree_sitter_java::LANGUAGE.into())?;
+
+        let mut csharp_parser = Parser::new();
+        csharp_parser.set_language(&tree_sitter_c_sharp::LANGUAGE.into())?;
+
+        let mut ruby_parser = Parser::new();
+        ruby_parser.set_language(&tree_sitter_ruby::LANGUAGE.into())?;
+
+        let mut cpp_parser = Parser::new();
+        cpp_parser.set_language(&tree_sitter_cpp::LANGUAGE.into())?;
+
+        let mut c_parser = Parser::new();
+        c_parser.set_language(&tree_sitter_c::LANGUAGE.into())?;
+
+        let mut php_parser = Parser::new();
+        php_parser.set_language(&tree_sitter_php::LANGUAGE_PHP.into())?;
+
         let lsp_client = Some(LspClient::new(Ecosystem::detect()));
 
-        Ok(Self { python_parser, rust_parser, ts_parser, js_parser, lsp_client })
+        Ok(Self {
+            python_parser, rust_parser, ts_parser, js_parser,
+            go_parser, java_parser, csharp_parser, ruby_parser,
+            cpp_parser, c_parser, php_parser,
+            lsp_client,
+        })
     }
 
     /// Parses a source code string and extracts semantic logical blocks
@@ -41,9 +74,16 @@ impl SemanticParser {
             "rs" => self.rust_parser.parse(source_code, None).ok_or("Failed to parse Rust tree")?,
             "ts" | "tsx" => self.ts_parser.parse(source_code, None).ok_or("Failed to parse TypeScript tree")?,
             "js" | "jsx" => self.js_parser.parse(source_code, None).ok_or("Failed to parse JavaScript tree")?,
-            _ => return Err("Unsupported file extension".into()),
+            "go" => self.go_parser.parse(source_code, None).ok_or("Failed to parse Go tree")?,
+            "java" => self.java_parser.parse(source_code, None).ok_or("Failed to parse Java tree")?,
+            "cs" => self.csharp_parser.parse(source_code, None).ok_or("Failed to parse C# tree")?,
+            "rb" => self.ruby_parser.parse(source_code, None).ok_or("Failed to parse Ruby tree")?,
+            "cpp" | "cc" | "cxx" | "hpp" => self.cpp_parser.parse(source_code, None).ok_or("Failed to parse C++ tree")?,
+            "c" | "h" => self.c_parser.parse(source_code, None).ok_or("Failed to parse C tree")?,
+            "php" => self.php_parser.parse(source_code, None).ok_or("Failed to parse PHP tree")?,
+            _ => return Err(format!("Unsupported file extension: .{}", ext).into()),
         };
-        
+
         let root_node = tree.root_node();
         let mut extracted_nodes = Vec::new();
         self.walk_ast(&root_node, source_code, ext, &mut extracted_nodes);
@@ -158,6 +198,13 @@ impl SemanticParser {
             "py" => kind == "function_definition" || kind == "class_definition",
             "rs" => kind == "function_item" || kind == "struct_item" || kind == "impl_item",
             "ts" | "tsx" | "js" | "jsx" => kind == "function_declaration" || kind == "class_declaration" || kind == "method_definition" || kind == "arrow_function" || kind == "variable_declarator",
+            "go" => kind == "function_declaration" || kind == "method_declaration" || kind == "type_declaration",
+            "java" => kind == "method_declaration" || kind == "class_declaration" || kind == "interface_declaration" || kind == "constructor_declaration",
+            "cs" => kind == "method_declaration" || kind == "class_declaration" || kind == "interface_declaration" || kind == "struct_declaration" || kind == "constructor_declaration",
+            "rb" => kind == "method" || kind == "class" || kind == "module" || kind == "singleton_method",
+            "cpp" | "cc" | "cxx" | "hpp" => kind == "function_definition" || kind == "class_specifier" || kind == "struct_specifier" || kind == "template_declaration",
+            "c" | "h" => kind == "function_definition" || kind == "struct_specifier",
+            "php" => kind == "function_definition" || kind == "class_declaration" || kind == "method_declaration",
             _ => false,
         };
 
@@ -258,7 +305,14 @@ impl SemanticParser {
             "rs" => self.rust_parser.parse(source_code, None).ok_or("Failed to parse Rust tree")?,
             "ts" | "tsx" => self.ts_parser.parse(source_code, None).ok_or("Failed to parse TypeScript tree")?,
             "js" | "jsx" => self.js_parser.parse(source_code, None).ok_or("Failed to parse JavaScript tree")?,
-            _ => return Err("Unsupported file extension".into()),
+            "go" => self.go_parser.parse(source_code, None).ok_or("Failed to parse Go tree")?,
+            "java" => self.java_parser.parse(source_code, None).ok_or("Failed to parse Java tree")?,
+            "cs" => self.csharp_parser.parse(source_code, None).ok_or("Failed to parse C# tree")?,
+            "rb" => self.ruby_parser.parse(source_code, None).ok_or("Failed to parse Ruby tree")?,
+            "cpp" | "cc" | "cxx" | "hpp" => self.cpp_parser.parse(source_code, None).ok_or("Failed to parse C++ tree")?,
+            "c" | "h" => self.c_parser.parse(source_code, None).ok_or("Failed to parse C tree")?,
+            "php" => self.php_parser.parse(source_code, None).ok_or("Failed to parse PHP tree")?,
+            _ => return Err(format!("Unsupported file extension: .{}", ext).into()),
         };
         
         let root_node = tree.root_node();
@@ -271,6 +325,13 @@ impl SemanticParser {
             "py" => kind == "function_definition" || kind == "class_definition",
             "rs" => kind == "function_item" || kind == "struct_item" || kind == "impl_item",
             "ts" | "tsx" | "js" | "jsx" => kind == "function_declaration" || kind == "class_declaration" || kind == "method_definition" || kind == "arrow_function" || kind == "variable_declarator",
+            "go" => kind == "function_declaration" || kind == "method_declaration" || kind == "type_declaration",
+            "java" => kind == "method_declaration" || kind == "class_declaration" || kind == "interface_declaration" || kind == "constructor_declaration",
+            "cs" => kind == "method_declaration" || kind == "class_declaration" || kind == "interface_declaration" || kind == "struct_declaration" || kind == "constructor_declaration",
+            "rb" => kind == "method" || kind == "class" || kind == "module" || kind == "singleton_method",
+            "cpp" | "cc" | "cxx" | "hpp" => kind == "function_definition" || kind == "class_specifier" || kind == "struct_specifier" || kind == "template_declaration",
+            "c" | "h" => kind == "function_definition" || kind == "struct_specifier",
+            "php" => kind == "function_definition" || kind == "class_declaration" || kind == "method_declaration",
             _ => false,
         };
 

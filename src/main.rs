@@ -167,7 +167,7 @@ fn capture_env_fingerprint() -> Option<String> {
     ecosystem::Ecosystem::fingerprint()
 }
 
-const CURRENT_VERSION: &str = "0.5.7";
+const CURRENT_VERSION: &str = "0.6.0";
 
 fn check_for_updates() -> Option<String> {
     let client = reqwest::blocking::Client::builder()
@@ -489,6 +489,27 @@ enum SymphonySubcommands {
     },
     /// Show Symphony configuration and status
     Status,
+}
+
+/// Maps file path to tree-sitter language extension. Returns empty string if unsupported.
+fn detect_lang_ext(path: &str) -> String {
+    if path.ends_with(".rs") { "rs" }
+    else if path.ends_with(".py") { "py" }
+    else if path.ends_with(".ts") { "ts" }
+    else if path.ends_with(".tsx") { "tsx" }
+    else if path.ends_with(".js") { "js" }
+    else if path.ends_with(".jsx") { "jsx" }
+    else if path.ends_with(".go") { "go" }
+    else if path.ends_with(".java") { "java" }
+    else if path.ends_with(".cs") { "cs" }
+    else if path.ends_with(".rb") { "rb" }
+    else if path.ends_with(".cpp") || path.ends_with(".cc") || path.ends_with(".cxx") { "cpp" }
+    else if path.ends_with(".hpp") { "hpp" }
+    else if path.ends_with(".c") { "c" }
+    else if path.ends_with(".h") { "h" }
+    else if path.ends_with(".php") { "php" }
+    else { "" }
+    .to_string()
 }
 
 fn open_repo() -> Result<Repository, Box<dyn std::error::Error>> {
@@ -946,7 +967,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 // Scan all files in index for the baseline
                 for entry in index.iter() {
                     let path_str = String::from_utf8_lossy(&entry.path).to_string();
-                    let ext = if path_str.ends_with(".rs") { "rs" } else if path_str.ends_with(".py") { "py" } else if path_str.ends_with(".ts") || path_str.ends_with(".tsx") { "ts" } else if path_str.ends_with(".js") || path_str.ends_with(".jsx") { "js" } else { continue };
+                    let ext = detect_lang_ext(&path_str); if ext.is_empty() { continue }; let ext = ext.as_str();
                     if let Ok(source_code) = fs::read_to_string(&path_str) {
                         if let Ok(ast_nodes) = parser.parse_file(&source_code, ext) {
                             staged_nodes.extend(ast_nodes);
@@ -1034,7 +1055,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     continue;
                 }
 
-                let ext = if path_str.ends_with(".rs") { "rs" } else if path_str.ends_with(".py") { "py" } else if path_str.ends_with(".ts") || path_str.ends_with(".tsx") { "ts" } else if path_str.ends_with(".js") || path_str.ends_with(".jsx") { "js" } else { continue };
+                let ext = detect_lang_ext(&path_str); if ext.is_empty() { continue }; let ext = ext.as_str();
 
                 if let Ok(source_code) = fs::read_to_string(&path_str) {
                     if let Ok(ast_nodes) = parser.parse_file(&source_code, ext) {
@@ -1474,10 +1495,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let mut parser = SemanticParser::new()?;
 
             // Determine file extension
-            let ext = if file_path.ends_with(".rs") { "rs" } else if file_path.ends_with(".py") { "py" } else if file_path.ends_with(".ts") || file_path.ends_with(".tsx") { "ts" } else if file_path.ends_with(".js") || file_path.ends_with(".jsx") { "js" } else {
+            let ext = detect_lang_ext(&file_path);
+            if ext.is_empty() {
                 println!("Unsupported file extension.");
                 return Ok(());
-            };
+            }
+            let ext = ext.as_str();
 
             // 1. Parse the current file on disk
             let current_source = match fs::read_to_string(file_path) {
@@ -1729,7 +1752,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     continue;
                 }
 
-                let ext = if path_str.ends_with(".rs") { "rs" } else if path_str.ends_with(".py") { "py" } else if path_str.ends_with(".ts") || path_str.ends_with(".tsx") { "ts" } else if path_str.ends_with(".js") || path_str.ends_with(".jsx") { "js" } else { continue };
+                let ext = detect_lang_ext(&path_str); if ext.is_empty() { continue }; let ext = ext.as_str();
 
                 if let Ok(source_code) = fs::read_to_string(&path_str) {
                     if let Ok(ast_nodes) = parser.parse_file(&source_code, ext) {
