@@ -2,6 +2,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::io::{self, BufRead, Write};
 use crate::checkpoint::{CheckpointStore, SnapshotStore};
+use crate::session::SessionManager;
 use git2::Repository;
 
 /// Basic JSON-RPC 2.0 structures for the Model Context Protocol (MCP)
@@ -232,6 +233,10 @@ impl McpServer {
     fn tool_log_intent(args: Value) -> Value {
         let intent = args["intent"].as_str().unwrap_or("No intent provided.").to_string();
 
+        // Start/resume session and log transcript
+        let _sess = SessionManager::start_session("MCP Agent");
+        SessionManager::append_transcript("assistant", &intent);
+
         // 1. Write the handshake file for the pre-commit hook
         let _ = std::fs::write(".gemini.intent", &intent);
 
@@ -311,6 +316,9 @@ impl McpServer {
             Some(p) => p,
             None => return json!({ "isError": true, "content": [{ "type": "text", "text": "file_path is required." }] }),
         };
+
+        // Track this file in the active session
+        SessionManager::touch_file(file_path);
 
         match SnapshotStore::snapshot_file(file_path, "mcp_pre_edit", "MCP Agent") {
             Ok(snap_id) => {

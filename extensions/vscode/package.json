@@ -1,0 +1,56 @@
+{
+  "name": "aura-vcs",
+  "displayName": "Aura — AI-Native Version Control",
+  "description": "Semantic version control for AI agents. Tracks AST logic, enforces intent, and provides session lifecycle management.",
+  "version": "0.6.2",
+  "publisher": "naridon",
+  "engines": { "vscode": "^1.85.0" },
+  "categories": ["SCM Providers", "Other"],
+  "activationEvents": ["workspaceContains:.aura", "workspaceContains:.git"],
+  "main": "./dist/extension.js",
+  "contributes": {
+    "commands": [
+      { "command": "aura.snapshot", "title": "Aura: Take Snapshot" },
+      { "command": "aura.status", "title": "Aura: Show Status" },
+      { "command": "aura.sessions", "title": "Aura: Show Sessions" },
+      { "command": "aura.explain", "title": "Aura: Explain Code Origin" },
+      { "command": "aura.prReview", "title": "Aura: PR Review" },
+      { "command": "aura.init", "title": "Aura: Initialize Repository" }
+    ],
+    "configuration": {
+      "title": "Aura",
+      "properties": {
+        "aura.binaryPath": {
+          "type": "string",
+          "default": "aura",
+          "description": "Path to the aura binary"
+        },
+        "aura.autoStartDaemon": {
+          "type": "boolean",
+          "default": true,
+          "description": "Automatically start the Aura watcher daemon on workspace open"
+        },
+        "aura.showStatusBar": {
+          "type": "boolean",
+          "default": true,
+          "description": "Show Aura session status in the status bar"
+        }
+      }
+    }
+  },
+  "scripts": {
+    "build": "esbuild src/extension.ts --bundle --outdir=dist --platform=node --format=cjs --external:vscode",
+    "watch": "esbuild src/extension.ts --bundle --outdir=dist --platform=node --format=cjs --external:vscode --watch",
+    "package": "vsce package"
+  },
+  "devDependencies": {
+    "@types/vscode": "^1.85.0",
+    "esbuild": "^0.20.0",
+    "typescript": "^5.3.0"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Naridon-Inc/aura"
+  },
+  "license": "MIT"
+}

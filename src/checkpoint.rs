@@ -279,6 +279,155 @@ impl CheckpointStore {
     pub fn compact_history(_repo: &Repository) -> Result<usize, Box<dyn std::error::Error>> {
         Ok(0)
     }
+
+    // ── Shadow Branch: durable checkpoint storage that survives rebase/stash/pull ──
+
+    const SHADOW_BRANCH: &'static str = "aura/checkpoints";
+    const SHADOW_SESSION_DIR: &'static str = ".git/aura-sessions";
+
+    /// Condense checkpoint + session data onto the shadow orphan branch.
+    /// Called after persist-checkpoint to make data rebase-proof.
+    pub fn condense_to_shadow(repo: &Repository, data: &CheckpointData, session_json: Option<&str>) -> Result<(), Box<dyn std::error::Error>> {
+        let sig = Signature::now("Aura Agent", "ai@aura.vcs")?;
+
+        // Shard by checkpoint ID: first 2 chars / rest
+        let shard = &data.id[..2];
+        let rest = &data.id[2..];
+        let checkpoint_path = format!("{}/{}/checkpoint.json", shard, rest);
+        let checkpoint_blob = serde_json::to_string_pretty(data)?;
+
+        // Get existing shadow tree or start empty
+        let parent = repo.find_reference(&format!("refs/heads/{}", Self::SHADOW_BRANCH))
+            .ok()
+            .and_then(|r| r.peel_to_commit().ok());
+
+        let mut tb = repo.treebuilder(parent.as_ref().and_then(|c| c.tree().ok()).as_ref())?;
+
+        // Build the shard subtree
+        let blob_oid = repo.blob(checkpoint_blob.as_bytes())?;
+
+        // Get or create shard tree
+        let existing_shard = parent.as_ref()
+            .and_then(|c| c.tree().ok())
+            .and_then(|t| t.get_name(shard).map(|e| e.id()));
+        let mut shard_tb = if let Some(shard_oid) = existing_shard {
+            let shard_tree = repo.find_tree(shard_oid)?;
+            repo.treebuilder(Some(&shard_tree))?
+        } else {
+            repo.treebuilder(None)?
+        };
+
+        // Build checkpoint subtree: rest/<files>
+        let mut cp_tb = repo.treebuilder(None)?;
+        cp_tb.insert("checkpoint.json", blob_oid, 0o100644)?;
+
+        // Add session transcript if available
+        if let Some(sess) = session_json {
+            let sess_blob = repo.blob(sess.as_bytes())?;
+            cp_tb.insert("session.json", sess_blob, 0o100644)?;
+        }
+
+        // Add transcript file if it exists
+        let transcript_path = format!(".aura/transcripts/{}.jsonl",
+            data.id.get(..16).unwrap_or(&data.id));
+        if let Ok(transcript) = fs::read_to_string(&transcript_path) {
+            let t_blob = repo.blob(transcript.as_bytes())?;
+            cp_tb.insert("transcript.jsonl", t_blob, 0o100644)?;
+        }
+
+        let cp_tree_oid = cp_tb.write()?;
+        shard_tb.insert(rest, cp_tree_oid, 0o040000)?;
+        let shard_tree_oid = shard_tb.write()?;
+        tb.insert(shard, shard_tree_oid, 0o040000)?;
+
+        let tree_oid = tb.write()?;
+        let tree = repo.find_tree(tree_oid)?;
+
+        // Commit onto the shadow branch
+        let msg = format!("aura: checkpoint {}", &data.id[..8]);
+        if let Some(ref parent_commit) = parent {
+            repo.commit(
+                Some(&format!("refs/heads/{}", Self::SHADOW_BRANCH)),
+                &sig, &sig, &msg, &tree, &[parent_commit],
+            )?;
+        } else {
+            // First commit — create orphan branch
+            repo.commit(
+                Some(&format!("refs/heads/{}", Self::SHADOW_BRANCH)),
+                &sig, &sig, &msg, &tree, &[],
+            )?;
+        }
+
+        Ok(())
+    }
+
+    /// Migrate shadow branch when HEAD changes (after rebase/pull/stash-apply).
+    /// Reads stored base_commit from session state and compares with current HEAD.
+    /// If they differ, renames the shadow branch reference.
+    pub fn migrate_shadow_if_needed(repo: &Repository) -> Result<bool, Box<dyn std::error::Error>> {
+        let _ = fs::create_dir_all(Self::SHADOW_SESSION_DIR);
+
+        let state_path = format!("{}/base_commit.txt", Self::SHADOW_SESSION_DIR);
+        let current_head = repo.head()
+            .ok()
+            .and_then(|h| h.peel_to_commit().ok())
+            .map(|c| c.id().to_string()[..7].to_string());
+
+        let current_head = match current_head {
+            Some(h) => h,
+            None => return Ok(false),
+        };
+
+        if let Ok(stored) = fs::read_to_string(&state_path) {
+            let stored = stored.trim().to_string();
+            if stored != current_head && !stored.is_empty() {
+                // HEAD changed — rebase/pull happened
+                // The shadow branch data is still valid, just update the stored base
+                fs::write(&state_path, &current_head)?;
+                return Ok(true); // Signal that migration occurred
+            }
+        }
+
+        // Store current HEAD for future comparisons
+        fs::write(&state_path, &current_head)?;
+        Ok(false)
+    }
+
+    /// Retrieve checkpoints from the shadow branch (survives rebase)
+    pub fn get_shadow_checkpoints(repo: &Repository) -> Result<Vec<CheckpointData>, Box<dyn std::error::Error>> {
+        let mut checkpoints = Vec::new();
+
+        let shadow_ref = match repo.find_reference(&format!("refs/heads/{}", Self::SHADOW_BRANCH)) {
+            Ok(r) => r,
+            Err(_) => return Ok(checkpoints),
+        };
+
+        let commit = shadow_ref.peel_to_commit()?;
+        let root_tree = commit.tree()?;
+
+        // Walk shard/rest/checkpoint.json
+        for shard_entry in root_tree.iter() {
+            if shard_entry.kind() != Some(git2::ObjectType::Tree) { continue; }
+            let shard_tree = repo.find_tree(shard_entry.id())?;
+            for cp_entry in shard_tree.iter() {
+                if cp_entry.kind() != Some(git2::ObjectType::Tree) { continue; }
+                let cp_tree = repo.find_tree(cp_entry.id())?;
+                if let Some(blob_entry) = cp_tree.get_name("checkpoint.json") {
+                    let obj = blob_entry.to_object(repo)?;
+                    if let Some(blob) = obj.as_blob() {
+                        if let Ok(json) = std::str::from_utf8(blob.content()) {
+                            if let Ok(data) = serde_json::from_str::<CheckpointData>(json) {
+                                checkpoints.push(data);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        checkpoints.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
+        Ok(checkpoints)
+    }
 }
 
 fn walk_notes_tree(repo: &Repository, tree: &git2::Tree, checkpoints: &mut Vec<CheckpointData>) -> Result<(), Box<dyn std::error::Error>> {

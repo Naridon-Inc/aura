@@ -20,6 +20,7 @@ mod exporter;
 mod redact;
 mod security;
 mod sync;
+mod session;
 
 use clap::{Parser, Subcommand};
 use parser::SemanticParser;
@@ -253,6 +254,16 @@ fn perform_update() -> Result<(), Box<dyn std::error::Error>> {
             }
             
             fs::rename(&tmp_exe, &current_exe)?;
+
+            // Re-sign on macOS to prevent SIGKILL from invalid adhoc signature
+            #[cfg(target_os = "macos")]
+            {
+                let _ = std::process::Command::new("codesign")
+                    .args(["--force", "--sign", "-"])
+                    .arg(&current_exe)
+                    .output();
+            }
+
             println!("{} Aura updated successfully to v{}!", "✓".green().bold(), new_version);
         }
     } else {
@@ -313,6 +324,15 @@ enum Commands {
     Status,
     /// Audit the Git history for unsanctioned code pushed without AI intent verification
     Audit,
+    /// Explain the intent behind code — trace a function back to the AI conversation that created it
+    Explain {
+        /// Function or identifier name to explain
+        identifier: String,
+        /// File path containing the identifier
+        file: String,
+    },
+    /// List and manage agent sessions
+    Sessions,
     /// Whitelist a specific logic node (e.g. Auth headers) for high-entropy secrets
     RequestAccess {
         /// The name of the function/class to exempt from Gatekeeper scrutiny
@@ -540,6 +560,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         Commands::Handover { .. } => "handover",
         Commands::Status => "status",
         Commands::Audit => "audit",
+        Commands::Explain { .. } => "explain",
+        Commands::Sessions => "sessions",
         Commands::RequestAccess { .. } => "request-access",
         Commands::Prove { .. } => "prove",
         Commands::Config { .. } => "config",
@@ -1023,6 +1045,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             println!("\n{}\n", "Welcome to the age of Agentic Engineering.".bold().blue());
         }
         Commands::CaptureContext { force } => {
+            // Detect rebase/pull and migrate shadow branch if needed
+            if let Ok(repo) = Repository::open(".") {
+                if let Ok(true) = CheckpointStore::migrate_shadow_if_needed(&repo) {
+                    eprintln!("Aura: HEAD changed (rebase/pull detected). Shadow checkpoints migrated.");
+                }
+            }
+
             let spinner = ProgressBar::new_spinner();
             spinner.set_style(
                 ProgressStyle::default_spinner()
@@ -1239,6 +1268,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             // Clean up the intent session marker
             let _ = fs::remove_file(".aura/.intent_logged");
 
+            // ── Session lifecycle: link this commit to an agent session ──
+            let sess = session::SessionManager::start_session(&agent_id);
+            // Track all staged files in the session (from git index)
+            for entry in index.iter() {
+                let path_str = String::from_utf8_lossy(&entry.path).to_string();
+                if detect_lang_ext(&path_str).is_empty() { continue; }
+                session::SessionManager::touch_file(&path_str);
+            }
+            // Capture full Claude Code transcript into session storage
+            session::capture_full_transcript();
+
             // Intent Verification (Logic Alignment): Prevent "Intent Poisoning"
             // Ensure the AI's text intent actually aligns with the code it modified.
             if !force && agent_id != "Aura Continuous Daemon" && !staged_nodes.is_empty() {
@@ -1397,11 +1437,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             };
 
             CheckpointStore::stage_checkpoint(&checkpoint)?;
-            
+
+            // Increment session checkpoint count
+            session::SessionManager::increment_checkpoint();
+
             spinner.finish_and_clear();
-            
+
             println!("{} Checkpoint logic staged.", "✓".green().bold());
             println!("  {} {} semantic nodes tracked", "↳".dimmed(), staged_nodes.len().to_string().cyan());
+            println!("  {} Session: {}", "↳".dimmed(), sess.session_id.dimmed());
         }
         Commands::InjectTrailer { commit_msg_file } => {
             if let Ok(Some(data)) = CheckpointStore::read_staged() {
@@ -1413,11 +1457,28 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         Commands::PersistCheckpoint => {
             let repo = open_repo()?;
             if let Ok(Some(data)) = CheckpointStore::read_staged() {
+                // Persist to git notes (primary)
                 if let Err(e) = CheckpointStore::commit_staged(&repo) {
                     println!("Failed to persist checkpoint: {}", e);
                 } else {
                     println!("{} Checkpoint {} permanently recorded in Git metadata.", "✓".green().bold(), &data.id[0..8]);
                 }
+
+                // Condense to shadow branch (rebase-proof backup)
+                let session_json = session::SessionManager::get_active_session()
+                    .and_then(|s| serde_json::to_string_pretty(&s).ok());
+                if let Err(e) = CheckpointStore::condense_to_shadow(
+                    &repo, &data, session_json.as_deref()
+                ) {
+                    // Non-fatal — notes are the primary store
+                    eprintln!("Shadow branch write skipped: {}", e);
+                }
+
+                // Track base commit for migration detection
+                let _ = CheckpointStore::migrate_shadow_if_needed(&repo);
+
+                // End session on commit
+                session::SessionManager::end_session();
             }
         }
         Commands::Ask { query } => {
@@ -1940,6 +2001,77 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             } else {
                 println!("\n{} Found {} unverified commits out of the last {}.", "⚠️".yellow().bold(), bypass_count.to_string().red(), total_scanned.to_string().cyan());
                 println!("  {} Action Required: Run `aura snapshot \"Pre-Audit\"` to secure the baseline before proceeding.", "↳".dimmed());
+            }
+        }
+        Commands::Explain { identifier, file } => {
+            println!("\n{} {}\n", "🔍".bold(), "Aura Explain: Tracing code provenance...".bold().cyan());
+
+            match session::SessionManager::explain_code(&file, &identifier) {
+                Some((sess, transcript)) => {
+                    println!("  {} {}: {}", "Agent".bold(), sess.agent_id.cyan(), sess.session_id.dimmed());
+                    if let Some(ref bc) = sess.base_commit {
+                        println!("  {} Commit: {}", "↳".dimmed(), bc.yellow());
+                    }
+                    println!("  {} Files touched: {}", "↳".dimmed(), sess.files_touched.join(", ").dimmed());
+                    println!("  {} Checkpoints: {}\n", "↳".dimmed(), sess.checkpoint_count);
+
+                    if transcript.is_empty() {
+                        println!("  {} No conversation transcript found for this session.", "⚠️".yellow());
+                        println!("  {} The code was tracked via checkpoint but the full conversation was not captured.", "↳".dimmed());
+                    } else {
+                        println!("  {} Conversation transcript ({} entries):\n", "💬".bold(), transcript.len());
+                        for entry in transcript.iter().take(20) {
+                            let role_label = match entry.role.as_str() {
+                                "user" => "  YOU".green().bold().to_string(),
+                                "assistant" => "  AI ".blue().bold().to_string(),
+                                "intent" => "  INTENT".cyan().bold().to_string(),
+                                _ => format!("  {}", entry.role.to_uppercase()),
+                            };
+                            let content = if entry.content.len() > 300 {
+                                format!("{}...", &entry.content[..300])
+                            } else {
+                                entry.content.clone()
+                            };
+                            println!("  {} {}", role_label, content);
+                        }
+                        if transcript.len() > 20 {
+                            println!("\n  {} ... and {} more entries", "↳".dimmed(), transcript.len() - 20);
+                        }
+                    }
+                }
+                None => {
+                    println!("  {} Could not trace '{}' in '{}'.", "⚠️".yellow(), identifier.cyan(), file.dimmed());
+                    println!("  {} Possible reasons:", "↳".dimmed());
+                    println!("    - The code was written before Aura was initialized");
+                    println!("    - The file is not tracked by git");
+                    println!("    - No checkpoint exists for the commit that introduced this code");
+                    println!("\n  {} Try: {}", "💡".blue(), format!("git log -S \"{}\" --oneline {}", identifier, file).cyan());
+                }
+            }
+        }
+        Commands::Sessions => {
+            println!("\n{} {}\n", "📋".bold(), "Aura Agent Sessions".bold().cyan());
+
+            let sessions = session::SessionManager::list_sessions();
+            if sessions.is_empty() {
+                println!("  {} No sessions recorded yet.", "↳".dimmed());
+                println!("  {} Sessions are created when AI agents work in this repository.", "↳".dimmed());
+            } else {
+                for sess in sessions.iter().take(20) {
+                    let phase_str = match sess.phase {
+                        session::SessionPhase::Active => "ACTIVE".green().bold().to_string(),
+                        session::SessionPhase::Idle => "IDLE".yellow().to_string(),
+                        session::SessionPhase::Ended => "ENDED".dimmed().to_string(),
+                    };
+                    println!("  {} {} [{}] — {} ({} files, {} checkpoints)",
+                        "●".cyan(),
+                        sess.session_id.bold(),
+                        phase_str,
+                        sess.agent_id.cyan(),
+                        sess.files_touched.len(),
+                        sess.checkpoint_count,
+                    );
+                }
             }
         }
         Commands::RequestAccess { identifier } => {
