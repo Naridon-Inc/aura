@@ -167,7 +167,7 @@ fn capture_env_fingerprint() -> Option<String> {
     ecosystem::Ecosystem::fingerprint()
 }
 
-const CURRENT_VERSION: &str = "0.5.2";
+const CURRENT_VERSION: &str = "0.5.3";
 
 fn check_for_updates() -> Option<String> {
     let client = reqwest::blocking::Client::builder()
@@ -565,7 +565,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             println!("{:-^80}\n", " INITIALIZATION WIZARD ".bold().blue());
 
             // 1. Agent Selection
-            let agents = &["Claude Code", "Gemini CLI", "Cursor", "Claude Desktop", "Aider", "OpenCode"];
+            let agents = &["Claude Code", "VS Code", "Gemini CLI", "Cursor", "Claude Desktop", "Aider", "OpenCode"];
             let selections = MultiSelect::with_theme(&ColorfulTheme::default())
                 .with_prompt("Which AI Agents will be working in this repository? (Use space to select MULTIPLE, Enter to confirm)")
                 .items(&agents[..])
@@ -616,6 +616,56 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             let _ = fs::write(claude_md_path, aura_block);
                             println!("    {} Created CLAUDE.md with Aura instructions.", "✓".green());
                         }
+                    },
+                    "VS Code" => {
+                        println!("  {} Auto-configuring VS Code MCP server...", "⚙️ ".cyan());
+
+                        // VS Code uses .vscode/mcp.json for MCP server registration (built-in since v1.99)
+                        let vscode_dir = std::path::Path::new(".vscode");
+                        let _ = fs::create_dir_all(vscode_dir);
+                        let vscode_mcp_path = vscode_dir.join("mcp.json");
+
+                        let mut mcp_config: serde_json::Value = if vscode_mcp_path.exists() {
+                            fs::read_to_string(&vscode_mcp_path).ok()
+                                .and_then(|s| serde_json::from_str(&s).ok())
+                                .unwrap_or_else(|| serde_json::json!({"servers": {}}))
+                        } else {
+                            serde_json::json!({"servers": {}})
+                        };
+
+                        if mcp_config.get("servers").is_none() {
+                            mcp_config["servers"] = serde_json::json!({});
+                        }
+                        mcp_config["servers"]["aura-vcs"] = serde_json::json!({
+                            "command": "aura",
+                            "args": ["mcp"],
+                            "type": "stdio"
+                        });
+                        if fs::write(&vscode_mcp_path, serde_json::to_string_pretty(&mcp_config).unwrap_or_default()).is_ok() {
+                            println!("    {} Aura MCP server registered in .vscode/mcp.json", "✓".green());
+                        }
+
+                        // Also add recommended extensions
+                        let extensions_path = vscode_dir.join("extensions.json");
+                        let mut extensions: serde_json::Value = if extensions_path.exists() {
+                            fs::read_to_string(&extensions_path).ok()
+                                .and_then(|s| serde_json::from_str(&s).ok())
+                                .unwrap_or_else(|| serde_json::json!({"recommendations": []}))
+                        } else {
+                            serde_json::json!({"recommendations": []})
+                        };
+
+                        if let Some(recs) = extensions.get_mut("recommendations").and_then(|r| r.as_array_mut()) {
+                            let copilot = serde_json::json!("github.copilot");
+                            let copilot_chat = serde_json::json!("github.copilot-chat");
+                            if !recs.contains(&copilot) { recs.push(copilot); }
+                            if !recs.contains(&copilot_chat) { recs.push(copilot_chat); }
+                            let _ = fs::write(&extensions_path, serde_json::to_string_pretty(&extensions).unwrap_or_default());
+                            println!("    {} Recommended GitHub Copilot extensions in .vscode/extensions.json", "✓".green());
+                        }
+
+                        println!("    {} Aura Semantic Engine is now available in VS Code via MCP.", "✓".green());
+                        println!("    {} Use Copilot Chat (Agent mode) to access Aura tools.", "💡".blue());
                     },
                     "Claude Desktop" => {
                         println!("  {} Auto-configuring Claude Desktop MCP server...", "⚙️ ".cyan());
