@@ -116,8 +116,8 @@ aura restore <snapshot_id>                  # Restore from snapshot
 
 ## Rules
 - **Snapshot first** before large edits
+- **MANDATORY: Log intent** — after every set of code changes, you MUST write your reasoning to `.gemini.intent` or call `aura_log_intent` via MCP. Without this, the pre-commit hook detects "Intent Poisoning" and blocks the commit. This is not optional.
 - **Atomic waves** for complex tasks — use `aura plan` + `aura execute`
 - **Verify before commit** — run `aura pr-review`
-- **Log intent** — always write `.gemini.intent` before committing
 - **Never bypass** — do not use `--no-verify` on git commits
 - **One wave at a time** — halt for user approval between waves

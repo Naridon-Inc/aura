@@ -104,11 +104,11 @@ impl McpServer {
                             },
                             {
                                 "name": "aura_log_intent",
-                                "description": "Proactively log your architectural intent to the Aura Semantic Brain BEFORE making a commit.",
+                                "description": "MANDATORY: You MUST call this tool after making code changes and BEFORE committing. Logs your architectural intent so Aura can link your reasoning to the AST changes. If you skip this, the pre-commit hook will detect 'Intent Poisoning' and may block the commit. Call this every time you finish a set of edits.",
                                 "inputSchema": {
                                     "type": "object",
                                     "properties": {
-                                        "intent": { "type": "string", "description": "Your 1-2 sentence reasoning for the code changes you are making." }
+                                        "intent": { "type": "string", "description": "1-2 sentence explanation of WHY you made these changes. Must reference the functions/classes you modified." }
                                     },
                                     "required": ["intent"]
                                 }
@@ -162,7 +162,7 @@ impl McpServer {
                 let name = params["name"].as_str().unwrap_or("");
                 let args = params["arguments"].clone();
 
-                let result = match name {
+                let mut result = match name {
                     "aura_read_history" => Self::tool_read_history(args),
                     "aura_log_intent" => Self::tool_log_intent(args),
                     "aura_pr_review" => Self::tool_pr_review(args),
@@ -171,6 +171,19 @@ impl McpServer {
                     "aura_snapshot_list" => Self::tool_snapshot_list(args),
                     _ => json!({ "isError": true, "content": [{ "type": "text", "text": "Unknown tool" }] })
                 };
+
+                // Append intent reminder to non-intent tool responses if intent hasn't been logged
+                if name != "aura_log_intent" && name != "aura_read_history" {
+                    let intent_logged = std::path::Path::new(".aura/.intent_logged").exists();
+                    if !intent_logged {
+                        if let Some(content) = result.get_mut("content").and_then(|c| c.as_array_mut()) {
+                            content.push(json!({
+                                "type": "text",
+                                "text": "\n⚠️ REMINDER: You have not logged your intent yet. Call `aura_log_intent` with a description of your changes BEFORE committing. Without intent, the pre-commit hook will flag Intent Poisoning."
+                            }));
+                        }
+                    }
+                }
 
                 json!({
                     "jsonrpc": "2.0",
@@ -218,12 +231,32 @@ impl McpServer {
 
     fn tool_log_intent(args: Value) -> Value {
         let intent = args["intent"].as_str().unwrap_or("No intent provided.").to_string();
-        
-        // Save the intent as a temporary file so the next `git commit` hook can pick it up.
-        // This bridges the MCP protocol with our Git-Native pre-commit hook.
-        let _ = std::fs::write(".gemini.intent", &intent); // Reusing the same handshake file for MVP
-        
-        json!({ "content": [{ "type": "text", "text": "Intent successfully logged to Aura. It will be bound to the AST logic on your next git commit." }] })
+
+        // 1. Write the handshake file for the pre-commit hook
+        let _ = std::fs::write(".gemini.intent", &intent);
+
+        // 2. Also append to the durable intent log (JSONL) so the watcher daemon
+        //    can link file snapshots to this intent context
+        let _ = std::fs::create_dir_all(".aura");
+        let log_entry = json!({
+            "agent_id": "MCP Agent",
+            "intent": intent,
+            "timestamp": std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs()
+        });
+        if let Ok(mut file) = std::fs::OpenOptions::new()
+            .create(true).append(true).open(".aura/intent_log.jsonl")
+        {
+            use std::io::Write;
+            let _ = writeln!(file, "{}", log_entry.to_string());
+        }
+
+        // Mark that intent has been logged for this session
+        let _ = std::fs::write(".aura/.intent_logged", "1");
+
+        json!({ "content": [{ "type": "text", "text": "Intent logged. Aura will bind this reasoning to your AST changes on the next commit." }] })
     }
 
     fn tool_pr_review(args: Value) -> Value {

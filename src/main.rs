@@ -167,7 +167,7 @@ fn capture_env_fingerprint() -> Option<String> {
     ecosystem::Ecosystem::fingerprint()
 }
 
-const CURRENT_VERSION: &str = "0.6.0";
+const CURRENT_VERSION: &str = "0.6.1";
 
 fn check_for_updates() -> Option<String> {
     let client = reqwest::blocking::Client::builder()
@@ -1198,6 +1198,46 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     }
                 }
             }
+
+            // Fallback: Use git commit message as intent if no agent provided one
+            // This covers VS Code, Cursor, and any agent that doesn't call aura_log_intent
+            if intent.starts_with("Automatically tracked") || intent == "No semantic logic changes detected in staged files." {
+                // Try to read the commit message from MERGE_MSG or COMMIT_EDITMSG
+                let commit_msg = fs::read_to_string(".git/COMMIT_EDITMSG")
+                    .or_else(|_| fs::read_to_string(".git/MERGE_MSG"))
+                    .ok();
+                if let Some(msg) = commit_msg {
+                    let clean_msg = msg.lines()
+                        .filter(|l| !l.starts_with('#'))
+                        .collect::<Vec<_>>()
+                        .join(" ")
+                        .trim()
+                        .to_string();
+                    if !clean_msg.is_empty() {
+                        intent = format!("[From commit message] {}", clean_msg);
+                        spinner.println(format!("{} Using commit message as intent fallback", "📝".blue()));
+                    }
+                }
+
+                // Also check the intent log JSONL for recent entries (from watcher or MCP)
+                if intent.starts_with("Automatically tracked") {
+                    if let Ok(log) = fs::read_to_string(".aura/intent_log.jsonl") {
+                        if let Some(last_line) = log.lines().last() {
+                            if let Ok(entry) = serde_json::from_str::<serde_json::Value>(last_line) {
+                                if let Some(logged_intent) = entry["intent"].as_str() {
+                                    let agent = entry["agent_id"].as_str().unwrap_or("unknown");
+                                    intent = format!("[From intent log — {}] {}", agent, logged_intent);
+                                    agent_id = agent.to_string();
+                                    spinner.println(format!("{} Recovered intent from Aura intent log", "⚡".cyan()));
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Clean up the intent session marker
+            let _ = fs::remove_file(".aura/.intent_logged");
 
             // Intent Verification (Logic Alignment): Prevent "Intent Poisoning"
             // Ensure the AI's text intent actually aligns with the code it modified.
