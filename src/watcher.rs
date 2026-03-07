@@ -86,6 +86,15 @@ impl ContinuousTracker {
                     else if path_str.ends_with(".tsx") { "tsx" }
                     else if path_str.ends_with(".js") { "js" }
                     else if path_str.ends_with(".jsx") { "jsx" }
+                    else if path_str.ends_with(".go") { "go" }
+                    else if path_str.ends_with(".java") { "java" }
+                    else if path_str.ends_with(".cs") { "cs" }
+                    else if path_str.ends_with(".rb") { "rb" }
+                    else if path_str.ends_with(".cpp") || path_str.ends_with(".cc") || path_str.ends_with(".cxx") { "cpp" }
+                    else if path_str.ends_with(".hpp") { "hpp" }
+                    else if path_str.ends_with(".c") { "c" }
+                    else if path_str.ends_with(".h") { "h" }
+                    else if path_str.ends_with(".php") { "php" }
                     else { continue; };
 
                 println!("\n[Aura Daemon] Detected file activity: {:?}", path.file_name().unwrap());
@@ -117,6 +126,13 @@ impl ContinuousTracker {
             "py" => "Python",
             "ts" | "tsx" => "TypeScript",
             "js" | "jsx" => "JavaScript",
+            "go" => "Go",
+            "java" => "Java",
+            "cs" => "C#",
+            "rb" => "Ruby",
+            "cpp" | "cc" | "cxx" | "hpp" => "C++",
+            "c" | "h" => "C",
+            "php" => "PHP",
             _ => ext,
         };
 

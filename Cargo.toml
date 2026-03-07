@@ -1,6 +1,6 @@
 [package]
 name = "aura"
-version = "0.5.7"
+version = "0.6.0"
 edition = "2024"
 
 [dependencies]
@@ -31,5 +31,13 @@ figlet-rs = "0.1.5"
 sysinfo = "0.36.1"
 tree-sitter-typescript = "0.23.2"
 tree-sitter-javascript = "0.25.0"
+tree-sitter-go = "0.25.0"
+tree-sitter-java = "0.23.5"
+tree-sitter-c-sharp = "0.23.1"
+tree-sitter-ruby = "0.23.1"
+tree-sitter-cpp = "0.23.4"
+tree-sitter-c = "0.24.1"
+# tree-sitter-swift and tree-sitter-kotlin not yet compatible with tree-sitter 0.26
+tree-sitter-php = "0.24.2"
 serde_yaml = "0.9"
 ctrlc = "3.4"
