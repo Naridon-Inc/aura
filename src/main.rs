@@ -167,7 +167,7 @@ fn capture_env_fingerprint() -> Option<String> {
     ecosystem::Ecosystem::fingerprint()
 }
 
-const CURRENT_VERSION: &str = "0.5.3";
+const CURRENT_VERSION: &str = "0.5.4";
 
 fn check_for_updates() -> Option<String> {
     let client = reqwest::blocking::Client::builder()
@@ -491,6 +491,17 @@ enum SymphonySubcommands {
     Status,
 }
 
+fn open_repo() -> Result<Repository, Box<dyn std::error::Error>> {
+    Repository::open(".").map_err(|_| {
+        format!(
+            "{} Not a Git repository. Run {} first, or use {} to set one up.",
+            "error:".red().bold(),
+            "git init".cyan(),
+            "aura init".cyan()
+        ).into()
+    })
+}
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     setup_crash_reporter();
     let cli = Cli::parse();
@@ -542,10 +553,31 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
             println!("\n{} {}\n", "✨".bold(), "AI-Native Semantic Version Control".bold().cyan());
             
-            let repo = Repository::open(".")?;
+            let repo = match Repository::open(".") {
+                Ok(r) => r,
+                Err(_) => {
+                    println!("{} {}", "⚠️".yellow().bold(), "No Git repository found in this directory.".bold());
+                    println!("  {} Aura requires a Git repository to operate.\n", "↳".dimmed());
+
+                    let should_init = dialoguer::Confirm::with_theme(&ColorfulTheme::default())
+                        .with_prompt("Would you like to initialize a Git repository here?")
+                        .default(true)
+                        .interact()
+                        .unwrap_or(false);
+
+                    if should_init {
+                        Repository::init(".")?;
+                        println!("  {} Git repository initialized.\n", "✓".green().bold());
+                        Repository::open(".")?
+                    } else {
+                        println!("\n  {} Run {} inside a Git repository, or let Aura create one.", "💡".blue(), "aura init".cyan());
+                        return Ok(());
+                    }
+                }
+            };
             let index = repo.index()?;
             let file_count = index.len();
-            
+
             if file_count > 1000 && !*force_baseline {
                 println!("{} {}", "⚠️".yellow().bold(), "Large repository detected!".bold());
                 println!("  {} Your project has {} files. Initializing Aura may trigger", "↳".dimmed(), file_count);
@@ -929,7 +961,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             spinner.set_message(format!("{}", "Analyzing staged files semantically...".bold()));
             spinner.enable_steady_tick(Duration::from_millis(80));
 
-            let repo = Repository::open(".")?;
+            let repo = open_repo()?;
             let mut parser = SemanticParser::new()?;
             let config = ConfigManager::load();
 
@@ -1235,7 +1267,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
         Commands::PersistCheckpoint => {
-            let repo = Repository::open(".")?;
+            let repo = open_repo()?;
             if let Ok(Some(data)) = CheckpointStore::read_staged() {
                 if let Err(e) = CheckpointStore::commit_staged(&repo) {
                     println!("Failed to persist checkpoint: {}", e);
@@ -1245,7 +1277,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
         Commands::Ask { query } => {
-            let repo = Repository::open(".")?;
+            let repo = open_repo()?;
             
             println!("\n{} {}\n", "🧠".bold(), "Aura Semantic Brain: Searching Git Context Branch...".bold().magenta());
 
@@ -1319,7 +1351,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
         Commands::Handover { agent } => {
-            let repo = Repository::open(".")?;
+            let repo = open_repo()?;
             let results = CheckpointStore::get_all_checkpoints(&repo)?;
             
             println!("{} Generating dense XML context payload for {}...", "🔄".cyan(), agent.bold());
@@ -1355,7 +1387,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         Commands::Rewind { identifier, file_path, amnesia } => {
             println!("\n{} {} {}", "⏪".bold(), "Aura Semantic Time Machine: Rewinding".bold().cyan(), identifier.bold().yellow());
 
-            let repo = Repository::open(".")?;
+            let repo = open_repo()?;
             let mut parser = SemanticParser::new()?;
 
             // Determine file extension
@@ -1494,7 +1526,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         Commands::Map => {
             println!("\n{} {}\n", "🕸️".bold(), "Aura Semantic Merkle-Graph (Latest State)".bold().cyan());
-            let repo = Repository::open(".")?;
+            let repo = open_repo()?;
             let results = CheckpointStore::get_all_checkpoints(&repo)?;
             
             if let Some(latest) = results.first() {
@@ -1595,7 +1627,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 .filter_map(|v| v.as_str()).map(|s| s.to_string()).collect::<Vec<String>>();
 
             // 2. Parse the AST of the current project
-            let repo = Repository::open(".")?;
+            let repo = open_repo()?;
             let mut parser = SemanticParser::new()?;
             let index = repo.index()?;
             let mut all_ast_nodes = Vec::new();
@@ -1665,7 +1697,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         Commands::Gc => {
             println!("{} {}", "🧹".bold(), "Aura Semantic Compaction: Analyzing history...".bold().cyan());
-            let repo = Repository::open(".")?;
+            let repo = open_repo()?;
             match CheckpointStore::compact_history(&repo) {
                 Ok(count) => {
                     if count > 0 {
