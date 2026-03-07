@@ -16,6 +16,10 @@ mod toon;
 pub mod orchestrate;
 mod symphony;
 mod linear;
+mod exporter;
+mod redact;
+mod security;
+mod sync;
 
 use clap::{Parser, Subcommand};
 use parser::SemanticParser;
@@ -163,7 +167,7 @@ fn capture_env_fingerprint() -> Option<String> {
     ecosystem::Ecosystem::fingerprint()
 }
 
-const CURRENT_VERSION: &str = "0.5.1";
+const CURRENT_VERSION: &str = "0.5.2";
 
 fn check_for_updates() -> Option<String> {
     let client = reqwest::blocking::Client::builder()
