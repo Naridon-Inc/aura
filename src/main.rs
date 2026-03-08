@@ -528,6 +528,8 @@ fn detect_lang_ext(path: &str) -> String {
     else if path.ends_with(".c") { "c" }
     else if path.ends_with(".h") { "h" }
     else if path.ends_with(".php") { "php" }
+    else if path.ends_with(".swift") { "swift" }
+    else if path.ends_with(".kt") || path.ends_with(".kts") { "kt" }
     else { "" }
     .to_string()
 }
@@ -1128,6 +1130,105 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
 
             thread::sleep(Duration::from_millis(200));
+            spinner.set_message(format!("{}", "Scanning for deleted logic nodes...".bold()));
+
+            // ── DELETION GUARD: Detect when AI agents silently remove working code ──
+            // Compare staged AST nodes against the latest checkpoint to find deletions.
+            // This is the core protection against "AI overwrites good code while building new features."
+            {
+                let deletion_check_checkpoints = CheckpointStore::get_all_checkpoints(&repo).unwrap_or_default();
+                if let Some(latest_checkpoint) = deletion_check_checkpoints.first() {
+                    let staged_identifiers: std::collections::HashSet<String> = staged_nodes.iter()
+                        .filter_map(|n| n.identifier.clone())
+                        .collect();
+
+                    let mut deleted_nodes: Vec<String> = Vec::new();
+                    for prev_node in &latest_checkpoint.ast_nodes {
+                        if let Some(ref ident) = prev_node.identifier {
+                            // Skip anonymous/generated identifiers
+                            if ident.is_empty() || ident == "anonymous" || ident.starts_with("__") {
+                                continue;
+                            }
+                            // If a named node existed in the last checkpoint but is missing now, it was deleted
+                            if !staged_identifiers.contains(ident) {
+                                deleted_nodes.push(ident.clone());
+                            }
+                        }
+                    }
+
+                    if !deleted_nodes.is_empty() {
+                        spinner.finish_and_clear();
+
+                        // Check if intent mentions the deletion
+                        let intent_text = fs::read_to_string(".gemini.intent").unwrap_or_default();
+                        let intent_log = fs::read_to_string(".aura/intent_log.jsonl").unwrap_or_default();
+                        let combined_intent = format!("{} {}", intent_text, intent_log).to_lowercase();
+
+                        let intent_mentions_deletion = combined_intent.contains("remov")
+                            || combined_intent.contains("delet")
+                            || combined_intent.contains("deprecat")
+                            || combined_intent.contains("drop")
+                            || combined_intent.contains("strip")
+                            || combined_intent.contains("clean")
+                            || combined_intent.contains("refactor");
+
+                        // Check if any deleted node names are mentioned in the intent
+                        let intent_mentions_specific = deleted_nodes.iter()
+                            .any(|name| combined_intent.contains(&name.to_lowercase()));
+
+                        let is_likely_intentional = intent_mentions_deletion && intent_mentions_specific;
+
+                        if deleted_nodes.len() > 5 && !is_likely_intentional {
+                            // Mass deletion — very suspicious
+                            println!("\n{} Logic Node Deletion Guard: {} logic nodes REMOVED", "🛡️".red().bold(), deleted_nodes.len().to_string().red().bold());
+                            println!("  {} This often happens when an AI agent rewrites a file and accidentally", "↳".dimmed());
+                            println!("  {} removes working features while building new ones.", "↳".dimmed());
+                            println!("\n  {} Deleted nodes (showing first 15):", "Missing:".bold().red());
+                            for (i, name) in deleted_nodes.iter().take(15).enumerate() {
+                                println!("    {} {}. {}", "✗".red(), i + 1, name.yellow());
+                            }
+                            if deleted_nodes.len() > 15 {
+                                println!("    {} ... and {} more", "↳".dimmed(), deleted_nodes.len() - 15);
+                            }
+
+                            // Auto-snapshot all modified files before potentially blocking
+                            for entry in index.iter() {
+                                let path_str = String::from_utf8_lossy(&entry.path).to_string();
+                                if !detect_lang_ext(&path_str).is_empty() {
+                                    let _ = checkpoint::SnapshotStore::snapshot_file(&path_str, "pre_deletion_guard", "Aura Deletion Guard");
+                                }
+                            }
+
+                            if config.strict_gatekeeper_mode {
+                                println!("\n  {} {}", "How to Fix:".bold().green(), "If this deletion is intentional, log your intent:");
+                                println!("    {} aura log-intent \"Removed <function_name> because ...\"", "$".dimmed());
+                                println!("  {} To bypass: {}", "💡".blue(), "aura config set strict-mode false".italic());
+                                println!("\n{} Commit halted. {} logic nodes would be lost.", "✗".red().bold(), deleted_nodes.len());
+                                println!("  {} Safety snapshots saved to .aura/snapshots/", "✓".green());
+                                std::process::exit(1);
+                            } else {
+                                println!("\n  {} Strict mode is OFF. Proceeding with warning.", "⚠️".yellow());
+                                println!("  {} To block mass deletions, run: {}", "💡".blue(), "aura config set strict-mode true".italic());
+                                let should_continue = dialoguer::Confirm::with_theme(&ColorfulTheme::default())
+                                    .with_prompt(format!("Continue? {} logic nodes will be removed", deleted_nodes.len()))
+                                    .default(false)
+                                    .interact()
+                                    .unwrap_or(false);
+                                if !should_continue {
+                                    println!("{} Commit cancelled. Review the deletions above.", "✗".red().bold());
+                                    std::process::exit(1);
+                                }
+                            }
+                        } else if !deleted_nodes.is_empty() && !is_likely_intentional {
+                            // Small deletion — warn but don't block
+                            println!("\n{} {} logic node(s) removed: {}", "⚠️".yellow(), deleted_nodes.len(),
+                                deleted_nodes.iter().take(5).cloned().collect::<Vec<_>>().join(", ").yellow());
+                            println!("  {} If intentional, document with: aura log-intent \"Removed ...\"", "↳".dimmed());
+                        }
+                    }
+                }
+            }
+
             spinner.set_message(format!("{}", "Extracting AST logic signatures...".bold()));
 
             // Determine Agent Context intelligently based on environment signatures
@@ -1479,6 +1580,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                 // End session on commit
                 session::SessionManager::end_session();
+
+                // Cloud sync (if configured)
+                let config = crate::config::ConfigManager::load();
+                if config.sync_enabled && config.cloud_api_token.is_some() {
+                    if let Ok(remote) = repo.find_remote("origin")
+                        .and_then(|r| Ok(r.url().unwrap_or("").to_string()))
+                    {
+                        if !remote.is_empty() {
+                            std::thread::spawn(move || {
+                                crate::sync::GlobalSync::sync_checkpoints(&remote);
+                            });
+                        }
+                    }
+                }
             }
         }
         Commands::Ask { query } => {
@@ -1905,7 +2020,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         Commands::Gc => {
             println!("{} {}", "🧹".bold(), "Aura Semantic Compaction: Analyzing history...".bold().cyan());
             let repo = open_repo()?;
-            match CheckpointStore::compact_history(&repo) {
+            match CheckpointStore::compact_history(&repo, 50) {
                 Ok(count) => {
                     if count > 0 {
                         println!("{} Garbage Collection Complete.", "✓".green().bold());
@@ -2229,7 +2344,35 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
         Commands::PrReview { base, json, verbose } => {
-            crate::pr::PrReviewEngine::run_review(base, *json, *verbose)?;
+            let result = crate::pr::PrReviewEngine::run_review(base, *json, *verbose)?;
+
+            // Cloud sync review result (if configured)
+            if let Some(ref json_str) = result {
+                let config = crate::config::ConfigManager::load();
+                if config.sync_enabled && config.cloud_api_token.is_some() {
+                    if let Ok(review_val) = serde_json::from_str::<serde_json::Value>(json_str) {
+                        if let Ok(repo) = git2::Repository::open(".") {
+                            if let Ok(remote) = repo.find_remote("origin") {
+                                let remote_url = remote.url().unwrap_or("").to_string();
+                                if !remote_url.is_empty() {
+                                    let review_data = serde_json::json!({
+                                        "base_branch": review_val["base_branch"],
+                                        "risk_score": review_val["risk_score"],
+                                        "risk_label": review_val["risk_label"],
+                                        "violations": review_val["invariant_violations"],
+                                        "summary": format!("PR review: {} changes, risk {}",
+                                            review_val["total_changes"].as_u64().unwrap_or(0),
+                                            review_val["risk_label"].as_str().unwrap_or("Unknown")),
+                                    });
+                                    std::thread::spawn(move || {
+                                        crate::sync::GlobalSync::sync_review(&remote_url, &review_data);
+                                    });
+                                }
+                            }
+                        }
+                    }
+                }
+            }
         }
         Commands::Fix { base } => {
             Arbitrator::auto_fix_violations(base)?;
