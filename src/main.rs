@@ -1626,18 +1626,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 session::SessionManager::end_session();
 
                 // Cloud sync (if configured)
+                // PRIVACY: Only sync structured metadata — never raw messages/transcripts.
+                // Transcripts stay local (on disk + shadow branch). Cloud gets:
+                // session metadata, token counts, file list, model name, summary.
                 let config = crate::config::ConfigManager::load();
                 if config.sync_enabled && config.cloud_api_token.is_some() {
-                    // Build session payload with transcript included
                     let session_payload = final_session.map(|sess| {
-                        let transcript = session::SessionManager::get_transcript(&sess.session_id);
-                        let transcript_entries: Vec<serde_json::Value> = transcript.iter().map(|t| {
-                            serde_json::json!({
-                                "role": t.role,
-                                "content": t.content,
-                                "timestamp": t.timestamp,
-                            })
-                        }).collect();
                         serde_json::json!({
                             "session_id": sess.session_id,
                             "agent_id": sess.agent_id,
@@ -1649,11 +1643,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             "base_commit": sess.base_commit,
                             "branch": sess.branch,
                             "model_name": sess.model_name,
-                            "first_prompt": sess.first_prompt,
                             "token_usage": sess.token_usage,
-                            "subagents": sess.subagents,
+                            "subagent_count": sess.subagents.len(),
                             "summary": sess.summary,
-                            "transcript": transcript_entries,
+                            // No transcript, no first_prompt, no raw messages
                         })
                     });
 
