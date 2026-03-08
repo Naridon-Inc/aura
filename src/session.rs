@@ -562,6 +562,67 @@ impl SessionManager {
         })
     }
 
+    /// Calculate turn count from transcript entries (user prompts = turns)
+    pub fn turn_count(session_id: &str) -> u32 {
+        let entries = Self::get_transcript(session_id);
+        entries.iter().filter(|e| e.role == "user").count() as u32
+    }
+
+    /// Get subagent count and types for a session
+    pub fn subagent_summary(session_id: &str) -> (u32, Vec<String>) {
+        let sessions = Self::list_sessions();
+        if let Some(sess) = sessions.iter().find(|s| s.session_id == session_id) {
+            let count = sess.subagents.len() as u32;
+            let types: Vec<String> = sess
+                .subagents
+                .iter()
+                .map(|s| s.agent_type.clone())
+                .collect::<std::collections::HashSet<_>>()
+                .into_iter()
+                .collect();
+            (count, types)
+        } else {
+            (0, vec![])
+        }
+    }
+
+    /// Detect if a branch was squash-merged into the base branch.
+    /// Returns the merge commit message if found.
+    pub fn detect_squash_merge(branch: &str) -> Option<String> {
+        let repo = git2::Repository::open(".").ok()?;
+
+        // Check if the branch still exists — if not, it was likely merged and deleted
+        let branch_exists = repo
+            .find_branch(branch, git2::BranchType::Local)
+            .is_ok();
+
+        if branch_exists {
+            // Branch still exists, check if its commits are in main/master
+            return None;
+        }
+
+        // Branch was deleted — look for squash merge in recent commits on HEAD
+        let mut revwalk = repo.revwalk().ok()?;
+        revwalk.push_head().ok()?;
+
+        for oid in revwalk.take(50) {
+            let oid = oid.ok()?;
+            let commit = repo.find_commit(oid).ok()?;
+            if let Some(message) = commit.message() {
+                // Common squash merge patterns
+                if message.contains(branch)
+                    || message.contains(&format!("Squashed commit of {}", branch))
+                    || message.contains(&format!("Merge branch '{}'", branch))
+                    || message.contains(&format!("(#"))  // GitHub PR merge
+                {
+                    return Some(message.to_string());
+                }
+            }
+        }
+
+        None
+    }
+
     fn save_session(session: &AgentSession) {
         Self::ensure_dirs();
         let path = format!("{}/{}.json", &sessions_dir(), session.session_id);
