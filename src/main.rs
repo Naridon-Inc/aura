@@ -48,24 +48,64 @@ use dialoguer::{theme::ColorfulTheme, MultiSelect, Password, Confirm};
 use config::ConfigManager;
 
 // Anonymous Telemetry & Crash Reporting
-fn track_event(event_name: &str, metadata: Option<&str>) {
+// Respects: config.telemetry_enabled, AURA_TELEMETRY_OPTOUT env var, DO_NOT_TRACK env var
+fn is_telemetry_enabled() -> bool {
+    // Environment variable opt-out takes highest priority (industry standard)
+    if std::env::var("AURA_TELEMETRY_OPTOUT").is_ok() {
+        return false;
+    }
+    // Respect the universal DO_NOT_TRACK convention
+    if std::env::var("DO_NOT_TRACK").ok().as_deref() == Some("1") {
+        return false;
+    }
     let config = ConfigManager::load();
-    if !config.telemetry_enabled {
+    config.telemetry_enabled
+}
+
+/// Generate an anonymous, stable machine ID (hashed, not PII)
+fn anonymous_machine_id() -> String {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+
+    let mut hasher = DefaultHasher::new();
+
+    // Use hostname + username as machine fingerprint (hashed for privacy)
+    if let Ok(hostname) = std::env::var("HOSTNAME")
+        .or_else(|_| std::env::var("COMPUTERNAME"))
+        .or_else(|_| {
+            std::process::Command::new("hostname")
+                .output()
+                .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        })
+    {
+        hostname.hash(&mut hasher);
+    }
+    if let Ok(user) = std::env::var("USER").or_else(|_| std::env::var("USERNAME")) {
+        user.hash(&mut hasher);
+    }
+
+    format!("anon_{:016x}", hasher.finish())
+}
+
+fn track_event(event_name: &str, metadata: Option<&str>) {
+    if !is_telemetry_enabled() {
         return;
     }
 
     let os = std::env::consts::OS;
     let arch = std::env::consts::ARCH;
     let version = CURRENT_VERSION;
+    let machine_id = anonymous_machine_id();
     let payload = serde_json::json!({
         "event": event_name,
         "os": os,
         "arch": arch,
         "version": version,
+        "machine_id": machine_id,
         "metadata": metadata.unwrap_or("none")
     });
 
-    // Fire and forget in a background thread so it never blocks the user
+    // Fire and forget in a detached background thread so it never blocks the user
     thread::spawn(move || {
         let client = reqwest::blocking::Client::builder().timeout(Duration::from_secs(3)).build().unwrap();
         let _ = client.post("http://api.auravcs.com/telemetry")
@@ -76,8 +116,6 @@ fn track_event(event_name: &str, metadata: Option<&str>) {
 
 fn setup_crash_reporter() {
     std::panic::set_hook(Box::new(|info| {
-        let config = ConfigManager::load();
-        
         let msg = match info.payload().downcast_ref::<&'static str>() {
             Some(s) => *s,
             None => match info.payload().downcast_ref::<String>() {
@@ -86,7 +124,7 @@ fn setup_crash_reporter() {
             },
         };
 
-        if config.telemetry_enabled {
+        if is_telemetry_enabled() {
             // Synchronous block to ensure it sends before the process dies
             let os = std::env::consts::OS;
             let payload = serde_json::json!({
