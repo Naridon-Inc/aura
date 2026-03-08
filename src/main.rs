@@ -175,9 +175,9 @@ fn generate_embedding(text: &str) -> Option<Vec<f32>> {
 
     // Fallback to Gemini
     if let Some(gemini_key) = ConfigManager::get_api_key("gemini") {
-        let url = format!("https://generativelanguage.googleapis.com/v1beta/models/text-embedding-004:embedContent?key={}", gemini_key);
+        let url = format!("https://generativelanguage.googleapis.com/v1beta/models/gemini-embedding-001:embedContent?key={}", gemini_key);
         let body = serde_json::json!({
-            "model": "models/text-embedding-004",
+            "model": "models/gemini-embedding-001",
             "content": {
                 "parts": [{ "text": text }]
             }
