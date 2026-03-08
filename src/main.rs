@@ -1621,18 +1621,52 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 // Track base commit for migration detection
                 let _ = CheckpointStore::migrate_shadow_if_needed(&repo);
 
-                // End session on commit
+                // End session on commit — capture final state first
+                let final_session = session::SessionManager::get_active_session();
                 session::SessionManager::end_session();
 
                 // Cloud sync (if configured)
                 let config = crate::config::ConfigManager::load();
                 if config.sync_enabled && config.cloud_api_token.is_some() {
+                    // Build session payload with transcript included
+                    let session_payload = final_session.map(|sess| {
+                        let transcript = session::SessionManager::get_transcript(&sess.session_id);
+                        let transcript_entries: Vec<serde_json::Value> = transcript.iter().map(|t| {
+                            serde_json::json!({
+                                "role": t.role,
+                                "content": t.content,
+                                "timestamp": t.timestamp,
+                            })
+                        }).collect();
+                        serde_json::json!({
+                            "session_id": sess.session_id,
+                            "agent_id": sess.agent_id,
+                            "phase": "Ended",
+                            "started_at": sess.started_at,
+                            "last_activity": sess.last_activity,
+                            "files_touched": sess.files_touched,
+                            "checkpoint_count": sess.checkpoint_count,
+                            "base_commit": sess.base_commit,
+                            "branch": sess.branch,
+                            "model_name": sess.model_name,
+                            "first_prompt": sess.first_prompt,
+                            "token_usage": sess.token_usage,
+                            "subagents": sess.subagents,
+                            "summary": sess.summary,
+                            "transcript": transcript_entries,
+                        })
+                    });
+
                     if let Ok(remote) = repo.find_remote("origin")
                         .and_then(|r| Ok(r.url().unwrap_or("").to_string()))
                     {
                         if !remote.is_empty() {
                             std::thread::spawn(move || {
                                 crate::sync::GlobalSync::sync_checkpoints(&remote);
+                                // Sync session with transcript to cloud
+                                if let Some(payload) = session_payload {
+                                    crate::sync::GlobalSync::sync_session(&remote, &payload);
+                                }
                             });
                         }
                     }
