@@ -18,6 +18,8 @@ pub struct AuraConfig {
     pub model_arbitrator: Option<String>,
 
     pub saas_token: Option<String>,
+    pub cloud_url: Option<String>,      // Cloud API URL (default: https://auravcs.com)
+    pub cloud_api_token: Option<String>, // API token for cloud sync (aura_xxxx)
     pub sync_enabled: bool,
     #[serde(default)]
     pub last_update_check: u64, // UNIX timestamp
@@ -48,6 +50,8 @@ impl Default for AuraConfig {
             model_auditor: None,
             model_arbitrator: None,
             saas_token: None,
+            cloud_url: None,
+            cloud_api_token: None,
             sync_enabled: false,
             last_update_check: 0,
             strict_gatekeeper_mode: false, // Warn-by-default is the standard
@@ -175,6 +179,13 @@ impl ConfigManager {
             }
         }
     }
+
+    /// Helper to check if plugins are configured
+    pub fn has_plugins_config() -> bool {
+        std::path::Path::new(".aura/plugins.toml").exists()
+            || std::env::var("HOME")
+                .ok()
+                .map(|h| std::path::Path::new(&format!("{}/.aura/plugins.toml", h)).exists())
+                .unwrap_or(false)
+    }
 }
-// test
-// test 2

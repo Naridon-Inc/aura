@@ -464,10 +464,49 @@ impl McpServer {
 
         let config = crate::config::ConfigManager::load();
         let checkpoints = CheckpointStore::get_all_checkpoints(&repo).unwrap_or_default();
-        
+
         let mut tracked_count = 0;
         if let Some(latest) = checkpoints.first() {
             tracked_count = latest.ast_nodes.len();
+        }
+
+        // Session & turn-level tracking
+        let mut session_data = json!(null);
+        if let Some(session) = SessionManager::get_active_session() {
+            let turns = SessionManager::turn_count(&session.session_id);
+            let (sub_count, sub_types) = SessionManager::subagent_summary(&session.session_id);
+
+            let mut sd = json!({
+                "session_id": session.session_id,
+                "agent_id": session.agent_id,
+                "phase": format!("{:?}", session.phase),
+                "turns": turns,
+                "subagent_count": sub_count,
+                "subagent_types": sub_types,
+                "files_touched": session.files_touched.len(),
+                "checkpoints": session.checkpoint_count,
+            });
+
+            if let Some(ref usage) = session.token_usage {
+                sd["tokens"] = json!({
+                    "input": usage.input_tokens,
+                    "output": usage.output_tokens,
+                    "cache_read": usage.cache_read_tokens,
+                    "cache_creation": usage.cache_creation_tokens,
+                    "api_calls": usage.api_call_count,
+                });
+            }
+
+            if let Some(cost) = crate::plugins::cost_reporter::calculate_session_cost(Some(&session.session_id)) {
+                sd["estimated_cost"] = json!({
+                    "total": format!("${:.4}", cost.total_cost),
+                    "model": cost.model,
+                    "input_cost": format!("${:.4}", cost.input_cost),
+                    "output_cost": format!("${:.4}", cost.output_cost),
+                });
+            }
+
+            session_data = sd;
         }
 
         let status_data = json!({
@@ -475,7 +514,8 @@ impl McpServer {
             "dev_mode": config.dev_mode,
             "latest_checkpoint_id": checkpoints.first().map(|c| c.id.clone()),
             "logic_nodes_tracked": tracked_count,
-            "total_checkpoints": checkpoints.len()
+            "total_checkpoints": checkpoints.len(),
+            "session": session_data,
         });
 
         let toon_text = crate::toon::encode(&status_data);

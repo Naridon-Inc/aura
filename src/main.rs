@@ -21,6 +21,9 @@ mod redact;
 mod security;
 mod sync;
 mod session;
+mod plugin;
+mod plugins;
+mod agents;
 
 use clap::{Parser, Subcommand};
 use parser::SemanticParser;
@@ -2114,27 +2117,78 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let config = ConfigManager::load();
             println!("  {} {}: {}", "⚙️ ".cyan(), "Gatekeeper Strict Mode".bold(), if config.strict_gatekeeper_mode { "ON (Blocking)".red() } else { "OFF (Warn-Only)".green() });
             println!("  {} {}: {}", "⚡".yellow(), "Dev Mode (Fast Init)".bold(), if config.dev_mode { "Active".green() } else { "Inactive (Enterprise)".dimmed() });
-            
+
             match Repository::open(".") {
                 Ok(repo) => {
                     match CheckpointStore::get_all_checkpoints(&repo) {
                         Ok(checkpoints) => {
                             if let Some(latest) = checkpoints.first() {
                                 println!("  {} {}: {}", "📍".blue(), "Latest Checkpoint".bold(), latest.id[0..8].to_string().cyan());
-                                println!("  {} {}: {} logic nodes tracked\n", "🧠".magenta(), "Merkle-Graph Size".bold(), latest.ast_nodes.len().to_string().yellow());
+                                println!("  {} {}: {} logic nodes tracked", "🧠".magenta(), "Merkle-Graph Size".bold(), latest.ast_nodes.len().to_string().yellow());
                             } else {
-                                println!("  {} {}\n", "ℹ️ ".blue(), "No semantic checkpoints found. Run `aura capture-context` or `git commit` to start tracking.".dimmed());
+                                println!("  {} {}", "ℹ️ ".blue(), "No semantic checkpoints found. Run `aura capture-context` or `git commit` to start tracking.".dimmed());
                             }
                         },
                         Err(_) => {
-                            println!("  {} {}\n", "⚠️".yellow(), "Could not read semantic history.".dimmed());
+                            println!("  {} {}", "⚠️".yellow(), "Could not read semantic history.".dimmed());
                         }
                     }
                 },
                 Err(_) => {
-                    println!("  {} {}\n", "✗".red(), "Not a Git repository.".bold());
+                    println!("  {} {}", "✗".red(), "Not a Git repository.".bold());
                 }
             }
+
+            // Session & Turn-level tracking
+            if let Some(session) = session::SessionManager::get_active_session() {
+                println!("\n  {} {}", "📊".bold(), "Active Session".bold().cyan());
+                println!("    {} Session: {}", "↳".dimmed(), session.session_id.cyan());
+                println!("    {} Agent: {}", "↳".dimmed(), session.agent_id.green());
+
+                let turns = session::SessionManager::turn_count(&session.session_id);
+                println!("    {} Turns: {}", "↳".dimmed(), turns.to_string().yellow());
+
+                let (sub_count, sub_types) = session::SessionManager::subagent_summary(&session.session_id);
+                if sub_count > 0 {
+                    println!("    {} Subagents: {} ({})", "↳".dimmed(),
+                        sub_count.to_string().yellow(),
+                        sub_types.join(", ").dimmed());
+                }
+
+                if let Some(ref usage) = session.token_usage {
+                    println!("    {} Tokens: {} in / {} out ({} API calls)", "↳".dimmed(),
+                        usage.input_tokens.to_string().yellow(),
+                        usage.output_tokens.to_string().yellow(),
+                        usage.api_call_count);
+                    if usage.cache_read_tokens > 0 {
+                        println!("    {} Cache: {} read / {} created", "↳".dimmed(),
+                            usage.cache_read_tokens.to_string().dimmed(),
+                            usage.cache_creation_tokens.to_string().dimmed());
+                    }
+                }
+
+                // Cost estimate
+                if let Some(cost) = plugins::cost_reporter::calculate_session_cost(Some(&session.session_id)) {
+                    println!("    {} Cost: {}", "↳".dimmed(), cost.format_compact().yellow());
+                }
+            }
+
+            // Plugin info
+            let plugin_config = plugin::load_plugin_config();
+            let registry = plugin::PluginRegistry::load_from_config(&plugin_config);
+            if registry.count() > 0 {
+                println!("\n  {} {} plugin(s) loaded:", "🔌".bold(), registry.count());
+                for (name, version) in registry.list() {
+                    println!("    {} {} v{}", "↳".dimmed(), name.cyan(), version);
+                }
+            }
+
+            // OpenCode detection
+            if let Some(info) = agents::opencode::detect_opencode() {
+                println!("\n  {} OpenCode detected (via {})", "🔗".bold(), info.detection_method.cyan());
+            }
+
+            println!();
         }
         Commands::Audit => {
             println!("\n{} {}", "🕵️ ".bold(), "Aura Semantic Audit: Scanning Git History for Bypasses...".bold().magenta());
@@ -2327,6 +2381,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 println!("  {} Switched to {}", "✓".green().bold(), branch.cyan());
             }
 
+            // Check for squash-merge history
+            if let Some(merge_msg) = session::SessionManager::detect_squash_merge(&branch) {
+                let first_line = merge_msg.lines().next().unwrap_or("(no message)");
+                println!("  {} Branch '{}' was previously squash-merged:", "ℹ".blue().bold(), branch.cyan());
+                println!("    {} \"{}\"", "↳".dimmed(), first_line.dimmed());
+                println!("    {} This session will be linked to the previous merge.\n", "↳".dimmed());
+            }
+
             // Find sessions on this branch
             let sessions = session::SessionManager::resume_branch(&branch);
             if sessions.is_empty() {
@@ -2457,6 +2519,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             if cleaned > 0 {
                 println!("  {} Cleaned {} stale sessions (>7 days old).", "🧹".green(), cleaned);
             }
+
+            // 7. Cost summary for active session
+            if let Some(cost) = plugins::cost_reporter::calculate_session_cost(None) {
+                println!("  {} Active session cost: {}", "💰".green(), cost.format_compact());
+            }
+
+            // 8. Plugin status
+            let plugin_config = plugin::load_plugin_config();
+            let registry = plugin::PluginRegistry::load_from_config(&plugin_config);
+            println!("  {} {} plugin(s) loaded.", "✓".green().bold(), registry.count());
 
             println!("\n  {} Doctor complete. {} issue(s) found.\n",
                 if issues_found == 0 { "✓".green().bold() } else { "⚠".yellow().bold() },
