@@ -1,0 +1,64 @@
+name: E2E Tests
+
+on:
+  push:
+    branches: [master, main]
+  pull_request:
+    branches: [master, main]
+  workflow_dispatch:
+    inputs:
+      keep_repos:
+        description: 'Preserve test repos on failure'
+        type: boolean
+        default: false
+
+env:
+  CARGO_TERM_COLOR: always
+  AURA_TELEMETRY_OPTOUT: "1"
+
+jobs:
+  e2e:
+    name: E2E Tests (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Build release binary
+        run: cargo build --release
+
+      - name: Run E2E tests
+        run: cargo test --test e2e -- --test-threads=4
+        env:
+          AURA_E2E_TIMEOUT: "60"
+          AURA_E2E_KEEP_REPOS: ${{ github.event.inputs.keep_repos && '1' || '' }}
+
+      - name: Run unit tests
+        run: cargo test --bin aura -- --test-threads=4
+
+      - name: Upload test artifacts on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-artifacts-${{ matrix.os }}
+          path: |
+            /tmp/**/test_artifacts/**
+            target/debug/deps/e2e-*.d
+          retention-days: 7
