@@ -278,6 +278,36 @@ impl McpServer {
                                     },
                                     "required": ["file_path", "intent"]
                                 }
+                            },
+                            {
+                                "name": "aura_session_resume",
+                                "description": "Find previous AI sessions on a specific branch and show their context, prompts, and summaries. Use this when resuming work on a feature branch to understand what was done before.",
+                                "inputSchema": {
+                                    "type": "object",
+                                    "properties": {
+                                        "branch": { "type": "string", "description": "Branch name to find sessions for (e.g., 'feat/auth')." }
+                                    },
+                                    "required": ["branch"]
+                                }
+                            },
+                            {
+                                "name": "aura_doctor",
+                                "description": "Diagnose repository health: find stuck sessions, orphaned snapshots, missing hooks, and shadow branch issues. Returns a health report with actionable fixes.",
+                                "inputSchema": {
+                                    "type": "object",
+                                    "properties": {}
+                                }
+                            },
+                            {
+                                "name": "aura_session_summarize",
+                                "description": "Generate an AI-powered summary of a specific session, including intent, outcome, learnings, and open items. Uses Gemini to analyze the session transcript.",
+                                "inputSchema": {
+                                    "type": "object",
+                                    "properties": {
+                                        "session_id": { "type": "string", "description": "Session ID to summarize (e.g., '2026-03-09-abc12345')." }
+                                    },
+                                    "required": ["session_id"]
+                                }
                             }
                         ]
                     }
@@ -308,6 +338,9 @@ impl McpServer {
                     "aura_gemini_batch" => Self::tool_gemini_batch(args),
                     "aura_context_budget" => Self::tool_context_budget(args),
                     "aura_suggest_edit" => Self::tool_suggest_edit(args),
+                    "aura_session_resume" => Self::tool_session_resume(args),
+                    "aura_doctor" => Self::tool_doctor(args),
+                    "aura_session_summarize" => Self::tool_session_summarize(args),
                     _ => json!({ "isError": true, "content": [{ "type": "text", "text": "Unknown tool" }] })
                 };
 
@@ -949,6 +982,157 @@ impl McpServer {
                 json!({ "content": [{ "type": "text", "text": toon_text }] })
             }
             None => json!({ "isError": true, "content": [{ "type": "text", "text": "Edit suggestion failed. Check API key configuration." }] }),
+        }
+    }
+
+    fn tool_session_resume(args: Value) -> Value {
+        let branch = match args["branch"].as_str() {
+            Some(b) => b,
+            None => return json!({ "isError": true, "content": [{ "type": "text", "text": "branch is required." }] }),
+        };
+
+        let sessions = SessionManager::resume_branch(branch);
+        if sessions.is_empty() {
+            return json!({ "content": [{ "type": "text", "text": format!("No previous sessions found on branch '{}'. Starting fresh.", branch) }] });
+        }
+
+        let mut output = format!("Found {} session(s) on branch '{}':\n\n", sessions.len(), branch);
+        for sess in &sessions {
+            output.push_str(&format!("Session: {} ({})\n", sess.session_id, sess.agent_id));
+            output.push_str(&format!("  Files: {}, Checkpoints: {}\n", sess.files_touched.len(), sess.checkpoint_count));
+            if let Some(ref model) = sess.model_name {
+                output.push_str(&format!("  Model: {}\n", model));
+            }
+            if let Some(ref prompt) = sess.first_prompt {
+                output.push_str(&format!("  Prompt: \"{}\"\n", prompt));
+            }
+            if let Some(ref usage) = sess.token_usage {
+                if usage.total() > 0 {
+                    output.push_str(&format!("  Tokens: {}k in / {}k out\n", usage.input_tokens / 1000, usage.output_tokens / 1000));
+                }
+            }
+            if let Some(ref summary) = sess.summary {
+                output.push_str(&format!("  Intent: {}\n  Outcome: {}\n", summary.intent, summary.outcome));
+                if !summary.open_items.is_empty() {
+                    output.push_str("  Open items:\n");
+                    for item in &summary.open_items {
+                        output.push_str(&format!("    - {}\n", item));
+                    }
+                }
+            }
+
+            // Include condensed transcript from last session
+            let transcript = SessionManager::condense_transcript(&sess.session_id);
+            if !transcript.is_empty() {
+                output.push_str("\n  Recent context:\n");
+                for line in transcript.lines().take(10) {
+                    output.push_str(&format!("    {}\n", line));
+                }
+            }
+            output.push('\n');
+        }
+
+        json!({ "content": [{ "type": "text", "text": output }] })
+    }
+
+    fn tool_doctor(args: Value) -> Value {
+        let _ = args;
+        let mut report = String::from("Aura Doctor Report:\n\n");
+        let mut issues = 0;
+
+        // 1. Stuck sessions
+        let stuck = SessionManager::find_stuck_sessions();
+        if stuck.is_empty() {
+            report.push_str("✓ No stuck sessions\n");
+        } else {
+            for (sess, reason) in &stuck {
+                report.push_str(&format!("⚠ Stuck: {} — {}\n", sess.session_id, reason));
+                issues += 1;
+            }
+            // Auto-fix stuck sessions
+            for (sess, _) in &stuck {
+                SessionManager::force_end_session(&sess.session_id);
+                report.push_str(&format!("  → Fixed: force-ended {}\n", sess.session_id));
+            }
+        }
+
+        // 2. Orphaned snapshots
+        let snapshots = SnapshotStore::get_all_snapshots();
+        let orphaned: usize = snapshots.iter()
+            .filter(|s| !Path::new(&s.file_path).exists())
+            .count();
+        if orphaned > 0 {
+            report.push_str(&format!("⚠ {} orphaned snapshots (deleted files)\n", orphaned));
+            issues += orphaned;
+        } else {
+            report.push_str("✓ No orphaned snapshots\n");
+        }
+
+        // 3. Snapshot disk usage
+        report.push_str(&format!("ℹ {} total snapshots\n", snapshots.len()));
+        if snapshots.len() > 400 {
+            SnapshotStore::prune_global();
+            report.push_str("  → Pruned excess snapshots\n");
+        }
+
+        // 4. Git hooks
+        let hooks_ok = Path::new(".git/hooks/pre-commit").exists();
+        if hooks_ok {
+            report.push_str("✓ Git hooks installed\n");
+        } else {
+            report.push_str("⚠ Git hooks not installed — run `aura init`\n");
+            issues += 1;
+        }
+
+        // 5. Shadow branch
+        if let Ok(repo) = Repository::open(".") {
+            if repo.find_reference("refs/heads/aura/checkpoints").is_ok() {
+                let count = CheckpointStore::get_shadow_checkpoints(&repo)
+                    .map(|c| c.len()).unwrap_or(0);
+                report.push_str(&format!("✓ Shadow branch healthy ({} checkpoints)\n", count));
+            } else {
+                report.push_str("ℹ Shadow branch not yet created\n");
+            }
+        }
+
+        // 6. Stale cleanup
+        let cleaned = SessionManager::cleanup_stale(7);
+        if cleaned > 0 {
+            report.push_str(&format!("🧹 Cleaned {} stale sessions\n", cleaned));
+        }
+
+        report.push_str(&format!("\nTotal issues: {}", issues));
+
+        json!({ "content": [{ "type": "text", "text": report }] })
+    }
+
+    fn tool_session_summarize(args: Value) -> Value {
+        let session_id = match args["session_id"].as_str() {
+            Some(s) => s,
+            None => return json!({ "isError": true, "content": [{ "type": "text", "text": "session_id is required." }] }),
+        };
+
+        match SessionManager::summarize_session(session_id) {
+            Some(summary) => {
+                let output = format!(
+                    "Session Summary for {}:\n\n\
+                    Intent: {}\n\
+                    Outcome: {}\n\
+                    Files: {}\n\
+                    Learnings: {}\n\
+                    Open Items: {}",
+                    session_id,
+                    summary.intent,
+                    summary.outcome,
+                    summary.files_changed.join(", "),
+                    if summary.learnings.is_empty() { "none".to_string() }
+                    else { summary.learnings.join("; ") },
+                    if summary.open_items.is_empty() { "none".to_string() }
+                    else { summary.open_items.join("; ") },
+                );
+                json!({ "content": [{ "type": "text", "text": output }] })
+            }
+            None => json!({ "content": [{ "type": "text", "text": format!("No transcript found for session '{}'.", session_id) }] }),
         }
     }
 }
