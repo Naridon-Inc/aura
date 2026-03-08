@@ -4,9 +4,52 @@ use std::io::{BufRead, BufReader, Write};
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-const SESSIONS_DIR: &str = ".aura/sessions";
-const TRANSCRIPTS_DIR: &str = ".aura/transcripts";
 const MAX_TRANSCRIPT_LINES: usize = 5000;
+
+/// Resolve session/transcript directories — worktree-aware.
+/// In a git worktree, uses the worktree-local .aura directory so concurrent
+/// agents in different worktrees don't collide on session state.
+fn sessions_dir() -> String {
+    worktree_aura_path("sessions")
+}
+
+fn transcripts_dir() -> String {
+    worktree_aura_path("transcripts")
+}
+
+fn worktree_aura_path(subdir: &str) -> String {
+    // Check if we're in a worktree by looking for .git file (not directory)
+    let git_path = std::path::Path::new(".git");
+    if git_path.is_file() {
+        // We're in a worktree — .git is a file pointing to the main repo.
+        // Derive a unique aura dir from the worktree directory name to
+        // prevent concurrent agents from colliding on session state.
+        if let Ok(cwd) = std::env::current_dir() {
+            let worktree_name = cwd.file_name()
+                .map(|n| n.to_string_lossy().to_string())
+                .unwrap_or_else(|| "default".to_string());
+            // Also find the main repo root to store worktree data there
+            if let Ok(git_content) = fs::read_to_string(".git") {
+                // .git file contains "gitdir: /path/to/main/.git/worktrees/<name>"
+                if let Some(main_git) = git_content.trim().strip_prefix("gitdir: ") {
+                    // Navigate up from .git/worktrees/<name> to repo root
+                    let main_git_path = Path::new(main_git);
+                    if let Some(repo_root) = main_git_path.parent()
+                        .and_then(|p| p.parent())
+                        .and_then(|p| p.parent())
+                    {
+                        let wt_aura = repo_root.join(".aura").join("worktrees")
+                            .join(&worktree_name).join(subdir);
+                        return wt_aura.to_string_lossy().to_string();
+                    }
+                }
+            }
+            // Fallback: use worktree-namespaced dir locally
+            return format!(".aura/worktrees/{}/{}", worktree_name, subdir);
+        }
+    }
+    format!(".aura/{}", subdir)
+}
 
 /// Session phase — tracks lifecycle of an agent conversation
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
@@ -14,6 +57,54 @@ pub enum SessionPhase {
     Active,
     Idle,
     Ended,
+}
+
+/// Token usage tracking per session (inspired by Entire CLI)
+#[derive(Serialize, Deserialize, Clone, Debug, Default)]
+pub struct TokenUsage {
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    pub cache_read_tokens: u64,
+    pub cache_creation_tokens: u64,
+    pub api_call_count: u32,
+}
+
+impl TokenUsage {
+    pub fn total(&self) -> u64 {
+        self.input_tokens + self.output_tokens
+    }
+
+    pub fn merge(&mut self, other: &TokenUsage) {
+        self.input_tokens += other.input_tokens;
+        self.output_tokens += other.output_tokens;
+        self.cache_read_tokens += other.cache_read_tokens;
+        self.cache_creation_tokens += other.cache_creation_tokens;
+        self.api_call_count += other.api_call_count;
+    }
+}
+
+/// Tracked subagent (Claude Code Task/Agent tool spawned agents)
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct SubagentRecord {
+    pub agent_id: String,
+    pub agent_type: String,
+    pub started_at: u64,
+    #[serde(default)]
+    pub ended_at: Option<u64>,
+    #[serde(default)]
+    pub result_summary: Option<String>,
+}
+
+/// AI-generated session summary
+#[derive(Serialize, Deserialize, Clone, Debug, Default)]
+pub struct SessionSummary {
+    pub intent: String,
+    pub outcome: String,
+    pub files_changed: Vec<String>,
+    #[serde(default)]
+    pub learnings: Vec<String>,
+    #[serde(default)]
+    pub open_items: Vec<String>,
 }
 
 /// A tracked agent session
@@ -27,6 +118,20 @@ pub struct AgentSession {
     pub files_touched: Vec<String>,
     pub checkpoint_count: u32,
     pub base_commit: Option<String>,
+    #[serde(default)]
+    pub worktree: Option<String>,
+    #[serde(default)]
+    pub token_usage: Option<TokenUsage>,
+    #[serde(default)]
+    pub summary: Option<SessionSummary>,
+    #[serde(default)]
+    pub model_name: Option<String>,
+    #[serde(default)]
+    pub branch: Option<String>,
+    #[serde(default)]
+    pub first_prompt: Option<String>,
+    #[serde(default)]
+    pub subagents: Vec<SubagentRecord>,
 }
 
 /// A single turn in a conversation transcript
@@ -42,8 +147,8 @@ pub struct SessionManager;
 
 impl SessionManager {
     fn ensure_dirs() {
-        let _ = fs::create_dir_all(SESSIONS_DIR);
-        let _ = fs::create_dir_all(TRANSCRIPTS_DIR);
+        let _ = fs::create_dir_all(&sessions_dir());
+        let _ = fs::create_dir_all(&transcripts_dir());
     }
 
     /// Start or resume a session for an agent
@@ -72,6 +177,13 @@ impl SessionManager {
                 Some(commit.id().to_string()[..7].to_string())
             });
 
+        let branch = git2::Repository::open(".")
+            .ok()
+            .and_then(|r| {
+                let head = r.head().ok()?;
+                head.shorthand().map(|s| s.to_string())
+            });
+
         let session = AgentSession {
             session_id: session_id.clone(),
             agent_id: agent_id.to_string(),
@@ -81,6 +193,13 @@ impl SessionManager {
             files_touched: Vec::new(),
             checkpoint_count: 0,
             base_commit,
+            worktree: std::env::current_dir().ok().map(|p| p.to_string_lossy().to_string()),
+            token_usage: Some(TokenUsage::default()),
+            summary: None,
+            model_name: None,
+            branch,
+            first_prompt: None,
+            subagents: Vec::new(),
         };
 
         Self::save_session(&session);
@@ -124,7 +243,7 @@ impl SessionManager {
     /// Get the currently active session
     pub fn get_active_session() -> Option<AgentSession> {
         Self::ensure_dirs();
-        if let Ok(entries) = fs::read_dir(SESSIONS_DIR) {
+        if let Ok(entries) = fs::read_dir(&sessions_dir()) {
             let mut sessions: Vec<AgentSession> = entries
                 .flatten()
                 .filter(|e| e.path().extension().map(|x| x == "json").unwrap_or(false))
@@ -145,7 +264,7 @@ impl SessionManager {
     pub fn list_sessions() -> Vec<AgentSession> {
         Self::ensure_dirs();
         let mut sessions = Vec::new();
-        if let Ok(entries) = fs::read_dir(SESSIONS_DIR) {
+        if let Ok(entries) = fs::read_dir(&sessions_dir()) {
             for entry in entries.flatten() {
                 if entry.path().extension().map(|x| x == "json").unwrap_or(false) {
                     if let Ok(content) = fs::read_to_string(entry.path()) {
@@ -160,9 +279,292 @@ impl SessionManager {
         sessions
     }
 
+    /// Update token usage for the active session
+    pub fn add_tokens(input: u64, output: u64) {
+        if let Some(mut session) = Self::get_active_session() {
+            let usage = session.token_usage.get_or_insert_with(TokenUsage::default);
+            usage.input_tokens += input;
+            usage.output_tokens += output;
+            usage.api_call_count += 1;
+            session.last_activity = now_secs();
+            Self::save_session(&session);
+        }
+    }
+
+    /// Set the model name for the active session
+    pub fn set_model(model: &str) {
+        if let Some(mut session) = Self::get_active_session() {
+            if session.model_name.is_none() {
+                session.model_name = Some(model.to_string());
+                Self::save_session(&session);
+            }
+        }
+    }
+
+    /// Set the first prompt for the active session
+    pub fn set_first_prompt(prompt: &str) {
+        if let Some(mut session) = Self::get_active_session() {
+            if session.first_prompt.is_none() {
+                let truncated = if prompt.len() > 200 {
+                    format!("{}...", &prompt[..200])
+                } else {
+                    prompt.to_string()
+                };
+                session.first_prompt = Some(truncated);
+                Self::save_session(&session);
+            }
+        }
+    }
+
+    /// Track a subagent being spawned
+    pub fn record_subagent_start(agent_id: &str, agent_type: &str) {
+        if let Some(mut session) = Self::get_active_session() {
+            session.subagents.push(SubagentRecord {
+                agent_id: agent_id.to_string(),
+                agent_type: agent_type.to_string(),
+                started_at: now_secs(),
+                ended_at: None,
+                result_summary: None,
+            });
+            session.last_activity = now_secs();
+            Self::save_session(&session);
+        }
+    }
+
+    /// Track a subagent finishing
+    pub fn record_subagent_stop(agent_id: &str, result_summary: Option<&str>) {
+        if let Some(mut session) = Self::get_active_session() {
+            if let Some(sub) = session.subagents.iter_mut()
+                .rev()  // find most recent matching
+                .find(|s| s.agent_id == agent_id && s.ended_at.is_none())
+            {
+                sub.ended_at = Some(now_secs());
+                sub.result_summary = result_summary.map(|s| {
+                    if s.len() > 200 { format!("{}...", &s[..200]) }
+                    else { s.to_string() }
+                });
+            }
+            session.last_activity = now_secs();
+            Self::save_session(&session);
+        }
+    }
+
+    /// Extract token usage from a Claude Code transcript JSONL file.
+    /// Claude Code transcripts contain `usage` objects with token counts.
+    pub fn extract_tokens_from_transcript(transcript_path: &str) -> Option<TokenUsage> {
+        let content = fs::read_to_string(transcript_path).ok()?;
+        let mut usage = TokenUsage::default();
+
+        for line in content.lines() {
+            if let Ok(entry) = serde_json::from_str::<serde_json::Value>(line) {
+                // Claude Code transcript format: {"type":"assistant","message":{"usage":{...}}}
+                if let Some(msg_usage) = entry.get("message")
+                    .and_then(|m| m.get("usage"))
+                {
+                    usage.input_tokens += msg_usage["input_tokens"].as_u64().unwrap_or(0);
+                    usage.output_tokens += msg_usage["output_tokens"].as_u64().unwrap_or(0);
+                    if let Some(cache) = msg_usage.get("cache_read_input_tokens") {
+                        usage.cache_read_tokens += cache.as_u64().unwrap_or(0);
+                    }
+                    if let Some(cache) = msg_usage.get("cache_creation_input_tokens") {
+                        usage.cache_creation_tokens += cache.as_u64().unwrap_or(0);
+                    }
+                    usage.api_call_count += 1;
+                }
+                // Also check top-level usage field
+                if let Some(top_usage) = entry.get("usage") {
+                    usage.input_tokens += top_usage["input_tokens"].as_u64().unwrap_or(0);
+                    usage.output_tokens += top_usage["output_tokens"].as_u64().unwrap_or(0);
+                    usage.api_call_count += 1;
+                }
+            }
+        }
+
+        if usage.api_call_count > 0 {
+            Some(usage)
+        } else {
+            None
+        }
+    }
+
+    /// Sync token usage from transcript into the active session
+    pub fn sync_tokens_from_transcript(transcript_path: &str) {
+        if let Some(mut session) = Self::get_active_session() {
+            if let Some(extracted) = Self::extract_tokens_from_transcript(transcript_path) {
+                session.token_usage = Some(extracted);
+                session.last_activity = now_secs();
+                Self::save_session(&session);
+            }
+        }
+    }
+
+    /// Resume: find sessions associated with a branch and show resume info
+    pub fn resume_branch(branch: &str) -> Vec<AgentSession> {
+        let sessions = Self::list_sessions();
+        sessions.into_iter()
+            .filter(|s| s.branch.as_deref() == Some(branch))
+            .collect()
+    }
+
+    /// Doctor: find stuck sessions (active but stale > 1 hour)
+    pub fn find_stuck_sessions() -> Vec<(AgentSession, String)> {
+        let now = now_secs();
+        let staleness_threshold = 3600; // 1 hour
+        let sessions = Self::list_sessions();
+        let mut stuck = Vec::new();
+
+        for sess in sessions {
+            match sess.phase {
+                SessionPhase::Active => {
+                    if now - sess.last_activity > staleness_threshold {
+                        let reason = format!(
+                            "Active but no interaction for {} minutes",
+                            (now - sess.last_activity) / 60
+                        );
+                        stuck.push((sess, reason));
+                    }
+                }
+                SessionPhase::Idle => {
+                    if now - sess.last_activity > staleness_threshold * 24 {
+                        let reason = format!(
+                            "Idle for {} hours",
+                            (now - sess.last_activity) / 3600
+                        );
+                        stuck.push((sess, reason));
+                    }
+                }
+                _ => {}
+            }
+        }
+        stuck
+    }
+
+    /// Doctor: force-end a stuck session
+    pub fn force_end_session(session_id: &str) -> bool {
+        let sessions = Self::list_sessions();
+        if let Some(mut sess) = sessions.into_iter().find(|s| s.session_id == session_id) {
+            sess.phase = SessionPhase::Ended;
+            sess.last_activity = now_secs();
+            Self::save_session(&sess);
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Cleanup: remove ended sessions older than N days
+    pub fn cleanup_stale(max_age_days: u64) -> usize {
+        let now = now_secs();
+        let max_age_secs = max_age_days * 86400;
+        let mut removed = 0;
+
+        if let Ok(entries) = fs::read_dir(&sessions_dir()) {
+            for entry in entries.flatten() {
+                if entry.path().extension().map(|x| x == "json").unwrap_or(false) {
+                    if let Ok(content) = fs::read_to_string(entry.path()) {
+                        if let Ok(sess) = serde_json::from_str::<AgentSession>(&content) {
+                            if sess.phase == SessionPhase::Ended && now - sess.last_activity > max_age_secs {
+                                let _ = fs::remove_file(entry.path());
+                                // Also remove transcript
+                                let transcript = format!("{}/{}.jsonl", &transcripts_dir(), sess.session_id);
+                                let _ = fs::remove_file(&transcript);
+                                removed += 1;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        removed
+    }
+
+    /// Auto-summarize a session using AI (Gemini/Claude)
+    pub fn summarize_session(session_id: &str) -> Option<SessionSummary> {
+        let transcript = Self::get_transcript(session_id);
+        if transcript.is_empty() {
+            return None;
+        }
+
+        // Build a condensed transcript for the AI
+        let mut condensed = String::new();
+        for entry in transcript.iter().take(50) {
+            let content = if entry.content.len() > 300 {
+                format!("{}...", &entry.content[..300])
+            } else {
+                entry.content.clone()
+            };
+            condensed.push_str(&format!("[{}] {}\n", entry.role, content));
+        }
+
+        // Try to summarize via Gemini API
+        let config = crate::config::ConfigManager::load();
+        let api_key = config.gemini_api_key
+            .or(crate::config::ConfigManager::get_api_key("gemini"));
+
+        if let Some(key) = api_key {
+            let client = reqwest::blocking::Client::builder()
+                .timeout(std::time::Duration::from_secs(15))
+                .build()
+                .ok()?;
+
+            let prompt = format!(
+                "Summarize this AI coding session in JSON format. Return ONLY valid JSON:\n\
+                {{\"intent\": \"what the user wanted\", \"outcome\": \"what was achieved\", \
+                \"files_changed\": [\"file1.rs\"], \"learnings\": [\"key insight\"], \
+                \"open_items\": [\"remaining work\"]}}\n\nSession transcript:\n{}",
+                condensed
+            );
+
+            let url = format!(
+                "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key={}",
+                key
+            );
+            let body = serde_json::json!({
+                "contents": [{"parts": [{"text": prompt}]}],
+                "generationConfig": {"temperature": 0.1, "maxOutputTokens": 500}
+            });
+
+            if let Ok(res) = client.post(&url).json(&body).send() {
+                if let Ok(json) = res.json::<serde_json::Value>() {
+                    let text = json["candidates"][0]["content"]["parts"][0]["text"]
+                        .as_str()
+                        .unwrap_or("");
+                    // Extract JSON from response (may have markdown fences)
+                    let json_str = text
+                        .trim()
+                        .trim_start_matches("```json")
+                        .trim_start_matches("```")
+                        .trim_end_matches("```")
+                        .trim();
+                    if let Ok(summary) = serde_json::from_str::<SessionSummary>(json_str) {
+                        // Save to session
+                        if let Some(mut sess) = Self::list_sessions().into_iter()
+                            .find(|s| s.session_id == session_id)
+                        {
+                            sess.summary = Some(summary.clone());
+                            Self::save_session(&sess);
+                        }
+                        return Some(summary);
+                    }
+                }
+            }
+        }
+
+        // Fallback: basic summary without AI
+        let sessions = Self::list_sessions();
+        let sess = sessions.iter().find(|s| s.session_id == session_id)?;
+        Some(SessionSummary {
+            intent: sess.first_prompt.clone().unwrap_or_else(|| "Unknown".to_string()),
+            outcome: format!("{} files modified, {} checkpoints", sess.files_touched.len(), sess.checkpoint_count),
+            files_changed: sess.files_touched.clone(),
+            learnings: vec![],
+            open_items: vec![],
+        })
+    }
+
     fn save_session(session: &AgentSession) {
         Self::ensure_dirs();
-        let path = format!("{}/{}.json", SESSIONS_DIR, session.session_id);
+        let path = format!("{}/{}.json", &sessions_dir(), session.session_id);
         let json = serde_json::to_string_pretty(session).unwrap_or_default();
         let _ = fs::write(path, json);
     }
@@ -183,7 +585,7 @@ impl SessionManager {
             session_id: session_id.clone(),
         };
 
-        let path = format!("{}/{}.jsonl", TRANSCRIPTS_DIR, session_id);
+        let path = format!("{}/{}.jsonl", &transcripts_dir(), session_id);
         if let Ok(mut file) = fs::OpenOptions::new().create(true).append(true).open(&path) {
             if let Ok(json) = serde_json::to_string(&entry) {
                 let _ = writeln!(file, "{}", json);
@@ -262,7 +664,7 @@ impl SessionManager {
         // We read .aura/transcripts/ for any Gemini entries already captured by hooks.
         Self::ensure_dirs();
         let mut all_entries = Vec::new();
-        if let Ok(entries) = fs::read_dir(TRANSCRIPTS_DIR) {
+        if let Ok(entries) = fs::read_dir(&transcripts_dir()) {
             for entry in entries.flatten() {
                 if let Ok(content) = fs::read_to_string(entry.path()) {
                     for line in content.lines() {
@@ -279,7 +681,7 @@ impl SessionManager {
     /// Get transcript for a specific session
     pub fn get_transcript(session_id: &str) -> Vec<TranscriptEntry> {
         Self::ensure_dirs();
-        let path = format!("{}/{}.jsonl", TRANSCRIPTS_DIR, session_id);
+        let path = format!("{}/{}.jsonl", &transcripts_dir(), session_id);
         let mut entries = Vec::new();
         if let Ok(content) = fs::read_to_string(&path) {
             for line in content.lines() {
@@ -345,6 +747,13 @@ impl SessionManager {
                     files_touched: vec![file_path.to_string()],
                     checkpoint_count: 1,
                     base_commit: Some(short_commit.to_string()),
+                    worktree: None,
+                    token_usage: None,
+                    summary: None,
+                    model_name: None,
+                    branch: None,
+                    first_prompt: Some(intent.clone()),
+                    subagents: Vec::new(),
                 };
 
                 let transcript = vec![TranscriptEntry {
@@ -403,7 +812,7 @@ pub fn capture_full_transcript() {
     // Claude Code
     if let Some(entries) = SessionManager::capture_claude_transcript() {
         let session = SessionManager::start_session("Claude Code");
-        let path = format!("{}/{}.jsonl", TRANSCRIPTS_DIR, session.session_id);
+        let path = format!("{}/{}.jsonl", &transcripts_dir(), session.session_id);
         if let Ok(mut file) = fs::OpenOptions::new().create(true).append(true).open(&path) {
             for entry in entries {
                 if let Ok(json) = serde_json::to_string(&entry) {

@@ -288,6 +288,9 @@ fn perform_update() -> Result<(), Box<dyn std::error::Error>> {
 struct Cli {
     #[command(subcommand)]
     command: Commands,
+    /// Enable accessible output mode (no emojis, no colors, screen-reader-friendly)
+    #[arg(long, global = true)]
+    accessible: bool,
 }
 
 #[derive(Subcommand)]
@@ -333,6 +336,19 @@ enum Commands {
     },
     /// List and manage agent sessions
     Sessions,
+    /// Resume a previous session by switching to its branch and showing context
+    Resume {
+        /// Branch name to resume (e.g., "feat/auth")
+        branch: String,
+    },
+    /// Diagnose and repair stuck sessions, orphaned data, and other issues
+    Doctor,
+    /// Generate shell completions for bash, zsh, or fish
+    Completions {
+        /// Shell to generate completions for
+        #[arg(value_enum)]
+        shell: clap_complete::Shell,
+    },
     /// Whitelist a specific logic node (e.g. Auth headers) for high-entropy secrets
     RequestAccess {
         /// The name of the function/class to exempt from Gatekeeper scrutiny
@@ -545,9 +561,33 @@ fn open_repo() -> Result<Repository, Box<dyn std::error::Error>> {
     })
 }
 
+/// Check if accessible mode is enabled (no emojis, no colors, screen-reader-friendly)
+fn is_accessible() -> bool {
+    std::env::var("AURA_ACCESSIBLE").map(|v| v == "1" || v == "true").unwrap_or(false)
+}
+
+/// Format label for accessible mode — strips emojis, uses text labels
+fn a11y_label(emoji: &str, text_label: &str) -> String {
+    if is_accessible() {
+        format!("[{}]", text_label)
+    } else {
+        emoji.to_string()
+    }
+}
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     setup_crash_reporter();
     let cli = Cli::parse();
+
+    // Set accessible mode environment variable so all output respects it
+    if cli.accessible {
+        // Safety: we set these before spawning any threads
+        unsafe {
+            std::env::set_var("AURA_ACCESSIBLE", "1");
+            // Disable colors when in accessible mode
+            std::env::set_var("NO_COLOR", "1");
+        }
+    }
 
     // KILL SHOT FIX: Passive Update Detection
     // Check for updates in the background once every 24 hours
@@ -564,6 +604,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         Commands::Audit => "audit",
         Commands::Explain { .. } => "explain",
         Commands::Sessions => "sessions",
+        Commands::Resume { .. } => "resume",
+        Commands::Doctor => "doctor",
+        Commands::Completions { .. } => "completions",
         Commands::RequestAccess { .. } => "request-access",
         Commands::Prove { .. } => "prove",
         Commands::Config { .. } => "config",
@@ -2165,7 +2208,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
         Commands::Sessions => {
-            println!("\n{} {}\n", "📋".bold(), "Aura Agent Sessions".bold().cyan());
+            println!("\n{} {}\n", a11y_label("📋", "SESSIONS"), "Aura Agent Sessions".bold().cyan());
+
+            // Auto-cleanup stale sessions (>7 days old, ended)
+            let cleaned = session::SessionManager::cleanup_stale(7);
+            if cleaned > 0 {
+                println!("  {} Cleaned up {} stale sessions.\n", "🧹".dimmed(), cleaned);
+            }
 
             let sessions = session::SessionManager::list_sessions();
             if sessions.is_empty() {
@@ -2178,16 +2227,223 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         session::SessionPhase::Idle => "IDLE".yellow().to_string(),
                         session::SessionPhase::Ended => "ENDED".dimmed().to_string(),
                     };
-                    println!("  {} {} [{}] — {} ({} files, {} checkpoints)",
+                    let branch_str = sess.branch.as_deref().unwrap_or("?");
+                    let model_str = sess.model_name.as_deref().unwrap_or("");
+                    let token_str = if let Some(ref usage) = sess.token_usage {
+                        if usage.total() > 0 {
+                            format!(" | {}k tokens", usage.total() / 1000)
+                        } else {
+                            String::new()
+                        }
+                    } else {
+                        String::new()
+                    };
+
+                    println!("  {} {} [{}] — {} on {} ({} files, {} checkpoints{})",
                         "●".cyan(),
                         sess.session_id.bold(),
                         phase_str,
                         sess.agent_id.cyan(),
+                        branch_str.yellow(),
                         sess.files_touched.len(),
                         sess.checkpoint_count,
+                        token_str.dimmed(),
                     );
+                    if !model_str.is_empty() {
+                        println!("    {} model: {}", "↳".dimmed(), model_str.dimmed());
+                    }
+                    if let Some(ref prompt) = sess.first_prompt {
+                        let display = if prompt.len() > 80 { &prompt[..80] } else { prompt };
+                        println!("    {} prompt: \"{}\"", "↳".dimmed(), display.italic().dimmed());
+                    }
+                    if let Some(ref summary) = sess.summary {
+                        println!("    {} {}", "↳".dimmed(), summary.outcome.dimmed());
+                    }
+                    if !sess.subagents.is_empty() {
+                        println!("    {} subagents: {}", "↳".dimmed(),
+                            sess.subagents.iter()
+                                .map(|s| format!("{}({})", s.agent_type, if s.ended_at.is_some() { "done" } else { "running" }))
+                                .collect::<Vec<_>>()
+                                .join(", ")
+                                .dimmed()
+                        );
+                    }
                 }
             }
+        }
+        Commands::Resume { branch } => {
+            println!("\n{} {}\n", "🔄".bold(), format!("Resuming work on branch: {}", branch).bold().cyan());
+
+            // Check for uncommitted changes
+            let repo = open_repo()?;
+            let statuses = repo.statuses(None)?;
+            let dirty = statuses.iter().any(|s| {
+                s.status() != git2::Status::CURRENT && s.status() != git2::Status::IGNORED
+            });
+            if dirty {
+                println!("  {} You have uncommitted changes. Commit or stash them first.", "⚠".yellow().bold());
+                println!("  {} Run: {} or {}", "↳".dimmed(), "git stash".cyan(), "git commit".cyan());
+                return Ok(());
+            }
+
+            // Switch branch
+            let current_branch = repo.head()
+                .ok()
+                .and_then(|h| h.shorthand().map(|s| s.to_string()));
+
+            if current_branch.as_deref() != Some(&branch) {
+                println!("  {} Switching to branch {}...", "↳".dimmed(), branch.cyan());
+                let obj = repo.revparse_single(&format!("refs/heads/{}", branch))
+                    .map_err(|_| format!("Branch '{}' not found. Check with: git branch -a", branch))?;
+                repo.checkout_tree(&obj, None)?;
+                repo.set_head(&format!("refs/heads/{}", branch))?;
+                println!("  {} Switched to {}", "✓".green().bold(), branch.cyan());
+            }
+
+            // Find sessions on this branch
+            let sessions = session::SessionManager::resume_branch(&branch);
+            if sessions.is_empty() {
+                println!("\n  {} No previous sessions found on this branch.", "↳".dimmed());
+                println!("  {} Starting fresh. Use your AI agent normally — Aura will track it.", "↳".dimmed());
+            } else {
+                println!("\n  {} Found {} previous session(s) on this branch:\n", "📋".bold(), sessions.len());
+                for sess in &sessions {
+                    let agent = &sess.agent_id;
+                    let prompt = sess.first_prompt.as_deref().unwrap_or("(no prompt recorded)");
+                    let files = sess.files_touched.len();
+                    let checkpoints = sess.checkpoint_count;
+
+                    println!("    {} {} — {} ({} files, {} checkpoints)",
+                        "●".cyan(), sess.session_id.bold(), agent.cyan(), files, checkpoints);
+                    println!("      {} \"{}\"", "↳".dimmed(), prompt.italic());
+
+                    if let Some(ref summary) = sess.summary {
+                        println!("      {} Intent: {}", "↳".dimmed(), summary.intent);
+                        println!("      {} Outcome: {}", "↳".dimmed(), summary.outcome);
+                        if !summary.open_items.is_empty() {
+                            println!("      {} Open items:", "↳".dimmed());
+                            for item in &summary.open_items {
+                                println!("        - {}", item);
+                            }
+                        }
+                    }
+                    println!();
+                }
+
+                // Generate handover context from the last session
+                let last = &sessions[0];
+                let transcript = session::SessionManager::condense_transcript(&last.session_id);
+                if !transcript.is_empty() {
+                    println!("  {} Last session context (condensed):\n", "📝".bold());
+                    for line in transcript.lines().take(15) {
+                        println!("    {}", line.dimmed());
+                    }
+                    if transcript.lines().count() > 15 {
+                        println!("    {} ... ({} more lines)", "↳".dimmed(), transcript.lines().count() - 15);
+                    }
+                }
+            }
+        }
+        Commands::Doctor => {
+            println!("\n{} {}\n", a11y_label("🩺", "DOCTOR"), "Aura Doctor: Diagnosing repository health...".bold().cyan());
+
+            let mut issues_found = 0;
+
+            // 1. Check for stuck sessions
+            let stuck = session::SessionManager::find_stuck_sessions();
+            if stuck.is_empty() {
+                println!("  {} No stuck sessions found.", "✓".green().bold());
+            } else {
+                println!("  {} Found {} stuck session(s):\n", "⚠".yellow().bold(), stuck.len());
+                for (sess, reason) in &stuck {
+                    println!("    {} {} — {}", "●".red(), sess.session_id.bold(), reason.yellow());
+                    println!("      {} Agent: {}, Files: {}", "↳".dimmed(), sess.agent_id, sess.files_touched.len());
+                    issues_found += 1;
+                }
+
+                let fix = dialoguer::Confirm::with_theme(&ColorfulTheme::default())
+                    .with_prompt("  Force-end all stuck sessions?")
+                    .default(true)
+                    .interact()
+                    .unwrap_or(false);
+
+                if fix {
+                    for (sess, _) in &stuck {
+                        session::SessionManager::force_end_session(&sess.session_id);
+                        println!("    {} Ended session {}", "✓".green(), sess.session_id);
+                    }
+                }
+            }
+
+            // 2. Check for orphaned snapshots (files that no longer exist)
+            let snapshots = checkpoint::SnapshotStore::get_all_snapshots();
+            let mut orphaned = 0;
+            for snap in &snapshots {
+                if !Path::new(&snap.file_path).exists() {
+                    orphaned += 1;
+                }
+            }
+            if orphaned > 0 {
+                println!("\n  {} {} orphaned snapshots (files no longer exist).", "⚠".yellow().bold(), orphaned);
+                issues_found += orphaned;
+            } else {
+                println!("  {} No orphaned snapshots.", "✓".green().bold());
+            }
+
+            // 3. Check snapshot disk usage
+            let snap_count = snapshots.len();
+            let snap_bytes: u64 = snapshots.iter()
+                .map(|s| s.content.len() as u64 + 200) // ~200 bytes metadata overhead
+                .sum();
+            println!("  {} {} snapshots using ~{} KB on disk.",
+                if snap_count > 400 { "⚠".yellow().bold() } else { "✓".green().bold() },
+                snap_count,
+                snap_bytes / 1024
+            );
+            if snap_count > 400 {
+                println!("    {} Consider running global prune.", "↳".dimmed());
+                checkpoint::SnapshotStore::prune_global();
+                println!("    {} Pruned to {} snapshots.", "✓".green(), checkpoint::SnapshotStore::get_all_snapshots().len());
+            }
+
+            // 4. Check git hooks are installed
+            let hooks_ok = Path::new(".git/hooks/pre-commit").exists();
+            if hooks_ok {
+                println!("  {} Git hooks installed.", "✓".green().bold());
+            } else {
+                println!("  {} Git hooks not installed. Run {} to fix.", "⚠".yellow().bold(), "aura init".cyan());
+                issues_found += 1;
+            }
+
+            // 5. Check shadow branch health
+            let repo = open_repo()?;
+            let shadow_ok = repo.find_reference("refs/heads/aura/checkpoints").is_ok();
+            if shadow_ok {
+                let shadow_cps = CheckpointStore::get_shadow_checkpoints(&repo).unwrap_or_default();
+                println!("  {} Shadow branch healthy ({} checkpoints archived).", "✓".green().bold(), shadow_cps.len());
+            } else {
+                println!("  {} Shadow branch not yet created (will be created on first commit).", "ℹ".blue());
+            }
+
+            // 6. Stale session cleanup
+            let cleaned = session::SessionManager::cleanup_stale(7);
+            if cleaned > 0 {
+                println!("  {} Cleaned {} stale sessions (>7 days old).", "🧹".green(), cleaned);
+            }
+
+            println!("\n  {} Doctor complete. {} issue(s) found.\n",
+                if issues_found == 0 { "✓".green().bold() } else { "⚠".yellow().bold() },
+                issues_found
+            );
+        }
+        Commands::Completions { shell } => {
+            use clap::CommandFactory;
+            clap_complete::generate(
+                *shell,
+                &mut Cli::command(),
+                "aura",
+                &mut std::io::stdout(),
+            );
         }
         Commands::RequestAccess { identifier } => {
             println!("\n{} {}", "🗝️ ".bold(), "Aura Access Protocol: Requesting Sentinel Override...".bold().cyan());
