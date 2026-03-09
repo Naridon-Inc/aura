@@ -608,6 +608,12 @@ fn is_accessible() -> bool {
 }
 
 /// Format label for accessible mode — strips emojis, uses text labels
+/// Detect if stdout is connected to a TTY (interactive terminal)
+fn atty_detect() -> bool {
+    use std::io::IsTerminal;
+    std::io::stdout().is_terminal() && std::io::stdin().is_terminal()
+}
+
 fn a11y_label(emoji: &str, text_label: &str) -> String {
     if is_accessible() {
         format!("[{}]", text_label)
@@ -726,11 +732,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             println!("{:-^80}\n", " INITIALIZATION WIZARD ".bold().blue());
 
             // 1. Agent Selection
+            // Detect non-interactive terminal — use sensible defaults if no TTY
+            let is_tty = atty_detect();
             let agents = &["Claude Code", "VS Code", "Gemini CLI", "Cursor", "Claude Desktop", "Aider", "OpenCode"];
-            let selections = MultiSelect::with_theme(&ColorfulTheme::default())
-                .with_prompt("Which AI Agents will be working in this repository? (Use space to select MULTIPLE, Enter to confirm)")
-                .items(&agents[..])
-                .interact()?;
+            let selections = if is_tty {
+                MultiSelect::with_theme(&ColorfulTheme::default())
+                    .with_prompt("Which AI Agents will be working in this repository? (Use space to select MULTIPLE, Enter to confirm)")
+                    .items(&agents[..])
+                    .interact()
+                    .unwrap_or_else(|_| vec![0]) // Default to Claude Code on error
+            } else {
+                println!("  {} Non-interactive mode: auto-selecting Claude Code + Gemini CLI", "ℹ".blue());
+                vec![0, 2] // Claude Code + Gemini CLI
+            };
 
             // Automated MCP Injection
             for &idx in &selections {
@@ -1032,10 +1046,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 println!("\n{} Aura requires an LLM backend for planning and arbitration.", "ℹ️ ".blue());
                 println!("  {} Current Provider: {}", "↳".dimmed(), provider.yellow());
 
-                let api_key = Password::with_theme(&ColorfulTheme::default())
-                    .with_prompt(format!("Please provide your {} API Key (Securely vaulted locally)", provider))
-                    .allow_empty_password(true)
-                    .interact()?;
+                let api_key = if is_tty {
+                    Password::with_theme(&ColorfulTheme::default())
+                        .with_prompt(format!("Please provide your {} API Key (Securely vaulted locally)", provider))
+                        .allow_empty_password(true)
+                        .interact()
+                        .unwrap_or_default()
+                } else {
+                    println!("  {} Non-interactive: skipping API key prompt. Set via: aura config", "ℹ".blue());
+                    String::new()
+                };
                 
                 if !api_key.is_empty() {
                     match provider.as_str() {
