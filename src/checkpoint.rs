@@ -275,9 +275,42 @@ impl CheckpointStore {
         Ok(checkpoints)
     }
 
-    /// Semantic Compaction for Git Notes (Placeholder for Note-Pruning logic)
-    pub fn compact_history(_repo: &Repository) -> Result<usize, Box<dyn std::error::Error>> {
-        Ok(0)
+    /// Semantic Compaction: prune old git notes, keeping the last N checkpoints.
+    /// Shadow branch is unaffected (it's the permanent archive).
+    pub fn compact_history(repo: &Repository, keep: usize) -> Result<usize, Box<dyn std::error::Error>> {
+        let mut checkpoints = Self::get_all_checkpoints(repo)?;
+        if checkpoints.len() <= keep {
+            return Ok(0);
+        }
+
+        // Sort newest first (already sorted), remove old ones from notes
+        let to_remove = checkpoints.split_off(keep);
+        let mut pruned = 0;
+
+        // Walk all commits and remove notes for old checkpoints
+        let notes_ref = match repo.find_reference(Self::NOTES_REF) {
+            Ok(r) => r,
+            Err(_) => return Ok(0),
+        };
+        let sig = Signature::now("Aura Agent", "ai@aura.vcs")?;
+
+        let mut revwalk = repo.revwalk()?;
+        revwalk.push_head()?;
+
+        for oid in revwalk.take(200) {
+            let oid = match oid { Ok(o) => o, Err(_) => continue };
+            if let Ok(note) = repo.find_note(Some(Self::NOTES_REF), oid) {
+                let note_text = note.message().unwrap_or("");
+                // Check if this note belongs to a checkpoint we want to remove
+                let should_remove = to_remove.iter().any(|cp| note_text.contains(&cp.id));
+                if should_remove {
+                    let _ = repo.note_delete(oid, Some(Self::NOTES_REF), &sig, &sig);
+                    pruned += 1;
+                }
+            }
+        }
+
+        Ok(pruned)
     }
 
     // ── Shadow Branch: durable checkpoint storage that survives rebase/stash/pull ──
@@ -287,14 +320,20 @@ impl CheckpointStore {
 
     /// Condense checkpoint + session data onto the shadow orphan branch.
     /// Called after persist-checkpoint to make data rebase-proof.
+    ///
+    /// Storage layout (256-shard, multi-session per checkpoint):
+    ///   <id[0..2]>/<id[2..]>/
+    ///     metadata.json          — aggregated checkpoint summary
+    ///     <session_count>/       — numbered subfolder per session (0, 1, 2, ...)
+    ///       checkpoint.json      — full checkpoint data
+    ///       session.json         — session metadata
+    ///       transcript.jsonl     — conversation transcript
     pub fn condense_to_shadow(repo: &Repository, data: &CheckpointData, session_json: Option<&str>) -> Result<(), Box<dyn std::error::Error>> {
         let sig = Signature::now("Aura Agent", "ai@aura.vcs")?;
 
-        // Shard by checkpoint ID: first 2 chars / rest
+        // Shard by checkpoint ID: first 2 chars / rest (256 shards)
         let shard = &data.id[..2];
         let rest = &data.id[2..];
-        let checkpoint_path = format!("{}/{}/checkpoint.json", shard, rest);
-        let checkpoint_blob = serde_json::to_string_pretty(data)?;
 
         // Get existing shadow tree or start empty
         let parent = repo.find_reference(&format!("refs/heads/{}", Self::SHADOW_BRANCH))
@@ -302,9 +341,6 @@ impl CheckpointStore {
             .and_then(|r| r.peel_to_commit().ok());
 
         let mut tb = repo.treebuilder(parent.as_ref().and_then(|c| c.tree().ok()).as_ref())?;
-
-        // Build the shard subtree
-        let blob_oid = repo.blob(checkpoint_blob.as_bytes())?;
 
         // Get or create shard tree
         let existing_shard = parent.as_ref()
@@ -317,23 +353,81 @@ impl CheckpointStore {
             repo.treebuilder(None)?
         };
 
-        // Build checkpoint subtree: rest/<files>
-        let mut cp_tb = repo.treebuilder(None)?;
-        cp_tb.insert("checkpoint.json", blob_oid, 0o100644)?;
+        // Determine session number: count existing numbered subfolders in this checkpoint
+        let existing_cp = existing_shard
+            .and_then(|sid| repo.find_tree(sid).ok())
+            .and_then(|st| st.get_name(rest).map(|e| e.id()))
+            .and_then(|cid| repo.find_tree(cid).ok());
 
-        // Add session transcript if available
+        let session_num = if let Some(ref cp_tree) = existing_cp {
+            // Count existing numbered session subfolders
+            cp_tree.iter()
+                .filter(|e| e.kind() == Some(git2::ObjectType::Tree))
+                .filter(|e| e.name().map(|n| n.parse::<u32>().is_ok()).unwrap_or(false))
+                .count() as u32
+        } else {
+            0
+        };
+
+        // Build session subfolder: <session_num>/<files>
+        let mut sess_tb = repo.treebuilder(None)?;
+
+        let checkpoint_blob = serde_json::to_string_pretty(data)?;
+        let blob_oid = repo.blob(checkpoint_blob.as_bytes())?;
+        sess_tb.insert("checkpoint.json", blob_oid, 0o100644)?;
+
         if let Some(sess) = session_json {
             let sess_blob = repo.blob(sess.as_bytes())?;
-            cp_tb.insert("session.json", sess_blob, 0o100644)?;
+            sess_tb.insert("session.json", sess_blob, 0o100644)?;
         }
 
-        // Add transcript file if it exists
-        let transcript_path = format!(".aura/transcripts/{}.jsonl",
-            data.id.get(..16).unwrap_or(&data.id));
-        if let Ok(transcript) = fs::read_to_string(&transcript_path) {
-            let t_blob = repo.blob(transcript.as_bytes())?;
-            cp_tb.insert("transcript.jsonl", t_blob, 0o100644)?;
+        // Find and attach transcript from any matching session
+        let _ = fs::create_dir_all(".aura/transcripts");
+        if let Ok(entries) = fs::read_dir(".aura/transcripts") {
+            // Get the most recent transcript file
+            let mut latest: Option<(std::time::SystemTime, std::path::PathBuf)> = None;
+            for entry in entries.flatten() {
+                if entry.path().extension().map(|e| e == "jsonl").unwrap_or(false) {
+                    if let Ok(meta) = entry.metadata() {
+                        if let Ok(modified) = meta.modified() {
+                            if latest.as_ref().map(|(t, _)| modified > *t).unwrap_or(true) {
+                                latest = Some((modified, entry.path()));
+                            }
+                        }
+                    }
+                }
+            }
+            if let Some((_, path)) = latest {
+                if let Ok(transcript) = fs::read_to_string(&path) {
+                    if !transcript.is_empty() {
+                        let t_blob = repo.blob(transcript.as_bytes())?;
+                        sess_tb.insert("transcript.jsonl", t_blob, 0o100644)?;
+                    }
+                }
+            }
         }
+
+        let sess_tree_oid = sess_tb.write()?;
+
+        // Build the checkpoint subtree with existing sessions + new one
+        let mut cp_tb = if let Some(ref cp_tree) = existing_cp {
+            repo.treebuilder(Some(cp_tree))?
+        } else {
+            repo.treebuilder(None)?
+        };
+
+        cp_tb.insert(&session_num.to_string(), sess_tree_oid, 0o040000)?;
+
+        // Write aggregated metadata
+        let metadata = serde_json::json!({
+            "checkpoint_id": data.id,
+            "agent_id": data.agent_id,
+            "session_count": session_num + 1,
+            "latest_timestamp": data.timestamp,
+            "ast_node_count": data.ast_nodes.len(),
+        });
+        let meta_blob = repo.blob(metadata.to_string().as_bytes())?;
+        cp_tb.insert("metadata.json", meta_blob, 0o100644)?;
 
         let cp_tree_oid = cp_tb.write()?;
         shard_tb.insert(rest, cp_tree_oid, 0o040000)?;
@@ -344,14 +438,13 @@ impl CheckpointStore {
         let tree = repo.find_tree(tree_oid)?;
 
         // Commit onto the shadow branch
-        let msg = format!("aura: checkpoint {}", &data.id[..8]);
+        let msg = format!("aura: checkpoint {} (session {})", &data.id[..8], session_num);
         if let Some(ref parent_commit) = parent {
             repo.commit(
                 Some(&format!("refs/heads/{}", Self::SHADOW_BRANCH)),
                 &sig, &sig, &msg, &tree, &[parent_commit],
             )?;
         } else {
-            // First commit — create orphan branch
             repo.commit(
                 Some(&format!("refs/heads/{}", Self::SHADOW_BRANCH)),
                 &sig, &sig, &msg, &tree, &[],
@@ -405,19 +498,25 @@ impl CheckpointStore {
         let commit = shadow_ref.peel_to_commit()?;
         let root_tree = commit.tree()?;
 
-        // Walk shard/rest/checkpoint.json
+        // Walk shard/rest/<session_num>/checkpoint.json (multi-session layout)
         for shard_entry in root_tree.iter() {
             if shard_entry.kind() != Some(git2::ObjectType::Tree) { continue; }
             let shard_tree = repo.find_tree(shard_entry.id())?;
             for cp_entry in shard_tree.iter() {
                 if cp_entry.kind() != Some(git2::ObjectType::Tree) { continue; }
                 let cp_tree = repo.find_tree(cp_entry.id())?;
-                if let Some(blob_entry) = cp_tree.get_name("checkpoint.json") {
-                    let obj = blob_entry.to_object(repo)?;
-                    if let Some(blob) = obj.as_blob() {
-                        if let Ok(json) = std::str::from_utf8(blob.content()) {
-                            if let Ok(data) = serde_json::from_str::<CheckpointData>(json) {
-                                checkpoints.push(data);
+                // Look inside numbered session subfolders
+                for sess_entry in cp_tree.iter() {
+                    if sess_entry.kind() != Some(git2::ObjectType::Tree) { continue; }
+                    if let Ok(sess_tree) = repo.find_tree(sess_entry.id()) {
+                        if let Some(blob_entry) = sess_tree.get_name("checkpoint.json") {
+                            let obj = blob_entry.to_object(repo)?;
+                            if let Some(blob) = obj.as_blob() {
+                                if let Ok(json) = std::str::from_utf8(blob.content()) {
+                                    if let Ok(data) = serde_json::from_str::<CheckpointData>(json) {
+                                        checkpoints.push(data);
+                                    }
+                                }
                             }
                         }
                     }

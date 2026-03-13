@@ -19,6 +19,8 @@ pub struct SemanticParser {
     cpp_parser: Parser,
     c_parser: Parser,
     php_parser: Parser,
+    swift_parser: Parser,
+    kotlin_parser: Parser,
     lsp_client: Option<LspClient>,
 }
 
@@ -57,12 +59,18 @@ impl SemanticParser {
         let mut php_parser = Parser::new();
         php_parser.set_language(&tree_sitter_php::LANGUAGE_PHP.into())?;
 
+        let mut swift_parser = Parser::new();
+        swift_parser.set_language(&tree_sitter_swift::LANGUAGE.into())?;
+
+        let mut kotlin_parser = Parser::new();
+        kotlin_parser.set_language(&tree_sitter_kotlin_ng::LANGUAGE.into())?;
+
         let lsp_client = Some(LspClient::new(Ecosystem::detect()));
 
         Ok(Self {
             python_parser, rust_parser, ts_parser, js_parser,
             go_parser, java_parser, csharp_parser, ruby_parser,
-            cpp_parser, c_parser, php_parser,
+            cpp_parser, c_parser, php_parser, swift_parser, kotlin_parser,
             lsp_client,
         })
     }
@@ -81,6 +89,8 @@ impl SemanticParser {
             "cpp" | "cc" | "cxx" | "hpp" => self.cpp_parser.parse(source_code, None).ok_or("Failed to parse C++ tree")?,
             "c" | "h" => self.c_parser.parse(source_code, None).ok_or("Failed to parse C tree")?,
             "php" => self.php_parser.parse(source_code, None).ok_or("Failed to parse PHP tree")?,
+            "swift" => self.swift_parser.parse(source_code, None).ok_or("Failed to parse Swift tree")?,
+            "kt" | "kts" => self.kotlin_parser.parse(source_code, None).ok_or("Failed to parse Kotlin tree")?,
             _ => return Err(format!("Unsupported file extension: .{}", ext).into()),
         };
 
@@ -205,6 +215,8 @@ impl SemanticParser {
             "cpp" | "cc" | "cxx" | "hpp" => kind == "function_definition" || kind == "class_specifier" || kind == "struct_specifier" || kind == "template_declaration",
             "c" | "h" => kind == "function_definition" || kind == "struct_specifier",
             "php" => kind == "function_definition" || kind == "class_declaration" || kind == "method_declaration",
+            "swift" => kind == "function_declaration" || kind == "class_declaration" || kind == "struct_declaration" || kind == "protocol_declaration" || kind == "enum_declaration",
+            "kt" | "kts" => kind == "function_declaration" || kind == "class_declaration" || kind == "object_declaration" || kind == "interface_declaration",
             _ => false,
         };
 
@@ -312,9 +324,11 @@ impl SemanticParser {
             "cpp" | "cc" | "cxx" | "hpp" => self.cpp_parser.parse(source_code, None).ok_or("Failed to parse C++ tree")?,
             "c" | "h" => self.c_parser.parse(source_code, None).ok_or("Failed to parse C tree")?,
             "php" => self.php_parser.parse(source_code, None).ok_or("Failed to parse PHP tree")?,
+            "swift" => self.swift_parser.parse(source_code, None).ok_or("Failed to parse Swift tree")?,
+            "kt" | "kts" => self.kotlin_parser.parse(source_code, None).ok_or("Failed to parse Kotlin tree")?,
             _ => return Err(format!("Unsupported file extension: .{}", ext).into()),
         };
-        
+
         let root_node = tree.root_node();
         Ok(self.find_node_source(&root_node, source_code, ext, target_identifier))
     }
@@ -332,6 +346,8 @@ impl SemanticParser {
             "cpp" | "cc" | "cxx" | "hpp" => kind == "function_definition" || kind == "class_specifier" || kind == "struct_specifier" || kind == "template_declaration",
             "c" | "h" => kind == "function_definition" || kind == "struct_specifier",
             "php" => kind == "function_definition" || kind == "class_declaration" || kind == "method_declaration",
+            "swift" => kind == "function_declaration" || kind == "class_declaration" || kind == "struct_declaration" || kind == "protocol_declaration" || kind == "enum_declaration",
+            "kt" | "kts" => kind == "function_declaration" || kind == "class_declaration" || kind == "object_declaration" || kind == "interface_declaration",
             _ => false,
         };
 

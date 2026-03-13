@@ -209,7 +209,7 @@ fn capture_env_fingerprint() -> Option<String> {
     ecosystem::Ecosystem::fingerprint()
 }
 
-const CURRENT_VERSION: &str = "0.6.1";
+const CURRENT_VERSION: &str = "0.7.2";
 
 fn check_for_updates() -> Option<String> {
     let client = reqwest::blocking::Client::builder()
@@ -342,7 +342,7 @@ enum Commands {
         #[arg(long)]
         force_baseline: bool,
     },
-    /// Plan a massive architectural objective using the native GSD Orchestrator
+    /// Plan an architectural objective and decompose into atomic waves
     Plan {
         /// The architectural objective to break down
         prompt: String,
@@ -412,8 +412,9 @@ enum Commands {
         #[arg(long)]
         verbose: bool,
     },
-    /// Autonomously resolve architectural invariant violations using the Shadow Branch loop
-    Fix {
+    /// Generate patch suggestions for architectural invariant violations (experimental)
+    #[command(name = "suggest-fix", alias = "fix")]
+    SuggestFix {
         /// The base branch to review against to find the violations
         #[arg(short, long, default_value = "master")]
         base: String,
@@ -451,17 +452,16 @@ enum Commands {
     /// (Internal) Visualize the Semantic Logic Graph
     #[command(hide = true)]
     Map,
-    /// (Internal) Run an autonomous conflict resolution arbitration
-    #[command(hide = true)]
-    Arbitrate { file_path: String },
+    /// (Internal) Generate merge conflict resolution suggestions
+    #[command(hide = true, name = "suggest-merge", alias = "arbitrate")]
+    SuggestMerge { file_path: String },
     /// (Internal) Create compiler-safe dummy logic for Enterprise RBAC
     #[command(hide = true)]
     GenerateStubs,
     /// (Internal) Semantic Compaction: Prune implicit history
     #[command(hide = true)]
     Gc,
-    /// (Internal) Check for and install updates to the Aura CLI
-    #[command(hide = true)]
+    /// Check for and install updates to the Aura CLI
     Update,
     /// (Internal) Start MCP server
     #[command(hide = true)]
@@ -472,8 +472,9 @@ enum Commands {
     /// (Internal) Restore project snapshot
     #[command(hide = true)]
     Restore { snapshot_id: String },
-    /// Mathematically prove if the codebase supports a specific behavioral goal
-    Prove {
+    /// Trace logic paths to verify if the codebase supports a behavioral goal (experimental)
+    #[command(name = "goal-trace", alias = "prove")]
+    GoalTrace {
         /// The goal to verify (e.g., "users can log in via Google")
         #[arg(short, long)]
         goal: String
@@ -655,7 +656,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         Commands::Doctor => "doctor",
         Commands::Completions { .. } => "completions",
         Commands::RequestAccess { .. } => "request-access",
-        Commands::Prove { .. } => "prove",
+        Commands::GoalTrace { .. } => "goal-trace",
         Commands::Config { .. } => "config",
         _ => "internal_command"
     };
@@ -1280,9 +1281,36 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         let intent_mentions_specific = deleted_nodes.iter()
                             .any(|name| combined_intent.contains(&name.to_lowercase()));
 
-                        let is_likely_intentional = intent_mentions_deletion && intent_mentions_specific;
+                        // Also check if intent mentions the deleted file/directory paths
+                        // (for bulk directory deletions, listing every node name is unreasonable)
+                        let deleted_file_paths: Vec<String> = {
+                            let mut paths = Vec::new();
+                            let head = repo.head().ok().and_then(|h| h.peel_to_tree().ok());
+                            if let Some(head_tree) = &head {
+                                let mut diff_opts = git2::DiffOptions::new();
+                                if let Ok(diff) = repo.diff_tree_to_index(Some(head_tree), Some(&index), Some(&mut diff_opts)) {
+                                    for delta in diff.deltas() {
+                                        if delta.status() == git2::Delta::Deleted {
+                                            if let Some(path) = delta.old_file().path() {
+                                                paths.push(path.to_string_lossy().to_lowercase());
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            paths
+                        };
+                        let intent_mentions_deleted_paths = deleted_file_paths.iter()
+                            .any(|path| {
+                                // Check if intent mentions the file path or its parent directory
+                                let parts: Vec<&str> = path.split('/').collect();
+                                parts.iter().any(|part| !part.is_empty() && part.len() > 2 && combined_intent.contains(*part))
+                            });
 
-                        if deleted_nodes.len() > 5 && !is_likely_intentional {
+                        let is_likely_intentional = intent_mentions_deletion
+                            && (intent_mentions_specific || intent_mentions_deleted_paths);
+
+                        if deleted_nodes.len() > 5 && !is_likely_intentional && !*force {
                             // Mass deletion — very suspicious
                             println!("\n{} Logic Node Deletion Guard: {} logic nodes REMOVED", "🛡️".red().bold(), deleted_nodes.len().to_string().red().bold());
                             println!("  {} This often happens when an AI agent rewrites a file and accidentally", "↳".dimmed());
@@ -1305,8 +1333,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                             if config.strict_gatekeeper_mode {
                                 println!("\n  {} {}", "How to Fix:".bold().green(), "If this deletion is intentional, log your intent:");
-                                println!("    {} aura log-intent \"Removed <function_name> because ...\"", "$".dimmed());
-                                println!("  {} To bypass: {}", "💡".blue(), "aura config set strict-mode false".italic());
+                                println!("    {} aura log-intent \"Removed <directory/file> because <reason>\"", "$".dimmed());
+                                println!("  {} Mention the deleted file/directory names and a deletion keyword (removed, deleted, cleaned, etc.)", "↳".dimmed());
                                 println!("\n{} Commit halted. {} logic nodes would be lost.", "✗".red().bold(), deleted_nodes.len());
                                 println!("  {} Safety snapshots saved to .aura/snapshots/", "✓".green());
                                 std::process::exit(1);
@@ -2056,7 +2084,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 println!("{} Failed to find snapshot {}.", "✗".red(), snapshot_id);
             }
         }
-        Commands::Prove { goal } => {
+        Commands::GoalTrace { goal } => {
             crate::gsd::GsdEngine::prove_goal(goal);
         }
         Commands::VerifyEnv { target, pos_target } => {            let env_target = target.clone().unwrap_or_else(|| {
@@ -2142,7 +2170,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 println!("{} AST logic perfectly conforms to {} constraints. Safe to deploy.", "✓".green().bold(), env_target);
             }
         }
-        Commands::Arbitrate { file_path } => {
+        Commands::SuggestMerge { file_path } => {
             Arbitrator::resolve_conflict(file_path);
         }
         Commands::GenerateStubs => {
@@ -2787,7 +2815,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
             }
         }
-        Commands::Fix { base } => {
+        Commands::SuggestFix { base } => {
             Arbitrator::auto_fix_violations(base)?;
         }
         Commands::Policy { sub } => {
