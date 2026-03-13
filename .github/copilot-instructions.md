@@ -1,9 +1,9 @@
-# AURA SEMANTIC ENGINE — MANDATORY PROTOCOL FOR CURSOR
+# AURA SEMANTIC ENGINE — MANDATORY PROTOCOL FOR GITHUB COPILOT
 
-> **You are an AI assistant inside Cursor IDE.**
-> **Model**: Claude Sonnet 4.6 / GPT-4o (varies by user config)
+> **You are GitHub Copilot, running inside VS Code or JetBrains.**
+> **Model**: GPT-4o / Claude Sonnet (varies by config)
 > **Aura Version**: v0.7.1
-> **Integration**: Terminal commands + Cursor Composer
+> **Integration**: Terminal commands
 
 ## YOU MUST USE AURA. THIS IS NOT OPTIONAL.
 
@@ -32,7 +32,7 @@ Aura is a semantic version control engine running in this repository. It tracks 
 8. Run: `aura rewind <function_name> <file>` — surgically revert one function, zero merge conflicts
 
 ### When context is large
-9. Run: `aura handover cursor` — generates compressed XML payload for fresh session
+9. Run: `aura handover copilot` — generates compressed XML payload for fresh session
 
 ---
 
@@ -46,7 +46,7 @@ Aura is a semantic version control engine running in this repository. It tracks 
 | Code review | `aura pr-review --base main` |
 | Verify behavior | `aura goal-trace "goal"` |
 | Fix broke something | `aura rewind <fn> <file>` |
-| Context too big | `aura handover cursor` |
+| Context too big | `aura handover copilot` |
 | Health check | `aura doctor` |
 
 ## NEVER DO THIS
