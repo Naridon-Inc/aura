@@ -1,129 +1,202 @@
 <div align="center">
 
-# 🌌 Aura
-**The Semantic Time Machine for AI-Generated Code.**
+# Aura
+**The Semantic Version Control Engine for AI-Generated Code.**
 
 [![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
 [![Website](https://img.shields.io/badge/Website-auravcs.com-10b981)](https://auravcs.com)
+[![GitHub Release](https://img.shields.io/github/v/release/MHASK/aura-sovereign)](https://github.com/MHASK/aura-sovereign/releases)
 
-**Git tracks text lines. Aura tracks mathematical logic.** <br>
-*Built in Rust for native integration with Cursor, Claude Code, and Aider.*
+**Git tracks text lines. Aura tracks mathematical logic.**
+
+Built in Rust. Works with Claude Code, Cursor, Gemini CLI, Aider, and OpenCode.
 
 </div>
 
 ---
 
-## 🛑 The Problem: AI Writes Faster Than You Can Review
+## The Problem
 
-When you type code, you think linearly. You write a function, test it, and commit it.
-When an AI (like Cursor or Claude) writes code, it operates non-linearly. It will refactor a database schema, update three API routes, and change the frontend state across 8 files in 14 seconds. 
+AI agents write code faster than humans can review. When an AI refactors 8 files in 14 seconds and introduces a subtle bug on minute 12, `git revert` creates a massive merge conflict. The AI's reasoning is lost when the session ends.
 
-By the time you realize the AI hallucinated on minute 12 of a 15-minute generation streak, it has already woven 4,000 lines of interdependent logic on top of the error. If you try to `git revert`, you get a massive merge conflict. If you close the IDE tab, the AI's contextual reasoning is lost forever.
+## The Solution
 
-## ⚡ The Solution: A Physics Engine for Code
+Aura is a **semantic layer on top of Git**. It parses your codebase into an Abstract Syntax Tree (AST), assigns cryptographic IDs to every function and class, and attaches the AI's intent to each change via Git Notes.
 
-Aura is a **Parasitic Gatekeeper** that runs silently on top of standard Git. 
-
-Instead of tracking files using text diffs, Aura compiles your codebase into an **Abstract Syntax Tree (AST)** locally. It assigns an immutable cryptographic UUID to every function and class. 
-
-When an AI agent modifies your code, Aura intercepts the save, extracts the AI's natural language intent, scrubs it for secrets, generates a neural embedding, and attaches the entire semantic history invisibly to your `git commit` using **Git Notes**.
-
----
-
-## 🚀 The "Ah-Ha" Workflow (The Semantic Time Machine)
-
-### 1. Ask the Brain
-When production breaks and you don't know why the AI wrote a specific block of code two months ago, you don't read PR descriptions. You ask the mathematical graph:
-
-```bash
-$ aura ask "Why did we switch to exponential backoff here?"
-
-> 🤖 Intent Found: "Claude-3.5 refactored retry_logic to use exponential backoff to comply with AWS Cognito rate limits."
-> 📍 Node ID: fn_retry_logic (Hash: 8f42a1)
-```
-
-### 2. The Surgical Rewind
-Standard `git revert` breaks files. Aura swaps AST bytes. You can revert a single function to its state from 3 months ago without touching the 4,000 lines of valid code the AI wrote around it.
-
-```bash
-$ aura rewind retry_logic
-> ✓ Surgically replaced AST node. Zero merge conflicts.
-```
-
-### 3. Native GSD (GetShitDone) Orchestration
-To prevent "Context Rot" (where an AI gets confused during a massive task), Aura forces the LLM to behave like a disciplined engineer with an **interactive planning workflow**.
-
-```bash
-$ aura plan "Build a new Stripe billing module"
-> 📋 Configuring Milestone...
-> ? Run plans in parallel? (Parallel/Sequential) [Parallel]
-> ? Git tracking strategy? (Single/Atomic) [Atomic Commits]
-> ✓ Synthesized 3 atomic XML execution plans.
-
-$ aura execute
-> 🌊 Wave 1: Executing Plan 1 in isolated context...
-> 🛡️ Gatekeeper: Verified AST safety.
-> ✓ Auto-committed micro-state (Checkpoint: 6af8d339).
-```
+This gives you:
+- **Surgical rewind** — revert a single function without merge conflicts
+- **Intent verification** — know *why* the AI wrote every line of code
+- **Deletion guard** — block AI agents from accidentally removing working features
+- **Semantic PR review** — catch bugs, security issues, and architectural violations using AST diffing + AI
 
 ---
 
-## 🆕 What's New in v0.2.0-alpha (The "Amnesia" Release)
-
-This release transforms Aura from a backend security prototype into a full-stack, AI-native infrastructure.
-
-- **🧠 Aura Amnesia Protocol**: The `aura rewind --amnesia` flag now surgically reverts code AND injects a System Override into AI chat logs, instantly breaking hallucination loops.
-- **🌐 Full-Stack Logic Engine**: Added native `tree-sitter` support for **TypeScript (.ts/.tsx)** and **JavaScript (.js/.jsx)**. Intent checking and surgical rewinds now work across the entire stack.
-- **📋 Human-Readable Roadmaps**: `aura plan` now generates a detailed `PLAN.md` for human review alongside the machine-readable XML waves.
-- **🔍 Semantic Status**: New `aura status` command provides instant visibility into Merkle-Graph metrics and security configurations.
-- **⚙️ Agent-Native Config**: Automate setup with `aura config set <key> <value>`, bypassing interactive TTY menus.
-- **⚡ Lightweight Dev Mode**: `aura secure-init --dev` allows solo developers to skip complex multi-sig protocols for local prototyping.
-
----
-
-## 🛠️ Installation & Configuration (AI-Native DX)
-
-Aura is distributed as a standalone, pre-compiled Rust binary. It does not require Node.js or Python.
+## Installation
 
 ```bash
 curl -fsSL https://auravcs.com/install.sh | bash
 ```
 
-Inside any existing Git repository, simply run:
+Then inside any Git repository:
+
 ```bash
 aura init
 ```
 
-### ⚙️ Autonomous Configuration
-Aura is built for both humans and AI agents. You can configure it interactively via `aura config` or non-interactively using:
+Aura hooks into your Git workflow. You `git commit` as always — Aura handles the rest.
+
+---
+
+## Commands
+
+### Core
+
+| Command | Description |
+|---------|-------------|
+| `aura init` | Initialize Aura in a repository with setup wizard |
+| `aura status` | View checkpoints, tracked nodes, session info, and config |
+| `aura config` | Manage configuration (API keys, strict mode, telemetry) |
+| `aura doctor` | Diagnose and repair stuck sessions, orphaned data |
+
+### AI Safety
+
+| Command | Description |
+|---------|-------------|
+| `aura rewind <identifier>` | Surgically revert a function/class to a previous safe state |
+| `aura explain <identifier>` | Trace code back to the AI conversation that created it |
+| `aura audit` | Scan Git history for code pushed without intent verification |
+| `aura request-access <id>` | Whitelist a node for high-entropy secrets |
+
+### Code Review
+
+| Command | Description |
+|---------|-------------|
+| `aura pr-review --base <branch>` | Semantic PR review with AI bug/security scanning |
+| `aura suggest-fix` | Generate patches for architectural violations (experimental) |
+| `aura policy` | Manage Architectural Invariant Policy Packs |
+| `aura goal-trace <goal>` | Verify if codebase supports a behavioral goal (experimental) |
+
+### Planning & Orchestration
+
+| Command | Description |
+|---------|-------------|
+| `aura plan <objective>` | Decompose an objective into atomic execution waves |
+| `aura execute` | Execute the current plan wave-by-wave with AST verification |
+| `aura orchestrate` | Multi-agent orchestration — Claude + Gemini in parallel |
+| `aura symphony` | Linear-driven development workflows with AI agents |
+
+### Context & Sessions
+
+| Command | Description |
+|---------|-------------|
+| `aura handover` | Generate token-optimized XML context for another AI agent |
+| `aura sessions` | List and manage agent sessions |
+| `aura resume` | Resume a previous session with full context |
+| `aura completions` | Generate shell completions (bash, zsh, fish) |
+
+---
+
+## Key Features
+
+### Semantic Checkpoints
+Every `git commit` triggers AST parsing. Aura extracts every function, class, and struct, computes content hashes, and stores the Merkle-Graph as Git Notes.
+
+### Surgical Rewind
+Revert a single function to its state from any previous checkpoint — without touching the rest of the codebase. Zero merge conflicts.
+
 ```bash
-# For solo developers: Bypass heavy enterprise protocols
-aura config set dev-mode true
-aura secure-init --dev
-
-# For security: Enable strict architectural enforcement
-aura config set strict-mode true
+aura rewind retry_logic
 ```
-*Aura hooks into your Git workflow instantly. You just `git commit` exactly as you always have. Aura handles the math.*
+
+### Deletion Guard
+In strict mode, Aura blocks commits that delete logic nodes unless the developer logs intent explaining why. Prevents AI agents from accidentally removing working features.
+
+```bash
+# Log intent before deleting code
+aura log-intent "Removed legacy auth module — replaced by OAuth2 in auth_v2.rs"
+git commit -m "refactor: remove legacy auth"
+```
+
+### Intent Verification
+Aura captures the AI agent's reasoning and binds it to AST changes. If intent doesn't align with code changes, the commit is flagged.
+
+### Semantic PR Review
+Diff against AST structure, not text. AI-powered scanning for bugs, security issues, and architectural violations with blast radius analysis.
+
+```bash
+aura pr-review --base main --json
+```
+
+### GSD Orchestrator
+Break complex objectives into atomic waves. Each wave is verified against the Merkle-Graph before proceeding.
+
+```bash
+aura plan "Add WebSocket support for real-time updates"
+aura execute
+```
+
+### Handover (Context Transfer)
+Generate a dense XML summary of the entire codebase's semantic state. Pass it to another AI agent to resume work with ~90% fewer tokens.
+
+```bash
+aura handover --agent claude
+```
+
+### Multi-Agent Orchestration
+Run Claude Code and Gemini CLI in parallel on different waves of the same plan. Aura coordinates, detects conflicts, and merges results.
+
+```bash
+aura orchestrate --objective "Implement auth + billing" --strategy smart
+```
 
 ---
 
-## 🏢 Enterprise: The Sovereign Vault
+## MCP Server
 
-Competitors (like Entire.io) require you to upload your raw, unredacted, proprietary chat transcripts to their cloud SaaS to generate vector embeddings.
+Aura exposes 29 tools via the Model Context Protocol for direct integration with Claude Code, Cursor, and other MCP-compatible editors. Key tools:
 
-Aura is a **Sovereign Enclave**.
-1. **Local Privacy:** Shannon Entropy algorithms scrub API keys locally. Vector embeddings are generated and stored completely inside your local `.git` folder.
-2. **Zero-Trust Dashboards:** The `aura dashboard` command spins up a gorgeous React application locally, ensuring your proprietary AI training data never touches an external database.
-3. **Agentic RBAC:** Need to hire a contractor? `aura generate-stubs` uses local LLMs to replace your proprietary algorithms with compiler-safe mock data, allowing contractors to work safely on GitHub without seeing your IP.
+- `aura_status` — check semantic state
+- `aura_log_intent` — log reasoning before commits
+- `aura_handover` — context transfer between agents
+- `aura_plan_discover` / `aura_plan_lock` / `aura_plan_next` — GSD orchestration
+- `aura_prove` — behavioral verification
+- `aura_rewind` — surgical rollback
+- `aura_pr_review` — semantic code review
+- `aura_doctor` — health diagnostics
+- `aura_snapshot` / `aura_snapshot_list` — snapshot management
 
 ---
 
-## 📜 License & Telemetry
+## Configuration
 
-Aura Core is released under the permissive **Apache 2.0 License**. 
+```bash
+# Enable strict mode (blocks suspicious deletions, enforces intent)
+aura config set strict-mode true
 
-Aura explicitly **fails open**. If you ask it to parse a 100,000-line minified file and it exceeds its 50ms performance budget, Aura aborts the semantic tracking and allows the human Git commit to proceed. It will never block a panicked developer trying to ship a hotfix. 
+# Set AI provider for PR reviews and planning
+aura config set ai-provider gemini
+aura config set gemini-api-key <key>
 
-**Code is just the medium. Logic is the asset.** <br>
-Welcome to the Agentic Era.
+# Dev mode (relaxed checks for solo development)
+aura config set dev-mode true
+```
+
+---
+
+## How It Works
+
+1. **Parse** — On every commit, Aura parses staged files into ASTs using tree-sitter (Rust, TypeScript, JavaScript, Python, Go, and more)
+2. **Hash** — Each function/class gets a deterministic content hash (rename-proof)
+3. **Store** — The Merkle-Graph is attached to the commit via Git Notes
+4. **Guard** — Pre-commit hook verifies intent, checks for secrets, and prevents accidental deletions
+5. **Review** — PR reviews diff against AST structure with AI-powered analysis
+
+Everything stays local in your `.git` folder. No cloud required.
+
+---
+
+## License
+
+Apache 2.0. See [LICENSE](LICENSE).
+
+Aura **fails open** — if AST parsing exceeds budget, Aura steps aside and lets the commit through. It will never block a hotfix.
