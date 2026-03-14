@@ -209,7 +209,7 @@ fn capture_env_fingerprint() -> Option<String> {
     ecosystem::Ecosystem::fingerprint()
 }
 
-const CURRENT_VERSION: &str = "0.7.2";
+const CURRENT_VERSION: &str = "0.8.0";
 
 fn check_for_updates() -> Option<String> {
     let client = reqwest::blocking::Client::builder()
@@ -495,6 +495,21 @@ enum Commands {
         #[command(subcommand)]
         sub: SymphonySubcommands,
     },
+    /// Real-time collaborative code awareness — see what your team is changing at the function level
+    Live {
+        #[command(subcommand)]
+        sub: LiveSubcommands,
+    },
+    /// Send and receive messages between team members and AI agents
+    Msg {
+        #[command(subcommand)]
+        sub: MsgSubcommands,
+    },
+    /// Connect to an Aura collaboration server for team features
+    Server {
+        #[command(subcommand)]
+        sub: ServerSubcommands,
+    },
 }
 
 #[derive(Subcommand)]
@@ -566,6 +581,83 @@ enum SymphonySubcommands {
         base: String,
     },
     /// Show Symphony configuration and status
+    Status,
+}
+
+#[derive(Subcommand)]
+enum LiveSubcommands {
+    /// Start streaming function-level changes to your team in real-time
+    Start,
+    /// Stop live streaming
+    Stop,
+    /// Show current team presence and what functions are being worked on
+    Status,
+    /// List unresolved cross-branch dependency impacts on your code
+    Impacts,
+    /// Push function bodies to the server for teammates to pull
+    #[command(name = "sync")]
+    Sync {
+        #[command(subcommand)]
+        sub: LiveSyncSubcommands,
+    },
+}
+
+#[derive(Subcommand)]
+enum LiveSyncSubcommands {
+    /// Push function bodies from a file for teammates to pull
+    Push {
+        /// File path to push functions from
+        file: String,
+    },
+    /// Pull function changes pushed by teammates
+    Pull,
+    /// Show pending sync changes and active pushers
+    Status,
+}
+
+#[derive(Subcommand)]
+enum MsgSubcommands {
+    /// Send a message to your team
+    Send {
+        /// The message to send
+        message: String,
+    },
+    /// List recent team messages
+    List,
+}
+
+#[derive(Subcommand)]
+enum ServerSubcommands {
+    /// Register a new account on an Aura collaboration server
+    Register {
+        /// Server URL (e.g., http://localhost:3001)
+        #[arg(long)]
+        url: String,
+        /// Username
+        #[arg(long)]
+        username: String,
+        /// Password
+        #[arg(long)]
+        password: String,
+    },
+    /// Log in to an Aura collaboration server
+    Login {
+        /// Server URL (e.g., http://localhost:3001)
+        #[arg(long)]
+        url: String,
+        /// Username
+        #[arg(long)]
+        username: String,
+        /// Password
+        #[arg(long)]
+        password: String,
+    },
+    /// Register a repository with the server
+    AddRepo {
+        /// Repository name (e.g., "owner/repo")
+        repo: String,
+    },
+    /// Check server connection status
     Status,
 }
 
@@ -658,6 +750,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         Commands::RequestAccess { .. } => "request-access",
         Commands::GoalTrace { .. } => "goal-trace",
         Commands::Config { .. } => "config",
+        Commands::Live { .. } => "live",
+        Commands::Msg { .. } => "msg",
+        Commands::Server { .. } => "server",
         _ => "internal_command"
     };
     track_event("cli_execution", Some(cmd_name));
@@ -2883,6 +2978,23 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     symphony::status()?;
                 }
             }
+        }
+        Commands::Live { .. } | Commands::Msg { .. } | Commands::Server { .. } => {
+            println!();
+            println!("  {}  {}", "⚡".bold(), "Team Collaboration — Aura Pro".bold().cyan());
+            println!();
+            println!("  Live presence, impact alerts, team messaging, and");
+            println!("  function-level code sync across your entire team.");
+            println!();
+            println!("  {}  See what every developer is changing in real-time", "•".dimmed());
+            println!("  {}  Get alerted when someone modifies a function you depend on", "•".dimmed());
+            println!("  {}  Push/pull individual functions between developers", "•".dimmed());
+            println!("  {}  Message your team and AI agents from the terminal", "•".dimmed());
+            println!();
+            println!("  {} per developer/month", "$20".bold().green());
+            println!();
+            println!("  {} {}", "→".bold(), "https://auravcs.com".cyan().underline());
+            println!();
         }
     }
 
