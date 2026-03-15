@@ -1535,9 +1535,8 @@ impl McpServer {
         }
 
         let mut output = format!("{} message(s):\n\n", messages.len());
-        let mut has_incoming_dm = false;
-        let mut reply_to_session = None;
-        for msg in &messages {
+        let mut newly_read_from = None;
+        for (msg, was_newly_read) in &messages {
             let is_incoming = msg.from_session != session_id;
             let direction = if !is_incoming {
                 "YOU \u{2192}".to_string()
@@ -1549,13 +1548,14 @@ impl McpServer {
                 Some(t) => format!("{} (DM)", &t[..t.len().min(12)]),
                 None => "ALL".to_string(),
             };
-            if is_incoming {
-                has_incoming_dm = true;
-                reply_to_session = Some(msg.from_session.clone());
+            let new_tag = if *was_newly_read && is_incoming { " [NEW]" } else { "" };
+            if *was_newly_read && is_incoming {
+                newly_read_from = Some(msg.from_session.clone());
             }
             output.push_str(&format!(
-                "[{}] {} {} {}\n  {}\n\n",
+                "[{}]{} {} {} {}\n  {}\n\n",
                 msg.id,
+                new_tag,
                 direction,
                 target,
                 format_age(msg.timestamp),
@@ -1563,14 +1563,12 @@ impl McpServer {
             ));
         }
 
-        // Prompt the agent to reply if there are incoming messages
-        if has_incoming_dm {
-            if let Some(ref reply_to) = reply_to_session {
-                output.push_str(&format!(
-                    "\n\u{26a0}\u{fe0f} ACTION REQUIRED: Another agent sent you a message. You MUST reply using `aura_sentinel_send` with to=\"{}\" to answer their question or acknowledge. Do NOT ignore messages from other agents — they are actively waiting for your response.",
-                    reply_to
-                ));
-            }
+        // Only prompt reply for NEWLY READ incoming messages (not old ones already seen)
+        if let Some(ref reply_to) = newly_read_from {
+            output.push_str(&format!(
+                "\n\u{26a0}\u{fe0f} ACTION REQUIRED: Another agent just sent you a NEW message. Reply using `aura_sentinel_send` with to=\"{}\" to answer their question or acknowledge. They are waiting for your response.",
+                reply_to
+            ));
         }
 
         json!({ "content": [{ "type": "text", "text": output }] })

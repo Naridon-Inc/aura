@@ -421,7 +421,8 @@ impl SentinelManager {
     }
 
     /// Read messages for a session (unread + recent read). Marks them as read.
-    pub fn read_messages(session_id: &str, limit: usize) -> Vec<SentinelMessage> {
+    /// Returns Vec of (message, was_newly_read) — newly_read=true means first time seeing it.
+    pub fn read_messages(session_id: &str, limit: usize) -> Vec<(SentinelMessage, bool)> {
         Self::ensure_dirs();
         let dir = Self::messages_dir();
         let mut messages = Vec::new();
@@ -447,19 +448,22 @@ impl SentinelManager {
         // Sort by timestamp descending
         messages.sort_by(|a, b| b.1.timestamp.cmp(&a.1.timestamp));
 
-        // Mark unread ones as read
+        // Mark unread ones as read, track which were newly read
+        let mut result = Vec::new();
         for entry in &mut messages {
-            if !entry.1.read_by.contains(&session_id.to_string()) {
+            let was_unread = !entry.1.read_by.contains(&session_id.to_string());
+            if was_unread {
                 entry.1.read_by.push(session_id.to_string());
                 if let Ok(json) = serde_json::to_string_pretty(&entry.1) {
                     let _ = Self::atomic_write(&entry.0.to_string_lossy(), json.as_bytes());
                 }
             }
+            result.push((entry.1.clone(), was_unread));
         }
 
         Self::update_unread_marker();
 
-        messages.into_iter().take(limit).map(|(_, m)| m).collect()
+        result.into_iter().take(limit).collect()
     }
 
     /// Count unread messages for a specific session
