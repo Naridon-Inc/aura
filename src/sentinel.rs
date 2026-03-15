@@ -134,18 +134,21 @@ impl SentinelManager {
         sys.process(sysinfo::Pid::from_u32(pid)).is_some()
     }
 
-    /// Remove claims with dead PIDs or heartbeats older than 10 minutes
+    /// Remove claims for dead processes.
+    /// PID alive = keep (even if idle). PID dead = remove.
+    /// Heartbeat staleness (>1hr) is only a fallback for zombie claim files.
     pub fn cleanup_stale() -> usize {
         Self::ensure_dirs();
         let now = Self::now();
-        let stale_threshold = 600; // 10 minutes
+        let zombie_threshold = 3600; // 1 hour — only for truly abandoned claims
         let mut removed = 0;
 
         let all = Self::load_all_claims();
         for claims in &all {
-            let is_stale = (now - claims.last_heartbeat > stale_threshold)
-                || !Self::is_pid_alive(claims.pid);
-            if is_stale {
+            let pid_dead = !Self::is_pid_alive(claims.pid);
+            let zombie = now - claims.last_heartbeat > zombie_threshold;
+            // Remove if PID is dead, or if heartbeat is ancient (zombie file from crash)
+            if pid_dead || zombie {
                 let path = Self::claim_path(&claims.session_id);
                 let _ = fs::remove_file(&path);
                 removed += 1;
