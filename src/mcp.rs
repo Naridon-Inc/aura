@@ -329,6 +329,36 @@ impl McpServer {
                                 }
                             },
                             {
+                                "name": "aura_sentinel_send",
+                                "description": "Send a message to another agent session working in this repo. Use to coordinate, ask questions, delegate work, or share findings. Messages are delivered locally via file-based mailbox — works between ANY agents (Claude, Copilot, Gemini, Cursor, etc.).",
+                                "inputSchema": {
+                                    "type": "object",
+                                    "properties": {
+                                        "message": { "type": "string", "description": "The message to send." },
+                                        "to": { "type": "string", "description": "Optional: target session_id for a direct message. If omitted, broadcasts to ALL active agent sessions." }
+                                    },
+                                    "required": ["message"]
+                                }
+                            },
+                            {
+                                "name": "aura_sentinel_inbox",
+                                "description": "Read messages from other agent sessions. Shows unread messages first, then recent history. Messages are automatically marked as read.",
+                                "inputSchema": {
+                                    "type": "object",
+                                    "properties": {
+                                        "limit": { "type": "number", "description": "Max messages to return (default: 20)." }
+                                    }
+                                }
+                            },
+                            {
+                                "name": "aura_sentinel_agents",
+                                "description": "List all active agent sessions in this repo. Shows agent type (Claude, Copilot, Gemini, etc.), PID, files being worked on, and session ID for sending direct messages.",
+                                "inputSchema": {
+                                    "type": "object",
+                                    "properties": {}
+                                }
+                            },
+                            {
                                 "name": "aura_session_summarize",
                                 "description": "Generate an AI-powered summary of a specific session, including intent, outcome, learnings, and open items. Uses Gemini to analyze the session transcript.",
                                 "inputSchema": {
@@ -374,6 +404,9 @@ impl McpServer {
                     "aura_sentinel_status" => Self::tool_sentinel_status(args),
                     "aura_zone_claim" => Self::tool_zone_claim(args),
                     "aura_sentinel_release" => Self::tool_sentinel_release(args),
+                    "aura_sentinel_send" => Self::tool_sentinel_send(args),
+                    "aura_sentinel_inbox" => Self::tool_sentinel_inbox(args),
+                    "aura_sentinel_agents" => Self::tool_sentinel_agents(args),
                     _ => json!({ "isError": true, "content": [{ "type": "text", "text": "Unknown tool" }] })
                 };
 
@@ -386,6 +419,26 @@ impl McpServer {
                                 "type": "text",
                                 "text": "\n⚠️ REMINDER: You have not logged your intent yet. Call `aura_log_intent` with a description of your changes BEFORE committing. Without intent, the pre-commit hook will flag Intent Poisoning."
                             }));
+                        }
+                    }
+                }
+
+                // Push-based: Inject sentinel unread message alerts
+                if name != "aura_sentinel_inbox" && name != "aura_sentinel_send" {
+                    if let Some(session) = SessionManager::get_active_session() {
+                        let unread = crate::sentinel::SentinelManager::unread_count(&session.session_id);
+                        if unread > 0 {
+                            if let Some(content) = result.get_mut("content").and_then(|c| c.as_array_mut()) {
+                                content.push(json!({
+                                    "type": "text",
+                                    "text": format!(
+                                        "\n\u{1f4e8} SENTINEL: {} unread message{} from other agent session{}. Call `aura_sentinel_inbox` to read.",
+                                        unread,
+                                        if unread == 1 { "" } else { "s" },
+                                        if unread == 1 { "" } else { "s" }
+                                    )
+                                }));
+                            }
                         }
                     }
                 }
@@ -1378,5 +1431,117 @@ impl McpServer {
             Err(_) => vec![format!("__file__{}", file_path)],
         }
     }
+
+    fn tool_sentinel_send(args: Value) -> Value {
+        let message = match args["message"].as_str() {
+            Some(m) => m,
+            None => return json!({ "isError": true, "content": [{ "type": "text", "text": "message is required." }] }),
+        };
+        let to = args["to"].as_str();
+
+        let session = SessionManager::get_active_session();
+        let session_id = session.as_ref().map(|s| s.session_id.as_str()).unwrap_or("unknown");
+        let agent_id = session.as_ref().map(|s| s.agent_id.as_str()).unwrap_or("unknown");
+
+        // Cleanup old messages opportunistically
+        crate::sentinel::SentinelManager::cleanup_old_messages();
+
+        let msg = crate::sentinel::SentinelManager::send_message(session_id, agent_id, to, message);
+
+        let target = match to {
+            Some(t) => format!("session {}", t),
+            None => "all active agents".to_string(),
+        };
+        json!({ "content": [{ "type": "text", "text": format!(
+            "Message sent to {} (id: {}). Other agents will see it on their next tool call.",
+            target, msg.id
+        ) }] })
+    }
+
+    fn tool_sentinel_inbox(args: Value) -> Value {
+        let limit = args["limit"].as_u64().unwrap_or(20) as usize;
+
+        let session_id = SessionManager::get_active_session()
+            .map(|s| s.session_id)
+            .unwrap_or_else(|| "unknown".to_string());
+
+        let messages = crate::sentinel::SentinelManager::read_messages(&session_id, limit);
+
+        if messages.is_empty() {
+            return json!({ "content": [{ "type": "text", "text": "No messages. You're the only one here (or nobody has written yet)." }] });
+        }
+
+        let mut output = format!("{} message(s):\n\n", messages.len());
+        for msg in &messages {
+            let direction = if msg.from_session == session_id {
+                "YOU \u{2192}".to_string()
+            } else {
+                format!("{} ({}) \u{2192}", msg.from_agent, &msg.from_session[..msg.from_session.len().min(12)])
+            };
+            let target = match &msg.to_session {
+                Some(t) if t == &session_id => "YOU (DM)".to_string(),
+                Some(t) => format!("{} (DM)", &t[..t.len().min(12)]),
+                None => "ALL".to_string(),
+            };
+            output.push_str(&format!(
+                "[{}] {} {} {}\n  {}\n\n",
+                msg.id,
+                direction,
+                target,
+                format_age(msg.timestamp),
+                msg.content
+            ));
+        }
+
+        json!({ "content": [{ "type": "text", "text": output }] })
+    }
+
+    fn tool_sentinel_agents(_args: Value) -> Value {
+        let agents = crate::sentinel::SentinelManager::list_agents();
+
+        if agents.is_empty() {
+            return json!({ "content": [{ "type": "text", "text": "No active agent sessions detected. Use `aura_snapshot` on a file to register your presence." }] });
+        }
+
+        let session_id = SessionManager::get_active_session()
+            .map(|s| s.session_id)
+            .unwrap_or_default();
+
+        let mut output = format!("{} active agent session(s):\n\n", agents.len());
+        for agent in &agents {
+            let is_me = agent["session_id"].as_str() == Some(&session_id);
+            let label = if is_me { " (YOU)" } else { "" };
+            output.push_str(&format!(
+                "  {} {}{}\n    PID: {} | Claims: {} | Files: {}\n    Session: {}\n\n",
+                agent["agent_id"].as_str().unwrap_or("unknown"),
+                label,
+                "",
+                agent["pid"].as_u64().unwrap_or(0),
+                agent["claim_count"].as_u64().unwrap_or(0),
+                agent["files"].as_array().map(|f| {
+                    f.iter().filter_map(|v| v.as_str()).collect::<Vec<_>>().join(", ")
+                }).unwrap_or_else(|| "none".to_string()),
+                agent["session_id"].as_str().unwrap_or("unknown"),
+            ));
+        }
+
+        output.push_str("To message an agent, use `aura_sentinel_send` with their session_id in the `to` field.");
+
+        json!({ "content": [{ "type": "text", "text": output }] })
+    }
 }
 
+fn format_age(timestamp: u64) -> String {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    let age = now.saturating_sub(timestamp);
+    if age < 60 {
+        format!("{}s ago", age)
+    } else if age < 3600 {
+        format!("{}m ago", age / 60)
+    } else {
+        format!("{}h ago", age / 3600)
+    }
+}

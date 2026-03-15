@@ -45,6 +45,19 @@ pub struct Collision {
     pub held_by_agent: String,
 }
 
+// ── Messaging ──
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct SentinelMessage {
+    pub id: String,
+    pub from_session: String,
+    pub from_agent: String,
+    pub to_session: Option<String>,  // None = broadcast to all
+    pub content: String,
+    pub timestamp: u64,
+    pub read_by: Vec<String>,        // session_ids that have read this
+}
+
 // ── Manager ──
 
 pub struct SentinelManager;
@@ -62,9 +75,18 @@ impl SentinelManager {
         worktree_aura_path("sentinel/collisions_pending")
     }
 
+    fn messages_dir() -> String {
+        worktree_aura_path("sentinel/messages")
+    }
+
+    fn unread_marker() -> String {
+        worktree_aura_path("sentinel/unread_pending")
+    }
+
     fn ensure_dirs() {
         let _ = fs::create_dir_all(Self::claims_dir());
         let _ = fs::create_dir_all(Self::zones_dir());
+        let _ = fs::create_dir_all(Self::messages_dir());
     }
 
     fn now() -> u64 {
@@ -366,6 +388,184 @@ impl SentinelManager {
             }
         }
         zones
+    }
+
+    // ── Messaging ──
+
+    /// Send a message to a specific session or broadcast to all
+    pub fn send_message(
+        from_session: &str,
+        from_agent: &str,
+        to_session: Option<&str>,
+        content: &str,
+    ) -> SentinelMessage {
+        Self::ensure_dirs();
+        let msg = SentinelMessage {
+            id: format!("msg-{}", &uuid::Uuid::new_v4().to_string()[..8]),
+            from_session: from_session.to_string(),
+            from_agent: from_agent.to_string(),
+            to_session: to_session.map(|s| s.to_string()),
+            content: content.to_string(),
+            timestamp: Self::now(),
+            read_by: vec![from_session.to_string()], // sender has "read" it
+        };
+        let path = format!("{}/{}.json", Self::messages_dir(), msg.id);
+        if let Ok(json) = serde_json::to_string_pretty(&msg) {
+            let _ = Self::atomic_write(&path, json.as_bytes());
+        }
+        Self::update_unread_marker();
+        msg
+    }
+
+    /// Read messages for a session (unread + recent read). Marks them as read.
+    pub fn read_messages(session_id: &str, limit: usize) -> Vec<SentinelMessage> {
+        Self::ensure_dirs();
+        let dir = Self::messages_dir();
+        let mut messages = Vec::new();
+
+        if let Ok(entries) = fs::read_dir(&dir) {
+            for entry in entries.flatten() {
+                if entry.path().extension().map(|x| x == "json").unwrap_or(false) {
+                    if let Ok(content) = fs::read_to_string(entry.path()) {
+                        if let Ok(msg) = serde_json::from_str::<SentinelMessage>(&content) {
+                            // Include if: broadcast, or addressed to us, or sent by us
+                            let dominated = msg.to_session.is_none()
+                                || msg.to_session.as_deref() == Some(session_id)
+                                || msg.from_session == session_id;
+                            if dominated {
+                                messages.push((entry.path(), msg));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Sort by timestamp descending
+        messages.sort_by(|a, b| b.1.timestamp.cmp(&a.1.timestamp));
+
+        // Mark unread ones as read
+        for entry in &mut messages {
+            if !entry.1.read_by.contains(&session_id.to_string()) {
+                entry.1.read_by.push(session_id.to_string());
+                if let Ok(json) = serde_json::to_string_pretty(&entry.1) {
+                    let _ = Self::atomic_write(&entry.0.to_string_lossy(), json.as_bytes());
+                }
+            }
+        }
+
+        Self::update_unread_marker();
+
+        messages.into_iter().take(limit).map(|(_, m)| m).collect()
+    }
+
+    /// Count unread messages for a specific session
+    pub fn unread_count(session_id: &str) -> u64 {
+        let dir = Self::messages_dir();
+        let mut count = 0u64;
+        if let Ok(entries) = fs::read_dir(&dir) {
+            for entry in entries.flatten() {
+                if entry.path().extension().map(|x| x == "json").unwrap_or(false) {
+                    if let Ok(content) = fs::read_to_string(entry.path()) {
+                        if let Ok(msg) = serde_json::from_str::<SentinelMessage>(&content) {
+                            let dominated = msg.to_session.is_none()
+                                || msg.to_session.as_deref() == Some(session_id);
+                            if dominated
+                                && msg.from_session != session_id
+                                && !msg.read_by.contains(&session_id.to_string())
+                            {
+                                count += 1;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        count
+    }
+
+    /// List all active agents (alive sessions with their agent types)
+    pub fn list_agents() -> Vec<serde_json::Value> {
+        Self::ensure_dirs();
+        Self::cleanup_stale();
+        let all = Self::load_all_claims();
+        all.iter().map(|c| {
+            serde_json::json!({
+                "session_id": c.session_id,
+                "agent_id": c.agent_id,
+                "pid": c.pid,
+                "claim_count": c.claims.len(),
+                "last_heartbeat": c.last_heartbeat,
+                "files": c.claims.iter()
+                    .map(|cl| cl.file_path.clone())
+                    .collect::<std::collections::HashSet<_>>()
+                    .into_iter()
+                    .collect::<Vec<_>>(),
+            })
+        }).collect()
+    }
+
+    /// Cleanup old messages (>1 hour)
+    pub fn cleanup_old_messages() -> usize {
+        let dir = Self::messages_dir();
+        let now = Self::now();
+        let max_age = 3600; // 1 hour
+        let mut removed = 0;
+        if let Ok(entries) = fs::read_dir(&dir) {
+            for entry in entries.flatten() {
+                if entry.path().extension().map(|x| x == "json").unwrap_or(false) {
+                    if let Ok(content) = fs::read_to_string(entry.path()) {
+                        if let Ok(msg) = serde_json::from_str::<SentinelMessage>(&content) {
+                            if now - msg.timestamp > max_age {
+                                let _ = fs::remove_file(entry.path());
+                                removed += 1;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        if removed > 0 {
+            Self::update_unread_marker();
+        }
+        removed
+    }
+
+    /// Update the unread marker file (total unread across all sessions)
+    fn update_unread_marker() {
+        let dir = Self::messages_dir();
+        let mut total_unread = 0u64;
+
+        // Count messages that have at least one session that hasn't read them
+        let all_sessions = Self::load_all_claims();
+        if let Ok(entries) = fs::read_dir(&dir) {
+            for entry in entries.flatten() {
+                if entry.path().extension().map(|x| x == "json").unwrap_or(false) {
+                    if let Ok(content) = fs::read_to_string(entry.path()) {
+                        if let Ok(msg) = serde_json::from_str::<SentinelMessage>(&content) {
+                            for sess in &all_sessions {
+                                if sess.session_id == msg.from_session {
+                                    continue;
+                                }
+                                let dominated = msg.to_session.is_none()
+                                    || msg.to_session.as_deref() == Some(&sess.session_id);
+                                if dominated && !msg.read_by.contains(&sess.session_id) {
+                                    total_unread += 1;
+                                    break; // count each message once
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        let marker = Self::unread_marker();
+        if total_unread > 0 {
+            let _ = fs::write(&marker, total_unread.to_string());
+        } else {
+            let _ = fs::remove_file(&marker);
+        }
     }
 
     /// Recount active collisions across all sessions and update the marker file
