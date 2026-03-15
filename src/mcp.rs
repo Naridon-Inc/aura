@@ -299,6 +299,36 @@ impl McpServer {
                                 }
                             },
                             {
+                                "name": "aura_sentinel_status",
+                                "description": "Check local multi-agent collision status. Shows which functions are claimed by which sessions, active collisions, and zone ownership. Use to see if another AI agent is working on the same code.",
+                                "inputSchema": {
+                                    "type": "object",
+                                    "properties": {}
+                                }
+                            },
+                            {
+                                "name": "aura_zone_claim",
+                                "description": "Claim an exclusive zone (directory/file pattern) for this session. Other sessions touching files in this zone will get a warning (mode: warn) or be blocked (mode: block).",
+                                "inputSchema": {
+                                    "type": "object",
+                                    "properties": {
+                                        "patterns": { "type": "string", "description": "Comma-separated file path patterns to claim (e.g., 'src/auth/,src/middleware/')." },
+                                        "mode": { "type": "string", "description": "Zone mode: 'warn' (default) or 'block'." }
+                                    },
+                                    "required": ["patterns"]
+                                }
+                            },
+                            {
+                                "name": "aura_sentinel_release",
+                                "description": "Manually release function claims for this session. Optionally release only claims for a specific file.",
+                                "inputSchema": {
+                                    "type": "object",
+                                    "properties": {
+                                        "file_path": { "type": "string", "description": "Optional: release claims only for this file. If omitted, releases all claims." }
+                                    }
+                                }
+                            },
+                            {
                                 "name": "aura_session_summarize",
                                 "description": "Generate an AI-powered summary of a specific session, including intent, outcome, learnings, and open items. Uses Gemini to analyze the session transcript.",
                                 "inputSchema": {
@@ -341,6 +371,9 @@ impl McpServer {
                     "aura_session_resume" => Self::tool_session_resume(args),
                     "aura_doctor" => Self::tool_doctor(args),
                     "aura_session_summarize" => Self::tool_session_summarize(args),
+                    "aura_sentinel_status" => Self::tool_sentinel_status(args),
+                    "aura_zone_claim" => Self::tool_zone_claim(args),
+                    "aura_sentinel_release" => Self::tool_sentinel_release(args),
                     _ => json!({ "isError": true, "content": [{ "type": "text", "text": "Unknown tool" }] })
                 };
 
@@ -353,6 +386,29 @@ impl McpServer {
                                 "type": "text",
                                 "text": "\n⚠️ REMINDER: You have not logged your intent yet. Call `aura_log_intent` with a description of your changes BEFORE committing. Without intent, the pre-commit hook will flag Intent Poisoning."
                             }));
+                        }
+                    }
+                }
+
+                // Push-based: Inject sentinel collision alerts
+                if name != "aura_sentinel_status" && name != "aura_sentinel_release" {
+                    let sentinel_marker_path = crate::session::worktree_aura_path("sentinel/collisions_pending");
+                    let sentinel_marker = std::path::Path::new(&sentinel_marker_path);
+                    if sentinel_marker.exists() {
+                        if let Ok(contents) = std::fs::read_to_string(sentinel_marker) {
+                            if let Ok(count) = contents.trim().parse::<u64>() {
+                                if count > 0 {
+                                    if let Some(content) = result.get_mut("content").and_then(|c| c.as_array_mut()) {
+                                        content.push(json!({
+                                            "type": "text",
+                                            "text": format!(
+                                                "\n\u{26a0}\u{fe0f} SENTINEL: {} function collision{}! Another agent session is editing the same functions. Call `aura_sentinel_status` to see details.",
+                                                count, if count == 1 { "" } else { "s" }
+                                            )
+                                        }));
+                                    }
+                                }
+                            }
                         }
                     }
                 }
@@ -533,7 +589,59 @@ impl McpServer {
 
         match SnapshotStore::snapshot_file(file_path, "mcp_pre_edit", "MCP Agent") {
             Ok(snap_id) => {
-                json!({ "content": [{ "type": "text", "text": format!("Snapshot saved: {}. File '{}' can now be recovered with `aura rewind`.", snap_id, file_path) }] })
+                let mut texts = vec![format!(
+                    "Snapshot saved: {}. File '{}' can now be recovered with `aura rewind`.",
+                    snap_id, file_path
+                )];
+
+                // Sentinel: claim functions in this file
+                if let Some(session) = SessionManager::get_active_session() {
+                    let pid = session.pid.unwrap_or(std::process::id());
+
+                    // Try to parse for function names; fall back to file-level claim
+                    let functions = Self::extract_function_names(file_path);
+
+                    // Cleanup stale claims first
+                    let stale = crate::sentinel::SentinelManager::cleanup_stale();
+                    if stale > 0 {
+                        texts.push(format!("Sentinel: cleaned {} stale session(s).", stale));
+                    }
+
+                    let collisions = crate::sentinel::SentinelManager::claim_functions(
+                        &session.session_id,
+                        &session.agent_id,
+                        pid,
+                        file_path,
+                        &functions,
+                    );
+
+                    if !collisions.is_empty() {
+                        let mut warn = String::from("\n\u{26a0}\u{fe0f} SENTINEL COLLISION: Another agent is editing the same functions:\n");
+                        for c in &collisions {
+                            warn.push_str(&format!(
+                                "  - {}::{} (held by session {} / agent {})\n",
+                                c.file_path, c.function_name, c.held_by_session, c.held_by_agent
+                            ));
+                        }
+                        warn.push_str("Coordinate with the other session to avoid conflicts.");
+                        texts.push(warn);
+                    }
+
+                    // Check zone ownership
+                    if let Some(zone) = crate::sentinel::SentinelManager::check_zone(&session.session_id, file_path) {
+                        let severity = match zone.mode {
+                            crate::sentinel::ZoneMode::Block => "BLOCKED",
+                            crate::sentinel::ZoneMode::Warn => "WARNING",
+                        };
+                        texts.push(format!(
+                            "\n\u{26a0}\u{fe0f} ZONE {}: File '{}' is in zone '{}' owned by session {}. Patterns: {:?}",
+                            severity, file_path, zone.zone_id, zone.session_id, zone.patterns
+                        ));
+                    }
+                }
+
+                let combined = texts.join("\n");
+                json!({ "content": [{ "type": "text", "text": combined }] })
             }
             Err(e) => {
                 json!({ "isError": true, "content": [{ "type": "text", "text": format!("Snapshot failed: {}", e) }] })
@@ -1173,6 +1281,101 @@ impl McpServer {
                 json!({ "content": [{ "type": "text", "text": output }] })
             }
             None => json!({ "content": [{ "type": "text", "text": format!("No transcript found for session '{}'.", session_id) }] }),
+        }
+    }
+
+    // ── Sentinel tools ──
+
+    fn tool_sentinel_status(_args: Value) -> Value {
+        let session_id = SessionManager::get_active_session()
+            .map(|s| s.session_id)
+            .unwrap_or_else(|| "unknown".to_string());
+
+        let status = crate::sentinel::SentinelManager::get_status(&session_id);
+        let toon_text = crate::toon::encode(&status);
+        json!({ "content": [{ "type": "text", "text": toon_text }] })
+    }
+
+    fn tool_zone_claim(args: Value) -> Value {
+        let patterns_str = match args["patterns"].as_str() {
+            Some(p) => p,
+            None => return json!({ "isError": true, "content": [{ "type": "text", "text": "patterns is required." }] }),
+        };
+
+        let patterns: Vec<String> = patterns_str
+            .split(',')
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect();
+
+        let mode = match args["mode"].as_str().unwrap_or("warn") {
+            "block" => crate::sentinel::ZoneMode::Block,
+            _ => crate::sentinel::ZoneMode::Warn,
+        };
+
+        let session_id = SessionManager::get_active_session()
+            .map(|s| s.session_id)
+            .unwrap_or_else(|| "unknown".to_string());
+
+        let zone = crate::sentinel::SentinelManager::create_zone(&session_id, patterns, mode);
+        json!({ "content": [{ "type": "text", "text": format!(
+            "Zone '{}' created for session {}. Patterns: {:?}, Mode: {:?}",
+            zone.zone_id, zone.session_id, zone.patterns, zone.mode
+        ) }] })
+    }
+
+    fn tool_sentinel_release(args: Value) -> Value {
+        let session_id = SessionManager::get_active_session()
+            .map(|s| s.session_id)
+            .unwrap_or_else(|| "unknown".to_string());
+
+        if let Some(file_path) = args["file_path"].as_str() {
+            crate::sentinel::SentinelManager::release_file_claims(&session_id, file_path);
+            json!({ "content": [{ "type": "text", "text": format!(
+                "Released claims for file '{}' in session {}.", file_path, session_id
+            ) }] })
+        } else {
+            crate::sentinel::SentinelManager::release_claims(&session_id);
+            json!({ "content": [{ "type": "text", "text": format!(
+                "Released all claims for session {}.", session_id
+            ) }] })
+        }
+    }
+
+    /// Extract function names from a file using the semantic parser.
+    /// Falls back to a single file-level claim if parsing fails.
+    fn extract_function_names(file_path: &str) -> Vec<String> {
+        let ext = Path::new(file_path)
+            .extension()
+            .and_then(|e| e.to_str())
+            .unwrap_or("");
+
+        if ext.is_empty() {
+            return vec![format!("__file__{}", file_path)];
+        }
+
+        let source = match std::fs::read_to_string(file_path) {
+            Ok(s) => s,
+            Err(_) => return vec![format!("__file__{}", file_path)],
+        };
+
+        let mut parser = match crate::parser::SemanticParser::new() {
+            Ok(p) => p,
+            Err(_) => return vec![format!("__file__{}", file_path)],
+        };
+        match parser.parse_file(&source, ext) {
+            Ok(nodes) => {
+                let names: Vec<String> = nodes
+                    .iter()
+                    .filter_map(|n| n.identifier.clone())
+                    .collect();
+                if names.is_empty() {
+                    vec![format!("__file__{}", file_path)]
+                } else {
+                    names
+                }
+            }
+            Err(_) => vec![format!("__file__{}", file_path)],
         }
     }
 }

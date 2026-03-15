@@ -17,7 +17,7 @@ fn transcripts_dir() -> String {
     worktree_aura_path("transcripts")
 }
 
-fn worktree_aura_path(subdir: &str) -> String {
+pub(crate) fn worktree_aura_path(subdir: &str) -> String {
     // Check if we're in a worktree by looking for .git file (not directory)
     let git_path = std::path::Path::new(".git");
     if git_path.is_file() {
@@ -132,6 +132,8 @@ pub struct AgentSession {
     pub first_prompt: Option<String>,
     #[serde(default)]
     pub subagents: Vec<SubagentRecord>,
+    #[serde(default)]
+    pub pid: Option<u32>,
 }
 
 /// A single turn in a conversation transcript
@@ -200,6 +202,7 @@ impl SessionManager {
             branch,
             first_prompt: None,
             subagents: Vec::new(),
+            pid: Some(std::process::id()),
         };
 
         Self::save_session(&session);
@@ -235,8 +238,11 @@ impl SessionManager {
         }
     }
 
-    /// End the current session
+    /// End the current session and release sentinel claims
     pub fn end_session() {
+        if let Some(session) = Self::get_active_session() {
+            crate::sentinel::SentinelManager::release_claims(&session.session_id);
+        }
         Self::set_phase(SessionPhase::Ended);
     }
 
@@ -815,6 +821,7 @@ impl SessionManager {
                     branch: None,
                     first_prompt: Some(intent.clone()),
                     subagents: Vec::new(),
+                    pid: None,
                 };
 
                 let transcript = vec![TranscriptEntry {
