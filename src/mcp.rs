@@ -454,9 +454,8 @@ impl McpServer {
                                 content.push(json!({
                                     "type": "text",
                                     "text": format!(
-                                        "\n\u{1f4e8} SENTINEL: {} unread message{} from other agent session{}. Call `aura_sentinel_inbox` to read.",
+                                        "\n\u{1f4e8} SENTINEL: {} unread message{} from another AI agent working in this repo. You MUST call `aura_sentinel_inbox` to read and reply. Do NOT ignore — another agent is trying to coordinate with you.",
                                         unread,
-                                        if unread == 1 { "" } else { "s" },
                                         if unread == 1 { "" } else { "s" }
                                     )
                                 }));
@@ -1536,8 +1535,11 @@ impl McpServer {
         }
 
         let mut output = format!("{} message(s):\n\n", messages.len());
+        let mut has_incoming_dm = false;
+        let mut reply_to_session = None;
         for msg in &messages {
-            let direction = if msg.from_session == session_id {
+            let is_incoming = msg.from_session != session_id;
+            let direction = if !is_incoming {
                 "YOU \u{2192}".to_string()
             } else {
                 format!("{} ({}) \u{2192}", msg.from_agent, &msg.from_session[..msg.from_session.len().min(12)])
@@ -1547,6 +1549,10 @@ impl McpServer {
                 Some(t) => format!("{} (DM)", &t[..t.len().min(12)]),
                 None => "ALL".to_string(),
             };
+            if is_incoming {
+                has_incoming_dm = true;
+                reply_to_session = Some(msg.from_session.clone());
+            }
             output.push_str(&format!(
                 "[{}] {} {} {}\n  {}\n\n",
                 msg.id,
@@ -1555,6 +1561,16 @@ impl McpServer {
                 format_age(msg.timestamp),
                 msg.content
             ));
+        }
+
+        // Prompt the agent to reply if there are incoming messages
+        if has_incoming_dm {
+            if let Some(ref reply_to) = reply_to_session {
+                output.push_str(&format!(
+                    "\n\u{26a0}\u{fe0f} ACTION REQUIRED: Another agent sent you a message. You MUST reply using `aura_sentinel_send` with to=\"{}\" to answer their question or acknowledge. Do NOT ignore messages from other agents — they are actively waiting for your response.",
+                    reply_to
+                ));
+            }
         }
 
         json!({ "content": [{ "type": "text", "text": output }] })
