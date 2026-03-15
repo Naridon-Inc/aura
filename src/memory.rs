@@ -71,6 +71,14 @@ impl Default for ProjectMemory {
     }
 }
 
+// ── Limits ──
+
+const MAX_ENTRY_LENGTH: usize = 1000;       // truncate individual entries
+const MAX_ENTRIES_PER_SECTION: usize = 50;   // cap per section
+const MAX_ARCHITECTURE: usize = 100;         // cap components
+const MAX_TIMELINE: usize = 200;             // cap timeline entries
+const ACTIVE_WORK_MAX_AGE: u64 = 86400 * 7;  // auto-prune active_work after 7 days
+
 // ── Manager ──
 
 pub struct MemoryManager;
@@ -106,8 +114,9 @@ impl MemoryManager {
         }
     }
 
-    /// Save project memory (atomic write)
-    fn save(memory: &ProjectMemory) -> Result<(), String> {
+    /// Save project memory (atomic write, with auto-pruning)
+    fn save(memory: &mut ProjectMemory) -> Result<(), String> {
+        Self::prune(memory);
         let path = Self::memory_path();
         let tmp = format!("{}.tmp", path);
         let json = serde_json::to_string_pretty(memory)
@@ -117,23 +126,63 @@ impl MemoryManager {
         Ok(())
     }
 
+    /// Enforce size limits and auto-cleanup
+    fn prune(memory: &mut ProjectMemory) {
+        let now = Self::now();
+
+        // Auto-prune old active_work entries
+        memory.active_work.retain(|e| now - e.added_at < ACTIVE_WORK_MAX_AGE);
+
+        // Cap sections — keep most recent when over limit
+        Self::cap_entries(&mut memory.conventions, MAX_ENTRIES_PER_SECTION);
+        Self::cap_entries(&mut memory.gotchas, MAX_ENTRIES_PER_SECTION);
+        Self::cap_entries(&mut memory.context, MAX_ENTRIES_PER_SECTION);
+        Self::cap_entries(&mut memory.active_work, MAX_ENTRIES_PER_SECTION);
+
+        // Cap architecture and timeline
+        if memory.architecture.len() > MAX_ARCHITECTURE {
+            memory.architecture = memory.architecture.split_off(memory.architecture.len() - MAX_ARCHITECTURE);
+        }
+        if memory.decisions.len() > MAX_TIMELINE {
+            memory.decisions = memory.decisions.split_off(memory.decisions.len() - MAX_TIMELINE);
+        }
+    }
+
+    /// Keep only the most recent N entries
+    fn cap_entries(entries: &mut Vec<MemoryEntry>, max: usize) {
+        if entries.len() > max {
+            entries.sort_by(|a, b| b.added_at.cmp(&a.added_at));
+            entries.truncate(max);
+        }
+    }
+
+    /// Truncate content to MAX_ENTRY_LENGTH
+    fn truncate(content: &str) -> String {
+        if content.len() > MAX_ENTRY_LENGTH {
+            format!("{}...", &content[..MAX_ENTRY_LENGTH])
+        } else {
+            content.to_string()
+        }
+    }
+
     /// Set project identity
     pub fn set_identity(identity: &str, stack: Vec<String>) {
         let mut mem = Self::load();
-        mem.identity = identity.to_string();
+        mem.identity = Self::truncate(identity);
         mem.stack = stack;
         mem.last_updated = Self::now();
-        let _ = Self::save(&mem);
+        let _ = Self::save(&mut mem);
     }
 
     /// Add an architecture component
-    pub fn add_component(component: ArchComponent) {
+    pub fn add_component(mut component: ArchComponent) {
         let mut mem = Self::load();
+        component.description = Self::truncate(&component.description);
         // Update if same name exists
         mem.architecture.retain(|c| c.name != component.name);
         mem.architecture.push(component);
         mem.last_updated = Self::now();
-        let _ = Self::save(&mem);
+        let _ = Self::save(&mut mem);
     }
 
     /// Remove an architecture component
@@ -141,24 +190,46 @@ impl MemoryManager {
         let mut mem = Self::load();
         mem.architecture.retain(|c| c.name != name);
         mem.last_updated = Self::now();
-        let _ = Self::save(&mem);
+        let _ = Self::save(&mut mem);
     }
 
     /// Add a timeline entry (decision, milestone, etc.)
-    pub fn add_timeline(entry: TimelineEntry) {
+    pub fn add_timeline(mut entry: TimelineEntry) {
         let mut mem = Self::load();
-        mem.decisions.push(entry);
+        entry.description = Self::truncate(&entry.description);
+        // Dedup: skip if same title+date already exists
+        if !mem.decisions.iter().any(|d| d.title == entry.title && d.date == entry.date) {
+            mem.decisions.push(entry);
+        }
         mem.last_updated = Self::now();
-        let _ = Self::save(&mem);
+        let _ = Self::save(&mut mem);
     }
 
     /// Add a memory entry to a section
     pub fn add_entry(section: &str, content: &str, tags: Vec<String>, author: &str) -> String {
         let mut mem = Self::load();
+        let truncated = Self::truncate(content);
+
+        // Dedup: skip if same content already exists in the section
+        let exists = |entries: &[MemoryEntry]| entries.iter().any(|e| e.content == truncated);
+        let target = match section {
+            "convention" | "conventions" => &mem.conventions,
+            "gotcha" | "gotchas" => &mem.gotchas,
+            "active" | "active_work" => &mem.active_work,
+            _ => &mem.context,
+        };
+        if exists(target) {
+            // Return existing entry's id
+            let existing_id = target.iter().find(|e| e.content == truncated)
+                .map(|e| e.id.clone())
+                .unwrap_or_else(|| "duplicate".to_string());
+            return existing_id;
+        }
+
         let id = format!("mem-{}", &uuid::Uuid::new_v4().to_string()[..8]);
         let entry = MemoryEntry {
             id: id.clone(),
-            content: content.to_string(),
+            content: truncated,
             tags,
             added_by: author.to_string(),
             added_at: Self::now(),
@@ -173,7 +244,7 @@ impl MemoryManager {
         }
 
         mem.last_updated = Self::now();
-        let _ = Self::save(&mem);
+        let _ = Self::save(&mut mem);
         id
     }
 
@@ -185,12 +256,11 @@ impl MemoryManager {
         mem.gotchas.retain(|e| e.id != id);
         mem.context.retain(|e| e.id != id);
         mem.active_work.retain(|e| e.id != id);
-        // Also allow removing timeline entries
         mem.decisions.retain(|e| e.title != id);
         let after = mem.conventions.len() + mem.gotchas.len() + mem.context.len() + mem.active_work.len();
         if before != after {
             mem.last_updated = Self::now();
-            let _ = Self::save(&mem);
+            let _ = Self::save(&mut mem);
             true
         } else {
             false
