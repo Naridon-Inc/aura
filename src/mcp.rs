@@ -618,7 +618,7 @@ impl McpServer {
             session_data = sd;
         }
 
-        let status_data = json!({
+        let mut status_data = json!({
             "strict_mode": config.strict_gatekeeper_mode,
             "dev_mode": config.dev_mode,
             "latest_checkpoint_id": checkpoints.first().map(|c| c.id.clone()),
@@ -626,6 +626,62 @@ impl McpServer {
             "total_checkpoints": checkpoints.len(),
             "session": session_data,
         });
+
+        // Sentinel: register presence and show other active agents
+        {
+            crate::sentinel::SentinelManager::cleanup_stale();
+
+            // Register this session so others can see us
+            if let Some(ref session) = SessionManager::get_active_session() {
+                let pid = session.pid.unwrap_or(std::process::id());
+                crate::sentinel::SentinelManager::claim_functions(
+                    &session.session_id,
+                    &session.agent_id,
+                    pid,
+                    "__presence__",
+                    &[],
+                );
+                crate::sentinel::SentinelManager::update_heartbeat(&session.session_id);
+            }
+
+            let agents = crate::sentinel::SentinelManager::list_agents();
+            let other_count = if let Some(ref session) = SessionManager::get_active_session() {
+                agents.iter().filter(|a| a["session_id"].as_str() != Some(&session.session_id)).count()
+            } else {
+                agents.len()
+            };
+
+            if other_count > 0 {
+                let others: Vec<serde_json::Value> = agents.iter()
+                    .filter(|a| {
+                        SessionManager::get_active_session()
+                            .map(|s| a["session_id"].as_str() != Some(&s.session_id))
+                            .unwrap_or(true)
+                    })
+                    .cloned()
+                    .collect();
+                status_data["sentinel"] = json!({
+                    "other_agents": other_count,
+                    "agents": others,
+                    "hint": "Other AI agents are active in this repo. Use `aura_sentinel_agents` to see details, `aura_sentinel_send` to communicate."
+                });
+            } else {
+                status_data["sentinel"] = json!({
+                    "other_agents": 0,
+                    "status": "You are the only active agent"
+                });
+            }
+
+            if let Some(ref session) = SessionManager::get_active_session() {
+                let unread = crate::sentinel::SentinelManager::unread_count(&session.session_id);
+                if unread > 0 {
+                    status_data["sentinel_messages"] = json!({
+                        "unread": unread,
+                        "hint": "Call `aura_sentinel_inbox` to read messages from other agents"
+                    });
+                }
+            }
+        }
 
         let toon_text = crate::toon::encode(&status_data);
         json!({ "content": [{ "type": "text", "text": toon_text }] })
