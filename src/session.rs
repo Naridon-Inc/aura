@@ -157,9 +157,13 @@ impl SessionManager {
     pub fn start_session(agent_id: &str) -> AgentSession {
         Self::ensure_dirs();
 
-        // Check for existing active session
+        // Check for existing active session from THIS process
         if let Some(existing) = Self::get_active_session() {
-            if existing.agent_id == agent_id && existing.phase != SessionPhase::Ended {
+            let my_pid = std::process::id();
+            if existing.agent_id == agent_id
+                && existing.phase != SessionPhase::Ended
+                && existing.pid == Some(my_pid)
+            {
                 return existing;
             }
         }
@@ -246,10 +250,12 @@ impl SessionManager {
         Self::set_phase(SessionPhase::Ended);
     }
 
-    /// Get the currently active session
+    /// Get the currently active session for this process.
+    /// Prefers a session matching the current PID; falls back to most recent active.
     pub fn get_active_session() -> Option<AgentSession> {
         Self::ensure_dirs();
         if let Ok(entries) = fs::read_dir(&sessions_dir()) {
+            let my_pid = std::process::id();
             let mut sessions: Vec<AgentSession> = entries
                 .flatten()
                 .filter(|e| e.path().extension().map(|x| x == "json").unwrap_or(false))
@@ -258,9 +264,16 @@ impl SessionManager {
                         .ok()
                         .and_then(|s| serde_json::from_str(&s).ok())
                 })
+                .filter(|s: &AgentSession| s.phase != SessionPhase::Ended)
                 .collect();
             sessions.sort_by(|a, b| b.last_activity.cmp(&a.last_activity));
-            sessions.into_iter().find(|s| s.phase != SessionPhase::Ended)
+
+            // Prefer session matching our PID (multi-agent safe)
+            if let Some(mine) = sessions.iter().find(|s| s.pid == Some(my_pid)) {
+                return Some(mine.clone());
+            }
+            // Fallback: most recent active session
+            sessions.into_iter().next()
         } else {
             None
         }
