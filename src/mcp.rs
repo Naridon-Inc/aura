@@ -410,19 +410,26 @@ impl McpServer {
                     _ => json!({ "isError": true, "content": [{ "type": "text", "text": "Unknown tool" }] })
                 };
 
-                // Sentinel: register presence on EVERY tool call (don't rely on agents calling aura_status)
+                // Sentinel: register presence on EVERY tool call.
+                // Ensure each MCP process gets its own session (PID-unique).
                 {
-                    if let Some(session) = SessionManager::get_active_session() {
-                        let pid = session.pid.unwrap_or(std::process::id());
-                        crate::sentinel::SentinelManager::claim_functions(
-                            &session.session_id,
-                            &session.agent_id,
-                            pid,
-                            "__presence__",
-                            &[],
-                        );
-                        crate::sentinel::SentinelManager::update_heartbeat(&session.session_id);
-                    }
+                    let my_pid = std::process::id();
+                    let session = SessionManager::get_active_session();
+                    let session = match session {
+                        Some(s) if s.pid == Some(my_pid) => s,
+                        _ => {
+                            // No session for this PID — create one
+                            SessionManager::start_session("MCP Agent")
+                        }
+                    };
+                    crate::sentinel::SentinelManager::claim_functions(
+                        &session.session_id,
+                        &session.agent_id,
+                        my_pid,
+                        "__presence__",
+                        &[],
+                    );
+                    crate::sentinel::SentinelManager::update_heartbeat(&session.session_id);
                 }
 
                 // Append intent reminder to non-intent tool responses if intent hasn't been logged
