@@ -24,6 +24,7 @@ mod session;
 mod plugin;
 mod plugins;
 mod agents;
+mod sentinel;
 
 use clap::{Parser, Subcommand};
 use parser::SemanticParser;
