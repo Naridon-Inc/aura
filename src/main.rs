@@ -307,11 +307,66 @@ fn perform_update() -> Result<(), Box<dyn std::error::Error>> {
             }
 
             println!("{} Aura updated successfully to v{}!", "✓".green().bold(), new_version);
+
+            // Refresh integrations (CLAUDE.md, hooks) in current repo
+            refresh_integrations();
         }
     } else {
         println!("{} Aura is already up to date (v{}).", "✓".green().bold(), CURRENT_VERSION);
+
+        // Still refresh integrations in case the template changed
+        refresh_integrations();
     }
     Ok(())
+}
+
+/// Refresh CLAUDE.md and other integration files with the latest Aura block.
+/// Called after `aura update` and can be called standalone.
+fn refresh_integrations() {
+    let claude_md_path = std::path::Path::new("CLAUDE.md");
+    let aura_block = include_str!("../integrations/claude-md-block.md");
+
+    if claude_md_path.exists() {
+        if let Ok(existing) = fs::read_to_string(claude_md_path) {
+            // Replace existing AURA block if present
+            if existing.contains("<!-- AURA_START -->") && existing.contains("<!-- AURA_END -->") {
+                if let (Some(start), Some(end)) = (
+                    existing.find("<!-- AURA_START -->"),
+                    existing.find("<!-- AURA_END -->"),
+                ) {
+                    let end = end + "<!-- AURA_END -->".len();
+                    let end = if existing[end..].starts_with('\n') { end + 1 } else { end };
+                    let updated = format!("{}{}{}", &existing[..start], aura_block, &existing[end..]);
+                    let _ = fs::write(claude_md_path, updated);
+                    println!("{} CLAUDE.md refreshed with latest Aura tools.", "✓".green().bold());
+                }
+            } else if !existing.contains("aura_log_intent") {
+                let updated = format!("{}\n\n{}", existing, aura_block);
+                let _ = fs::write(claude_md_path, updated);
+                println!("{} Aura instructions appended to CLAUDE.md.", "✓".green().bold());
+            } else {
+                println!("{} CLAUDE.md already has Aura instructions (no markers found to auto-update).", "ℹ".blue());
+            }
+        }
+    }
+
+    let gemini_md_path = std::path::Path::new("GEMINI.md");
+    if gemini_md_path.exists() {
+        if let Ok(existing) = fs::read_to_string(gemini_md_path) {
+            if existing.contains("<!-- AURA_START -->") && existing.contains("<!-- AURA_END -->") {
+                if let (Some(start), Some(end)) = (
+                    existing.find("<!-- AURA_START -->"),
+                    existing.find("<!-- AURA_END -->"),
+                ) {
+                    let end = end + "<!-- AURA_END -->".len();
+                    let end = if existing[end..].starts_with('\n') { end + 1 } else { end };
+                    let updated = format!("{}{}{}", &existing[..start], aura_block, &existing[end..]);
+                    let _ = fs::write(gemini_md_path, updated);
+                    println!("{} GEMINI.md refreshed with latest Aura tools.", "✓".green().bold());
+                }
+            }
+        }
+    }
 }
 
 #[derive(Parser)]
