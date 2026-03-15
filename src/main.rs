@@ -1,3 +1,4 @@
+#![recursion_limit = "512"]
 mod models;
 mod parser;
 mod hook;
@@ -25,6 +26,7 @@ mod plugin;
 mod plugins;
 mod agents;
 mod sentinel;
+mod memory;
 
 use clap::{Parser, Subcommand};
 use parser::SemanticParser;

@@ -368,6 +368,41 @@ impl McpServer {
                                     },
                                     "required": ["session_id"]
                                 }
+                            },
+                            {
+                                "name": "aura_memory_write",
+                                "description": "Write to the project's permanent memory. Use this to record architectural knowledge, decisions, conventions, gotchas, or context that future AI agents (or yourself in a future session) should know. This memory persists FOREVER across all sessions and all agents. Sections: 'identity' (set project purpose + stack), 'architecture' (add component), 'timeline' (record decision/milestone), 'convention', 'gotcha', 'context', 'active_work'.",
+                                "inputSchema": {
+                                    "type": "object",
+                                    "properties": {
+                                        "section": { "type": "string", "description": "Section to write to: 'identity', 'architecture', 'timeline', 'convention', 'gotcha', 'context', 'active_work'." },
+                                        "content": { "type": "string", "description": "The memory content. For 'identity': project description. For 'architecture': JSON with name, kind, path, description, connects_to. For 'timeline': JSON with date, title, description, category. For others: plain text." },
+                                        "tags": { "type": "string", "description": "Optional comma-separated tags for searchability." },
+                                        "stack": { "type": "string", "description": "Optional: comma-separated tech stack (only for 'identity' section)." }
+                                    },
+                                    "required": ["section", "content"]
+                                }
+                            },
+                            {
+                                "name": "aura_memory_read",
+                                "description": "Read the project's permanent memory — architecture, decisions, conventions, gotchas, and context accumulated across all past sessions. Call this when starting work on an unfamiliar area, or when you need to understand why something was built a certain way. Use 'query' to search, or omit for the full project memory.",
+                                "inputSchema": {
+                                    "type": "object",
+                                    "properties": {
+                                        "query": { "type": "string", "description": "Optional: search keyword to filter memories. If omitted, returns the full project memory." }
+                                    }
+                                }
+                            },
+                            {
+                                "name": "aura_memory_forget",
+                                "description": "Remove a memory entry by its ID. Use when information is outdated or wrong.",
+                                "inputSchema": {
+                                    "type": "object",
+                                    "properties": {
+                                        "id": { "type": "string", "description": "The memory entry ID to remove (e.g., 'mem-a1b2c3d4')." }
+                                    },
+                                    "required": ["id"]
+                                }
                             }
                         ]
                     }
@@ -407,6 +442,9 @@ impl McpServer {
                     "aura_sentinel_send" => Self::tool_sentinel_send(args),
                     "aura_sentinel_inbox" => Self::tool_sentinel_inbox(args),
                     "aura_sentinel_agents" => Self::tool_sentinel_agents(args),
+                    "aura_memory_write" => Self::tool_memory_write(args),
+                    "aura_memory_read" => Self::tool_memory_read(args),
+                    "aura_memory_forget" => Self::tool_memory_forget(args),
                     _ => json!({ "isError": true, "content": [{ "type": "text", "text": "Unknown tool" }] })
                 };
 
@@ -688,6 +726,11 @@ impl McpServer {
                     });
                 }
             }
+        }
+
+        // Project memory: inject compact summary so agents get context instantly
+        if let Some(memory_summary) = crate::memory::MemoryManager::compact_summary() {
+            status_data["project_memory"] = memory_summary;
         }
 
         let toon_text = crate::toon::encode(&status_data);
@@ -1606,6 +1649,122 @@ impl McpServer {
         output.push_str("To message an agent, use `aura_sentinel_send` with their session_id in the `to` field.");
 
         json!({ "content": [{ "type": "text", "text": output }] })
+    }
+
+    // ── Memory tools ──
+
+    fn tool_memory_write(args: Value) -> Value {
+        let section = match args["section"].as_str() {
+            Some(s) => s,
+            None => return json!({ "isError": true, "content": [{ "type": "text", "text": "section is required." }] }),
+        };
+        let content = match args["content"].as_str() {
+            Some(c) => c,
+            None => return json!({ "isError": true, "content": [{ "type": "text", "text": "content is required." }] }),
+        };
+
+        let agent = SessionManager::get_active_session()
+            .map(|s| s.agent_id)
+            .unwrap_or_else(|| "unknown".to_string());
+
+        match section {
+            "identity" => {
+                let stack: Vec<String> = args["stack"].as_str()
+                    .unwrap_or("")
+                    .split(',')
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty())
+                    .collect();
+                crate::memory::MemoryManager::set_identity(content, stack);
+                json!({ "content": [{ "type": "text", "text": format!("Project identity set: {}", content) }] })
+            }
+            "architecture" => {
+                let comp = if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(content) {
+                    crate::memory::ArchComponent {
+                        name: parsed["name"].as_str().unwrap_or("unnamed").to_string(),
+                        kind: parsed["kind"].as_str().unwrap_or("module").to_string(),
+                        path: parsed["path"].as_str().map(|s| s.to_string()),
+                        description: parsed["description"].as_str().unwrap_or("").to_string(),
+                        connects_to: parsed["connects_to"].as_array()
+                            .map(|a| a.iter().filter_map(|v| v.as_str().map(|s| s.to_string())).collect())
+                            .unwrap_or_default(),
+                    }
+                } else {
+                    let name = content.split_whitespace().next().unwrap_or("component").to_string();
+                    crate::memory::ArchComponent {
+                        name,
+                        kind: "module".to_string(),
+                        path: None,
+                        description: content.to_string(),
+                        connects_to: Vec::new(),
+                    }
+                };
+                let name = comp.name.clone();
+                crate::memory::MemoryManager::add_component(comp);
+                json!({ "content": [{ "type": "text", "text": format!("Architecture component '{}' added to project memory.", name) }] })
+            }
+            "timeline" => {
+                let entry = if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(content) {
+                    crate::memory::TimelineEntry {
+                        date: parsed["date"].as_str().unwrap_or("unknown").to_string(),
+                        title: parsed["title"].as_str().unwrap_or("").to_string(),
+                        description: parsed["description"].as_str().unwrap_or("").to_string(),
+                        category: parsed["category"].as_str().unwrap_or("decision").to_string(),
+                        author: Some(agent),
+                    }
+                } else {
+                    crate::memory::TimelineEntry {
+                        date: "unknown".to_string(),
+                        title: content.to_string(),
+                        description: String::new(),
+                        category: "decision".to_string(),
+                        author: Some(agent),
+                    }
+                };
+                let title = entry.title.clone();
+                crate::memory::MemoryManager::add_timeline(entry);
+                json!({ "content": [{ "type": "text", "text": format!("Timeline entry '{}' added to project memory.", title) }] })
+            }
+            _ => {
+                let tags: Vec<String> = args["tags"].as_str()
+                    .unwrap_or("")
+                    .split(',')
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty())
+                    .collect();
+                let id = crate::memory::MemoryManager::add_entry(section, content, tags, &agent);
+                json!({ "content": [{ "type": "text", "text": format!("Memory '{}' added to '{}' section.", id, section) }] })
+            }
+        }
+    }
+
+    fn tool_memory_read(args: Value) -> Value {
+        if let Some(query) = args["query"].as_str() {
+            let results = crate::memory::MemoryManager::search(query);
+            if results.is_empty() {
+                return json!({ "content": [{ "type": "text", "text": format!("No memories matching '{}'.", query) }] });
+            }
+            let data = serde_json::json!({ "query": query, "results": results });
+            let toon_text = crate::toon::encode(&data);
+            json!({ "content": [{ "type": "text", "text": toon_text }] })
+        } else {
+            let full = crate::memory::MemoryManager::full_view();
+            let toon_text = crate::toon::encode(&full);
+            json!({ "content": [{ "type": "text", "text": toon_text }] })
+        }
+    }
+
+    fn tool_memory_forget(args: Value) -> Value {
+        let id = match args["id"].as_str() {
+            Some(i) => i,
+            None => return json!({ "isError": true, "content": [{ "type": "text", "text": "id is required." }] }),
+        };
+
+        if crate::memory::MemoryManager::forget(id) {
+            json!({ "content": [{ "type": "text", "text": format!("Memory '{}' removed.", id) }] })
+        } else {
+            json!({ "content": [{ "type": "text", "text": format!("Memory '{}' not found.", id) }] })
+        }
     }
 }
 
