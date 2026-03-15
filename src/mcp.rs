@@ -410,6 +410,21 @@ impl McpServer {
                     _ => json!({ "isError": true, "content": [{ "type": "text", "text": "Unknown tool" }] })
                 };
 
+                // Sentinel: register presence on EVERY tool call (don't rely on agents calling aura_status)
+                {
+                    if let Some(session) = SessionManager::get_active_session() {
+                        let pid = session.pid.unwrap_or(std::process::id());
+                        crate::sentinel::SentinelManager::claim_functions(
+                            &session.session_id,
+                            &session.agent_id,
+                            pid,
+                            "__presence__",
+                            &[],
+                        );
+                        crate::sentinel::SentinelManager::update_heartbeat(&session.session_id);
+                    }
+                }
+
                 // Append intent reminder to non-intent tool responses if intent hasn't been logged
                 if name != "aura_log_intent" && name != "aura_read_history" {
                     let intent_logged = std::path::Path::new(".aura/.intent_logged").exists();
@@ -627,23 +642,9 @@ impl McpServer {
             "session": session_data,
         });
 
-        // Sentinel: register presence and show other active agents
+        // Sentinel: show other active agents (presence already registered by global hook)
         {
             crate::sentinel::SentinelManager::cleanup_stale();
-
-            // Register this session so others can see us
-            if let Some(ref session) = SessionManager::get_active_session() {
-                let pid = session.pid.unwrap_or(std::process::id());
-                crate::sentinel::SentinelManager::claim_functions(
-                    &session.session_id,
-                    &session.agent_id,
-                    pid,
-                    "__presence__",
-                    &[],
-                );
-                crate::sentinel::SentinelManager::update_heartbeat(&session.session_id);
-            }
-
             let agents = crate::sentinel::SentinelManager::list_agents();
             let other_count = if let Some(ref session) = SessionManager::get_active_session() {
                 agents.iter().filter(|a| a["session_id"].as_str() != Some(&session.session_id)).count()
