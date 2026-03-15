@@ -127,7 +127,7 @@ impl McpServer {
                             },
                             {
                                 "name": "aura_status",
-                                "description": "Check the current semantic status of the repository, including active checkpoints and logic nodes tracked.",
+                                "description": "Check the current semantic status of the repository, including active checkpoints, logic nodes tracked, and other active AI agent sessions (Sentinel). Call this at the start of every session.",
                                 "inputSchema": {
                                     "type": "object",
                                     "properties": {}
@@ -352,7 +352,7 @@ impl McpServer {
                             },
                             {
                                 "name": "aura_sentinel_agents",
-                                "description": "List all active agent sessions in this repo. Shows agent type (Claude, Copilot, Gemini, etc.), PID, files being worked on, and session ID for sending direct messages.",
+                                "description": "IMPORTANT: You MUST call this tool whenever the user asks about other agents, other Claude sessions, or who else is working on this repo. Lists all active AI agent sessions (Claude, Copilot, Gemini, Cursor, etc.) with their PID, files being worked on, and session ID for messaging. Never guess — always check.",
                                 "inputSchema": {
                                     "type": "object",
                                     "properties": {}
