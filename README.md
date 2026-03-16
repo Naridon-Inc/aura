@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="https://img.shields.io/badge/version-0.8.0-white?style=flat-square" />
+  <img src="https://img.shields.io/badge/version-0.8.1-white?style=flat-square" />
   <img src="https://img.shields.io/badge/license-Apache%202.0-blue?style=flat-square" />
   <img src="https://img.shields.io/badge/lang-Rust-orange?style=flat-square" />
   <img src="https://img.shields.io/badge/agents-Claude%20Code%20%2B%20Gemini%20CLI-green?style=flat-square" />

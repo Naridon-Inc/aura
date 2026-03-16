@@ -356,6 +356,162 @@ impl MemoryManager {
         })
     }
 
+    /// AI-powered memory compaction. Summarizes old entries in a section
+    /// into fewer, denser entries. Uses whatever AI provider is configured
+    /// (Gemini free tier via CLI key, or Anthropic from Claude Code env).
+    /// Returns number of entries compacted, or error.
+    pub fn compact_section(section: &str) -> Result<usize, String> {
+        let mut mem = Self::load();
+        let entries = match section {
+            "convention" | "conventions" => &mut mem.conventions,
+            "gotcha" | "gotchas" => &mut mem.gotchas,
+            "context" => &mut mem.context,
+            _ => return Err(format!("Cannot compact section '{}'", section)),
+        };
+
+        if entries.len() < 10 {
+            return Ok(0); // Not worth compacting
+        }
+
+        // Collect all content
+        let all_content: Vec<String> = entries.iter()
+            .map(|e| format!("- {}", e.content))
+            .collect();
+        let combined = all_content.join("\n");
+
+        let prompt = format!(
+            "Compress these {} '{}' entries into at most 5 dense entries. \
+             Each entry should be one clear sentence. Return ONLY a JSON array of strings, nothing else.\n\n{}",
+            entries.len(), section, combined
+        );
+
+        // Try Gemini first (free), then Anthropic
+        let response = Self::call_ai(&prompt)?;
+
+        // Parse response as JSON array of strings
+        let json_str = response
+            .trim()
+            .trim_start_matches("```json")
+            .trim_start_matches("```")
+            .trim_end_matches("```")
+            .trim();
+
+        let compressed: Vec<String> = serde_json::from_str(json_str)
+            .map_err(|e| format!("Failed to parse AI response: {}", e))?;
+
+        let original_count = entries.len();
+        let now = Self::now();
+
+        // Replace entries with compressed versions
+        entries.clear();
+        for content in &compressed {
+            entries.push(MemoryEntry {
+                id: format!("mem-{}", &uuid::Uuid::new_v4().to_string()[..8]),
+                content: Self::truncate(content),
+                tags: vec!["compacted".to_string()],
+                added_by: "aura-compactor".to_string(),
+                added_at: now,
+            });
+        }
+
+        mem.last_updated = now;
+        let _ = Self::save(&mut mem);
+
+        Ok(original_count - compressed.len())
+    }
+
+    /// Call AI provider (Gemini or Anthropic) for text generation
+    fn call_ai(prompt: &str) -> Result<String, String> {
+        let _config = crate::config::ConfigManager::load();
+        let provider = crate::config::ConfigManager::get_active_provider();
+
+        let client = reqwest::blocking::Client::builder()
+            .timeout(std::time::Duration::from_secs(30))
+            .build()
+            .map_err(|e| format!("HTTP client error: {}", e))?;
+
+        match provider.as_str() {
+            "anthropic" => {
+                let key = crate::config::ConfigManager::get_api_key("anthropic")
+                    .ok_or("No Anthropic API key found")?;
+
+                let body = serde_json::json!({
+                    "model": "claude-haiku-4-5-20251001",
+                    "max_tokens": 1024,
+                    "messages": [{"role": "user", "content": prompt}]
+                });
+
+                let res = client.post("https://api.anthropic.com/v1/messages")
+                    .header("x-api-key", &key)
+                    .header("anthropic-version", "2023-06-01")
+                    .header("content-type", "application/json")
+                    .json(&body)
+                    .send()
+                    .map_err(|e| format!("Anthropic request failed: {}", e))?;
+
+                let json: serde_json::Value = res.json()
+                    .map_err(|e| format!("Anthropic parse error: {}", e))?;
+
+                json["content"][0]["text"].as_str()
+                    .map(|s| s.to_string())
+                    .ok_or("Empty Anthropic response".to_string())
+            }
+            _ => {
+                // Gemini (default, free tier)
+                let key = crate::config::ConfigManager::get_api_key("gemini")
+                    .ok_or("No Gemini API key found. Configure via `aura config` or install Gemini CLI.")?;
+
+                let url = format!(
+                    "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key={}",
+                    key
+                );
+
+                let body = serde_json::json!({
+                    "contents": [{"parts": [{"text": prompt}]}],
+                    "generationConfig": {"temperature": 0.1, "maxOutputTokens": 1024}
+                });
+
+                let res = client.post(&url)
+                    .json(&body)
+                    .send()
+                    .map_err(|e| format!("Gemini request failed: {}", e))?;
+
+                let json: serde_json::Value = res.json()
+                    .map_err(|e| format!("Gemini parse error: {}", e))?;
+
+                json["candidates"][0]["content"]["parts"][0]["text"].as_str()
+                    .map(|s| s.to_string())
+                    .ok_or("Empty Gemini response".to_string())
+            }
+        }
+    }
+
+    /// Get memory file size in bytes
+    pub fn file_size() -> u64 {
+        let path = Self::memory_path();
+        fs::metadata(&path).map(|m| m.len()).unwrap_or(0)
+    }
+
+    /// Check if compaction is recommended (>50KB or >30 entries in any section)
+    pub fn needs_compaction() -> Option<String> {
+        let mem = Self::load();
+        let size = Self::file_size();
+
+        if size > 50_000 {
+            return Some(format!("Memory file is {}KB — compaction recommended", size / 1024));
+        }
+        if mem.conventions.len() > 30 {
+            return Some(format!("{} conventions — compaction recommended", mem.conventions.len()));
+        }
+        if mem.gotchas.len() > 30 {
+            return Some(format!("{} gotchas — compaction recommended", mem.gotchas.len()));
+        }
+        if mem.context.len() > 30 {
+            return Some(format!("{} context entries — compaction recommended", mem.context.len()));
+        }
+        None
+    }
+
     /// Search memories by keyword across all sections
     pub fn search(query: &str) -> Vec<serde_json::Value> {
         let mem = Self::load();

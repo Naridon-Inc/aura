@@ -403,6 +403,17 @@ impl McpServer {
                                     },
                                     "required": ["id"]
                                 }
+                            },
+                            {
+                                "name": "aura_memory_compact",
+                                "description": "AI-powered memory compaction. Compresses many entries in a section into fewer, denser entries using Gemini (free) or Anthropic. Use when a section has 10+ entries or memory file exceeds 50KB.",
+                                "inputSchema": {
+                                    "type": "object",
+                                    "properties": {
+                                        "section": { "type": "string", "description": "Section to compact: 'conventions', 'gotchas', or 'context'." }
+                                    },
+                                    "required": ["section"]
+                                }
                             }
                         ]
                     }
@@ -445,6 +456,7 @@ impl McpServer {
                     "aura_memory_write" => Self::tool_memory_write(args),
                     "aura_memory_read" => Self::tool_memory_read(args),
                     "aura_memory_forget" => Self::tool_memory_forget(args),
+                    "aura_memory_compact" => Self::tool_memory_compact(args),
                     _ => json!({ "isError": true, "content": [{ "type": "text", "text": "Unknown tool" }] })
                 };
 
@@ -717,12 +729,41 @@ impl McpServer {
                 });
             }
 
+            // Surface unread messages with full previews — BLOCKING instruction
             if let Some(ref session) = SessionManager::get_active_session() {
-                let unread = crate::sentinel::SentinelManager::unread_count(&session.session_id);
-                if unread > 0 {
-                    status_data["sentinel_messages"] = json!({
-                        "unread": unread,
-                        "hint": "Call `aura_sentinel_inbox` to read messages from other agents"
+                let unread_msgs = crate::sentinel::SentinelManager::get_unread_messages(&session.session_id);
+                if !unread_msgs.is_empty() {
+                    let now = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_secs();
+                    let previews: Vec<serde_json::Value> = unread_msgs.iter().map(|msg| {
+                        let age_secs = now.saturating_sub(msg.timestamp);
+                        let age_str = if age_secs < 60 {
+                            format!("{}s ago", age_secs)
+                        } else if age_secs < 3600 {
+                            format!("{}m ago", age_secs / 60)
+                        } else {
+                            format!("{}h ago", age_secs / 3600)
+                        };
+                        let target = if msg.to_session.is_some() { "YOU (direct)" } else { "ALL agents (broadcast)" };
+                        json!({
+                            "id": msg.id,
+                            "from_agent": msg.from_agent,
+                            "to": target,
+                            "age": age_str,
+                            "preview": if msg.content.len() > 200 {
+                                format!("{}...", &msg.content[..200])
+                            } else {
+                                msg.content.clone()
+                            },
+                        })
+                    }).collect();
+                    status_data["PENDING_MESSAGES"] = json!({
+                        "BLOCKING": true,
+                        "instruction": "You MUST read and reply to these messages BEFORE doing anything else. Call `aura_sentinel_inbox` to read full messages, then reply with `aura_sentinel_send`.",
+                        "unread_count": unread_msgs.len(),
+                        "messages": previews,
                     });
                 }
             }
@@ -1764,6 +1805,22 @@ impl McpServer {
             json!({ "content": [{ "type": "text", "text": format!("Memory '{}' removed.", id) }] })
         } else {
             json!({ "content": [{ "type": "text", "text": format!("Memory '{}' not found.", id) }] })
+        }
+    }
+
+    fn tool_memory_compact(args: Value) -> Value {
+        let section = match args["section"].as_str() {
+            Some(s) => s,
+            None => return json!({ "isError": true, "content": [{ "type": "text", "text": "section is required (conventions, gotchas, or context)." }] }),
+        };
+
+        match crate::memory::MemoryManager::compact_section(section) {
+            Ok(0) => json!({ "content": [{ "type": "text", "text": format!("Section '{}' has fewer than 10 entries — compaction not needed.", section) }] }),
+            Ok(removed) => {
+                let size_kb = crate::memory::MemoryManager::file_size() / 1024;
+                json!({ "content": [{ "type": "text", "text": format!("✓ Compacted '{}': {} entries removed. Memory file now {}KB.", section, removed, size_kb) }] })
+            }
+            Err(e) => json!({ "isError": true, "content": [{ "type": "text", "text": format!("Compaction failed: {}", e) }] }),
         }
     }
 }
