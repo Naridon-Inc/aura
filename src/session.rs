@@ -242,9 +242,37 @@ impl SessionManager {
         }
     }
 
-    /// End the current session and release sentinel claims
+    /// End the current session and release sentinel claims.
+    /// Auto-replies to any unread messages so senders aren't left hanging.
     pub fn end_session() {
         if let Some(session) = Self::get_active_session() {
+            // Auto-reply to unread messages before ending
+            let unread = crate::sentinel::SentinelManager::get_unread_messages(&session.session_id);
+            if !unread.is_empty() {
+                let mut replied_sessions = std::collections::HashSet::new();
+                for msg in &unread {
+                    if msg.from_session != session.session_id && !replied_sessions.contains(&msg.from_session) {
+                        replied_sessions.insert(msg.from_session.clone());
+                        crate::sentinel::SentinelManager::send_message(
+                            &session.session_id,
+                            &session.agent_id,
+                            Some(&msg.from_session),
+                            &format!(
+                                "[AUTO] {} session ended. {} unread message{} were not seen. \
+                                 Files touched: {}. The work may be incomplete — check git log for latest state.",
+                                session.agent_id,
+                                unread.iter().filter(|m| m.from_session == msg.from_session).count(),
+                                if unread.iter().filter(|m| m.from_session == msg.from_session).count() == 1 { "" } else { "s" },
+                                if session.files_touched.is_empty() {
+                                    "none".to_string()
+                                } else {
+                                    session.files_touched.iter().take(5).cloned().collect::<Vec<_>>().join(", ")
+                                }
+                            ),
+                        );
+                    }
+                }
+            }
             crate::sentinel::SentinelManager::release_claims(&session.session_id);
         }
         Self::set_phase(SessionPhase::Ended);

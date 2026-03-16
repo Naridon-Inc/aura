@@ -466,6 +466,33 @@ impl SentinelManager {
         result.into_iter().take(limit).collect()
     }
 
+    /// Get unread messages for a specific session WITHOUT marking them as read.
+    /// Returns messages sorted by timestamp descending (newest first).
+    pub fn get_unread_messages(session_id: &str) -> Vec<SentinelMessage> {
+        let dir = Self::messages_dir();
+        let mut unread = Vec::new();
+        if let Ok(entries) = fs::read_dir(&dir) {
+            for entry in entries.flatten() {
+                if entry.path().extension().map(|x| x == "json").unwrap_or(false) {
+                    if let Ok(content) = fs::read_to_string(entry.path()) {
+                        if let Ok(msg) = serde_json::from_str::<SentinelMessage>(&content) {
+                            let dominated = msg.to_session.is_none()
+                                || msg.to_session.as_deref() == Some(session_id);
+                            if dominated
+                                && msg.from_session != session_id
+                                && !msg.read_by.contains(&session_id.to_string())
+                            {
+                                unread.push(msg);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        unread.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
+        unread
+    }
+
     /// Count unread messages for a specific session
     pub fn unread_count(session_id: &str) -> u64 {
         let dir = Self::messages_dir();

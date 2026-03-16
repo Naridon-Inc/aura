@@ -1061,7 +1061,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         }
                         let gsd_prompt = serde_json::json!({
                             "name": "aura-semantic-engine",
-                            "description": "Aura Semantic Engine v0.5.0 — AI-native version control with multi-agent orchestration, semantic PR review, surgical rewind, and durable snapshots.",
+                            "description": "Aura Semantic Engine v0.8.1 — AI-native version control with multi-agent orchestration, semantic PR review, surgical rewind, and durable snapshots.",
                             "instructions": "You have access to the Aura Semantic Engine. Key commands: (1) `aura snapshot \"desc\"` — ALWAYS run before large edits for safety. (2) `aura rewind <func> <file>` — surgically revert a function. (3) `aura pr-review --base main` — check for violations before committing. (4) `aura plan \"objective\"` then `aura execute` — decompose large tasks into atomic waves. (5) `aura prove --goal \"description\"` — mathematically verify a behavioral goal. (6) `aura orchestrate run \"objective\" --duo` — run Claude + Gemini in parallel. (7) `aura fix --base main` — auto-fix violations. (8) `aura handover cursor` — compressed context for agent relay. Before committing, log intent to `.gemini.intent` and run `aura pr-review`. Never use --no-verify."
                         });
                         let _ = fs::write(".claude/aura-gsd.json", serde_json::to_string_pretty(&gsd_prompt).unwrap_or_default());
