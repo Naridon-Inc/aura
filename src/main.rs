@@ -1463,8 +1463,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         let is_likely_intentional = intent_mentions_deletion
                             && (intent_mentions_specific || intent_mentions_deleted_paths);
 
-                        if deleted_nodes.len() > 5 && !is_likely_intentional && !*force {
-                            // Mass deletion — very suspicious
+                        if !deleted_nodes.is_empty() && !is_likely_intentional && !*force {
+                            // Any deletion without intent is suspicious in strict mode
                             println!("\n{} Logic Node Deletion Guard: {} logic nodes REMOVED", "🛡️".red().bold(), deleted_nodes.len().to_string().red().bold());
                             println!("  {} This often happens when an AI agent rewrites a file and accidentally", "↳".dimmed());
                             println!("  {} removes working features while building new ones.", "↳".dimmed());
@@ -1504,11 +1504,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     std::process::exit(1);
                                 }
                             }
-                        } else if !deleted_nodes.is_empty() && !is_likely_intentional {
-                            // Small deletion — warn but don't block
-                            println!("\n{} {} logic node(s) removed: {}", "⚠️".yellow(), deleted_nodes.len(),
-                                deleted_nodes.iter().take(5).cloned().collect::<Vec<_>>().join(", ").yellow());
-                            println!("  {} If intentional, document with: aura log-intent \"Removed ...\"", "↳".dimmed());
                         }
                     }
                 }
@@ -1668,6 +1663,23 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             // Intent Verification (Logic Alignment): Prevent "Intent Poisoning"
             // Ensure the AI's text intent actually aligns with the code it modified.
             if !force && agent_id != "Aura Continuous Daemon" && !staged_nodes.is_empty() {
+                // Check if aura_log_intent was actually called (marker file must exist)
+                let intent_was_logged = std::path::Path::new(".aura/.intent_logged").exists();
+
+                // Block if intent was never logged via aura_log_intent (strict mode)
+                if !intent_was_logged {
+                    let config = ConfigManager::load();
+                    if config.strict_gatekeeper_mode {
+                        spinner.finish_and_clear();
+                        println!("{} Intent Not Logged: You must call {} before committing.", "🚨".red().bold(), "aura_log_intent".cyan().bold());
+                        println!("  {} {} logic nodes were modified but no intent was logged via the MCP tool.", "↳".dimmed(), staged_nodes.len());
+                        println!("\n  {} {}", "How to Fix:".bold().green(), "Call aura_log_intent with a description of your changes:");
+                        println!("    {} aura_log_intent(\"<describe what you changed and why>\")", "→".dimmed());
+                        println!("\n{} Commit halted.", "✗".red().bold());
+                        std::process::exit(1);
+                    }
+                }
+
                 // Reject the default fallback string explicitly
                 if intent.starts_with("Automatically tracked") || intent == "No semantic logic changes detected in staged files." {
                     let config = ConfigManager::load();
