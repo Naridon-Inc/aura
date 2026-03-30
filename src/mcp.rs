@@ -52,17 +52,29 @@ impl McpServer {
 
             if let Ok(req) = serde_json::from_str::<RpcRequest>(&line) {
                 let response = Self::handle_request(req);
-                let res_json = serde_json::to_string(&response).unwrap();
-                writeln!(stdout, "{}", res_json).unwrap();
-                stdout.flush().unwrap();
+                let res_json = match serde_json::to_string(&response) {
+                    Ok(j) => j,
+                    Err(e) => {
+                        eprintln!("MCP serialize error: {}", e);
+                        continue;
+                    }
+                };
+                if let Err(e) = writeln!(stdout, "{}", res_json) {
+                    eprintln!("MCP write error: {}", e);
+                    return;
+                }
+                let _ = stdout.flush();
             } else {
                 let err_res = json!({
                     "jsonrpc": "2.0",
                     "id": null,
                     "error": { "code": -32700, "message": "Parse error" }
                 });
-                writeln!(stdout, "{}", err_res).unwrap();
-                stdout.flush().unwrap();
+                if let Err(e) = writeln!(stdout, "{}", err_res) {
+                    eprintln!("MCP write error: {}", e);
+                    return;
+                }
+                let _ = stdout.flush();
             }
         }
     }
@@ -268,6 +280,20 @@ impl McpServer {
                                 }
                             },
                             {
+                                "name": "aura_usage",
+                                "description": "Track AI token usage, costs, and budgets across all agent sessions. Shows per-session, per-model, and per-day cost breakdowns. Use this to monitor how much AI resources you're consuming and stay within budget. Call periodically during long sessions to self-monitor spend.",
+                                "inputSchema": {
+                                    "type": "object",
+                                    "properties": {
+                                        "period": {
+                                            "type": "string",
+                                            "description": "Time period: 'today', 'week', 'month', 'all'. Default: 'today'.",
+                                            "default": "today"
+                                        }
+                                    }
+                                }
+                            },
+                            {
                                 "name": "aura_suggest_edit",
                                 "description": "AI-powered edit suggestion. Given a file and an intent, returns the exact code changes needed — including which functions to modify and how. Uses the AST Merkle-Graph to understand dependencies before suggesting.",
                                 "inputSchema": {
@@ -293,6 +319,87 @@ impl McpServer {
                             {
                                 "name": "aura_doctor",
                                 "description": "Diagnose repository health: find stuck sessions, orphaned snapshots, missing hooks, and shadow branch issues. Returns a health report with actionable fixes.",
+                                "inputSchema": {
+                                    "type": "object",
+                                    "properties": {}
+                                }
+                            },
+                            {
+                                "name": "aura_session_summarize",
+                                "description": "Generate an AI-powered summary of a specific session, including intent, outcome, learnings, and open items. Uses Gemini to analyze the session transcript.",
+                                "inputSchema": {
+                                    "type": "object",
+                                    "properties": {
+                                        "session_id": { "type": "string", "description": "Session ID to summarize (e.g., '2026-03-09-abc12345')." }
+                                    },
+                                    "required": ["session_id"]
+                                }
+                            },
+                            {
+                                "name": "aura_live_impacts",
+                                "description": "Fetch unresolved cross-branch impact alerts from Aura Cloud. Shows functions on other branches that were modified or deleted while your code depends on them. Call at session start and periodically during long sessions.",
+                                "inputSchema": {
+                                    "type": "object",
+                                    "properties": {}
+                                }
+                            },
+                            {
+                                "name": "aura_live_resolve",
+                                "description": "Mark an impact alert as resolved after you have reviewed and fixed the dependency conflict. This dismisses the alert from future queries.",
+                                "inputSchema": {
+                                    "type": "object",
+                                    "properties": {
+                                        "alert_id": { "type": "string", "description": "The UUID of the impact alert to resolve." }
+                                    },
+                                    "required": ["alert_id"]
+                                }
+                            },
+                            {
+                                "name": "aura_msg_send",
+                                "description": "Send a message to your team or a specific developer working in the same repository. Messages are delivered in real-time via Aura Cloud. Use this to coordinate with other developers or AI agents across branches.",
+                                "inputSchema": {
+                                    "type": "object",
+                                    "properties": {
+                                        "message": { "type": "string", "description": "The message to send to the team." },
+                                        "to": { "type": "string", "description": "Optional: specific username to DM. If omitted, broadcasts to the whole repo team." }
+                                    },
+                                    "required": ["message"]
+                                }
+                            },
+                            {
+                                "name": "aura_msg_list",
+                                "description": "Read recent team messages for this repository. Returns the latest messages from other developers and AI agents. Call this when you see an unread message notification.",
+                                "inputSchema": {
+                                    "type": "object",
+                                    "properties": {
+                                        "limit": { "type": "number", "description": "Max messages to return (default: 20)." }
+                                    }
+                                }
+                            },
+                            {
+                                "name": "aura_live_sync_push",
+                                "description": "Push function bodies from a file to Aura Cloud so teammates can pull them. Use after editing a file to share your changes at the function level — like Figma for code.",
+                                "inputSchema": {
+                                    "type": "object",
+                                    "properties": {
+                                        "file_path": { "type": "string", "description": "Path to the file whose functions to push." }
+                                    },
+                                    "required": ["file_path"]
+                                }
+                            },
+                            {
+                                "name": "aura_live_sync_pull",
+                                "description": "Pull function-level changes from teammates and apply them to your local files. Shows what changed and applies updates at the AST level with automatic snapshots for safety.",
+                                "inputSchema": {
+                                    "type": "object",
+                                    "properties": {
+                                        "dry_run": { "type": "boolean", "description": "If true, show what would change without applying. Default: false." }
+                                    }
+                                }
+                            },
+                            {
+                                "name": "aura_live_sync_status",
+                                "description": "Check function-level sync status: pending changes from teammates, total synced functions, and active pushers.",
                                 "inputSchema": {
                                     "type": "object",
                                     "properties": {}
@@ -359,17 +466,6 @@ impl McpServer {
                                 }
                             },
                             {
-                                "name": "aura_session_summarize",
-                                "description": "Generate an AI-powered summary of a specific session, including intent, outcome, learnings, and open items. Uses Gemini to analyze the session transcript.",
-                                "inputSchema": {
-                                    "type": "object",
-                                    "properties": {
-                                        "session_id": { "type": "string", "description": "Session ID to summarize (e.g., '2026-03-09-abc12345')." }
-                                    },
-                                    "required": ["session_id"]
-                                }
-                            },
-                            {
                                 "name": "aura_memory_write",
                                 "description": "Write to the project's permanent memory. Use this to record architectural knowledge, decisions, conventions, gotchas, or context that future AI agents (or yourself in a future session) should know. This memory persists FOREVER across all sessions and all agents. Sections: 'identity' (set project purpose + stack), 'architecture' (add component), 'timeline' (record decision/milestone), 'convention', 'gotcha', 'context', 'active_work'.",
                                 "inputSchema": {
@@ -406,11 +502,11 @@ impl McpServer {
                             },
                             {
                                 "name": "aura_memory_compact",
-                                "description": "AI-powered memory compaction. Compresses many entries in a section into fewer, denser entries using Gemini (free) or Anthropic. Use when a section has 10+ entries or memory file exceeds 50KB.",
+                                "description": "AI-powered memory compaction. Uses Gemini (free) or Claude to compress many entries in a section into fewer, denser ones. Call when aura_status shows a compaction recommendation. No extra API key needed — uses existing Gemini CLI or Claude Code credentials.",
                                 "inputSchema": {
                                     "type": "object",
                                     "properties": {
-                                        "section": { "type": "string", "description": "Section to compact: 'conventions', 'gotchas', or 'context'." }
+                                        "section": { "type": "string", "description": "Section to compact: 'convention', 'gotcha', or 'context'." }
                                     },
                                     "required": ["section"]
                                 }
@@ -443,10 +539,18 @@ impl McpServer {
                     "aura_gemini_read" => Self::tool_gemini_read(args),
                     "aura_gemini_batch" => Self::tool_gemini_batch(args),
                     "aura_context_budget" => Self::tool_context_budget(args),
+                    "aura_usage" => Self::tool_usage(args),
                     "aura_suggest_edit" => Self::tool_suggest_edit(args),
                     "aura_session_resume" => Self::tool_session_resume(args),
                     "aura_doctor" => Self::tool_doctor(args),
                     "aura_session_summarize" => Self::tool_session_summarize(args),
+                    "aura_live_impacts" => Self::tool_live_impacts(args),
+                    "aura_live_resolve" => Self::tool_live_resolve(args),
+                    "aura_msg_send" => Self::tool_msg_send(args),
+                    "aura_msg_list" => Self::tool_msg_list(args),
+                    "aura_live_sync_push" => Self::tool_sync_push(args),
+                    "aura_live_sync_pull" => Self::tool_sync_pull(args),
+                    "aura_live_sync_status" => Self::tool_sync_status(args),
                     "aura_sentinel_status" => Self::tool_sentinel_status(args),
                     "aura_zone_claim" => Self::tool_zone_claim(args),
                     "aura_sentinel_release" => Self::tool_sentinel_release(args),
@@ -495,6 +599,115 @@ impl McpServer {
                     }
                 }
 
+                // Push-based: Warn if files were modified without a snapshot
+                // This is the "seatbelt" — catches edits that bypassed aura_snapshot
+                if name != "aura_snapshot" && name != "aura_snapshot_list" {
+                    // Get git-modified files (unstaged working tree changes)
+                    let unsnapshotted: Option<Vec<String>> = (|| {
+                        let output = std::process::Command::new("git")
+                            .args(["diff", "--name-only"])
+                            .output()
+                            .ok()?;
+                        let diff_text = String::from_utf8_lossy(&output.stdout);
+                        let modified_files: Vec<String> = diff_text
+                            .lines()
+                            .filter(|l| !l.is_empty())
+                            .map(|l| l.to_string())
+                            .collect();
+
+                        if modified_files.is_empty() {
+                            return None;
+                        }
+
+                        // Check which modified files have NO snapshot on disk
+                        let snap_dir = std::path::Path::new(".aura/snapshots");
+                        let mut missing = Vec::new();
+                        for file in &modified_files {
+                            let safe_name = file.replace('/', "__").replace('\\', "__");
+                            let has_snapshot = snap_dir.is_dir()
+                                && std::fs::read_dir(snap_dir)
+                                    .ok()
+                                    .map(|entries| {
+                                        entries.flatten().any(|e| {
+                                            e.file_name()
+                                                .to_string_lossy()
+                                                .starts_with(&safe_name)
+                                        })
+                                    })
+                                    .unwrap_or(false);
+                            if !has_snapshot {
+                                missing.push(file.clone());
+                            }
+                        }
+                        if missing.is_empty() { None } else { Some(missing) }
+                    })();
+
+                    if let Some(files) = unsnapshotted {
+                        let file_list = files.iter().take(5).cloned().collect::<Vec<_>>().join(", ");
+                        let extra = if files.len() > 5 {
+                            format!(" (+{} more)", files.len() - 5)
+                        } else {
+                            String::new()
+                        };
+                        if let Some(content) = result.get_mut("content").and_then(|c| c.as_array_mut()) {
+                            content.push(json!({
+                                "type": "text",
+                                "text": format!(
+                                    "\n🛡️ SNAPSHOT MISSING: {} modified file{} without a snapshot: {}{}. Call `aura_snapshot` on these files NOW — without a snapshot, `aura rewind` cannot recover them if something goes wrong.",
+                                    files.len(),
+                                    if files.len() == 1 { "" } else { "s" },
+                                    file_list,
+                                    extra
+                                )
+                            }));
+                        }
+                    }
+                }
+
+                // Push-based: Inject impact alerts into every tool response
+                if name != "aura_live_impacts" && name != "aura_live_resolve" {
+                    let marker_path = std::path::Path::new(".aura/live/impacts_pending");
+                    if marker_path.exists() {
+                        if let Ok(contents) = std::fs::read_to_string(marker_path) {
+                            if let Ok(count) = contents.trim().parse::<u64>() {
+                                if count > 0 {
+                                    if let Some(content) = result.get_mut("content").and_then(|c| c.as_array_mut()) {
+                                        content.push(json!({
+                                            "type": "text",
+                                            "text": format!(
+                                                "\n🔴 CROSS-BRANCH ALERT: {} unresolved impact alert{}. Functions you depend on were modified or deleted on other branches. Call `aura_live_impacts` immediately to review.",
+                                                count, if count == 1 { "" } else { "s" }
+                                            )
+                                        }));
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // Push-based: Inject sync pending alerts into every tool response
+                if name != "aura_live_sync_pull" && name != "aura_live_sync_push" && name != "aura_live_sync_status" {
+                    let sync_marker = std::path::Path::new(".aura/live/sync_pending");
+                    if sync_marker.exists() {
+                        if let Ok(contents) = std::fs::read_to_string(sync_marker) {
+                            if let Ok(count) = contents.trim().parse::<u64>() {
+                                if count > 0 {
+                                    if let Some(content) = result.get_mut("content").and_then(|c| c.as_array_mut()) {
+                                        content.push(json!({
+                                            "type": "text",
+                                            "text": format!(
+                                                "\n🔄 SYNC: {} function update{} from teammates available. Call `aura_live_sync_pull` to apply.",
+                                                count, if count == 1 { "" } else { "s" }
+                                            )
+                                        }));
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
                 // Push-based: Inject sentinel unread message alerts
                 if name != "aura_sentinel_inbox" && name != "aura_sentinel_send" {
                     if let Some(session) = SessionManager::get_active_session() {
@@ -527,6 +740,28 @@ impl McpServer {
                                             "type": "text",
                                             "text": format!(
                                                 "\n\u{26a0}\u{fe0f} SENTINEL: {} function collision{}! Another agent session is editing the same functions. Call `aura_sentinel_status` to see details.",
+                                                count, if count == 1 { "" } else { "s" }
+                                            )
+                                        }));
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // Push-based: Inject unread team messages into every tool response
+                {
+                    let msg_marker = std::path::Path::new(".aura/live/unread_messages");
+                    if msg_marker.exists() {
+                        if let Ok(contents) = std::fs::read_to_string(msg_marker) {
+                            if let Ok(count) = contents.trim().parse::<u64>() {
+                                if count > 0 && name != "aura_msg_list" {
+                                    if let Some(content) = result.get_mut("content").and_then(|c| c.as_array_mut()) {
+                                        content.push(json!({
+                                            "type": "text",
+                                            "text": format!(
+                                                "\n💬 TEAM: {} unread message{}. Call `aura_msg_list` to read.",
                                                 count, if count == 1 { "" } else { "s" }
                                             )
                                         }));
@@ -689,14 +924,35 @@ impl McpServer {
             session_data = sd;
         }
 
+        // Check for pending live impacts
+        let live_impacts = {
+            let marker_path = std::path::Path::new(".aura/live/impacts_pending");
+            if marker_path.exists() {
+                std::fs::read_to_string(marker_path)
+                    .ok()
+                    .and_then(|s| s.trim().parse::<u64>().ok())
+                    .filter(|&n| n > 0)
+            } else {
+                None
+            }
+        };
+
         let mut status_data = json!({
             "strict_mode": config.strict_gatekeeper_mode,
+            "strict_mode_locked": crate::config::ConfigManager::is_strict_mode_locked(&config),
             "dev_mode": config.dev_mode,
             "latest_checkpoint_id": checkpoints.first().map(|c| c.id.clone()),
             "logic_nodes_tracked": tracked_count,
             "total_checkpoints": checkpoints.len(),
             "session": session_data,
         });
+
+        if let Some(count) = live_impacts {
+            status_data["live_impacts"] = json!({
+                "pending": count,
+                "hint": "Call aura_live_impacts for details"
+            });
+        }
 
         // Sentinel: show other active agents (presence already registered by global hook)
         {
@@ -1276,6 +1532,39 @@ impl McpServer {
         json!({ "content": [{ "type": "text", "text": toon_text }] })
     }
 
+    fn tool_usage(args: Value) -> Value {
+        let period = args["period"].as_str().unwrap_or("today");
+        let since_secs = match period {
+            "today" | "day" => 86400u64,
+            "week" => 604800,
+            "month" => 2592000,
+            "all" => u64::MAX,
+            _ => 86400,
+        };
+
+        let report = crate::usage::build_report(since_secs, period);
+        let mut report_json = crate::usage::report_to_json(&report);
+
+        // Include budget alerts if configured
+        let config = crate::config::ConfigManager::load();
+        if let Some(ref budget) = config.budget {
+            let alerts = crate::usage::check_budget(budget);
+            let alerts_json: Vec<Value> = alerts.iter().map(|a| {
+                json!({
+                    "scope": a.scope,
+                    "spent": (a.spent * 10000.0).round() / 10000.0,
+                    "cap": a.cap,
+                    "is_exceeded": a.is_exceeded,
+                    "is_warning": a.is_warning,
+                })
+            }).collect();
+            report_json["budget_alerts"] = json!(alerts_json);
+        }
+
+        let toon_text = crate::toon::encode(&report_json);
+        json!({ "content": [{ "type": "text", "text": toon_text }] })
+    }
+
     fn tool_suggest_edit(args: Value) -> Value {
         let file_path = match args["file_path"].as_str() {
             Some(p) => p,
@@ -1484,6 +1773,219 @@ impl McpServer {
         }
     }
 
+    fn tool_live_impacts(_args: Value) -> Value {
+        match crate::live_sync::fetch_impacts_json() {
+            Ok(data) => {
+                let toon_text = crate::toon::encode(&data);
+                json!({ "content": [{ "type": "text", "text": toon_text }] })
+            }
+            Err(e) => {
+                json!({ "isError": true, "content": [{ "type": "text", "text": format!("Failed to fetch impacts: {}", e) }] })
+            }
+        }
+    }
+
+    fn tool_live_resolve(args: Value) -> Value {
+        let alert_id = match args["alert_id"].as_str() {
+            Some(s) => s,
+            None => return json!({ "isError": true, "content": [{ "type": "text", "text": "alert_id is required." }] }),
+        };
+
+        let config = crate::config::ConfigManager::load();
+        let token = match config.cloud_api_token
+            .or_else(|| std::env::var("AURA_CLOUD_TOKEN").ok())
+        {
+            Some(t) => t,
+            None => return json!({ "isError": true, "content": [{ "type": "text", "text": "No cloud token configured." }] }),
+        };
+
+        let cloud_url = config.cloud_url
+            .unwrap_or_else(|| "https://auravcs.com".to_string());
+        let url = format!("{}/api/v1/live/impacts/resolve", cloud_url.trim_end_matches('/'));
+
+        let client = reqwest::blocking::Client::builder()
+            .timeout(std::time::Duration::from_secs(5))
+            .build()
+            .unwrap_or_else(|_| reqwest::blocking::Client::new());
+
+        let payload = json!({ "alert_id": alert_id });
+
+        match client.post(&url)
+            .header("Authorization", format!("Bearer {}", token))
+            .json(&payload)
+            .send()
+        {
+            Ok(resp) if resp.status().is_success() => {
+                json!({ "content": [{ "type": "text", "text": format!("Impact alert {} resolved.", alert_id) }] })
+            }
+            Ok(resp) => {
+                json!({ "isError": true, "content": [{ "type": "text", "text": format!("Failed to resolve: HTTP {}", resp.status()) }] })
+            }
+            Err(e) => {
+                json!({ "isError": true, "content": [{ "type": "text", "text": format!("Cloud unreachable: {}", e) }] })
+            }
+        }
+    }
+
+    fn tool_msg_send(args: Value) -> Value {
+        let message = match args["message"].as_str() {
+            Some(m) => m,
+            None => return json!({ "isError": true, "content": [{ "type": "text", "text": "message is required." }] }),
+        };
+        let to = args["to"].as_str();
+
+        match crate::live_sync::send_team_message(message, to) {
+            Ok(resp) => {
+                let toon_text = crate::toon::encode(&resp);
+                json!({ "content": [{ "type": "text", "text": toon_text }] })
+            }
+            Err(e) => {
+                json!({ "isError": true, "content": [{ "type": "text", "text": format!("Failed to send message: {}", e) }] })
+            }
+        }
+    }
+
+    fn tool_msg_list(args: Value) -> Value {
+        let limit = args["limit"].as_u64().unwrap_or(20) as usize;
+
+        match crate::live_sync::fetch_team_messages(limit) {
+            Ok(data) => {
+                // Mark messages as read by clearing the unread marker
+                let marker = std::path::Path::new(".aura/live/unread_messages");
+                if marker.exists() {
+                    let _ = std::fs::remove_file(marker);
+                }
+                let toon_text = crate::toon::encode(&data);
+                json!({ "content": [{ "type": "text", "text": toon_text }] })
+            }
+            Err(e) => {
+                json!({ "isError": true, "content": [{ "type": "text", "text": format!("Failed to fetch messages: {}", e) }] })
+            }
+        }
+    }
+
+    fn tool_sync_push(args: Value) -> Value {
+        let file_path = match args["file_path"].as_str() {
+            Some(p) => p,
+            None => return json!({ "isError": true, "content": [{ "type": "text", "text": "Missing required parameter: file_path" }] }),
+        };
+
+        let path = std::path::Path::new(file_path);
+        if !path.exists() {
+            return json!({ "isError": true, "content": [{ "type": "text", "text": format!("File not found: {}", file_path) }] });
+        }
+
+        let source = match std::fs::read_to_string(path) {
+            Ok(s) => s,
+            Err(e) => return json!({ "isError": true, "content": [{ "type": "text", "text": format!("Could not read file: {}", e) }] }),
+        };
+
+        let ext = path.extension()
+            .and_then(|e| e.to_str())
+            .unwrap_or("");
+
+        let mut parser = match crate::parser::SemanticParser::new() {
+            Ok(p) => p,
+            Err(e) => return json!({ "isError": true, "content": [{ "type": "text", "text": format!("Parser init failed: {}", e) }] }),
+        };
+
+        let nodes = match parser.parse_file(&source, ext) {
+            Ok(n) => n,
+            Err(e) => return json!({ "isError": true, "content": [{ "type": "text", "text": format!("Parse failed: {}", e) }] }),
+        };
+
+        let mut payloads = Vec::new();
+        for node in &nodes {
+            if let Some(ref ident) = node.identifier {
+                if let Some(body) = crate::live_sync::extract_function_body(&source, ident) {
+                    payloads.push(crate::live_sync::SyncFunctionPayload {
+                        file_path: file_path.to_string(),
+                        function_name: ident.clone(),
+                        function_kind: node.kind.clone(),
+                        content_hash: node.content_hash.clone(),
+                        body,
+                    });
+                }
+            }
+        }
+
+        if payloads.is_empty() {
+            return json!({ "content": [{ "type": "text", "text": "No identifiable functions found in file." }] });
+        }
+
+        match crate::live_sync::push_function_bodies(&payloads) {
+            Ok(resp) => {
+                let pushed = resp["pushed"].as_u64().unwrap_or(0);
+                json!({ "content": [{ "type": "text", "text": format!("Pushed {} functions from {} to Aura Cloud for teammates to pull.", pushed, file_path) }] })
+            }
+            Err(e) => {
+                json!({ "isError": true, "content": [{ "type": "text", "text": format!("Push failed: {}", e) }] })
+            }
+        }
+    }
+
+    fn tool_sync_pull(args: Value) -> Value {
+        let dry_run = args["dry_run"].as_bool().unwrap_or(false);
+
+        match crate::live_sync::pull_function_bodies() {
+            Ok(data) => {
+                let functions = data["functions"].as_array();
+                let total = data["total"].as_u64().unwrap_or(0);
+
+                if total == 0 {
+                    return json!({ "content": [{ "type": "text", "text": "No new function changes from teammates." }] });
+                }
+
+                if dry_run {
+                    let mut summary = format!("{} function update(s) available:\n", total);
+                    if let Some(funcs) = functions {
+                        for f in funcs {
+                            let fp = f["file_path"].as_str().unwrap_or("?");
+                            let fn_name = f["function_name"].as_str().unwrap_or("?");
+                            let pushed_by = f["pushed_by"].as_str().unwrap_or("?");
+                            summary.push_str(&format!("  {}::{} from {}\n", fp, fn_name, pushed_by));
+                        }
+                    }
+                    summary.push_str("\nDry run — no files modified. Call again with dry_run: false to apply.");
+                    return json!({ "content": [{ "type": "text", "text": summary }] });
+                }
+
+                if let Some(funcs) = functions {
+                    let (applied, skipped, conflicts) =
+                        crate::live_sync::apply_pulled_functions(funcs);
+
+                    let mut summary = format!("Pulled {} function update(s): {} applied, {} skipped.\n", total, applied, skipped);
+
+                    if !conflicts.is_empty() {
+                        summary.push_str(&format!("\n{} conflict(s):\n", conflicts.len()));
+                        for c in &conflicts {
+                            summary.push_str(&format!("  - {}\n", c));
+                        }
+                    }
+
+                    json!({ "content": [{ "type": "text", "text": summary }] })
+                } else {
+                    json!({ "content": [{ "type": "text", "text": format!("{} function update(s) available but no function data returned.", total) }] })
+                }
+            }
+            Err(e) => {
+                json!({ "isError": true, "content": [{ "type": "text", "text": format!("Pull failed: {}", e) }] })
+            }
+        }
+    }
+
+    fn tool_sync_status(_args: Value) -> Value {
+        match crate::live_sync::fetch_sync_status() {
+            Ok(data) => {
+                let toon_text = crate::toon::encode(&data);
+                json!({ "content": [{ "type": "text", "text": toon_text }] })
+            }
+            Err(e) => {
+                json!({ "isError": true, "content": [{ "type": "text", "text": format!("Sync status failed: {}", e) }] })
+            }
+        }
+    }
+
     // ── Sentinel tools ──
 
     fn tool_sentinel_status(_args: Value) -> Value {
@@ -1619,7 +2121,7 @@ impl McpServer {
         }
 
         let mut output = format!("{} message(s):\n\n", messages.len());
-        let mut newly_read_from = None;
+        let mut newly_read_from = None; // track if there's a NEW incoming message needing reply
         for (msg, was_newly_read) in &messages {
             let is_incoming = msg.from_session != session_id;
             let direction = if !is_incoming {
@@ -1633,6 +2135,7 @@ impl McpServer {
                 None => "ALL".to_string(),
             };
             let new_tag = if *was_newly_read && is_incoming { " [NEW]" } else { "" };
+            // Only prompt reply for messages seen for the first time
             if *was_newly_read && is_incoming {
                 newly_read_from = Some(msg.from_session.clone());
             }
@@ -1720,6 +2223,7 @@ impl McpServer {
                 json!({ "content": [{ "type": "text", "text": format!("Project identity set: {}", content) }] })
             }
             "architecture" => {
+                // Parse JSON component or use content as description
                 let comp = if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(content) {
                     crate::memory::ArchComponent {
                         name: parsed["name"].as_str().unwrap_or("unnamed").to_string(),
@@ -1731,6 +2235,7 @@ impl McpServer {
                             .unwrap_or_default(),
                     }
                 } else {
+                    // Plain text — use as description, generate name from first word
                     let name = content.split_whitespace().next().unwrap_or("component").to_string();
                     crate::memory::ArchComponent {
                         name,
@@ -1811,14 +2316,17 @@ impl McpServer {
     fn tool_memory_compact(args: Value) -> Value {
         let section = match args["section"].as_str() {
             Some(s) => s,
-            None => return json!({ "isError": true, "content": [{ "type": "text", "text": "section is required (conventions, gotchas, or context)." }] }),
+            None => return json!({ "isError": true, "content": [{ "type": "text", "text": "section is required." }] }),
         };
 
         match crate::memory::MemoryManager::compact_section(section) {
-            Ok(0) => json!({ "content": [{ "type": "text", "text": format!("Section '{}' has fewer than 10 entries — compaction not needed.", section) }] }),
-            Ok(removed) => {
-                let size_kb = crate::memory::MemoryManager::file_size() / 1024;
-                json!({ "content": [{ "type": "text", "text": format!("✓ Compacted '{}': {} entries removed. Memory file now {}KB.", section, removed, size_kb) }] })
+            Ok(0) => json!({ "content": [{ "type": "text", "text": format!("Section '{}' has fewer than 10 entries — no compaction needed.", section) }] }),
+            Ok(n) => {
+                let size = crate::memory::MemoryManager::file_size();
+                json!({ "content": [{ "type": "text", "text": format!(
+                    "Compacted '{}': removed {} redundant entries. Memory file now {}KB.",
+                    section, n, size / 1024
+                ) }] })
             }
             Err(e) => json!({ "isError": true, "content": [{ "type": "text", "text": format!("Compaction failed: {}", e) }] }),
         }

@@ -76,6 +76,15 @@ impl SemanticParser {
     }
 
     /// Parses a source code string and extracts semantic logical blocks
+    /// Parses source with file path context for richer metadata
+    pub fn parse_file_with_path(&mut self, source_code: &str, ext: &str, file_path: &str) -> Result<Vec<AstNode>, Box<dyn std::error::Error>> {
+        let mut nodes = self.parse_file(source_code, ext)?;
+        for node in &mut nodes {
+            node.file_path = Some(file_path.to_string());
+        }
+        Ok(nodes)
+    }
+
     pub fn parse_file(&mut self, source_code: &str, ext: &str) -> Result<Vec<AstNode>, Box<dyn std::error::Error>> {
         let tree = match ext {
             "py" => self.python_parser.parse(source_code, None).ok_or("Failed to parse Python tree")?,
@@ -288,6 +297,49 @@ impl SemanticParser {
                 }
             }
 
+            // Extract line numbers
+            let start_line = node.start_position().row as u32 + 1; // tree-sitter is 0-based
+            let end_line = node.end_position().row as u32 + 1;
+
+            // Extract human-readable signature (first line of the block, trimmed)
+            let signature = {
+                let first_line = content.lines().next().unwrap_or("").trim();
+                // Remove trailing { or : for cleaner display
+                let sig = first_line.trim_end_matches('{').trim_end_matches(':').trim();
+                if sig.is_empty() { None } else { Some(sig.to_string()) }
+            };
+
+            // Extract doc comment from preceding sibling nodes
+            let doc_comment = {
+                let mut doc = None;
+                let mut prev = node.prev_sibling();
+                let mut doc_lines = Vec::new();
+                while let Some(prev_node) = prev {
+                    let pk = prev_node.kind();
+                    if pk == "comment" || pk == "line_comment" || pk == "block_comment" || pk == "doc_comment" || pk == "string_literal" {
+                        let text = source_code[prev_node.byte_range()].trim().to_string();
+                        // Only include doc-style comments (/// or /** or # or """)
+                        if text.starts_with("///") || text.starts_with("/**") || text.starts_with("##") || text.starts_with("\"\"\"") || text.starts_with("//!") {
+                            doc_lines.push(text);
+                            prev = prev_node.prev_sibling();
+                            continue;
+                        }
+                    }
+                    break;
+                }
+                if !doc_lines.is_empty() {
+                    doc_lines.reverse();
+                    let joined = doc_lines.join("\n")
+                        .replace("///", "").replace("/**", "").replace("*/", "")
+                        .replace("##", "").replace("\"\"\"", "")
+                        .lines().map(|l| l.trim().trim_start_matches('*').trim()).collect::<Vec<_>>().join(" ").trim().to_string();
+                    if !joined.is_empty() {
+                        doc = Some(joined);
+                    }
+                }
+                doc
+            };
+
             extracted_nodes.push(AstNode {
                 node_id,
                 kind: kind.to_string(),
@@ -297,8 +349,13 @@ impl SemanticParser {
                 dependencies,
                 contains_secret,
                 is_stub,
-                derived_from: None, 
-                confidence: 1.0,    
+                derived_from: None,
+                confidence: 1.0,
+                file_path: None, // Set by parse_file_with_path or caller
+                start_line: Some(start_line),
+                end_line: Some(end_line),
+                signature,
+                doc_comment,
             });
         }
 

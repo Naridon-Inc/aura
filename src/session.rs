@@ -134,6 +134,9 @@ pub struct AgentSession {
     pub subagents: Vec<SubagentRecord>,
     #[serde(default)]
     pub pid: Option<u32>,
+    /// Project name (repo directory name) — used for cross-project usage tracking
+    #[serde(default)]
+    pub project: Option<String>,
 }
 
 /// A single turn in a conversation transcript
@@ -207,6 +210,8 @@ impl SessionManager {
             first_prompt: None,
             subagents: Vec::new(),
             pid: Some(std::process::id()),
+            project: std::env::current_dir().ok()
+                .and_then(|p| p.file_name().map(|n| n.to_string_lossy().to_string())),
         };
 
         Self::save_session(&session);
@@ -249,6 +254,7 @@ impl SessionManager {
             // Auto-reply to unread messages before ending
             let unread = crate::sentinel::SentinelManager::get_unread_messages(&session.session_id);
             if !unread.is_empty() {
+                // Collect unique senders to reply to
                 let mut replied_sessions = std::collections::HashSet::new();
                 for msg in &unread {
                     if msg.from_session != session.session_id && !replied_sessions.contains(&msg.from_session) {
@@ -674,7 +680,15 @@ impl SessionManager {
         Self::ensure_dirs();
         let path = format!("{}/{}.json", &sessions_dir(), session.session_id);
         let json = serde_json::to_string_pretty(session).unwrap_or_default();
-        let _ = fs::write(path, json);
+        let _ = fs::write(path, &json);
+
+        // Mirror to global ~/.aura/usage/ for cross-project aggregation
+        if let Ok(home) = std::env::var("HOME") {
+            let global_dir = format!("{}/.aura/usage", home);
+            let _ = fs::create_dir_all(&global_dir);
+            let global_path = format!("{}/{}.json", global_dir, session.session_id);
+            let _ = fs::write(global_path, &json);
+        }
     }
 
     // ── Transcript capture ──
@@ -863,6 +877,7 @@ impl SessionManager {
                     first_prompt: Some(intent.clone()),
                     subagents: Vec::new(),
                     pid: None,
+                    project: None,
                 };
 
                 let transcript = vec![TranscriptEntry {

@@ -24,6 +24,13 @@ After making code changes and BEFORE committing, you MUST call `aura_log_intent`
 - `aura_sentinel_inbox` — Read messages from other agent sessions. Unread messages are auto-pushed to you.
 - `aura_sentinel_release` — Manually release function claims for this session.
 - `aura_zone_claim` — Claim exclusive ownership of a directory/file pattern (warn or block mode).
+- `aura_live_impacts` — Fetch cross-branch dependency conflict alerts (auto-pushed to you).
+- `aura_live_resolve` — Mark an impact alert as resolved.
+- `aura_live_sync_push` — Push function bodies to cloud so teammates can pull changes.
+- `aura_live_sync_pull` — Pull function changes from teammates and apply at AST level.
+- `aura_live_sync_status` — Check pending function sync changes from teammates.
+- `aura_msg_send` — Send a message to team or a specific developer/agent via cloud.
+- `aura_msg_list` — Read recent team messages (auto-pushed when unread).
 - `aura_doctor` — Diagnose repository health issues.
 
 ## Sentinel — Multi-Agent Awareness
@@ -38,7 +45,10 @@ When you call `aura_status`, Aura automatically registers your presence and show
 - `aura pr-review --base main` — Semantic review with risk scoring (0-100).
 - `aura plan "objective"` then `aura execute` — Decompose large tasks into atomic waves.
 - `aura prove --goal "description"` — Mathematically verify a behavioral goal.
+- `aura orchestrate run "objective" --duo` — Run Claude Code + Gemini CLI in parallel.
 - `aura fix --base main` — Auto-resolve architectural violations.
+- `aura msg send "message"` — Send a message to team (or `--to user` for DM).
+- `aura msg list` — Read recent team/agent messages.
 - `aura handover cursor` — Generate compressed AST context (90%+ token savings).
 - `aura policy add security` — Add architectural invariant checks.
 
@@ -54,5 +64,7 @@ When you call `aura_status`, Aura automatically registers your presence and show
 You do NOT need to poll for alerts. Aura automatically injects these into every MCP tool response:
 - **Sentinel messages** — when another AI agent sends you a message
 - **Sentinel collisions** — when another agent is editing the same functions as you
+- **Cross-branch impact alerts** — when functions you depend on are modified/deleted on other branches
+- **Unread team messages** — when a teammate sends you a message via cloud
 - **Intent reminders** — when you haven't logged intent before committing
 <!-- AURA_END -->

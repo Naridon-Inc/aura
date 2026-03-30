@@ -26,6 +26,16 @@ pub struct AstNode {
     pub derived_from: Option<String>, // KILL SHOT FIX: Lineage tracking
     #[serde(default)]
     pub confidence: f32,           // Epistemic certainty score
+    #[serde(default)]
+    pub file_path: Option<String>,  // Source file (e.g., "src/server.rs")
+    #[serde(default)]
+    pub start_line: Option<u32>,    // Line number where the node starts (1-based)
+    #[serde(default)]
+    pub end_line: Option<u32>,      // Line number where the node ends
+    #[serde(default)]
+    pub signature: Option<String>,  // Human-readable signature (e.g., "fn health_check(state: AppState) -> StatusCode")
+    #[serde(default)]
+    pub doc_comment: Option<String>,// Doc comment / docstring if present
 }
 
 /// The metadata around *why* the code changed.
