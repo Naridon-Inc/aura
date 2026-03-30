@@ -216,7 +216,7 @@ fn capture_env_fingerprint() -> Option<String> {
     ecosystem::Ecosystem::fingerprint()
 }
 
-const CURRENT_VERSION: &str = "0.10.0";
+const CURRENT_VERSION: &str = "0.10.1";
 
 fn check_for_updates() -> Option<String> {
     let client = reqwest::blocking::Client::builder()
@@ -463,6 +463,11 @@ fn install_claude_statusline() {
         // Already pointing to our script — just updated the file above
         println!("    {} Aura status line updated.", "✓".green());
         return;
+    }
+
+    // Log what we're replacing so users can debug
+    if !current_cmd.is_empty() {
+        println!("    {} Replacing existing status line: {}", "ℹ".blue(), current_cmd.dimmed());
     }
 
     // Overwrite whatever was there — our script is the status line
@@ -1222,7 +1227,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         }
                         let gsd_prompt = serde_json::json!({
                             "name": "aura-semantic-engine",
-                            "description": "Aura Semantic Engine v0.10.0 — AI-native version control with multi-agent orchestration, semantic PR review, surgical rewind, and durable snapshots.",
+                            "description": "Aura Semantic Engine v0.10.1 — AI-native version control with multi-agent orchestration, semantic PR review, surgical rewind, and durable snapshots.",
                             "instructions": "You have access to the Aura Semantic Engine. Key commands: (1) `aura snapshot \"desc\"` — ALWAYS run before large edits for safety. (2) `aura rewind <func> <file>` — surgically revert a function. (3) `aura pr-review --base main` — check for violations before committing. (4) `aura plan \"objective\"` then `aura execute` — decompose large tasks into atomic waves. (5) `aura prove --goal \"description\"` — mathematically verify a behavioral goal. (6) `aura orchestrate run \"objective\" --duo` — run Claude + Gemini in parallel. (7) `aura fix --base main` — auto-fix violations. (8) `aura handover cursor` — compressed context for agent relay. Before committing, log intent to `.gemini.intent` and run `aura pr-review`. Never use --no-verify."
                         });
                         let _ = fs::write(".claude/aura-gsd.json", serde_json::to_string_pretty(&gsd_prompt).unwrap_or_default());
@@ -3016,6 +3021,64 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let plugin_config = plugin::load_plugin_config();
             let registry = plugin::PluginRegistry::load_from_config(&plugin_config);
             println!("  {} {} plugin(s) loaded.", "✓".green().bold(), registry.count());
+
+            // 9. Status line health check
+            {
+                let home = std::env::var("HOME").unwrap_or_default();
+                let script_path = format!("{}/.claude/aura-statusline.sh", home);
+                let settings_path = format!("{}/.claude/settings.json", home);
+
+                let script_exists = Path::new(&script_path).exists();
+                let script_executable = script_exists && {
+                    #[cfg(unix)]
+                    { std::os::unix::fs::PermissionsExt::mode(&fs::metadata(&script_path).unwrap().permissions()) & 0o111 != 0 }
+                    #[cfg(not(unix))]
+                    { true }
+                };
+
+                let (settings_ok, current_cmd) = if let Ok(content) = fs::read_to_string(&settings_path) {
+                    if let Ok(settings) = serde_json::from_str::<serde_json::Value>(&content) {
+                        let cmd = settings.get("statusLine")
+                            .and_then(|s| s.get("command"))
+                            .and_then(|c| c.as_str())
+                            .unwrap_or("")
+                            .to_string();
+                        (!cmd.is_empty(), cmd)
+                    } else { (false, String::new()) }
+                } else { (false, String::new()) };
+
+                let points_to_aura = current_cmd.contains("aura-statusline");
+                let jq_installed = std::process::Command::new("jq").arg("--version").output().is_ok();
+
+                if script_exists && script_executable && points_to_aura && jq_installed {
+                    println!("  {} Claude Code status line: healthy", "✓".green().bold());
+                } else {
+                    println!("  {} Claude Code status line: issues detected", "⚠".yellow().bold());
+                    if !script_exists {
+                        println!("    {} Script missing: {}", "✗".red(), script_path.dimmed());
+                        println!("      Fix: run {} to install", "aura init".cyan());
+                        issues_found += 1;
+                    } else if !script_executable {
+                        println!("    {} Script not executable: {}", "✗".red(), script_path.dimmed());
+                        println!("      Fix: {}", format!("chmod +x {}", script_path).cyan());
+                        issues_found += 1;
+                    }
+                    if !settings_ok {
+                        println!("    {} ~/.claude/settings.json missing or has no statusLine", "✗".red());
+                        println!("      Fix: run {} to install", "aura init".cyan());
+                        issues_found += 1;
+                    } else if !points_to_aura {
+                        println!("    {} statusLine points to: {}", "⚠".yellow(), current_cmd.dimmed());
+                        println!("      Fix: run {} to switch to Aura's status line", "aura init".cyan());
+                        issues_found += 1;
+                    }
+                    if !jq_installed {
+                        println!("    {} jq not found — required for status line", "✗".red());
+                        println!("      Fix: {}", "brew install jq".cyan());
+                        issues_found += 1;
+                    }
+                }
+            }
 
             println!("\n  {} Doctor complete. {} issue(s) found.\n",
                 if issues_found == 0 { "✓".green().bold() } else { "⚠".yellow().bold() },
