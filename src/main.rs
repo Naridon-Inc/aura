@@ -448,19 +448,27 @@ fn install_claude_statusline() {
         let _ = fs::set_permissions(&script_path, fs::Permissions::from_mode(0o755));
     }
 
-    // Add statusLine to settings.json — create file if it doesn't exist
+    // Always set statusLine to Aura's script — create settings.json if needed
     let content = fs::read_to_string(&settings_path).unwrap_or_else(|_| "{}".to_string());
-    if content.contains("statusLine") {
-        // Already configured — just update the script file (done above)
+    let mut settings = serde_json::from_str::<serde_json::Value>(&content)
+        .unwrap_or_else(|_| serde_json::json!({}));
+
+    let aura_cmd = "bash $HOME/.claude/aura-statusline.sh";
+    let current_cmd = settings.get("statusLine")
+        .and_then(|s| s.get("command"))
+        .and_then(|c| c.as_str())
+        .unwrap_or("");
+
+    if current_cmd == aura_cmd {
+        // Already pointing to our script — just updated the file above
         println!("    {} Aura status line updated.", "✓".green());
         return;
     }
 
-    let mut settings = serde_json::from_str::<serde_json::Value>(&content)
-        .unwrap_or_else(|_| serde_json::json!({}));
+    // Overwrite whatever was there — our script is the status line
     settings["statusLine"] = serde_json::json!({
         "type": "command",
-        "command": "bash $HOME/.claude/aura-statusline.sh"
+        "command": aura_cmd
     });
     if let Ok(updated) = serde_json::to_string_pretty(&settings) {
         let claude_dir = format!("{}/.claude", home);
