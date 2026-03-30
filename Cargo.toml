@@ -1,6 +1,6 @@
 [package]
 name = "aura"
-version = "0.10.1"
+version = "0.11.0"
 edition = "2024"
 
 [dependencies]
@@ -42,6 +42,17 @@ tree-sitter-php = "0.24.2"
 sha2 = "0.10"
 hex = "0.4"
 rand = "0.8"
+bcrypt = "0.17"
+jsonwebtoken = "9"
+chrono = { version = "0.4", features = ["serde"] }
+tower-http = { version = "0.6", features = ["cors"] }
+http = "1"
+rcgen = "0.13"
+tokio-rustls = "0.26"
+rustls = "0.23"
+rustls-pemfile = "2"
+axum-server = { version = "0.7", features = ["tls-rustls"] }
+base64 = "0.22"
 serde_yaml = "0.9"
 ctrlc = "3.4"
 tree-sitter-swift = "0.7.1"
