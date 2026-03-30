@@ -218,7 +218,7 @@ fn capture_env_fingerprint() -> Option<String> {
     ecosystem::Ecosystem::fingerprint()
 }
 
-const CURRENT_VERSION: &str = "0.11.0";
+const CURRENT_VERSION: &str = "0.11.1";
 
 fn check_for_updates() -> Option<String> {
     let client = reqwest::blocking::Client::builder()
@@ -1950,18 +1950,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 // Check if aura_log_intent was actually called (marker file must exist)
                 let intent_was_logged = std::path::Path::new(".aura/.intent_logged").exists();
 
-                // Block if intent was never logged via aura_log_intent (strict mode)
+                // Block if intent was never logged via aura_log_intent
+                // Always block — intent logging is mandatory for all commits with logic changes
                 if !intent_was_logged {
-                    let config = ConfigManager::load();
-                    if config.strict_gatekeeper_mode {
-                        spinner.finish_and_clear();
-                        println!("{} Intent Not Logged: You must call {} before committing.", "🚨".red().bold(), "aura_log_intent".cyan().bold());
-                        println!("  {} {} logic nodes were modified but no intent was logged via the MCP tool.", "↳".dimmed(), staged_nodes.len());
-                        println!("\n  {} {}", "How to Fix:".bold().green(), "Call aura_log_intent with a description of your changes:");
-                        println!("    {} aura_log_intent(\"<describe what you changed and why>\")", "→".dimmed());
-                        println!("\n{} Commit halted.", "✗".red().bold());
-                        std::process::exit(1);
-                    }
+                    spinner.finish_and_clear();
+                    println!("{} Intent Not Logged: You must call {} before committing.", "🚨".red().bold(), "aura_log_intent".cyan().bold());
+                    println!("  {} {} logic nodes were modified but no intent was logged via the MCP tool.", "↳".dimmed(), staged_nodes.len());
+                    println!("\n  {} {}", "How to Fix:".bold().green(), "Call aura_log_intent with a description of your changes:");
+                    println!("    {} aura_log_intent(\"<describe what you changed and why>\")", "→".dimmed());
+                    println!("\n{} Commit halted.", "✗".red().bold());
+                    std::process::exit(1);
                 }
 
                 // Reject the default fallback string explicitly
