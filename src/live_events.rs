@@ -219,7 +219,7 @@ impl LiveEventBuffer {
 
 /// Helper to get current git branch name.
 pub fn current_branch() -> String {
-    let repo = match git2::Repository::open(".") {
+    let repo = match git2::Repository::discover(".") {
         Ok(r) => r,
         Err(_) => return "unknown".to_string(),
     };
@@ -232,7 +232,7 @@ pub fn current_branch() -> String {
 
 /// Helper to get repo name from git remote (e.g., "Naridon-Inc/aura").
 pub fn repo_name() -> String {
-    let url = git2::Repository::open(".")
+    let url = git2::Repository::discover(".")
         .ok()
         .and_then(|repo| {
             repo.find_remote("origin")
@@ -261,7 +261,7 @@ pub fn repo_name() -> String {
 
 /// Helper to get current username from git config.
 pub fn git_user() -> String {
-    git2::Repository::open(".")
+    git2::Repository::discover(".")
         .ok()
         .and_then(|repo| {
             repo.config()
