@@ -1,1 +1,0 @@
-{"file_path":"aura-web/src/main.tsx","content":"import { StrictMode } from 'react'\nimport { createRoot } from 'react-dom/client'\nimport './index.css'\nimport App from './App.tsx'\n\ncreateRoot(document.getElementById('root')!).render(\n  <StrictMode>\n    <App />\n  </StrictMode>,\n)\n","timestamp":1773405877605,"trigger":"pre_deletion_guard","agent_id":"Aura Deletion Guard"}

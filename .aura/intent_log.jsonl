@@ -1,4 +1,0 @@
-{"timestamp":1774857786,"agent":"muhammed","intent":"Full v0.9.0 sync — removed old JS integration files replaced by native Rust. Deleted legacy cursor-extension stubs and reference JS helpers. All functionality preserved in updated Rust source.","checkpoint_id":null}
-{"timestamp":1774858173,"agent":"muhammed","intent":"Bump version to 0.10.0","checkpoint_id":null}
-{"timestamp":1774858987,"agent":"muhammed","intent":"Fix statusline overwrite","checkpoint_id":null}
-{"timestamp":1774859190,"agent":"muhammed","intent":"Release v0.10.1","checkpoint_id":null}
