@@ -59,6 +59,7 @@ pub struct InviteCode {
     pub code: String,
     pub org_id: String,
     pub created_by: String,
+    pub for_username: Option<String>, // If set, only this username can use the code
     pub max_uses: i32,
     pub uses: i32,
     pub expires_at: String,
@@ -195,6 +196,7 @@ CREATE TABLE IF NOT EXISTS invite_codes (
     code        TEXT NOT NULL UNIQUE,
     org_id      TEXT NOT NULL,
     created_by  TEXT NOT NULL,
+    for_username TEXT,
     max_uses    INTEGER NOT NULL DEFAULT 5,
     uses        INTEGER NOT NULL DEFAULT 0,
     expires_at  TEXT NOT NULL,
@@ -224,6 +226,8 @@ CREATE INDEX IF NOT EXISTS idx_function_bodies_pushed_at ON function_bodies(push
 pub fn init_db(path: &str) -> SqlResult<Connection> {
     let conn = Connection::open(path)?;
     conn.execute_batch(SCHEMA)?;
+    // Migrations for existing databases
+    let _ = conn.execute("ALTER TABLE invite_codes ADD COLUMN for_username TEXT", []);
     Ok(conn)
 }
 
@@ -898,7 +902,7 @@ pub fn count_sync_pending_for_heartbeat(conn: &Connection, repo_id: &str, branch
 
 // ─── Invite Code Queries ────────────────────────────────────────────────────
 
-pub fn create_invite_code(conn: &Connection, org_id: &str, created_by: &str, max_uses: i32, expires_hours: i64) -> SqlResult<InviteCode> {
+pub fn create_invite_code(conn: &Connection, org_id: &str, created_by: &str, max_uses: i32, expires_hours: i64, for_username: Option<&str>) -> SqlResult<InviteCode> {
     use rand::Rng;
     let id = new_id();
     let ts = now();
@@ -911,27 +915,29 @@ pub fn create_invite_code(conn: &Connection, org_id: &str, created_by: &str, max
     };
     let expires_at = (Utc::now() + chrono::Duration::hours(expires_hours)).to_rfc3339();
     conn.execute(
-        "INSERT INTO invite_codes (id, code, org_id, created_by, max_uses, expires_at, created_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-        params![id, code, org_id, created_by, max_uses, expires_at, ts],
+        "INSERT INTO invite_codes (id, code, org_id, created_by, for_username, max_uses, expires_at, created_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+        params![id, code, org_id, created_by, for_username, max_uses, expires_at, ts],
     )?;
     Ok(InviteCode {
         id, code, org_id: org_id.to_string(), created_by: created_by.to_string(),
+        for_username: for_username.map(|s| s.to_string()),
         max_uses, uses: 0, expires_at, created_at: ts,
     })
 }
 
 pub fn validate_invite_code(conn: &Connection, code: &str) -> SqlResult<Option<InviteCode>> {
     let mut stmt = conn.prepare(
-        "SELECT id, code, org_id, created_by, max_uses, uses, expires_at, created_at
+        "SELECT id, code, org_id, created_by, for_username, max_uses, uses, expires_at, created_at
          FROM invite_codes WHERE code = ?1 AND uses < max_uses AND expires_at > datetime('now')"
     )?;
     let mut rows = stmt.query(params![code])?;
     if let Some(row) = rows.next()? {
         Ok(Some(InviteCode {
             id: row.get(0)?, code: row.get(1)?, org_id: row.get(2)?,
-            created_by: row.get(3)?, max_uses: row.get(4)?, uses: row.get(5)?,
-            expires_at: row.get(6)?, created_at: row.get(7)?,
+            created_by: row.get(3)?, for_username: row.get(4)?,
+            max_uses: row.get(5)?, uses: row.get(6)?,
+            expires_at: row.get(7)?, created_at: row.get(8)?,
         }))
     } else {
         Ok(None)
