@@ -218,7 +218,18 @@ fn capture_env_fingerprint() -> Option<String> {
     ecosystem::Ecosystem::fingerprint()
 }
 
-const CURRENT_VERSION: &str = "0.11.1";
+const CURRENT_VERSION: &str = "0.11.2";
+
+/// Build an HTTP client that respects accept_self_signed for mothership TLS.
+fn cloud_http_client() -> reqwest::blocking::Client {
+    let config = ConfigManager::load();
+    let mut builder = reqwest::blocking::Client::builder()
+        .timeout(std::time::Duration::from_secs(10));
+    if config.accept_self_signed {
+        builder = builder.danger_accept_invalid_certs(true);
+    }
+    builder.build().unwrap_or_else(|_| reqwest::blocking::Client::new())
+}
 
 fn check_for_updates() -> Option<String> {
     let client = reqwest::blocking::Client::builder()
@@ -4104,7 +4115,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 ServerSubcommands::Register { url, username, password } => {
                     println!("{} Registering on {}...", "🔐".bold(), url.cyan());
 
-                    let client = reqwest::blocking::Client::new();
+                    let client = cloud_http_client();
                     let resp = client.post(format!("{}/auth/register", url))
                         .json(&serde_json::json!({
                             "username": username,
@@ -4160,7 +4171,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 ServerSubcommands::Login { url, username, password } => {
                     println!("{} Logging in to {}...", "🔐".bold(), url.cyan());
 
-                    let client = reqwest::blocking::Client::new();
+                    let client = cloud_http_client();
                     let resp = client.post(format!("{}/auth/login", url))
                         .json(&serde_json::json!({
                             "username": username,
@@ -4238,7 +4249,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         return Ok(());
                     }
 
-                    let client = reqwest::blocking::Client::new();
+                    let client = cloud_http_client();
                     let resp = client.post(format!("{}/api/v1/orgs/{}/repos", cloud_url, org_slug))
                         .bearer_auth(cloud_token)
                         .json(&serde_json::json!({ "repo_name": repo_name }))
@@ -4268,10 +4279,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                     println!("{} Checking connection to {}...", "🔍".bold(), cloud_url.cyan());
 
-                    let client = reqwest::blocking::Client::builder()
-                        .timeout(std::time::Duration::from_secs(5))
-                        .build()
-                        .unwrap();
+                    let client = cloud_http_client();
 
                     match client.get(format!("{}/health", cloud_url)).send() {
                         Ok(r) if r.status().is_success() => {
