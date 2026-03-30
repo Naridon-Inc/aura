@@ -17,6 +17,7 @@ use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
 use tower_http::cors::CorsLayer;
 use http::Method;
+use colored::Colorize;
 use crate::host_db;
 
 // ─── State ──────────────────────────────────────────────────────────────────
@@ -158,6 +159,202 @@ pub fn load_or_create_jwt_secret() -> String {
 fn dirs_path() -> String {
     let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
     format!("{}/.aura", home)
+}
+
+// ─── Daemon / PID File Management ──────────────────────────────────────────
+
+fn pid_path() -> String {
+    format!("{}/mothership.pid", dirs_path())
+}
+
+fn log_path() -> String {
+    format!("{}/mothership.log", dirs_path())
+}
+
+pub fn write_pid_file() {
+    let _ = std::fs::write(pid_path(), std::process::id().to_string());
+}
+
+pub fn remove_pid_file() {
+    let _ = std::fs::remove_file(pid_path());
+}
+
+/// Returns Some(pid) if the mothership daemon is running, None otherwise.
+pub fn read_running_pid() -> Option<u32> {
+    let pid_str = std::fs::read_to_string(pid_path()).ok()?;
+    let pid: u32 = pid_str.trim().parse().ok()?;
+    // Check if process is alive (signal 0 = existence check)
+    let status = std::process::Command::new("kill")
+        .args(["-0", &pid.to_string()])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status();
+    match status {
+        Ok(s) if s.success() => Some(pid),
+        _ => {
+            // Stale PID file — clean up
+            let _ = std::fs::remove_file(pid_path());
+            None
+        }
+    }
+}
+
+/// Fork the mothership as a background daemon. Re-execs the current binary
+/// with `--foreground`, redirecting output to the log file.
+pub fn daemonize(port: u16, tunnel: bool, no_tls: bool) -> Result<(), Box<dyn std::error::Error>> {
+    if let Some(pid) = read_running_pid() {
+        eprintln!("  Mothership is already running (PID {}). Use `aura host stop` first.", pid);
+        return Ok(());
+    }
+
+    let exe = std::env::current_exe()?;
+    let log = log_path();
+    let log_file = std::fs::OpenOptions::new()
+        .create(true).append(true).open(&log)?;
+    let log_err = log_file.try_clone()?;
+
+    let mut cmd = std::process::Command::new(exe);
+    cmd.arg("host").arg("start").arg("--foreground")
+        .arg("--port").arg(port.to_string());
+    if tunnel { cmd.arg("--tunnel"); }
+    if no_tls { cmd.arg("--no-tls"); }
+
+    cmd.stdout(log_file)
+        .stderr(log_err)
+        .stdin(std::process::Stdio::null());
+
+    // Detach on Unix
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        cmd.process_group(0);  // new process group — survives terminal close
+    }
+
+    let child = cmd.spawn()?;
+    let pid = child.id();
+    let _ = std::fs::write(pid_path(), pid.to_string());
+
+    println!("\n  {} Mothership daemon started (PID {})", "✓".green().bold(), pid);
+    println!("  {} Logs: {}", "•".dimmed(), log);
+    println!("  {} Stop with: aura host stop", "•".dimmed());
+    println!();
+    Ok(())
+}
+
+/// Stop the running mothership daemon via PID file.
+pub fn stop_daemon() -> bool {
+    if let Some(pid) = read_running_pid() {
+        let _ = std::process::Command::new("kill")
+            .arg(pid.to_string())
+            .status();
+        remove_pid_file();
+        println!("  {} Mothership stopped (PID {})", "✓".green().bold(), pid);
+        true
+    } else {
+        println!("  {} No running mothership found", "ℹ".blue());
+        false
+    }
+}
+
+/// Show daemon status — PID, uptime, log tail.
+pub fn daemon_status() {
+    if let Some(pid) = read_running_pid() {
+        println!("  {} Mothership daemon is {} (PID {})", "●".green(), "running".green().bold(), pid);
+        println!("  {} Logs: {}", "•".dimmed(), log_path());
+        // Show last 5 lines of log
+        if let Ok(log) = std::fs::read_to_string(log_path()) {
+            let lines: Vec<&str> = log.lines().collect();
+            let tail: Vec<&str> = lines.iter().rev().take(5).rev().cloned().collect();
+            if !tail.is_empty() {
+                println!("  {} Recent log:", "•".dimmed());
+                for line in tail {
+                    println!("    {}", line.dimmed());
+                }
+            }
+        }
+    } else {
+        println!("  {} Mothership is {}", "●".red(), "not running".red().bold());
+    }
+}
+
+/// Install a macOS LaunchAgent so the mothership auto-starts on login.
+pub fn install_launchagent(port: u16, no_tls: bool) -> Result<(), Box<dyn std::error::Error>> {
+    let home = std::env::var("HOME")?;
+    let agents_dir = format!("{}/Library/LaunchAgents", home);
+    let plist_path = format!("{}/com.aura.mothership.plist", agents_dir);
+    let exe = std::env::current_exe()?.to_string_lossy().to_string();
+    let log = log_path();
+
+    let mut args = vec![
+        format!("<string>{}</string>", exe),
+        "<string>host</string>".to_string(),
+        "<string>start</string>".to_string(),
+        "<string>--foreground</string>".to_string(),
+        "<string>--port</string>".to_string(),
+        format!("<string>{}</string>", port),
+    ];
+    if no_tls {
+        args.push("<string>--no-tls</string>".to_string());
+    }
+    let args_xml = args.join("\n            ");
+
+    let plist = format!(r#"<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.aura.mothership</string>
+    <key>ProgramArguments</key>
+    <array>
+            {args_xml}
+    </array>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+    <key>StandardOutPath</key>
+    <string>{log}</string>
+    <key>StandardErrorPath</key>
+    <string>{log}</string>
+</dict>
+</plist>"#);
+
+    let _ = std::fs::create_dir_all(&agents_dir);
+    std::fs::write(&plist_path, plist)?;
+
+    // Load the agent
+    let _ = std::process::Command::new("launchctl")
+        .args(["unload", &plist_path])
+        .output();
+    let status = std::process::Command::new("launchctl")
+        .args(["load", &plist_path])
+        .status()?;
+
+    if status.success() {
+        println!("\n  {} LaunchAgent installed — mothership will auto-start on login", "✓".green().bold());
+        println!("  {} Plist: {}", "•".dimmed(), plist_path);
+        println!("  {} Uninstall: launchctl unload {}", "•".dimmed(), plist_path);
+    } else {
+        eprintln!("  {} launchctl load failed", "✗".red().bold());
+    }
+    println!();
+    Ok(())
+}
+
+/// Uninstall the macOS LaunchAgent.
+pub fn uninstall_launchagent() -> Result<(), Box<dyn std::error::Error>> {
+    let home = std::env::var("HOME")?;
+    let plist_path = format!("{}/Library/LaunchAgents/com.aura.mothership.plist", home);
+    if std::path::Path::new(&plist_path).exists() {
+        let _ = std::process::Command::new("launchctl")
+            .args(["unload", &plist_path])
+            .status();
+        std::fs::remove_file(&plist_path)?;
+        println!("  {} LaunchAgent removed — mothership will no longer auto-start", "✓".green().bold());
+    } else {
+        println!("  {} No LaunchAgent installed", "ℹ".blue());
+    }
+    Ok(())
 }
 
 // ─── TLS Certificate Management ─────────────────────────────────────────────
@@ -388,6 +585,11 @@ fn build_app(state: Arc<MothershipState>) -> Router {
         .route("/live/sync/push", post(sync_push))
         .route("/live/sync/pull", get(sync_pull))
         .route("/live/sync/status", get(sync_status))
+        .route("/live/zones", get(get_zones).post(create_zone_handler))
+        .route("/live/zones/check", get(check_zone))
+        .route("/live/zones/{zone_id}", axum::routing::delete(delete_zone_handler))
+        .route("/live/knowledge", get(query_knowledge_handler).post(store_knowledge_handler))
+        .route("/live/knowledge/{id}/upvote", post(upvote_knowledge_handler))
         .layer(middleware::from_fn_with_state(state.clone(), auth_middleware));
 
     Router::new()
@@ -406,6 +608,14 @@ fn build_app(state: Arc<MothershipState>) -> Router {
 /// - If `tunnel` is true, spawns bore/cloudflared for NAT traversal
 /// - If `no_tls` is true, falls back to plain HTTP (for local dev/testing)
 pub async fn start_mothership(port: u16, tunnel: bool, no_tls: bool) -> Result<(), Box<dyn std::error::Error>> {
+    // Write PID so `aura host stop` and `aura host status` can find us
+    write_pid_file();
+
+    // Clean up PID on graceful shutdown
+    struct PidGuard;
+    impl Drop for PidGuard { fn drop(&mut self) { remove_pid_file(); } }
+    let _pid_guard = PidGuard;
+
     let db_path = format!("{}/mothership.db", dirs_path());
     let _ = std::fs::create_dir_all(&dirs_path());
 
@@ -1241,4 +1451,171 @@ async fn sync_status(
         "active_pushers": active_pushers,
         "cursor": cursor_time,
     })))
+}
+
+// ─── Sentinel Zone Handlers ────────────────────────────────────────────────
+
+#[derive(Deserialize)]
+struct CreateZoneRequest {
+    repo_full_name: String,
+    patterns: Vec<String>,
+    #[serde(default = "default_zone_mode")]
+    mode: String,
+    label: Option<String>,
+}
+fn default_zone_mode() -> String { "warn".to_string() }
+
+#[derive(Deserialize)]
+struct ZoneQuery {
+    repo: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct ZoneCheckQuery {
+    repo: Option<String>,
+    file_path: Option<String>,
+}
+
+async fn create_zone_handler(
+    State(state): State<Arc<MothershipState>>,
+    auth: axum::Extension<TokenAuth>,
+    ExtractJson(payload): ExtractJson<CreateZoneRequest>,
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    let db = state.db.lock().unwrap();
+    let repo = host_db::get_repo_by_name_and_org(&db, &payload.repo_full_name, &auth.org_id)
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        .ok_or(StatusCode::NOT_FOUND)?;
+
+    let id = host_db::create_zone(&db, &auth.org_id, &repo.id, &auth.user_id, &payload.patterns, &payload.mode, payload.label.as_deref())
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    Ok(Json(serde_json::json!({ "status": "ok", "zone_id": id })))
+}
+
+async fn get_zones(
+    State(state): State<Arc<MothershipState>>,
+    auth: axum::Extension<TokenAuth>,
+    Query(params): Query<ZoneQuery>,
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    let db = state.db.lock().unwrap();
+    let repo_name = params.repo.as_deref().unwrap_or("");
+    let repo = host_db::get_repo_by_name_and_org(&db, repo_name, &auth.org_id)
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        .ok_or(StatusCode::NOT_FOUND)?;
+
+    let zones = host_db::get_zones(&db, &repo.id)
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    Ok(Json(serde_json::json!({ "status": "ok", "zones": zones })))
+}
+
+async fn check_zone(
+    State(state): State<Arc<MothershipState>>,
+    auth: axum::Extension<TokenAuth>,
+    Query(params): Query<ZoneCheckQuery>,
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    let db = state.db.lock().unwrap();
+    let repo_name = params.repo.as_deref().unwrap_or("");
+    let file_path = params.file_path.as_deref().unwrap_or("");
+    let repo = host_db::get_repo_by_name_and_org(&db, repo_name, &auth.org_id)
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        .ok_or(StatusCode::NOT_FOUND)?;
+
+    let conflicts = host_db::check_zone_conflict(&db, &repo.id, &auth.user_id, file_path)
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    let blocked = conflicts.iter().any(|z| z.mode == "block");
+
+    Ok(Json(serde_json::json!({
+        "status": "ok",
+        "conflicts": conflicts,
+        "blocked": blocked,
+    })))
+}
+
+async fn delete_zone_handler(
+    State(state): State<Arc<MothershipState>>,
+    auth: axum::Extension<TokenAuth>,
+    Path(zone_id): Path<String>,
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    let db = state.db.lock().unwrap();
+    let deleted = host_db::delete_zone(&db, &zone_id, &auth.user_id)
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    Ok(Json(serde_json::json!({ "status": "ok", "deleted": deleted })))
+}
+
+// ─── Team Knowledge Handlers ───────────────────────────────────────────────
+
+#[derive(Deserialize)]
+struct StoreKnowledgeRequest {
+    repo_full_name: Option<String>,
+    category: Option<String>,
+    question: String,
+    answer: String,
+    #[serde(default = "default_knowledge_source")]
+    source: String,
+    #[serde(default)]
+    tags: Vec<String>,
+}
+fn default_knowledge_source() -> String { "agent".to_string() }
+
+#[derive(Deserialize)]
+struct KnowledgeQuery {
+    search: Option<String>,
+    category: Option<String>,
+    repo: Option<String>,
+    #[serde(default = "default_knowledge_limit")]
+    limit: i64,
+}
+fn default_knowledge_limit() -> i64 { 20 }
+
+async fn store_knowledge_handler(
+    State(state): State<Arc<MothershipState>>,
+    auth: axum::Extension<TokenAuth>,
+    ExtractJson(payload): ExtractJson<StoreKnowledgeRequest>,
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    let db = state.db.lock().unwrap();
+
+    let repo_id = if let Some(ref name) = payload.repo_full_name {
+        host_db::get_repo_by_name_and_org(&db, name, &auth.org_id)
+            .ok().flatten().map(|r| r.id)
+    } else {
+        None
+    };
+
+    let category = payload.category.as_deref().unwrap_or("general");
+    let id = host_db::store_knowledge(&db, &auth.org_id, repo_id.as_deref(), &auth.user_id, category, &payload.question, &payload.answer, &payload.source, &payload.tags)
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    Ok(Json(serde_json::json!({ "status": "ok", "id": id })))
+}
+
+async fn query_knowledge_handler(
+    State(state): State<Arc<MothershipState>>,
+    auth: axum::Extension<TokenAuth>,
+    Query(params): Query<KnowledgeQuery>,
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    let db = state.db.lock().unwrap();
+
+    let repo_id = if let Some(ref name) = params.repo {
+        host_db::get_repo_by_name_and_org(&db, name, &auth.org_id)
+            .ok().flatten().map(|r| r.id)
+    } else {
+        None
+    };
+
+    let results = host_db::query_knowledge(&db, &auth.org_id, params.search.as_deref(), params.category.as_deref(), repo_id.as_deref(), params.limit)
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    Ok(Json(serde_json::json!({ "status": "ok", "results": results, "total": results.len() })))
+}
+
+async fn upvote_knowledge_handler(
+    State(state): State<Arc<MothershipState>>,
+    Path(id): Path<String>,
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    let db = state.db.lock().unwrap();
+    let upvoted = host_db::upvote_knowledge(&db, &id)
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    Ok(Json(serde_json::json!({ "status": "ok", "upvoted": upvoted })))
 }
