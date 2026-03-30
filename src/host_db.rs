@@ -203,7 +203,38 @@ CREATE TABLE IF NOT EXISTS invite_codes (
     created_at  TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS sentinel_zones (
+    id              TEXT PRIMARY KEY,
+    org_id          TEXT NOT NULL,
+    repo_id         TEXT NOT NULL,
+    user_id         TEXT NOT NULL,
+    patterns        TEXT NOT NULL DEFAULT '[]',
+    mode            TEXT NOT NULL DEFAULT 'warn',
+    label           TEXT,
+    created_at      TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS team_knowledge (
+    id              TEXT PRIMARY KEY,
+    org_id          TEXT NOT NULL,
+    repo_id         TEXT,
+    user_id         TEXT NOT NULL,
+    category        TEXT NOT NULL DEFAULT 'general',
+    question        TEXT NOT NULL,
+    answer          TEXT NOT NULL,
+    source          TEXT NOT NULL DEFAULT 'agent',
+    tags            TEXT NOT NULL DEFAULT '[]',
+    upvotes         INTEGER NOT NULL DEFAULT 0,
+    created_at      TEXT NOT NULL,
+    updated_at      TEXT NOT NULL
+);
+
 -- Indexes
+CREATE INDEX IF NOT EXISTS idx_sentinel_zones_repo ON sentinel_zones(repo_id);
+CREATE INDEX IF NOT EXISTS idx_sentinel_zones_org ON sentinel_zones(org_id);
+CREATE INDEX IF NOT EXISTS idx_team_knowledge_org ON team_knowledge(org_id, category);
+CREATE INDEX IF NOT EXISTS idx_team_knowledge_repo ON team_knowledge(repo_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_team_knowledge_tags ON team_knowledge(tags);
 CREATE INDEX IF NOT EXISTS idx_api_tokens_hash ON api_tokens(token_hash);
 CREATE INDEX IF NOT EXISTS idx_repos_org ON repos(org_id);
 CREATE INDEX IF NOT EXISTS idx_org_members_user ON org_members(user_id);
@@ -957,4 +988,175 @@ pub fn count_users(conn: &Connection) -> SqlResult<i64> {
 /// Count total repos (for status display).
 pub fn count_repos(conn: &Connection) -> SqlResult<i64> {
     conn.query_row("SELECT COUNT(*) FROM repos", [], |row| row.get(0))
+}
+
+// ─── Sentinel Zone Queries ─────────────────────────────────────────────────
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ZoneRow {
+    pub id: String,
+    pub org_id: String,
+    pub repo_id: String,
+    pub user_id: String,
+    pub username: String,
+    pub patterns: Vec<String>,
+    pub mode: String,
+    pub label: Option<String>,
+    pub created_at: String,
+}
+
+pub fn create_zone(conn: &Connection, org_id: &str, repo_id: &str, user_id: &str, patterns: &[String], mode: &str, label: Option<&str>) -> SqlResult<String> {
+    let id = new_id();
+    let ts = now();
+    let patterns_json = serde_json::to_string(patterns).unwrap_or_else(|_| "[]".to_string());
+    conn.execute(
+        "INSERT INTO sentinel_zones (id, org_id, repo_id, user_id, patterns, mode, label, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+        params![id, org_id, repo_id, user_id, patterns_json, mode, label, ts],
+    )?;
+    Ok(id)
+}
+
+pub fn get_zones(conn: &Connection, repo_id: &str) -> SqlResult<Vec<ZoneRow>> {
+    let mut stmt = conn.prepare(
+        "SELECT z.id, z.org_id, z.repo_id, z.user_id, u.username, z.patterns, z.mode, z.label, z.created_at
+         FROM sentinel_zones z JOIN users u ON z.user_id = u.id
+         WHERE z.repo_id = ?1 ORDER BY z.created_at"
+    )?;
+    let rows = stmt.query_map(params![repo_id], |row| {
+        let patterns_str: String = row.get(5)?;
+        let patterns: Vec<String> = serde_json::from_str(&patterns_str).unwrap_or_default();
+        Ok(ZoneRow {
+            id: row.get(0)?,
+            org_id: row.get(1)?,
+            repo_id: row.get(2)?,
+            user_id: row.get(3)?,
+            username: row.get(4)?,
+            patterns,
+            mode: row.get(6)?,
+            label: row.get(7)?,
+            created_at: row.get(8)?,
+        })
+    })?;
+    rows.collect()
+}
+
+pub fn delete_zone(conn: &Connection, zone_id: &str, user_id: &str) -> SqlResult<bool> {
+    let changed = conn.execute(
+        "DELETE FROM sentinel_zones WHERE id = ?1 AND user_id = ?2",
+        params![zone_id, user_id],
+    )?;
+    Ok(changed > 0)
+}
+
+pub fn check_zone_conflict(conn: &Connection, repo_id: &str, user_id: &str, file_path: &str) -> SqlResult<Vec<ZoneRow>> {
+    // Get all zones for this repo claimed by OTHER users
+    let all_zones = get_zones(conn, repo_id)?;
+    let conflicts: Vec<ZoneRow> = all_zones.into_iter()
+        .filter(|z| z.user_id != user_id)
+        .filter(|z| {
+            z.patterns.iter().any(|pat| {
+                glob_match(pat, file_path)
+            })
+        })
+        .collect();
+    Ok(conflicts)
+}
+
+fn glob_match(pattern: &str, path: &str) -> bool {
+    // Simple glob: * matches anything in one segment, ** matches across segments
+    let pattern = pattern.replace(".", r"\.");
+    let pattern = pattern.replace("**", "DOUBLESTAR");
+    let pattern = pattern.replace("*", "[^/]*");
+    let pattern = pattern.replace("DOUBLESTAR", ".*");
+    let pattern = format!("^{}$", pattern);
+    regex::Regex::new(&pattern).map(|re| re.is_match(path)).unwrap_or(false)
+}
+
+// ─── Team Knowledge Queries ────────────────────────────────────────────────
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct KnowledgeRow {
+    pub id: String,
+    pub org_id: String,
+    pub repo_id: Option<String>,
+    pub user_id: String,
+    pub username: String,
+    pub category: String,
+    pub question: String,
+    pub answer: String,
+    pub source: String,
+    pub tags: Vec<String>,
+    pub upvotes: i64,
+    pub created_at: String,
+}
+
+pub fn store_knowledge(conn: &Connection, org_id: &str, repo_id: Option<&str>, user_id: &str, category: &str, question: &str, answer: &str, source: &str, tags: &[String]) -> SqlResult<String> {
+    let id = new_id();
+    let ts = now();
+    let tags_json = serde_json::to_string(tags).unwrap_or_else(|_| "[]".to_string());
+    conn.execute(
+        "INSERT INTO team_knowledge (id, org_id, repo_id, user_id, category, question, answer, source, tags, created_at, updated_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+        params![id, org_id, repo_id, user_id, category, question, answer, source, tags_json, ts, ts],
+    )?;
+    Ok(id)
+}
+
+pub fn query_knowledge(conn: &Connection, org_id: &str, search: Option<&str>, category: Option<&str>, repo_id: Option<&str>, limit: i64) -> SqlResult<Vec<KnowledgeRow>> {
+    let mut sql = String::from(
+        "SELECT k.id, k.org_id, k.repo_id, k.user_id, u.username, k.category, k.question, k.answer, k.source, k.tags, k.upvotes, k.created_at
+         FROM team_knowledge k JOIN users u ON k.user_id = u.id
+         WHERE k.org_id = ?1"
+    );
+    let mut param_idx = 2;
+    let mut params_vec: Vec<Box<dyn rusqlite::types::ToSql>> = vec![Box::new(org_id.to_string())];
+
+    if let Some(cat) = category {
+        sql.push_str(&format!(" AND k.category = ?{}", param_idx));
+        params_vec.push(Box::new(cat.to_string()));
+        param_idx += 1;
+    }
+    if let Some(rid) = repo_id {
+        sql.push_str(&format!(" AND (k.repo_id = ?{} OR k.repo_id IS NULL)", param_idx));
+        params_vec.push(Box::new(rid.to_string()));
+        param_idx += 1;
+    }
+    if let Some(q) = search {
+        sql.push_str(&format!(" AND (k.question LIKE ?{} OR k.answer LIKE ?{} OR k.tags LIKE ?{})", param_idx, param_idx, param_idx));
+        params_vec.push(Box::new(format!("%{}%", q)));
+        param_idx += 1;
+    }
+    let _ = param_idx; // suppress warning
+    sql.push_str(" ORDER BY k.upvotes DESC, k.created_at DESC LIMIT ?");
+    params_vec.push(Box::new(limit));
+
+    let params_refs: Vec<&dyn rusqlite::types::ToSql> = params_vec.iter().map(|p| p.as_ref()).collect();
+    let mut stmt = conn.prepare(&sql)?;
+    let rows = stmt.query_map(params_refs.as_slice(), |row| {
+        let tags_str: String = row.get(9)?;
+        let tags: Vec<String> = serde_json::from_str(&tags_str).unwrap_or_default();
+        Ok(KnowledgeRow {
+            id: row.get(0)?,
+            org_id: row.get(1)?,
+            repo_id: row.get(2)?,
+            user_id: row.get(3)?,
+            username: row.get(4)?,
+            category: row.get(5)?,
+            question: row.get(6)?,
+            answer: row.get(7)?,
+            source: row.get(8)?,
+            tags,
+            upvotes: row.get(10)?,
+            created_at: row.get(11)?,
+        })
+    })?;
+    rows.collect()
+}
+
+pub fn upvote_knowledge(conn: &Connection, knowledge_id: &str) -> SqlResult<bool> {
+    let changed = conn.execute(
+        "UPDATE team_knowledge SET upvotes = upvotes + 1 WHERE id = ?1",
+        params![knowledge_id],
+    )?;
+    Ok(changed > 0)
 }

@@ -41,6 +41,8 @@ pub struct AuraConfig {
     pub telemetry_enabled: bool, // Allow users to opt-out of anonymous usage ping
     #[serde(default)]
     pub budget: Option<crate::usage::BudgetConfig>, // AI spending caps
+    #[serde(default)]
+    pub team_repos: Vec<String>, // Repos managed by the team (e.g., "MHASK/aura-sovereign")
 }
 
 fn default_telemetry() -> bool { true }
@@ -71,6 +73,7 @@ impl Default for AuraConfig {
             secret_allowlist: vec![],
             telemetry_enabled: true,
             budget: None,
+            team_repos: vec![],
         }
     }
 }

@@ -218,7 +218,7 @@ fn capture_env_fingerprint() -> Option<String> {
     ecosystem::Ecosystem::fingerprint()
 }
 
-const CURRENT_VERSION: &str = "0.12.0";
+const CURRENT_VERSION: &str = "0.12.1";
 
 /// Build an HTTP client that respects accept_self_signed for mothership TLS.
 fn cloud_http_client() -> reqwest::blocking::Client {
@@ -694,6 +694,11 @@ enum Commands {
         #[command(subcommand)]
         sub: ServerSubcommands,
     },
+    /// Manage team-linked repos — control which projects sync through the mothership
+    Team {
+        #[command(subcommand)]
+        sub: TeamSubcommands,
+    },
     /// Run a mothership server — your machine becomes the team's collaboration hub (P2P, no cloud)
     Host {
         #[command(subcommand)]
@@ -831,6 +836,12 @@ enum HostSubcommands {
         /// Disable TLS (plain HTTP — only for local testing)
         #[arg(long)]
         no_tls: bool,
+        /// Run in foreground (blocking) — used by daemon and LaunchAgent internally
+        #[arg(long)]
+        foreground: bool,
+        /// Install as macOS LaunchAgent so it auto-starts on login
+        #[arg(long)]
+        install: bool,
     },
     /// Generate an invite code for teammates to join
     Invite {
@@ -855,6 +866,90 @@ enum HostSubcommands {
     Status,
     /// Stop the running mothership process
     Stop,
+    /// Remove the macOS LaunchAgent (stops auto-start on login)
+    Uninstall,
+}
+
+#[derive(Subcommand)]
+enum TeamSubcommands {
+    /// Link the current repo to the team mothership — syncs through the team hub
+    Link,
+    /// Unlink the current repo from the team — stops syncing, keeps local data
+    Unlink,
+    /// Show which repos are team-managed
+    Status,
+    /// Shared team knowledge base — ask what the team has learned
+    Knowledge {
+        #[command(subcommand)]
+        sub: KnowledgeSubcommands,
+    },
+    /// Manage sentinel zones — claim files/dirs so the team knows who owns what
+    Zones {
+        #[command(subcommand)]
+        sub: ZoneSubcommands,
+    },
+}
+
+#[derive(Subcommand)]
+enum KnowledgeSubcommands {
+    /// Store a piece of knowledge for the team
+    Store {
+        /// The question/topic (e.g., "How does retry logic work?")
+        #[arg(long)]
+        question: String,
+        /// The answer/insight
+        #[arg(long)]
+        answer: String,
+        /// Category (general, bug, pattern, decision, etc.)
+        #[arg(long, default_value = "general")]
+        category: String,
+        /// Tags for searchability
+        #[arg(long, value_delimiter = ',')]
+        tags: Vec<String>,
+    },
+    /// Query the team knowledge base
+    Query {
+        /// Search text
+        search: Option<String>,
+        /// Filter by category
+        #[arg(long)]
+        category: Option<String>,
+        /// Max results
+        #[arg(long, default_value = "10")]
+        limit: usize,
+    },
+    /// Upvote a knowledge entry (pass the ID)
+    Upvote {
+        id: String,
+    },
+}
+
+#[derive(Subcommand)]
+enum ZoneSubcommands {
+    /// Claim a file pattern as yours (e.g., "src/auth/**")
+    Claim {
+        /// Glob patterns to claim (e.g., "src/auth/**")
+        #[arg(required = true)]
+        patterns: Vec<String>,
+        /// Mode: warn (default) or block
+        #[arg(long, default_value = "warn")]
+        mode: String,
+        /// Label for this zone claim
+        #[arg(long)]
+        label: Option<String>,
+    },
+    /// List all zone claims for this repo
+    List,
+    /// Release a zone claim
+    Release {
+        /// Zone ID to release
+        zone_id: String,
+    },
+    /// Check if a file is in someone else's zone
+    Check {
+        /// File path to check
+        file_path: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -1064,6 +1159,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         Commands::Config { .. } => "config",
         Commands::Live { .. } => "live",
         Commands::Server { .. } => "server",
+        Commands::Team { .. } => "team",
         Commands::Host { .. } => "host",
         Commands::Ping => "ping",
         Commands::Join { .. } => "join",
@@ -2772,6 +2868,24 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 println!("\n  {} OpenCode detected (via {})", "🔗".bold(), info.detection_method.cyan());
             }
 
+            // Team & Mothership status
+            {
+                let config_t = ConfigManager::load();
+                let current_repo = live_sync::repo_name_from_cwd();
+                let is_team = config_t.team_repos.contains(&current_repo);
+                let has_cloud = config_t.cloud_url.is_some() && (config_t.cloud_api_token.is_some() || std::env::var("AURA_CLOUD_TOKEN").is_ok());
+
+                if has_cloud || is_team {
+                    println!("\n  {} {}", "Team".bold(), "Collaboration".bold().cyan());
+                    if is_team {
+                        println!("  {} Repo: {} ({})", "•".dimmed(), current_repo.cyan(), "team-managed".green());
+                    } else if !current_repo.is_empty() {
+                        println!("  {} Repo: {} ({})", "•".dimmed(), current_repo.cyan(), "personal".yellow());
+                    }
+                    live_sync::print_mothership_status_line();
+                }
+            }
+
             println!();
         }
         Commands::Audit => {
@@ -3668,6 +3782,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     println!("  {} {}", "Branch:".dimmed(), live_events::current_branch().cyan());
                     println!("  {} {}", "Repo:".dimmed(), live_events::repo_name().cyan());
                     live_sync::print_sync_status();
+                    live_sync::print_mothership_status_line();
                     println!();
                     println!("  Streaming function-level diffs...");
                     println!("  Your team can see what you're working on in real-time.");
@@ -3721,6 +3836,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     use colored::Colorize;
                     println!("{}", "🔴 Aura Live — Team Status".bold());
                     println!();
+                    live_sync::print_mothership_status_line();
+                    println!();
 
                     let user = live_events::git_user();
                     let branch = live_events::current_branch();
@@ -3768,9 +3885,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         let url = format!("{}/api/v1/live/presence?repo={}",
                             cloud_url.trim_end_matches('/'), repo);
 
-                        let client = reqwest::blocking::Client::builder()
-                            .timeout(std::time::Duration::from_secs(5))
-                            .build()
+                        let mut pbuilder = reqwest::blocking::Client::builder()
+                            .timeout(std::time::Duration::from_secs(5));
+                        if config.accept_self_signed {
+                            pbuilder = pbuilder.danger_accept_invalid_certs(true);
+                        }
+                        let client = pbuilder.build()
                             .unwrap_or_else(|_| reqwest::blocking::Client::new());
 
                         match client.get(&url)
@@ -3860,9 +3980,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         println!("  {} Checking impacts on branch {}...", "↳".dimmed(), branch.cyan());
                         println!();
 
-                        let client = reqwest::blocking::Client::builder()
-                            .timeout(std::time::Duration::from_secs(5))
-                            .build()
+                        let mut cbuilder = reqwest::blocking::Client::builder()
+                            .timeout(std::time::Duration::from_secs(5));
+                        if config.accept_self_signed {
+                            cbuilder = cbuilder.danger_accept_invalid_certs(true);
+                        }
+                        let client = cbuilder.build()
                             .unwrap_or_else(|_| reqwest::blocking::Client::new());
 
                         match client.get(&url)
@@ -4416,15 +4539,200 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
             }
         }
+        Commands::Team { sub } => {
+            match sub {
+                TeamSubcommands::Link => {
+                    let repo = live_sync::repo_name_from_cwd();
+                    if repo.is_empty() {
+                        eprintln!("{} Not inside a git repo", "✗".red().bold());
+                    } else {
+                        let mut config = ConfigManager::load();
+                        if !config.team_repos.contains(&repo) {
+                            config.team_repos.push(repo.clone());
+                            let _ = ConfigManager::save(&config);
+                        }
+                        println!("{} Repo '{}' is now team-managed", "✓".green().bold(), repo.cyan());
+                        println!("  {} It will sync through the mothership", "•".dimmed());
+                    }
+                }
+                TeamSubcommands::Unlink => {
+                    let repo = live_sync::repo_name_from_cwd();
+                    if repo.is_empty() {
+                        eprintln!("{} Not inside a git repo", "✗".red().bold());
+                    } else {
+                        let mut config = ConfigManager::load();
+                        config.team_repos.retain(|r| r != &repo);
+                        let _ = ConfigManager::save(&config);
+                        println!("{} Repo '{}' unlinked from team", "✓".green().bold(), repo.cyan());
+                    }
+                }
+                TeamSubcommands::Status => {
+                    let config = ConfigManager::load();
+                    let current_repo = live_sync::repo_name_from_cwd();
+                    let is_team = config.team_repos.contains(&current_repo);
+
+                    println!("\n  {} Team Status", "Team".bold());
+
+                    if !current_repo.is_empty() {
+                        if is_team {
+                            println!("  {} Current repo: {} ({})", "●".green(), current_repo.cyan(), "team-managed".green());
+                        } else {
+                            println!("  {} Current repo: {} ({})", "●".yellow(), current_repo.cyan(), "personal".yellow());
+                        }
+                    }
+
+                    live_sync::print_mothership_status_line();
+
+                    if config.team_repos.is_empty() {
+                        println!("  {} No team-managed repos. Use {} to link.", "•".dimmed(), "aura team link".cyan());
+                    } else {
+                        println!("  {} Team repos ({}):", "•".dimmed(), config.team_repos.len());
+                        for r in &config.team_repos {
+                            let marker = if r == &current_repo { " ← here" } else { "" };
+                            println!("    {} {}{}", "•".dimmed(), r.cyan(), marker.dimmed());
+                        }
+                    }
+                    println!();
+                }
+                TeamSubcommands::Knowledge { sub: ksub } => {
+                    match ksub {
+                        KnowledgeSubcommands::Store { question, answer, category, tags } => {
+                            match live_sync::store_team_knowledge(question, answer, Some(category), tags, "human") {
+                                Ok(resp) => {
+                                    let id = resp["id"].as_str().unwrap_or("?");
+                                    println!("{} Knowledge stored (id: {})", "✓".green().bold(), id.dimmed());
+                                }
+                                Err(e) => eprintln!("{} Failed: {}", "✗".red().bold(), e),
+                            }
+                        }
+                        KnowledgeSubcommands::Query { search, category, limit } => {
+                            match live_sync::query_team_knowledge(search.as_deref(), category.as_deref(), *limit) {
+                                Ok(resp) => {
+                                    let results = resp["results"].as_array();
+                                    let total = results.map(|a| a.len()).unwrap_or(0);
+                                    println!("\n  {} Team Knowledge ({} result{})", "Knowledge".bold(), total, if total == 1 { "" } else { "s" });
+                                    if let Some(items) = results {
+                                        for item in items {
+                                            let q = item["question"].as_str().unwrap_or("?");
+                                            let a = item["answer"].as_str().unwrap_or("");
+                                            let by = item["username"].as_str().unwrap_or("?");
+                                            let cat = item["category"].as_str().unwrap_or("");
+                                            let up = item["upvotes"].as_i64().unwrap_or(0);
+                                            let id = item["id"].as_str().unwrap_or("");
+                                            println!("  {} [{}] {} (by {}, {} upvotes)", "Q:".cyan().bold(), cat.dimmed(), q, by.dimmed(), up);
+                                            println!("  {} {}", "A:".green().bold(), a);
+                                            println!("     {}", format!("id: {}", id).dimmed());
+                                            println!();
+                                        }
+                                    }
+                                }
+                                Err(e) => eprintln!("{} Failed: {}", "✗".red().bold(), e),
+                            }
+                        }
+                        KnowledgeSubcommands::Upvote { id } => {
+                            match live_sync::upvote_team_knowledge(id) {
+                                Ok(_) => println!("{} Upvoted", "✓".green().bold()),
+                                Err(e) => eprintln!("{} Failed: {}", "✗".red().bold(), e),
+                            }
+                        }
+                    }
+                }
+                TeamSubcommands::Zones { sub: zsub } => {
+                    match zsub {
+                        ZoneSubcommands::Claim { patterns, mode, label } => {
+                            match live_sync::create_remote_zone(patterns, mode, label.as_deref()) {
+                                Ok(resp) => {
+                                    let id = resp["zone_id"].as_str().unwrap_or("?");
+                                    println!("{} Zone claimed (id: {})", "✓".green().bold(), id.dimmed());
+                                    for p in patterns {
+                                        println!("  {} {} ({})", "•".dimmed(), p.cyan(), mode);
+                                    }
+                                }
+                                Err(e) => eprintln!("{} Failed: {}", "✗".red().bold(), e),
+                            }
+                        }
+                        ZoneSubcommands::List => {
+                            match live_sync::fetch_remote_zones() {
+                                Ok(resp) => {
+                                    let zones = resp["zones"].as_array();
+                                    let total = zones.map(|a| a.len()).unwrap_or(0);
+                                    println!("\n  {} Sentinel Zones ({} active)", "Zones".bold(), total);
+                                    if let Some(items) = zones {
+                                        for z in items {
+                                            let user = z["username"].as_str().unwrap_or("?");
+                                            let mode = z["mode"].as_str().unwrap_or("warn");
+                                            let label = z["label"].as_str().unwrap_or("");
+                                            let patterns = z["patterns"].as_array()
+                                                .map(|a| a.iter().filter_map(|v| v.as_str()).collect::<Vec<_>>().join(", "))
+                                                .unwrap_or_default();
+                                            let id = z["id"].as_str().unwrap_or("");
+                                            let mode_display = if mode == "block" { mode.red().to_string() } else { mode.yellow().to_string() };
+                                            println!("  {} {} [{}] {} {}",
+                                                "•".dimmed(), user.cyan(), mode_display, patterns,
+                                                if !label.is_empty() { format!("({})", label).dimmed().to_string() } else { String::new() });
+                                            println!("     {}", format!("id: {}", id).dimmed());
+                                        }
+                                    }
+                                    println!();
+                                }
+                                Err(e) => eprintln!("{} Failed: {}", "✗".red().bold(), e),
+                            }
+                        }
+                        ZoneSubcommands::Release { zone_id } => {
+                            match live_sync::delete_remote_zone(zone_id) {
+                                Ok(_) => println!("{} Zone released", "✓".green().bold()),
+                                Err(e) => eprintln!("{} Failed: {}", "✗".red().bold(), e),
+                            }
+                        }
+                        ZoneSubcommands::Check { file_path } => {
+                            match live_sync::check_remote_zone(file_path) {
+                                Ok(resp) => {
+                                    let blocked = resp["blocked"].as_bool().unwrap_or(false);
+                                    let conflicts = resp["conflicts"].as_array();
+                                    if let Some(items) = conflicts {
+                                        if items.is_empty() {
+                                            println!("{} No zone conflicts for {}", "✓".green().bold(), file_path.cyan());
+                                        } else {
+                                            for c in items {
+                                                let user = c["username"].as_str().unwrap_or("?");
+                                                let mode = c["mode"].as_str().unwrap_or("warn");
+                                                println!("  {} {} has claimed this area [{}]", "⚠".yellow(), user.cyan(), mode);
+                                            }
+                                            if blocked {
+                                                println!("  {} Editing this file is {}", "✗".red().bold(), "blocked".red().bold());
+                                            }
+                                        }
+                                    }
+                                }
+                                Err(e) => eprintln!("{} Failed: {}", "✗".red().bold(), e),
+                            }
+                        }
+                    }
+                }
+            }
+        }
         Commands::Host { sub } => {
             match sub {
-                HostSubcommands::Start { port, tunnel, no_tls } => {
-                    let rt = tokio::runtime::Runtime::new().unwrap();
-                    rt.block_on(async {
-                        if let Err(e) = host::start_mothership(*port, *tunnel, *no_tls).await {
-                            eprintln!("{} Mothership failed: {}", "✗".red().bold(), e);
+                HostSubcommands::Start { port, tunnel, no_tls, foreground, install } => {
+                    if *install {
+                        // Install macOS LaunchAgent for auto-start on login
+                        if let Err(e) = host::install_launchagent(*port, *no_tls) {
+                            eprintln!("{} Failed to install LaunchAgent: {}", "✗".red().bold(), e);
                         }
-                    });
+                    } else if *foreground {
+                        // Foreground (blocking) mode — used by daemon child + LaunchAgent
+                        let rt = tokio::runtime::Runtime::new().unwrap();
+                        rt.block_on(async {
+                            if let Err(e) = host::start_mothership(*port, *tunnel, *no_tls).await {
+                                eprintln!("{} Mothership failed: {}", "✗".red().bold(), e);
+                            }
+                        });
+                    } else {
+                        // Default: daemon mode — fork to background
+                        if let Err(e) = host::daemonize(*port, *tunnel, *no_tls) {
+                            eprintln!("{} Failed to start daemon: {}", "✗".red().bold(), e);
+                        }
+                    }
                 }
                 HostSubcommands::Invite { for_user, max_uses, expires_hours } => {
                     let db_path = format!("{}/.aura/mothership.db", std::env::var("HOME").unwrap_or_else(|_| ".".to_string()));
@@ -4485,33 +4793,34 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     }
                 }
                 HostSubcommands::Status => {
+                    println!("\n  {} Aura Mothership Status", "Mothership".bold());
+                    host::daemon_status();
+
                     let db_path = format!("{}/.aura/mothership.db", std::env::var("HOME").unwrap_or_else(|_| ".".to_string()));
                     if !std::path::Path::new(&db_path).exists() {
-                        println!("{} Mothership has never been started. Run: aura host start", "ℹ".blue());
-                        return Ok(());
-                    }
-                    match host_db::init_db(&db_path) {
-                        Ok(conn) => {
-                            let users = host_db::count_users(&conn).unwrap_or(0);
-                            let repos = host_db::count_repos(&conn).unwrap_or(0);
-                            let active: i64 = conn.query_row(
-                                "SELECT COUNT(*) FROM live_sessions WHERE last_heartbeat > datetime('now', '-2 minutes')",
-                                [], |row| row.get(0)
-                            ).unwrap_or(0);
+                        println!("  {} Database not found. Run: aura host start", "ℹ".blue());
+                    } else if let Ok(conn) = host_db::init_db(&db_path) {
+                        let users = host_db::count_users(&conn).unwrap_or(0);
+                        let repos = host_db::count_repos(&conn).unwrap_or(0);
+                        let active: i64 = conn.query_row(
+                            "SELECT COUNT(*) FROM live_sessions WHERE last_heartbeat > datetime('now', '-2 minutes')",
+                            [], |row| row.get(0)
+                        ).unwrap_or(0);
 
-                            println!("\n  {} Aura Mothership Status", "🖥".bold());
-                            println!("  {} Database: {}", "•".dimmed(), db_path);
-                            println!("  {} Registered users: {}", "•".dimmed(), format!("{}", users).cyan());
-                            println!("  {} Tracked repos: {}", "•".dimmed(), format!("{}", repos).cyan());
-                            println!("  {} Active peers (2m): {}", "•".dimmed(), format!("{}", active).green());
-                            println!();
-                        }
-                        Err(e) => eprintln!("{} Cannot read database: {}", "✗".red().bold(), e),
+                        println!("  {} Database: {}", "•".dimmed(), db_path);
+                        println!("  {} Registered users: {}", "•".dimmed(), format!("{}", users).cyan());
+                        println!("  {} Tracked repos: {}", "•".dimmed(), format!("{}", repos).cyan());
+                        println!("  {} Active peers (2m): {}", "•".dimmed(), format!("{}", active).green());
                     }
+                    println!();
                 }
                 HostSubcommands::Stop => {
-                    let _ = std::process::Command::new("pkill").args(["-f", "aura host start"]).status();
-                    println!("{} Mothership stopped", "✓".green().bold());
+                    host::stop_daemon();
+                }
+                HostSubcommands::Uninstall => {
+                    if let Err(e) = host::uninstall_launchagent() {
+                        eprintln!("{} Failed to uninstall: {}", "✗".red().bold(), e);
+                    }
                 }
                 HostSubcommands::Users => {
                     let db_path = format!("{}/.aura/mothership.db", std::env::var("HOME").unwrap_or_else(|_| ".".to_string()));

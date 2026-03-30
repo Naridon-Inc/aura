@@ -701,6 +701,220 @@ pub fn extract_function_body(source: &str, function_name: &str) -> Option<String
     }
 }
 
+// ─── Mothership Connectivity Check ─────────────────────────────────────────
+
+/// Quick connectivity probe. Returns (reachable, latency_ms, peer_count).
+pub fn check_mothership() -> (bool, u64, u64) {
+    let config = ConfigManager::load();
+    let token = match config.cloud_api_token
+        .or_else(|| std::env::var("AURA_CLOUD_TOKEN").ok()) {
+        Some(t) => t,
+        None => return (false, 0, 0),
+    };
+    let cloud_url = match config.cloud_url {
+        Some(ref u) if !u.is_empty() => u.clone(),
+        _ => return (false, 0, 0),
+    };
+    let client = build_cloud_client();
+    let start = std::time::Instant::now();
+    let url = format!("{}/api/v1/live/presence?repo={}", cloud_url.trim_end_matches('/'), repo_name());
+    match client.get(&url)
+        .header("Authorization", format!("Bearer {}", token))
+        .timeout(Duration::from_secs(3))
+        .send() {
+        Ok(resp) if resp.status().is_success() => {
+            let ms = start.elapsed().as_millis() as u64;
+            let peers = resp.json::<serde_json::Value>()
+                .ok()
+                .and_then(|j| j["developers"].as_array().map(|a| a.len() as u64))
+                .unwrap_or(0);
+            (true, ms, peers)
+        }
+        _ => (false, 0, 0),
+    }
+}
+
+/// Print a one-line mothership status. Returns true if online.
+pub fn print_mothership_status_line() -> bool {
+    let config = ConfigManager::load();
+    let has_token = config.cloud_api_token.is_some()
+        || std::env::var("AURA_CLOUD_TOKEN").is_ok();
+    if !has_token || config.cloud_url.is_none() {
+        return false;
+    }
+    let (online, ms, peers) = check_mothership();
+    if online {
+        println!("  {} Mothership: {} ({}ms, {} peer{})",
+            "●".green(), "online".green().bold(), ms, peers,
+            if peers == 1 { "" } else { "s" });
+        true
+    } else {
+        println!("  {} Mothership: {} (buffering locally)",
+            "●".red(), "offline".red().bold());
+        false
+    }
+}
+
+// ─── Sentinel Zones (P2P) ──────────────────────────────────────────────────
+
+pub fn create_remote_zone(patterns: &[String], mode: &str, label: Option<&str>) -> Result<serde_json::Value, String> {
+    let config = ConfigManager::load();
+    let token = config.cloud_api_token
+        .or_else(|| std::env::var("AURA_CLOUD_TOKEN").ok())
+        .ok_or_else(|| "No cloud token configured".to_string())?;
+    let cloud_url = config.cloud_url
+        .unwrap_or_else(|| "https://auravcs.com".to_string());
+    let url = format!("{}/api/v1/live/zones", cloud_url.trim_end_matches('/'));
+
+    let mut body = json!({
+        "repo_full_name": repo_name(),
+        "patterns": patterns,
+        "mode": mode,
+    });
+    if let Some(l) = label {
+        body["label"] = json!(l);
+    }
+
+    let client = build_cloud_client();
+    let resp = client.post(&url)
+        .header("Authorization", format!("Bearer {}", token))
+        .json(&body)
+        .send()
+        .map_err(|e| format!("Cloud unreachable: {}", e))?;
+    resp.json::<serde_json::Value>()
+        .map_err(|e| format!("Invalid response: {}", e))
+}
+
+pub fn fetch_remote_zones() -> Result<serde_json::Value, String> {
+    let config = ConfigManager::load();
+    let token = config.cloud_api_token
+        .or_else(|| std::env::var("AURA_CLOUD_TOKEN").ok())
+        .ok_or_else(|| "No cloud token configured".to_string())?;
+    let cloud_url = config.cloud_url
+        .unwrap_or_else(|| "https://auravcs.com".to_string());
+    let url = format!("{}/api/v1/live/zones?repo={}", cloud_url.trim_end_matches('/'), repo_name());
+
+    let client = build_cloud_client();
+    let resp = client.get(&url)
+        .header("Authorization", format!("Bearer {}", token))
+        .send()
+        .map_err(|e| format!("Cloud unreachable: {}", e))?;
+    resp.json::<serde_json::Value>()
+        .map_err(|e| format!("Invalid response: {}", e))
+}
+
+pub fn check_remote_zone(file_path: &str) -> Result<serde_json::Value, String> {
+    let config = ConfigManager::load();
+    let token = config.cloud_api_token
+        .or_else(|| std::env::var("AURA_CLOUD_TOKEN").ok())
+        .ok_or_else(|| "No cloud token configured".to_string())?;
+    let cloud_url = config.cloud_url
+        .unwrap_or_else(|| "https://auravcs.com".to_string());
+    let url = format!("{}/api/v1/live/zones/check?repo={}&file_path={}",
+        cloud_url.trim_end_matches('/'), repo_name(), file_path);
+
+    let client = build_cloud_client();
+    let resp = client.get(&url)
+        .header("Authorization", format!("Bearer {}", token))
+        .send()
+        .map_err(|e| format!("Cloud unreachable: {}", e))?;
+    resp.json::<serde_json::Value>()
+        .map_err(|e| format!("Invalid response: {}", e))
+}
+
+pub fn delete_remote_zone(zone_id: &str) -> Result<serde_json::Value, String> {
+    let config = ConfigManager::load();
+    let token = config.cloud_api_token
+        .or_else(|| std::env::var("AURA_CLOUD_TOKEN").ok())
+        .ok_or_else(|| "No cloud token configured".to_string())?;
+    let cloud_url = config.cloud_url
+        .unwrap_or_else(|| "https://auravcs.com".to_string());
+    let url = format!("{}/api/v1/live/zones/{}", cloud_url.trim_end_matches('/'), zone_id);
+
+    let client = build_cloud_client();
+    let resp = client.delete(&url)
+        .header("Authorization", format!("Bearer {}", token))
+        .send()
+        .map_err(|e| format!("Cloud unreachable: {}", e))?;
+    resp.json::<serde_json::Value>()
+        .map_err(|e| format!("Invalid response: {}", e))
+}
+
+// ─── Team Knowledge (P2P) ──────────────────────────────────────────────────
+
+pub fn store_team_knowledge(question: &str, answer: &str, category: Option<&str>, tags: &[String], source: &str) -> Result<serde_json::Value, String> {
+    let config = ConfigManager::load();
+    let token = config.cloud_api_token
+        .or_else(|| std::env::var("AURA_CLOUD_TOKEN").ok())
+        .ok_or_else(|| "No cloud token configured".to_string())?;
+    let cloud_url = config.cloud_url
+        .unwrap_or_else(|| "https://auravcs.com".to_string());
+    let url = format!("{}/api/v1/live/knowledge", cloud_url.trim_end_matches('/'));
+
+    let body = json!({
+        "repo_full_name": repo_name(),
+        "category": category.unwrap_or("general"),
+        "question": question,
+        "answer": answer,
+        "source": source,
+        "tags": tags,
+    });
+
+    let client = build_cloud_client();
+    let resp = client.post(&url)
+        .header("Authorization", format!("Bearer {}", token))
+        .json(&body)
+        .send()
+        .map_err(|e| format!("Cloud unreachable: {}", e))?;
+    resp.json::<serde_json::Value>()
+        .map_err(|e| format!("Invalid response: {}", e))
+}
+
+pub fn query_team_knowledge(search: Option<&str>, category: Option<&str>, limit: usize) -> Result<serde_json::Value, String> {
+    let config = ConfigManager::load();
+    let token = config.cloud_api_token
+        .or_else(|| std::env::var("AURA_CLOUD_TOKEN").ok())
+        .ok_or_else(|| "No cloud token configured".to_string())?;
+    let cloud_url = config.cloud_url
+        .unwrap_or_else(|| "https://auravcs.com".to_string());
+
+    let mut url = format!("{}/api/v1/live/knowledge?repo={}&limit={}",
+        cloud_url.trim_end_matches('/'), repo_name(), limit);
+    if let Some(q) = search { url.push_str(&format!("&search={}", q)); }
+    if let Some(c) = category { url.push_str(&format!("&category={}", c)); }
+
+    let client = build_cloud_client();
+    let resp = client.get(&url)
+        .header("Authorization", format!("Bearer {}", token))
+        .send()
+        .map_err(|e| format!("Cloud unreachable: {}", e))?;
+    resp.json::<serde_json::Value>()
+        .map_err(|e| format!("Invalid response: {}", e))
+}
+
+pub fn upvote_team_knowledge(id: &str) -> Result<serde_json::Value, String> {
+    let config = ConfigManager::load();
+    let token = config.cloud_api_token
+        .or_else(|| std::env::var("AURA_CLOUD_TOKEN").ok())
+        .ok_or_else(|| "No cloud token configured".to_string())?;
+    let cloud_url = config.cloud_url
+        .unwrap_or_else(|| "https://auravcs.com".to_string());
+    let url = format!("{}/api/v1/live/knowledge/{}/upvote", cloud_url.trim_end_matches('/'), id);
+
+    let client = build_cloud_client();
+    let resp = client.post(&url)
+        .header("Authorization", format!("Bearer {}", token))
+        .send()
+        .map_err(|e| format!("Cloud unreachable: {}", e))?;
+    resp.json::<serde_json::Value>()
+        .map_err(|e| format!("Invalid response: {}", e))
+}
+
+/// Public wrapper for repo_name from live_events (for use from main.rs).
+pub fn repo_name_from_cwd() -> String {
+    repo_name()
+}
+
 /// Check if cloud sync is configured and print status.
 pub fn print_sync_status() {
     let config = ConfigManager::load();
