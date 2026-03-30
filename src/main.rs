@@ -699,6 +699,8 @@ enum Commands {
         #[arg(long)]
         password: Option<String>,
     },
+    /// Check connection to mothership — latency, TLS status, online peers
+    Ping,
     /// Connect to a team mothership for P2P collaboration (advanced — use `aura join` instead)
     Connect {
         /// Mothership URL (e.g., https://192.168.1.50:7700)
@@ -1042,6 +1044,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         Commands::Live { .. } => "live",
         Commands::Server { .. } => "server",
         Commands::Host { .. } => "host",
+        Commands::Ping => "ping",
         Commands::Join { .. } => "join",
         Commands::Connect { .. } => "connect",
         Commands::Usage { .. } => "usage",
@@ -4301,6 +4304,99 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             println!("{} Cannot reach server: {}", "✗".red().bold(), e);
                         }
                     }
+                }
+            }
+        }
+        Commands::Ping => {
+            let config = ConfigManager::load();
+            let cloud_url = config.cloud_url.as_deref().unwrap_or("");
+
+            if cloud_url.is_empty() {
+                println!("{} Not connected to any mothership or server.", "✗".red().bold());
+                println!("  Run {} to join a team, or {} to start hosting.", "aura join <token>".cyan(), "aura host start".cyan());
+                return Ok(());
+            }
+
+            let mut client_builder = reqwest::blocking::Client::builder()
+                .timeout(std::time::Duration::from_secs(5));
+            if config.accept_self_signed {
+                client_builder = client_builder.danger_accept_invalid_certs(true);
+            }
+            let client = client_builder.build().unwrap_or_else(|_| reqwest::blocking::Client::new());
+
+            // Ping health endpoint with timing
+            let start = std::time::Instant::now();
+            match client.get(format!("{}/health", cloud_url)).send() {
+                Ok(r) if r.status().is_success() => {
+                    let latency = start.elapsed();
+                    let tls = if cloud_url.starts_with("https://") { "TLS" } else { "HTTP" };
+
+                    println!("\n  {} Mothership is reachable", "✓".green().bold());
+                    println!("  {} URL:     {}", "•".dimmed(), cloud_url.cyan());
+                    println!("  {} Latency: {}ms", "•".dimmed(), format!("{}", latency.as_millis()).green());
+                    println!("  {} Mode:    {}", "•".dimmed(), tls.cyan());
+
+                    // Get credentials for authenticated requests
+                    let token = config.cloud_api_token.as_deref().unwrap_or("");
+                    if !token.is_empty() {
+                        // Fetch presence — who's online
+                        if let Ok(resp) = client.get(format!("{}/api/v1/live/presence", cloud_url))
+                            .bearer_auth(token)
+                            .send()
+                        {
+                            if let Ok(data) = resp.json::<serde_json::Value>() {
+                                let devs = data["developers"].as_array();
+                                let total = data["total_active"].as_u64().unwrap_or(0);
+
+                                println!("  {} Online:  {} peer(s)", "•".dimmed(), format!("{}", total).green().bold());
+
+                                if let Some(devs) = devs {
+                                    for dev in devs {
+                                        let name = dev["username"].as_str().unwrap_or("?");
+                                        let branch = dev["branch"].as_str().unwrap_or("?");
+                                        let repo = dev["repo"].as_str().unwrap_or("?");
+                                        println!("    {} {} on {} ({})", "↳".dimmed(), name.cyan(), branch.yellow(), repo.dimmed());
+                                    }
+                                }
+                            }
+                        }
+
+                        // Fetch heartbeat stats
+                        let repo_name = live_events::repo_name();
+                        let branch = live_events::current_branch();
+                        if let Ok(resp) = client.post(format!("{}/api/v1/live/heartbeat", cloud_url))
+                            .bearer_auth(token)
+                            .json(&serde_json::json!({
+                                "repo_full_name": repo_name,
+                                "branch": branch,
+                            }))
+                            .send()
+                        {
+                            if let Ok(data) = resp.json::<serde_json::Value>() {
+                                let impacts = data["pending_impacts"].as_i64().unwrap_or(0);
+                                let msgs = data["unread_messages"].as_i64().unwrap_or(0);
+                                let sync = data["sync_pending"].as_i64().unwrap_or(0);
+
+                                if impacts > 0 || msgs > 0 || sync > 0 {
+                                    println!("\n  {} Pending:", "📬".bold());
+                                    if impacts > 0 { println!("    {} {} impact alert(s)", "↳".dimmed(), format!("{}", impacts).red()); }
+                                    if msgs > 0 { println!("    {} {} unread message(s)", "↳".dimmed(), format!("{}", msgs).yellow()); }
+                                    if sync > 0 { println!("    {} {} function(s) to pull", "↳".dimmed(), format!("{}", sync).blue()); }
+                                }
+                            }
+                        }
+                    }
+                    println!();
+                }
+                Ok(r) => {
+                    println!("{} Mothership responded with {}", "⚠".yellow(), r.status());
+                    println!("  {} URL: {}", "•".dimmed(), cloud_url);
+                }
+                Err(e) => {
+                    let latency = start.elapsed();
+                    println!("\n  {} Mothership unreachable ({}ms)", "✗".red().bold(), latency.as_millis());
+                    println!("  {} URL: {}", "•".dimmed(), cloud_url);
+                    println!("  {} Error: {}\n", "•".dimmed(), format!("{}", e).red());
                 }
             }
         }
