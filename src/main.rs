@@ -31,6 +31,8 @@ mod sentinel;
 mod memory;
 mod usage;
 mod plan_tracker;
+mod host;
+mod host_db;
 
 use clap::{Parser, Subcommand};
 use parser::SemanticParser;
@@ -681,6 +683,42 @@ enum Commands {
         #[command(subcommand)]
         sub: ServerSubcommands,
     },
+    /// Run a mothership server — your machine becomes the team's collaboration hub (P2P, no cloud)
+    Host {
+        #[command(subcommand)]
+        sub: HostSubcommands,
+    },
+    /// Join a team mothership with a single token (simplest way)
+    Join {
+        /// The join token from the mothership (base64 string printed by `aura host start`)
+        token: String,
+        /// Your username
+        #[arg(long)]
+        username: Option<String>,
+        /// Your password
+        #[arg(long)]
+        password: Option<String>,
+    },
+    /// Connect to a team mothership for P2P collaboration (advanced — use `aura join` instead)
+    Connect {
+        /// Mothership URL (e.g., https://192.168.1.50:7700)
+        url: String,
+        /// Invite code from the mothership host
+        #[arg(long)]
+        code: String,
+        /// Your username
+        #[arg(long)]
+        username: String,
+        /// Your password
+        #[arg(long)]
+        password: String,
+        /// Expected TLS fingerprint (SHA-256) — verify against what the mothership shows
+        #[arg(long)]
+        fingerprint: Option<String>,
+        /// Accept self-signed TLS certificates without fingerprint verification (less secure)
+        #[arg(long)]
+        accept_self_signed: bool,
+    },
     /// Track AI token usage, costs, and budgets across all your agent sessions
     Usage {
         /// Time period: "today", "week", "month", "all" (default: today)
@@ -765,6 +803,35 @@ enum ServerSubcommands {
     },
     /// Check connection to the configured Aura Server
     Status,
+}
+
+#[derive(Subcommand)]
+enum HostSubcommands {
+    /// Start the mothership server — your machine becomes the team hub
+    Start {
+        /// Port to listen on (default: 7700)
+        #[arg(long, default_value = "7700")]
+        port: u16,
+        /// Open a tunnel for internet access (auto-detects bore or cloudflared)
+        #[arg(long)]
+        tunnel: bool,
+        /// Disable TLS (plain HTTP — only for local testing)
+        #[arg(long)]
+        no_tls: bool,
+    },
+    /// Generate an invite code for teammates to join
+    Invite {
+        /// Max number of times this code can be used (default: 5)
+        #[arg(long, default_value = "5")]
+        max_uses: i32,
+        /// Hours until the code expires (default: 168 = 7 days)
+        #[arg(long, default_value = "168")]
+        expires_hours: i64,
+    },
+    /// Show mothership status — connected peers, registered users, repos
+    Status,
+    /// Stop the running mothership process
+    Stop,
 }
 
 #[derive(Subcommand)]
@@ -974,6 +1041,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         Commands::Config { .. } => "config",
         Commands::Live { .. } => "live",
         Commands::Server { .. } => "server",
+        Commands::Host { .. } => "host",
+        Commands::Join { .. } => "join",
+        Commands::Connect { .. } => "connect",
         Commands::Usage { .. } => "usage",
         _ => "internal_command"
     };
@@ -4231,6 +4301,327 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             println!("{} Cannot reach server: {}", "✗".red().bold(), e);
                         }
                     }
+                }
+            }
+        }
+        Commands::Host { sub } => {
+            match sub {
+                HostSubcommands::Start { port, tunnel, no_tls } => {
+                    let rt = tokio::runtime::Runtime::new().unwrap();
+                    rt.block_on(async {
+                        if let Err(e) = host::start_mothership(*port, *tunnel, *no_tls).await {
+                            eprintln!("{} Mothership failed: {}", "✗".red().bold(), e);
+                        }
+                    });
+                }
+                HostSubcommands::Invite { max_uses, expires_hours } => {
+                    let db_path = format!("{}/.aura/mothership.db", std::env::var("HOME").unwrap_or_else(|_| ".".to_string()));
+                    match host_db::init_db(&db_path) {
+                        Ok(conn) => {
+                            // Get first org (mothership admin's org)
+                            let orgs: Vec<host_db::Organization> = {
+                                let mut stmt = conn.prepare("SELECT id, slug, name, created_at, updated_at FROM organizations LIMIT 1").unwrap();
+                                stmt.query_map([], |row| {
+                                    Ok(host_db::Organization {
+                                        id: row.get(0)?, slug: row.get(1)?, name: row.get(2)?,
+                                        created_at: row.get(3)?, updated_at: row.get(4)?,
+                                    })
+                                }).unwrap().filter_map(|r| r.ok()).collect()
+                            };
+
+                            if let Some(org) = orgs.first() {
+                                // Get first user as creator
+                                let creator: String = conn.query_row(
+                                    "SELECT id FROM users LIMIT 1", [], |row| row.get(0)
+                                ).unwrap_or_else(|_| "unknown".to_string());
+
+                                match host_db::create_invite_code(&conn, &org.id, &creator, *max_uses, *expires_hours) {
+                                    Ok(invite) => {
+                                        // Build join token
+                                        let config = ConfigManager::load();
+                                        let local_ip = host::JoinToken::decode("").map(|_| "localhost".to_string())
+                                            .unwrap_or_else(|| "localhost".to_string());
+                                        // Detect IP
+                                        let ip = {
+                                            if let Ok(socket) = std::net::UdpSocket::bind("0.0.0.0:0") {
+                                                if socket.connect("8.8.8.8:80").is_ok() {
+                                                    if let Ok(addr) = socket.local_addr() {
+                                                        addr.ip().to_string()
+                                                    } else { "localhost".to_string() }
+                                                } else { "localhost".to_string() }
+                                            } else { "localhost".to_string() }
+                                        };
+                                        let fp = std::fs::read_to_string(
+                                            format!("{}/.aura/mothership_fingerprint", std::env::var("HOME").unwrap_or_default())
+                                        ).unwrap_or_default().trim().to_string();
+                                        let scheme = if fp.is_empty() { "http" } else { "https" };
+                                        let url = format!("{}://{}:7700", scheme, ip);
+                                        let token = host::JoinToken { url, code: invite.code.clone(), fp };
+
+                                        println!("\n  {} Join token generated", "✓".green().bold());
+                                        println!("  {} Uses: {}/{}", "•".dimmed(), invite.uses, invite.max_uses);
+                                        println!("  {} Expires: {}", "•".dimmed(), invite.expires_at);
+                                        println!("\n  Send this to your teammate:\n");
+                                        println!("    aura join {}\n", token.encode());
+                                    }
+                                    Err(e) => eprintln!("{} Failed to create invite: {}", "✗".red().bold(), e),
+                                }
+                            } else {
+                                eprintln!("{} No organization found. Start the mothership first with: aura host start", "✗".red().bold());
+                            }
+                        }
+                        Err(e) => eprintln!("{} Cannot open mothership database: {}", "✗".red().bold(), e),
+                    }
+                }
+                HostSubcommands::Status => {
+                    let db_path = format!("{}/.aura/mothership.db", std::env::var("HOME").unwrap_or_else(|_| ".".to_string()));
+                    if !std::path::Path::new(&db_path).exists() {
+                        println!("{} Mothership has never been started. Run: aura host start", "ℹ".blue());
+                        return Ok(());
+                    }
+                    match host_db::init_db(&db_path) {
+                        Ok(conn) => {
+                            let users = host_db::count_users(&conn).unwrap_or(0);
+                            let repos = host_db::count_repos(&conn).unwrap_or(0);
+                            let active: i64 = conn.query_row(
+                                "SELECT COUNT(*) FROM live_sessions WHERE last_heartbeat > datetime('now', '-2 minutes')",
+                                [], |row| row.get(0)
+                            ).unwrap_or(0);
+
+                            println!("\n  {} Aura Mothership Status", "🖥".bold());
+                            println!("  {} Database: {}", "•".dimmed(), db_path);
+                            println!("  {} Registered users: {}", "•".dimmed(), format!("{}", users).cyan());
+                            println!("  {} Tracked repos: {}", "•".dimmed(), format!("{}", repos).cyan());
+                            println!("  {} Active peers (2m): {}", "•".dimmed(), format!("{}", active).green());
+                            println!();
+                        }
+                        Err(e) => eprintln!("{} Cannot read database: {}", "✗".red().bold(), e),
+                    }
+                }
+                HostSubcommands::Stop => {
+                    // Kill any running mothership process
+                    let _ = std::process::Command::new("pkill").args(["-f", "aura host start"]).status();
+                    println!("{} Mothership stopped", "✓".green().bold());
+                }
+            }
+        }
+        Commands::Join { token, username, password } => {
+            // Decode the join token
+            let join_info = match host::JoinToken::decode(token) {
+                Some(t) => t,
+                None => {
+                    eprintln!("{} Invalid join token. Get a new one from the mothership operator.", "✗".red().bold());
+                    return Ok(());
+                }
+            };
+
+            println!("{} Joining mothership at {}...", "🔗".bold(), join_info.url.cyan());
+
+            // Prompt for username/password if not provided
+            let username = match username {
+                Some(u) => u.clone(),
+                None => {
+                    use dialoguer::Input;
+                    Input::new().with_prompt("Username").interact_text().unwrap_or_else(|_| "peer".to_string())
+                }
+            };
+            let password = match password {
+                Some(p) => p.clone(),
+                None => {
+                    use dialoguer::Password;
+                    Password::new().with_prompt("Password").interact().unwrap_or_else(|_| "password".to_string())
+                }
+            };
+
+            // Build client — accept self-signed if fingerprint is in token
+            let mut client_builder = reqwest::blocking::Client::builder();
+            if join_info.url.starts_with("https://") {
+                client_builder = client_builder.danger_accept_invalid_certs(true);
+            }
+            let client = client_builder.build().unwrap_or_else(|_| reqwest::blocking::Client::new());
+
+            // Verify fingerprint if provided
+            if !join_info.fp.is_empty() {
+                match client.get(format!("{}/fingerprint", join_info.url)).send() {
+                    Ok(r) if r.status().is_success() => {
+                        let data: serde_json::Value = r.json().unwrap_or_default();
+                        let server_fp = data["fingerprint"].as_str().unwrap_or("");
+                        if server_fp != join_info.fp {
+                            println!("{} TLS fingerprint MISMATCH — possible attack!", "✗".red().bold());
+                            println!("  Expected: {}", join_info.fp.cyan());
+                            println!("  Got:      {}", server_fp.red());
+                            return Ok(());
+                        }
+                        println!("  {} TLS fingerprint verified", "✓".green().bold());
+                    }
+                    _ => {
+                        println!("{} Could not reach mothership at {}", "✗".red().bold(), join_info.url);
+                        return Ok(());
+                    }
+                }
+            }
+
+            // Join
+            let resp = client.post(format!("{}/auth/join", join_info.url))
+                .json(&serde_json::json!({
+                    "code": join_info.code,
+                    "username": username,
+                    "password": password,
+                }))
+                .send();
+
+            match resp {
+                Ok(r) if r.status().is_success() => {
+                    let data: serde_json::Value = r.json().unwrap_or_default();
+                    let api_token = data["api_token"].as_str().unwrap_or("");
+                    let org_slug = data["org_slug"].as_str().unwrap_or("");
+
+                    // Store credentials
+                    let cred_dir = directories::ProjectDirs::from("com", "naridon", "aura")
+                        .map(|d| d.config_dir().to_path_buf())
+                        .unwrap_or_else(|| {
+                            std::path::PathBuf::from(std::env::var("HOME").unwrap_or_else(|_| ".".to_string())).join(".aura")
+                        });
+                    let _ = fs::create_dir_all(&cred_dir);
+                    let creds = serde_json::json!({
+                        "cloud_url": join_info.url,
+                        "jwt": data["jwt"].as_str().unwrap_or(""),
+                        "api_token": api_token,
+                        "org_slug": org_slug,
+                        "username": username,
+                    });
+                    let _ = fs::write(cred_dir.join("credentials.json"), serde_json::to_string_pretty(&creds).unwrap_or_default());
+
+                    let mut config = ConfigManager::load();
+                    config.cloud_url = Some(join_info.url.clone());
+                    config.cloud_api_token = Some(api_token.to_string());
+                    if join_info.url.starts_with("https://") {
+                        config.accept_self_signed = true;
+                    }
+                    let _ = ConfigManager::save(&config);
+
+                    println!("\n  {} Joined mothership!", "✓".green().bold());
+                    println!("  {} User: {}", "•".dimmed(), username.cyan());
+                    println!("  {} Team: {}", "•".dimmed(), org_slug.cyan());
+                    println!("  {} URL:  {}", "•".dimmed(), join_info.url.cyan());
+                    println!("\n  All {} and {} commands now sync through this mothership.\n", "aura live".cyan(), "aura msg".cyan());
+                }
+                Ok(r) if r.status().as_u16() == 404 => {
+                    println!("{} Invite code expired or invalid. Ask for a new join token.", "✗".red().bold());
+                }
+                Ok(r) if r.status().as_u16() == 401 => {
+                    println!("{} Wrong password for existing user '{}'", "✗".red().bold(), username);
+                }
+                Ok(r) => {
+                    println!("{} Join failed ({})", "✗".red().bold(), r.status());
+                }
+                Err(e) => {
+                    println!("{} Could not reach mothership: {}", "✗".red().bold(), e);
+                }
+            }
+        }
+        Commands::Connect { url, code, username, password, fingerprint, accept_self_signed } => {
+            println!("{} Joining mothership at {}...", "🔗".bold(), url.cyan());
+
+            // Build client that can handle self-signed certs
+            let mut client_builder = reqwest::blocking::Client::builder();
+            if url.starts_with("https://") {
+                if *accept_self_signed || fingerprint.is_some() {
+                    // Accept self-signed certs (we verify fingerprint separately)
+                    client_builder = client_builder.danger_accept_invalid_certs(true);
+                }
+            }
+            let client = client_builder.build().unwrap_or_else(|_| reqwest::blocking::Client::new());
+
+            // If fingerprint provided, verify it against the mothership
+            if let Some(expected_fp) = fingerprint {
+                println!("  {} Verifying TLS fingerprint...", "🔒".bold());
+                match client.get(format!("{}/fingerprint", url)).send() {
+                    Ok(r) if r.status().is_success() => {
+                        let data: serde_json::Value = r.json().unwrap_or_default();
+                        let server_fp = data["fingerprint"].as_str().unwrap_or("");
+                        if server_fp != expected_fp.as_str() {
+                            println!("{} TLS fingerprint MISMATCH!", "✗".red().bold());
+                            println!("  Expected: {}", expected_fp.cyan());
+                            println!("  Got:      {}", server_fp.red());
+                            println!("\n  This could indicate a man-in-the-middle attack.");
+                            println!("  Verify the fingerprint with the mothership operator.");
+                            return Ok(());
+                        }
+                        println!("  {} Fingerprint verified", "✓".green().bold());
+                    }
+                    _ => {
+                        println!("{} Could not verify fingerprint — connection failed", "✗".red().bold());
+                        return Ok(());
+                    }
+                }
+            } else if url.starts_with("https://") && !*accept_self_signed {
+                // For HTTPS without fingerprint or --accept-self-signed, warn
+                println!("  {} Self-signed cert detected. Use {} or {} to connect securely.",
+                    "⚠".yellow(),
+                    "--fingerprint <fp>".cyan(),
+                    "--accept-self-signed".cyan());
+            }
+
+            let resp = client.post(format!("{}/auth/join", url))
+                .json(&serde_json::json!({
+                    "code": code,
+                    "username": username,
+                    "password": password,
+                }))
+                .send();
+
+            match resp {
+                Ok(r) if r.status().is_success() => {
+                    let data: serde_json::Value = r.json().unwrap_or_default();
+                    let jwt = data["jwt"].as_str().unwrap_or("");
+                    let api_token = data["api_token"].as_str().unwrap_or("");
+                    let org_slug = data["org_slug"].as_str().unwrap_or("");
+
+                    // Store credentials
+                    let cred_dir = directories::ProjectDirs::from("com", "naridon", "aura")
+                        .map(|d| d.config_dir().to_path_buf())
+                        .unwrap_or_else(|| {
+                            std::path::PathBuf::from(std::env::var("HOME").unwrap_or_else(|_| ".".to_string())).join(".aura")
+                        });
+                    let _ = fs::create_dir_all(&cred_dir);
+                    let creds = serde_json::json!({
+                        "cloud_url": url,
+                        "jwt": jwt,
+                        "api_token": api_token,
+                        "org_slug": org_slug,
+                        "username": username,
+                    });
+                    let cred_path = cred_dir.join("credentials.json");
+                    let _ = fs::write(&cred_path, serde_json::to_string_pretty(&creds).unwrap_or_default());
+
+                    // Set cloud config so all live/msg/sync commands work
+                    let mut config = ConfigManager::load();
+                    config.cloud_url = Some(url.clone());
+                    config.cloud_api_token = Some(api_token.to_string());
+                    // If connecting to a mothership with self-signed cert, remember for future requests
+                    if *accept_self_signed || fingerprint.is_some() {
+                        config.accept_self_signed = true;
+                    }
+                    let _ = ConfigManager::save(&config);
+
+                    println!("{} Connected to mothership!", "✓".green().bold());
+                    println!("  {} URL: {}", "•".dimmed(), url.cyan());
+                    println!("  {} User: {}", "•".dimmed(), username.cyan());
+                    println!("  {} Org: {}", "•".dimmed(), org_slug.cyan());
+                    println!("\n  All {} and {} commands now go through this mothership.", "aura live".cyan(), "aura msg".cyan());
+                }
+                Ok(r) if r.status().as_u16() == 404 => {
+                    println!("{} Invalid or expired invite code", "✗".red().bold());
+                }
+                Ok(r) if r.status().as_u16() == 401 => {
+                    println!("{} Wrong password for existing user '{}'", "✗".red().bold(), username);
+                }
+                Ok(r) => {
+                    println!("{} Join failed ({})", "✗".red().bold(), r.status());
+                }
+                Err(e) => {
+                    println!("{} Could not connect to {}: {}", "✗".red().bold(), url, e);
                 }
             }
         }

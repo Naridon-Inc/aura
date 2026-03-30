@@ -7,6 +7,17 @@ use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
 
+/// Build a reqwest client that respects the accept_self_signed config for mothership TLS.
+fn build_cloud_client() -> reqwest::blocking::Client {
+    let config = ConfigManager::load();
+    let mut builder = reqwest::blocking::Client::builder()
+        .timeout(Duration::from_secs(10));
+    if config.accept_self_signed {
+        builder = builder.danger_accept_invalid_certs(true);
+    }
+    builder.build().unwrap_or_else(|_| reqwest::blocking::Client::new())
+}
+
 /// Manages the daemon-to-cloud sync loop.
 /// Batches local events every SYNC_INTERVAL and POSTs to Aura Cloud.
 /// Sends heartbeats every HEARTBEAT_INTERVAL to maintain presence.
@@ -41,10 +52,14 @@ impl LiveSyncWorker {
             repo: repo_name(),
             branch: current_branch(),
             user: git_user(),
-            client: reqwest::blocking::Client::builder()
-                .timeout(Duration::from_secs(10))
-                .build()
-                .unwrap_or_else(|_| reqwest::blocking::Client::new()),
+            client: {
+                let mut builder = reqwest::blocking::Client::builder()
+                    .timeout(Duration::from_secs(10));
+                if config.accept_self_signed {
+                    builder = builder.danger_accept_invalid_certs(true);
+                }
+                builder.build().unwrap_or_else(|_| reqwest::blocking::Client::new())
+            },
             running,
         })
     }
@@ -208,10 +223,7 @@ pub fn fetch_impacts_json() -> Result<serde_json::Value, String> {
     let url = format!("{}/api/v1/live/impacts?repo={}",
         cloud_url.trim_end_matches('/'), repo);
 
-    let client = reqwest::blocking::Client::builder()
-        .timeout(Duration::from_secs(5))
-        .build()
-        .map_err(|e| format!("HTTP client error: {}", e))?;
+    let client = build_cloud_client();
 
     let resp = client.get(&url)
         .header("Authorization", format!("Bearer {}", token))
@@ -250,10 +262,7 @@ pub fn send_team_message(message: &str, to: Option<&str>) -> Result<serde_json::
         payload["to"] = json!(recipient);
     }
 
-    let client = reqwest::blocking::Client::builder()
-        .timeout(Duration::from_secs(5))
-        .build()
-        .map_err(|e| format!("HTTP client error: {}", e))?;
+    let client = build_cloud_client();
 
     let resp = client.post(&url)
         .header("Authorization", format!("Bearer {}", token))
@@ -282,10 +291,7 @@ pub fn fetch_team_messages(limit: usize) -> Result<serde_json::Value, String> {
     let url = format!("{}/api/v1/live/messages?repo={}&limit={}",
         cloud_url.trim_end_matches('/'), repo, limit);
 
-    let client = reqwest::blocking::Client::builder()
-        .timeout(Duration::from_secs(5))
-        .build()
-        .map_err(|e| format!("HTTP client error: {}", e))?;
+    let client = build_cloud_client();
 
     let resp = client.get(&url)
         .header("Authorization", format!("Bearer {}", token))
@@ -386,10 +392,7 @@ pub fn fetch_sync_status() -> Result<serde_json::Value, String> {
     let url = format!("{}/api/v1/live/sync/status?repo={}&branch={}",
         cloud_url.trim_end_matches('/'), repo, branch);
 
-    let client = reqwest::blocking::Client::builder()
-        .timeout(Duration::from_secs(5))
-        .build()
-        .map_err(|e| format!("HTTP client error: {}", e))?;
+    let client = build_cloud_client();
 
     let resp = client.get(&url)
         .header("Authorization", format!("Bearer {}", token))

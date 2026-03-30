@@ -20,6 +20,8 @@ pub struct AuraConfig {
     pub saas_token: Option<String>,
     pub cloud_url: Option<String>,      // Cloud API URL (default: https://auravcs.com)
     pub cloud_api_token: Option<String>, // API token for cloud sync (aura_xxxx)
+    #[serde(default)]
+    pub accept_self_signed: bool,       // Accept self-signed TLS certs (mothership mode)
     pub sync_enabled: bool,
     #[serde(default)]
     pub last_update_check: u64, // UNIX timestamp
@@ -58,6 +60,7 @@ impl Default for AuraConfig {
             saas_token: None,
             cloud_url: None,
             cloud_api_token: None,
+            accept_self_signed: false,
             sync_enabled: false,
             last_update_check: 0,
             strict_gatekeeper_mode: false, // Warn-by-default is the standard
