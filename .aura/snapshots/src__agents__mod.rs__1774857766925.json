@@ -1,0 +1,1 @@
+{"file_path":"src/agents/mod.rs","content":"pub mod opencode;\n","timestamp":1774857766925,"trigger":"pre_deletion_guard","agent_id":"Aura Deletion Guard"}

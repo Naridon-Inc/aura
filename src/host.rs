@@ -283,7 +283,7 @@ fn auto_provision_if_needed(conn: &rusqlite::Connection) -> Option<String> {
             "SELECT id FROM users LIMIT 1", [], |row| row.get(0)
         ).ok();
         if let (Some(oid), Some(uid)) = (org_id, user_id) {
-            if let Ok(invite) = host_db::create_invite_code(conn, &oid, &uid, 10, 168) {
+            if let Ok(invite) = host_db::create_invite_code(conn, &oid, &uid, 10, 168, None) {
                 return Some(invite.code);
             }
         }
@@ -312,7 +312,7 @@ fn auto_provision_if_needed(conn: &rusqlite::Connection) -> Option<String> {
     let token_hash = hash_api_token(&raw_token);
     let _ = host_db::create_api_token(conn, &user.id, &org.id, &token_hash, "default");
 
-    let invite = host_db::create_invite_code(conn, &org.id, &user.id, 10, 168).ok()?;
+    let invite = host_db::create_invite_code(conn, &org.id, &user.id, 10, 168, None).ok()?;
     Some(invite.code)
 }
 
@@ -607,6 +607,13 @@ async fn join_with_code(
     let invite = host_db::validate_invite_code(&db, &payload.code)
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
         .ok_or(StatusCode::NOT_FOUND)?;
+
+    // If invite is locked to a specific username, enforce it
+    if let Some(ref required_name) = invite.for_username {
+        if required_name != &payload.username {
+            return Err(StatusCode::FORBIDDEN);
+        }
+    }
 
     // Create user or get existing
     let user = if let Ok(Some(existing)) = host_db::get_user_by_username(&db, &payload.username) {

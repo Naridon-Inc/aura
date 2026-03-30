@@ -218,7 +218,7 @@ fn capture_env_fingerprint() -> Option<String> {
     ecosystem::Ecosystem::fingerprint()
 }
 
-const CURRENT_VERSION: &str = "0.11.3";
+const CURRENT_VERSION: &str = "0.12.0";
 
 /// Build an HTTP client that respects accept_self_signed for mothership TLS.
 fn cloud_http_client() -> reqwest::blocking::Client {
@@ -834,12 +834,22 @@ enum HostSubcommands {
     },
     /// Generate an invite code for teammates to join
     Invite {
-        /// Max number of times this code can be used (default: 5)
-        #[arg(long, default_value = "5")]
+        /// Lock this invite to a specific username (only they can use it)
+        #[arg(long, alias = "for")]
+        for_user: Option<String>,
+        /// Max number of times this code can be used (default: 1)
+        #[arg(long, default_value = "1")]
         max_uses: i32,
         /// Hours until the code expires (default: 168 = 7 days)
         #[arg(long, default_value = "168")]
         expires_hours: i64,
+    },
+    /// List all registered users on the mothership
+    Users,
+    /// Remove a user from the mothership
+    Kick {
+        /// Username to remove
+        username: String,
     },
     /// Show mothership status — connected peers, registered users, repos
     Status,
@@ -4416,7 +4426,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         }
                     });
                 }
-                HostSubcommands::Invite { max_uses, expires_hours } => {
+                HostSubcommands::Invite { for_user, max_uses, expires_hours } => {
                     let db_path = format!("{}/.aura/mothership.db", std::env::var("HOME").unwrap_or_else(|_| ".".to_string()));
                     match host_db::init_db(&db_path) {
                         Ok(conn) => {
@@ -4437,12 +4447,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     "SELECT id FROM users LIMIT 1", [], |row| row.get(0)
                                 ).unwrap_or_else(|_| "unknown".to_string());
 
-                                match host_db::create_invite_code(&conn, &org.id, &creator, *max_uses, *expires_hours) {
+                                match host_db::create_invite_code(&conn, &org.id, &creator, *max_uses, *expires_hours, for_user.as_deref()) {
                                     Ok(invite) => {
-                                        // Build join token
-                                        let config = ConfigManager::load();
-                                        let local_ip = host::JoinToken::decode("").map(|_| "localhost".to_string())
-                                            .unwrap_or_else(|| "localhost".to_string());
                                         // Detect IP
                                         let ip = {
                                             if let Ok(socket) = std::net::UdpSocket::bind("0.0.0.0:0") {
@@ -4461,6 +4467,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                         let token = host::JoinToken { url, code: invite.code.clone(), fp };
 
                                         println!("\n  {} Join token generated", "✓".green().bold());
+                                        if let Some(ref name) = invite.for_username {
+                                            println!("  {} Locked to: {}", "🔒".bold(), name.cyan());
+                                        }
                                         println!("  {} Uses: {}/{}", "•".dimmed(), invite.uses, invite.max_uses);
                                         println!("  {} Expires: {}", "•".dimmed(), invite.expires_at);
                                         println!("\n  Send this to your teammate:\n");
@@ -4501,9 +4510,46 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     }
                 }
                 HostSubcommands::Stop => {
-                    // Kill any running mothership process
                     let _ = std::process::Command::new("pkill").args(["-f", "aura host start"]).status();
                     println!("{} Mothership stopped", "✓".green().bold());
+                }
+                HostSubcommands::Users => {
+                    let db_path = format!("{}/.aura/mothership.db", std::env::var("HOME").unwrap_or_else(|_| ".".to_string()));
+                    match host_db::init_db(&db_path) {
+                        Ok(conn) => {
+                            let mut stmt = conn.prepare("SELECT username, created_at FROM users ORDER BY created_at").unwrap();
+                            let users: Vec<(String, String)> = stmt.query_map([], |row| {
+                                Ok((row.get(0)?, row.get(1)?))
+                            }).unwrap().filter_map(|r| r.ok()).collect();
+
+                            println!("\n  {} Registered users ({})", "👥".bold(), users.len());
+                            for (name, created) in &users {
+                                let date = created.split('T').next().unwrap_or(created);
+                                println!("    {} {} (joined {})", "•".dimmed(), name.cyan(), date.dimmed());
+                            }
+                            println!();
+                        }
+                        Err(e) => eprintln!("{} Cannot open database: {}", "✗".red().bold(), e),
+                    }
+                }
+                HostSubcommands::Kick { username } => {
+                    let db_path = format!("{}/.aura/mothership.db", std::env::var("HOME").unwrap_or_else(|_| ".".to_string()));
+                    match host_db::init_db(&db_path) {
+                        Ok(conn) => {
+                            let user = host_db::get_user_by_username(&conn, username);
+                            match user {
+                                Ok(Some(u)) => {
+                                    let _ = conn.execute("DELETE FROM api_tokens WHERE user_id = ?1", rusqlite::params![u.id]);
+                                    let _ = conn.execute("DELETE FROM org_members WHERE user_id = ?1", rusqlite::params![u.id]);
+                                    let _ = conn.execute("DELETE FROM live_sessions WHERE user_id = ?1", rusqlite::params![u.id]);
+                                    let _ = conn.execute("DELETE FROM users WHERE id = ?1", rusqlite::params![u.id]);
+                                    println!("{} User '{}' removed from mothership", "✓".green().bold(), username);
+                                }
+                                _ => println!("{} User '{}' not found", "✗".red().bold(), username),
+                            }
+                        }
+                        Err(e) => eprintln!("{} Cannot open database: {}", "✗".red().bold(), e),
+                    }
                 }
             }
         }
