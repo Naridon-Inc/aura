@@ -218,7 +218,7 @@ fn capture_env_fingerprint() -> Option<String> {
     ecosystem::Ecosystem::fingerprint()
 }
 
-const CURRENT_VERSION: &str = "0.12.1";
+const CURRENT_VERSION: &str = "0.12.6";
 
 /// Build an HTTP client that respects accept_self_signed for mothership TLS.
 fn cloud_http_client() -> reqwest::blocking::Client {
