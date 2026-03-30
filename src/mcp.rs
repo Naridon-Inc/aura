@@ -847,7 +847,49 @@ impl McpServer {
         // Mark that intent has been logged for this session
         let _ = std::fs::write(".aura/.intent_logged", "1");
 
-        json!({ "content": [{ "type": "text", "text": "Intent logged. Aura will bind this reasoning to your AST changes on the next commit." }] })
+        // Auto-push modified function bodies to mothership for real-time team sync
+        let mut auto_push_msg = String::new();
+        if let Some(session) = SessionManager::get_active_session() {
+            let touched = &session.files_touched;
+            if !touched.is_empty() {
+                let mut total_pushed: u64 = 0;
+                for file_path in touched {
+                    if std::path::Path::new(file_path).exists() {
+                        if let Ok(source) = std::fs::read_to_string(file_path) {
+                            let ext = std::path::Path::new(file_path)
+                                .extension().and_then(|e| e.to_str()).unwrap_or("");
+                            if let Ok(mut parser) = crate::parser::SemanticParser::new() {
+                                if let Ok(nodes) = parser.parse_file(&source, ext) {
+                                    let payloads: Vec<crate::live_sync::SyncFunctionPayload> = nodes.iter()
+                                        .filter_map(|n| {
+                                            let ident = n.identifier.as_ref()?;
+                                            let body = crate::live_sync::extract_function_body(&source, ident)?;
+                                            Some(crate::live_sync::SyncFunctionPayload {
+                                                file_path: file_path.clone(),
+                                                function_name: ident.clone(),
+                                                function_kind: n.kind.clone(),
+                                                content_hash: n.content_hash.clone(),
+                                                body,
+                                            })
+                                        }).collect();
+                                    if !payloads.is_empty() {
+                                        if let Ok(resp) = crate::live_sync::push_function_bodies(&payloads) {
+                                            total_pushed += resp["pushed"].as_u64().unwrap_or(0);
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                if total_pushed > 0 {
+                    auto_push_msg = format!("\n🔄 AUTO-SYNC: Pushed {} function bodies to mothership. Teammates will see your changes in real-time.", total_pushed);
+                }
+            }
+        }
+
+        let msg = format!("Intent logged. Aura will bind this reasoning to your AST changes on the next commit.{}", auto_push_msg);
+        json!({ "content": [{ "type": "text", "text": msg }] })
     }
 
     fn tool_pr_review(args: Value) -> Value {
@@ -1030,6 +1072,33 @@ impl McpServer {
             status_data["project_memory"] = memory_summary;
         }
 
+        // Team sync: mothership connectivity + pending pulls + team knowledge
+        {
+            let (online, ms, peers) = crate::live_sync::check_mothership();
+            if online {
+                let mut team = json!({
+                    "mothership": "online",
+                    "latency_ms": ms,
+                    "peers": peers,
+                });
+                // Check for pending sync
+                if let Ok(sync) = crate::live_sync::fetch_sync_status() {
+                    let pending = sync["pending_changes"].as_u64().unwrap_or(0);
+                    if pending > 0 {
+                        team["pending_pull"] = json!({
+                            "count": pending,
+                            "action": "IMPORTANT: Teammates have pushed function changes. Call `aura_live_sync_pull` to apply them BEFORE editing those files."
+                        });
+                    }
+                }
+                // Check config for team-managed repo
+                let config_t = crate::config::ConfigManager::load();
+                let repo_name = crate::live_sync::repo_name_from_cwd();
+                team["is_team_repo"] = json!(config_t.team_repos.contains(&repo_name));
+                status_data["team"] = team;
+            }
+        }
+
         let toon_text = crate::toon::encode(&status_data);
         json!({ "content": [{ "type": "text", "text": toon_text }] })
     }
@@ -1083,7 +1152,7 @@ impl McpServer {
                         texts.push(warn);
                     }
 
-                    // Check zone ownership
+                    // Check zone ownership (local sentinel)
                     if let Some(zone) = crate::sentinel::SentinelManager::check_zone(&session.session_id, file_path) {
                         let severity = match zone.mode {
                             crate::sentinel::ZoneMode::Block => "BLOCKED",
@@ -1093,6 +1162,29 @@ impl McpServer {
                             "\n\u{26a0}\u{fe0f} ZONE {}: File '{}' is in zone '{}' owned by session {}. Patterns: {:?}",
                             severity, file_path, zone.zone_id, zone.session_id, zone.patterns
                         ));
+                    }
+
+                    // Check remote zone ownership (mothership P2P)
+                    if let Ok(resp) = crate::live_sync::check_remote_zone(file_path) {
+                        let blocked = resp["blocked"].as_bool().unwrap_or(false);
+                        if let Some(conflicts) = resp["conflicts"].as_array() {
+                            if !conflicts.is_empty() {
+                                let mut warn = format!("\n\u{1f6a8} TEAM ZONE {}: This file is claimed by a teammate on the mothership:\n",
+                                    if blocked { "BLOCKED" } else { "WARNING" });
+                                for c in conflicts {
+                                    let user = c["username"].as_str().unwrap_or("?");
+                                    let mode = c["mode"].as_str().unwrap_or("warn");
+                                    let label = c["label"].as_str().unwrap_or("");
+                                    warn.push_str(&format!("  - {} [{}] {}\n", user, mode, label));
+                                }
+                                if blocked {
+                                    warn.push_str("You MUST NOT edit this file. Coordinate with the zone owner first via `aura_msg_send`.");
+                                } else {
+                                    warn.push_str("Proceed with caution — notify the zone owner via `aura_msg_send` before making changes.");
+                                }
+                                texts.push(warn);
+                            }
+                        }
                     }
                 }
 
