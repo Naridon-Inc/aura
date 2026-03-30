@@ -304,9 +304,25 @@ impl MemoryManager {
             );
         }
 
+        // Only surface up to 5 gotchas in status to avoid bloat
+        if gotcha_count > 5 {
+            summary["gotchas"] = serde_json::json!(
+                mem.gotchas.iter().take(5).map(|g| &g.content).collect::<Vec<_>>()
+            );
+            summary["gotchas_truncated"] = serde_json::json!(format!(
+                "+{} more — call aura_memory_read for all", gotcha_count - 5
+            ));
+        }
+
         summary["hint"] = serde_json::json!(
             "Call `aura_memory_read` for full project memory (architecture, decisions, conventions)."
         );
+
+        if let Some(compaction_msg) = Self::needs_compaction() {
+            summary["compaction"] = serde_json::json!(compaction_msg);
+        }
+
+        summary["size_kb"] = serde_json::json!(Self::file_size() / 1024);
 
         Some(summary)
     }
@@ -354,6 +370,51 @@ impl MemoryManager {
             })).collect::<Vec<_>>(),
             "last_updated": mem.last_updated,
         })
+    }
+
+    /// Search memories by keyword across all sections
+    pub fn search(query: &str) -> Vec<serde_json::Value> {
+        let mem = Self::load();
+        let q = query.to_lowercase();
+        let mut results = Vec::new();
+
+        // Search identity
+        if mem.identity.to_lowercase().contains(&q) {
+            results.push(serde_json::json!({"section": "identity", "content": mem.identity}));
+        }
+
+        // Search architecture
+        for c in &mem.architecture {
+            if c.name.to_lowercase().contains(&q) || c.description.to_lowercase().contains(&q) {
+                results.push(serde_json::json!({"section": "architecture", "name": c.name, "description": c.description}));
+            }
+        }
+
+        // Search timeline
+        for d in &mem.decisions {
+            if d.title.to_lowercase().contains(&q) || d.description.to_lowercase().contains(&q) {
+                results.push(serde_json::json!({"section": "timeline", "date": d.date, "title": d.title, "description": d.description}));
+            }
+        }
+
+        // Search all entry sections
+        let sections = [
+            ("conventions", &mem.conventions),
+            ("gotchas", &mem.gotchas),
+            ("context", &mem.context),
+            ("active_work", &mem.active_work),
+        ];
+        for (name, entries) in &sections {
+            for e in *entries {
+                if e.content.to_lowercase().contains(&q)
+                    || e.tags.iter().any(|t| t.to_lowercase().contains(&q))
+                {
+                    results.push(serde_json::json!({"section": name, "id": e.id, "content": e.content, "tags": e.tags}));
+                }
+            }
+        }
+
+        results
     }
 
     /// AI-powered memory compaction. Summarizes old entries in a section
@@ -422,7 +483,7 @@ impl MemoryManager {
 
     /// Call AI provider (Gemini or Anthropic) for text generation
     fn call_ai(prompt: &str) -> Result<String, String> {
-        let _config = crate::config::ConfigManager::load();
+        let config = crate::config::ConfigManager::load();
         let provider = crate::config::ConfigManager::get_active_provider();
 
         let client = reqwest::blocking::Client::builder()
@@ -510,50 +571,5 @@ impl MemoryManager {
             return Some(format!("{} context entries — compaction recommended", mem.context.len()));
         }
         None
-    }
-
-    /// Search memories by keyword across all sections
-    pub fn search(query: &str) -> Vec<serde_json::Value> {
-        let mem = Self::load();
-        let q = query.to_lowercase();
-        let mut results = Vec::new();
-
-        // Search identity
-        if mem.identity.to_lowercase().contains(&q) {
-            results.push(serde_json::json!({"section": "identity", "content": mem.identity}));
-        }
-
-        // Search architecture
-        for c in &mem.architecture {
-            if c.name.to_lowercase().contains(&q) || c.description.to_lowercase().contains(&q) {
-                results.push(serde_json::json!({"section": "architecture", "name": c.name, "description": c.description}));
-            }
-        }
-
-        // Search timeline
-        for d in &mem.decisions {
-            if d.title.to_lowercase().contains(&q) || d.description.to_lowercase().contains(&q) {
-                results.push(serde_json::json!({"section": "timeline", "date": d.date, "title": d.title, "description": d.description}));
-            }
-        }
-
-        // Search all entry sections
-        let sections = [
-            ("conventions", &mem.conventions),
-            ("gotchas", &mem.gotchas),
-            ("context", &mem.context),
-            ("active_work", &mem.active_work),
-        ];
-        for (name, entries) in &sections {
-            for e in *entries {
-                if e.content.to_lowercase().contains(&q)
-                    || e.tags.iter().any(|t| t.to_lowercase().contains(&q))
-                {
-                    results.push(serde_json::json!({"section": name, "id": e.id, "content": e.content, "tags": e.tags}));
-                }
-            }
-        }
-
-        results
     }
 }

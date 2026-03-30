@@ -24,9 +24,13 @@ mod sync;
 mod session;
 mod plugin;
 mod plugins;
+mod live_events;
+mod live_sync;
 mod agents;
 mod sentinel;
 mod memory;
+mod usage;
+mod plan_tracker;
 
 use clap::{Parser, Subcommand};
 use parser::SemanticParser;
@@ -212,7 +216,7 @@ fn capture_env_fingerprint() -> Option<String> {
     ecosystem::Ecosystem::fingerprint()
 }
 
-const CURRENT_VERSION: &str = "0.8.0";
+const CURRENT_VERSION: &str = "0.9.0";
 
 fn check_for_updates() -> Option<String> {
     let client = reqwest::blocking::Client::builder()
@@ -312,12 +316,15 @@ fn perform_update() -> Result<(), Box<dyn std::error::Error>> {
 
             // Refresh integrations (CLAUDE.md, hooks) in current repo
             refresh_integrations();
+            // Install/update status line on every update
+            install_claude_statusline();
         }
     } else {
         println!("{} Aura is already up to date (v{}).", "✓".green().bold(), CURRENT_VERSION);
 
         // Still refresh integrations in case the template changed
         refresh_integrations();
+        install_claude_statusline();
     }
     Ok(())
 }
@@ -337,12 +344,14 @@ fn refresh_integrations() {
                     existing.find("<!-- AURA_END -->"),
                 ) {
                     let end = end + "<!-- AURA_END -->".len();
+                    // Check if there's a trailing newline after the end marker
                     let end = if existing[end..].starts_with('\n') { end + 1 } else { end };
                     let updated = format!("{}{}{}", &existing[..start], aura_block, &existing[end..]);
                     let _ = fs::write(claude_md_path, updated);
                     println!("{} CLAUDE.md refreshed with latest Aura tools.", "✓".green().bold());
                 }
             } else if !existing.contains("aura_log_intent") {
+                // No Aura block at all — append
                 let updated = format!("{}\n\n{}", existing, aura_block);
                 let _ = fs::write(claude_md_path, updated);
                 println!("{} Aura instructions appended to CLAUDE.md.", "✓".green().bold());
@@ -352,6 +361,7 @@ fn refresh_integrations() {
         }
     }
 
+    // Refresh .gemini and other agent instruction files if they exist
     let gemini_md_path = std::path::Path::new("GEMINI.md");
     if gemini_md_path.exists() {
         if let Ok(existing) = fs::read_to_string(gemini_md_path) {
@@ -368,6 +378,96 @@ fn refresh_integrations() {
                 }
             }
         }
+    }
+
+    // Ensure .aura/.gitignore exists — keep intents + memory in git, ignore runtime state
+    ensure_aura_gitignore();
+}
+
+/// Create .aura/.gitignore to track only intents and memory in git.
+/// Everything else (snapshots, sessions, sentinel, transcripts) is local runtime state.
+fn ensure_aura_gitignore() {
+    let aura_dir = std::path::Path::new(".aura");
+    if !aura_dir.exists() {
+        return;
+    }
+
+    let gitignore_path = aura_dir.join(".gitignore");
+    let desired = "\
+# Aura: track intents + project memory in git, ignore local runtime state
+#
+# TRACKED (committed to git for team context):
+#   .gitignore        — so all devs share the same ignore rules
+#   intent_log.jsonl  — why changes were made (links to git commits)
+#   memory.json       — project knowledge (architecture, decisions, gotchas)
+#
+# IGNORED (local per-machine state):
+snapshots/
+sessions/
+transcripts/
+sentinel/
+tracker/
+reviews/
+plans/
+orchestrate/
+worktrees/
+live/
+.intent_logged
+last_review.json
+";
+
+    // Write if missing or outdated
+    let needs_update = if let Ok(existing) = fs::read_to_string(&gitignore_path) {
+        !existing.contains("orchestrate/")  // old version without orchestrate
+    } else {
+        true
+    };
+
+    if needs_update {
+        let _ = fs::write(&gitignore_path, desired);
+    }
+}
+
+/// Install Aura status line script for Claude Code.
+/// Writes ~/.claude/aura-statusline.sh and adds statusLine to ~/.claude/settings.json
+fn install_claude_statusline() {
+    let home = match std::env::var("HOME") {
+        Ok(h) => h,
+        Err(_) => return,
+    };
+
+    let script_path = format!("{}/.claude/aura-statusline.sh", home);
+    let settings_path = format!("{}/.claude/settings.json", home);
+
+    // Write the status line script
+    let script = include_str!("../integrations/aura-statusline.sh");
+    let _ = fs::write(&script_path, script);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = fs::set_permissions(&script_path, fs::Permissions::from_mode(0o755));
+    }
+
+    // Add statusLine to settings.json — create file if it doesn't exist
+    let content = fs::read_to_string(&settings_path).unwrap_or_else(|_| "{}".to_string());
+    if content.contains("statusLine") {
+        // Already configured — just update the script file (done above)
+        println!("    {} Aura status line updated.", "✓".green());
+        return;
+    }
+
+    let mut settings = serde_json::from_str::<serde_json::Value>(&content)
+        .unwrap_or_else(|_| serde_json::json!({}));
+    settings["statusLine"] = serde_json::json!({
+        "type": "command",
+        "command": "bash $HOME/.claude/aura-statusline.sh"
+    });
+    if let Ok(updated) = serde_json::to_string_pretty(&settings) {
+        let claude_dir = format!("{}/.claude", home);
+        let _ = fs::create_dir_all(&claude_dir);
+        let _ = fs::write(&settings_path, updated);
+        println!("    {} Aura status line installed for Claude Code.", "✓".green());
+        return;
     }
 }
 
@@ -563,11 +663,133 @@ enum Commands {
         #[command(subcommand)]
         sub: MsgSubcommands,
     },
-    /// Connect to an Aura collaboration server for team features
+    /// Connect to a self-hosted Aura Server for team collaboration
     Server {
         #[command(subcommand)]
         sub: ServerSubcommands,
     },
+    /// Track AI token usage, costs, and budgets across all your agent sessions
+    Usage {
+        /// Time period: "today", "week", "month", "all" (default: today)
+        #[arg(default_value = "today")]
+        period: String,
+        /// Output raw JSON instead of formatted display
+        #[arg(long)]
+        json: bool,
+        /// Only show usage for the current project (default: all projects)
+        #[arg(long)]
+        project: bool,
+        /// Show Claude Pro/Max plan usage — parses Claude Code transcripts for real token data,
+        /// peak hours, per-project quota burn, and burn rate predictions
+        #[arg(long)]
+        plan: bool,
+        /// Set daily budget cap in USD (e.g. --budget-daily 5.00)
+        #[arg(long)]
+        budget_daily: Option<f64>,
+        /// Set weekly budget cap in USD (e.g. --budget-weekly 25.00)
+        #[arg(long)]
+        budget_weekly: Option<f64>,
+        /// Set per-session budget cap in USD (e.g. --budget-session 2.00)
+        #[arg(long)]
+        budget_session: Option<f64>,
+        /// Export usage data as CSV to a file (e.g. --export usage.csv)
+        #[arg(long)]
+        export: Option<String>,
+    },
+}
+
+#[derive(Subcommand)]
+enum MsgSubcommands {
+    /// Send a message to the team or a specific developer
+    Send {
+        /// The message text
+        message: String,
+        /// Optional: send to a specific user (DM) instead of the whole team
+        #[arg(long)]
+        to: Option<String>,
+    },
+    /// List recent messages for this repository
+    List {
+        /// Max messages to show (default: 20)
+        #[arg(long, default_value = "20")]
+        limit: usize,
+        /// Output raw JSON
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+#[derive(Subcommand)]
+enum ServerSubcommands {
+    /// Register a new account on a self-hosted Aura Server
+    Register {
+        /// Server URL (e.g., http://localhost:3001)
+        #[arg(long)]
+        url: String,
+        /// Username
+        #[arg(long)]
+        username: String,
+        /// Password
+        #[arg(long)]
+        password: String,
+    },
+    /// Log in to a self-hosted Aura Server
+    Login {
+        /// Server URL (e.g., http://localhost:3001)
+        #[arg(long)]
+        url: String,
+        /// Username
+        #[arg(long)]
+        username: String,
+        /// Password
+        #[arg(long)]
+        password: String,
+    },
+    /// Register a repository with the connected Aura Server
+    AddRepo {
+        /// Repository name in owner/repo format
+        repo_name: String,
+    },
+    /// Check connection to the configured Aura Server
+    Status,
+}
+
+#[derive(Subcommand)]
+enum LiveSubcommands {
+    /// Start streaming function-level changes to Aura Cloud in real-time
+    Start,
+    /// Stop live streaming
+    Stop,
+    /// Show current team presence and what functions are being worked on
+    Status,
+    /// List unresolved cross-branch dependency impacts on your code
+    Impacts {
+        /// Output raw JSON instead of pretty-printed table
+        #[arg(long)]
+        json: bool,
+    },
+    /// Function-level code sync — push/pull function bodies across the team
+    Sync {
+        #[command(subcommand)]
+        sub: SyncSubcommands,
+    },
+}
+
+#[derive(Subcommand)]
+enum SyncSubcommands {
+    /// Push current file's function bodies to the cloud for teammates to pull
+    Push {
+        /// File path to push (pushes all tracked functions in the file)
+        file: String,
+    },
+    /// Pull function changes from teammates and apply them to your local files
+    Pull {
+        /// Dry run — show what would change without applying
+        #[arg(long)]
+        dry_run: bool,
+    },
+    /// Show sync status: pending changes, active pushers, synced functions
+    Status,
 }
 
 #[derive(Subcommand)]
@@ -578,6 +800,12 @@ enum ConfigSubcommands {
         key: String,
         /// The value to set
         value: String,
+    },
+    /// Reset or change the strict-mode passcode
+    ResetPasscode {
+        /// Force-reset: disables strict mode and clears passcode without verifying the old one
+        #[arg(long)]
+        force: bool,
     },
 }
 
@@ -639,83 +867,6 @@ enum SymphonySubcommands {
         base: String,
     },
     /// Show Symphony configuration and status
-    Status,
-}
-
-#[derive(Subcommand)]
-enum LiveSubcommands {
-    /// Start streaming function-level changes to your team in real-time
-    Start,
-    /// Stop live streaming
-    Stop,
-    /// Show current team presence and what functions are being worked on
-    Status,
-    /// List unresolved cross-branch dependency impacts on your code
-    Impacts,
-    /// Push function bodies to the server for teammates to pull
-    #[command(name = "sync")]
-    Sync {
-        #[command(subcommand)]
-        sub: LiveSyncSubcommands,
-    },
-}
-
-#[derive(Subcommand)]
-enum LiveSyncSubcommands {
-    /// Push function bodies from a file for teammates to pull
-    Push {
-        /// File path to push functions from
-        file: String,
-    },
-    /// Pull function changes pushed by teammates
-    Pull,
-    /// Show pending sync changes and active pushers
-    Status,
-}
-
-#[derive(Subcommand)]
-enum MsgSubcommands {
-    /// Send a message to your team
-    Send {
-        /// The message to send
-        message: String,
-    },
-    /// List recent team messages
-    List,
-}
-
-#[derive(Subcommand)]
-enum ServerSubcommands {
-    /// Register a new account on an Aura collaboration server
-    Register {
-        /// Server URL (e.g., http://localhost:3001)
-        #[arg(long)]
-        url: String,
-        /// Username
-        #[arg(long)]
-        username: String,
-        /// Password
-        #[arg(long)]
-        password: String,
-    },
-    /// Log in to an Aura collaboration server
-    Login {
-        /// Server URL (e.g., http://localhost:3001)
-        #[arg(long)]
-        url: String,
-        /// Username
-        #[arg(long)]
-        username: String,
-        /// Password
-        #[arg(long)]
-        password: String,
-    },
-    /// Register a repository with the server
-    AddRepo {
-        /// Repository name (e.g., "owner/repo")
-        repo: String,
-    },
-    /// Check server connection status
     Status,
 }
 
@@ -809,8 +960,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         Commands::GoalTrace { .. } => "goal-trace",
         Commands::Config { .. } => "config",
         Commands::Live { .. } => "live",
-        Commands::Msg { .. } => "msg",
         Commands::Server { .. } => "server",
+        Commands::Usage { .. } => "usage",
         _ => "internal_command"
     };
     track_event("cli_execution", Some(cmd_name));
@@ -945,6 +1096,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             let _ = fs::write(claude_md_path, aura_block);
                             println!("    {} Created CLAUDE.md with Aura instructions.", "✓".green());
                         }
+                        // Install Aura status line for Claude Code
+                        install_claude_statusline();
                     },
                     "VS Code" => {
                         println!("  {} Auto-configuring VS Code MCP server...", "⚙️ ".cyan());
@@ -1061,7 +1214,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         }
                         let gsd_prompt = serde_json::json!({
                             "name": "aura-semantic-engine",
-                            "description": "Aura Semantic Engine v0.8.1 — AI-native version control with multi-agent orchestration, semantic PR review, surgical rewind, and durable snapshots.",
+                            "description": "Aura Semantic Engine v0.9.0 — AI-native version control with multi-agent orchestration, semantic PR review, surgical rewind, and durable snapshots.",
                             "instructions": "You have access to the Aura Semantic Engine. Key commands: (1) `aura snapshot \"desc\"` — ALWAYS run before large edits for safety. (2) `aura rewind <func> <file>` — surgically revert a function. (3) `aura pr-review --base main` — check for violations before committing. (4) `aura plan \"objective\"` then `aura execute` — decompose large tasks into atomic waves. (5) `aura prove --goal \"description\"` — mathematically verify a behavioral goal. (6) `aura orchestrate run \"objective\" --duo` — run Claude + Gemini in parallel. (7) `aura fix --base main` — auto-fix violations. (8) `aura handover cursor` — compressed context for agent relay. Before committing, log intent to `.gemini.intent` and run `aura pr-review`. Never use --no-verify."
                         });
                         let _ = fs::write(".claude/aura-gsd.json", serde_json::to_string_pretty(&gsd_prompt).unwrap_or_default());
@@ -1134,8 +1287,28 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         let hook_js = include_str!("../assets/gemini-hooks/aura-intent.js");
                         let _ = fs::write(hooks_dir.join("aura-intent.js"), hook_js);
 
-                        // Inject settings.json with MCP server + hooks
-                        // Read existing settings to avoid overwriting user config
+                        // Register MCP server in GLOBAL ~/.gemini/settings.json
+                        // Gemini CLI reads MCP servers from the global config, not project-level
+                        let global_gemini_settings_path = std::path::Path::new(&home).join(".gemini").join("settings.json");
+                        let mut global_settings: serde_json::Value = if global_gemini_settings_path.exists() {
+                            fs::read_to_string(&global_gemini_settings_path).ok()
+                                .and_then(|s| serde_json::from_str(&s).ok())
+                                .unwrap_or_else(|| serde_json::json!({}))
+                        } else {
+                            serde_json::json!({})
+                        };
+
+                        if global_settings.get("mcpServers").is_none() {
+                            global_settings["mcpServers"] = serde_json::json!({});
+                        }
+                        global_settings["mcpServers"]["aura-vcs"] = serde_json::json!({
+                            "command": "aura",
+                            "args": ["mcp"]
+                        });
+                        let _ = fs::write(&global_gemini_settings_path, serde_json::to_string_pretty(&global_settings).unwrap_or_default());
+                        println!("    {} Aura MCP server registered in ~/.gemini/settings.json (global).", "✓".green());
+
+                        // Project-level .gemini/settings.json — hooks only
                         let settings_path = gemini_project_dir.join("settings.json");
                         let mut settings: serde_json::Value = if settings_path.exists() {
                             fs::read_to_string(&settings_path).ok()
@@ -1145,7 +1318,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             serde_json::json!({})
                         };
 
-                        // Inject MCP server (same as Claude Code setup)
+                        // Also add MCP to project-level as fallback
                         if settings.get("mcpServers").is_none() {
                             settings["mcpServers"] = serde_json::json!({});
                         }
@@ -1184,8 +1357,26 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         ]);
 
                         let _ = fs::write(&settings_path, serde_json::to_string_pretty(&settings).unwrap_or_default());
-                        println!("    {} Aura MCP server registered in Gemini CLI.", "✓".green());
-                        
+                        println!("    {} Project hooks registered in .gemini/settings.json.", "✓".green());
+
+                        // Inject GEMINI.md with Aura instructions
+                        let gemini_md_path = std::path::Path::new("GEMINI.md");
+                        let gemini_block = include_str!("../integrations/gemini-md-block.md");
+                        if gemini_md_path.exists() {
+                            if let Ok(existing) = fs::read_to_string(gemini_md_path) {
+                                if !existing.contains("AURA_START") {
+                                    let updated = format!("{}\n\n{}", existing, gemini_block);
+                                    let _ = fs::write(gemini_md_path, updated);
+                                    println!("    {} Aura instructions appended to GEMINI.md.", "✓".green());
+                                } else {
+                                    println!("    {} GEMINI.md already has Aura instructions.", "✓".green());
+                                }
+                            }
+                        } else {
+                            let _ = fs::write(gemini_md_path, gemini_block);
+                            println!("    {} Created GEMINI.md with Aura instructions.", "✓".green());
+                        }
+
                         println!("    {} Aura Semantic Engine is now natively powering your Gemini sessions.", "✓".green());
                     },
                     _ => {}
@@ -1239,6 +1430,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 println!("  {} {}", "✗".red().bold(), e);
                 return Ok(());
             }
+
+            // Always install/update the status line for Claude Code
+            install_claude_statusline();
 
             if *force_baseline {
                 println!("  {} Establishing Merkle-Graph baseline (Force Mode)...", "🧠".cyan());
@@ -1361,7 +1555,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                         let config_path = ConfigManager::get_config_path().map(|p| p.to_string_lossy().to_string()).unwrap_or_else(|| "unknown".to_string());
                                         println!("{} Semantic Sentinel: High-Entropy Secret detected in {} (Hash: {}). Commit halted!", "🚨".red().bold(), ident.yellow(), node.content_hash[0..8].to_string());
                                         println!("  {} If this is legitimate, run: {} {} {}", "↳".dimmed(), "aura request-access".cyan(), ident, "to allowlist this node.");
-                                        println!("  {} To bypass all blocks globally, run: {}", "💡".blue(), "aura config set strict-mode false".italic());
+                                        if ConfigManager::is_strict_mode_locked(&config) {
+                                            println!("  {} Strict mode is passcode-locked (human must unlock from terminal).", "💡".blue());
+                                        } else {
+                                            println!("  {} To bypass all blocks globally, run: {}", "💡".blue(), "aura config set strict-mode false".italic());
+                                        }
                                         println!("  {} (Using config: {})", "🔍".dimmed(), config_path.dimmed());
                                         std::process::exit(1);
                                     } else {
@@ -1698,7 +1896,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         }
                         println!("  {} Identified modified nodes: {}", "↳".dimmed(), identified_nodes.join(", ").yellow().bold());
                         println!("\n  {} {}", "How to Fix:".bold().green(), "Update your commit message to explain WHY you changed these nodes.");
-                        println!("  {} To bypass this security requirement, run: {}", "💡".blue(), "aura config set strict-mode false".italic());
+                        if ConfigManager::is_strict_mode_locked(&config) {
+                            println!("  {} Strict mode is passcode-locked (human must unlock from terminal).", "💡".blue());
+                        } else {
+                            println!("  {} To bypass this security requirement, run: {}", "💡".blue(), "aura config set strict-mode false".italic());
+                        }
                         println!("\n{} Commit halted.", "✗".red().bold());
                         std::process::exit(1);
                     } else {
@@ -1748,7 +1950,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         
                         println!("\n  {} {}", "How to Fix:".bold().green(), "Update your commit message to include the EXACT names of the functions or classes listed above.");
                         println!("  {} Example: {} 'Refactored {}'", "↳".dimmed(), "git commit -m".cyan(), identified_nodes.first().unwrap_or(&"logic".to_string()));
-                        println!("  {} If this is intentional and you wish to bypass this check, run: {}", "💡".blue(), "aura config set strict-mode false".italic());
+                        if ConfigManager::is_strict_mode_locked(&config) {
+                            println!("  {} Strict mode is passcode-locked (human must unlock from terminal).", "💡".blue());
+                        } else {
+                            println!("  {} If this is intentional and you wish to bypass this check, run: {}", "💡".blue(), "aura config set strict-mode false".italic());
+                        }
                         
                         println!("\n{} Commit halted.", "✗".red().bold());
                         std::process::exit(1);
@@ -1769,6 +1975,24 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     }
                 } else {
                     spinner.println(format!("{} Intent mathematically aligned with AST modifications.", "🛡️ ".green()));
+                }
+            }
+
+            // Check for pending live impacts (non-blocking warning)
+            {
+                let marker_path = Path::new(".aura/live/impacts_pending");
+                if marker_path.exists() {
+                    if let Ok(contents) = fs::read_to_string(marker_path) {
+                        if let Ok(count) = contents.trim().parse::<u64>() {
+                            if count > 0 {
+                                println!("{} {} unresolved cross-branch impact alert{}. Run {} to review.",
+                                    "⚠️".yellow().bold(),
+                                    count.to_string().yellow().bold(),
+                                    if count == 1 { "" } else { "s" },
+                                    "aura live impacts".cyan());
+                            }
+                        }
+                    }
                 }
             }
 
@@ -2322,7 +2546,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     for (func, dep) in &violations {
                         println!("  {} {} calls forbidden dependency: {}", "↳".dimmed(), func.yellow(), dep.red());
                     }
-                    println!("  {} To allow these changes, set `strict_gatekeeper_mode: false` with `aura config set strict-mode false`", "💡".blue());
+                    if ConfigManager::is_strict_mode_locked(&config) {
+                        println!("  {} Strict mode is passcode-locked (human must unlock from terminal).", "💡".blue());
+                    } else {
+                        println!("  {} To allow these changes, set `strict_gatekeeper_mode: false` with `aura config set strict-mode false`", "💡".blue());
+                    }
                     std::process::exit(1);
                 } else {
                     println!("{} Deployment Gatekeeper: The AI logic contains forbidden calls for production.", "⚠️".yellow().bold());
@@ -2816,8 +3044,54 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     ConfigSubcommands::Set { key, value } => {
                         match key.as_str() {
                             "strict-mode" => {
-                                config.strict_gatekeeper_mode = value.parse().unwrap_or(false);
-                                println!("{} Strict mode set to {}.", "✓".green().bold(), config.strict_gatekeeper_mode);
+                                let want_enable: bool = value.parse().unwrap_or(false);
+                                if want_enable {
+                                    // Enabling strict mode — require interactive TTY for passcode
+                                    if !ConfigManager::is_interactive_tty() {
+                                        println!("{} Strict mode can only be enabled from an interactive terminal.", "✗".red().bold());
+                                        return Ok(());
+                                    }
+                                    let passcode = Password::with_theme(&ColorfulTheme::default())
+                                        .with_prompt("Set a passcode to lock strict mode (min 4 chars)")
+                                        .with_confirmation("Confirm passcode", "Passcodes do not match")
+                                        .interact()?;
+                                    if passcode.len() < 4 {
+                                        println!("{} Passcode must be at least 4 characters.", "✗".red().bold());
+                                        return Ok(());
+                                    }
+                                    let salt = ConfigManager::generate_salt();
+                                    let hash = ConfigManager::hash_passcode(&passcode, &salt);
+                                    config.strict_gatekeeper_mode = true;
+                                    config.strict_mode_passcode_hash = Some(hash);
+                                    config.strict_mode_passcode_salt = Some(salt);
+                                    println!("{} Strict mode ENABLED and LOCKED with passcode.", "✓".green().bold());
+                                } else {
+                                    // Disabling strict mode — enforce passcode if locked
+                                    if ConfigManager::is_strict_mode_locked(&config) {
+                                        if !ConfigManager::is_interactive_tty() {
+                                            println!("{} Strict mode is passcode-locked. It can only be disabled from an interactive terminal.", "✗".red().bold());
+                                            return Ok(());
+                                        }
+                                        if ConfigManager::is_ai_agent() {
+                                            println!("{} Strict mode is passcode-locked. AI agents cannot disable it. A human must unlock from a terminal.", "✗".red().bold());
+                                            return Ok(());
+                                        }
+                                        let attempt = Password::with_theme(&ColorfulTheme::default())
+                                            .with_prompt("Enter passcode to unlock strict mode")
+                                            .interact()?;
+                                        if !ConfigManager::verify_passcode(&config, &attempt) {
+                                            println!("{} Incorrect passcode. Strict mode remains locked.", "✗".red().bold());
+                                            return Ok(());
+                                        }
+                                        config.strict_gatekeeper_mode = false;
+                                        config.strict_mode_passcode_hash = None;
+                                        config.strict_mode_passcode_salt = None;
+                                        println!("{} Strict mode DISABLED and unlocked.", "✓".green().bold());
+                                    } else {
+                                        config.strict_gatekeeper_mode = false;
+                                        println!("{} Strict mode set to false.", "✓".green().bold());
+                                    }
+                                }
                             },
                             "api-key" => {
                                 config.gemini_api_key = Some(value.to_string());
@@ -2835,12 +3109,68 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 config.telemetry_enabled = value.parse().unwrap_or(true);
                                 println!("{} Anonymous Telemetry set to {}.", "✓".green().bold(), config.telemetry_enabled);
                             },
+                            "cloud-token" => {
+                                config.cloud_api_token = Some(value.to_string());
+                                println!("{} Cloud API token updated.", "✓".green().bold());
+                            },
+                            "cloud-url" => {
+                                config.cloud_url = Some(value.to_string());
+                                println!("{} Cloud URL set to {}.", "✓".green().bold(), value);
+                            },
                             _ => {
                                 println!("{} Unknown configuration key: {}", "✗".red(), key);
                                 return Ok(());
                             }
                         }
                         ConfigManager::save(&config)?;
+                        return Ok(());
+                    }
+                    ConfigSubcommands::ResetPasscode { force } => {
+                        if !ConfigManager::is_interactive_tty() {
+                            println!("{} Passcode reset requires an interactive terminal.", "✗".red().bold());
+                            return Ok(());
+                        }
+                        if !ConfigManager::is_strict_mode_locked(&config) {
+                            println!("{} Strict mode is not passcode-locked. Nothing to reset.", "ℹ️".blue());
+                            return Ok(());
+                        }
+                        if *force {
+                            let confirm = Confirm::with_theme(&ColorfulTheme::default())
+                                .with_prompt("⚠️  Force reset will DISABLE strict mode and clear the passcode. Continue?")
+                                .default(false)
+                                .interact()?;
+                            if !confirm {
+                                println!("{} Cancelled.", "ℹ️".blue());
+                                return Ok(());
+                            }
+                            config.strict_gatekeeper_mode = false;
+                            config.strict_mode_passcode_hash = None;
+                            config.strict_mode_passcode_salt = None;
+                            ConfigManager::save(&config)?;
+                            println!("{} Strict mode DISABLED and passcode cleared (force reset).", "✓".green().bold());
+                        } else {
+                            let attempt = Password::with_theme(&ColorfulTheme::default())
+                                .with_prompt("Enter current passcode")
+                                .interact()?;
+                            if !ConfigManager::verify_passcode(&config, &attempt) {
+                                println!("{} Incorrect passcode.", "✗".red().bold());
+                                return Ok(());
+                            }
+                            let new_passcode = Password::with_theme(&ColorfulTheme::default())
+                                .with_prompt("Set new passcode (min 4 chars)")
+                                .with_confirmation("Confirm new passcode", "Passcodes do not match")
+                                .interact()?;
+                            if new_passcode.len() < 4 {
+                                println!("{} Passcode must be at least 4 characters.", "✗".red().bold());
+                                return Ok(());
+                            }
+                            let salt = ConfigManager::generate_salt();
+                            let hash = ConfigManager::hash_passcode(&new_passcode, &salt);
+                            config.strict_mode_passcode_hash = Some(hash);
+                            config.strict_mode_passcode_salt = Some(salt);
+                            ConfigManager::save(&config)?;
+                            println!("{} Passcode updated successfully.", "✓".green().bold());
+                        }
                         return Ok(());
                     }
                 }
@@ -2872,10 +3202,47 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         .with_prompt("Enable Strict Mode? (If enabled, Aura will hard-block commits containing forbidden dependencies instead of just warning)")
                         .default(config.strict_gatekeeper_mode)
                         .interact()?;
-                    
-                    config.strict_gatekeeper_mode = strict;
-                    ConfigManager::save(&config)?;
-                    println!("{} Gatekeeper strict mode updated.", "✓".green().bold());
+
+                    if strict && !config.strict_gatekeeper_mode {
+                        // Enabling — set passcode
+                        let passcode = Password::with_theme(&ColorfulTheme::default())
+                            .with_prompt("Set a passcode to lock strict mode (min 4 chars)")
+                            .with_confirmation("Confirm passcode", "Passcodes do not match")
+                            .interact()?;
+                        if passcode.len() < 4 {
+                            println!("{} Passcode must be at least 4 characters.", "✗".red().bold());
+                        } else {
+                            let salt = ConfigManager::generate_salt();
+                            let hash = ConfigManager::hash_passcode(&passcode, &salt);
+                            config.strict_gatekeeper_mode = true;
+                            config.strict_mode_passcode_hash = Some(hash);
+                            config.strict_mode_passcode_salt = Some(salt);
+                            ConfigManager::save(&config)?;
+                            println!("{} Strict mode ENABLED and LOCKED with passcode.", "✓".green().bold());
+                        }
+                    } else if !strict && config.strict_gatekeeper_mode {
+                        // Disabling — check passcode if locked
+                        if ConfigManager::is_strict_mode_locked(&config) {
+                            let attempt = Password::with_theme(&ColorfulTheme::default())
+                                .with_prompt("Enter passcode to unlock strict mode")
+                                .interact()?;
+                            if !ConfigManager::verify_passcode(&config, &attempt) {
+                                println!("{} Incorrect passcode. Strict mode remains locked.", "✗".red().bold());
+                            } else {
+                                config.strict_gatekeeper_mode = false;
+                                config.strict_mode_passcode_hash = None;
+                                config.strict_mode_passcode_salt = None;
+                                ConfigManager::save(&config)?;
+                                println!("{} Strict mode DISABLED and unlocked.", "✓".green().bold());
+                            }
+                        } else {
+                            config.strict_gatekeeper_mode = false;
+                            ConfigManager::save(&config)?;
+                            println!("{} Gatekeeper strict mode updated.", "✓".green().bold());
+                        }
+                    } else {
+                        println!("{} No change.", "ℹ️".blue());
+                    }
                 }
                 1 => {
                     let local_embed = Confirm::with_theme(&ColorfulTheme::default())
@@ -3049,24 +3416,879 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
             }
         }
-        Commands::Live { .. } | Commands::Msg { .. } | Commands::Server { .. } => {
-            println!();
-            println!("  {}  {}", "⚡".bold(), "Team Collaboration — Aura Pro".bold().cyan());
-            println!();
-            println!("  Live presence, impact alerts, team messaging, and");
-            println!("  function-level code sync across your entire team.");
-            println!();
-            println!("  {}  See what every developer is changing in real-time", "•".dimmed());
-            println!("  {}  Get alerted when someone modifies a function you depend on", "•".dimmed());
-            println!("  {}  Push/pull individual functions between developers", "•".dimmed());
-            println!("  {}  Message your team and AI agents from the terminal", "•".dimmed());
-            println!();
-            println!("  {} per developer/month", "$20".bold().green());
-            println!();
-            println!("  {} {}", "→".bold(), "https://auravcs.com".cyan().underline());
-            println!();
+        Commands::Msg { sub } => {
+            match sub {
+                MsgSubcommands::Send { message, to } => {
+                    match live_sync::send_team_message(message, to.as_deref()) {
+                        Ok(resp) => {
+                            let msg_id = resp["id"].as_str().unwrap_or("?");
+                            if let Some(recipient) = to {
+                                println!("{} Message sent to {} ({})", "✓".green().bold(), recipient.cyan(), msg_id);
+                            } else {
+                                println!("{} Message broadcast to team ({})", "✓".green().bold(), msg_id);
+                            }
+                        }
+                        Err(e) => {
+                            println!("{} Failed to send message: {}", "✗".red().bold(), e);
+                        }
+                    }
+                }
+                MsgSubcommands::List { limit, json } => {
+                    match live_sync::fetch_team_messages(*limit) {
+                        Ok(data) => {
+                            if *json {
+                                println!("{}", serde_json::to_string_pretty(&data).unwrap_or_else(|_| "{}".to_string()));
+                            } else {
+                                let messages = data["messages"].as_array();
+                                let total = data["total"].as_u64().unwrap_or(0);
+
+                                if total == 0 {
+                                    println!("{} No messages in this repository.", "ℹ️".blue());
+                                } else {
+                                    println!("{} {} message{}\n", "💬".bold(),
+                                        total.to_string().cyan().bold(),
+                                        if total == 1 { "" } else { "s" });
+
+                                    if let Some(msgs) = messages {
+                                        for msg in msgs {
+                                            let user = msg["from"].as_str().unwrap_or("?");
+                                            let branch = msg["branch"].as_str().unwrap_or("?");
+                                            let text = msg["message"].as_str().unwrap_or("");
+                                            let time = msg["created_at"].as_str().unwrap_or("");
+                                            let to_user = msg["to"].as_str();
+                                            let is_agent = msg["is_agent"].as_bool().unwrap_or(false);
+
+                                            let sender_label = if is_agent {
+                                                format!("{} {}", "🤖", user.cyan())
+                                            } else {
+                                                format!("{}", user.cyan())
+                                            };
+
+                                            if let Some(recipient) = to_user {
+                                                println!("  {} {} → {} on {} {}", "│".dimmed(),
+                                                    sender_label, recipient.yellow(), branch.green(),
+                                                    time.dimmed());
+                                            } else {
+                                                println!("  {} {} on {} {}", "│".dimmed(),
+                                                    sender_label, branch.green(), time.dimmed());
+                                            }
+                                            println!("  {}   {}", "│".dimmed(), text);
+                                            println!("  {}", "│".dimmed());
+                                        }
+                                    }
+                                }
+                            }
+
+                            // Clear unread marker
+                            let marker = std::path::Path::new(".aura/live/unread_messages");
+                            if marker.exists() {
+                                let _ = fs::remove_file(marker);
+                            }
+                        }
+                        Err(e) => {
+                            println!("{} Failed to fetch messages: {}", "✗".red().bold(), e);
+                        }
+                    }
+                }
+            }
+        }
+        Commands::Live { sub } => {
+            match sub {
+                LiveSubcommands::Start => {
+                    use colored::Colorize;
+                    use std::sync::atomic::{AtomicBool, Ordering};
+                    use std::sync::Arc;
+
+                    println!("{}", "🔴 Aura Live — Real-time Collaborative Code Awareness".bold());
+                    println!();
+                    println!("  {} {}", "User:".dimmed(), live_events::git_user().cyan());
+                    println!("  {} {}", "Branch:".dimmed(), live_events::current_branch().cyan());
+                    println!("  {} {}", "Repo:".dimmed(), live_events::repo_name().cyan());
+                    live_sync::print_sync_status();
+                    println!();
+                    println!("  Streaming function-level diffs...");
+                    println!("  Your team can see what you're working on in real-time.");
+                    println!("  Press {} to stop.\n", "Ctrl+C".bold());
+
+                    // Start cloud sync worker in background (if token configured)
+                    let running = Arc::new(AtomicBool::new(true));
+                    let sync_handle = live_sync::LiveSyncWorker::new(running.clone())
+                        .map(|worker| {
+                            println!("  {} Cloud sync worker started (every 5s)", "☁".cyan());
+                            worker.start()
+                        });
+
+                    // Register Ctrl+C handler to gracefully stop sync
+                    let running_ctrlc = running.clone();
+                    let _ = ctrlc::set_handler(move || {
+                        println!("\n{} Shutting down Aura Live...", "⏹".bold());
+                        running_ctrlc.store(false, Ordering::Relaxed);
+                        // Give sync worker time to flush
+                        std::thread::sleep(std::time::Duration::from_secs(2));
+                        std::process::exit(0);
+                    });
+
+                    let parser = SemanticParser::new()?;
+                    let tracker = ContinuousTracker::with_live_mode(parser);
+                    tracker.watch(".")?;
+
+                    // Cleanup (reached if watcher exits)
+                    running.store(false, Ordering::Relaxed);
+                    if let Some(handle) = sync_handle {
+                        let _ = handle.join();
+                    }
+                }
+                LiveSubcommands::Stop => {
+                    use colored::Colorize;
+                    // Kill any running aura live/daemon process
+                    let _ = std::process::Command::new("pkill")
+                        .args(["-f", "aura live start"])
+                        .output();
+                    let _ = std::process::Command::new("pkill")
+                        .args(["-f", "aura daemon"])
+                        .output();
+                    println!("{} Aura Live stopped.", "✓".green().bold());
+
+                    let count = live_events::LiveEventBuffer::count();
+                    if count > 0 {
+                        println!("  {} {} unsent events in buffer.", "↳".dimmed(), count);
+                    }
+                }
+                LiveSubcommands::Status => {
+                    use colored::Colorize;
+                    println!("{}", "🔴 Aura Live — Team Status".bold());
+                    println!();
+
+                    let user = live_events::git_user();
+                    let branch = live_events::current_branch();
+                    let repo = live_events::repo_name();
+                    let buffered = live_events::LiveEventBuffer::count();
+
+                    println!("  {} {} on {} ({})", "You:".bold(), user.cyan(), branch.green(), repo.dimmed());
+                    println!("  {} {} events buffered locally", "Buffer:".dimmed(), buffered);
+                    println!();
+
+                    // Show local activity
+                    let events_path = ".aura/live/events.jsonl";
+                    if let Ok(content) = std::fs::read_to_string(events_path) {
+                        let recent: Vec<live_events::LiveEvent> = content
+                            .lines()
+                            .rev()
+                            .take(10)
+                            .filter_map(|l| serde_json::from_str(l).ok())
+                            .collect();
+
+                        if !recent.is_empty() {
+                            println!("  {} Recent local activity:", "Activity:".bold());
+                            for event in recent.iter().rev() {
+                                let changes: Vec<String> = event.changes.iter().map(|c| {
+                                    let sym = match c.change_type {
+                                        live_events::ChangeType::Added => "+".green().to_string(),
+                                        live_events::ChangeType::Modified => "~".yellow().to_string(),
+                                        live_events::ChangeType::Deleted => "-".red().to_string(),
+                                    };
+                                    format!("{}{}", sym, c.name)
+                                }).collect();
+                                println!("    {} {} → {}", "•".dimmed(), event.file_path.dimmed(), changes.join(", "));
+                            }
+                        }
+                    }
+
+                    // Fetch team presence from cloud
+                    let config = config::ConfigManager::load();
+                    let token = config.cloud_api_token
+                        .or_else(|| std::env::var("AURA_CLOUD_TOKEN").ok());
+
+                    if let Some(token) = token {
+                        let cloud_url = config.cloud_url
+                            .unwrap_or_else(|| "https://auravcs.com".to_string());
+                        let url = format!("{}/api/v1/live/presence?repo={}",
+                            cloud_url.trim_end_matches('/'), repo);
+
+                        let client = reqwest::blocking::Client::builder()
+                            .timeout(std::time::Duration::from_secs(5))
+                            .build()
+                            .unwrap_or_else(|_| reqwest::blocking::Client::new());
+
+                        match client.get(&url)
+                            .header("Authorization", format!("Bearer {}", token))
+                            .send()
+                        {
+                            Ok(resp) if resp.status().is_success() => {
+                                if let Ok(data) = resp.json::<serde_json::Value>() {
+                                    let devs = data["developers"].as_array();
+                                    let total = data["total_active"].as_u64().unwrap_or(0);
+
+                                    println!();
+                                    println!("  {} {} active developer{}", "Team:".bold(),
+                                        total.to_string().cyan(),
+                                        if total == 1 { "" } else { "s" });
+
+                                    if let Some(devs) = devs {
+                                        for dev in devs {
+                                            let name = dev["username"].as_str().unwrap_or("?");
+                                            let dev_branch = dev["branch"].as_str().unwrap_or("?");
+                                            let fns = dev["active_functions"].as_array()
+                                                .map(|arr| arr.iter()
+                                                    .filter_map(|f| f["name"].as_str())
+                                                    .collect::<Vec<_>>()
+                                                    .join(", "))
+                                                .unwrap_or_default();
+
+                                            let is_you = name == user;
+                                            let name_display = if is_you {
+                                                format!("{} (you)", name).cyan().to_string()
+                                            } else {
+                                                name.yellow().to_string()
+                                            };
+
+                                            println!("    {} {} on {} → {}",
+                                                "•".dimmed(), name_display,
+                                                dev_branch.green(),
+                                                if fns.is_empty() { "idle".dimmed().to_string() } else { fns });
+                                        }
+                                    }
+                                }
+                            }
+                            Ok(resp) => {
+                                println!("\n  {} Cloud returned {}", "⚠️".yellow(), resp.status());
+                            }
+                            Err(_) => {
+                                println!("\n  {} Cloud unreachable, showing local data only", "⚠️".yellow());
+                            }
+                        }
+                    } else {
+                        println!();
+                        println!("  {} Team presence requires Aura Cloud connection.", "ℹ️ ".blue());
+                        println!("  {} Configure with: {}", "↳".dimmed(), "aura config set cloud-token <token>".cyan());
+                    }
+                }
+                LiveSubcommands::Impacts { json } => {
+                    if *json {
+                        match live_sync::fetch_impacts_json() {
+                            Ok(data) => {
+                                println!("{}", serde_json::to_string_pretty(&data).unwrap_or_else(|_| "{}".to_string()));
+                            }
+                            Err(e) => {
+                                let err = serde_json::json!({"error": e});
+                                println!("{}", serde_json::to_string_pretty(&err).unwrap_or_else(|_| "{}".to_string()));
+                            }
+                        }
+                        return Ok(());
+                    }
+
+                    use colored::Colorize;
+                    println!("{}", "⚠️  Aura Live — Cross-Branch Impacts".bold());
+                    println!();
+
+                    let branch = live_events::current_branch();
+                    let repo = live_events::repo_name();
+
+                    let config = config::ConfigManager::load();
+                    let token = config.cloud_api_token
+                        .or_else(|| std::env::var("AURA_CLOUD_TOKEN").ok());
+
+                    if let Some(token) = token {
+                        let cloud_url = config.cloud_url
+                            .unwrap_or_else(|| "https://auravcs.com".to_string());
+                        let url = format!("{}/api/v1/live/impacts?repo={}",
+                            cloud_url.trim_end_matches('/'), repo);
+
+                        println!("  {} Checking impacts on branch {}...", "↳".dimmed(), branch.cyan());
+                        println!();
+
+                        let client = reqwest::blocking::Client::builder()
+                            .timeout(std::time::Duration::from_secs(5))
+                            .build()
+                            .unwrap_or_else(|_| reqwest::blocking::Client::new());
+
+                        match client.get(&url)
+                            .header("Authorization", format!("Bearer {}", token))
+                            .send()
+                        {
+                            Ok(resp) if resp.status().is_success() => {
+                                if let Ok(data) = resp.json::<serde_json::Value>() {
+                                    let alerts = data["alerts"].as_array();
+                                    let total = data["total"].as_u64().unwrap_or(0);
+
+                                    if total == 0 {
+                                        println!("  {} No impacts detected on your branch.", "✓".green().bold());
+                                        println!("  {} Your dependencies are safe across all active branches.", "↳".dimmed());
+                                    } else {
+                                        println!("  {} {} impact{} detected!", "⚠️".yellow().bold(),
+                                            total.to_string().red().bold(),
+                                            if total == 1 { "" } else { "s" });
+                                        println!();
+
+                                        if let Some(alerts) = alerts {
+                                            for alert in alerts {
+                                                let src_user = alert["source_user"].as_str().unwrap_or("?");
+                                                let src_branch = alert["source_branch"].as_str().unwrap_or("?");
+                                                let src_fn = alert["source_function"].as_str().unwrap_or("?");
+                                                let impact_type = alert["impact_type"].as_str().unwrap_or("modified");
+                                                let affected = alert["affected_functions"].as_array();
+
+                                                let type_label = match impact_type {
+                                                    "deleted" => "DELETED".red().bold().to_string(),
+                                                    "modified" => "MODIFIED".yellow().bold().to_string(),
+                                                    _ => impact_type.to_uppercase(),
+                                                };
+
+                                                println!("  {} {} {} {} on {}",
+                                                    "│".dimmed(), type_label,
+                                                    src_fn.cyan().bold(),
+                                                    format!("by {}", src_user).dimmed(),
+                                                    src_branch.green());
+
+                                                if let Some(fns) = affected {
+                                                    for f in fns {
+                                                        let name = f["name"].as_str().unwrap_or("?");
+                                                        let dep = f["depends_on"].as_str().unwrap_or("?");
+                                                        println!("  {}   {} your {} depends on {}",
+                                                            "│".dimmed(), "→".yellow(),
+                                                            name.cyan(), dep.yellow());
+                                                    }
+                                                }
+                                                println!("  {}", "│".dimmed());
+                                            }
+                                        }
+
+                                        println!("  {} Review these changes before merging to avoid runtime conflicts.", "💡".blue());
+                                    }
+                                }
+                            }
+                            Ok(resp) => {
+                                println!("  {} Cloud returned {}", "⚠️".yellow(), resp.status());
+                            }
+                            Err(e) => {
+                                println!("  {} Cloud unreachable: {}", "⚠️".yellow(), e);
+                            }
+                        }
+                    } else {
+                        println!("  {} Connect to Aura Cloud to enable cross-branch impact detection.", "⚠️".yellow());
+                        println!("  {} Run: {}", "↳".dimmed(), "aura config set cloud-token <your-token>".cyan());
+                    }
+                }
+                LiveSubcommands::Sync { sub } => {
+                    match sub {
+                        SyncSubcommands::Push { file } => {
+                            use colored::Colorize;
+                            println!("{}", "🔄 Aura Sync — Push".bold());
+                            println!();
+
+                            let path = std::path::Path::new(file.as_str());
+                            if !path.exists() {
+                                println!("  {} File not found: {}", "✗".red(), file);
+                                return Ok(());
+                            }
+
+                            // Parse the file to extract function bodies
+                            let source = match std::fs::read_to_string(path) {
+                                Ok(s) => s,
+                                Err(e) => {
+                                    println!("  {} Could not read file: {}", "✗".red(), e);
+                                    return Ok(());
+                                }
+                            };
+
+                            let ext = path.extension()
+                                .and_then(|e| e.to_str())
+                                .unwrap_or("");
+
+                            let mut parser = match crate::parser::SemanticParser::new() {
+                                Ok(p) => p,
+                                Err(e) => {
+                                    println!("  {} Parser init failed: {}", "✗".red(), e);
+                                    return Ok(());
+                                }
+                            };
+
+                            let nodes = match parser.parse_file(&source, ext) {
+                                Ok(n) => n,
+                                Err(e) => {
+                                    println!("  {} Parse failed: {}", "✗".red(), e);
+                                    return Ok(());
+                                }
+                            };
+
+                            if nodes.is_empty() {
+                                println!("  {} No functions/structs found in {}", "⚠".yellow(), file);
+                                return Ok(());
+                            }
+
+                            // Extract function bodies using splice logic to find each function's text
+                            let mut payloads = Vec::new();
+                            for node in &nodes {
+                                if let Some(ref ident) = node.identifier {
+                                    // Use the splice finder to extract the function body from source
+                                    if let Some(body) = live_sync::extract_function_body(&source, ident) {
+                                        payloads.push(live_sync::SyncFunctionPayload {
+                                            file_path: file.clone(),
+                                            function_name: ident.clone(),
+                                            function_kind: node.kind.clone(),
+                                            content_hash: node.content_hash.clone(),
+                                            body,
+                                        });
+                                    }
+                                }
+                            }
+
+                            if payloads.is_empty() {
+                                println!("  {} No identifiable functions to push", "⚠".yellow());
+                                return Ok(());
+                            }
+
+                            println!("  {} Pushing {} functions from {}...",
+                                "↳".dimmed(), payloads.len().to_string().cyan(), file.cyan());
+
+                            match live_sync::push_function_bodies(&payloads) {
+                                Ok(resp) => {
+                                    let pushed = resp["pushed"].as_u64().unwrap_or(0);
+                                    println!("  {} {} functions pushed to Aura Cloud",
+                                        "✓".green().bold(), pushed);
+                                }
+                                Err(e) => {
+                                    println!("  {} Push failed: {}", "✗".red(), e);
+                                }
+                            }
+                        }
+                        SyncSubcommands::Pull { dry_run } => {
+                            use colored::Colorize;
+                            println!("{}", "🔄 Aura Sync — Pull".bold());
+                            println!();
+
+                            let branch = live_events::current_branch();
+                            println!("  {} Pulling changes on branch {}...",
+                                "↳".dimmed(), branch.cyan());
+
+                            match live_sync::pull_function_bodies() {
+                                Ok(data) => {
+                                    let functions = data["functions"].as_array();
+                                    let total = data["total"].as_u64().unwrap_or(0);
+
+                                    if total == 0 {
+                                        println!("  {} No new changes from teammates.", "✓".green().bold());
+                                        return Ok(());
+                                    }
+
+                                    println!("  {} {} function update{} available",
+                                        "📥".blue(), total.to_string().cyan().bold(),
+                                        if total == 1 { "" } else { "s" });
+                                    println!();
+
+                                    if let Some(funcs) = functions {
+                                        for f in funcs {
+                                            let file_path = f["file_path"].as_str().unwrap_or("?");
+                                            let fn_name = f["function_name"].as_str().unwrap_or("?");
+                                            let pushed_by = f["pushed_by"].as_str().unwrap_or("?");
+                                            println!("  {} {}::{} from {}",
+                                                "│".dimmed(),
+                                                file_path.dimmed(),
+                                                fn_name.cyan(),
+                                                pushed_by.green());
+                                        }
+                                        println!();
+
+                                        if *dry_run {
+                                            println!("  {} Dry run — no files modified. Remove --dry-run to apply.",
+                                                "ℹ".blue());
+                                        } else {
+                                            let (applied, skipped, conflicts) =
+                                                live_sync::apply_pulled_functions(funcs);
+
+                                            println!("  {} {} applied, {} skipped",
+                                                "✓".green().bold(),
+                                                applied.to_string().green(),
+                                                skipped.to_string().yellow());
+
+                                            if !conflicts.is_empty() {
+                                                println!();
+                                                println!("  {} {} conflict{}:",
+                                                    "⚠".yellow().bold(),
+                                                    conflicts.len(),
+                                                    if conflicts.len() == 1 { "" } else { "s" });
+                                                for c in &conflicts {
+                                                    println!("    {} {}", "→".yellow(), c);
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                                Err(e) => {
+                                    println!("  {} Pull failed: {}", "✗".red(), e);
+                                }
+                            }
+                        }
+                        SyncSubcommands::Status => {
+                            use colored::Colorize;
+                            println!("{}", "🔄 Aura Sync — Status".bold());
+                            println!();
+
+                            let branch = live_events::current_branch();
+                            let repo = live_events::repo_name();
+                            println!("  {} {} on {}", "↳".dimmed(), repo.cyan(), branch.green());
+
+                            match live_sync::fetch_sync_status() {
+                                Ok(data) => {
+                                    let pending = data["pending_changes"].as_u64().unwrap_or(0);
+                                    let total = data["total_synced_functions"].as_u64().unwrap_or(0);
+                                    let active = data["active_pushers"].as_u64().unwrap_or(0);
+
+                                    println!();
+                                    println!("  {} synced functions: {}", "•".dimmed(), total.to_string().cyan());
+                                    println!("  {} pending from others: {}",
+                                        "•".dimmed(),
+                                        if pending > 0 { pending.to_string().yellow().bold().to_string() }
+                                        else { "0".green().to_string() });
+                                    println!("  {} active pushers (5m): {}", "•".dimmed(), active.to_string().cyan());
+
+                                    if pending > 0 {
+                                        println!();
+                                        println!("  {} Run {} to apply teammate changes",
+                                            "💡".blue(), "aura live sync pull".cyan());
+                                    }
+                                }
+                                Err(e) => {
+                                    println!("  {} Could not fetch sync status: {}", "⚠".yellow(), e);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        Commands::Server { sub } => {
+            match sub {
+                ServerSubcommands::Register { url, username, password } => {
+                    println!("{} Registering on {}...", "🔐".bold(), url.cyan());
+
+                    let client = reqwest::blocking::Client::new();
+                    let resp = client.post(format!("{}/auth/register", url))
+                        .json(&serde_json::json!({
+                            "username": username,
+                            "password": password,
+                        }))
+                        .send();
+
+                    match resp {
+                        Ok(r) if r.status().is_success() => {
+                            let data: serde_json::Value = r.json().unwrap_or_default();
+                            let jwt = data["jwt"].as_str().unwrap_or("");
+                            let api_token = data["api_token"].as_str().unwrap_or("");
+                            let org_slug = data["org_slug"].as_str().unwrap_or("");
+
+                            // Store credentials
+                            let cred_dir = directories::ProjectDirs::from("com", "naridon", "aura")
+                                .map(|d| d.config_dir().to_path_buf())
+                                .unwrap_or_else(|| {
+                                    std::path::PathBuf::from(std::env::var("HOME").unwrap_or_else(|_| ".".to_string())).join(".aura")
+                                });
+                            let _ = fs::create_dir_all(&cred_dir);
+                            let creds = serde_json::json!({
+                                "cloud_url": url,
+                                "jwt": jwt,
+                                "api_token": api_token,
+                                "org_slug": org_slug,
+                                "username": username,
+                            });
+                            let cred_path = cred_dir.join("credentials.json");
+                            let _ = fs::write(&cred_path, serde_json::to_string_pretty(&creds).unwrap_or_default());
+
+                            // Also set cloud-url in config
+                            let mut config = ConfigManager::load();
+                            config.cloud_url = Some(url.clone());
+                            config.cloud_api_token = Some(api_token.to_string());
+                            let _ = ConfigManager::save(&config);
+
+                            println!("{} Registered as {} on {}", "✓".green().bold(), username.cyan(), url);
+                            println!("  {} Org: {}", "•".dimmed(), org_slug.cyan());
+                            println!("  {} API token stored — all aura commands will use this server", "•".dimmed());
+                        }
+                        Ok(r) if r.status() == 409 => {
+                            println!("{} Username '{}' already exists on this server", "✗".red().bold(), username);
+                        }
+                        Ok(r) => {
+                            println!("{} Registration failed ({})", "✗".red().bold(), r.status());
+                        }
+                        Err(e) => {
+                            println!("{} Could not connect to {}: {}", "✗".red().bold(), url, e);
+                        }
+                    }
+                }
+                ServerSubcommands::Login { url, username, password } => {
+                    println!("{} Logging in to {}...", "🔐".bold(), url.cyan());
+
+                    let client = reqwest::blocking::Client::new();
+                    let resp = client.post(format!("{}/auth/login", url))
+                        .json(&serde_json::json!({
+                            "username": username,
+                            "password": password,
+                        }))
+                        .send();
+
+                    match resp {
+                        Ok(r) if r.status().is_success() => {
+                            let data: serde_json::Value = r.json().unwrap_or_default();
+                            let jwt = data["jwt"].as_str().unwrap_or("");
+
+                            let cred_dir = directories::ProjectDirs::from("com", "naridon", "aura")
+                                .map(|d| d.config_dir().to_path_buf())
+                                .unwrap_or_else(|| {
+                                    std::path::PathBuf::from(std::env::var("HOME").unwrap_or_else(|_| ".".to_string())).join(".aura")
+                                });
+                            let _ = fs::create_dir_all(&cred_dir);
+                            let cred_path = cred_dir.join("credentials.json");
+
+                            // Merge with existing creds if any
+                            let mut creds: serde_json::Value = if cred_path.exists() {
+                                serde_json::from_str(&fs::read_to_string(&cred_path).unwrap_or_default()).unwrap_or_default()
+                            } else {
+                                serde_json::json!({})
+                            };
+                            creds["cloud_url"] = serde_json::json!(url);
+                            creds["jwt"] = serde_json::json!(jwt);
+                            creds["username"] = serde_json::json!(username);
+                            let _ = fs::write(&cred_path, serde_json::to_string_pretty(&creds).unwrap_or_default());
+
+                            let mut config = ConfigManager::load();
+                            config.cloud_url = Some(url.clone());
+                            let _ = ConfigManager::save(&config);
+
+                            println!("{} Logged in as {} on {}", "✓".green().bold(), username.cyan(), url);
+                        }
+                        Ok(r) if r.status() == 401 => {
+                            println!("{} Invalid username or password", "✗".red().bold());
+                        }
+                        Ok(r) => {
+                            println!("{} Login failed ({})", "✗".red().bold(), r.status());
+                        }
+                        Err(e) => {
+                            println!("{} Could not connect to {}: {}", "✗".red().bold(), url, e);
+                        }
+                    }
+                }
+                ServerSubcommands::AddRepo { repo_name } => {
+                    let config = ConfigManager::load();
+                    let cloud_url = config.cloud_url.as_deref().unwrap_or("");
+                    let cloud_token = config.cloud_api_token.as_deref().unwrap_or("");
+
+                    if cloud_url.is_empty() || cloud_token.is_empty() {
+                        println!("{} Not connected to a server. Run {} first.",
+                            "✗".red().bold(), "aura server register".cyan());
+                        return Ok(());
+                    }
+
+                    // Read org_slug from credentials
+                    let cred_dir = directories::ProjectDirs::from("com", "naridon", "aura")
+                        .map(|d| d.config_dir().to_path_buf())
+                        .unwrap_or_else(|| std::path::PathBuf::from(std::env::var("HOME").unwrap_or_else(|_| ".".to_string())).join(".aura"));
+                    let cred_path = cred_dir.join("credentials.json");
+                    let creds: serde_json::Value = if cred_path.exists() {
+                        serde_json::from_str(&fs::read_to_string(&cred_path).unwrap_or_default()).unwrap_or_default()
+                    } else {
+                        serde_json::json!({})
+                    };
+                    let org_slug = creds["org_slug"].as_str().unwrap_or("");
+
+                    if org_slug.is_empty() {
+                        println!("{} No org configured. Run {} first.",
+                            "✗".red().bold(), "aura server register".cyan());
+                        return Ok(());
+                    }
+
+                    let client = reqwest::blocking::Client::new();
+                    let resp = client.post(format!("{}/api/v1/orgs/{}/repos", cloud_url, org_slug))
+                        .bearer_auth(cloud_token)
+                        .json(&serde_json::json!({ "repo_name": repo_name }))
+                        .send();
+
+                    match resp {
+                        Ok(r) if r.status().is_success() => {
+                            println!("{} Repository '{}' registered on server", "✓".green().bold(), repo_name.cyan());
+                        }
+                        Ok(r) => {
+                            println!("{} Failed to register repo ({})", "✗".red().bold(), r.status());
+                        }
+                        Err(e) => {
+                            println!("{} Could not connect: {}", "✗".red().bold(), e);
+                        }
+                    }
+                }
+                ServerSubcommands::Status => {
+                    let config = ConfigManager::load();
+                    let cloud_url = config.cloud_url.as_deref().unwrap_or("");
+
+                    if cloud_url.is_empty() {
+                        println!("{} Not connected to any server. Run {} first.",
+                            "ℹ️".blue(), "aura server register".cyan());
+                        return Ok(());
+                    }
+
+                    println!("{} Checking connection to {}...", "🔍".bold(), cloud_url.cyan());
+
+                    let client = reqwest::blocking::Client::builder()
+                        .timeout(std::time::Duration::from_secs(5))
+                        .build()
+                        .unwrap();
+
+                    match client.get(format!("{}/health", cloud_url)).send() {
+                        Ok(r) if r.status().is_success() => {
+                            println!("{} Server is online", "✓".green().bold());
+                            println!("  {} URL: {}", "•".dimmed(), cloud_url.cyan());
+
+                            // Show credentials info
+                            let cred_dir = directories::ProjectDirs::from("com", "naridon", "aura")
+                                .map(|d| d.config_dir().to_path_buf())
+                                .unwrap_or_else(|| std::path::PathBuf::from(std::env::var("HOME").unwrap_or_else(|_| ".".to_string())).join(".aura"));
+                            let cred_path = cred_dir.join("credentials.json");
+                            if cred_path.exists() {
+                                let creds: serde_json::Value = serde_json::from_str(
+                                    &fs::read_to_string(&cred_path).unwrap_or_default()
+                                ).unwrap_or_default();
+                                if let Some(user) = creds["username"].as_str() {
+                                    println!("  {} User: {}", "•".dimmed(), user.cyan());
+                                }
+                                if let Some(org) = creds["org_slug"].as_str() {
+                                    println!("  {} Org: {}", "•".dimmed(), org.cyan());
+                                }
+                            }
+                        }
+                        Ok(r) => {
+                            println!("{} Server responded with status {}", "⚠".yellow(), r.status());
+                        }
+                        Err(e) => {
+                            println!("{} Cannot reach server: {}", "✗".red().bold(), e);
+                        }
+                    }
+                }
+            }
+        }
+        Commands::Usage { period, json, project, plan, budget_daily, budget_weekly, budget_session, export } => {
+            // If any budget flags were passed, save them to config
+            if budget_daily.is_some() || budget_weekly.is_some() || budget_session.is_some() {
+                let mut config = ConfigManager::load();
+                let mut budget = config.budget.clone().unwrap_or_default();
+                if let Some(v) = budget_daily { budget.daily_cap_usd = *v; }
+                if let Some(v) = budget_weekly { budget.weekly_cap_usd = *v; }
+                if let Some(v) = budget_session { budget.session_cap_usd = *v; }
+                config.budget = Some(budget.clone());
+                let _ = ConfigManager::save(&config);
+                println!("  {} Budget updated:", "✓".green().bold());
+                if budget.daily_cap_usd > 0.0 {
+                    println!("    {} Daily cap:   ${:.2}", "↳".dimmed(), budget.daily_cap_usd);
+                }
+                if budget.weekly_cap_usd > 0.0 {
+                    println!("    {} Weekly cap:  ${:.2}", "↳".dimmed(), budget.weekly_cap_usd);
+                }
+                if budget.session_cap_usd > 0.0 {
+                    println!("    {} Session cap: ${:.2}", "↳".dimmed(), budget.session_cap_usd);
+                }
+                println!();
+            }
+
+            let since_secs = match period.as_str() {
+                "today" | "day" => 86400u64,
+                "week" => 604800,
+                "month" => 2592000,
+                "all" => u64::MAX,
+                _ => {
+                    eprintln!("{} Unknown period '{}'. Use: today, week, month, all", "✗".red(), period);
+                    std::process::exit(1);
+                }
+            };
+
+            if *plan {
+                // Parse Claude Code transcripts for real usage data
+                match plan_tracker::build_plan_report(since_secs, period) {
+                    Some(report) => {
+                        if *json {
+                            println!("{}", serde_json::to_string_pretty(&plan_tracker::plan_report_to_json(&report)).unwrap_or_default());
+                        } else {
+                            plan_tracker::print_plan_report(&report);
+                        }
+                    }
+                    None => {
+                        eprintln!("{} No Claude Code transcripts found at ~/.claude/projects/", "✗".red());
+                        eprintln!("  This feature parses Claude Code session data to show plan usage.");
+                    }
+                }
+            } else {
+                let report = if *project {
+                    usage::build_report_project(since_secs, period)
+                } else {
+                    usage::build_report(since_secs, period)
+                };
+
+                if *json {
+                    println!("{}", serde_json::to_string_pretty(&usage::report_to_json(&report)).unwrap_or_default());
+                } else {
+                    usage::print_report(&report);
+
+                    // Check budget alerts
+                    let config = ConfigManager::load();
+                    if let Some(ref budget) = config.budget {
+                        let alerts = usage::check_budget(budget);
+                        if !alerts.is_empty() {
+                            usage::print_budget_alerts(&alerts);
+                        }
+                    }
+                }
+            }
+
+            // Export to CSV if requested
+            if let Some(path) = export {
+                if *plan {
+                    if let Some(report) = plan_tracker::build_plan_report(since_secs, period) {
+                        export_plan_csv(path, &report);
+                    }
+                } else {
+                    let report = if *project {
+                        usage::build_report_project(since_secs, period)
+                    } else {
+                        usage::build_report(since_secs, period)
+                    };
+                    export_usage_csv(path, &report);
+                }
+            }
         }
     }
 
     Ok(())
+}
+
+fn export_usage_csv(path: &str, report: &usage::UsageReport) {
+    let mut csv = String::from("session_id,agent,model,project,started_at,duration_secs,input_tokens,output_tokens,api_calls,cost_usd,files_touched,phase\n");
+    for s in &report.sessions {
+        csv.push_str(&format!(
+            "{},{},{},{},{},{},{},{},{},{:.4},{},{}\n",
+            s.session_id, s.agent_id, s.model, s.project,
+            s.started_at, s.duration_secs, s.input_tokens, s.output_tokens,
+            s.api_calls, s.cost_usd, s.files_touched, s.phase,
+        ));
+    }
+    match fs::write(path, &csv) {
+        Ok(_) => println!("  {} Exported {} sessions to {}", "✓".green().bold(), report.sessions.len(), path.cyan()),
+        Err(e) => eprintln!("  {} Failed to write {}: {}", "✗".red(), path, e),
+    }
+}
+
+fn export_plan_csv(path: &str, report: &plan_tracker::PlanReport) {
+    let mut csv = String::from("date,messages,output_tokens,estimated_cost_usd\n");
+    for d in &report.by_day {
+        csv.push_str(&format!(
+            "{},{},{},{:.2}\n",
+            d.date, d.messages, d.output_tokens, d.estimated_cost,
+        ));
+    }
+    csv.push_str("\n\nproject,messages,input_tokens,output_tokens,estimated_cost_usd\n");
+    for p in &report.by_project {
+        csv.push_str(&format!(
+            "{},{},{},{},{:.2}\n",
+            p.name, p.messages, p.input_tokens, p.output_tokens, p.estimated_cost,
+        ));
+    }
+    match fs::write(path, &csv) {
+        Ok(_) => println!("  {} Exported plan usage to {}", "✓".green().bold(), path.cyan()),
+        Err(e) => eprintln!("  {} Failed to write {}: {}", "✗".red(), path, e),
+    }
 }

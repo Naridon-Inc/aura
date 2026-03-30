@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="https://img.shields.io/badge/version-0.8.1-white?style=flat-square" />
+  <img src="https://img.shields.io/badge/version-0.6.3-white?style=flat-square" />
   <img src="https://img.shields.io/badge/license-Apache%202.0-blue?style=flat-square" />
   <img src="https://img.shields.io/badge/lang-Rust-orange?style=flat-square" />
   <img src="https://img.shields.io/badge/agents-Claude%20Code%20%2B%20Gemini%20CLI-green?style=flat-square" />
@@ -257,24 +257,6 @@ src/
 | PHP | `.php` | Full support |
 | Swift | `.swift` | Full support |
 | Kotlin | `.kt`, `.kts` | Full support |
-
-## Team Collaboration (Aura Pro)
-
-Upgrade to [Aura Pro](https://auravcs.com) for real-time team features:
-
-- **Live Presence** — see what every developer is changing at the function level
-- **Impact Alerts** — get notified when someone modifies a function you depend on
-- **Team Messaging** — communicate with developers and AI agents from the terminal
-- **Function Sync** — push/pull individual function bodies across the team
-
-```bash
-aura live start          # start streaming changes
-aura live impacts        # check cross-branch impacts
-aura msg send "hello"    # message your team
-aura live sync push f.rs # push functions for teammates
-```
-
-$20/developer/month at [auravcs.com](https://auravcs.com)
 
 ## Privacy
 

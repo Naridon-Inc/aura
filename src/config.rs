@@ -26,6 +26,10 @@ pub struct AuraConfig {
     #[serde(default)]
     pub strict_gatekeeper_mode: bool, // Toggle for strict AST dependency blocking
     #[serde(default)]
+    pub strict_mode_passcode_hash: Option<String>,
+    #[serde(default)]
+    pub strict_mode_passcode_salt: Option<String>,
+    #[serde(default)]
     pub use_local_embeddings: bool, // Toggle to enforce 100% offline sovereign embeddings
     #[serde(default)]
     pub dev_mode: bool, // Toggle to bypass heavy infrastructure for local development
@@ -33,6 +37,8 @@ pub struct AuraConfig {
     pub secret_allowlist: Vec<String>, // List of node identifiers allowed to contain high-entropy data
     #[serde(default = "default_telemetry")]
     pub telemetry_enabled: bool, // Allow users to opt-out of anonymous usage ping
+    #[serde(default)]
+    pub budget: Option<crate::usage::BudgetConfig>, // AI spending caps
 }
 
 fn default_telemetry() -> bool { true }
@@ -55,10 +61,13 @@ impl Default for AuraConfig {
             sync_enabled: false,
             last_update_check: 0,
             strict_gatekeeper_mode: false, // Warn-by-default is the standard
+            strict_mode_passcode_hash: None,
+            strict_mode_passcode_salt: None,
             use_local_embeddings: false, // Cloud APIs are the default MVP
             dev_mode: false,
             secret_allowlist: vec![],
             telemetry_enabled: true,
+            budget: None,
         }
     }
 }
@@ -178,6 +187,53 @@ impl ConfigManager {
                 None
             }
         }
+    }
+
+    /// Check if strict mode is locked with a passcode
+    pub fn is_strict_mode_locked(config: &AuraConfig) -> bool {
+        config.strict_mode_passcode_hash.is_some() && config.strict_mode_passcode_salt.is_some()
+    }
+
+    /// Verify a passcode candidate against stored hash
+    pub fn verify_passcode(config: &AuraConfig, candidate: &str) -> bool {
+        if let (Some(hash), Some(salt)) = (&config.strict_mode_passcode_hash, &config.strict_mode_passcode_salt) {
+            Self::hash_passcode(candidate, salt) == *hash
+        } else {
+            false
+        }
+    }
+
+    /// Hash a passcode with a salt using SHA-256
+    pub fn hash_passcode(passcode: &str, salt: &str) -> String {
+        use sha2::{Sha256, Digest};
+        let mut hasher = Sha256::new();
+        hasher.update(format!("{}{}", salt, passcode).as_bytes());
+        hex::encode(hasher.finalize())
+    }
+
+    /// Generate a random 16-byte hex-encoded salt
+    pub fn generate_salt() -> String {
+        use rand::Rng;
+        let mut rng = rand::thread_rng();
+        let mut bytes = [0u8; 16];
+        rng.fill(&mut bytes);
+        hex::encode(bytes)
+    }
+
+    /// Detect if the current process is being run by an AI agent
+    pub fn is_ai_agent() -> bool {
+        std::env::var("CLAUDE_VERSION").is_ok()
+            || std::env::var("CLAUDE_CONFIG_DIR").is_ok()
+            || std::env::var("GEMINI_CLI").is_ok()
+            || std::env::var("VSCODE_INJECTION").is_ok()
+            || std::env::var("AIDER_MODEL").is_ok()
+            || std::env::var("AURA_AGENT").is_ok()
+    }
+
+    /// Detect if stdout/stdin are connected to an interactive TTY
+    pub fn is_interactive_tty() -> bool {
+        use std::io::IsTerminal;
+        std::io::stdout().is_terminal() && std::io::stdin().is_terminal()
     }
 
     /// Helper to check if plugins are configured

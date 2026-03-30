@@ -1,4 +1,8 @@
 use crate::checkpoint::{CheckpointData, CheckpointStore, SnapshotStore};
+use crate::live_events::{
+    AstStateCache, LiveEvent, LiveEventBuffer, FunctionChange,
+    current_branch, repo_name, git_user, now_ms,
+};
 use crate::parser::SemanticParser;
 use git2::Repository;
 use notify::{Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
@@ -12,12 +16,30 @@ use uuid::Uuid;
 
 pub struct ContinuousTracker {
     parser: Arc<Mutex<SemanticParser>>,
+    ast_cache: Arc<Mutex<AstStateCache>>,
+    live_mode: bool,
 }
 
 impl ContinuousTracker {
     pub fn new(parser: SemanticParser) -> Self {
         Self {
             parser: Arc::new(Mutex::new(parser)),
+            ast_cache: Arc::new(Mutex::new(AstStateCache::new())),
+            live_mode: false,
+        }
+    }
+
+    /// Create a tracker with live mode enabled (streams events to buffer).
+    pub fn with_live_mode(parser: SemanticParser) -> Self {
+        LiveEventBuffer::init();
+        let mut cache = AstStateCache::new();
+        // Mark initial scan done immediately — the watcher has no initial scan phase,
+        // so any new files detected should emit "added" events.
+        cache.mark_initial_scan_done();
+        Self {
+            parser: Arc::new(Mutex::new(parser)),
+            ast_cache: Arc::new(Mutex::new(cache)),
+            live_mode: true,
         }
     }
 
@@ -28,7 +50,13 @@ impl ContinuousTracker {
         let mut watcher = RecommendedWatcher::new(tx, notify::Config::default())?;
         watcher.watch(Path::new(path_str), RecursiveMode::Recursive)?;
 
-        println!("[Aura Daemon] Watching {} for continuous semantic changes (Rust, Python, TypeScript, JavaScript)...", path_str);
+        let mode_label = if self.live_mode { " + Live Mode" } else { "" };
+        println!("[Aura Daemon] Watching {} for continuous semantic changes{mode_label}...", path_str);
+
+        if self.live_mode {
+            println!("[Aura Live] Streaming function-level diffs to .aura/live/events.jsonl");
+            println!("[Aura Live] User: {} | Branch: {} | Repo: {}", git_user(), current_branch(), repo_name());
+        }
 
         for res in rx {
             match res {
@@ -112,13 +140,20 @@ impl ContinuousTracker {
                     let _ = SnapshotStore::snapshot_file(
                         &path_str, &trigger_label, &agent_id
                     );
-                    self.process_semantic_update(&source_code, ext);
+
+                    // Make path relative for consistent cross-machine tracking
+                    let relative_path = path_str
+                        .strip_prefix(&format!("{}/", std::env::current_dir().unwrap_or_default().display()))
+                        .unwrap_or(&path_str)
+                        .to_string();
+
+                    self.process_semantic_update(&source_code, ext, &relative_path);
                 }
             }
         }
     }
 
-    fn process_semantic_update(&self, source_code: &str, ext: &str) {
+    fn process_semantic_update(&self, source_code: &str, ext: &str, file_path: &str) {
         let mut parser = self.parser.lock().unwrap();
 
         let lang_name = match ext {
@@ -146,7 +181,47 @@ impl ContinuousTracker {
                 staged_nodes.push(node.clone());
             }
 
+            // Compute function-level diffs for Aura Live
+            if self.live_mode {
+                self.emit_live_event(file_path, &ast_nodes);
+            }
+
             self.commit_micro_state(staged_nodes);
+        }
+    }
+
+    /// Compute AST diff and emit a LiveEvent to the buffer.
+    fn emit_live_event(&self, file_path: &str, new_nodes: &[crate::models::AstNode]) {
+        let mut cache = self.ast_cache.lock().unwrap();
+        let changes = cache.diff_and_update(file_path, new_nodes);
+
+        if changes.is_empty() {
+            return;
+        }
+
+        let change_summary: Vec<String> = changes.iter().map(|c| {
+            let action = match c.change_type {
+                crate::live_events::ChangeType::Added => "+",
+                crate::live_events::ChangeType::Modified => "~",
+                crate::live_events::ChangeType::Deleted => "-",
+            };
+            format!("{}{} {}", action, c.kind, c.name)
+        }).collect();
+
+        println!("  [Live] {} changes: {}", changes.len(), change_summary.join(", "));
+
+        let event = LiveEvent {
+            event_id: Uuid::new_v4().to_string(),
+            timestamp: now_ms(),
+            user: git_user(),
+            branch: current_branch(),
+            repo: repo_name(),
+            file_path: file_path.to_string(),
+            changes,
+        };
+
+        if let Err(e) = LiveEventBuffer::append(&event) {
+            println!("  [Live] Failed to buffer event: {}", e);
         }
     }
 

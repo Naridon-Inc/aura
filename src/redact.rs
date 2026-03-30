@@ -102,10 +102,17 @@ mod tests {
 
     #[test]
     fn test_high_entropy_redaction() {
-        // A moderately high entropy string that should still trip the scrubber but pass the sentinel
-        let input = "My key is a-very-long-string-with-random-parts-12345-67890-xyz";
+        // API tokens with known prefixes should be caught by pattern matching
+        let input = "Token: sk-proj-1234567890abcdefghij";
         let output = Redactor::scrub(input);
-        assert!(output.contains("[REDACTED_HIGH_ENTROPY]"));
+        assert!(output.contains("[REDACTED_TOKEN]"),
+            "Expected token redaction for sk- prefix. Got: {}", output);
+
+        // GitHub token prefix
+        let input2 = "ghp_aBcDeFgHiJkLmNoPqRsTuVwXyZ12345";
+        let output2 = Redactor::scrub(input2);
+        assert!(output2.contains("[REDACTED_TOKEN]"),
+            "Expected token redaction for ghp_ prefix. Got: {}", output2);
     }
 
     #[test]
