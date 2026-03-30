@@ -327,10 +327,7 @@ pub fn push_function_bodies(functions: &[SyncFunctionPayload]) -> Result<serde_j
         "functions": functions,
     });
 
-    let client = reqwest::blocking::Client::builder()
-        .timeout(Duration::from_secs(10))
-        .build()
-        .map_err(|e| format!("HTTP client error: {}", e))?;
+    let client = build_cloud_client();
 
     let resp = client.post(&url)
         .header("Authorization", format!("Bearer {}", token))
@@ -360,10 +357,7 @@ pub fn pull_function_bodies() -> Result<serde_json::Value, String> {
     let url = format!("{}/api/v1/live/sync/pull?repo={}&branch={}",
         cloud_url.trim_end_matches('/'), repo, branch);
 
-    let client = reqwest::blocking::Client::builder()
-        .timeout(Duration::from_secs(10))
-        .build()
-        .map_err(|e| format!("HTTP client error: {}", e))?;
+    let client = build_cloud_client();
 
     let resp = client.get(&url)
         .header("Authorization", format!("Bearer {}", token))
