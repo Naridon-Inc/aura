@@ -218,7 +218,7 @@ fn capture_env_fingerprint() -> Option<String> {
     ecosystem::Ecosystem::fingerprint()
 }
 
-const CURRENT_VERSION: &str = "0.12.8";
+const CURRENT_VERSION: &str = "0.12.9";
 
 /// Build an HTTP client that respects accept_self_signed for mothership TLS.
 fn cloud_http_client() -> reqwest::blocking::Client {
@@ -970,6 +970,12 @@ enum LiveSubcommands {
     Sync {
         #[command(subcommand)]
         sub: SyncSubcommands,
+    },
+    /// Fast notification check — reads local markers, no network. For use in hooks.
+    Check {
+        /// Optional file path to check zone ownership
+        #[arg(long)]
+        file: Option<String>,
     },
 }
 
@@ -4053,6 +4059,81 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     } else {
                         println!("  {} Connect to Aura Cloud to enable cross-branch impact detection.", "⚠️".yellow());
                         println!("  {} Run: {}", "↳".dimmed(), "aura config set cloud-token <your-token>".cyan());
+                    }
+                }
+                LiveSubcommands::Check { file } => {
+                    // Ultra-fast local marker check — no network calls
+                    // Designed to run as a Claude Code hook on Edit/Write/Read
+                    let mut alerts = Vec::new();
+
+                    // 1. Unread team messages
+                    let msg_marker = std::path::Path::new(".aura/live/unread_messages");
+                    if msg_marker.exists() {
+                        if let Ok(c) = std::fs::read_to_string(msg_marker) {
+                            if let Ok(n) = c.trim().parse::<u64>() {
+                                if n > 0 {
+                                    alerts.push(format!("TEAM: {} unread message{}. Run: aura msg list", n, if n == 1 { "" } else { "s" }));
+                                }
+                            }
+                        }
+                    }
+
+                    // 2. Pending sync from teammates
+                    let sync_marker = std::path::Path::new(".aura/live/sync_pending");
+                    if sync_marker.exists() {
+                        if let Ok(c) = std::fs::read_to_string(sync_marker) {
+                            if let Ok(n) = c.trim().parse::<u64>() {
+                                if n > 0 {
+                                    alerts.push(format!("SYNC: {} function update{} from teammates. Run: aura live sync pull", n, if n == 1 { "" } else { "s" }));
+                                }
+                            }
+                        }
+                    }
+
+                    // 3. Pending impact alerts
+                    let impact_marker = std::path::Path::new(".aura/live/impacts_pending");
+                    if impact_marker.exists() {
+                        if let Ok(c) = std::fs::read_to_string(impact_marker) {
+                            if let Ok(n) = c.trim().parse::<u64>() {
+                                if n > 0 {
+                                    alerts.push(format!("IMPACT: {} cross-branch conflict{}. Run: aura live impacts", n, if n == 1 { "" } else { "s" }));
+                                }
+                            }
+                        }
+                    }
+
+                    // 4. Sentinel collisions
+                    let collision_marker_path = crate::session::worktree_aura_path("sentinel/collisions_pending");
+                    let collision_marker = std::path::Path::new(&collision_marker_path);
+                    if collision_marker.exists() {
+                        if let Ok(c) = std::fs::read_to_string(collision_marker) {
+                            if let Ok(n) = c.trim().parse::<u64>() {
+                                if n > 0 {
+                                    alerts.push(format!("COLLISION: {} function{} being edited by another agent", n, if n == 1 { "" } else { "s" }));
+                                }
+                            }
+                        }
+                    }
+
+                    // 5. Remote zone check (only if file specified — quick network call)
+                    if let Some(fp) = file {
+                        if let Ok(resp) = live_sync::check_remote_zone(fp) {
+                            if let Some(conflicts) = resp["conflicts"].as_array() {
+                                for c in conflicts {
+                                    let user = c["username"].as_str().unwrap_or("?");
+                                    let mode = c["mode"].as_str().unwrap_or("warn");
+                                    alerts.push(format!("ZONE {}: {} claimed by {}", mode.to_uppercase(), fp, user));
+                                }
+                            }
+                        }
+                    }
+
+                    if alerts.is_empty() {
+                        // Silent — no output means no alerts
+                    } else {
+                        for a in &alerts {
+                            println!("[aura] {}", a);
+                        }
                     }
                 }
                 LiveSubcommands::Sync { sub } => {
