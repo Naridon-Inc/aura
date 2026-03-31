@@ -153,7 +153,72 @@ impl AstStateCache {
         // Update cache
         self.state.insert(file_path.to_string(), new_cached);
 
+        // Track dirty functions for auto-pull safety
+        if !changes.is_empty() {
+            DirtyTracker::mark_dirty(file_path, &changes);
+        }
+
         changes
+    }
+}
+
+// ─── Dirty Function Tracker ────────────────────────────────────────────────
+// Tracks locally-modified functions so auto-pull knows which are safe to overwrite.
+
+pub struct DirtyTracker;
+
+impl DirtyTracker {
+    const DIRTY_FILE: &'static str = ".aura/live/dirty_functions.json";
+    const EXPIRY_SECS: u64 = 30;
+
+    /// Mark functions as dirty (locally modified).
+    pub fn mark_dirty(file_path: &str, changes: &[FunctionChange]) {
+        let now = now_ms() / 1000;
+        let mut entries = Self::load();
+
+        for change in changes {
+            if change.change_type == ChangeType::Modified || change.change_type == ChangeType::Added {
+                let key = format!("{}::{}", file_path, change.name);
+                entries.insert(key, now);
+            }
+        }
+
+        Self::save(&entries);
+    }
+
+    /// Check if a function is dirty (modified locally within EXPIRY_SECS).
+    pub fn is_dirty(file_path: &str, function_name: &str) -> bool {
+        let now = now_ms() / 1000;
+        let entries = Self::load();
+        let key = format!("{}::{}", file_path, function_name);
+        if let Some(&ts) = entries.get(&key) {
+            now.saturating_sub(ts) < Self::EXPIRY_SECS
+        } else {
+            false
+        }
+    }
+
+    fn load() -> std::collections::HashMap<String, u64> {
+        let path = Path::new(Self::DIRTY_FILE);
+        if !path.exists() {
+            return std::collections::HashMap::new();
+        }
+        fs::read_to_string(path)
+            .ok()
+            .and_then(|s| serde_json::from_str(&s).ok())
+            .unwrap_or_default()
+    }
+
+    fn save(entries: &std::collections::HashMap<String, u64>) {
+        let _ = fs::create_dir_all(".aura/live");
+        // Prune expired entries while saving
+        let now = now_ms() / 1000;
+        let pruned: std::collections::HashMap<&String, &u64> = entries.iter()
+            .filter(|(_, ts)| now.saturating_sub(**ts) < Self::EXPIRY_SECS)
+            .collect();
+        if let Ok(json) = serde_json::to_string(&pruned) {
+            let _ = fs::write(Self::DIRTY_FILE, json);
+        }
     }
 }
 

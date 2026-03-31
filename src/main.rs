@@ -218,7 +218,7 @@ fn capture_env_fingerprint() -> Option<String> {
     ecosystem::Ecosystem::fingerprint()
 }
 
-const CURRENT_VERSION: &str = "0.12.9";
+const CURRENT_VERSION: &str = "0.13.0";
 
 /// Build an HTTP client that respects accept_self_signed for mothership TLS.
 fn cloud_http_client() -> reqwest::blocking::Client {
@@ -694,6 +694,41 @@ enum Commands {
         #[command(subcommand)]
         sub: ServerSubcommands,
     },
+    /// Save your work — snapshot + intent + git commit + auto-push to team (one command)
+    Save {
+        /// What you changed and why (commit message + intent)
+        message: String,
+        /// Skip git commit (snapshot + push to team only)
+        #[arg(long)]
+        no_git: bool,
+    },
+    /// Push all locally changed functions to the team immediately
+    Share,
+    /// Pull teammate changes and apply at function level
+    Pull {
+        /// Show what would change without applying
+        #[arg(long)]
+        dry_run: bool,
+    },
+    /// Semantic diff — function-level changes, not line-level
+    Diff {
+        /// File to diff (defaults to all changed files)
+        file: Option<String>,
+    },
+    /// Semantic history — who changed what function, when, and why
+    History {
+        /// Filter to a specific file
+        #[arg(long)]
+        file: Option<String>,
+        /// Max entries
+        #[arg(long, default_value = "20")]
+        limit: usize,
+    },
+    /// Trace a function — who changed it, every version, with intent
+    Trace {
+        /// Function name to trace
+        function: String,
+    },
     /// Manage team-linked repos — control which projects sync through the mothership
     Team {
         #[command(subcommand)]
@@ -1165,6 +1200,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         Commands::Config { .. } => "config",
         Commands::Live { .. } => "live",
         Commands::Server { .. } => "server",
+        Commands::Save { .. } => "save",
+        Commands::Share => "share",
+        Commands::Pull { .. } => "pull",
+        Commands::Diff { .. } => "diff",
+        Commands::History { .. } => "history",
+        Commands::Trace { .. } => "trace",
         Commands::Team { .. } => "team",
         Commands::Host { .. } => "host",
         Commands::Ping => "ping",
@@ -4619,6 +4660,397 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     println!("  {} Error: {}\n", "•".dimmed(), format!("{}", e).red());
                 }
             }
+        }
+        Commands::Save { message, no_git } => {
+            use colored::Colorize;
+            println!("{}", "💾 Aura Save".bold());
+            println!();
+
+            // 1. Find modified files
+            let modified_files: Vec<String> = if let Ok(repo) = Repository::open(".") {
+                let diff = repo.diff_index_to_workdir(None, None)
+                    .or_else(|_| {
+                        let head = repo.head().ok().and_then(|h| h.peel_to_tree().ok());
+                        repo.diff_tree_to_workdir(head.as_ref(), None)
+                    });
+                match diff {
+                    Ok(d) => {
+                        let mut files = Vec::new();
+                        d.foreach(&mut |delta, _| {
+                            if let Some(p) = delta.new_file().path() {
+                                files.push(p.to_string_lossy().to_string());
+                            }
+                            true
+                        }, None, None, None).ok();
+                        files
+                    }
+                    Err(_) => vec![],
+                }
+            } else {
+                vec![]
+            };
+
+            if modified_files.is_empty() {
+                println!("  {} No modified files to save", "ℹ".blue());
+                return Ok(());
+            }
+
+            // 2. Snapshot each modified file
+            for f in &modified_files {
+                if std::path::Path::new(f).exists() {
+                    let _ = checkpoint::SnapshotStore::snapshot_file(f, "save", "user");
+                }
+            }
+            println!("  {} Snapshotted {} file{}", "✓".green().bold(), modified_files.len(), if modified_files.len() == 1 { "" } else { "s" });
+
+            // 3. Log intent
+            let _ = std::fs::create_dir_all(".aura");
+            let log_entry = serde_json::json!({
+                "agent_id": "user",
+                "intent": message,
+                "timestamp": SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs()
+            });
+            if let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true).open(".aura/intent_log.jsonl") {
+                let _ = writeln!(file, "{}", log_entry.to_string());
+            }
+            let _ = std::fs::write(".gemini.intent", &message);
+            let _ = std::fs::write(".aura/.intent_logged", "1");
+            println!("  {} Intent logged: {}", "✓".green().bold(), message.dimmed());
+
+            // 4. Git commit (unless --no-git)
+            if !*no_git {
+                if let Ok(_repo) = Repository::open(".") {
+                    let add = std::process::Command::new("git").args(["add", "-A"]).status();
+                    if add.map(|s| s.success()).unwrap_or(false) {
+                        let commit = std::process::Command::new("git")
+                            .args(["commit", "-m", &message])
+                            .status();
+                        match commit {
+                            Ok(s) if s.success() => println!("  {} Git commit created", "✓".green().bold()),
+                            _ => println!("  {} Git commit failed (pre-commit hook?)", "⚠".yellow()),
+                        }
+                    }
+                }
+            } else {
+                println!("  {} Skipped git commit (--no-git)", "•".dimmed());
+            }
+
+            // 5. Auto-push changed functions to mothership
+            let mut total_pushed: u64 = 0;
+            for file_path in &modified_files {
+                if std::path::Path::new(file_path).exists() {
+                    if let Ok(source) = std::fs::read_to_string(file_path) {
+                        let ext = std::path::Path::new(file_path)
+                            .extension().and_then(|e| e.to_str()).unwrap_or("");
+                        if let Ok(mut parser) = SemanticParser::new() {
+                            if let Ok(nodes) = parser.parse_file(&source, ext) {
+                                let payloads: Vec<live_sync::SyncFunctionPayload> = nodes.iter()
+                                    .filter_map(|n| {
+                                        let ident = n.identifier.as_ref()?;
+                                        let body = live_sync::extract_function_body(&source, ident)?;
+                                        Some(live_sync::SyncFunctionPayload {
+                                            file_path: file_path.clone(),
+                                            function_name: ident.clone(),
+                                            function_kind: n.kind.clone(),
+                                            content_hash: n.content_hash.clone(),
+                                            body,
+                                        })
+                                    }).collect();
+                                if !payloads.is_empty() {
+                                    if let Ok(resp) = live_sync::push_function_bodies(&payloads) {
+                                        total_pushed += resp["pushed"].as_u64().unwrap_or(0);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            if total_pushed > 0 {
+                println!("  {} Pushed {} functions to team", "🔄".cyan(), total_pushed);
+            }
+            println!();
+        }
+        Commands::Share => {
+            use colored::Colorize;
+            println!("{}", "🔄 Aura Share".bold());
+            println!();
+
+            // Find modified files via git diff
+            let modified_files: Vec<String> = if let Ok(repo) = Repository::open(".") {
+                let diff = repo.diff_index_to_workdir(None, None)
+                    .or_else(|_| {
+                        let head = repo.head().ok().and_then(|h| h.peel_to_tree().ok());
+                        repo.diff_tree_to_workdir(head.as_ref(), None)
+                    });
+                match diff {
+                    Ok(d) => {
+                        let mut files = Vec::new();
+                        d.foreach(&mut |delta, _| {
+                            if let Some(p) = delta.new_file().path() {
+                                files.push(p.to_string_lossy().to_string());
+                            }
+                            true
+                        }, None, None, None).ok();
+                        files
+                    }
+                    Err(_) => vec![],
+                }
+            } else {
+                vec![]
+            };
+
+            let mut total_pushed: u64 = 0;
+            for file_path in &modified_files {
+                if std::path::Path::new(file_path).exists() {
+                    if let Ok(source) = std::fs::read_to_string(file_path) {
+                        let ext = std::path::Path::new(file_path)
+                            .extension().and_then(|e| e.to_str()).unwrap_or("");
+                        if let Ok(mut parser) = SemanticParser::new() {
+                            if let Ok(nodes) = parser.parse_file(&source, ext) {
+                                let payloads: Vec<live_sync::SyncFunctionPayload> = nodes.iter()
+                                    .filter_map(|n| {
+                                        let ident = n.identifier.as_ref()?;
+                                        let body = live_sync::extract_function_body(&source, ident)?;
+                                        Some(live_sync::SyncFunctionPayload {
+                                            file_path: file_path.clone(),
+                                            function_name: ident.clone(),
+                                            function_kind: n.kind.clone(),
+                                            content_hash: n.content_hash.clone(),
+                                            body,
+                                        })
+                                    }).collect();
+                                if !payloads.is_empty() {
+                                    if let Ok(resp) = live_sync::push_function_bodies(&payloads) {
+                                        total_pushed += resp["pushed"].as_u64().unwrap_or(0);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            if total_pushed > 0 {
+                println!("  {} Shared {} functions with team", "✓".green().bold(), total_pushed);
+            } else {
+                println!("  {} No modified functions to share", "ℹ".blue());
+            }
+            println!();
+        }
+        Commands::Pull { dry_run } => {
+            use colored::Colorize;
+            println!("{}", "🔄 Aura Pull".bold());
+            println!();
+
+            match live_sync::pull_function_bodies() {
+                Ok(resp) => {
+                    let functions = resp["functions"].as_array();
+                    let total = functions.map(|a| a.len()).unwrap_or(0);
+
+                    if total == 0 {
+                        println!("  {} Already up to date — no new changes from teammates", "✓".green().bold());
+                        return Ok(());
+                    }
+
+                    println!("  {} {} function{} from teammates", "↳".dimmed(), total, if total == 1 { "" } else { "s" });
+
+                    if let Some(funcs) = functions {
+                        for f in funcs {
+                            let name = f["function_name"].as_str().unwrap_or("?");
+                            let file = f["file_path"].as_str().unwrap_or("?");
+                            let by = f["pushed_by"].as_str().unwrap_or("?");
+                            println!("    {} {}::{} (by {})", "•".dimmed(), file.cyan(), name, by.dimmed());
+                        }
+                    }
+
+                    if *dry_run {
+                        println!("\n  {} Dry run — no files modified", "ℹ".blue());
+                    } else {
+                        let funcs = resp["functions"].as_array().unwrap();
+                        let (applied, skipped, conflicts) = live_sync::apply_pulled_functions(funcs);
+                        println!("\n  {} Applied: {}, Skipped: {}, Conflicts: {}",
+                            "✓".green().bold(), applied.to_string().green(), skipped, conflicts.len());
+                        for c in &conflicts {
+                            println!("    {} {}", "⚠".yellow(), c);
+                        }
+                    }
+                }
+                Err(e) => eprintln!("  {} Pull failed: {}", "✗".red().bold(), e),
+            }
+            println!();
+        }
+        Commands::Diff { file } => {
+            use colored::Colorize;
+            println!("{}", "🔍 Aura Diff — Semantic Changes".bold());
+            println!();
+
+            // Get files to diff
+            let files_to_diff: Vec<String> = if let Some(f) = file {
+                vec![f.clone()]
+            } else if let Ok(repo) = Repository::open(".") {
+                let diff = repo.diff_index_to_workdir(None, None)
+                    .or_else(|_| {
+                        let head = repo.head().ok().and_then(|h| h.peel_to_tree().ok());
+                        repo.diff_tree_to_workdir(head.as_ref(), None)
+                    });
+                match diff {
+                    Ok(d) => {
+                        let mut files = Vec::new();
+                        d.foreach(&mut |delta, _| {
+                            if let Some(p) = delta.new_file().path() {
+                                files.push(p.to_string_lossy().to_string());
+                            }
+                            true
+                        }, None, None, None).ok();
+                        files
+                    }
+                    Err(_) => vec![],
+                }
+            } else {
+                vec![]
+            };
+
+            if files_to_diff.is_empty() {
+                println!("  {} No modified files", "✓".green().bold());
+                return Ok(());
+            }
+
+            let mut total_changes = 0;
+            for file_path in &files_to_diff {
+                if !std::path::Path::new(file_path).exists() { continue; }
+                let ext = std::path::Path::new(file_path)
+                    .extension().and_then(|e| e.to_str()).unwrap_or("");
+                let source = match std::fs::read_to_string(file_path) {
+                    Ok(s) => s,
+                    Err(_) => continue,
+                };
+
+                if let Ok(mut parser) = SemanticParser::new() {
+                    if let Ok(nodes) = parser.parse_file(&source, ext) {
+                        // Get the last snapshot for comparison
+                        let snapshots = checkpoint::SnapshotStore::get_snapshots_for_file(file_path);
+                        if let Some(snap) = snapshots.first() {
+                            let old_source = &snap.content;
+                            if let Ok(old_nodes) = parser.parse_file(old_source, ext) {
+                                // Compare
+                                let mut cache = live_events::AstStateCache::new();
+                                cache.mark_initial_scan_done();
+                                let _ = cache.diff_and_update(file_path, &old_nodes);
+                                let changes = cache.diff_and_update(file_path, &nodes);
+
+                                if !changes.is_empty() {
+                                    println!("  {} {}", "📄".bold(), file_path.cyan());
+                                    for c in &changes {
+                                        let symbol = match c.change_type {
+                                            live_events::ChangeType::Added => "+".green().to_string(),
+                                            live_events::ChangeType::Modified => "~".yellow().to_string(),
+                                            live_events::ChangeType::Deleted => "-".red().to_string(),
+                                        };
+                                        println!("    {} {} {} ({})", symbol, c.kind, c.name.bold(), format!("{:?}", c.change_type).dimmed());
+                                        total_changes += 1;
+                                    }
+                                    println!();
+                                }
+                            }
+                        } else {
+                            // No snapshot — show all functions as new
+                            println!("  {} {} (new file — {} functions)", "📄".bold(), file_path.cyan(), nodes.len());
+                            total_changes += nodes.len();
+                        }
+                    }
+                }
+            }
+            if total_changes == 0 {
+                println!("  {} No semantic changes detected", "✓".green().bold());
+            } else {
+                println!("  {} {} function-level change{}", "Summary:".bold(), total_changes, if total_changes == 1 { "" } else { "s" });
+            }
+            println!();
+        }
+        Commands::History { file, limit } => {
+            use colored::Colorize;
+            println!("{}", "📜 Aura History — Semantic Timeline".bold());
+            println!();
+
+            // Read local intent log
+            let intent_path = ".aura/intent_log.jsonl";
+            if let Ok(content) = std::fs::read_to_string(intent_path) {
+                let mut entries: Vec<serde_json::Value> = content.lines()
+                    .filter_map(|line| serde_json::from_str(line).ok())
+                    .collect();
+                entries.reverse(); // newest first
+                entries.truncate(*limit);
+
+                if entries.is_empty() {
+                    println!("  {} No history yet. Use `aura save` to start tracking.", "ℹ".blue());
+                } else {
+                    for entry in &entries {
+                        let agent = entry["agent_id"].as_str().unwrap_or("?");
+                        let intent = entry["intent"].as_str().unwrap_or("?");
+                        let ts = entry["timestamp"].as_u64().unwrap_or(0);
+                        let date = chrono::DateTime::from_timestamp(ts as i64, 0)
+                            .map(|d| d.format("%Y-%m-%d %H:%M").to_string())
+                            .unwrap_or_else(|| "?".to_string());
+                        println!("  {} {} by {}", date.dimmed(), intent, agent.cyan());
+                    }
+                }
+            } else {
+                println!("  {} No intent history found", "ℹ".blue());
+            }
+
+            // Also try mothership history if connected
+            if let Ok(resp) = live_sync::query_team_knowledge(None, None, 0) {
+                // Will be replaced with proper history route in Phase 3
+                let _ = resp;
+            }
+
+            let _ = file; // Will be used for filtering in Phase 3
+            println!();
+        }
+        Commands::Trace { function } => {
+            use colored::Colorize;
+            println!("{} {}", "🔎 Aura Trace —".bold(), function.cyan().bold());
+            println!();
+
+            // Search local intent log for mentions of this function
+            let intent_path = ".aura/intent_log.jsonl";
+            let mut found = 0;
+            if let Ok(content) = std::fs::read_to_string(intent_path) {
+                let entries: Vec<serde_json::Value> = content.lines()
+                    .filter_map(|line| serde_json::from_str(line).ok())
+                    .collect();
+                for entry in entries.iter().rev() {
+                    let intent = entry["intent"].as_str().unwrap_or("");
+                    if intent.to_lowercase().contains(&function.to_lowercase()) {
+                        let agent = entry["agent_id"].as_str().unwrap_or("?");
+                        let ts = entry["timestamp"].as_u64().unwrap_or(0);
+                        let date = chrono::DateTime::from_timestamp(ts as i64, 0)
+                            .map(|d| d.format("%Y-%m-%d %H:%M").to_string())
+                            .unwrap_or_else(|| "?".to_string());
+                        println!("  {} {} — {}", date.dimmed(), agent.cyan(), intent);
+                        found += 1;
+                    }
+                }
+            }
+
+            // Search snapshots for this function
+            let snapshots = checkpoint::SnapshotStore::get_all_snapshots();
+            let mut fn_snapshots = 0;
+            for snap in &snapshots {
+                if snap.content.contains(&*function) {
+                    fn_snapshots += 1;
+                }
+            }
+
+            if found == 0 && fn_snapshots == 0 {
+                println!("  {} No trace found for '{}'. Full team trace available in v0.14 (mothership history).", "ℹ".blue(), function);
+            } else {
+                if fn_snapshots > 0 {
+                    println!("\n  {} Found in {} snapshot{}", "•".dimmed(), fn_snapshots, if fn_snapshots == 1 { "" } else { "s" });
+                }
+                println!("  {} Full team trace with mothership history coming in Phase 3", "•".dimmed());
+            }
+            println!();
         }
         Commands::Team { sub } => {
             match sub {
