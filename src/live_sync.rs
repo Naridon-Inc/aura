@@ -1068,6 +1068,62 @@ pub fn classify_merge(remote_functions: &[serde_json::Value]) -> Vec<MergeAction
     actions
 }
 
+// ─── Scaffold Push/Pull ────────────────────────────────────────────────────
+
+#[derive(serde::Serialize)]
+pub struct ScaffoldPushPayload {
+    pub file_path: String,
+    pub content_hash: String,
+    pub content: String,
+    pub file_type: String,
+}
+
+pub fn push_scaffolds(scaffolds: &[ScaffoldPushPayload]) -> Result<serde_json::Value, String> {
+    if scaffolds.is_empty() { return Ok(json!({"pushed": 0})); }
+
+    let config = ConfigManager::load();
+    let token = config.cloud_api_token
+        .or_else(|| std::env::var("AURA_CLOUD_TOKEN").ok())
+        .ok_or_else(|| "No cloud token configured".to_string())?;
+    let cloud_url = config.cloud_url
+        .unwrap_or_else(|| "https://auravcs.com".to_string());
+    let url = format!("{}/api/v1/live/scaffolds/push", cloud_url.trim_end_matches('/'));
+
+    let payload = json!({
+        "repo_full_name": repo_name(),
+        "branch": current_branch(),
+        "scaffolds": scaffolds,
+    });
+
+    let client = build_cloud_client();
+    let resp = client.post(&url)
+        .header("Authorization", format!("Bearer {}", token))
+        .json(&payload)
+        .send()
+        .map_err(|e| format!("Cloud unreachable: {}", e))?;
+    resp.json::<serde_json::Value>()
+        .map_err(|e| format!("Invalid response: {}", e))
+}
+
+pub fn pull_scaffolds_from_team() -> Result<serde_json::Value, String> {
+    let config = ConfigManager::load();
+    let token = config.cloud_api_token
+        .or_else(|| std::env::var("AURA_CLOUD_TOKEN").ok())
+        .ok_or_else(|| "No cloud token configured".to_string())?;
+    let cloud_url = config.cloud_url
+        .unwrap_or_else(|| "https://auravcs.com".to_string());
+    let url = format!("{}/api/v1/live/scaffolds/pull?repo={}&branch={}",
+        cloud_url.trim_end_matches('/'), repo_name(), current_branch());
+
+    let client = build_cloud_client();
+    let resp = client.get(&url)
+        .header("Authorization", format!("Bearer {}", token))
+        .send()
+        .map_err(|e| format!("Cloud unreachable: {}", e))?;
+    resp.json::<serde_json::Value>()
+        .map_err(|e| format!("Invalid response: {}", e))
+}
+
 /// Public wrapper for repo_name from live_events (for use from main.rs).
 pub fn repo_name_from_cwd() -> String {
     repo_name()
