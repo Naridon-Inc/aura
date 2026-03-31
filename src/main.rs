@@ -218,7 +218,7 @@ fn capture_env_fingerprint() -> Option<String> {
     ecosystem::Ecosystem::fingerprint()
 }
 
-const CURRENT_VERSION: &str = "0.13.0";
+const CURRENT_VERSION: &str = "0.13.1";
 
 /// Build an HTTP client that respects accept_self_signed for mothership TLS.
 fn cloud_http_client() -> reqwest::blocking::Client {
@@ -724,6 +724,17 @@ enum Commands {
         #[arg(long, default_value = "20")]
         limit: usize,
     },
+    /// Merge another branch into yours at the function level — smarter than git merge
+    Merge {
+        /// Source branch to merge from (e.g., "feature/auth")
+        branch: String,
+        /// Show what would change without applying
+        #[arg(long)]
+        dry_run: bool,
+        /// Auto-accept all non-conflicting changes without prompting
+        #[arg(long)]
+        auto: bool,
+    },
     /// Trace a function — who changed it, every version, with intent
     Trace {
         /// Function name to trace
@@ -1203,6 +1214,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         Commands::Save { .. } => "save",
         Commands::Share => "share",
         Commands::Pull { .. } => "pull",
+        Commands::Merge { .. } => "merge",
         Commands::Diff { .. } => "diff",
         Commands::History { .. } => "history",
         Commands::Trace { .. } => "trace",
@@ -4877,6 +4889,181 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
                 Err(e) => eprintln!("  {} Pull failed: {}", "✗".red().bold(), e),
             }
+            println!();
+        }
+        Commands::Merge { branch, dry_run, auto } => {
+            use colored::Colorize;
+            println!("{} ← {}", "🔀 Aura Merge".bold(), branch.cyan().bold());
+            println!();
+
+            // 1. Pull all functions from source branch
+            let resp = match live_sync::pull_branch_for_merge(branch) {
+                Ok(r) => r,
+                Err(e) => {
+                    eprintln!("  {} Failed to fetch branch: {}", "✗".red().bold(), e);
+                    return Ok(());
+                }
+            };
+
+            let functions = match resp["functions"].as_array() {
+                Some(f) if !f.is_empty() => f.clone(),
+                _ => {
+                    println!("  {} No functions found on branch '{}'. Has anyone pushed to it?", "ℹ".blue(), branch);
+                    return Ok(());
+                }
+            };
+
+            println!("  {} Found {} function{} on '{}'", "↳".dimmed(), functions.len(), if functions.len() == 1 { "" } else { "s" }, branch.cyan());
+            println!();
+
+            // 2. Classify each function
+            let actions = live_sync::classify_merge(&functions);
+
+            let adds: Vec<_> = actions.iter().filter(|a| matches!(a, live_sync::MergeAction::Add { .. })).collect();
+            let conflicts: Vec<_> = actions.iter().filter(|a| matches!(a, live_sync::MergeAction::Conflict { .. })).collect();
+            let identical: Vec<_> = actions.iter().filter(|a| matches!(a, live_sync::MergeAction::Identical { .. })).collect();
+
+            println!("  {} {} new, {} conflicts, {} identical",
+                "Summary:".bold(),
+                adds.len().to_string().green(),
+                conflicts.len().to_string().red(),
+                identical.len().to_string().dimmed());
+            println!();
+
+            // 3. Show new functions
+            if !adds.is_empty() {
+                println!("  {} New functions (will be added):", "➕".green());
+                for a in &adds {
+                    if let live_sync::MergeAction::Add { file_path, function_name, pushed_by, .. } = a {
+                        println!("    {} {}::{} (by {})", "•".green(), file_path.cyan(), function_name, pushed_by.dimmed());
+                    }
+                }
+                println!();
+            }
+
+            // 4. Show conflicts
+            if !conflicts.is_empty() {
+                println!("  {} Conflicts (needs resolution):", "⚠".yellow());
+                for c in &conflicts {
+                    if let live_sync::MergeAction::Conflict { file_path, function_name, pushed_by, .. } = c {
+                        println!("    {} {}::{} (by {})", "•".red(), file_path.cyan(), function_name, pushed_by.dimmed());
+                    }
+                }
+                println!();
+            }
+
+            if *dry_run {
+                println!("  {} Dry run — no files modified", "ℹ".blue());
+                return Ok(());
+            }
+
+            // 5. Apply new functions (auto)
+            let mut applied = 0;
+            for a in &adds {
+                if let live_sync::MergeAction::Add { file_path, function_name, body, .. } = a {
+                    // Snapshot before modifying
+                    if std::path::Path::new(file_path.as_str()).exists() {
+                        let _ = checkpoint::SnapshotStore::snapshot_file(file_path, "merge", "aura-merge");
+                        if let Ok(source) = std::fs::read_to_string(file_path) {
+                            match live_sync::splice_function_public(&source, function_name, body) {
+                                Ok(new_content) => {
+                                    let _ = std::fs::write(file_path, new_content);
+                                    applied += 1;
+                                }
+                                Err(_) => {
+                                    // Append if splice can't find it (truly new)
+                                    let mut content = std::fs::read_to_string(file_path).unwrap_or_default();
+                                    content.push_str("\n\n");
+                                    content.push_str(body);
+                                    content.push('\n');
+                                    let _ = std::fs::write(file_path, content);
+                                    applied += 1;
+                                }
+                            }
+                        }
+                    } else {
+                        // New file
+                        if let Some(parent) = std::path::Path::new(file_path.as_str()).parent() {
+                            let _ = std::fs::create_dir_all(parent);
+                        }
+                        let _ = std::fs::write(file_path, format!("{}\n", body));
+                        applied += 1;
+                    }
+                }
+            }
+
+            // 6. Resolve conflicts interactively
+            let mut resolved = 0;
+            for c in &conflicts {
+                if let live_sync::MergeAction::Conflict { file_path, function_name, local_body, remote_body, pushed_by } = c {
+                    if *auto {
+                        // Auto mode: keep local (safe default)
+                        println!("    {} {}::{} — kept local (auto mode)", "•".dimmed(), file_path, function_name);
+                        resolved += 1;
+                        continue;
+                    }
+
+                    println!("\n  {} {}::{}", "CONFLICT".red().bold(), file_path.cyan(), function_name.bold());
+                    println!("  {} Local (yours):", "─".dimmed());
+                    for line in local_body.lines().take(8) {
+                        println!("    {}", line.green());
+                    }
+                    if local_body.lines().count() > 8 {
+                        println!("    {} ... ({} more lines)", "".dimmed(), local_body.lines().count() - 8);
+                    }
+                    println!("  {} Remote ({} on {}):", "─".dimmed(), pushed_by.cyan(), branch.cyan());
+                    for line in remote_body.lines().take(8) {
+                        println!("    {}", line.red());
+                    }
+                    if remote_body.lines().count() > 8 {
+                        println!("    {} ... ({} more lines)", "".dimmed(), remote_body.lines().count() - 8);
+                    }
+
+                    // Interactive choice
+                    let choice = dialoguer::Select::with_theme(&dialoguer::theme::ColorfulTheme::default())
+                        .with_prompt("  Resolution")
+                        .items(&["Keep local (yours)", "Accept remote (theirs)", "Keep both (side by side)"])
+                        .default(0)
+                        .interact()
+                        .unwrap_or(0);
+
+                    match choice {
+                        0 => {
+                            println!("    {} Kept local", "✓".green());
+                        }
+                        1 => {
+                            // Accept remote — splice it in
+                            let _ = checkpoint::SnapshotStore::snapshot_file(file_path, "merge_conflict", "aura-merge");
+                            if let Ok(source) = std::fs::read_to_string(file_path) {
+                                if let Ok(new_content) = live_sync::splice_function_public(&source, function_name, remote_body) {
+                                    let _ = std::fs::write(file_path, new_content);
+                                }
+                            }
+                            println!("    {} Accepted remote", "✓".green());
+                        }
+                        2 => {
+                            // Keep both — add remote as a commented alternative
+                            let _ = checkpoint::SnapshotStore::snapshot_file(file_path, "merge_both", "aura-merge");
+                            if let Ok(mut source) = std::fs::read_to_string(file_path) {
+                                source.push_str(&format!(
+                                    "\n\n// ─── MERGE CONFLICT: {} (from branch '{}' by {}) ───\n// Uncomment to use the remote version:\n",
+                                    function_name, branch, pushed_by
+                                ));
+                                for line in remote_body.lines() {
+                                    source.push_str(&format!("// {}\n", line));
+                                }
+                                let _ = std::fs::write(file_path, source);
+                            }
+                            println!("    {} Kept both (remote commented out)", "✓".green());
+                        }
+                        _ => {}
+                    }
+                    resolved += 1;
+                }
+            }
+
+            println!("\n  {} Merge complete: {} applied, {} conflicts resolved, {} identical (skipped)",
+                "✓".green().bold(), applied.to_string().green(), resolved, identical.len());
             println!();
         }
         Commands::Diff { file } => {

@@ -904,6 +904,26 @@ pub fn pull_functions(conn: &Connection, repo_id: &str, branch: &str, user_id: &
     rows.collect()
 }
 
+/// Pull ALL function bodies from a branch (for cross-branch merge). No cursor, no user filter.
+pub fn pull_all_functions_on_branch(conn: &Connection, repo_id: &str, branch: &str) -> SqlResult<Vec<FunctionRow>> {
+    let mut stmt = conn.prepare(
+        "SELECT fb.id, fb.file_path, fb.function_name, fb.function_kind,
+                fb.content_hash, fb.body, u.username, fb.pushed_at
+         FROM function_bodies fb
+         JOIN users u ON u.id = fb.pushed_by
+         WHERE fb.repo_id = ?1 AND fb.branch = ?2
+         ORDER BY fb.file_path, fb.function_name"
+    )?;
+    let rows = stmt.query_map(params![repo_id, branch], |row| {
+        Ok(FunctionRow {
+            id: row.get(0)?, file_path: row.get(1)?, function_name: row.get(2)?,
+            function_kind: row.get(3)?, content_hash: row.get(4)?, body: row.get(5)?,
+            pushed_by: row.get(6)?, pushed_at: row.get(7)?,
+        })
+    })?;
+    rows.collect()
+}
+
 pub fn upsert_sync_cursor(conn: &Connection, user_id: &str, repo_id: &str, branch: &str, pulled_at: &str) -> SqlResult<()> {
     let id = new_id();
     conn.execute(
