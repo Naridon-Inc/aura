@@ -33,6 +33,7 @@ mod usage;
 mod plan_tracker;
 mod host;
 mod host_db;
+mod merge_engine;
 
 use clap::{Parser, Subcommand};
 use parser::SemanticParser;
@@ -218,7 +219,7 @@ fn capture_env_fingerprint() -> Option<String> {
     ecosystem::Ecosystem::fingerprint()
 }
 
-const CURRENT_VERSION: &str = "0.13.1";
+const CURRENT_VERSION: &str = "0.14.0";
 
 /// Build an HTTP client that respects accept_self_signed for mothership TLS.
 fn cloud_http_client() -> reqwest::blocking::Client {
@@ -4781,6 +4782,67 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             if total_pushed > 0 {
                 println!("  {} Pushed {} functions to team", "🔄".cyan(), total_pushed);
             }
+
+            // 6. Push scaffolds for non-code files (JSON, YAML, text, etc) + code scaffolds
+            let mut scaffold_payloads = Vec::new();
+            for file_path in &modified_files {
+                if std::path::Path::new(file_path.as_str()).exists() {
+                    let ft = merge_engine::detect_file_type(file_path);
+                    match ft {
+                        merge_engine::FileType::Json | merge_engine::FileType::Yaml
+                        | merge_engine::FileType::Toml | merge_engine::FileType::Text
+                        | merge_engine::FileType::Env => {
+                            // Non-code: push entire file as scaffold
+                            if let Ok(content) = std::fs::read_to_string(file_path) {
+                                use sha2::{Digest, Sha256};
+                                let hash = hex::encode(Sha256::digest(content.as_bytes()));
+                                scaffold_payloads.push(live_sync::ScaffoldPushPayload {
+                                    file_path: file_path.clone(),
+                                    content_hash: hash,
+                                    content,
+                                    file_type: format!("{:?}", ft).to_lowercase(),
+                                });
+                            }
+                        }
+                        merge_engine::FileType::Code => {
+                            // Code: extract scaffold (non-function parts)
+                            if let Ok(source) = std::fs::read_to_string(file_path) {
+                                let ext = std::path::Path::new(file_path.as_str())
+                                    .extension().and_then(|e| e.to_str()).unwrap_or("");
+                                if let Ok(mut parser) = SemanticParser::new() {
+                                    if let Ok(nodes) = parser.parse_file(&source, ext) {
+                                        let fn_bodies: Vec<(String, String)> = nodes.iter()
+                                            .filter_map(|n| {
+                                                let ident = n.identifier.as_ref()?;
+                                                let body = live_sync::extract_function_body(&source, ident)?;
+                                                Some((ident.clone(), body))
+                                            }).collect();
+                                        let scaffold = merge_engine::extract_scaffold(&source, &fn_bodies);
+                                        use sha2::{Digest, Sha256};
+                                        let hash = hex::encode(Sha256::digest(scaffold.as_bytes()));
+                                        scaffold_payloads.push(live_sync::ScaffoldPushPayload {
+                                            file_path: file_path.clone(),
+                                            content_hash: hash,
+                                            content: scaffold,
+                                            file_type: "code".to_string(),
+                                        });
+                                    }
+                                }
+                            }
+                        }
+                        _ => {} // Binary/Ignored — skip
+                    }
+                }
+            }
+            if !scaffold_payloads.is_empty() {
+                if let Ok(resp) = live_sync::push_scaffolds(&scaffold_payloads) {
+                    let pushed = resp["pushed"].as_u64().unwrap_or(0);
+                    if pushed > 0 {
+                        println!("  {} Pushed {} scaffold{} (imports, config, text files)", "📄".cyan(), pushed, if pushed == 1 { "" } else { "s" });
+                    }
+                }
+            }
+
             println!();
         }
         Commands::Share => {
@@ -5062,8 +5124,68 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
             }
 
-            println!("\n  {} Merge complete: {} applied, {} conflicts resolved, {} identical (skipped)",
-                "✓".green().bold(), applied.to_string().green(), resolved, identical.len());
+            // 7. Merge scaffolds (non-code files: JSON, YAML, text, etc)
+            let mut scaffold_merged = 0;
+            let mut scaffold_conflicts = 0;
+            if let Some(scaffolds) = resp["scaffolds"].as_array() {
+                for s in scaffolds {
+                    let file_path = s["file_path"].as_str().unwrap_or("");
+                    let remote_content = s["content"].as_str().unwrap_or("");
+                    let file_type = s["file_type"].as_str().unwrap_or("text");
+                    let pushed_by = s["pushed_by"].as_str().unwrap_or("?");
+
+                    if file_path.is_empty() || remote_content.is_empty() { continue; }
+                    if *dry_run {
+                        println!("    {} {} ({}, by {})", "📄".dimmed(), file_path.cyan(), file_type, pushed_by.dimmed());
+                        scaffold_merged += 1;
+                        continue;
+                    }
+
+                    let local_content = std::fs::read_to_string(file_path).unwrap_or_default();
+                    if local_content.is_empty() {
+                        // New file from source branch
+                        if let Some(parent) = std::path::Path::new(file_path).parent() {
+                            let _ = std::fs::create_dir_all(parent);
+                        }
+                        let _ = std::fs::write(file_path, remote_content);
+                        scaffold_merged += 1;
+                        continue;
+                    }
+
+                    // Use merge engine
+                    match merge_engine::merge_file(file_path, &local_content, remote_content, None) {
+                        merge_engine::MergeResult::Merged(result) => {
+                            let _ = checkpoint::SnapshotStore::snapshot_file(file_path, "merge", "aura-merge");
+                            let _ = std::fs::write(file_path, result);
+                            println!("    {} {} — merged cleanly", "✓".green(), file_path.cyan());
+                            scaffold_merged += 1;
+                        }
+                        merge_engine::MergeResult::Conflicts { merged, conflict_count, conflict_details } => {
+                            let _ = checkpoint::SnapshotStore::snapshot_file(file_path, "merge_conflict", "aura-merge");
+                            let _ = std::fs::write(file_path, &merged);
+                            println!("    {} {} — {} conflict{} (markers inserted)", "⚠".yellow(), file_path.cyan(), conflict_count, if conflict_count == 1 { "" } else { "s" });
+                            for cd in &conflict_details {
+                                println!("      {} at {}", "↳".dimmed(), cd.location);
+                            }
+                            scaffold_conflicts += conflict_count;
+                        }
+                        merge_engine::MergeResult::Identical => {
+                            // Skip
+                        }
+                        merge_engine::MergeResult::CannotMerge(reason) => {
+                            println!("    {} {} — {}", "⚠".yellow(), file_path.cyan(), reason);
+                        }
+                    }
+                }
+            }
+
+            println!("\n  {} Merge complete:", "✓".green().bold());
+            println!("    Functions: {} applied, {} conflicts resolved, {} identical",
+                applied.to_string().green(), resolved, identical.len());
+            if scaffold_merged > 0 || scaffold_conflicts > 0 {
+                println!("    Files: {} merged, {} conflicts",
+                    scaffold_merged.to_string().green(), scaffold_conflicts);
+            }
             println!();
         }
         Commands::Diff { file } => {

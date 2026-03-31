@@ -244,6 +244,20 @@ CREATE TABLE IF NOT EXISTS function_body_history (
     pushed_at       TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS file_scaffolds (
+    id              TEXT PRIMARY KEY,
+    repo_id         TEXT NOT NULL,
+    branch          TEXT NOT NULL,
+    file_path       TEXT NOT NULL,
+    content_hash    TEXT NOT NULL,
+    content         TEXT NOT NULL,
+    file_type       TEXT NOT NULL DEFAULT 'code',
+    pushed_by       TEXT NOT NULL,
+    pushed_at       TEXT NOT NULL,
+    UNIQUE (repo_id, branch, file_path)
+);
+
+CREATE INDEX IF NOT EXISTS idx_file_scaffolds_repo ON file_scaffolds(repo_id, branch);
 CREATE INDEX IF NOT EXISTS idx_fbh_function ON function_body_history(repo_id, branch, file_path, function_name, pushed_at DESC);
 CREATE INDEX IF NOT EXISTS idx_fbh_repo ON function_body_history(repo_id, pushed_at DESC);
 CREATE INDEX IF NOT EXISTS idx_sentinel_zones_repo ON sentinel_zones(repo_id);
@@ -1281,4 +1295,73 @@ pub fn upvote_knowledge(conn: &Connection, knowledge_id: &str) -> SqlResult<bool
         params![knowledge_id],
     )?;
     Ok(changed > 0)
+}
+
+// ─── File Scaffold Queries ─────────────────────────────────────────────────
+
+pub fn upsert_scaffold(conn: &Connection, repo_id: &str, branch: &str, file_path: &str, content_hash: &str, content: &str, file_type: &str, pushed_by: &str) -> SqlResult<()> {
+    let id = new_id();
+    let ts = now();
+    conn.execute(
+        "INSERT INTO file_scaffolds (id, repo_id, branch, file_path, content_hash, content, file_type, pushed_by, pushed_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+         ON CONFLICT(repo_id, branch, file_path) DO UPDATE SET
+           content_hash = excluded.content_hash,
+           content = excluded.content,
+           file_type = excluded.file_type,
+           pushed_by = excluded.pushed_by,
+           pushed_at = excluded.pushed_at",
+        params![id, repo_id, branch, file_path, content_hash, content, file_type, pushed_by, ts],
+    )?;
+    Ok(())
+}
+
+#[derive(Debug, Serialize)]
+pub struct ScaffoldRow {
+    pub file_path: String,
+    pub content_hash: String,
+    pub content: String,
+    pub file_type: String,
+    pub pushed_by: String,
+    pub pushed_at: String,
+}
+
+pub fn pull_scaffolds(conn: &Connection, repo_id: &str, branch: &str, user_id: &str) -> SqlResult<Vec<ScaffoldRow>> {
+    let mut stmt = conn.prepare(
+        "SELECT s.file_path, s.content_hash, s.content, s.file_type, u.username, s.pushed_at
+         FROM file_scaffolds s JOIN users u ON s.pushed_by = u.id
+         WHERE s.repo_id = ?1 AND s.branch = ?2 AND s.pushed_by != ?3
+         ORDER BY s.pushed_at DESC"
+    )?;
+    let rows = stmt.query_map(params![repo_id, branch, user_id], |row| {
+        Ok(ScaffoldRow {
+            file_path: row.get(0)?,
+            content_hash: row.get(1)?,
+            content: row.get(2)?,
+            file_type: row.get(3)?,
+            pushed_by: row.get(4)?,
+            pushed_at: row.get(5)?,
+        })
+    })?;
+    rows.collect()
+}
+
+pub fn pull_all_scaffolds_on_branch(conn: &Connection, repo_id: &str, branch: &str) -> SqlResult<Vec<ScaffoldRow>> {
+    let mut stmt = conn.prepare(
+        "SELECT s.file_path, s.content_hash, s.content, s.file_type, u.username, s.pushed_at
+         FROM file_scaffolds s JOIN users u ON s.pushed_by = u.id
+         WHERE s.repo_id = ?1 AND s.branch = ?2
+         ORDER BY s.file_path"
+    )?;
+    let rows = stmt.query_map(params![repo_id, branch], |row| {
+        Ok(ScaffoldRow {
+            file_path: row.get(0)?,
+            content_hash: row.get(1)?,
+            content: row.get(2)?,
+            file_type: row.get(3)?,
+            pushed_by: row.get(4)?,
+            pushed_at: row.get(5)?,
+        })
+    })?;
+    rows.collect()
 }

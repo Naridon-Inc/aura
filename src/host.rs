@@ -593,6 +593,8 @@ fn build_app(state: Arc<MothershipState>) -> Router {
         .route("/live/history", get(get_function_history))
         .route("/live/trace", get(trace_function_handler))
         .route("/live/merge", get(merge_branch_handler))
+        .route("/live/scaffolds/push", post(scaffold_push_handler))
+        .route("/live/scaffolds/pull", get(scaffold_pull_handler))
         .layer(middleware::from_fn_with_state(state.clone(), auth_middleware));
 
     Router::new()
@@ -1698,10 +1700,76 @@ async fn merge_branch_handler(
     let functions = host_db::pull_all_functions_on_branch(&db, &repo.id, source_branch)
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
+    let scaffolds = host_db::pull_all_scaffolds_on_branch(&db, &repo.id, source_branch)
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
     Ok(Json(serde_json::json!({
         "status": "ok",
         "source_branch": source_branch,
         "functions": functions,
+        "scaffolds": scaffolds,
         "total": functions.len(),
+        "scaffold_count": scaffolds.len(),
     })))
+}
+
+// ─── Scaffold Push/Pull Handlers ───────────────────────────────────────────
+
+#[derive(Deserialize)]
+struct ScaffoldPushRequest {
+    repo_full_name: String,
+    branch: String,
+    scaffolds: Vec<ScaffoldPayload>,
+}
+
+#[derive(Deserialize)]
+struct ScaffoldPayload {
+    file_path: String,
+    content_hash: String,
+    content: String,
+    file_type: String,
+}
+
+async fn scaffold_push_handler(
+    State(state): State<Arc<MothershipState>>,
+    auth: axum::Extension<TokenAuth>,
+    ExtractJson(payload): ExtractJson<ScaffoldPushRequest>,
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    let db = state.db.lock().unwrap();
+    let repo = host_db::get_repo_by_name_and_org(&db, &payload.repo_full_name, &auth.org_id)
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        .ok_or(StatusCode::NOT_FOUND)?;
+
+    let mut pushed = 0;
+    for s in &payload.scaffolds {
+        if host_db::upsert_scaffold(&db, &repo.id, &payload.branch, &s.file_path, &s.content_hash, &s.content, &s.file_type, &auth.user_id).is_ok() {
+            pushed += 1;
+        }
+    }
+
+    Ok(Json(serde_json::json!({ "status": "ok", "pushed": pushed })))
+}
+
+#[derive(Deserialize)]
+struct ScaffoldPullQuery {
+    repo: Option<String>,
+    branch: Option<String>,
+}
+
+async fn scaffold_pull_handler(
+    State(state): State<Arc<MothershipState>>,
+    auth: axum::Extension<TokenAuth>,
+    Query(params): Query<ScaffoldPullQuery>,
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    let db = state.db.lock().unwrap();
+    let repo_name = params.repo.as_deref().unwrap_or("");
+    let branch = params.branch.as_deref().unwrap_or("main");
+    let repo = host_db::get_repo_by_name_and_org(&db, repo_name, &auth.org_id)
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        .ok_or(StatusCode::NOT_FOUND)?;
+
+    let scaffolds = host_db::pull_scaffolds(&db, &repo.id, branch, &auth.user_id)
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    Ok(Json(serde_json::json!({ "status": "ok", "scaffolds": scaffolds, "total": scaffolds.len() })))
 }
