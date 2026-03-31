@@ -568,6 +568,15 @@ enum SpliceResult {
 
 /// Find a function/class/struct by name in the file content and replace its body.
 /// Uses simple brace-matching for languages with braces (Rust, JS, TS, Go, Java, etc.)
+/// Public wrapper for splice_function — returns Ok(new_content) or Err(reason).
+pub fn splice_function_public(file_content: &str, function_name: &str, new_body: &str) -> Result<String, String> {
+    match splice_function(file_content, function_name, new_body) {
+        SpliceResult::Replaced(content) => Ok(content),
+        SpliceResult::NotFound => Err(format!("Function '{}' not found in file", function_name)),
+        SpliceResult::Conflict(reason) => Err(reason),
+    }
+}
+
 fn splice_function(file_content: &str, function_name: &str, new_body: &str) -> SpliceResult {
     // Strategy: Find the function signature line, then match braces to find the end
     let lines: Vec<&str> = file_content.lines().collect();
@@ -974,6 +983,89 @@ pub fn upvote_team_knowledge(id: &str) -> Result<serde_json::Value, String> {
         .map_err(|e| format!("Cloud unreachable: {}", e))?;
     resp.json::<serde_json::Value>()
         .map_err(|e| format!("Invalid response: {}", e))
+}
+
+// ─── Cross-Branch Merge ────────────────────────────────────────────────────
+
+/// Pull all function bodies from a different branch for merge.
+pub fn pull_branch_for_merge(source_branch: &str) -> Result<serde_json::Value, String> {
+    let config = ConfigManager::load();
+    let token = config.cloud_api_token
+        .or_else(|| std::env::var("AURA_CLOUD_TOKEN").ok())
+        .ok_or_else(|| "No cloud token configured".to_string())?;
+    let cloud_url = config.cloud_url
+        .unwrap_or_else(|| "https://auravcs.com".to_string());
+    let url = format!("{}/api/v1/live/merge?repo={}&source_branch={}",
+        cloud_url.trim_end_matches('/'), repo_name(), source_branch);
+
+    let client = build_cloud_client();
+    let resp = client.get(&url)
+        .header("Authorization", format!("Bearer {}", token))
+        .send()
+        .map_err(|e| format!("Cloud unreachable: {}", e))?;
+    if !resp.status().is_success() {
+        return Err(format!("Cloud returned {}", resp.status()));
+    }
+    resp.json::<serde_json::Value>()
+        .map_err(|e| format!("Invalid response: {}", e))
+}
+
+/// Merge result for a single function.
+#[derive(Debug)]
+pub enum MergeAction {
+    /// Function only exists on source branch — auto-apply (new function)
+    Add { file_path: String, function_name: String, body: String, pushed_by: String },
+    /// Function exists on both, same content — skip
+    Identical { file_path: String, function_name: String },
+    /// Function exists on both, different content — conflict
+    Conflict { file_path: String, function_name: String, local_body: String, remote_body: String, pushed_by: String },
+    /// Function only exists locally — no action (local-only)
+    LocalOnly { file_path: String, function_name: String },
+}
+
+/// Compare source branch functions against local files and classify each.
+pub fn classify_merge(remote_functions: &[serde_json::Value]) -> Vec<MergeAction> {
+    let mut actions = Vec::new();
+
+    for func in remote_functions {
+        let file_path = func["file_path"].as_str().unwrap_or("").to_string();
+        let function_name = func["function_name"].as_str().unwrap_or("").to_string();
+        let remote_body = func["body"].as_str().unwrap_or("").to_string();
+        let remote_hash = func["content_hash"].as_str().unwrap_or("").to_string();
+        let pushed_by = func["pushed_by"].as_str().unwrap_or("?").to_string();
+
+        // Read local file and try to extract the same function
+        if let Ok(local_source) = std::fs::read_to_string(&file_path) {
+            if let Some(local_body) = extract_function_body(&local_source, &function_name) {
+                // Function exists locally — compare
+                use sha2::{Digest, Sha256};
+                let mut hasher = Sha256::new();
+                hasher.update(local_body.trim().as_bytes());
+                let local_hash = hex::encode(hasher.finalize());
+
+                if local_hash == remote_hash || local_body.trim() == remote_body.trim() {
+                    actions.push(MergeAction::Identical { file_path, function_name });
+                } else {
+                    actions.push(MergeAction::Conflict {
+                        file_path, function_name,
+                        local_body, remote_body, pushed_by,
+                    });
+                }
+            } else {
+                // Function doesn't exist locally — it's new from source branch
+                actions.push(MergeAction::Add {
+                    file_path, function_name, body: remote_body, pushed_by,
+                });
+            }
+        } else {
+            // File doesn't exist locally — new file + function from source branch
+            actions.push(MergeAction::Add {
+                file_path, function_name, body: remote_body, pushed_by,
+            });
+        }
+    }
+
+    actions
 }
 
 /// Public wrapper for repo_name from live_events (for use from main.rs).

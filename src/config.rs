@@ -251,3 +251,4 @@ impl ConfigManager {
                 .unwrap_or(false)
     }
 }
+// Sync test from main machine — this should appear on M1 Max automatically

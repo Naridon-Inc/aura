@@ -592,6 +592,7 @@ fn build_app(state: Arc<MothershipState>) -> Router {
         .route("/live/knowledge/{id}/upvote", post(upvote_knowledge_handler))
         .route("/live/history", get(get_function_history))
         .route("/live/trace", get(trace_function_handler))
+        .route("/live/merge", get(merge_branch_handler))
         .layer(middleware::from_fn_with_state(state.clone(), auth_middleware));
 
     Router::new()
@@ -1672,4 +1673,35 @@ async fn trace_function_handler(
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
     Ok(Json(serde_json::json!({ "status": "ok", "entries": entries, "total": entries.len() })))
+}
+
+// ─── Merge Handler ─────────────────────────────────────────────────────────
+
+#[derive(Deserialize)]
+struct MergeQuery {
+    repo: Option<String>,
+    source_branch: Option<String>,
+}
+
+async fn merge_branch_handler(
+    State(state): State<Arc<MothershipState>>,
+    auth: axum::Extension<TokenAuth>,
+    Query(params): Query<MergeQuery>,
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    let db = state.db.lock().unwrap();
+    let repo_name = params.repo.as_deref().unwrap_or("");
+    let source_branch = params.source_branch.as_deref().unwrap_or("");
+    let repo = host_db::get_repo_by_name_and_org(&db, repo_name, &auth.org_id)
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        .ok_or(StatusCode::NOT_FOUND)?;
+
+    let functions = host_db::pull_all_functions_on_branch(&db, &repo.id, source_branch)
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    Ok(Json(serde_json::json!({
+        "status": "ok",
+        "source_branch": source_branch,
+        "functions": functions,
+        "total": functions.len(),
+    })))
 }
