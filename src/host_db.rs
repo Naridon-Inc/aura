@@ -230,6 +230,22 @@ CREATE TABLE IF NOT EXISTS team_knowledge (
 );
 
 -- Indexes
+CREATE TABLE IF NOT EXISTS function_body_history (
+    id              TEXT PRIMARY KEY,
+    repo_id         TEXT NOT NULL,
+    branch          TEXT NOT NULL,
+    file_path       TEXT NOT NULL,
+    function_name   TEXT NOT NULL,
+    function_kind   TEXT NOT NULL DEFAULT 'function',
+    content_hash    TEXT NOT NULL,
+    body            TEXT NOT NULL,
+    intent          TEXT,
+    pushed_by       TEXT NOT NULL,
+    pushed_at       TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_fbh_function ON function_body_history(repo_id, branch, file_path, function_name, pushed_at DESC);
+CREATE INDEX IF NOT EXISTS idx_fbh_repo ON function_body_history(repo_id, pushed_at DESC);
 CREATE INDEX IF NOT EXISTS idx_sentinel_zones_repo ON sentinel_zones(repo_id);
 CREATE INDEX IF NOT EXISTS idx_sentinel_zones_org ON sentinel_zones(org_id);
 CREATE INDEX IF NOT EXISTS idx_team_knowledge_org ON team_knowledge(org_id, category);
@@ -823,8 +839,26 @@ pub fn upsert_function_body(
     conn: &Connection, repo_id: &str, branch: &str, file_path: &str,
     fn_name: &str, fn_kind: &str, content_hash: &str, body: &str, pushed_by: &str,
 ) -> SqlResult<()> {
+    upsert_function_body_with_intent(conn, repo_id, branch, file_path, fn_name, fn_kind, content_hash, body, pushed_by, None)
+}
+
+pub fn upsert_function_body_with_intent(
+    conn: &Connection, repo_id: &str, branch: &str, file_path: &str,
+    fn_name: &str, fn_kind: &str, content_hash: &str, body: &str, pushed_by: &str,
+    intent: Option<&str>,
+) -> SqlResult<()> {
     let id = new_id();
     let ts = now();
+
+    // Append-only history log (for aura history / aura trace)
+    let history_id = new_id();
+    conn.execute(
+        "INSERT INTO function_body_history (id, repo_id, branch, file_path, function_name, function_kind, content_hash, body, intent, pushed_by, pushed_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+        params![history_id, repo_id, branch, file_path, fn_name, fn_kind, content_hash, body, intent, pushed_by, ts],
+    )?;
+
+    // Upsert latest version
     conn.execute(
         "INSERT INTO function_bodies (id, repo_id, branch, file_path, function_name, function_kind, content_hash, body, pushed_by, pushed_at)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
@@ -1148,6 +1182,74 @@ pub fn query_knowledge(conn: &Connection, org_id: &str, search: Option<&str>, ca
             tags,
             upvotes: row.get(10)?,
             created_at: row.get(11)?,
+        })
+    })?;
+    rows.collect()
+}
+
+// ─── Function History Queries ───────────────────────────────────────────────
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FunctionHistoryRow {
+    pub id: String,
+    pub file_path: String,
+    pub function_name: String,
+    pub function_kind: String,
+    pub content_hash: String,
+    pub intent: Option<String>,
+    pub username: String,
+    pub pushed_at: String,
+}
+
+pub fn query_function_history(conn: &Connection, repo_id: &str, file_path: Option<&str>, limit: i64) -> SqlResult<Vec<FunctionHistoryRow>> {
+    let mut sql = String::from(
+        "SELECT h.id, h.file_path, h.function_name, h.function_kind, h.content_hash, h.intent, u.username, h.pushed_at
+         FROM function_body_history h JOIN users u ON h.pushed_by = u.id
+         WHERE h.repo_id = ?1"
+    );
+    let mut params_vec: Vec<Box<dyn rusqlite::types::ToSql>> = vec![Box::new(repo_id.to_string())];
+
+    if let Some(fp) = file_path {
+        sql.push_str(" AND h.file_path = ?2");
+        params_vec.push(Box::new(fp.to_string()));
+    }
+    sql.push_str(" ORDER BY h.pushed_at DESC LIMIT ?");
+    params_vec.push(Box::new(limit));
+
+    let params_refs: Vec<&dyn rusqlite::types::ToSql> = params_vec.iter().map(|p| p.as_ref()).collect();
+    let mut stmt = conn.prepare(&sql)?;
+    let rows = stmt.query_map(params_refs.as_slice(), |row| {
+        Ok(FunctionHistoryRow {
+            id: row.get(0)?,
+            file_path: row.get(1)?,
+            function_name: row.get(2)?,
+            function_kind: row.get(3)?,
+            content_hash: row.get(4)?,
+            intent: row.get(5)?,
+            username: row.get(6)?,
+            pushed_at: row.get(7)?,
+        })
+    })?;
+    rows.collect()
+}
+
+pub fn trace_function(conn: &Connection, repo_id: &str, function_name: &str) -> SqlResult<Vec<FunctionHistoryRow>> {
+    let mut stmt = conn.prepare(
+        "SELECT h.id, h.file_path, h.function_name, h.function_kind, h.content_hash, h.intent, u.username, h.pushed_at
+         FROM function_body_history h JOIN users u ON h.pushed_by = u.id
+         WHERE h.repo_id = ?1 AND h.function_name = ?2
+         ORDER BY h.pushed_at DESC LIMIT 50"
+    )?;
+    let rows = stmt.query_map(params![repo_id, function_name], |row| {
+        Ok(FunctionHistoryRow {
+            id: row.get(0)?,
+            file_path: row.get(1)?,
+            function_name: row.get(2)?,
+            function_kind: row.get(3)?,
+            content_hash: row.get(4)?,
+            intent: row.get(5)?,
+            username: row.get(6)?,
+            pushed_at: row.get(7)?,
         })
     })?;
     rows.collect()

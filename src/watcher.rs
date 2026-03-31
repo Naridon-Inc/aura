@@ -94,6 +94,11 @@ impl ContinuousTracker {
             return;
         }
 
+        // Skip if auto-pull is writing files — prevents feedback loop
+        if Path::new(".aura/live/pull_in_progress").exists() {
+            return;
+        }
+
         if matches!(event.kind, EventKind::Modify(_) | EventKind::Create(_)) {
             for path in event.paths {
                 let path_str = path.to_string_lossy();

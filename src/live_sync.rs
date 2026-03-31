@@ -81,11 +81,14 @@ impl LiveSyncWorker {
                 break;
             }
 
-            // Drain and sync events
+            // Drain and sync events (PUSH)
             let events = LiveEventBuffer::drain();
             if !events.is_empty() {
                 self.sync_events(&events);
             }
+
+            // Auto-pull teammate changes (PULL) — the "Google Docs" half
+            self.try_auto_pull();
 
             // Heartbeat every HEARTBEAT_INTERVAL
             ticks_since_heartbeat += SYNC_INTERVAL_SECS;
@@ -205,6 +208,75 @@ impl LiveSyncWorker {
                 // Heartbeat failures are non-critical, just log
                 println!("  {} Heartbeat failed, will retry", "⚠".yellow());
             }
+        }
+    }
+
+    /// Auto-pull teammate changes every sync cycle.
+    /// Safe functions (not locally modified) are applied immediately.
+    /// Dirty functions (locally modified in last 30s) are queued for manual pull.
+    fn try_auto_pull(&self) {
+        use crate::live_events::DirtyTracker;
+
+        // Pull from mothership
+        let functions = match pull_function_bodies() {
+            Ok(resp) => {
+                match resp["functions"].as_array() {
+                    Some(f) if !f.is_empty() => f.clone(),
+                    _ => return, // Nothing to pull
+                }
+            }
+            Err(_) => return, // Network error — silent, will retry next cycle
+        };
+
+        let mut safe_functions = Vec::new();
+        let mut queued_count = 0u64;
+
+        for func in &functions {
+            let file_path = func["file_path"].as_str().unwrap_or("");
+            let function_name = func["function_name"].as_str().unwrap_or("");
+            let pushed_by = func["pushed_by"].as_str().unwrap_or("");
+
+            // Skip our own pushes (shouldn't happen due to cursor, but safety check)
+            if pushed_by == self.user {
+                continue;
+            }
+
+            if DirtyTracker::is_dirty(file_path, function_name) {
+                // Function is being locally edited — queue for manual resolution
+                queued_count += 1;
+            } else {
+                // Safe to auto-apply
+                safe_functions.push(func.clone());
+            }
+        }
+
+        // Apply safe functions with pull_in_progress lock to prevent watcher feedback
+        if !safe_functions.is_empty() {
+            let lock_path = ".aura/live/pull_in_progress";
+            let _ = std::fs::write(lock_path, "1");
+
+            let (applied, _skipped, conflicts) = apply_pulled_functions(&safe_functions);
+
+            // Remove lock after a short delay so watcher skips the inotify events
+            std::thread::sleep(Duration::from_millis(200));
+            let _ = std::fs::remove_file(lock_path);
+
+            if applied > 0 {
+                println!("  {} Auto-synced {} function{} from teammates",
+                    "🔄".cyan(), applied, if applied == 1 { "" } else { "s" });
+            }
+            for c in &conflicts {
+                println!("  {} Conflict: {}", "⚠".yellow(), c);
+            }
+        }
+
+        // Update pending queue marker
+        if queued_count > 0 {
+            let marker_dir = std::path::Path::new(".aura/live");
+            let _ = std::fs::create_dir_all(marker_dir);
+            let _ = std::fs::write(marker_dir.join("sync_pending"), queued_count.to_string());
+            println!("  {} {} function{} queued (locally modified) — run `aura pull` to resolve",
+                "⏳".yellow(), queued_count, if queued_count == 1 { "" } else { "s" });
         }
     }
 }
