@@ -43,7 +43,28 @@ pub struct AuraConfig {
     pub budget: Option<crate::usage::BudgetConfig>, // AI spending caps
     #[serde(default)]
     pub team_repos: Vec<String>, // Repos managed by the team (e.g., "MHASK/aura-sovereign")
+    #[serde(default)]
+    pub auto_responder: Option<AutoResponderConfig>, // Spawn `claude -p` on incoming aura messages
 }
+
+#[derive(Serialize, Deserialize, Clone, Default)]
+pub struct AutoResponderConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default = "default_responder_cmd")]
+    pub command: String, // e.g. "claude" — the binary to spawn
+    #[serde(default = "default_responder_cooldown")]
+    pub cooldown_secs: u64, // minimum gap between spawns
+    #[serde(default = "default_responder_daily_cap")]
+    pub daily_cap: u32, // max spawns per UTC day
+    #[serde(default)]
+    pub resume_session: Option<String>, // optional dedicated bot session id to --resume
+}
+
+fn default_responder_cmd() -> String { "claude".to_string() }
+fn default_responder_cooldown() -> u64 { 30 }
+fn default_responder_daily_cap() -> u32 { 50 }
+
 
 fn default_telemetry() -> bool { true }
 
@@ -74,6 +95,7 @@ impl Default for AuraConfig {
             telemetry_enabled: true,
             budget: None,
             team_repos: vec![],
+            auto_responder: None,
         }
     }
 }

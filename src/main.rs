@@ -34,6 +34,7 @@ mod plan_tracker;
 mod host;
 mod host_db;
 mod merge_engine;
+mod responder;
 
 use clap::{Parser, Subcommand};
 use parser::SemanticParser;
@@ -219,7 +220,7 @@ fn capture_env_fingerprint() -> Option<String> {
     ecosystem::Ecosystem::fingerprint()
 }
 
-const CURRENT_VERSION: &str = "0.14.0";
+const CURRENT_VERSION: &str = "0.14.1";
 
 /// Build an HTTP client that respects accept_self_signed for mothership TLS.
 fn cloud_http_client() -> reqwest::blocking::Client {
@@ -935,6 +936,34 @@ enum TeamSubcommands {
         #[command(subcommand)]
         sub: ZoneSubcommands,
     },
+    /// Auto-responder: spawn a background `claude -p` when team messages arrive
+    Responder {
+        #[command(subcommand)]
+        sub: ResponderSubcommands,
+    },
+}
+
+#[derive(Subcommand)]
+enum ResponderSubcommands {
+    /// Turn the auto-responder ON for this machine
+    Enable {
+        /// Binary to spawn (default: claude)
+        #[arg(long, default_value = "claude")]
+        command: String,
+        /// Minimum seconds between spawns (default: 30)
+        #[arg(long, default_value = "30")]
+        cooldown: u64,
+        /// Max spawns per UTC day (default: 50)
+        #[arg(long, default_value = "50")]
+        daily_cap: u32,
+        /// Optional dedicated bot session id to --resume
+        #[arg(long)]
+        resume_session: Option<String>,
+    },
+    /// Turn the auto-responder OFF
+    Disable,
+    /// Show responder status, cooldown, daily count
+    Status,
 }
 
 #[derive(Subcommand)]
@@ -2107,9 +2136,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
             }
 
-            // Clean up the intent session marker
-            let _ = fs::remove_file(".aura/.intent_logged");
-
             // ── Session lifecycle: link this commit to an agent session ──
             let sess = session::SessionManager::start_session(&agent_id);
             // Track all staged files in the session (from git index)
@@ -2138,6 +2164,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     println!("\n{} Commit halted.", "✗".red().bold());
                     std::process::exit(1);
                 }
+
+                // Intent was logged — consume the marker so it isn't reused for a later commit
+                let _ = fs::remove_file(".aura/.intent_logged");
 
                 // Reject the default fallback string explicitly
                 if intent.starts_with("Automatically tracked") || intent == "No semantic logic changes detected in staged files." {
@@ -5374,6 +5403,39 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             let _ = ConfigManager::save(&config);
                         }
                         println!("{} Repo '{}' is now team-managed", "✓".green().bold(), repo.cyan());
+
+                        // Also register the repo on the mothership so msg/sync routes don't 404
+                        let cloud_url = config.cloud_url.clone().unwrap_or_default();
+                        let cloud_token = config.cloud_api_token.clone().unwrap_or_default();
+                        if !cloud_url.is_empty() && !cloud_token.is_empty() {
+                            let cred_dir = directories::ProjectDirs::from("com", "naridon", "aura")
+                                .map(|d| d.config_dir().to_path_buf())
+                                .unwrap_or_else(|| std::path::PathBuf::from(std::env::var("HOME").unwrap_or_else(|_| ".".to_string())).join(".aura"));
+                            let creds: serde_json::Value = fs::read_to_string(cred_dir.join("credentials.json"))
+                                .ok()
+                                .and_then(|s| serde_json::from_str(&s).ok())
+                                .unwrap_or_default();
+                            let org_slug = creds["org_slug"].as_str().unwrap_or("");
+                            if !org_slug.is_empty() {
+                                let client = cloud_http_client();
+                                let resp = client.post(format!("{}/api/v1/orgs/{}/repos", cloud_url, org_slug))
+                                    .bearer_auth(&cloud_token)
+                                    .json(&serde_json::json!({ "repo_name": repo }))
+                                    .send();
+                                match resp {
+                                    Ok(r) if r.status().is_success() => {
+                                        println!("  {} Registered on mothership", "✓".green());
+                                    }
+                                    Ok(r) => {
+                                        println!("  {} Mothership register returned {}", "⚠".yellow(), r.status());
+                                    }
+                                    Err(e) => {
+                                        println!("  {} Could not reach mothership: {}", "⚠".yellow(), e);
+                                    }
+                                }
+                            }
+                        }
+
                         println!("  {} It will sync through the mothership", "•".dimmed());
                     }
                 }
@@ -5528,6 +5590,70 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 }
                                 Err(e) => eprintln!("{} Failed: {}", "✗".red().bold(), e),
                             }
+                        }
+                    }
+                }
+                TeamSubcommands::Responder { sub: rsub } => {
+                    match rsub {
+                        ResponderSubcommands::Enable { command, cooldown, daily_cap, resume_session } => {
+                            let mut config = ConfigManager::load();
+                            config.auto_responder = Some(config::AutoResponderConfig {
+                                enabled: true,
+                                command: command.clone(),
+                                cooldown_secs: *cooldown,
+                                daily_cap: *daily_cap,
+                                resume_session: resume_session.clone(),
+                            });
+                            let _ = ConfigManager::save(&config);
+                            println!("{} Auto-responder enabled", "✓".green().bold());
+                            println!("  {} Command:    {}", "•".dimmed(), command.cyan());
+                            println!("  {} Cooldown:   {}s", "•".dimmed(), cooldown);
+                            println!("  {} Daily cap:  {}", "•".dimmed(), daily_cap);
+                            if let Some(s) = resume_session {
+                                println!("  {} Resume:     {}", "•".dimmed(), s.cyan());
+                            }
+                            println!("\n  {} Background `{}` will spawn when team messages arrive.", "ℹ".blue(), command);
+                            println!("  {} Make sure `aura live start` is running.", "ℹ".blue());
+                        }
+                        ResponderSubcommands::Disable => {
+                            let mut config = ConfigManager::load();
+                            if let Some(r) = config.auto_responder.as_mut() {
+                                r.enabled = false;
+                            }
+                            let _ = ConfigManager::save(&config);
+                            println!("{} Auto-responder disabled", "✓".green().bold());
+                        }
+                        ResponderSubcommands::Status => {
+                            let config = ConfigManager::load();
+                            println!("\n  {} Auto-Responder", "Responder".bold());
+                            match config.auto_responder.as_ref() {
+                                Some(r) if r.enabled => {
+                                    println!("  {} Status:    {}", "●".green(), "enabled".green());
+                                    println!("  {} Command:   {}", "•".dimmed(), r.command.cyan());
+                                    println!("  {} Cooldown:  {}s", "•".dimmed(), r.cooldown_secs);
+                                    println!("  {} Daily cap: {}", "•".dimmed(), r.daily_cap);
+                                    if let Some(s) = r.resume_session.as_ref() {
+                                        println!("  {} Resume:    {}", "•".dimmed(), s.cyan());
+                                    }
+                                }
+                                _ => {
+                                    println!("  {} Status:    {}", "●".yellow(), "disabled".yellow());
+                                    println!("  {} Enable with: {}", "•".dimmed(), "aura team responder enable".cyan());
+                                }
+                            }
+                            // Show today's spawn count if state file exists
+                            if let Ok(s) = std::fs::read_to_string(".aura/live/responder_state.json") {
+                                if let Ok(v) = serde_json::from_str::<serde_json::Value>(&s) {
+                                    let count = v["daily_count"].as_u64().unwrap_or(0);
+                                    let last = v["last_spawn_at"].as_u64().unwrap_or(0);
+                                    println!("  {} Today:     {} spawn(s)", "•".dimmed(), count);
+                                    if last > 0 {
+                                        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+                                        println!("  {} Last:      {}s ago", "•".dimmed(), now.saturating_sub(last));
+                                    }
+                                }
+                            }
+                            println!();
                         }
                     }
                 }

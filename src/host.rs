@@ -1275,9 +1275,14 @@ async fn send_message(
 ) -> Result<Json<serde_json::Value>, StatusCode> {
     let db = state.db.lock().unwrap();
 
-    let repo = host_db::get_repo_by_name_and_org(&db, &payload.repo_full_name, &auth.org_id)
+    // Auto-register repo on first message — joined users shouldn't have to register manually
+    let repo = match host_db::get_repo_by_name_and_org(&db, &payload.repo_full_name, &auth.org_id)
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
-        .ok_or(StatusCode::NOT_FOUND)?;
+    {
+        Some(r) => r,
+        None => host_db::upsert_repo(&db, &auth.org_id, &payload.repo_full_name)
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?,
+    };
 
     let to_user_id: Option<String> = if let Some(ref username) = payload.to {
         host_db::get_user_by_username(&db, username)

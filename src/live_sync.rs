@@ -190,6 +190,8 @@ impl LiveSyncWorker {
                     let msg_marker = marker_dir.join("unread_messages");
                     if unread > 0 {
                         let _ = std::fs::write(&msg_marker, unread.to_string());
+                        // Auto-responder: spawn `claude -p` if enabled, cooldown clear, daily cap not hit
+                        crate::responder::maybe_spawn(unread, &self.repo);
                     } else if msg_marker.exists() {
                         let _ = std::fs::remove_file(&msg_marker);
                     }
