@@ -197,12 +197,40 @@ impl ContinuousTracker {
 
     /// Compute AST diff and emit a LiveEvent to the buffer.
     fn emit_live_event(&self, file_path: &str, new_nodes: &[crate::models::AstNode]) {
+        // Filter non-source files — screenshots, OS junk, binaries, editor temp files.
+        let fp_lower = file_path.to_lowercase();
+        let skip_exts = [
+            ".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg", ".pdf", ".mp4",
+            ".mov", ".zip", ".tar", ".tar.gz", ".tgz", ".dmg", ".ds_store",
+            ".lock", ".log", ".swp", ".swo", ".pyc", ".class",
+        ];
+        if skip_exts.iter().any(|e| fp_lower.ends_with(e))
+            || file_path.contains("/var/folders/")
+            || file_path.contains("/TemporaryItems/")
+            || file_path.contains("/.git/")
+            || file_path.contains("/node_modules/")
+            || file_path.contains("/target/")
+            || file_path.contains("/dist/")
+        {
+            return;
+        }
+
         let mut cache = self.ast_cache.lock().unwrap();
-        let changes = cache.diff_and_update(file_path, new_nodes);
+        let mut changes = cache.diff_and_update(file_path, new_nodes);
 
         if changes.is_empty() {
             return;
         }
+
+        // Enrich with AI-generated rationales (free no-op if no key or intent)
+        let (_agent, intent) = Self::get_latest_intent();
+        crate::live_events::enrich_with_rationales(&mut changes, &intent);
+
+        // Persist rationales to the commit-keyed store with a "pending" SHA.
+        // The post-commit hook (persist-checkpoint) backfills the real SHA
+        // once the commit lands, so `intent vs actual` can later join these
+        // per-symbol rationales onto a historical commit's report.
+        crate::live_events::persist_rationales(None, file_path, &changes);
 
         let change_summary: Vec<String> = changes.iter().map(|c| {
             let action = match c.change_type {
@@ -253,6 +281,7 @@ impl ContinuousTracker {
             ast_nodes,
             timestamp,
             intent_vector: None,
+            intent_vector_model: None,
             env_fingerprint: None,
         };
 

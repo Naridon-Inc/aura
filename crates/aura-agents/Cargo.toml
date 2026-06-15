@@ -1,0 +1,14 @@
+[package]
+name = "aura-agents"
+version = "0.16.3"
+edition = "2024"
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1.0.149"
+toml = "0.8"
+once_cell = "1.19"
+parking_lot = "0.12"

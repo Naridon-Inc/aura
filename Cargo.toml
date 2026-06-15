@@ -1,9 +1,44 @@
 [package]
 name = "aura"
-version = "0.14.1"
+version = "0.18.0"
 edition = "2024"
 
+# Public release workspace: the aura CLI (root package) + its vendored
+# member crates under crates/. Mirrors the modular sovereign layout.
+[workspace]
+members = ["crates/*"]
+resolver = "2"
+
 [dependencies]
+aura-toon = { path = "crates/aura-toon" }
+aura-merge = { path = "crates/aura-merge" }
+aura-agents = { path = "crates/aura-agents" }
+aura-attestation = { path = "crates/aura-attestation" }
+aura-plugin-sign = { path = "crates/aura-plugin-sign" }
+aura-blocks      = { path = "crates/aura-blocks" }
+aura-blockstore  = { path = "crates/aura-blockstore" }
+aura-loop        = { path = "crates/aura-loop" }
+aura-policy       = { path = "crates/aura-policy" }
+# Semantic CI — declarative .aura/pipelines that orchestrate the gates we
+# already own. Dependency-light + one-way: aura-ci never depends back on this
+# crate (the CLI feeds it facts via GateContext), so there is no cycle. See
+# `src/ci.rs` for the fact-gathering + wiring.
+aura-ci          = { path = "crates/aura-ci" }
+# Always-on secret/PII scrubber. Awareness events are metadata that leave the
+# local box (pushed to teammates via LiveTransport), so every outbound free-text
+# field is run through this before it is signed + persisted. See
+# `src/awareness/emit.rs`.
+aura-redact      = { path = "crates/aura-redact" }
+# Pure unified-diff line index, shared with aura-cloud so the local
+# (`aura review post`) and cloud (`/api/v2/pr/review`) PR-review paths anchor
+# inline comments to real diff lines identically. See `src/review/github.rs`.
+aura-prdiff      = { path = "crates/aura-prdiff" }
+# S1-G aura-stackgraph (Python + TypeScript find-refs/find-defs) is
+# *not* a direct dep here: stack-graphs pins tree-sitter 0.24 and our
+# parser stack pins 0.26 — `links = "tree-sitter"` collides. Wire-up
+# is via the standalone `aura-stackgraph` binary; the MCP handler
+# shells out and reads JSON over stdio. See `aura-stackgraph/src/bin/`
+# for the protocol.
 axum = "0.8.8"
 bincode = "1"
 clap = { version = "4.5.60", features = ["derive"] }
@@ -58,6 +93,28 @@ ctrlc = "3.4"
 tree-sitter-swift = "0.7.1"
 tree-sitter-kotlin-ng = "1.1.0"
 libloading = "0.8"
+tempfile = "3"
+# Used by `aura subagent spawn-bg` to call libc::setsid() in a
+# pre_exec hook so we can detach without depending on the external
+# `setsid(1)` binary (missing on macOS by default).
+libc = "0.2"
+
+# Added for src/crdt.rs + src/crypto.rs (plan W4 CRDT session + W6 E2E
+# crypto). These modules were added to src/ without touching Cargo.toml
+# and produced ~95 build errors on `feat/extract-tier1-crates`.
+yrs = "0.22"
+argon2 = "0.5"
+chacha20poly1305 = "0.10"
+rand_core = { version = "0.6", features = ["std"] }
+x25519-dalek = { version = "2", features = ["static_secrets"] }
+# src/live_ws.rs (plan W2.1b — cloud live plane WS client) and
+# src/cloud_connect.rs (device-flow login) finish the dep-gap started
+# above. `MaybeTlsStream` + `IntoClientRequest` are the 0.21 API shape.
+tungstenite = { version = "0.21", default-features = false, features = ["handshake", "rustls-tls-native-roots"] }
+webbrowser = "1"
+# src/intent_block.rs needs OffsetDateTime to construct Block timestamps.
+# aura-blocks uses it on the public API but does not re-export it.
+time = { version = "0.3", features = ["serde", "serde-well-known"] }
 
 [dev-dependencies]
 tempfile = "3"

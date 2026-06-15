@@ -1,8 +1,19 @@
 use git2::{Repository, Signature};
 use serde::{Deserialize, Serialize};
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
+
+/// Resolve the real `.git` directory, honouring worktrees where `.git`
+/// is a file pointer rather than a directory. Falls back to a literal
+/// `.git` path if we can't open the repo (e.g. aura invoked outside a
+/// repo — the subsequent write will fail loudly with a git error, which
+/// is the correct behaviour).
+fn git_dir() -> PathBuf {
+    Repository::open(".")
+        .map(|r| r.path().to_path_buf())
+        .unwrap_or_else(|_| PathBuf::from(".git"))
+}
 
 use crate::models::AstNode;
 
@@ -15,6 +26,11 @@ pub struct CheckpointData {
     pub timestamp: u64,
     #[serde(default)]
     pub intent_vector: Option<Vec<f32>>,
+    /// Which embedding model produced `intent_vector` (W1). Vectors from
+    /// different models live in different spaces — `aura ask` only compares
+    /// same-model. Additive: old checkpoints deserialize with `None`.
+    #[serde(default)]
+    pub intent_vector_model: Option<String>,
     #[serde(default)]
     pub env_fingerprint: Option<String>,
 }
@@ -78,6 +94,26 @@ impl SnapshotStore {
 
         // Prune old snapshots for this file
         Self::prune_file_snapshots(file_path);
+
+        // Best-effort cloud push (async, never blocks)
+        let config = crate::config::ConfigManager::load();
+        if config.sync_enabled && config.cloud_api_token.is_some() {
+            use sha2::{Digest, Sha256};
+            let mut hasher = Sha256::new();
+            hasher.update(snapshot.content.as_bytes());
+            let sha = format!("{:x}", hasher.finalize());
+            let size = snapshot.content.len() as u64;
+            let repo_full = git2::Repository::open(".").ok()
+                .and_then(|r| r.find_remote("origin").ok().and_then(|rem| rem.url().map(String::from)));
+            crate::sync::GlobalSync::push_snapshot(
+                &snapshot.file_path,
+                &sha,
+                size,
+                &snapshot.trigger,
+                &snapshot.agent_id,
+                repo_full.as_deref(),
+            );
+        }
 
         Ok(filename)
     }
@@ -192,24 +228,24 @@ impl CheckpointStore {
     /// Save the checkpoint data locally in a temp file during pre-commit
     pub fn stage_checkpoint(data: &CheckpointData) -> Result<(), Box<dyn std::error::Error>> {
         let json = serde_json::to_string_pretty(data)?;
-        fs::write(".git/AURA_CTX.json", json)?;
+        fs::write(git_dir().join("AURA_CTX.json"), json)?;
         Ok(())
     }
 
     /// Read the staged checkpoint data
     pub fn read_staged() -> Result<Option<CheckpointData>, Box<dyn std::error::Error>> {
-        let path = Path::new(".git/AURA_CTX.json");
+        let path = git_dir().join("AURA_CTX.json");
         if !path.exists() {
             return Ok(None);
         }
-        let json = fs::read_to_string(path)?;
+        let json = fs::read_to_string(&path)?;
         let data: CheckpointData = serde_json::from_str(&json)?;
         Ok(Some(data))
     }
 
     /// Clean up the staged checkpoint
     pub fn cleanup_staged() {
-        let _ = fs::remove_file(".git/AURA_CTX.json");
+        let _ = fs::remove_file(git_dir().join("AURA_CTX.json"));
     }
 
     /// Persist the staged checkpoint permanently into Git Notes attached to the current HEAD
@@ -316,7 +352,11 @@ impl CheckpointStore {
     // ── Shadow Branch: durable checkpoint storage that survives rebase/stash/pull ──
 
     const SHADOW_BRANCH: &'static str = "aura/checkpoints";
-    const SHADOW_SESSION_DIR: &'static str = ".git/aura-sessions";
+    /// Shadow session dir lives under the per-worktree gitdir so each
+    /// worktree tracks its own base commit independently.
+    fn shadow_session_dir() -> PathBuf {
+        git_dir().join("aura-sessions")
+    }
 
     /// Condense checkpoint + session data onto the shadow orphan branch.
     /// Called after persist-checkpoint to make data rebase-proof.
@@ -458,9 +498,10 @@ impl CheckpointStore {
     /// Reads stored base_commit from session state and compares with current HEAD.
     /// If they differ, renames the shadow branch reference.
     pub fn migrate_shadow_if_needed(repo: &Repository) -> Result<bool, Box<dyn std::error::Error>> {
-        let _ = fs::create_dir_all(Self::SHADOW_SESSION_DIR);
+        let session_dir = Self::shadow_session_dir();
+        let _ = fs::create_dir_all(&session_dir);
 
-        let state_path = format!("{}/base_commit.txt", Self::SHADOW_SESSION_DIR);
+        let state_path = session_dir.join("base_commit.txt");
         let current_head = repo.head()
             .ok()
             .and_then(|h| h.peel_to_commit().ok())

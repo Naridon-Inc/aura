@@ -1,0 +1,21 @@
+# Standalone crate with its own git repo, published independently to crates.io.
+# Vendored here as a member of the public aura workspace.
+[package]
+name = "aura-redact"
+version = "0.2.0"
+edition = "2021"
+license = "Apache-2.0"
+description = "Always-on secret & PII scrubber: 20+ credential shapes (cloud/VCS keys, JWTs, PEM, credentialed URIs) + Shannon-entropy pass with a git-SHA-safe guard, custom rule-packs, and a redaction report. Drop-in for LLM prompts, logs, telemetry."
+repository = "https://github.com/Naridon-Inc/aura-redact"
+homepage = "https://auravcs.com"
+documentation = "https://docs.rs/aura-redact"
+readme = "README.md"
+keywords = ["security", "secrets", "pii", "redaction", "llm"]
+categories = ["text-processing", "cryptography"]
+
+[lib]
+name = "aura_redact"
+path = "src/lib.rs"
+
+[dependencies]
+regex = "1"

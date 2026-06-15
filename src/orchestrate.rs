@@ -1,9 +1,21 @@
+use aura_agents::{InvokeMode, InvokeRequest, registry};
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::time::{SystemTime, UNIX_EPOCH};
 use uuid::Uuid;
+
+/// Stable id under which an `AgentType` is looked up in the
+/// `aura-agents` registry. Saved orchestration JSON keeps using the
+/// snake_case enum names for back-compat — this maps those to the
+/// runtime registry keys.
+fn agent_provider_id(agent: &AgentType) -> &'static str {
+    match agent {
+        AgentType::ClaudeCode => "claude",
+        AgentType::GeminiCli => "gemini",
+    }
+}
 
 // ─── Data Structures ────────────────────────────────────────────────────────
 
@@ -87,11 +99,22 @@ fn estimate_tokens(text: &str) -> u64 {
 }
 
 fn calculate_cost(agent: &AgentType, input_tokens: u64, output_tokens: u64) -> f64 {
-    let (input_rate, output_rate) = match agent {
-        AgentType::ClaudeCode => (CLAUDE_INPUT_COST_PER_M, CLAUDE_OUTPUT_COST_PER_M),
-        AgentType::GeminiCli => (GEMINI_INPUT_COST_PER_M, GEMINI_OUTPUT_COST_PER_M),
+    // Look up cost in the provider registry first; fall back to the
+    // legacy hardcoded constants if the provider doesn't declare a
+    // price (or registers as None — then we treat it as zero, since
+    // the Cursor agent runs against a flat-fee subscription).
+    let (input_per_m, output_per_m) = match registry().get(agent_provider_id(agent)) {
+        Some(p) => match p.cost_per_1k() {
+            Some(c) => (c.input_usd * 1000.0, c.output_usd * 1000.0),
+            None => (0.0, 0.0),
+        },
+        None => match agent {
+            AgentType::ClaudeCode => (CLAUDE_INPUT_COST_PER_M, CLAUDE_OUTPUT_COST_PER_M),
+            AgentType::GeminiCli => (GEMINI_INPUT_COST_PER_M, GEMINI_OUTPUT_COST_PER_M),
+        },
     };
-    (input_tokens as f64 / 1_000_000.0) * input_rate + (output_tokens as f64 / 1_000_000.0) * output_rate
+    (input_tokens as f64 / 1_000_000.0) * input_per_m
+        + (output_tokens as f64 / 1_000_000.0) * output_per_m
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -241,6 +264,11 @@ pub struct DuoTask {
     pub retry_count: u32,
     #[serde(default)]
     pub usage: Option<TokenUsage>,
+    /// Manager-mode short summary (~200 tokens) of this task's output.
+    /// Populated post-completion via `aura summarize-task`; consumed by
+    /// downstream tasks' prompt builders as relay context.
+    #[serde(default)]
+    pub summary: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -288,26 +316,14 @@ fn default_mode() -> OrchestrateMode { OrchestrateMode::Wave }
 // ─── Agent Availability ─────────────────────────────────────────────────────
 
 fn is_agent_available(agent: &AgentType) -> bool {
-    let cmd = match agent {
-        AgentType::ClaudeCode => "claude",
-        AgentType::GeminiCli => "gemini",
-    };
-    Command::new("which").arg(cmd).output().map(|o| o.status.success()).unwrap_or(false)
+    registry()
+        .get(agent_provider_id(agent))
+        .map(|p| p.is_available())
+        .unwrap_or(false)
 }
 
 fn get_agent_version(agent: &AgentType) -> Option<String> {
-    let cmd = match agent {
-        AgentType::ClaudeCode => "claude",
-        AgentType::GeminiCli => "gemini",
-    };
-    let output = Command::new(cmd).arg("--version").output().ok()?;
-    let ver = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    if ver.is_empty() {
-        let ver = String::from_utf8_lossy(&output.stderr).trim().to_string();
-        Some(ver.lines().next().unwrap_or("unknown").to_string())
-    } else {
-        Some(ver.lines().next().unwrap_or("unknown").to_string())
-    }
+    registry().get(agent_provider_id(agent)).and_then(|p| p.version())
 }
 
 pub fn report_agent_availability() -> Result<Vec<AgentType>, String> {
@@ -554,38 +570,45 @@ pub fn invoke_agent(
 ) -> Result<(String, Option<String>, TokenUsage), String> {
     let repo_root = get_repo_root()?;
 
-    let mut child = match agent {
-        AgentType::ClaudeCode => {
-            let mut cmd = Command::new("claude");
-            // If we have a prior session, resume it to save context tokens
-            if let Some(sid) = claude_session_id {
-                cmd.args(["--resume", sid, "-p", prompt, "--allowedTools", "Bash Edit Write Read Glob Grep"]);
-            } else {
-                cmd.args(["-p", prompt, "--allowedTools", "Bash Edit Write Read Glob Grep"]);
-            }
-            cmd.env_remove("CLAUDECODE")
-                .stdout(Stdio::piped())
-                .stderr(Stdio::piped())
-                .current_dir(&repo_root)
-                .spawn()
-                .map_err(|e| format!("Failed to spawn Claude Code: {}", e))?
-        }
-        AgentType::GeminiCli => {
-            let mut cmd = Command::new("gemini");
-            cmd.args(["-p", prompt, "--yolo"])
-                .stdout(Stdio::piped())
-                .stderr(Stdio::piped())
-                .current_dir(&repo_root);
-            // Forward Gemini API key from Aura's config if not already in env
-            if std::env::var("GEMINI_API_KEY").is_err() {
-                if let Some(key) = crate::config::ConfigManager::get_api_key("gemini") {
-                    cmd.env("GEMINI_API_KEY", key);
-                }
-            }
-            cmd.spawn()
-                .map_err(|e| format!("Failed to spawn Gemini CLI: {}", e))?
-        }
-    };
+    // Build the invocation through the provider registry. Adding a
+    // new agent CLI is a one-liner in `aura-agents` — no patches to
+    // this dispatch path.
+    let reg = registry();
+    let provider_id = agent_provider_id(agent);
+    let provider = reg
+        .get(provider_id)
+        .ok_or_else(|| format!("agent '{}' not in registry", provider_id))?;
+    let inv = provider
+        .build_invocation(&InvokeRequest {
+            prompt,
+            mode: InvokeMode::OneShot,
+            resume_session_id: claude_session_id,
+            attachments_via_stdin: false,
+            effort: None,
+            fast: false,
+            model: None,
+            approval: None,
+        })
+        .map_err(|e| format!("build invocation for {provider_id}: {e}"))?;
+
+    let mut cmd = Command::new(&inv.bin);
+    cmd.args(&inv.args)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .current_dir(&repo_root);
+    for (k, v) in &inv.env {
+        cmd.env(k, v);
+    }
+    // Claude-specific guard: prevent the spawned `claude` from picking
+    // up its own runtime breadcrumb and recursing. Not modeled in the
+    // provider trait because it's a CLI-side quirk that doesn't apply
+    // to the desktop shell's spawn path.
+    if provider_id == "claude" {
+        cmd.env_remove("CLAUDECODE");
+    }
+    let mut child = cmd
+        .spawn()
+        .map_err(|e| format!("Failed to spawn {}: {e}", provider.label()))?;
 
     // Wait with timeout — poll every 500ms
     let timeout = std::time::Duration::from_secs(timeout_secs);
@@ -1157,6 +1180,7 @@ fn json_to_duo_task(val: &serde_json::Value, id: usize, default_agent: AgentType
         completed_at: None,
         retry_count: 0,
             usage: None,
+            summary: None,
     }
 }
 
@@ -1327,6 +1351,7 @@ fn fallback_decompose(objective: &str, available: &[AgentType]) -> Vec<DuoTask> 
                     completed_at: None,
                     retry_count: 0,
                     usage: None,
+                    summary: None,
                 });
             }
             // Ensure at least one task per agent
@@ -1358,6 +1383,7 @@ fn fallback_decompose(objective: &str, available: &[AgentType]) -> Vec<DuoTask> 
             completed_at: None,
             retry_count: 0,
             usage: None,
+            summary: None,
         }];
     }
 
@@ -1384,6 +1410,7 @@ fn fallback_decompose(objective: &str, available: &[AgentType]) -> Vec<DuoTask> 
             completed_at: None,
             retry_count: 0,
             usage: None,
+            summary: None,
         });
     }
 

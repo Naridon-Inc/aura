@@ -18,10 +18,11 @@ pub struct AuraConfig {
     pub model_arbitrator: Option<String>,
 
     pub saas_token: Option<String>,
-    pub cloud_url: Option<String>,      // Cloud API URL (default: https://auravcs.com)
+    pub cloud_url: Option<String>,      // Cloud API URL (default: https://api.auravcs.com)
     pub cloud_api_token: Option<String>, // API token for cloud sync (aura_xxxx)
     #[serde(default)]
     pub accept_self_signed: bool,       // Accept self-signed TLS certs (mothership mode)
+    #[serde(default)]
     pub sync_enabled: bool,
     #[serde(default)]
     pub last_update_check: u64, // UNIX timestamp
@@ -44,8 +45,23 @@ pub struct AuraConfig {
     #[serde(default)]
     pub team_repos: Vec<String>, // Repos managed by the team (e.g., "MHASK/aura-sovereign")
     #[serde(default)]
+    pub team_repos_cloud: std::collections::HashMap<String, String>, // repo_full_name -> org_slug, for cloud-routed teams
+    #[serde(default)]
     pub auto_responder: Option<AutoResponderConfig>, // Spawn `claude -p` on incoming aura messages
+    /// Taste Engine — Phase 3 hard gate. When ON together with
+    /// `strict_gatekeeper_mode`, the pre-commit hook blocks commits
+    /// whose diff violates any taste rule with confidence ≥ the
+    /// configured threshold. Off by default — taste runs informational
+    /// even in strict mode unless the user opts in.
+    #[serde(default)]
+    pub taste_strict: bool,
+    /// Confidence floor for strict-mode taste blocking. Default 0.85
+    /// (only well-established, ≥5-weight active rules are enforced).
+    #[serde(default = "default_taste_strict_threshold")]
+    pub taste_strict_threshold: f64,
 }
+
+fn default_taste_strict_threshold() -> f64 { 0.85 }
 
 #[derive(Serialize, Deserialize, Clone, Default)]
 pub struct AutoResponderConfig {
@@ -95,7 +111,10 @@ impl Default for AuraConfig {
             telemetry_enabled: true,
             budget: None,
             team_repos: vec![],
+            team_repos_cloud: std::collections::HashMap::new(),
             auto_responder: None,
+            taste_strict: false,
+            taste_strict_threshold: 0.85,
         }
     }
 }

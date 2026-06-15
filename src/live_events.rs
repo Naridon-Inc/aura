@@ -29,6 +29,12 @@ pub struct FunctionChange {
     /// Full function body text (for sync push). Only populated when sync is active.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub content: Option<String>,
+    /// AI-generated 1-sentence WHY for this specific change. None if no AI key or generation failed.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub rationale: Option<String>,
+    /// AI-generated 1-line persistent tagline for what this node does. None until first successful call.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub summary: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
@@ -104,6 +110,8 @@ impl AstStateCache {
                             new_hash: Some(new.content_hash.clone()),
                             dependencies: new.dependencies.clone(),
                             content: None,
+                            rationale: None,
+                            summary: None,
                         });
                     }
                 } else {
@@ -116,6 +124,8 @@ impl AstStateCache {
                         new_hash: Some(new.content_hash.clone()),
                         dependencies: new.dependencies.clone(),
                         content: None,
+                        rationale: None,
+                        summary: None,
                     });
                 }
             } else if self.initial_scan_done {
@@ -128,6 +138,8 @@ impl AstStateCache {
                     new_hash: Some(new.content_hash.clone()),
                     dependencies: new.dependencies.clone(),
                     content: None,
+                    rationale: None,
+                    summary: None,
                 });
             }
             // else: initial scan — don't emit "added" to avoid noise
@@ -145,6 +157,8 @@ impl AstStateCache {
                         new_hash: None,
                         dependencies: old.dependencies.clone(),
                         content: None,
+                        rationale: None,
+                        summary: None,
                     });
                 }
             }
@@ -282,17 +296,237 @@ impl LiveEventBuffer {
     }
 }
 
+// ─── Commit-keyed rationale store ──────────────────────────────────────────
+// The live events buffer (events.jsonl) carries rationales keyed by event_id,
+// not by commit SHA — so once a commit lands you can't retrieve "why did
+// function X change in commit <sha>?". This store closes that gap: rationales
+// are written keyed by commit SHA (or "pending" pre-commit) into a durable
+// append-only log, then the SHA is backfilled in the post-commit hook once it
+// becomes known. intent_vs_actual joins against it at report time.
+
+/// A rationale/summary row pinned to the commit it belongs to.
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct CommitRationale {
+    /// Full commit SHA, or "pending" until backfilled post-commit.
+    pub commit_sha: String,
+    pub timestamp: u64,
+    pub function_name: String,
+    pub kind: String,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub rationale: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub summary: Option<String>,
+}
+
+impl CommitRationale {
+    const STORE_FILE: &'static str = ".aura/commit_rationales.jsonl";
+    /// Sentinel SHA used until the real commit hash is known (post-commit).
+    pub const PENDING_SHA: &'static str = "pending";
+}
+
+/// Persist a batch of FunctionChange rationales to the commit-keyed store.
+///
+/// `commit_sha` is the known SHA when available; pass `None` from the
+/// pre-commit / live path where the hash doesn't exist yet — rows are then
+/// written with the "pending" sentinel and rewritten by `backfill_commit_shas`
+/// from the post-commit hook. Only changes that actually carry a rationale or
+/// summary are written (an un-enriched change has nothing to retrieve later).
+///
+/// Append-only and best-effort: any IO error is swallowed so this never blocks
+/// or aborts a commit. `file_path` is recorded as context in the kind field's
+/// sibling — kept on FunctionChange — but not required for the join, which is
+/// by function name within a SHA.
+pub fn persist_rationales(commit_sha: Option<&str>, _file_path: &str, changes: &[FunctionChange]) {
+    let to_write: Vec<&FunctionChange> = changes
+        .iter()
+        .filter(|c| c.rationale.is_some() || c.summary.is_some())
+        .collect();
+    if to_write.is_empty() {
+        return;
+    }
+
+    let _ = fs::create_dir_all(".aura");
+    let file = match fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(CommitRationale::STORE_FILE)
+    {
+        Ok(f) => f,
+        Err(_) => return,
+    };
+    let mut writer = BufWriter::new(file);
+
+    let sha = commit_sha
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| CommitRationale::PENDING_SHA.to_string());
+    let ts = now_ms() / 1000;
+
+    for c in to_write {
+        let row = CommitRationale {
+            commit_sha: sha.clone(),
+            timestamp: ts,
+            function_name: c.name.clone(),
+            kind: c.kind.clone(),
+            rationale: c.rationale.clone(),
+            summary: c.summary.clone(),
+        };
+        if let Ok(json) = serde_json::to_string(&row) {
+            let _ = writeln!(writer, "{}", json);
+        }
+    }
+    let _ = writer.flush();
+}
+
+/// Replace every "pending" commit_sha in the store with the real `commit_sha`.
+///
+/// Called from the post-commit hook once HEAD points at the freshly-created
+/// commit. Rewrites the whole file in place (the store is small — one batch of
+/// function-level rows per commit). Rows already pinned to a real SHA are left
+/// untouched, so re-running the hook is idempotent. Best-effort: a read/write
+/// failure leaves the store as-is rather than aborting the post-commit flow.
+pub fn backfill_commit_shas(commit_sha: &str) {
+    let path = Path::new(CommitRationale::STORE_FILE);
+    let content = match fs::read_to_string(path) {
+        Ok(c) => c,
+        Err(_) => return, // no store yet → nothing to backfill
+    };
+
+    let mut rows: Vec<CommitRationale> = Vec::new();
+    let mut changed = false;
+    for line in content.lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        match serde_json::from_str::<CommitRationale>(line) {
+            Ok(mut row) => {
+                if row.commit_sha == CommitRationale::PENDING_SHA {
+                    row.commit_sha = commit_sha.to_string();
+                    changed = true;
+                }
+                rows.push(row);
+            }
+            // Preserve unparseable lines verbatim would be ideal, but a
+            // corrupt row can't be re-typed; drop only if we're rewriting.
+            Err(_) => {}
+        }
+    }
+
+    if !changed {
+        return; // nothing pending — avoid a needless rewrite
+    }
+
+    let mut buf = String::new();
+    for row in &rows {
+        if let Ok(json) = serde_json::to_string(row) {
+            buf.push_str(&json);
+            buf.push('\n');
+        }
+    }
+    let _ = fs::write(path, buf);
+}
+
+/// Enrich a set of FunctionChange entries with AI-generated rationales + summaries.
+/// Mutates each change in place. Silent no-op if no AI key is configured, the intent
+/// is empty, changes is empty, or the call/parse fails. Never blocks commits.
+pub fn enrich_with_rationales(changes: &mut [FunctionChange], intent: &str) {
+    if changes.is_empty() || intent.trim().is_empty() {
+        return;
+    }
+
+    // Baseline: the user's stated intent is itself a valid rationale for every
+    // change. AI enrichment below can override with more specific per-function
+    // reasoning, but if no key is set / the call fails, the raw intent still
+    // shows up in the dashboard instead of a generic "X modified Y" fallback.
+    let intent_trimmed = intent.trim().to_string();
+    for c in changes.iter_mut() {
+        if c.rationale.is_none() {
+            c.rationale = Some(intent_trimmed.clone());
+        }
+    }
+
+    let cfg = crate::config::ConfigManager::load();
+    let has_key = cfg.gemini_api_key.is_some()
+        || cfg.anthropic_api_key.is_some()
+        || cfg.openai_api_key.is_some()
+        || cfg.mercury_api_key.is_some();
+    if !has_key {
+        return;
+    }
+
+    // Compact input: one line per change to keep prompt small.
+    let mut lines = String::new();
+    for c in changes.iter() {
+        let action = match c.change_type {
+            ChangeType::Added => "added",
+            ChangeType::Modified => "modified",
+            ChangeType::Deleted => "deleted",
+        };
+        lines.push_str(&format!("- {} {} {}\n", action, c.kind, c.name));
+    }
+
+    let system = "You explain code changes. For each function below, write ONE concise sentence (under 20 words) explaining WHY it changed, grounded in the stated intent. Also write a persistent one-line summary of what the function does. Output STRICT JSON only, no prose: {\"<fn_name>\": {\"reason\": \"...\", \"summary\": \"...\"}}. Keys must exactly match the function names given.";
+    let user = format!("Intent: {}\n\nChanges:\n{}", intent, lines);
+
+    let raw = match crate::gsd::GsdEngine::generate_content(
+        system,
+        &user,
+        0.2,
+        crate::gsd::CognitiveLabor::Researcher,
+    ) {
+        Some(s) => s,
+        None => return,
+    };
+
+    // LLMs often wrap JSON in ```json ... ``` fences — strip them.
+    let trimmed = raw.trim();
+    let cleaned = trimmed
+        .trim_start_matches("```json")
+        .trim_start_matches("```")
+        .trim_end_matches("```")
+        .trim();
+
+    let parsed: serde_json::Value = match serde_json::from_str(cleaned) {
+        Ok(v) => v,
+        Err(_) => return,
+    };
+    let obj = match parsed.as_object() {
+        Some(o) => o,
+        None => return,
+    };
+
+    for c in changes.iter_mut() {
+        if let Some(entry) = obj.get(&c.name).and_then(|v| v.as_object()) {
+            if let Some(r) = entry.get("reason").and_then(|v| v.as_str()) {
+                c.rationale = Some(r.trim().to_string());
+            }
+            if let Some(s) = entry.get("summary").and_then(|v| v.as_str()) {
+                c.summary = Some(s.trim().to_string());
+            }
+        }
+    }
+}
+
 /// Helper to get current git branch name.
 pub fn current_branch() -> String {
     let repo = match git2::Repository::discover(".") {
         Ok(r) => r,
         Err(_) => return "unknown".to_string(),
     };
-    let head = match repo.head() {
-        Ok(h) => h,
-        Err(_) => return "unknown".to_string(),
-    };
-    head.shorthand().unwrap_or("unknown").to_string()
+    if let Ok(head) = repo.head() {
+        if let Some(name) = head.shorthand() {
+            return name.to_string();
+        }
+    }
+    // Unborn HEAD (fresh `git init` with no commits): parse .git/HEAD symbolic-ref.
+    let head_path = repo.path().join("HEAD");
+    if let Ok(content) = std::fs::read_to_string(&head_path) {
+        let trimmed = content.trim();
+        if let Some(rest) = trimmed.strip_prefix("ref: refs/heads/") {
+            return rest.to_string();
+        }
+    }
+    "unknown".to_string()
 }
 
 /// Helper to get repo name from git remote (e.g., "Naridon-Inc/aura").

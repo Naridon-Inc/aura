@@ -105,7 +105,7 @@ impl SemanticParser {
 
         let root_node = tree.root_node();
         let mut extracted_nodes = Vec::new();
-        self.walk_ast(&root_node, source_code, ext, &mut extracted_nodes);
+        self.walk_ast(&root_node, source_code, ext, false, &mut extracted_nodes);
 
         Ok(extracted_nodes)
     }
@@ -208,9 +208,41 @@ impl SemanticParser {
         }
     }
 
-    /// Recursively walks the AST to find semantic blocks (functions, classes, structs)
-    fn walk_ast(&self, node: &Node, source_code: &str, ext: &str, extracted_nodes: &mut Vec<AstNode>) {
+    /// Recursively walks the AST to find semantic blocks (functions, classes, structs).
+    ///
+    /// `in_callable` is true once the walk has descended into a function /
+    /// closure / method *body*. Symbols captured while it's set are body-locals
+    /// (loop counters, temporaries, inline helpers) — they're still extracted
+    /// for the graph, but flagged `top_level: false` so surfaces like the
+    /// change-note card can list only the module-level/class-member symbols a
+    /// reader actually cares about. A class body does NOT set it: methods stay
+    /// top-level.
+    fn walk_ast(&self, node: &Node, source_code: &str, ext: &str, in_callable: bool, extracted_nodes: &mut Vec<AstNode>) {
         let kind = node.kind();
+
+        // A node whose *body* makes its descendants locals. Mirrors the target
+        // blocks below but only the callable ones — classes/structs/modules are
+        // excluded so their members keep `top_level: true`.
+        let node_is_callable = match ext {
+            "py" => kind == "function_definition" || kind == "lambda",
+            "rs" => kind == "function_item" || kind == "closure_expression",
+            "ts" | "tsx" | "js" | "jsx" => matches!(
+                kind,
+                "function_declaration"
+                    | "arrow_function"
+                    | "function_expression"
+                    | "generator_function"
+                    | "generator_function_declaration"
+                    | "method_definition"
+            ),
+            "go" => kind == "function_declaration" || kind == "method_declaration" || kind == "func_literal",
+            "java" | "cs" => kind == "method_declaration" || kind == "constructor_declaration",
+            "rb" => kind == "method" || kind == "singleton_method",
+            "cpp" | "cc" | "cxx" | "hpp" | "c" | "h" => kind == "function_definition",
+            "php" => kind == "function_definition" || kind == "method_declaration",
+            "swift" | "kt" | "kts" => kind == "function_declaration",
+            _ => false,
+        };
 
         // Language-specific logic blocks
         let is_target_block = match ext {
@@ -356,13 +388,16 @@ impl SemanticParser {
                 end_line: Some(end_line),
                 signature,
                 doc_comment,
+                top_level: !in_callable,
             });
         }
 
-        // Walk deeper
+        // Walk deeper. Once we're inside a callable's body, every descendant is
+        // a local — propagate the flag so the recursion stays sticky.
+        let child_in_callable = in_callable || node_is_callable;
         let mut cursor = node.walk();
         for child in node.children(&mut cursor) {
-            self.walk_ast(&child, source_code, ext, extracted_nodes);
+            self.walk_ast(&child, source_code, ext, child_in_callable, extracted_nodes);
         }
     }
 

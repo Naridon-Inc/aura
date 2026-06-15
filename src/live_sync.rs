@@ -65,7 +65,23 @@ impl LiveSyncWorker {
     }
 
     /// Start the sync loop in a background thread. Returns the join handle.
+    ///
+    /// Also spawns the WS client thread (W2.1b) — it runs independently
+    /// and fails closed (HTTP polling here still works if the WS connect
+    /// cannot be established).
     pub fn start(self) -> thread::JoinHandle<()> {
+        let _ = crate::live_ws::spawn(
+            self.cloud_url.clone(),
+            self.cloud_token.clone(),
+            self.running.clone(),
+        );
+        // Spawn the whole-file CRDT daemon whenever CRDT is the writer for this
+        // repo (cloud-routed, or Go Live turned it on) — not only when
+        // cloud-routed. While it runs it owns the bytes; the function-body pull
+        // below demotes itself to detection-only on the same predicate.
+        if crate::crdt_daemon::live_crdt_enabled() {
+            let _ = crate::crdt_daemon::spawn(self.running.clone());
+        }
         thread::spawn(move || {
             self.run_loop();
         })
@@ -87,6 +103,9 @@ impl LiveSyncWorker {
                 self.sync_events(&events);
             }
 
+            // Retry any outbox entries queued from prior failures
+            self.drain_outbox();
+
             // Auto-pull teammate changes (PULL) — the "Google Docs" half
             self.try_auto_pull();
 
@@ -98,20 +117,28 @@ impl LiveSyncWorker {
             }
         }
 
-        // Final drain on shutdown
+        // Final drain on shutdown — in-memory buffer first, then outbox.
         let remaining = LiveEventBuffer::drain();
         if !remaining.is_empty() {
             self.sync_events(&remaining);
         }
+        self.drain_outbox();
     }
 
     fn sync_events(&self, events: &[LiveEvent]) {
+        // Pull the most recent prose intent (if any) from .aura/intent_log.jsonl
+        // and attach it as the rationale for any change that doesn't have one
+        // yet. Without this fallback, dashboard "Intent Log" rows fall back
+        // to AST-diff summaries ("1 added: foo in bar.rs") even though the
+        // agent logged full prose via `aura_log_intent`.
+        let latest_prose = read_latest_intent_prose(30 * 60); // 30min window
         let event_data: Vec<serde_json::Value> = events.iter().map(|e| {
             json!({
                 "event_id": e.event_id,
                 "branch": e.branch,
                 "file_path": e.file_path,
                 "changes": e.changes.iter().map(|c| {
+                    let rationale = c.rationale.clone().or_else(|| latest_prose.clone());
                     json!({
                         "name": c.name,
                         "kind": c.kind,
@@ -119,6 +146,8 @@ impl LiveSyncWorker {
                         "old_hash": c.old_hash,
                         "new_hash": c.new_hash,
                         "dependencies": c.dependencies,
+                        "rationale": rationale,
+                        "summary": c.summary,
                     })
                 }).collect::<Vec<_>>(),
             })
@@ -140,18 +169,82 @@ impl LiveSyncWorker {
                 println!("  {} Synced {} events to Aura Cloud", "☁".cyan(), events.len());
             }
             Ok(resp) => {
-                println!("  {} Cloud sync failed ({}), events buffered locally",
-                    "⚠".yellow(), resp.status());
-                // Re-buffer the events so they aren't lost
-                for event in events {
-                    let _ = LiveEventBuffer::append(event);
+                let status = resp.status();
+                if status.is_client_error() {
+                    println!("  {} Cloud rejected events ({}), dropping (4xx poison)",
+                        "⚠".yellow(), status);
+                } else {
+                    println!("  {} Cloud sync failed ({}), queued to outbox",
+                        "⚠".yellow(), status);
+                    let _ = crate::outbox::enqueue(
+                        crate::outbox::OutboxKind::Event,
+                        payload.clone(),
+                    );
                 }
             }
             Err(e) => {
-                println!("  {} Cloud unreachable ({}), operating offline",
+                println!("  {} Cloud unreachable ({}), queued to outbox",
                     "⚠".yellow(), e);
-                for event in events {
-                    let _ = LiveEventBuffer::append(event);
+                let _ = crate::outbox::enqueue(
+                    crate::outbox::OutboxKind::Event,
+                    payload.clone(),
+                );
+            }
+        }
+    }
+
+    /// Drain the file-backed outbox and retry each payload against the cloud.
+    /// 2xx → ack; 4xx → drop (poison); 5xx/network → leave queued.
+    fn drain_outbox(&self) {
+        let entries = crate::outbox::drain(None);
+        if entries.is_empty() {
+            return;
+        }
+        for loaded in entries {
+            // Respect per-entry retry backoff: an entry that keeps failing
+            // (down cloud, persistent 5xx, or a kind with no endpoint yet)
+            // waits progressively longer between retries instead of being
+            // re-POSTed every 5s. Nothing is dropped — it resumes the moment
+            // the cloud recovers. Explicit `aura` drains skip this gate.
+            if crate::outbox::is_backing_off(&loaded.entry) {
+                continue;
+            }
+            let kind = match crate::outbox::OutboxKind::from_str(&loaded.entry.kind) {
+                Some(k) => k,
+                None => continue,
+            };
+            let url = match kind {
+                crate::outbox::OutboxKind::Event =>
+                    format!("{}/api/v1/live/events", self.cloud_url),
+                crate::outbox::OutboxKind::Message =>
+                    format!("{}/api/v1/live/messages", self.cloud_url),
+                crate::outbox::OutboxKind::SyncPush =>
+                    format!("{}/api/v1/live/sync/push", self.cloud_url),
+                crate::outbox::OutboxKind::Impact =>
+                    format!("{}/api/v1/live/impacts", self.cloud_url),
+                crate::outbox::OutboxKind::Intent =>
+                    format!("{}/api/v1/live/intents", self.cloud_url),
+                // Kinds without a stable v1 endpoint yet — leave queued for
+                // later waves (W2+) to handle.
+                _ => continue,
+            };
+            match self.client.post(&url)
+                .header("Authorization", format!("Bearer {}", self.cloud_token))
+                .json(&loaded.entry.body)
+                .send()
+            {
+                Ok(resp) if resp.status().is_success() => {
+                    let _ = crate::outbox::ack(&loaded.path);
+                }
+                Ok(resp) if resp.status().is_client_error() => {
+                    // Poison pill — drop so it doesn't block the queue.
+                    let _ = crate::outbox::ack(&loaded.path);
+                    println!("  {} Outbox entry rejected ({}), dropped",
+                        "⚠".yellow(), resp.status());
+                }
+                _ => {
+                    // 5xx / network — leave queued, bump attempt count.
+                    let _ = crate::outbox::bump_attempt(&loaded.path);
                 }
             }
         }
@@ -230,6 +323,13 @@ impl LiveSyncWorker {
             Err(_) => return, // Network error — silent, will retry next cycle
         };
 
+        // Capture the ancestor hashes BEFORE overwriting the cache with the
+        // freshly pulled ones — this is the common base a divergence forked
+        // from, recorded on any conflict below.
+        let parent_hash_cache = load_parent_hash_cache();
+        // W3: refresh parent_hash cache for next push.
+        update_parent_hash_cache_from_pull(&functions);
+
         let mut safe_functions = Vec::new();
         let mut queued_count = 0u64;
 
@@ -244,8 +344,36 @@ impl LiveSyncWorker {
             }
 
             if DirtyTracker::is_dirty(file_path, function_name) {
-                // Function is being locally edited — queue for manual resolution
+                // Function is being locally edited AND a teammate pushed a new
+                // body for it → a same-node divergence. Queue it for manual
+                // resolution and record a durable first-class ConflictedNode
+                // (jj-style) so it survives until a human resolves it, rather
+                // than being silently merged across the logic boundary.
                 queued_count += 1;
+                if let (Some(remote_body), Ok(local_src)) =
+                    (pulled_body(func), std::fs::read_to_string(file_path))
+                {
+                    if let Some(local_body) = extract_function_body(&local_src, function_name) {
+                        if local_body.trim() != remote_body.trim() {
+                            let base_hash = parent_hash_cache
+                                .get(&parent_hash_key(file_path, function_name))
+                                .cloned()
+                                .or_else(|| {
+                                    func["content_hash"].as_str().map(|s| s.to_string())
+                                })
+                                .unwrap_or_default();
+                            crate::live_conflicts::record_conflict(
+                                file_path,
+                                function_name,
+                                &base_hash,
+                                &local_body,
+                                &remote_body,
+                                &git_user(),
+                                pushed_by,
+                            );
+                        }
+                    }
+                }
             } else {
                 // Safe to auto-apply
                 safe_functions.push(func.clone());
@@ -382,6 +510,17 @@ pub fn fetch_team_messages(limit: usize) -> Result<serde_json::Value, String> {
 
 /// Push function bodies to Aura Cloud for sync.
 pub fn push_function_bodies(functions: &[SyncFunctionPayload]) -> Result<serde_json::Value, String> {
+    // AURA-15: function bodies are un-pushed CODE — only the `diffs` privacy
+    // level may ship them off the box. Pull stays ungated (inbound leaks
+    // nothing); only the outbound direction is policy-checked.
+    let policy = crate::awareness::policy::load();
+    if !policy.allows_code_sync() {
+        return Err(format!(
+            "privacy policy '{}' blocks function-body sync — run `aura radar privacy diffs` to allow sharing un-pushed code",
+            policy.as_str()
+        ));
+    }
+
     let config = ConfigManager::load();
     let token = config.cloud_api_token
         .or_else(|| std::env::var("AURA_CLOUD_TOKEN").ok())
@@ -395,10 +534,39 @@ pub fn push_function_bodies(functions: &[SyncFunctionPayload]) -> Result<serde_j
     let repo = repo_name();
     let branch = current_branch();
 
+    // W3: hydrate parent_hash from the last-pulled hash cache so the
+    // server can detect stale-parent conflicts.
+    let parent_cache = load_parent_hash_cache();
+    let functions: Vec<SyncFunctionPayload> = functions.iter().map(|f| {
+        let mut out = f.clone();
+        if out.parent_hash.is_none() {
+            let key = parent_hash_key(&f.file_path, &f.function_name);
+            out.parent_hash = parent_cache.get(&key).cloned();
+        }
+        // W6: if the user has unlocked an org content key, seal the body
+        // and clear the plaintext before it leaves the machine. Server
+        // stores only ciphertext for E2E orgs.
+        if let Some((ct, nonce, ver)) = crate::crypto::maybe_seal_body(out.body.as_bytes()) {
+            out.body_ciphertext_b64 = Some(ct);
+            out.body_nonce_b64 = Some(nonce);
+            out.body_key_version = Some(ver);
+            out.body.clear();
+        }
+        out
+    }).collect();
+
+    // W5: run build verification locally before attaching the push.
+    // We give it a 30s budget; `skipped` is safe (no matching adapter).
+    let build = crate::build_verify::verify(30);
+    let force_red = std::env::var("AURA_FORCE_RED").is_ok();
+
     let payload = json!({
         "repo_full_name": repo,
         "branch": branch,
         "functions": functions,
+        "build_status": build.status,
+        "build_checks": build.checks,
+        "force_red": force_red,
     });
 
     let client = build_cloud_client();
@@ -409,6 +577,11 @@ pub fn push_function_bodies(functions: &[SyncFunctionPayload]) -> Result<serde_j
         .send()
         .map_err(|e| format!("Cloud unreachable: {}", e))?;
 
+    if resp.status() == reqwest::StatusCode::CONFLICT {
+        return Err(
+            "build verification red — push blocked. Fix failing checks or set AURA_FORCE_RED=1 to push anyway.".into(),
+        );
+    }
     if !resp.status().is_success() {
         return Err(format!("Cloud returned {}", resp.status()));
     }
@@ -419,6 +592,12 @@ pub fn push_function_bodies(functions: &[SyncFunctionPayload]) -> Result<serde_j
 
 /// Pull function bodies from other developers since last cursor.
 pub fn pull_function_bodies() -> Result<serde_json::Value, String> {
+    pull_function_bodies_opts(false)
+}
+
+/// W5: `allow_red=true` asks the server to include rows the author flagged
+/// as a broken build. Default false so `aura pull` keeps your tree green.
+pub fn pull_function_bodies_opts(allow_red: bool) -> Result<serde_json::Value, String> {
     let config = ConfigManager::load();
     let token = config.cloud_api_token
         .or_else(|| std::env::var("AURA_CLOUD_TOKEN").ok())
@@ -428,8 +607,12 @@ pub fn pull_function_bodies() -> Result<serde_json::Value, String> {
         .unwrap_or_else(|| "https://auravcs.com".to_string());
     let repo = repo_name();
     let branch = current_branch();
-    let url = format!("{}/api/v1/live/sync/pull?repo={}&branch={}",
-        cloud_url.trim_end_matches('/'), repo, branch);
+    let url = format!("{}/api/v1/live/sync/pull?repo={}&branch={}&allow_red={}",
+        cloud_url.trim_end_matches('/'), repo, branch, allow_red);
+
+    if std::env::var("AURA_TRACE").is_ok() {
+        eprintln!("  [trace] pull GET {}", url);
+    }
 
     let client = build_cloud_client();
 
@@ -438,11 +621,20 @@ pub fn pull_function_bodies() -> Result<serde_json::Value, String> {
         .send()
         .map_err(|e| format!("Cloud unreachable: {}", e))?;
 
-    if !resp.status().is_success() {
-        return Err(format!("Cloud returned {}", resp.status()));
+    let status = resp.status();
+    if !status.is_success() {
+        let body = resp.text().unwrap_or_default();
+        return Err(format!("Cloud returned {} — {}", status, body));
     }
 
-    resp.json::<serde_json::Value>()
+    let body_text = resp.text()
+        .map_err(|e| format!("Failed to read response body: {}", e))?;
+    if std::env::var("AURA_TRACE").is_ok() {
+        eprintln!("  [trace] pull response ({} bytes): {}",
+            body_text.len(),
+            &body_text[..body_text.len().min(400)]);
+    }
+    serde_json::from_str::<serde_json::Value>(&body_text)
         .map_err(|e| format!("Invalid JSON response: {}", e))
 }
 
@@ -475,21 +667,110 @@ pub fn fetch_sync_status() -> Result<serde_json::Value, String> {
         .map_err(|e| format!("Invalid JSON response: {}", e))
 }
 
+// ── W3 parent-hash cache ──────────────────────────────────────────────────
+// `.aura/live/parent_hashes.json` maps "<file_path>::<fn_name>" → last
+// content_hash the server showed us. Written on pull, read on push so
+// the server can detect stale-parent conflicts.
+
+fn parent_hash_cache_path() -> std::path::PathBuf {
+    std::path::PathBuf::from(".aura/live/parent_hashes.json")
+}
+
+pub fn parent_hash_key(file_path: &str, function_name: &str) -> String {
+    format!("{}::{}", file_path, function_name)
+}
+
+pub fn load_parent_hash_cache() -> std::collections::HashMap<String, String> {
+    let path = parent_hash_cache_path();
+    match std::fs::read_to_string(&path) {
+        Ok(s) => serde_json::from_str(&s).unwrap_or_default(),
+        Err(_) => std::collections::HashMap::new(),
+    }
+}
+
+pub fn save_parent_hash_cache(cache: &std::collections::HashMap<String, String>) {
+    let path = parent_hash_cache_path();
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    if let Ok(s) = serde_json::to_string(cache) {
+        let _ = std::fs::write(&path, s);
+    }
+}
+
+/// Record each pulled function's hash so subsequent pushes can cite it
+/// as `parent_hash`.
+pub fn update_parent_hash_cache_from_pull(functions: &[serde_json::Value]) {
+    let mut cache = load_parent_hash_cache();
+    for f in functions {
+        let (Some(fp), Some(fn_name), Some(hash)) = (
+            f["file_path"].as_str(),
+            f["function_name"].as_str(),
+            f["content_hash"].as_str(),
+        ) else { continue };
+        cache.insert(parent_hash_key(fp, fn_name), hash.to_string());
+    }
+    save_parent_hash_cache(&cache);
+}
+
 /// Payload for pushing function bodies to cloud.
-#[derive(serde::Serialize)]
+#[derive(Clone, Default, serde::Serialize)]
 pub struct SyncFunctionPayload {
     pub file_path: String,
     pub function_name: String,
     pub function_kind: String,
     pub content_hash: String,
     pub body: String,
+    /// W6: populated when the repo's org has E2E enabled and the user has
+    /// unlocked their wrapped content key. When present, `body` is empty
+    /// and the server stores only ciphertext.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub body_ciphertext_b64: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub body_nonce_b64: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub body_key_version: Option<i32>,
+    /// W3: hash the author based this edit on. Populated from the last
+    /// pulled hash cache (`.aura/live/parent_hashes.json`) so the server
+    /// can detect stale-parent conflicts on `sync_push`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_hash: Option<String>,
+}
+
+/// Extract the usable function body from a pulled record: prefer ciphertext if
+/// present and the org content key is cached (E2E orgs), else the plaintext
+/// `body`. Returns None when neither is available/usable.
+pub fn pulled_body(func: &serde_json::Value) -> Option<String> {
+    let decrypted: Option<String> = func["body_ciphertext_b64"].as_str().and_then(|ct_b64| {
+        let nonce_b64 = func["body_nonce_b64"].as_str()?;
+        let key_ver = func["body_key_version"].as_i64()? as i32;
+        crate::crypto::decrypt_for_active(ct_b64, nonce_b64, key_ver).ok()
+    });
+    match decrypted {
+        Some(s) => Some(s),
+        None => match func["body"].as_str() {
+            Some(b) if !b.is_empty() => Some(b.to_string()),
+            _ => None,
+        },
+    }
 }
 
 /// Apply pulled function bodies to local files using AST-level splice.
 /// Returns (applied_count, skipped_count, conflicts).
+///
+/// When whole-file CRDT is the disk writer (`crdt_daemon::live_crdt_enabled`)
+/// this runs in *detection-only* mode: the CRDT daemon already materialises
+/// teammate edits, so we must not splice/write the same bytes — that double
+/// write is the two-writer clobber. (Same-function semantic conflicts are
+/// surfaced as durable ConflictedNodes from `try_auto_pull`'s dirty branch,
+/// where the local node is known to have diverged.) Assumes peers run the same
+/// unified engine; a peer that only pushes function bodies and never whole-file
+/// CRDT ops would not have its edits applied in this mode.
 pub fn apply_pulled_functions(
     functions: &[serde_json::Value],
 ) -> (usize, usize, Vec<String>) {
+    let crdt_writer = crate::crdt_daemon::live_crdt_enabled();
+
     let mut applied = 0;
     let mut skipped = 0;
     let mut conflicts = Vec::new();
@@ -503,12 +784,19 @@ pub fn apply_pulled_functions(
             Some(n) => n,
             None => { skipped += 1; continue; }
         };
-        let new_body = match func["body"].as_str() {
+        let new_body_owned = match pulled_body(func) {
             Some(b) => b,
             None => { skipped += 1; continue; }
         };
-        let remote_hash = func["content_hash"].as_str().unwrap_or("");
+        let new_body: &str = &new_body_owned;
         let pushed_by = func["pushed_by"].as_str().unwrap_or("unknown");
+
+        // Detection-only when CRDT owns the bytes: the daemon already wrote
+        // this edit. Count it as synced for the status line, never splice.
+        if crdt_writer {
+            applied += 1;
+            continue;
+        }
 
         // Check if file exists
         let path = std::path::Path::new(file_path);
@@ -1147,4 +1435,125 @@ pub fn print_sync_status() {
             "offline".yellow(),
             "aura config set cloud-token <token>".cyan());
     }
+}
+
+/// Read the tail of `.aura/intent_log.jsonl` and return the most recent
+/// prose intent — anything that's not the AST-diff fallback shape
+/// ("N added/modified/removed: ..."). Returns None if the file is missing,
+/// no entries exist within `max_age_secs`, or every entry is the
+/// auto-generated summary shape. Used by `sync_events` to ensure dashboard
+/// Intent Log rows render human-written narrative instead of AST diffs.
+#[cfg(test)]
+mod intent_tests {
+    use super::read_latest_intent_prose;
+    use std::io::Write;
+
+    fn setup_tempdir() -> std::path::PathBuf {
+        let tmp = std::env::temp_dir().join(format!(
+            "aura-intent-prose-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(tmp.join(".aura")).unwrap();
+        tmp
+    }
+
+    fn run_in<P: AsRef<std::path::Path>, F: FnOnce()>(dir: P, f: F) {
+        let prev = std::env::current_dir().unwrap();
+        std::env::set_current_dir(dir.as_ref()).unwrap();
+        f();
+        std::env::set_current_dir(prev).unwrap();
+    }
+
+    #[test]
+    fn returns_most_recent_prose_skipping_fallback_shape() {
+        let tmp = setup_tempdir();
+        let path = tmp.join(".aura/intent_log.jsonl");
+        let mut f = std::fs::File::create(&path).unwrap();
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        // Old prose entry (still within window).
+        writeln!(
+            f,
+            r#"{{"intent":"Rewired auth middleware","timestamp":{}}}"#,
+            now - 60
+        )
+        .unwrap();
+        // Newer fallback-shape summary — must be skipped.
+        writeln!(
+            f,
+            r#"{{"intent":"1 modified: foo in bar.rs","timestamp":{}}}"#,
+            now - 10
+        )
+        .unwrap();
+        drop(f);
+
+        run_in(&tmp, || {
+            let got = read_latest_intent_prose(30 * 60);
+            assert_eq!(got.as_deref(), Some("Rewired auth middleware"));
+        });
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn returns_none_when_freshest_entry_is_stale() {
+        let tmp = setup_tempdir();
+        let path = tmp.join(".aura/intent_log.jsonl");
+        let mut f = std::fs::File::create(&path).unwrap();
+        writeln!(
+            f,
+            r#"{{"intent":"Very old prose","timestamp":100}}"#
+        )
+        .unwrap();
+        drop(f);
+
+        run_in(&tmp, || {
+            assert!(read_latest_intent_prose(60).is_none());
+        });
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn returns_none_when_log_missing() {
+        let tmp = setup_tempdir();
+        run_in(&tmp, || {
+            assert!(read_latest_intent_prose(3600).is_none());
+        });
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+}
+
+pub fn read_latest_intent_prose(max_age_secs: u64) -> Option<String> {
+    use std::io::{BufRead, BufReader};
+    let path = ".aura/intent_log.jsonl";
+    let file = std::fs::File::open(path).ok()?;
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()?
+        .as_secs();
+    let fallback_shape =
+        regex::Regex::new(r"^\s*\d+\s+(added|modified|removed|changed|deleted)").ok()?;
+
+    let lines: Vec<String> = BufReader::new(file).lines().filter_map(|l| l.ok()).collect();
+    for line in lines.iter().rev() {
+        let v: serde_json::Value = match serde_json::from_str(line) {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+        let ts = v["timestamp"].as_u64().unwrap_or(0);
+        if ts > 0 && now.saturating_sub(ts) > max_age_secs {
+            return None; // freshest entry already stale → no override
+        }
+        let intent = v["intent"].as_str().unwrap_or("").trim().to_string();
+        if intent.is_empty() || fallback_shape.is_match(&intent) {
+            continue;
+        }
+        return Some(intent);
+    }
+    None
 }

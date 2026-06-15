@@ -1,0 +1,7 @@
+[package]
+name = "aura-prdiff"
+version = "0.1.0"
+edition = "2021"
+
+# Standalone, dependency-free. Anchors inline review comments to real diff lines.
+[dependencies]

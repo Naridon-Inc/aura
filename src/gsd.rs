@@ -65,12 +65,15 @@ impl GsdEngine {
         let api_key = match ConfigManager::get_api_key(active_api_provider) {
             Some(key) => key,
             None => {
-                println!("{} Missing API key for provider: {}", "⚠️".yellow(), active_api_provider);
+                eprintln!("{} Missing API key for provider: {}", "⚠️".yellow(), active_api_provider);
                 return None;
             }
         };
 
-        let client = reqwest::blocking::Client::new();
+        let client = reqwest::blocking::Client::builder()
+            .timeout(std::time::Duration::from_secs(45))
+            .build()
+            .unwrap_or_else(|_| reqwest::blocking::Client::new());
         let combined_prompt = if user_prompt.is_empty() {
             system_prompt.to_string()
         } else {
@@ -154,7 +157,7 @@ impl GsdEngine {
                         } else {
                             // Print API errors for debugging
                             if let Some(err) = json_res.get("error") {
-                                println!("{} API Error: {}", "⚠️".yellow(), err);
+                                eprintln!("{} API Error: {}", "⚠️".yellow(), err);
                             }
                         }
                     }
@@ -203,23 +206,46 @@ impl GsdEngine {
         trimmed.to_string()
     }
 
+    /// Returns true when stdin is not a TTY (e.g. invoked by the MCP server,
+    /// CI, or piped shells). In that case the planner must skip every
+    /// `dialoguer` prompt and use sensible defaults — otherwise the interactive
+    /// calls silently fail and the caller receives a stale plan file from a
+    /// prior run.
+    fn is_headless() -> bool {
+        use std::io::IsTerminal;
+        !std::io::stdin().is_terminal() || std::env::var("AURA_NONINTERACTIVE").is_ok()
+    }
+
     /// Step 1: The Orchestrator / Planner
     pub fn plan_milestone(prompt: &str) {
-        println!("{} {} {}", "🧠".bold(), "Aura Orchestrator: Planning Milestone for".bold().cyan(), prompt.yellow());
-        
+        // Clear any stale plan from a prior run. plan_discover used to silently
+        // re-serve an old ACTIVE_MILESTONE.xml when the interactive dialoguer
+        // calls aborted on non-TTY callers (MCP, CI). Deleting up-front makes
+        // the failure mode obvious: no plan returned, not a wrong plan.
+        let _ = fs::remove_file(".aura/plans/ACTIVE_MILESTONE.xml");
+        let _ = fs::remove_file(".aura/plans/PLAN.md");
+
+        let headless = Self::is_headless();
+
+        eprintln!("{} {} {}", "🧠".bold(), "Aura Orchestrator: Planning Milestone for".bold().cyan(), prompt.yellow());
+
         let provider = ConfigManager::get_active_provider();
         let _api_key = match ConfigManager::get_api_key(&provider) {
             Some(key) => key,
             None => {
-                println!("{} API Key required for Orchestration (Provider: {}).", "⚠️".yellow(), provider);
+                if headless {
+                    eprintln!("{} No API key configured for provider {}. Cannot plan in headless mode. Set one via `aura config set-api-key`.", "✗".red(), provider);
+                    return;
+                }
+                eprintln!("{} API Key required for Orchestration (Provider: {}).", "⚠️".yellow(), provider);
                 use dialoguer::Password;
                 use dialoguer::theme::ColorfulTheme;
-                
+
                 let key = Password::with_theme(&ColorfulTheme::default())
                     .with_prompt("Enter your API Key to continue (It will be securely saved)")
                     .allow_empty_password(false)
                     .interact();
-                    
+
                 if let Ok(valid_key) = key {
                     let mut config = ConfigManager::load();
                     match provider.as_str() {
@@ -229,37 +255,43 @@ impl GsdEngine {
                         _ => config.gemini_api_key = Some(valid_key.clone()),
                     }
                     let _ = ConfigManager::save(&config);
-                    println!("{} API Key saved to local configuration.", "✓".green());
+                    eprintln!("{} API Key saved to local configuration.", "✓".green());
                     valid_key
                 } else {
-                    println!("{} Planning aborted. Valid API key required.", "✗".red());
+                    eprintln!("{} Planning aborted. Valid API key required.", "✗".red());
                     return;
                 }
             }
         };
 
-        println!("\n{} {}", "📋".bold(), "Configuring Milestone...".cyan());
-        use dialoguer::{Select, theme::ColorfulTheme};
+        let (exec_choice, git_choice) = if headless {
+            eprintln!("  {} Headless mode: defaulting to Parallel execution + Atomic commits.", "↳".dimmed());
+            ("Parallel", "Atomic Commits")
+        } else {
+            eprintln!("\n{} {}", "📋".bold(), "Configuring Milestone...".cyan());
+            use dialoguer::{Select, theme::ColorfulTheme};
 
-        let execution_modes = vec!["Parallel (Independent plans run simultaneously)", "Sequential (One plan at a time)"];
-        let exec_selection = Select::with_theme(&ColorfulTheme::default())
-            .with_prompt("Run plans in parallel?")
-            .default(0)
-            .items(&execution_modes)
-            .interact()
-            .unwrap_or(0);
-        let exec_choice = if exec_selection == 0 { "Parallel" } else { "Sequential" };
+            let execution_modes = vec!["Parallel (Independent plans run simultaneously)", "Sequential (One plan at a time)"];
+            let exec_selection = Select::with_theme(&ColorfulTheme::default())
+                .with_prompt("Run plans in parallel?")
+                .default(0)
+                .items(&execution_modes)
+                .interact()
+                .unwrap_or(0);
+            let exec = if exec_selection == 0 { "Parallel" } else { "Sequential" };
 
-        let git_strategies = vec!["Atomic Commits (Commit after every wave)", "Single Commit (Commit everything at the end)"];
-        let git_selection = Select::with_theme(&ColorfulTheme::default())
-            .with_prompt("Git tracking strategy?")
-            .default(0)
-            .items(&git_strategies)
-            .interact()
-            .unwrap_or(0);
-        let git_choice = if git_selection == 0 { "Atomic Commits" } else { "Single Commit" };
+            let git_strategies = vec!["Atomic Commits (Commit after every wave)", "Single Commit (Commit everything at the end)"];
+            let git_selection = Select::with_theme(&ColorfulTheme::default())
+                .with_prompt("Git tracking strategy?")
+                .default(0)
+                .items(&git_strategies)
+                .interact()
+                .unwrap_or(0);
+            let git = if git_selection == 0 { "Atomic Commits" } else { "Single Commit" };
+            (exec, git)
+        };
 
-        println!("\n{} Querying Local RAG and Merkle-Graph for dependency context...", "↳".dimmed());
+        eprintln!("\n{} Querying Local RAG and Merkle-Graph for dependency context...", "↳".dimmed());
         
         let mut ast_context = String::from("No Merkle-Graph context available. Proceed with standard heuristics.");
         if let Ok(repo) = Repository::open(".") {
@@ -282,7 +314,7 @@ impl GsdEngine {
         }
 
         // MASSIVE IMPROVEMENT: Parallel Research Wave
-        println!("{} Spawning parallel research agents (Architecture, Logic, Schema, Routes)...", "🌊".blue());
+        eprintln!("{} Spawning parallel research agents (Architecture, Logic, Schema, Routes)...", "🌊".blue());
         
         let domains = vec!["Architecture & Patterns", "Logic & Dependencies", "Data Schema & Models", "API Routes & Integration"];
         let research_data = Arc::new(Mutex::new(Vec::new()));
@@ -314,10 +346,10 @@ impl GsdEngine {
         }
         
         let final_research = research_data.lock().unwrap().join("\n");
-        println!("  {} Research complete. {} specialized insights gathered.", "✓".green(), domains.len());
+        eprintln!("  {} Research complete. {} specialized insights gathered.", "✓".green(), domains.len());
 
         // --- DISCOVERY PHASE (Aura Discuss) ---
-        println!("\n{} {}", "🤔".bold(), "Aura Architect: Establishing Phase Context...".cyan());
+        eprintln!("\n{} {}", "🤔".bold(), "Aura Architect: Establishing Phase Context...".cyan());
         
         let discovery_prompt = format!(
             "CRITICAL: You are the Aura Architect in 'Discovery Mode'. \n\
@@ -342,85 +374,95 @@ impl GsdEngine {
 
         let mut user_decisions = String::new();
         if let Some(questions_str) = Self::generate_content(&discovery_prompt, "", 0.3, CognitiveLabor::Architect) {
-            use dialoguer::{Select, Input, Confirm};
-            use dialoguer::theme::ColorfulTheme;
-
-            println!("\n{:-^80}", " AURA ARCHITECT: DISCOVERY PHASE ".bold().cyan());
-            println!("{}\n", "The Architect needs your input on these critical decisions:".italic().dimmed());
-            
             let lines: Vec<&str> = questions_str.lines().filter(|l| !l.trim().is_empty()).collect();
             let chunks: Vec<&[&str]> = lines.chunks(3).filter(|c| c.len() == 3).collect();
-            let total_steps = chunks.len();
-            
-            for (i, chunk) in chunks.iter().enumerate() {
-                let question = chunk[0].trim_start_matches(|c: char| c.is_numeric() || c == '.' || c == ' ');
-                let opt_a = chunk[1].trim_start_matches("- ").trim();
-                let opt_b = chunk[2].trim_start_matches("- ").trim();
-                
-                // Stepped UI Box
-                println!("┌──────────────────────────────────────────────────────────────────────────────");
-                println!("│ {} {}/{} {}", "Step".cyan().bold(), i + 1, total_steps, "Decision Required".cyan().bold());
-                println!("├──────────────────────────────────────────────────────────────────────────────");
-                for line in textwrap::wrap(question, 74) {
-                    println!("│ {}", line.yellow().bold());
-                }
-                println!("└──────────────────────────────────────────────────────────────────────────────");
-                
-                let options = vec![opt_a.to_string(), opt_b.to_string(), "Type a custom answer...".to_string(), "Developer Discretion (AI chooses)".to_string()];
-                
-                // BULLETPROOF UI: Try interactive Select first, but provide a numeric fallback
-                let selection = match Select::with_theme(&ColorfulTheme::default())
-                    .with_prompt("Select an approach (Use arrows or type number)")
-                    .default(0)
-                    .items(&options)
-                    .interact_opt() 
-                {
-                    Ok(Some(s)) => s,
-                    _ => {
-                        // Fallback for non-interactive terminals or broken escape codes
-                        println!("  {} Terminal interaction limited. Please enter a number:", "⚠️".yellow());
-                        for (idx, opt) in options.iter().enumerate() {
-                            println!("    {}. {}", idx + 1, opt);
-                        }
-                        let input: String = Input::with_theme(&ColorfulTheme::default())
-                            .with_prompt("Choice (1-4)")
-                            .interact_text()
-                            .unwrap_or_else(|_| "4".to_string());
-                        
-                        let val = input.parse::<usize>().unwrap_or(4);
-                        if val >= 1 && val <= options.len() { val - 1 } else { 3 }
-                    }
-                };
-                    
-                let final_ans = if selection == 2 {
-                    Input::with_theme(&ColorfulTheme::default())
-                        .with_prompt("Enter your custom approach")
-                        .interact_text()
-                        .unwrap_or_else(|_| "Developer Discretion".to_string())
-                } else {
-                    options[selection].clone()
-                };
-                
-                println!("  {} {}\n", "↳ Locked:".green(), final_ans.dimmed());
-                user_decisions.push_str(&format!("Question: {}\nDecision: {}\n\n", question, final_ans));
-            }
 
-            println!("{:-^80}\n", " FINAL REVIEW ".bold().magenta());
-            println!("{}", user_decisions.cyan());
-            
-            let proceed = Confirm::with_theme(&ColorfulTheme::default())
-                .with_prompt("Lock in these decisions and generate the architecture plan?")
-                .default(true)
-                .interact()
-                .unwrap_or(true);
-                
-            if !proceed {
-                println!("{} Planning cancelled by user.", "✗".red());
-                return;
+            if headless {
+                eprintln!("\n  {} Discovery questions recorded (headless mode — AI discretion for each).", "↳".dimmed());
+                for chunk in chunks.iter() {
+                    let question = chunk[0].trim_start_matches(|c: char| c.is_numeric() || c == '.' || c == ' ');
+                    let opt_a = chunk[1].trim_start_matches("- ").trim();
+                    user_decisions.push_str(&format!(
+                        "Question: {}\nDecision: {} (AI discretion — headless run)\n\n",
+                        question, opt_a
+                    ));
+                }
+            } else {
+                use dialoguer::{Select, Input, Confirm};
+                use dialoguer::theme::ColorfulTheme;
+
+                eprintln!("\n{:-^80}", " AURA ARCHITECT: DISCOVERY PHASE ".bold().cyan());
+                eprintln!("{}\n", "The Architect needs your input on these critical decisions:".italic().dimmed());
+
+                let total_steps = chunks.len();
+
+                for (i, chunk) in chunks.iter().enumerate() {
+                    let question = chunk[0].trim_start_matches(|c: char| c.is_numeric() || c == '.' || c == ' ');
+                    let opt_a = chunk[1].trim_start_matches("- ").trim();
+                    let opt_b = chunk[2].trim_start_matches("- ").trim();
+
+                    // Stepped UI Box
+                    eprintln!("┌──────────────────────────────────────────────────────────────────────────────");
+                    eprintln!("│ {} {}/{} {}", "Step".cyan().bold(), i + 1, total_steps, "Decision Required".cyan().bold());
+                    eprintln!("├──────────────────────────────────────────────────────────────────────────────");
+                    for line in textwrap::wrap(question, 74) {
+                        eprintln!("│ {}", line.yellow().bold());
+                    }
+                    eprintln!("└──────────────────────────────────────────────────────────────────────────────");
+
+                    let options = vec![opt_a.to_string(), opt_b.to_string(), "Type a custom answer...".to_string(), "Developer Discretion (AI chooses)".to_string()];
+
+                    let selection = match Select::with_theme(&ColorfulTheme::default())
+                        .with_prompt("Select an approach (Use arrows or type number)")
+                        .default(0)
+                        .items(&options)
+                        .interact_opt()
+                    {
+                        Ok(Some(s)) => s,
+                        _ => {
+                            eprintln!("  {} Terminal interaction limited. Please enter a number:", "⚠️".yellow());
+                            for (idx, opt) in options.iter().enumerate() {
+                                eprintln!("    {}. {}", idx + 1, opt);
+                            }
+                            let input: String = Input::with_theme(&ColorfulTheme::default())
+                                .with_prompt("Choice (1-4)")
+                                .interact_text()
+                                .unwrap_or_else(|_| "4".to_string());
+
+                            let val = input.parse::<usize>().unwrap_or(4);
+                            if val >= 1 && val <= options.len() { val - 1 } else { 3 }
+                        }
+                    };
+
+                    let final_ans = if selection == 2 {
+                        Input::with_theme(&ColorfulTheme::default())
+                            .with_prompt("Enter your custom approach")
+                            .interact_text()
+                            .unwrap_or_else(|_| "Developer Discretion".to_string())
+                    } else {
+                        options[selection].clone()
+                    };
+
+                    eprintln!("  {} {}\n", "↳ Locked:".green(), final_ans.dimmed());
+                    user_decisions.push_str(&format!("Question: {}\nDecision: {}\n\n", question, final_ans));
+                }
+
+                eprintln!("{:-^80}\n", " FINAL REVIEW ".bold().magenta());
+                eprintln!("{}", user_decisions.cyan());
+
+                let proceed = Confirm::with_theme(&ColorfulTheme::default())
+                    .with_prompt("Lock in these decisions and generate the architecture plan?")
+                    .default(true)
+                    .interact()
+                    .unwrap_or(true);
+
+                if !proceed {
+                    eprintln!("{} Planning cancelled by user.", "✗".red());
+                    return;
+                }
             }
-            
         } else {
-            println!("  {} Discovery Phase failed to retrieve options from the LLM. Using AI discretion.", "⚠️".yellow());
+            eprintln!("  {} Discovery Phase failed to retrieve options from the LLM. Using AI discretion.", "⚠️".yellow());
             user_decisions.push_str("Use developer discretion for all implementation details.");
         }
 
@@ -428,10 +470,10 @@ impl GsdEngine {
         let _ = fs::create_dir_all(".aura/plans");
         let context_content = format!("# Phase Context\n\n**Objective:** {}\n\n## Implementation Decisions\n{}", prompt, user_decisions);
         let _ = fs::write(".aura/plans/CONTEXT.md", &context_content);
-        println!("  {} Phase decisions captured in .aura/plans/CONTEXT.md", "✓".green());
+        eprintln!("  {} Phase decisions captured in .aura/plans/CONTEXT.md", "✓".green());
 
         // --- PLANNING PHASE ---
-        println!("\n  {} Synthesizing atomic execution waves based on your decisions...", "↳".dimmed());
+        eprintln!("\n  {} Synthesizing atomic execution waves based on your decisions...", "↳".dimmed());
         
         let system_prompt = format!(
             "You are the Aura Architect. Use the provided research, AST context, and the locked user decisions to generate a flawless execution plan.\n\
@@ -480,7 +522,7 @@ impl GsdEngine {
         }
 
         // Plan Checker Loop
-        println!("{} Verifying plan integrity via Aura Auditor...", "🔍".cyan());
+        eprintln!("{} Verifying plan integrity via Aura Auditor...", "🔍".cyan());
         
         let check_prompt = format!(
             "You are the Aura Plan Checker. Review the following execution plan for logical consistency, dependency deadlocks, and requirement coverage. \n\
@@ -491,9 +533,9 @@ impl GsdEngine {
 
         if let Some(feedback) = Self::generate_content(&check_prompt, "", 0.1, CognitiveLabor::Auditor) {
             if feedback.trim().contains("PASS") {
-                println!("  {} Plan verified by Auditor.", "✓".green());
+                eprintln!("  {} Plan verified by Auditor.", "✓".green());
             } else {
-                println!("{} Plan Auditor found issues:\n{}", "⚠️".yellow(), feedback.dimmed());
+                eprintln!("{} Plan Auditor found issues:\n{}", "⚠️".yellow(), feedback.dimmed());
             }
         }
         
@@ -501,18 +543,23 @@ impl GsdEngine {
         let _ = fs::write(".aura/plans/ACTIVE_MILESTONE.xml", &cleaned_xml);
         let _ = fs::write(".aura/plans/PLAN.md", format!("# Aura Execution Plan\n\n{}", markdown_plan));
         
-        println!("{} Milestone locked and saved to .aura/plans/PLAN.md", "✓".green().bold());
+        eprintln!("{} Milestone locked and saved to .aura/plans/PLAN.md", "✓".green().bold());
 
         // Display a brief summary to the user
-        println!("\n{:-^80}\n", " EXECUTION PLAN SUMMARY ".bold().blue());
+        eprintln!("\n{:-^80}\n", " EXECUTION PLAN SUMMARY ".bold().blue());
         
         // Extract wave titles or action summaries for the user
         for line in markdown_plan.lines() {
             if line.starts_with("### Wave") || (line.starts_with("- ") && line.len() < 80) {
-                println!("{}", line.yellow());
+                eprintln!("{}", line.yellow());
             }
         }
-        println!("\n{:-^80}\n", "-".dimmed());
+        eprintln!("\n{:-^80}\n", "-".dimmed());
+
+        if Self::is_headless() {
+            eprintln!("\n{} Plan saved. Call `aura_plan_next` (MCP) or `aura execute` (CLI) to run the first wave.", "⏸️".blue());
+            return;
+        }
 
         use dialoguer::Confirm;
         use dialoguer::theme::ColorfulTheme;
@@ -524,21 +571,21 @@ impl GsdEngine {
             .unwrap_or(false);
 
         if start_execution {
-            println!("\n");
+            eprintln!("\n");
             Self::execute_wave();
         } else {
-            println!("\n{} Execution paused. You can start it later by running `aura execute`.", "⏸️".blue());
+            eprintln!("\n{} Execution paused. You can start it later by running `aura execute`.", "⏸️".blue());
         }
     }
 
     /// Step 2: The Executor (Wave Runner)
     pub fn execute_wave() {
-        println!("{} {}", "⚡".bold(), "Aura Executor: Initiating Atomic Waves".bold().cyan());
+        eprintln!("{} {}", "⚡".bold(), "Aura Executor: Initiating Atomic Waves".bold().cyan());
         
         let plans_xml = match fs::read_to_string(".aura/plans/ACTIVE_MILESTONE.xml") {
             Ok(content) => content,
             Err(_) => {
-                println!("{} No active milestone found.", "✗".red());
+                eprintln!("{} No active milestone found.", "✗".red());
                 return;
             }
         };
@@ -569,7 +616,7 @@ impl GsdEngine {
         let total_waves = waves.len();
         
         for (i, (action, verify)) in waves.iter().enumerate() {
-            println!("\n{} {} {}/{}", "🌊".blue(), "Executing Wave".bold().cyan(), i + 1, total_waves);
+            eprintln!("\n{} {} {}/{}", "🌊".blue(), "Executing Wave".bold().cyan(), i + 1, total_waves);
             
             // Setup Progress Bar
             let pb = ProgressBar::new(100);
@@ -597,113 +644,422 @@ impl GsdEngine {
             }
             
             pb.finish_with_message("Wave completed and verified.");
-            println!("  {} Pulse Check: AST stability confirmed.", "✓".green());
+            eprintln!("  {} Pulse Check: AST stability confirmed.", "✓".green());
         }
 
-        println!("\n{} {}", "🚀".bold(), "Milestone achieved. All logic nodes mathematically verified.".bold().green());
+        eprintln!("\n{} {}", "🚀".bold(), "Milestone achieved. All logic nodes mathematically verified.".bold().green());
         let _ = fs::remove_file(".aura/plans/ACTIVE_MILESTONE.xml");
     }
 
     /// Step 3: Goal-Backward Verification (Aura Prove)
-    pub fn prove_goal(goal: &str) {
-        println!("{} {} {}", "🧪".bold(), "Aura Prover: Verifying Goal Achievement:".bold().cyan(), goal.yellow());
+    /// Decompose a behavioral goal into semantic requirements and check each
+    /// against the latest AST checkpoint, returning a structured outcome
+    /// instead of printing. Single source of truth shared by the human-text
+    /// renderer (`prove_goal`) and the machine-readable `--json` mode
+    /// (`prove_goal_json`) — so the desktop Goals surface and the CLI can
+    /// never drift on what counts as "proven".
+    ///
+    /// Shape:
+    /// ```json
+    /// {
+    ///   "goal": "users can sign in via Google",
+    ///   "checks": [
+    ///     { "node_name": "authenticate", "node_type": "Function",
+    ///       "must_call": "google_oauth", "exists": true, "is_stub": false,
+    ///       "wired": true, "passed": true,
+    ///       "reason": "exists and is wired to google_oauth" }
+    ///   ],
+    ///   "passed": 1, "total": 1,
+    ///   "verdict": "verified",   // verified | partial | not_wired | unknown
+    ///   "error": null
+    /// }
+    /// ```
+    ///
+    /// `verdict` is the plain-language hinge the UI translates to
+    /// Done / Almost / Not-yet. `error` is set (and verdict = "unknown") when
+    /// the goal can't be decomposed or there's no checkpoint to check against
+    /// — those are "we can't tell yet", NOT "not reached".
+    pub fn prove_goal_structured(goal: &str) -> serde_json::Value {
+        // Decompose-once / prove-on-build: the LLM breakdown (slow, costed) and
+        // the AST check (fast, deterministic, free) are now separate steps.
+        // Ad-hoc `aura prove` runs both; the goal ledger caches the
+        // decomposition and re-runs only the AST half on every build.
+        let requirements = match Self::decompose_goal(goal) {
+            Some(reqs) if !reqs.is_empty() => reqs,
+            _ => {
+                return json!({
+                    "goal": goal, "checks": [], "passed": 0, "total": 0,
+                    "verdict": "unknown",
+                    "error": "Couldn't work out what this goal needs yet.",
+                });
+            }
+        };
+        Self::prove_requirements(goal, &requirements)
+    }
 
-        println!("  {} Analyzing behavioral requirements via local context...", "↳".dimmed());
-        
+    /// The **costed** half of proving: ask the auditor model to break a goal
+    /// into 3-5 semantic requirements (a logic node that must exist + an
+    /// optional connection it must make). Returns `None` if the model is
+    /// unavailable or its answer doesn't parse — the caller treats that as
+    /// "can't tell yet", never as a failure. Run this ONCE per goal and cache
+    /// the result; re-proving reuses it via [`prove_requirements`].
+    pub fn decompose_goal(goal: &str) -> Option<Vec<crate::goals::Requirement>> {
+        Self::decompose_goal_with_context(goal, None)
+    }
+
+    /// Decompose a goal, optionally grounded in the **live reasons** behind the
+    /// work — the intent the agent just logged, the change in flight. Feeding
+    /// the real reasoning in makes the requirements reflect what's actually
+    /// being built (so a build-time prove isn't checking a stale, generic
+    /// breakdown). This is the "dynamic reasons should make it prove" path.
+    pub fn decompose_goal_with_context(goal: &str, context: Option<&str>) -> Option<Vec<crate::goals::Requirement>> {
+        // Ground the decomposition in symbols that ACTUALLY exist in this repo.
+        // Without this, the auditor invents plausible-but-fictional node names
+        // (e.g. `DurableLedger`, `ProveGoal`) that match nothing in the AST, so
+        // every check comes back "isn't in the code yet" — a false "not started"
+        // verdict, the exact hallucinated-slop the prove path exists to prevent.
+        // Feeding the real, goal-relevant identifiers in makes the model name
+        // requirements after code that's really there (or genuinely absent).
+        let catalog = Self::repo_symbol_catalog(goal, context);
+
         let system_prompt = "You are the Aura Semantic Auditor. Analyze the user's software goal and break it down into 3-5 'Semantic Requirements'. \n\
             Each requirement must be: \n\
             - A specific Logic Node (Function, Class, or Struct) that must exist.\n\
             - A connection (dependency) that must be wired.\n\
             \n\
+            CRITICAL: When the goal is about code that already exists, you will be given an 'Existing symbols' list of REAL identifiers from this repository. Prefer those exact names for `node_name` whenever one fits the goal — do not invent a synonym for a symbol that is already named. Only introduce a new name when the goal genuinely requires code that is not yet in the list.\n\
+            \n\
             Format your response as a valid JSON array of objects: \n\
             [{\"node_name\": \"string\", \"type\": \"Function|Class|Struct\", \"must_call\": \"node_name_or_none\"}]";
 
-        let mut requirements: Vec<serde_json::Value> = Vec::new();
-        
-        if let Some(text) = Self::generate_content(system_prompt, &format!("Goal: {}", goal), 0.1, CognitiveLabor::Auditor) {
-            let clean_json = text.trim_matches(|c| c == '`').trim_start_matches("json").trim();
-            if let Ok(parsed) = serde_json::from_str::<Vec<serde_json::Value>>(clean_json) {
-                requirements = parsed;
-            }
+        let mut user_prompt = match context {
+            Some(c) if !c.trim().is_empty() => format!(
+                "Goal: {}\n\nRecent work and reasoning (use this to ground the requirements in what is actually being built — the specific functions/types touched):\n{}",
+                goal,
+                c.trim(),
+            ),
+            _ => format!("Goal: {}", goal),
+        };
+        if let Some(cat) = &catalog {
+            user_prompt.push_str("\n\nExisting symbols in this repository (most relevant to the goal first — reuse these exact names where they fit):\n");
+            user_prompt.push_str(cat);
         }
 
+        let text = Self::generate_content(system_prompt, &user_prompt, 0.1, CognitiveLabor::Auditor)?;
+        let clean_json = text.trim_matches(|c| c == '`').trim_start_matches("json").trim();
+        let parsed = serde_json::from_str::<Vec<serde_json::Value>>(clean_json).ok()?;
+        let requirements: Vec<crate::goals::Requirement> = parsed
+            .into_iter()
+            .filter_map(|req| {
+                let node_name = req["node_name"].as_str()?.to_string();
+                if node_name.is_empty() {
+                    return None;
+                }
+                let node_type = req["type"].as_str().unwrap_or("Logic").to_string();
+                let must_call = req["must_call"]
+                    .as_str()
+                    .filter(|c| *c != "none" && !c.is_empty())
+                    .map(|s| s.to_string());
+                Some(crate::goals::Requirement { node_name, node_type, must_call })
+            })
+            .collect();
         if requirements.is_empty() {
-            println!("{} Failed to extract semantic requirements.", "✗".red());
-            return;
+            None
+        } else {
+            Some(requirements)
+        }
+    }
+
+    /// Build a relevance-ranked catalog of the identifiers that REALLY exist in
+    /// this repo, to hand the auditor so it names requirements after real code
+    /// instead of inventing fictional node names. Reads the latest checkpoint's
+    /// AST nodes, scores each identifier by word-overlap with the goal + the
+    /// in-flight reasoning, and returns the top slice as a compact bullet list
+    /// (`- name (Kind)`). Returns `None` when there's no checkpoint to read —
+    /// in which case the decompose falls back to ungrounded behaviour (a brand
+    /// new repo genuinely has nothing to ground against). Token-bounded by the
+    /// `MAX` cap so a large repo can't blow the prompt budget.
+    fn repo_symbol_catalog(goal: &str, context: Option<&str>) -> Option<String> {
+        const MAX: usize = 60;
+
+        let repo = Repository::open(".").ok()?;
+        let checkpoints = CheckpointStore::get_all_checkpoints(&repo).ok()?;
+        let latest = checkpoints.first()?;
+
+        // The vocabulary we're matching symbols against: words from the goal and
+        // any live reasoning, lowercased, length-filtered to kill noise words.
+        let mut haystack = goal.to_lowercase();
+        if let Some(c) = context {
+            haystack.push(' ');
+            haystack.push_str(&c.to_lowercase());
+        }
+        let goal_words: std::collections::HashSet<String> = haystack
+            .split(|c: char| !c.is_alphanumeric())
+            .filter(|w| w.len() >= 3)
+            .map(|w| w.to_string())
+            .collect();
+
+        // One entry per distinct identifier, scored by how many of its own
+        // sub-words (split on snake_case / camelCase) appear in the goal vocab.
+        let mut seen: std::collections::HashSet<&str> = std::collections::HashSet::new();
+        let mut scored: Vec<(usize, &str, &str)> = Vec::new();
+        for node in &latest.ast_nodes {
+            let ident = match node.identifier.as_deref() {
+                Some(i) if !i.is_empty() => i,
+                _ => continue,
+            };
+            if !seen.insert(ident) {
+                continue;
+            }
+            let score = Self::symbol_relevance(ident, &goal_words);
+            scored.push((score, ident, node.kind.as_str()));
+        }
+        if scored.is_empty() {
+            return None;
         }
 
-        println!("  {} Scanning Merkle-Graph for logic nodes and wiring...", "↳".dimmed());
+        // Most-relevant first; ties keep checkpoint order (stable sort).
+        scored.sort_by(|a, b| b.0.cmp(&a.0));
+        let mut out = String::new();
+        for (_, ident, kind) in scored.into_iter().take(MAX) {
+            out.push_str(&format!("- {} ({})\n", ident, kind));
+        }
+        Some(out)
+    }
+
+    /// Score one identifier's relevance to the goal vocabulary: the number of
+    /// the identifier's sub-words (snake_case / camelCase boundaries) that
+    /// appear in `goal_words`. Zero is fine — a symbol can still be offered as
+    /// a candidate, just ranked below the ones the goal actually mentions.
+    fn symbol_relevance(ident: &str, goal_words: &std::collections::HashSet<String>) -> usize {
+        let mut parts: Vec<String> = Vec::new();
+        let mut cur = String::new();
+        let mut prev_lower = false;
+        for ch in ident.chars() {
+            if ch == '_' || ch == '-' || ch == ':' || ch == '.' {
+                if !cur.is_empty() {
+                    parts.push(std::mem::take(&mut cur));
+                }
+                prev_lower = false;
+                continue;
+            }
+            if ch.is_uppercase() && prev_lower && !cur.is_empty() {
+                parts.push(std::mem::take(&mut cur));
+            }
+            cur.push(ch.to_ascii_lowercase());
+            prev_lower = ch.is_lowercase();
+        }
+        if !cur.is_empty() {
+            parts.push(cur);
+        }
+        parts
+            .iter()
+            .filter(|p| p.len() >= 3 && goal_words.contains(p.as_str()))
+            .count()
+    }
+
+    /// The **free** half of proving: check already-decomposed requirements
+    /// against the latest code snapshot's AST — deterministic, no model call.
+    /// Each check is enriched with the `file`/`line` of the satisfying node so
+    /// the result doubles as a reverse code↔goal index. This is what the goal
+    /// ledger re-runs on every build (decompose-once / prove-on-build).
+    pub fn prove_requirements(goal: &str, requirements: &[crate::goals::Requirement]) -> serde_json::Value {
+        if requirements.is_empty() {
+            return json!({
+                "goal": goal, "checks": [], "passed": 0, "total": 0,
+                "verdict": "unknown",
+                "error": "Couldn't work out what this goal needs yet.",
+            });
+        }
+
         let repo = match Repository::open(".") {
             Ok(r) => r,
             Err(_) => {
-                println!("{} Git repository not found.", "✗".red());
-                return;
+                return json!({
+                    "goal": goal, "checks": [], "passed": 0, "total": 0,
+                    "verdict": "unknown", "error": "Not a git repository.",
+                });
             }
         };
-
         let checkpoints = CheckpointStore::get_all_checkpoints(&repo).unwrap_or_default();
         let latest = match checkpoints.first() {
             Some(l) => l,
             None => {
-                println!("{} No Aura checkpoints found.", "✗".red());
-                return;
+                return json!({
+                    "goal": goal, "checks": [], "passed": 0, "total": 0,
+                    "verdict": "unknown",
+                    "error": "No snapshot of the code to check against yet.",
+                });
             }
         };
 
-        println!("\n{:-^60}", " SEMANTIC PROOF REPORT ".bold().blue());
-        
-        let total_checks = requirements.len();
-        let mut passed_checks = 0;
+        let total = requirements.len();
+        let mut passed = 0usize;
+        let mut checks: Vec<serde_json::Value> = Vec::with_capacity(total);
 
         for req in requirements {
-            let node_name = req["node_name"].as_str().unwrap_or("unknown");
-            let node_type = req["type"].as_str().unwrap_or("Logic");
-            let must_call = req["must_call"].as_str();
+            let node_name = req.node_name.clone();
+            let node_type = req.node_type.clone();
+            let must_call = req.must_call.clone();
 
-            let target_node = latest.ast_nodes.iter().find(|n| {
-                n.identifier.as_deref() == Some(node_name)
-            });
+            let target_node = latest.ast_nodes.iter().find(|n| n.identifier.as_deref() == Some(node_name.as_str()));
 
-            match target_node {
-                Some(node) => {
-                    if node.is_stub {
-                        println!("{} {} '{}' exists but is a {}!", "⚠️".yellow(), node_type, node_name, "STUB".bold().red());
-                    } else {
-                        println!("{} {} '{}' exists and is substantive.", "✓".green(), node_type, node_name);
-                        
-                        if let Some(call_target) = must_call {
-                            if call_target != "none" {
-                                let is_wired = node.dependencies.iter().any(|d| d.name == call_target);
-                                if is_wired {
-                                    println!("  {} Properly wired to '{}'", "↳".dimmed(), call_target.green());
-                                    passed_checks += 1;
-                                } else {
-                                    println!("  {} {} NOT wired to '{}'", "↳".dimmed(), "✗".red(), call_target.yellow());
-                                }
+            let (exists, is_stub, wired, check_passed, reason): (bool, bool, Option<bool>, bool, String) =
+                match target_node {
+                    None => (false, false, None, false, format!("'{}' isn't in the code yet", node_name)),
+                    Some(node) if node.is_stub => (
+                        true, true, None, false,
+                        format!("'{}' is there but is still an empty placeholder", node_name),
+                    ),
+                    Some(node) => match &must_call {
+                        Some(call_target) => {
+                            let is_wired = node.dependencies.iter().any(|d| &d.name == call_target);
+                            if is_wired {
+                                (true, false, Some(true), true,
+                                 format!("'{}' is built and connected to '{}'", node_name, call_target))
                             } else {
-                                passed_checks += 1;
+                                (true, false, Some(false), false,
+                                 format!("'{}' is built but isn't connected to '{}' yet", node_name, call_target))
                             }
                         }
-                    }
-                },
-                None => {
-                    println!("{} {} '{}' is missing from the AST!", "✗".red(), node_type, node_name);
+                        None => (true, false, None, true, format!("'{}' is built", node_name)),
+                    },
+                };
+
+            // Where the satisfying node lives — the concrete code↔goal link.
+            let (file, line) = match target_node {
+                Some(node) => (
+                    node.file_path.clone().map(serde_json::Value::from).unwrap_or(serde_json::Value::Null),
+                    node.start_line.map(serde_json::Value::from).unwrap_or(serde_json::Value::Null),
+                ),
+                None => (serde_json::Value::Null, serde_json::Value::Null),
+            };
+
+            if check_passed {
+                passed += 1;
+            }
+            checks.push(json!({
+                "node_name": node_name,
+                "node_type": node_type,
+                "must_call": must_call,
+                "exists": exists,
+                "is_stub": is_stub,
+                "wired": wired,
+                "passed": check_passed,
+                "reason": reason,
+                "file": file,
+                "line": line,
+            }));
+        }
+
+        let verdict = if passed == total {
+            "verified"
+        } else if passed == 0 {
+            "not_wired"
+        } else {
+            "partial"
+        };
+
+        json!({
+            "goal": goal,
+            "checks": checks,
+            "passed": passed,
+            "total": total,
+            "verdict": verdict,
+            "error": serde_json::Value::Null,
+        })
+    }
+
+    /// Machine-readable proof: prints the structured outcome as pretty JSON to
+    /// stdout (so a caller can capture it cleanly while progress/errors stay on
+    /// stderr). Backs `aura prove --json` and the desktop Goals surface.
+    pub fn prove_goal_json(goal: &str) {
+        let outcome = Self::prove_goal_structured(goal);
+        println!("{}", serde_json::to_string_pretty(&outcome).unwrap_or_else(|_| "{}".into()));
+    }
+
+    pub fn prove_goal(goal: &str) {
+        eprintln!("{} {} {}", "🧪".bold(), "Aura Prover: Verifying Goal Achievement:".bold().cyan(), goal.yellow());
+        eprintln!("  {} Analyzing behavioral requirements via local context...", "↳".dimmed());
+        eprintln!("  {} Scanning Merkle-Graph for logic nodes and wiring...", "↳".dimmed());
+
+        let outcome = Self::prove_goal_structured(goal);
+
+        if let Some(err) = outcome["error"].as_str() {
+            eprintln!("{} {}", "✗".red(), err);
+            return;
+        }
+
+        eprintln!("\n{:-^60}", " SEMANTIC PROOF REPORT ".bold().blue());
+        for check in outcome["checks"].as_array().into_iter().flatten() {
+            let node_name = check["node_name"].as_str().unwrap_or("unknown");
+            let node_type = check["node_type"].as_str().unwrap_or("Logic");
+            let exists = check["exists"].as_bool().unwrap_or(false);
+            let is_stub = check["is_stub"].as_bool().unwrap_or(false);
+            if !exists {
+                eprintln!("{} {} '{}' is missing from the AST!", "✗".red(), node_type, node_name);
+            } else if is_stub {
+                eprintln!("{} {} '{}' exists but is a {}!", "⚠️".yellow(), node_type, node_name, "STUB".bold().red());
+            } else {
+                eprintln!("{} {} '{}' exists and is substantive.", "✓".green(), node_type, node_name);
+                match check["wired"].as_bool() {
+                    Some(true) => eprintln!("  {} Properly wired to '{}'", "↳".dimmed(),
+                        check["must_call"].as_str().unwrap_or("").green()),
+                    Some(false) => eprintln!("  {} {} NOT wired to '{}'", "↳".dimmed(), "✗".red(),
+                        check["must_call"].as_str().unwrap_or("").yellow()),
+                    None => {}
                 }
             }
         }
+        eprintln!("{:-^60}\n", " END REPORT ".bold().blue());
 
-        println!("{:-^60}\n", " END REPORT ".bold().blue());
-
-        if passed_checks == total_checks {
-            println!("{} Goal '{}' is {}!", "🛡️ ".bold(), goal, "MATHEMATICALLY PROVEN".bold().green());
+        let passed = outcome["passed"].as_u64().unwrap_or(0);
+        let total = outcome["total"].as_u64().unwrap_or(0);
+        if passed == total {
+            eprintln!("{} Goal '{}' is {}!", "🛡️ ".bold(), goal, "MATHEMATICALLY PROVEN".bold().green());
         } else {
-            println!("{} Goal '{}' is {} ({} of {} semantic links verified).", 
-                "❌".bold(), 
-                goal, 
-                "NOT PROVEN".bold().red(),
-                passed_checks,
-                total_checks
-            );
+            eprintln!("{} Goal '{}' is {} ({} of {} semantic links verified).",
+                "❌".bold(), goal, "NOT PROVEN".bold().red(), passed, total);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::HashSet;
+
+    fn words(list: &[&str]) -> HashSet<String> {
+        list.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn relevance_splits_snake_case() {
+        let goal = words(&["prove", "requirements"]);
+        // `prove_requirements` → ["prove", "requirements"] → both hit.
+        assert_eq!(GsdEngine::symbol_relevance("prove_requirements", &goal), 2);
+        // `prove_goal` → ["prove", "goal"] → only "prove" hits.
+        assert_eq!(GsdEngine::symbol_relevance("prove_goal", &goal), 1);
+    }
+
+    #[test]
+    fn relevance_splits_camel_case() {
+        let goal = words(&["ledger", "record"]);
+        // `LedgerRecord` → ["ledger", "record"] → both hit.
+        assert_eq!(GsdEngine::symbol_relevance("LedgerRecord", &goal), 2);
+        // `GoalStore` → ["goal", "store"] → neither in vocab.
+        assert_eq!(GsdEngine::symbol_relevance("GoalStore", &goal), 0);
+    }
+
+    #[test]
+    fn relevance_handles_path_separators_and_short_words() {
+        let goal = words(&["decompose", "goal"]);
+        // Module path: `goals::decompose_goal` → ["goals","decompose","goal"].
+        // "goals" (5) and "goal" (4) and "decompose" all length-pass; only the
+        // exact tokens in the vocab count, so "decompose" + "goal" = 2.
+        assert_eq!(GsdEngine::symbol_relevance("goals::decompose_goal", &goal), 2);
+        // Sub-words under 3 chars are dropped so they never spuriously match.
+        let noisy = words(&["a", "id"]);
+        assert_eq!(GsdEngine::symbol_relevance("a_id", &noisy), 0);
     }
 }

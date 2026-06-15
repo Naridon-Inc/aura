@@ -1,0 +1,21 @@
+[package]
+name = "aura-ci"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0 OR MIT"
+description = "Semantic CI — declarative .aura/pipelines that orchestrate the gates Aura already owns. Orchestration + verdict + GitHub-Actions export; the CLI supplies the semantic facts."
+publish = false
+
+# Standalone-friendly: this crate is dependency-light on purpose so the
+# workspace-excluded `aura` CLI can depend on it via a path dep WITHOUT a
+# crate cycle. The semantic facts that live in the CLI (staged AstNodes, the
+# build_verify runner, etc.) are passed IN via `GateContext` — `aura-ci`
+# never depends on `aura-cli`.
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.8"
+anyhow = "1"
+
+[dev-dependencies]
+serde_json = "1"

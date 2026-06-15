@@ -1,0 +1,19 @@
+[package]
+name = "aura-merge"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+description = "Structured 3-way merge engine: deep-merge for JSON/YAML/TOML, line-level 3-way for text, scaffold extraction for code."
+repository = "https://github.com/Naridon-Inc/aura-merge"
+homepage = "https://auravcs.com"
+documentation = "https://docs.rs/aura-merge"
+readme = "README.md"
+keywords = ["merge", "diff", "vcs", "json", "3-way"]
+categories = ["development-tools", "algorithms"]
+
+[lib]
+name = "aura_merge"
+path = "src/lib.rs"
+
+[dependencies]
+serde_json = "1.0"
