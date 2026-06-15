@@ -1361,9 +1361,10 @@ async fn sync_push(
 ) -> Result<Json<serde_json::Value>, StatusCode> {
     let db = state.db.lock().unwrap();
 
-    let repo = host_db::get_repo_by_name_and_org(&db, &payload.repo_full_name, &auth.org_id)
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
-        .ok_or(StatusCode::NOT_FOUND)?;
+    // Auto-register the repo on first push so `aura share` works without
+    // a separate POST /orgs/{slug}/repos handshake — parity with cloud.
+    let repo = host_db::upsert_repo(&db, &auth.org_id, &payload.repo_full_name)
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
     let mut upserted = 0;
     for func in &payload.functions {

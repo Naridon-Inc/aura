@@ -36,6 +36,19 @@ pub struct AstNode {
     pub signature: Option<String>,  // Human-readable signature (e.g., "fn health_check(state: AppState) -> StatusCode")
     #[serde(default)]
     pub doc_comment: Option<String>,// Doc comment / docstring if present
+    /// True when this symbol is defined at module top level (or as a class
+    /// member) rather than nested inside a function/closure body. Lets the
+    /// change-note card list the symbols a reader cares about and drop
+    /// body-locals (loop counters, temporaries). Defaults to `true` so an
+    /// older serialized node — or any builder that doesn't set scope — is
+    /// treated as visible, never silently hidden.
+    #[serde(default = "default_true")]
+    pub top_level: bool,
+}
+
+/// serde default for `AstNode::top_level` — absent scope means "visible".
+fn default_true() -> bool {
+    true
 }
 
 /// The metadata around *why* the code changed.

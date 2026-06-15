@@ -1,0 +1,19 @@
+[package]
+name = "aura-toon"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+description = "Token-Oriented Object Notation encoder. 30-60% fewer LLM tokens than JSON for the same data."
+repository = "https://github.com/Naridon-Inc/aura-toon"
+homepage = "https://auravcs.com"
+documentation = "https://docs.rs/aura-toon"
+readme = "README.md"
+keywords = ["llm", "json", "serialization", "tokens", "ai"]
+categories = ["encoding", "data-structures"]
+
+[lib]
+name = "aura_toon"
+path = "src/lib.rs"
+
+[dependencies]
+serde_json = "1.0"

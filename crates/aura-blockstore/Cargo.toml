@@ -1,0 +1,24 @@
+[package]
+name        = "aura-blockstore"
+version     = "0.1.0"
+edition     = "2024"
+license     = "Apache-2.0 OR MIT"
+description = "SQLite-backed store + deterministic reducer + sidebar projection for Aura Block envelopes."
+repository  = "https://github.com/Naridon-Inc/aura"
+publish     = false
+
+[dependencies]
+aura-blocks = { path = "../aura-blocks" }
+rusqlite    = { version = "0.38", features = ["bundled", "blob"] }
+tokio       = { version = "1", features = ["sync", "rt", "macros", "time"] }
+serde       = { version = "1", features = ["derive"] }
+serde_json  = "1"
+time        = { version = "0.3", features = ["serde", "formatting", "parsing"] }
+uuid        = { version = "1", features = ["v7", "serde"] }
+thiserror   = "1"
+bytes       = "1"
+base64      = "0.22"
+
+[dev-dependencies]
+tempfile    = "3"
+tokio       = { version = "1", features = ["macros", "rt-multi-thread", "time", "test-util"] }

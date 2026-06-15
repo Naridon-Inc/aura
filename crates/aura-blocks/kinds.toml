@@ -1,0 +1,63 @@
+# Registry of legal BlockKind variants.
+#
+# Adding a kind here is a MINOR schema version bump (additive).
+# Removing a kind is a MAJOR bump and requires a registered Migration.
+#
+# Each entry must have a stable `name` (PascalCase; becomes the Rust variant)
+# and a `wire` string (snake_case; stable on-wire discriminator — NEVER rename
+# without a major bump + migration).
+#
+# There is no `Custom` escape hatch. New kinds require a PR that touches this
+# file, which forces code review. That friction is the feature.
+
+schema_version = { major = 1, minor = 0, patch = 0 }
+
+[[kinds]]
+name  = "Command"
+wire  = "command"
+doc   = "Agent or human command — the classic Warp-block case."
+
+[[kinds]]
+name  = "Proposal"
+wire  = "proposal"
+doc   = "Agent proposal awaiting policy decision. Becomes Command on approval."
+
+[[kinds]]
+name  = "Message"
+wire  = "message"
+doc   = "Dev-to-dev message anchored to code."
+
+[[kinds]]
+name  = "SentinelEvent"
+wire  = "sentinel_event"
+doc   = "Agent-to-agent sentinel traffic (review, critique, security scan)."
+
+[[kinds]]
+name  = "ExternalMirror"
+wire  = "external_mirror"
+doc   = "Mirrored external artifact (PR comment, issue, CI webhook)."
+
+[[kinds]]
+name  = "ImpactAlert"
+wire  = "impact_alert"
+doc   = "Impact alert — a function you own was changed upstream."
+
+[[kinds]]
+name  = "ZoneEvent"
+wire  = "zone_event"
+doc   = "Zone claim / release / expiration."
+
+[[kinds]]
+name  = "BuildEvent"
+wire  = "build_event"
+doc   = "Build state change (red / green / started / failed)."
+
+[[kinds]]
+name  = "Skill"
+wire  = "skill"
+doc   = "Saved skill invocation or template."
+
+[[kinds]]
+name  = "Branch"
+wire  = "branch"
+doc   = "Rewind / branch marker; points at a prior block via supersedes_id."

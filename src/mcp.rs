@@ -5,13 +5,67 @@ use crate::checkpoint::{CheckpointStore, SnapshotStore};
 use crate::session::SessionManager;
 use git2::Repository;
 use std::path::Path;
+use std::sync::Mutex;
+
+/// The connecting client's canonical agent id, captured from the MCP
+/// `initialize` handshake's `clientInfo.name`. The server is always driven by
+/// a real CLI agent (Claude Code, Gemini CLI, Codex, Cursor…); historically we
+/// stamped a generic "MCP Agent" on every logged intent, which made the Trace
+/// UI unable to tell who actually did the work. We capture the client once and
+/// attribute every subsequent intent/session to it.
+static MCP_CLIENT_AGENT: Mutex<Option<String>> = Mutex::new(None);
+
+/// Canonicalize an MCP client name (clientInfo.name, or the AURA_AGENT env
+/// override) into one of Aura's known agent ids. An unrecognised-but-real
+/// client keeps its reported name rather than being discarded; an empty name
+/// yields None so the caller can fall back to the historical label.
+fn canonical_agent_from_client(name: &str) -> Option<String> {
+    let s = name.trim().to_lowercase();
+    if s.is_empty() {
+        return None;
+    }
+    if s.contains("claude") {
+        return Some("claude".to_string());
+    }
+    if s.contains("gemini") || s.contains("google") {
+        return Some("gemini".to_string());
+    }
+    if s.contains("cursor") {
+        return Some("cursor".to_string());
+    }
+    if s.contains("codex") || s.contains("openai") || s.contains("gpt") {
+        return Some("codex".to_string());
+    }
+    Some(name.trim().to_string())
+}
+
+/// The agent id to stamp on intents/sessions for the current MCP client.
+/// Prefers the clientInfo captured at `initialize`, then an `AURA_AGENT` env
+/// override, and falls back to the historical "MCP Agent" label only when the
+/// client never identified itself.
+fn caller_agent_id() -> String {
+    if let Ok(guard) = MCP_CLIENT_AGENT.lock() {
+        if let Some(a) = guard.as_ref() {
+            if !a.is_empty() {
+                return a.clone();
+            }
+        }
+    }
+    if let Ok(env) = std::env::var("AURA_AGENT") {
+        if let Some(a) = canonical_agent_from_client(&env) {
+            return a;
+        }
+    }
+    "MCP Agent".to_string()
+}
 
 /// Basic JSON-RPC 2.0 structures for the Model Context Protocol (MCP)
 #[derive(Deserialize, Debug)]
 #[allow(dead_code)]
 struct RpcRequest {
     jsonrpc: String,
-    id: Value,
+    #[serde(default)]
+    id: Option<Value>,
     method: String,
     params: Option<Value>,
 }
@@ -51,6 +105,10 @@ impl McpServer {
             }
 
             if let Ok(req) = serde_json::from_str::<RpcRequest>(&line) {
+                // JSON-RPC notifications (no id) must not receive a response.
+                if req.id.is_none() {
+                    continue;
+                }
                 let response = Self::handle_request(req);
                 let res_json = match serde_json::to_string(&response) {
                     Ok(j) => j,
@@ -65,21 +123,28 @@ impl McpServer {
                 }
                 let _ = stdout.flush();
             } else {
-                let err_res = json!({
-                    "jsonrpc": "2.0",
-                    "id": null,
-                    "error": { "code": -32700, "message": "Parse error" }
-                });
-                if let Err(e) = writeln!(stdout, "{}", err_res) {
-                    eprintln!("MCP write error: {}", e);
-                    return;
-                }
-                let _ = stdout.flush();
+                // Malformed / unparseable input — log and move on. We cannot
+                // reply with a parse error lacking an id because some clients
+                // (e.g. Claude Code's Zod schema) reject id:null responses.
+                eprintln!("MCP: dropping unparseable line");
             }
         }
     }
 
     fn handle_request(req: RpcRequest) -> Value {
+        // Capture the connecting client's identity from the initialize
+        // handshake so every intent/session we log downstream is attributed to
+        // the real coding agent instead of a generic "MCP Agent".
+        if req.method == "initialize" {
+            if let Some(params) = req.params.as_ref() {
+                let name = params["clientInfo"]["name"].as_str().unwrap_or("");
+                if let Some(agent) = canonical_agent_from_client(name) {
+                    if let Ok(mut guard) = MCP_CLIENT_AGENT.lock() {
+                        *guard = Some(agent);
+                    }
+                }
+            }
+        }
         match req.method.as_str() {
             // MCP Initialization Handshake
             "initialize" => {
@@ -114,17 +179,73 @@ impl McpServer {
                                         "query": { "type": "string", "description": "What to search for (e.g., 'race conditions')" }
                                     },
                                     "required": ["query"]
+                                },
+                                "annotations": {
+                                    "title": "Read Semantic History",
+                                    "readOnlyHint": true,
+                                    "destructiveHint": false,
+                                    "idempotentHint": true,
+                                    "openWorldHint": false,
+                                    "auraCapability": "auto"
                                 }
                             },
                             {
                                 "name": "aura_log_intent",
-                                "description": "MANDATORY: You MUST call this tool after making code changes and BEFORE committing. Logs your architectural intent so Aura can link your reasoning to the AST changes. If you skip this, the pre-commit hook will detect 'Intent Poisoning' and may block the commit. Call this every time you finish a set of edits.",
+                                "description": "MANDATORY: You MUST call this tool after making code changes and BEFORE committing. Logs your architectural intent so Aura can link your reasoning to the AST changes. If you skip this, the pre-commit hook will detect 'Intent Poisoning' and may block the commit. Call this every time you finish a set of edits. Optionally pass `intent_type` to tag the entry — one of FeatureAdd, BugFix, Refactor, Revert, Performance, Docs, Deps. Tagged entries are queryable via aura_intent_query.",
                                 "inputSchema": {
                                     "type": "object",
                                     "properties": {
-                                        "intent": { "type": "string", "description": "1-2 sentence explanation of WHY you made these changes. Must reference the functions/classes you modified." }
+                                        "intent": { "type": "string", "description": "1-2 sentence explanation of WHY you made these changes. Must reference the functions/classes you modified." },
+                                        "intent_type": { "type": "string", "description": "Optional canonical type for this intent. One of: FeatureAdd, BugFix, Refactor, Revert, Performance, Docs, Deps. Case-sensitive. Invalid values are rejected with isError." }
                                     },
                                     "required": ["intent"]
+                                },
+                                "annotations": {
+                                    "title": "Log Architectural Intent",
+                                    "readOnlyHint": false,
+                                    "destructiveHint": false,
+                                    "idempotentHint": false,
+                                    "openWorldHint": true,
+                                    "auraCapability": "gate"
+                                }
+                            },
+                            {
+                                "name": "aura_intent_query",
+                                "description": "Query the local intent log (.aura/intent_log.jsonl) by canonical type and/or time window. Returns {since_hours, total_matches, returned, intent_type, entries[]}. Each entry carries timestamp, agent_id, intent text, intent_type (when set), and signed_block_id (when present). Use to answer 'show me all Refactor intents in the last 7 days' or 'how many BugFix intents this week'. Reads only the local file — air-gapped. Pair with aura_log_intent's intent_type arg to make new entries queryable.",
+                                "inputSchema": {
+                                    "type": "object",
+                                    "properties": {
+                                        "intent_type": { "type": "string", "description": "Filter by canonical type. One of: FeatureAdd, BugFix, Refactor, Revert, Performance, Docs, Deps. Omit for all types." },
+                                        "since_hours": { "type": "integer", "description": "Lookback window in hours. Default 168 (7 days). Set 0 to disable the cutoff." },
+                                        "limit": { "type": "integer", "description": "Max entries in the response slice (newest first). Default 50, capped at 500. The total_matches field reports the unbounded count." }
+                                    }
+                                },
+                                "annotations": {
+                                    "title": "Query Typed Intents",
+                                    "readOnlyHint": true,
+                                    "destructiveHint": false,
+                                    "idempotentHint": true,
+                                    "openWorldHint": false,
+                                    "auraCapability": "auto"
+                                }
+                            },
+                            {
+                                "name": "aura_intent_summary",
+                                "description": "Bucket recent typed intents from .aura/intent_log.jsonl into a structured envelope (typed_total, untyped, type_count, buckets[] each with intent_type/count/samples). Mirrors `aura intents summary --json` and the prose form embedded in handover XML — same source-of-truth helper, different rendering. Use when an agent needs the histogram (e.g. 'how many BugFix vs Refactor this week') without scraping prose. Empty case returns status=empty with zero counters so the schema is stable.",
+                                "inputSchema": {
+                                    "type": "object",
+                                    "properties": {
+                                        "since_hours": { "type": "integer", "description": "Lookback window in hours. Default 24 (matches handover XML)." },
+                                        "sample_per_type": { "type": "integer", "description": "Newest sample intents to include per bucket. Default 1, set 0 for counts-only." }
+                                    }
+                                },
+                                "annotations": {
+                                    "title": "Typed Intent Summary",
+                                    "readOnlyHint": true,
+                                    "destructiveHint": false,
+                                    "idempotentHint": true,
+                                    "openWorldHint": false,
+                                    "auraCapability": "auto"
                                 }
                             },
                             {
@@ -135,6 +256,14 @@ impl McpServer {
                                     "properties": {
                                         "base": { "type": "string", "description": "The base branch to compare against (default: master)." }
                                     }
+                                },
+                                "annotations": {
+                                    "title": "Semantic PR Review",
+                                    "readOnlyHint": true,
+                                    "destructiveHint": false,
+                                    "idempotentHint": true,
+                                    "openWorldHint": true,
+                                    "auraCapability": "auto"
                                 }
                             },
                             {
@@ -143,6 +272,14 @@ impl McpServer {
                                 "inputSchema": {
                                     "type": "object",
                                     "properties": {}
+                                },
+                                "annotations": {
+                                    "title": "Aura Status",
+                                    "readOnlyHint": true,
+                                    "destructiveHint": false,
+                                    "idempotentHint": true,
+                                    "openWorldHint": true,
+                                    "auraCapability": "auto"
                                 }
                             },
                             {
@@ -154,6 +291,14 @@ impl McpServer {
                                         "file_path": { "type": "string", "description": "Path to the file to snapshot before editing." }
                                     },
                                     "required": ["file_path"]
+                                },
+                                "annotations": {
+                                    "title": "Snapshot File",
+                                    "readOnlyHint": false,
+                                    "destructiveHint": false,
+                                    "idempotentHint": true,
+                                    "openWorldHint": false,
+                                    "auraCapability": "auto"
                                 }
                             },
                             {
@@ -164,6 +309,53 @@ impl McpServer {
                                     "properties": {
                                         "file_path": { "type": "string", "description": "Optional: filter snapshots for a specific file." }
                                     }
+                                },
+                                "annotations": {
+                                    "title": "List Snapshots",
+                                    "readOnlyHint": true,
+                                    "destructiveHint": false,
+                                    "idempotentHint": true,
+                                    "openWorldHint": false,
+                                    "auraCapability": "auto"
+                                }
+                            },
+                            {
+                                "name": "aura_attest_list",
+                                "description": "List signed intent blocks under .aura/blocks/ as a JSON array. Each row carries id, kind, created_at, signature flag, rekor flag, human_id (DID form, when the block was signed with a dual-identity binding), and intent_type (when stamped at sign time per S2-TIB). Optional `human` arg filters to blocks signed for a specific identity (raw env value or DID form). Optional `intent_type` arg filters to one canonical type (FeatureAdd / BugFix / Refactor / Revert / Performance / Docs / Deps); untyped blocks are excluded when the filter is present. Pair with aura_attest_verify to enumerate-then-verify from a downstream agent without shelling out.",
+                                "inputSchema": {
+                                    "type": "object",
+                                    "properties": {
+                                        "human": { "type": "string", "description": "Filter to blocks signed for this human (raw env value e.g. 'ashiq@naridon' OR DID form e.g. 'did:aura:human/ashiq-naridon')." },
+                                        "intent_type": { "type": "string", "description": "Filter to one canonical type. Invalid values rejected with isError." }
+                                    }
+                                },
+                                "annotations": {
+                                    "title": "List Signed Intent Blocks",
+                                    "readOnlyHint": true,
+                                    "destructiveHint": false,
+                                    "idempotentHint": true,
+                                    "openWorldHint": false,
+                                    "auraCapability": "auto"
+                                }
+                            },
+                            {
+                                "name": "aura_attest_verify",
+                                "description": "Verify a signed intent block by id. Checks the ed25519 signature against the local key; when the block was signed by a key that has since been rotated out, walks the on-disk rotation chain to recover the historical pubkey, and (if the local chain is incomplete) auto-pulls the cloud rotation mirror once and retries. When the block carries a Rekor stamp, re-fetches the transparency-log entry to detect drift. Returns structured fields (signature_verified, key_id, human_id when present, recovered_via_chain.{hops,hop_count,auto_pulled_from_cloud}, rekor.status) so an agent can branch on the result.",
+                                "inputSchema": {
+                                    "type": "object",
+                                    "properties": {
+                                        "block_id": { "type": "string", "description": "UUID of the signed block under .aura/blocks/." },
+                                        "no_rekor": { "type": "boolean", "description": "Skip the Rekor inclusion check even if the block carries a stamp. Default false." }
+                                    },
+                                    "required": ["block_id"]
+                                },
+                                "annotations": {
+                                    "title": "Verify Signed Intent Block",
+                                    "readOnlyHint": true,
+                                    "destructiveHint": false,
+                                    "idempotentHint": true,
+                                    "openWorldHint": true,
+                                    "auraCapability": "auto"
                                 }
                             },
                             {
@@ -175,6 +367,33 @@ impl McpServer {
                                         "agent": { "type": "string", "description": "Target agent name (e.g., 'claude', 'gemini', 'cursor')." }
                                     },
                                     "required": ["agent"]
+                                },
+                                "annotations": {
+                                    "title": "Generate Handover Payload",
+                                    "readOnlyHint": true,
+                                    "destructiveHint": false,
+                                    "idempotentHint": true,
+                                    "openWorldHint": false,
+                                    "auraCapability": "auto"
+                                }
+                            },
+                            {
+                                "name": "aura_ask",
+                                "description": "Ask a natural-language question about the codebase. Answers are synthesized from the rationale graph (per-function WHY explanations) and returned with citations to AST nodes. Use for: 'why does X do Y', 'what handles Z', 'who changed function F recently'.",
+                                "inputSchema": {
+                                    "type": "object",
+                                    "properties": {
+                                        "question": { "type": "string", "description": "Natural-language question about the codebase." }
+                                    },
+                                    "required": ["question"]
+                                },
+                                "annotations": {
+                                    "title": "Ask Codebase",
+                                    "readOnlyHint": true,
+                                    "destructiveHint": false,
+                                    "idempotentHint": true,
+                                    "openWorldHint": true,
+                                    "auraCapability": "auto"
                                 }
                             },
                             {
@@ -186,6 +405,51 @@ impl McpServer {
                                         "goal": { "type": "string", "description": "The behavioral goal to prove (e.g., 'User can login via OAuth')." }
                                     },
                                     "required": ["goal"]
+                                },
+                                "annotations": {
+                                    "title": "Prove Behavioral Goal",
+                                    "readOnlyHint": true,
+                                    "destructiveHint": false,
+                                    "idempotentHint": true,
+                                    "openWorldHint": false,
+                                    "auraCapability": "auto"
+                                }
+                            },
+                            {
+                                "name": "aura_goals_prove",
+                                "description": "Prove a goal against the code through the DURABLE goal ledger (.aura/goals.jsonl): break the goal into checkable parts ONCE (cached), check them against the latest code at the AST level, and record a lasting, commit-stamped run. Unlike aura_prove (a transient check), this remembers the result, ties it to a board task, and feeds the Goals surface — use it to keep your work provably aligned to its goal. Returns each part in plain language with the file:line where it lives.",
+                                "inputSchema": {
+                                    "type": "object",
+                                    "properties": {
+                                        "goal": { "type": "string", "description": "What you're building, in plain words (e.g., 'User can sign in via Google')." },
+                                        "task": { "type": "string", "description": "Optional board task to tie this goal to (e.g., 'AURA-42'), so the verdict surfaces on that task." }
+                                    },
+                                    "required": ["goal"]
+                                },
+                                "annotations": {
+                                    "title": "Prove Goal (durable)",
+                                    "readOnlyHint": false,
+                                    "destructiveHint": false,
+                                    "idempotentHint": false,
+                                    "openWorldHint": false,
+                                    "auraCapability": "auto"
+                                }
+                            },
+                            {
+                                "name": "aura_goals_list",
+                                "description": "List every tracked goal from the durable ledger (.aura/goals.jsonl) with whether the code backs it up: built and checked / almost there / not started yet, plus the linked board task. Read this to see how the work maps to its goals before proving or building.",
+                                "inputSchema": {
+                                    "type": "object",
+                                    "properties": {},
+                                    "required": []
+                                },
+                                "annotations": {
+                                    "title": "List Goals",
+                                    "readOnlyHint": true,
+                                    "destructiveHint": false,
+                                    "idempotentHint": true,
+                                    "openWorldHint": false,
+                                    "auraCapability": "auto"
                                 }
                             },
                             {
@@ -198,6 +462,14 @@ impl McpServer {
                                         "file_path": { "type": "string", "description": "Path to the file containing the identifier." }
                                     },
                                     "required": ["identifier", "file_path"]
+                                },
+                                "annotations": {
+                                    "title": "Rewind Function",
+                                    "readOnlyHint": false,
+                                    "destructiveHint": true,
+                                    "idempotentHint": false,
+                                    "openWorldHint": false,
+                                    "auraCapability": "gate"
                                 }
                             },
                             {
@@ -209,6 +481,14 @@ impl McpServer {
                                         "objective": { "type": "string", "description": "The architectural objective to plan (e.g., 'Implement RBAC with policy engine')." }
                                     },
                                     "required": ["objective"]
+                                },
+                                "annotations": {
+                                    "title": "Discover Plan",
+                                    "readOnlyHint": false,
+                                    "destructiveHint": false,
+                                    "idempotentHint": false,
+                                    "openWorldHint": true,
+                                    "auraCapability": "auto"
                                 }
                             },
                             {
@@ -217,6 +497,14 @@ impl McpServer {
                                 "inputSchema": {
                                     "type": "object",
                                     "properties": {}
+                                },
+                                "annotations": {
+                                    "title": "Lock Plan",
+                                    "readOnlyHint": false,
+                                    "destructiveHint": false,
+                                    "idempotentHint": true,
+                                    "openWorldHint": false,
+                                    "auraCapability": "gate"
                                 }
                             },
                             {
@@ -225,6 +513,14 @@ impl McpServer {
                                 "inputSchema": {
                                     "type": "object",
                                     "properties": {}
+                                },
+                                "annotations": {
+                                    "title": "Next Plan Wave",
+                                    "readOnlyHint": false,
+                                    "destructiveHint": false,
+                                    "idempotentHint": false,
+                                    "openWorldHint": false,
+                                    "auraCapability": "gate"
                                 }
                             },
                             {
@@ -233,6 +529,14 @@ impl McpServer {
                                 "inputSchema": {
                                     "type": "object",
                                     "properties": {}
+                                },
+                                "annotations": {
+                                    "title": "Orchestrate Status",
+                                    "readOnlyHint": true,
+                                    "destructiveHint": false,
+                                    "idempotentHint": true,
+                                    "openWorldHint": true,
+                                    "auraCapability": "auto"
                                 }
                             },
                             {
@@ -245,6 +549,14 @@ impl McpServer {
                                         "question": { "type": "string", "description": "Optional: specific question to answer about the content." }
                                     },
                                     "required": ["file_path"]
+                                },
+                                "annotations": {
+                                    "title": "Gemini Skim",
+                                    "readOnlyHint": true,
+                                    "destructiveHint": false,
+                                    "idempotentHint": true,
+                                    "openWorldHint": true,
+                                    "auraCapability": "auto"
                                 }
                             },
                             {
@@ -257,6 +569,14 @@ impl McpServer {
                                         "focus": { "type": "string", "description": "Optional: specific aspect to focus on (e.g., 'security', 'performance', 'architecture')." }
                                     },
                                     "required": ["file_path"]
+                                },
+                                "annotations": {
+                                    "title": "Gemini Read",
+                                    "readOnlyHint": true,
+                                    "destructiveHint": false,
+                                    "idempotentHint": true,
+                                    "openWorldHint": true,
+                                    "auraCapability": "auto"
                                 }
                             },
                             {
@@ -269,6 +589,14 @@ impl McpServer {
                                         "question": { "type": "string", "description": "Question to answer about the batch of files." }
                                     },
                                     "required": ["file_paths", "question"]
+                                },
+                                "annotations": {
+                                    "title": "Gemini Batch",
+                                    "readOnlyHint": true,
+                                    "destructiveHint": false,
+                                    "idempotentHint": true,
+                                    "openWorldHint": true,
+                                    "auraCapability": "auto"
                                 }
                             },
                             {
@@ -277,6 +605,14 @@ impl McpServer {
                                 "inputSchema": {
                                     "type": "object",
                                     "properties": {}
+                                },
+                                "annotations": {
+                                    "title": "Context Budget",
+                                    "readOnlyHint": true,
+                                    "destructiveHint": false,
+                                    "idempotentHint": true,
+                                    "openWorldHint": false,
+                                    "auraCapability": "auto"
                                 }
                             },
                             {
@@ -291,6 +627,14 @@ impl McpServer {
                                             "default": "today"
                                         }
                                     }
+                                },
+                                "annotations": {
+                                    "title": "Usage & Cost",
+                                    "readOnlyHint": true,
+                                    "destructiveHint": false,
+                                    "idempotentHint": true,
+                                    "openWorldHint": true,
+                                    "auraCapability": "auto"
                                 }
                             },
                             {
@@ -303,6 +647,14 @@ impl McpServer {
                                         "intent": { "type": "string", "description": "What you want to achieve (e.g., 'add rate limiting to this endpoint')." }
                                     },
                                     "required": ["file_path", "intent"]
+                                },
+                                "annotations": {
+                                    "title": "Suggest Edit",
+                                    "readOnlyHint": true,
+                                    "destructiveHint": false,
+                                    "idempotentHint": false,
+                                    "openWorldHint": true,
+                                    "auraCapability": "auto"
                                 }
                             },
                             {
@@ -314,6 +666,14 @@ impl McpServer {
                                         "branch": { "type": "string", "description": "Branch name to find sessions for (e.g., 'feat/auth')." }
                                     },
                                     "required": ["branch"]
+                                },
+                                "annotations": {
+                                    "title": "Resume Session",
+                                    "readOnlyHint": true,
+                                    "destructiveHint": false,
+                                    "idempotentHint": true,
+                                    "openWorldHint": false,
+                                    "auraCapability": "auto"
                                 }
                             },
                             {
@@ -322,6 +682,35 @@ impl McpServer {
                                 "inputSchema": {
                                     "type": "object",
                                     "properties": {}
+                                },
+                                "annotations": {
+                                    "title": "Doctor Diagnostic",
+                                    "readOnlyHint": true,
+                                    "destructiveHint": false,
+                                    "idempotentHint": true,
+                                    "openWorldHint": false,
+                                    "auraCapability": "auto"
+                                }
+                            },
+                            {
+                                "name": "aura_subagent_monitor",
+                                "description": "Bucket O — Tail the most recent stdout/stderr lines from a Manager subagent's PTY. Returns up to `tail` lines (default 200) plus the running line count. Call when a fan-out has been Running >2 minutes and you want to know whether it's progressing or stuck. Don't poll faster than every 30s. Use BEFORE deciding to kill or wait.",
+                                "inputSchema": {
+                                    "type": "object",
+                                    "properties": {
+                                        "session_id": { "type": "string", "description": "Manager session id (the one shown in the chat URL)." },
+                                        "task_id": { "type": "integer", "description": "Task id within the session (the # shown on the DAG TaskCard)." },
+                                        "tail": { "type": "integer", "description": "Max lines to return (newest last). Default 200." }
+                                    },
+                                    "required": ["session_id", "task_id"]
+                                },
+                                "annotations": {
+                                    "title": "Monitor Subagent",
+                                    "readOnlyHint": true,
+                                    "destructiveHint": false,
+                                    "idempotentHint": true,
+                                    "openWorldHint": false,
+                                    "auraCapability": "auto"
                                 }
                             },
                             {
@@ -333,6 +722,14 @@ impl McpServer {
                                         "session_id": { "type": "string", "description": "Session ID to summarize (e.g., '2026-03-09-abc12345')." }
                                     },
                                     "required": ["session_id"]
+                                },
+                                "annotations": {
+                                    "title": "Summarize Session",
+                                    "readOnlyHint": true,
+                                    "destructiveHint": false,
+                                    "idempotentHint": true,
+                                    "openWorldHint": true,
+                                    "auraCapability": "auto"
                                 }
                             },
                             {
@@ -341,6 +738,14 @@ impl McpServer {
                                 "inputSchema": {
                                     "type": "object",
                                     "properties": {}
+                                },
+                                "annotations": {
+                                    "title": "Live Impacts",
+                                    "readOnlyHint": true,
+                                    "destructiveHint": false,
+                                    "idempotentHint": true,
+                                    "openWorldHint": true,
+                                    "auraCapability": "auto"
                                 }
                             },
                             {
@@ -352,6 +757,14 @@ impl McpServer {
                                         "alert_id": { "type": "string", "description": "The UUID of the impact alert to resolve." }
                                     },
                                     "required": ["alert_id"]
+                                },
+                                "annotations": {
+                                    "title": "Resolve Impact Alert",
+                                    "readOnlyHint": false,
+                                    "destructiveHint": false,
+                                    "idempotentHint": true,
+                                    "openWorldHint": true,
+                                    "auraCapability": "gate"
                                 }
                             },
                             {
@@ -364,6 +777,14 @@ impl McpServer {
                                         "to": { "type": "string", "description": "Optional: specific username to DM. If omitted, broadcasts to the whole repo team." }
                                     },
                                     "required": ["message"]
+                                },
+                                "annotations": {
+                                    "title": "Send Team Message",
+                                    "readOnlyHint": false,
+                                    "destructiveHint": false,
+                                    "idempotentHint": false,
+                                    "openWorldHint": true,
+                                    "auraCapability": "gate"
                                 }
                             },
                             {
@@ -374,6 +795,14 @@ impl McpServer {
                                     "properties": {
                                         "limit": { "type": "number", "description": "Max messages to return (default: 20)." }
                                     }
+                                },
+                                "annotations": {
+                                    "title": "List Team Messages",
+                                    "readOnlyHint": true,
+                                    "destructiveHint": false,
+                                    "idempotentHint": true,
+                                    "openWorldHint": true,
+                                    "auraCapability": "auto"
                                 }
                             },
                             {
@@ -385,6 +814,14 @@ impl McpServer {
                                         "file_path": { "type": "string", "description": "Path to the file whose functions to push." }
                                     },
                                     "required": ["file_path"]
+                                },
+                                "annotations": {
+                                    "title": "Push Function Sync",
+                                    "readOnlyHint": false,
+                                    "destructiveHint": false,
+                                    "idempotentHint": false,
+                                    "openWorldHint": true,
+                                    "auraCapability": "gate"
                                 }
                             },
                             {
@@ -395,6 +832,14 @@ impl McpServer {
                                     "properties": {
                                         "dry_run": { "type": "boolean", "description": "If true, show what would change without applying. Default: false." }
                                     }
+                                },
+                                "annotations": {
+                                    "title": "Pull Function Sync",
+                                    "readOnlyHint": false,
+                                    "destructiveHint": true,
+                                    "idempotentHint": false,
+                                    "openWorldHint": true,
+                                    "auraCapability": "gate"
                                 }
                             },
                             {
@@ -403,6 +848,14 @@ impl McpServer {
                                 "inputSchema": {
                                     "type": "object",
                                     "properties": {}
+                                },
+                                "annotations": {
+                                    "title": "Sync Status",
+                                    "readOnlyHint": true,
+                                    "destructiveHint": false,
+                                    "idempotentHint": true,
+                                    "openWorldHint": true,
+                                    "auraCapability": "auto"
                                 }
                             },
                             {
@@ -411,6 +864,14 @@ impl McpServer {
                                 "inputSchema": {
                                     "type": "object",
                                     "properties": {}
+                                },
+                                "annotations": {
+                                    "title": "Sentinel Status",
+                                    "readOnlyHint": true,
+                                    "destructiveHint": false,
+                                    "idempotentHint": true,
+                                    "openWorldHint": false,
+                                    "auraCapability": "auto"
                                 }
                             },
                             {
@@ -423,6 +884,14 @@ impl McpServer {
                                         "mode": { "type": "string", "description": "Zone mode: 'warn' (default) or 'block'." }
                                     },
                                     "required": ["patterns"]
+                                },
+                                "annotations": {
+                                    "title": "Claim Zone",
+                                    "readOnlyHint": false,
+                                    "destructiveHint": false,
+                                    "idempotentHint": true,
+                                    "openWorldHint": true,
+                                    "auraCapability": "gate"
                                 }
                             },
                             {
@@ -433,6 +902,14 @@ impl McpServer {
                                     "properties": {
                                         "file_path": { "type": "string", "description": "Optional: release claims only for this file. If omitted, releases all claims." }
                                     }
+                                },
+                                "annotations": {
+                                    "title": "Release Sentinel Claims",
+                                    "readOnlyHint": false,
+                                    "destructiveHint": false,
+                                    "idempotentHint": true,
+                                    "openWorldHint": false,
+                                    "auraCapability": "auto"
                                 }
                             },
                             {
@@ -445,6 +922,14 @@ impl McpServer {
                                         "to": { "type": "string", "description": "Optional: target session_id for a direct message. If omitted, broadcasts to ALL active agent sessions." }
                                     },
                                     "required": ["message"]
+                                },
+                                "annotations": {
+                                    "title": "Send Sentinel Message",
+                                    "readOnlyHint": false,
+                                    "destructiveHint": false,
+                                    "idempotentHint": false,
+                                    "openWorldHint": false,
+                                    "auraCapability": "auto"
                                 }
                             },
                             {
@@ -455,6 +940,14 @@ impl McpServer {
                                     "properties": {
                                         "limit": { "type": "number", "description": "Max messages to return (default: 20)." }
                                     }
+                                },
+                                "annotations": {
+                                    "title": "Sentinel Inbox",
+                                    "readOnlyHint": false,
+                                    "destructiveHint": false,
+                                    "idempotentHint": false,
+                                    "openWorldHint": false,
+                                    "auraCapability": "auto"
                                 }
                             },
                             {
@@ -463,6 +956,14 @@ impl McpServer {
                                 "inputSchema": {
                                     "type": "object",
                                     "properties": {}
+                                },
+                                "annotations": {
+                                    "title": "List Active Agents",
+                                    "readOnlyHint": true,
+                                    "destructiveHint": false,
+                                    "idempotentHint": true,
+                                    "openWorldHint": false,
+                                    "auraCapability": "auto"
                                 }
                             },
                             {
@@ -474,19 +975,36 @@ impl McpServer {
                                         "section": { "type": "string", "description": "Section to write to: 'identity', 'architecture', 'timeline', 'convention', 'gotcha', 'context', 'active_work'." },
                                         "content": { "type": "string", "description": "The memory content. For 'identity': project description. For 'architecture': JSON with name, kind, path, description, connects_to. For 'timeline': JSON with date, title, description, category. For others: plain text." },
                                         "tags": { "type": "string", "description": "Optional comma-separated tags for searchability." },
-                                        "stack": { "type": "string", "description": "Optional: comma-separated tech stack (only for 'identity' section)." }
+                                        "stack": { "type": "string", "description": "Optional: comma-separated tech stack (only for 'identity' section)." },
+                                        "symbol": { "type": "string", "description": "Optional code anchor for entry sections (convention/gotcha/context/active_work): '<repo-relative-path>#<identifier>', e.g. 'src/auth.rs#verify_token'. The symbol's current text is fingerprinted; future reads flag this memory stale when that code changes or disappears. Pass it whenever the fact is ABOUT a specific function/class." }
                                     },
                                     "required": ["section", "content"]
+                                },
+                                "annotations": {
+                                    "title": "Write Memory",
+                                    "readOnlyHint": false,
+                                    "destructiveHint": false,
+                                    "idempotentHint": false,
+                                    "openWorldHint": false,
+                                    "auraCapability": "gate"
                                 }
                             },
                             {
                                 "name": "aura_memory_read",
-                                "description": "Read the project's permanent memory — architecture, decisions, conventions, gotchas, and context accumulated across all past sessions. Call this when starting work on an unfamiliar area, or when you need to understand why something was built a certain way. Use 'query' to search, or omit for the full project memory.",
+                                "description": "Read the project's permanent memory — architecture, decisions, conventions, gotchas, and context accumulated across all past sessions. Call this when starting work on an unfamiliar area, or when you need to understand why something was built a certain way. Use 'query' to search, or omit for the full project memory. Query results are RANKED (BM25 + embeddings + recency, RRF-fused; each carries score + matched legs) and provenance-bound entries are verified against the live code at read time: 'stale': true with a 'stale_reason' means the symbol the memory was learned from has changed or been removed since — re-verify before trusting it.",
                                 "inputSchema": {
                                     "type": "object",
                                     "properties": {
                                         "query": { "type": "string", "description": "Optional: search keyword to filter memories. If omitted, returns the full project memory." }
                                     }
+                                },
+                                "annotations": {
+                                    "title": "Read Memory",
+                                    "readOnlyHint": true,
+                                    "destructiveHint": false,
+                                    "idempotentHint": true,
+                                    "openWorldHint": false,
+                                    "auraCapability": "auto"
                                 }
                             },
                             {
@@ -498,6 +1016,14 @@ impl McpServer {
                                         "id": { "type": "string", "description": "The memory entry ID to remove (e.g., 'mem-a1b2c3d4')." }
                                     },
                                     "required": ["id"]
+                                },
+                                "annotations": {
+                                    "title": "Forget Memory Entry",
+                                    "readOnlyHint": false,
+                                    "destructiveHint": true,
+                                    "idempotentHint": true,
+                                    "openWorldHint": false,
+                                    "auraCapability": "gate"
                                 }
                             },
                             {
@@ -509,11 +1035,858 @@ impl McpServer {
                                         "section": { "type": "string", "description": "Section to compact: 'convention', 'gotcha', or 'context'." }
                                     },
                                     "required": ["section"]
+                                },
+                                "annotations": {
+                                    "title": "Compact Memory",
+                                    "readOnlyHint": false,
+                                    "destructiveHint": false,
+                                    "idempotentHint": false,
+                                    "openWorldHint": true,
+                                    "auraCapability": "gate"
+                                }
+                            },
+                            {
+                                "name": "aura_taste_rules",
+                                "description": "Return the project's learned taste rules — coding patterns Aura has distilled from accepted commits (named-vs-default exports, indent width, error-handling style, etc.). Call BEFORE editing a file so your output matches the codebase's existing taste. Optional file_path narrows the response to rules whose language/layer match. Phase 1 surface; rules are observation-derived (no LLM in the hot path) and updated on every commit.",
+                                "inputSchema": {
+                                    "type": "object",
+                                    "properties": {
+                                        "file_path": { "type": "string", "description": "Optional: a path you're about to edit. Filters to rules matching its language and layer." },
+                                        "intent_type": { "type": "string", "description": "Optional: the kind of work (BugFix, Feature, Refactor, ...). Reserved for future scope-narrowing; ignored in Phase 1." },
+                                        "limit": { "type": "integer", "description": "Max rules to return. Default 10." }
+                                    }
+                                },
+                                "annotations": {
+                                    "title": "Project Taste Rules",
+                                    "readOnlyHint": true,
+                                    "destructiveHint": false,
+                                    "idempotentHint": true,
+                                    "openWorldHint": false,
+                                    "auraCapability": "auto"
+                                }
+                            },
+                            {
+                                "name": "aura_episodic_recall",
+                                "description": "Recall recent episodic events — intent logs, agent-to-agent sentinel messages, and pre-edit snapshots — grouped by time window. Answers 'what happened here recently?' for swarm handover and resume workflows. Local-only preview of the Bet 1 cloud episodic store; the response shape is stable across the local→cloud migration.",
+                                "inputSchema": {
+                                    "type": "object",
+                                    "properties": {
+                                        "window_hours": { "type": "integer", "description": "Lookback window in hours. Default 168 (7 days)." },
+                                        "focus_file": { "type": "string", "description": "Optional: filter events to those mentioning this file path or keyword." },
+                                        "limit": { "type": "integer", "description": "Max events to return (most recent first). Default 25." }
+                                    }
+                                },
+                                "annotations": {
+                                    "title": "Recall Episodic Events",
+                                    "readOnlyHint": true,
+                                    "destructiveHint": false,
+                                    "idempotentHint": true,
+                                    "openWorldHint": false,
+                                    "auraCapability": "auto"
+                                }
+                            },
+                            {
+                                "name": "aura_episodic_narrate",
+                                "description": "Cloud-side compressed narration of an episodic-event window — one paragraph an agent can read instead of the raw rows. With an org LLM key configured the cloud calls a tier-shallow (default) or tier-deep model; without one it returns a deterministic 'Synthesized digest' fallback. Same filter shape as aura_episodic_recall. Use when context is tight and you only need the gist.",
+                                "inputSchema": {
+                                    "type": "object",
+                                    "properties": {
+                                        "window_hours": { "type": "integer", "description": "Lookback window in hours. Default 168 (7 days)." },
+                                        "event_type": { "type": "string", "description": "Optional: only narrate events of this type (intent, sentinel, handover, …)." },
+                                        "focus_file": { "type": "string", "description": "Optional: scope to events touching this file path." },
+                                        "focus_fn": { "type": "string", "description": "Optional: scope to events touching this function name." },
+                                        "repo": { "type": "string", "description": "Optional: scope to a single repo (github full_name)." },
+                                        "tier": { "type": "string", "description": "'shallow' (cheap, default) or 'deep' (more capable). Ignored on the synthetic-fallback path." },
+                                        "limit": { "type": "integer", "description": "Max events the narrator considers. Default 100." }
+                                    }
+                                },
+                                "annotations": {
+                                    "title": "Narrate Episodic Window",
+                                    "readOnlyHint": true,
+                                    "destructiveHint": false,
+                                    "idempotentHint": true,
+                                    "openWorldHint": true,
+                                    "auraCapability": "auto"
+                                }
+                            },
+                            {
+                                "name": "aura_episodic_timeline",
+                                "description": "Per-function materialized timeline view from cloud episodic events. For one function name returns: total_events, first/last seen, counts_by_type, by_day buckets, agents_seen, plus the events slice itself (newest first). Use BEFORE refactoring or removing a function to see who's been touching it and when. Single call replaces a recall+filter+group dance.",
+                                "inputSchema": {
+                                    "type": "object",
+                                    "properties": {
+                                        "function_name": { "type": "string", "description": "Function name to materialize a timeline for. Required." },
+                                        "window_hours": { "type": "integer", "description": "Lookback window in hours. Default 168 (7 days)." },
+                                        "repo": { "type": "string", "description": "Optional: scope to a single repo (github full_name)." },
+                                        "limit": { "type": "integer", "description": "Max events in the response slice. Default 50, capped at 500. The total_events field reports the unbounded count." }
+                                    },
+                                    "required": ["function_name"]
+                                },
+                                "annotations": {
+                                    "title": "Per-Function Episodic Timeline",
+                                    "readOnlyHint": true,
+                                    "destructiveHint": false,
+                                    "idempotentHint": true,
+                                    "openWorldHint": true,
+                                    "auraCapability": "auto"
+                                }
+                            },
+                            {
+                                "name": "aura_episodic_agent_digest",
+                                "description": "Per-agent materialized digest from cloud episodic events. For one agent_id returns: total_events, first/last seen, counts_by_type, by_day buckets, top_functions[] and top_files[] (count desc, name asc), plus the events slice itself (newest first). Use at session start to absorb what another agent has been doing without rereading the raw stream — the natural complement to aura_episodic_timeline (function-centric) and aura_episodic_recall (window query).",
+                                "inputSchema": {
+                                    "type": "object",
+                                    "properties": {
+                                        "agent_id": { "type": "string", "description": "Agent identifier to materialize a digest for. Required. Conventionally the producer's agent_id (e.g. 'claude', 'gemini', GitHub login, or a session id)." },
+                                        "window_hours": { "type": "integer", "description": "Lookback window in hours. Default 168 (7 days)." },
+                                        "repo": { "type": "string", "description": "Optional: scope to a single repo (github full_name)." },
+                                        "limit": { "type": "integer", "description": "Max events in the response slice. Default 50, capped at 500. The total_events field reports the unbounded count." }
+                                    },
+                                    "required": ["agent_id"]
+                                },
+                                "annotations": {
+                                    "title": "Per-Agent Episodic Digest",
+                                    "readOnlyHint": true,
+                                    "destructiveHint": false,
+                                    "idempotentHint": true,
+                                    "openWorldHint": true,
+                                    "auraCapability": "auto"
+                                }
+                            },
+                            {
+                                "name": "aura_episodic_multi_session_arc",
+                                "description": "Interleaved per-session arc across 2+ agent_ids. Computes the per-session arc for each agent (same shape as aura_episodic_session_arc) and merges the segments into a single timeline ordered by start_ts, with each merged segment carrying its source agent_id. Returns {agent_ids[], window_hours, gap_minutes, total_events, segment_count, per_agent_segment_counts[], counts_by_intent_type{} (typed-intent rollup across every agent's events; bucket sum = total_events; untyped events fall under \"untyped\"), segments[]}. Use to render a multi-agent activity timeline (e.g. claude vs gemini working concurrently) without stitching the per-agent responses client-side. Up to 16 agent_ids per call.",
+                                "inputSchema": {
+                                    "type": "object",
+                                    "properties": {
+                                        "agent_ids": { "type": "string", "description": "Comma-separated agent_ids. Up to 16, deduplicated, empty entries dropped." },
+                                        "window_hours": { "type": "integer", "description": "Lookback window in hours. Default 168." },
+                                        "gap_minutes": { "type": "integer", "description": "Inactivity gap that closes one segment and opens the next (per agent). Default 30." },
+                                        "repo": { "type": "string", "description": "Optional: scope to a single repo (github full_name)." },
+                                        "limit": { "type": "integer", "description": "Per-agent event cap. Default 500, max 1000." }
+                                    },
+                                    "required": ["agent_ids"]
+                                },
+                                "annotations": {
+                                    "title": "Multi-Session Arc",
+                                    "readOnlyHint": true,
+                                    "destructiveHint": false,
+                                    "idempotentHint": true,
+                                    "openWorldHint": true,
+                                    "auraCapability": "auto"
+                                }
+                            },
+                            {
+                                "name": "aura_episodic_session_arc",
+                                "description": "Per-session arc materialized view from cloud episodic events. For one agent_id (which doubles as session_id) returns the events grouped into time-ordered segments separated by `gap_minutes` of inactivity. Each segment carries: index, start_ts, end_ts, duration_seconds, event_count, counts_by_type[] (count desc, name asc), counts_by_intent_type{} (per-segment typed-intent rollup; bucket sum = event_count; untyped under \"untyped\"), top_function, top_file, first_summary, last_summary. Top-level response also carries counts_by_intent_type{} aggregated across all segments (bucket sum = total_events). Use to render an arc visualization or to write a one-liner per work-burst without re-fetching events. Sibling to aura_episodic_agent_digest (top-N rankings, one row per agent) — same scoping, time-ordered output instead of collapsed.",
+                                "inputSchema": {
+                                    "type": "object",
+                                    "properties": {
+                                        "agent_id": { "type": "string", "description": "Agent identifier (or session id) to materialize an arc for. Required." },
+                                        "window_hours": { "type": "integer", "description": "Lookback window in hours. Default 168 (7 days)." },
+                                        "gap_minutes": { "type": "integer", "description": "Inactivity gap that closes one segment and opens the next. Default 30." },
+                                        "repo": { "type": "string", "description": "Optional: scope to a single repo (github full_name)." },
+                                        "limit": { "type": "integer", "description": "Cap on events the arc considers (newest-first). Default 500, max 1000." }
+                                    },
+                                    "required": ["agent_id"]
+                                },
+                                "annotations": {
+                                    "title": "Per-Session Arc",
+                                    "readOnlyHint": true,
+                                    "destructiveHint": false,
+                                    "idempotentHint": true,
+                                    "openWorldHint": true,
+                                    "auraCapability": "auto"
+                                }
+                            },
+                            {
+                                "name": "aura_episodic_recall_cloud",
+                                "description": "Unified window query over cloud episodic events. Filter rows by any combination of agent_id, event_type, focus_fn, focus_file, repo, and a window_hours lookback. Returns {window_hours, total_events, returned, events[], counts_by_type, narration} — the same shape the cloud /recall route emits, with `narration` being a one-line deterministic digest. Sits between aura_episodic_timeline (function-only, day-bucketed) and aura_episodic_agent_digest (agent-only, top-N refs): use this when you want raw events with two or more axes narrowed at once. Cloud-backed sibling to aura_episodic_recall (which reads only the local .aura/* signals).",
+                                "inputSchema": {
+                                    "type": "object",
+                                    "properties": {
+                                        "window_hours": { "type": "integer", "description": "Lookback window in hours. Default 168 (7 days). Minimum 1." },
+                                        "event_type": { "type": "string", "description": "Filter by event_type (e.g. 'intent', 'pr_review', 'suggest_edit')." },
+                                        "agent_id": { "type": "string", "description": "Filter by agent_id (the producer's handle, e.g. 'claude-foo' or a session id)." },
+                                        "focus_fn": { "type": "string", "description": "Filter by a function name in refs_fn (any event whose refs_fn array contains the value)." },
+                                        "focus_file": { "type": "string", "description": "Filter by a file path in refs_file." },
+                                        "repo": { "type": "string", "description": "Optional: scope to a single repo (github full_name)." },
+                                        "intent_type": { "type": "string", "description": "S2-TICR: filter by canonical intent_type — one of FeatureAdd, BugFix, Refactor, Revert, Performance, Docs, Deps. Server returns 400 on a typo so a misspelled value never silently empties the result." },
+                                        "limit": { "type": "integer", "description": "Max events in the response slice. Default 25, capped at 500. The total_events field reports the unbounded count." }
+                                    }
+                                },
+                                "annotations": {
+                                    "title": "Unified Episodic Recall",
+                                    "readOnlyHint": true,
+                                    "destructiveHint": false,
+                                    "idempotentHint": true,
+                                    "openWorldHint": true,
+                                    "auraCapability": "auto"
+                                }
+                            },
+                            {
+                                "name": "aura_impacts_cross_repo",
+                                "description": "Find every (repo, file_path) across the caller's org whose `function_bodies` row matches a given function name. Use BEFORE renaming or deleting a shared utility — answers 'do any sibling repos in this org have a function with the same name?'. Cross-repo, name-level (real symbol-graph caller resolution across repos is Phase D).",
+                                "inputSchema": {
+                                    "type": "object",
+                                    "properties": {
+                                        "function_name": { "type": "string", "description": "Function name to search for across the org." },
+                                        "exclude_repo": { "type": "string", "description": "Optional: exclude this repo (typically your own) from results." },
+                                        "branch": { "type": "string", "description": "Optional: scope to one branch name (e.g. 'main') across all repos." },
+                                        "limit": { "type": "integer", "description": "Max matches to return. Default 100, capped at 500." }
+                                    },
+                                    "required": ["function_name"]
+                                },
+                                "annotations": {
+                                    "title": "Cross-Repo Function Impact Lookup",
+                                    "readOnlyHint": true,
+                                    "destructiveHint": false,
+                                    "idempotentHint": true,
+                                    "openWorldHint": true,
+                                    "auraCapability": "auto"
+                                }
+                            },
+                            {
+                                "name": "aura_pr_commit_review_generate",
+                                "description": "Run the per-commit AI review pipeline over a list of commits in a PR. For each commit the cloud calls generate_ai_review (sharing the umbrella PR prompt + JSON schema), upserts the result into pr_commit_reviews, and returns the (id, risk_score, risk_label) tuple. On no-LLM-key the cloud falls back to a deterministic synthesized review (model_used='fallback::synthetic') so the row is still populated.",
+                                "inputSchema": {
+                                    "type": "object",
+                                    "properties": {
+                                        "repo": { "type": "string", "description": "GitHub full name, e.g. 'owner/name'." },
+                                        "platform": { "type": "string", "description": "'github' or 'gitlab'." },
+                                        "pr_number": { "type": "integer", "description": "PR / MR number." },
+                                        "commits": {
+                                            "type": "array",
+                                            "description": "List of commits to review. Each item carries the sha, optional parent, intent_summary, and modified/deleted function lists.",
+                                            "items": {
+                                                "type": "object",
+                                                "properties": {
+                                                    "commit_sha": { "type": "string" },
+                                                    "parent_sha": { "type": "string" },
+                                                    "author_login": { "type": "string" },
+                                                    "intent_summary": { "type": "string" },
+                                                    "files_touched": { "type": "integer" },
+                                                    "functions_modified": { "type": "array" },
+                                                    "functions_deleted": { "type": "array" }
+                                                },
+                                                "required": ["commit_sha"]
+                                            }
+                                        }
+                                    },
+                                    "required": ["repo", "platform", "pr_number", "commits"]
+                                },
+                                "annotations": {
+                                    "title": "Generate Per-Commit Reviews",
+                                    "readOnlyHint": false,
+                                    "destructiveHint": false,
+                                    "idempotentHint": true,
+                                    "openWorldHint": true,
+                                    "auraCapability": "auto"
+                                }
+                            },
+                            {
+                                "name": "aura_a2a_task_create",
+                                "description": "Create a long-running A2A v1.2 task in this org. Returns the task in 'submitted' state with a stable id the caller can poll via aura_a2a_task_get. Status follows A2A v1.2 §4: submitted | working | input-required | completed | failed | canceled | rejected | auth-required. Terminal states (completed/failed/canceled/rejected) are sticky. Use this for fire-and-poll work (cross-repo refactor, multi-step review) where message/send (one-shot) is not enough.",
+                                "inputSchema": {
+                                    "type": "object",
+                                    "properties": {
+                                        "agent_kind": { "type": "string", "description": "A2A actor kind, e.g. 'a2a:claude', 'a2a:cursor'. Mirrors sentinel_messages.from_agent_kind." },
+                                        "input": { "type": "string", "description": "Task description / payload the worker will act on." },
+                                        "repo": { "type": "string", "description": "Optional repo full-name (org/name) to scope the task." },
+                                        "context_id": { "type": "string", "description": "Optional A2A context grouping (free-form)." },
+                                        "metadata": { "type": "object", "description": "Optional client-supplied metadata bag." }
+                                    },
+                                    "required": ["agent_kind", "input"]
+                                },
+                                "annotations": {
+                                    "title": "Create A2A Task",
+                                    "readOnlyHint": false,
+                                    "destructiveHint": false,
+                                    "idempotentHint": false,
+                                    "openWorldHint": true,
+                                    "auraCapability": "auto"
+                                }
+                            },
+                            {
+                                "name": "aura_a2a_task_get",
+                                "description": "Read one A2A v1.2 task by id (org-scoped — wrong-org JWT returns 404). Returns the full Task object: agent_kind, input_text, input_metadata, status, result (once completed), error_message (on failed/rejected), created_at, updated_at.",
+                                "inputSchema": {
+                                    "type": "object",
+                                    "properties": {
+                                        "id": { "type": "string", "description": "Task UUID returned by aura_a2a_task_create." }
+                                    },
+                                    "required": ["id"]
+                                },
+                                "annotations": {
+                                    "title": "Get A2A Task",
+                                    "readOnlyHint": true,
+                                    "destructiveHint": false,
+                                    "idempotentHint": true,
+                                    "openWorldHint": true,
+                                    "auraCapability": "auto"
+                                }
+                            },
+                            {
+                                "name": "aura_memory_cloud_list",
+                                "description": "List entries in the cloud project_memory store (kind/title/body), org-scoped, newest first. The local aura_memory_read and aura_memory_write tools operate on a per-machine memory file; this surface is the org-wide durable counterpart for cross-machine sharing. Useful for joining a session and learning what the team has decided.",
+                                "inputSchema": {
+                                    "type": "object",
+                                    "properties": {
+                                        "page": { "type": "integer", "description": "1-based page number. Default 1." },
+                                        "limit": { "type": "integer", "description": "Max rows per page. Default 100, capped at 500." }
+                                    }
+                                },
+                                "annotations": {
+                                    "title": "List Cloud Memory",
+                                    "readOnlyHint": true,
+                                    "destructiveHint": false,
+                                    "idempotentHint": true,
+                                    "openWorldHint": true,
+                                    "auraCapability": "auto"
+                                }
+                            },
+                            {
+                                "name": "aura_memory_cloud_push",
+                                "description": "Insert a project_memory entry org-wide (kind defaults to 'project'). Use when you've learned something durable that the team should see — design decisions, conventions, gotchas. Repo scope is optional and resolves by github_full_name.",
+                                "inputSchema": {
+                                    "type": "object",
+                                    "properties": {
+                                        "body": { "type": "string", "description": "Memory body (Markdown). Required." },
+                                        "title": { "type": "string", "description": "Optional short title for indexing." },
+                                        "kind": { "type": "string", "description": "Optional kind tag, e.g. 'decision', 'convention', 'gotcha'. Defaults to 'project'." },
+                                        "repo_full_name": { "type": "string", "description": "Optional GitHub full_name (org/name) to scope the entry to one repo." }
+                                    },
+                                    "required": ["body"]
+                                },
+                                "annotations": {
+                                    "title": "Push Cloud Memory",
+                                    "readOnlyHint": false,
+                                    "destructiveHint": false,
+                                    "idempotentHint": false,
+                                    "openWorldHint": true,
+                                    "auraCapability": "auto"
+                                }
+                            },
+                            {
+                                "name": "aura_handover_cloud_list",
+                                "description": "List handovers stored in the cloud handover ledger (cross-machine pickup). Returns paginated rows with (id, session_id, agent_name, summary, token_count, created_at), newest first. Use this when joining a session another agent left mid-stream — the local `aura_handover` tool generates a payload, this lists what's already been pushed.",
+                                "inputSchema": {
+                                    "type": "object",
+                                    "properties": {
+                                        "page": { "type": "integer", "description": "1-based page number. Default 1." },
+                                        "limit": { "type": "integer", "description": "Max rows per page. Default 50, capped at 200." }
+                                    }
+                                },
+                                "annotations": {
+                                    "title": "List Cloud Handovers",
+                                    "readOnlyHint": true,
+                                    "destructiveHint": false,
+                                    "idempotentHint": true,
+                                    "openWorldHint": true,
+                                    "auraCapability": "auto"
+                                }
+                            },
+                            {
+                                "name": "aura_handover_cloud_push",
+                                "description": "Push a handover record to the cloud handover ledger so another agent (on another machine, in another conversation) can discover and resume the work. The local `aura_handover` tool produces the payload; this tool persists a summary line so the receiving agent can find it.",
+                                "inputSchema": {
+                                    "type": "object",
+                                    "properties": {
+                                        "session_id": { "type": "string", "description": "Session identifier the receiving agent will resume against." },
+                                        "agent_name": { "type": "string", "description": "Source agent name, e.g. 'claude', 'cursor', 'gemini'." },
+                                        "summary": { "type": "string", "description": "One-paragraph human-readable summary of where the session was when the handover was generated." },
+                                        "token_count": { "type": "integer", "description": "Optional: token count of the source session at handover time, for downstream sizing." }
+                                    }
+                                },
+                                "annotations": {
+                                    "title": "Push Cloud Handover",
+                                    "readOnlyHint": false,
+                                    "destructiveHint": false,
+                                    "idempotentHint": false,
+                                    "openWorldHint": true,
+                                    "auraCapability": "auto"
+                                }
+                            },
+                            {
+                                "name": "aura_pr_commit_review_list",
+                                "description": "List per-commit AI reviews for a PR. Returns the upserted rows in commit order with their (sha, parent_sha, ai_summary, risk_score, risk_label, model_used) — including any 'fallback::trivial-skip' fmt-only commits and 'fallback::synthetic' no-LLM-key entries. Top-level response also carries `counts_by_intent_type` — a histogram of canonical intent_type buckets across the FULL PR (untyped commits land under the 'untyped' key so the bucket sum equals total). Pass `intent_type` to filter the rows to a single canonical type (FeatureAdd | BugFix | Refactor | Revert | Performance | Docs | Deps); the histogram still reflects the unfiltered PR so dashboards can answer 'is this PR mostly Refactor or BugFix?'. Read after aura_pr_commit_review_generate (or after the cloud has ingested commit reviews from another path) to see the per-commit picture.",
+                                "inputSchema": {
+                                    "type": "object",
+                                    "properties": {
+                                        "repo": { "type": "string", "description": "GitHub full name, e.g. 'owner/name'." },
+                                        "platform": { "type": "string", "description": "'github' or 'gitlab'." },
+                                        "pr_number": { "type": "integer", "description": "PR / MR number." },
+                                        "intent_type": { "type": "string", "description": "Optional canonical intent_type filter (FeatureAdd | BugFix | Refactor | Revert | Performance | Docs | Deps). A typo round-trips as an HTTP 400 isError so the caller doesn't mistake it for 'no matching commits'." }
+                                    },
+                                    "required": ["repo", "platform", "pr_number"]
+                                },
+                                "annotations": {
+                                    "title": "List Per-Commit Reviews",
+                                    "readOnlyHint": true,
+                                    "destructiveHint": false,
+                                    "idempotentHint": true,
+                                    "openWorldHint": true,
+                                    "auraCapability": "auto"
+                                }
+                            },
+                            {
+                                "name": "aura_pr_commit_review_get",
+                                "description": "Read one per-commit AI review by (commit_sha + repo + platform + pr_number). The PR triplet is required because the same SHA can legitimately appear across forks/PRs in the org — cloud rejects without all three. Returns the full row with ai_summary, risk_score, risk_label, model_used, and the original commit metadata. 404 surfaces as an isError envelope so the caller can decide whether to trigger generate.",
+                                "inputSchema": {
+                                    "type": "object",
+                                    "properties": {
+                                        "commit_sha": { "type": "string", "description": "Full 40-char (or short) commit SHA." },
+                                        "repo": { "type": "string", "description": "Github full_name (org/repo)." },
+                                        "platform": { "type": "string", "description": "'github' or 'gitlab'." },
+                                        "pr_number": { "type": "integer", "description": "PR number for this commit." }
+                                    },
+                                    "required": ["commit_sha", "repo", "platform", "pr_number"]
+                                },
+                                "annotations": {
+                                    "title": "Get Per-Commit Review",
+                                    "readOnlyHint": true,
+                                    "destructiveHint": false,
+                                    "idempotentHint": true,
+                                    "openWorldHint": true,
+                                    "auraCapability": "auto"
+                                }
+                            },
+                            {
+                                "name": "aura_a2a_task_list",
+                                "description": "List A2A v1.2 tasks in this org, newest first. Filter by status (submitted | working | input-required | completed | failed | canceled | rejected | auth-required) or by repo full-name. Use this to discover tasks the worker should pick up next ('what's submitted to a2a:claude that I can work on?').",
+                                "inputSchema": {
+                                    "type": "object",
+                                    "properties": {
+                                        "status": { "type": "string", "description": "Optional A2A v1.2 status filter (lowercase canonical form)." },
+                                        "repo": { "type": "string", "description": "Optional repo full-name (org/name)." },
+                                        "limit": { "type": "integer", "description": "Max tasks to return. Default 50, server-side cap applies." }
+                                    }
+                                },
+                                "annotations": {
+                                    "title": "List A2A Tasks",
+                                    "readOnlyHint": true,
+                                    "destructiveHint": false,
+                                    "idempotentHint": true,
+                                    "openWorldHint": true,
+                                    "auraCapability": "auto"
+                                }
+                            },
+                            {
+                                "name": "aura_a2a_task_patch",
+                                "description": "Update an A2A v1.2 task's status, result, or error_message. Standard transitions: submitted→working→completed (with result) or submitted→working→failed (with error_message). Terminal states (completed/failed/canceled/rejected) are sticky — once set the cloud rejects further patches with HTTP 409. Use this from a worker agent after picking a task off the list to mark it 'working' and eventually 'completed' with the output payload.",
+                                "inputSchema": {
+                                    "type": "object",
+                                    "properties": {
+                                        "id": { "type": "string", "description": "Task UUID returned by aura_a2a_task_create or aura_a2a_task_list." },
+                                        "status": { "type": "string", "description": "New A2A v1.2 status (lowercase canonical form). Optional if you're only attaching a result." },
+                                        "result": { "type": "object", "description": "Optional output payload to attach (typically set when transitioning to 'completed')." },
+                                        "error_message": { "type": "string", "description": "Optional human-readable error (typically set when transitioning to 'failed' or 'rejected')." }
+                                    },
+                                    "required": ["id"]
+                                },
+                                "annotations": {
+                                    "title": "Patch A2A Task",
+                                    "readOnlyHint": false,
+                                    "destructiveHint": false,
+                                    "idempotentHint": false,
+                                    "openWorldHint": true,
+                                    "auraCapability": "auto"
+                                }
+                            },
+                            {
+                                "name": "aura_loop_plan_context",
+                                "description": "Read the autonomous work-loop's ORDERLESS pile — the .aura/a2a graph nodes that currently sit in no dependency order — bucketed into focused chunks along the seams already in the data (epic → sprint → batch), so a huge board (hundreds of tasks) can be planned in FULL, not skimmed. Returns per chunk: a label, an optional seed_goal (the epic/sprint name), and the tasks as {id,title,detail}; plus how_to_apply. Use this when the user asks to 'plan an order' or organise a big task board: pull this, reason the real dependencies inside each chunk, name the goal each connected group adds up to, group goals under a few larger objectives, then write it back with aura_loop_plan_apply. This is the SAME chunking Aura's desktop 'plan an order' uses — here YOU are the planner.",
+                                "inputSchema": {
+                                    "type": "object",
+                                    "properties": {}
+                                },
+                                "annotations": {
+                                    "title": "Read Loop Plan Context",
+                                    "readOnlyHint": true,
+                                    "destructiveHint": false,
+                                    "idempotentHint": true,
+                                    "openWorldHint": false,
+                                    "auraCapability": "auto"
+                                }
+                            },
+                            {
+                                "name": "aura_loop_plan_apply",
+                                "description": "Write a planned order back onto the work-loop graph (.aura/a2a): wire dependency edges (cycle-checked — self-edges, unknown ids, and cycles are refused and counted, never fabricated), name the goal each connected group of tasks adds up to (stamps a goal: tag the canvas draws a region from), and roll those goals up under larger objectives (stamps an objective: tag). Call after aura_loop_plan_context. These edges drive the loop's ready-set and the Crew board flow — identical to the graph the desktop 'plan an order' button builds. Returns a count of what was wired/named/skipped.",
+                                "inputSchema": {
+                                    "type": "object",
+                                    "properties": {
+                                        "edges": {
+                                            "type": "array",
+                                            "description": "Dependency edges. Add one ONLY where a task genuinely needs another's output.",
+                                            "items": {
+                                                "type": "object",
+                                                "properties": {
+                                                    "task": { "type": "string", "description": "Task id that must WAIT." },
+                                                    "depends_on": { "type": "string", "description": "Task id that must finish FIRST." }
+                                                },
+                                                "required": ["task", "depends_on"]
+                                            }
+                                        },
+                                        "goals": {
+                                            "type": "array",
+                                            "description": "Named goals. Each connected group of tasks adds up to one goal.",
+                                            "items": {
+                                                "type": "object",
+                                                "properties": {
+                                                    "goal": { "type": "string", "description": "Short outcome phrase." },
+                                                    "tasks": { "type": "array", "items": { "type": "string" }, "description": "Task ids that make up this goal." }
+                                                },
+                                                "required": ["goal", "tasks"]
+                                            }
+                                        },
+                                        "objectives": {
+                                            "type": "array",
+                                            "description": "Larger objectives the goals roll up to (2–6 for most projects).",
+                                            "items": {
+                                                "type": "object",
+                                                "properties": {
+                                                    "objective": { "type": "string", "description": "Short outcome phrase." },
+                                                    "goals": { "type": "array", "items": { "type": "string" }, "description": "Goal NAMES (from `goals` above) under this objective." }
+                                                },
+                                                "required": ["objective", "goals"]
+                                            }
+                                        }
+                                    }
+                                },
+                                "annotations": {
+                                    "title": "Apply Loop Plan",
+                                    "readOnlyHint": false,
+                                    "destructiveHint": false,
+                                    "idempotentHint": false,
+                                    "openWorldHint": false,
+                                    "auraCapability": "auto"
+                                }
+                            },
+                            {
+                                "name": "aura_refs",
+                                "description": "Find every site that references a symbol across an indexed file set, using a real cross-file stack-graph (not regex). Phase A surface for Python + TypeScript — the natural successor to grep/`aura_live_impacts`'s function-name heuristic. Returns sorted, deduplicated (caller_file, definition_file) tuples. Cross-repo resolution is Phase D (deferred).",
+                                "inputSchema": {
+                                    "type": "object",
+                                    "properties": {
+                                        "symbol": { "type": "string", "description": "Symbol name to resolve (function/class/variable identifier)." },
+                                        "files": {
+                                            "type": "array",
+                                            "description": "Files to index. Each item: {path, source}. Extension drives language dispatch (.py / .ts / .tsx).",
+                                            "items": {
+                                                "type": "object",
+                                                "properties": {
+                                                    "path": { "type": "string" },
+                                                    "source": { "type": "string" }
+                                                },
+                                                "required": ["path", "source"]
+                                            }
+                                        }
+                                    },
+                                    "required": ["symbol", "files"]
+                                },
+                                "annotations": {
+                                    "title": "Find References",
+                                    "readOnlyHint": true,
+                                    "destructiveHint": false,
+                                    "idempotentHint": true,
+                                    "openWorldHint": false,
+                                    "auraCapability": "auto"
+                                }
+                            },
+                            {
+                                "name": "aura_defs",
+                                "description": "Find every definition site for a symbol across an indexed file set. Surfaces direct definitions AND import-as-local-binding sites (e.g. `from x import y` registers `y` in the importer). Use alongside `aura_refs` to disambiguate which definition a given reference resolves to.",
+                                "inputSchema": {
+                                    "type": "object",
+                                    "properties": {
+                                        "symbol": { "type": "string", "description": "Symbol name to look up." },
+                                        "files": {
+                                            "type": "array",
+                                            "description": "Files to index. Each item: {path, source}.",
+                                            "items": {
+                                                "type": "object",
+                                                "properties": {
+                                                    "path": { "type": "string" },
+                                                    "source": { "type": "string" }
+                                                },
+                                                "required": ["path", "source"]
+                                            }
+                                        }
+                                    },
+                                    "required": ["symbol", "files"]
+                                },
+                                "annotations": {
+                                    "title": "Find Definitions",
+                                    "readOnlyHint": true,
+                                    "destructiveHint": false,
+                                    "idempotentHint": true,
+                                    "openWorldHint": false,
+                                    "auraCapability": "auto"
+                                }
+                            },
+                            {
+                                "name": "aura_route_suggest",
+                                "description": "Ask the cross-project Agent Skill Ledger which provider/brain is historically best for a kind of task, before you dispatch it. Aggregates closed-task outcomes for the taxonomy cell (category × language × layer) and applies the canonical score = quality·pr_pass / (1 + cost) ranking, requiring at least 10 samples before naming a winner. Returns the single best provider_id with its score and sample_count, or null when no provider has enough evidence yet (caller should fall back to the active brain). This is the same ranker `aura skill suggest` and the in-app manager use, so routing is consistent across the CLI, MCP, and the desktop app.",
+                                "inputSchema": {
+                                    "type": "object",
+                                    "properties": {
+                                        "category": { "type": "string", "description": "Coarse category — one of frontend|backend|infra|refactor|security-review|architecture-review." },
+                                        "language": { "type": "string", "description": "Optional fine language filter (e.g. rust, typescript, python)." },
+                                        "layer": { "type": "string", "description": "Optional fine layer filter — ui|api|db|cli." }
+                                    },
+                                    "required": ["category"]
+                                },
+                                "annotations": {
+                                    "title": "Suggest Best Provider",
+                                    "readOnlyHint": true,
+                                    "destructiveHint": false,
+                                    "idempotentHint": true,
+                                    "openWorldHint": true,
+                                    "auraCapability": "auto"
+                                }
+                            },
+                            {
+                                "name": "aura_tasks_list",
+                                "description": "List tasks from the shared Aura Tasks board (the same kanban the human sees in the desktop app, backed by .aura/tasks/tasks.json). Returns compact summaries — id, AURA-{n} ref, title, status/state, priority, assignees, labels, due date — newest-updated first. Use this to find work to pick up; address a task in aura_task_get / aura_task_update by either its id or its AURA-{n} ref.",
+                                "inputSchema": {
+                                    "type": "object",
+                                    "properties": {
+                                        "status": { "type": "string", "description": "Optional filter: backlog | todo | in_progress | in_review | done | cancelled. Omit for all." },
+                                        "limit": { "type": "integer", "description": "Max tasks to return (default 50, 0 = no cap)." }
+                                    }
+                                },
+                                "annotations": {
+                                    "title": "List Tasks",
+                                    "readOnlyHint": true,
+                                    "destructiveHint": false,
+                                    "idempotentHint": true,
+                                    "openWorldHint": false,
+                                    "auraCapability": "auto"
+                                }
+                            },
+                            {
+                                "name": "aura_task_get",
+                                "description": "Fetch one task from the Aura Tasks board in full (every field — description, sub-task links, cycle/module, dates, linked PR). Identify it by raw id or AURA-{n} ref (a bare number works too).",
+                                "inputSchema": {
+                                    "type": "object",
+                                    "properties": {
+                                        "id": { "type": "string", "description": "Task id or AURA-{n} ref (e.g. 'AURA-42' or '42')." }
+                                    },
+                                    "required": ["id"]
+                                },
+                                "annotations": {
+                                    "title": "Get Task",
+                                    "readOnlyHint": true,
+                                    "destructiveHint": false,
+                                    "idempotentHint": true,
+                                    "openWorldHint": false,
+                                    "auraCapability": "auto"
+                                }
+                            },
+                            {
+                                "name": "aura_task_update",
+                                "description": "Update a task on the shared Aura Tasks board — move it across the kanban (status), set priority, (re)assign it, or claim it for an AI agent. Changes are written to the same file the desktop app reads, so the human sees them live. Only the named fields change; everything else is preserved. Status and state_id are mirrored exactly as the app heals them.",
+                                "inputSchema": {
+                                    "type": "object",
+                                    "properties": {
+                                        "id": { "type": "string", "description": "Task id or AURA-{n} ref." },
+                                        "status": { "type": "string", "description": "New status: backlog | todo | in_progress | in_review | done | cancelled." },
+                                        "priority": { "type": "string", "description": "New priority: urgent | high | medium | low | none." },
+                                        "assignee": { "type": "string", "description": "Human handle to assign. Pass an empty string to unassign." },
+                                        "agent_assignee": { "type": "string", "description": "AI agent to own this task (claude, codex, gemini, …). Empty string clears it." }
+                                    },
+                                    "required": ["id"]
+                                },
+                                "annotations": {
+                                    "title": "Update Task",
+                                    "readOnlyHint": false,
+                                    "destructiveHint": false,
+                                    "idempotentHint": false,
+                                    "openWorldHint": false,
+                                    "auraCapability": "auto"
+                                }
+                            },
+                            {
+                                "name": "aura_task_create",
+                                "description": "Mint a new task on the shared Aura Tasks board (the same kanban the human sees, backed by .aura/tasks/tasks.json). The task lands on the board live with the next AURA-{n} handle. Use this to file follow-up work, break a request into trackable items, or hand yourself a TODO. Returns the full created task (including its id + AURA-{n} ref) so you can address it later with aura_task_update.",
+                                "inputSchema": {
+                                    "type": "object",
+                                    "properties": {
+                                        "title": { "type": "string", "description": "Short task title (required)." },
+                                        "description": { "type": "string", "description": "Optional longer body / acceptance criteria. Markdown ok." },
+                                        "status": { "type": "string", "description": "Starting column: backlog | todo | in_progress | in_review | done | cancelled. Default todo." },
+                                        "priority": { "type": "string", "description": "urgent | high | medium | low | none. Default medium." },
+                                        "agent_assignee": { "type": "string", "description": "Optional AI agent to own it (claude, codex, gemini, …)." }
+                                    },
+                                    "required": ["title"]
+                                },
+                                "annotations": {
+                                    "title": "Create Task",
+                                    "readOnlyHint": false,
+                                    "destructiveHint": false,
+                                    "idempotentHint": false,
+                                    "openWorldHint": false,
+                                    "auraCapability": "auto"
+                                }
+                            },
+                            {
+                                "name": "aura_pages_list",
+                                "description": "List pages from the shared Aura Pages wiki (the team's Notion-style markdown docs under .aura/notes/, the same ones the desktop app's Pages surface shows). Returns summaries — id, scope, bucket, title, visibility, tags — newest-updated first. Scopes: team (shared), channel (per channel), member (per person).",
+                                "inputSchema": {
+                                    "type": "object",
+                                    "properties": {
+                                        "scope": { "type": "string", "description": "Filter to one scope: team | channel | member. Omit to list all." },
+                                        "bucket": { "type": "string", "description": "For channel/member scope, narrow to one channel handle / member." }
+                                    }
+                                },
+                                "annotations": {
+                                    "title": "List Pages",
+                                    "readOnlyHint": true,
+                                    "destructiveHint": false,
+                                    "idempotentHint": true,
+                                    "openWorldHint": false,
+                                    "auraCapability": "auto"
+                                }
+                            },
+                            {
+                                "name": "aura_page_read",
+                                "description": "Read one page from the Aura Pages wiki in full — its frontmatter (title, tags, visibility), the markdown body, and the raw on-disk text. Identify it by scope + id (+ bucket for channel/member scope).",
+                                "inputSchema": {
+                                    "type": "object",
+                                    "properties": {
+                                        "scope": { "type": "string", "description": "team | channel | member." },
+                                        "id": { "type": "string", "description": "Page id (the file stem, e.g. 'note_…')." },
+                                        "bucket": { "type": "string", "description": "Channel handle / member, for channel|member scope. Empty for team." }
+                                    },
+                                    "required": ["scope", "id"]
+                                },
+                                "annotations": {
+                                    "title": "Read Page",
+                                    "readOnlyHint": true,
+                                    "destructiveHint": false,
+                                    "idempotentHint": true,
+                                    "openWorldHint": false,
+                                    "auraCapability": "auto"
+                                }
+                            },
+                            {
+                                "name": "aura_page_write",
+                                "description": "Create or update a page in the shared Aura Pages wiki. Omit id to create a new page (a fresh id is returned); pass an existing id to update it in place (created_at and untouched frontmatter keys are preserved). Writes land in the same files the desktop app renders, so the team sees the doc immediately. Body is markdown.",
+                                "inputSchema": {
+                                    "type": "object",
+                                    "properties": {
+                                        "scope": { "type": "string", "description": "team | channel | member." },
+                                        "bucket": { "type": "string", "description": "Channel handle / member, for channel|member scope. Empty/omit for team." },
+                                        "id": { "type": "string", "description": "Existing page id to update. Omit to create a new page." },
+                                        "title": { "type": "string", "description": "Page title (frontmatter)." },
+                                        "body": { "type": "string", "description": "Markdown body of the page." },
+                                        "tags": { "type": "array", "items": { "type": "string" }, "description": "Optional tags." },
+                                        "visibility": { "type": "string", "description": "private | shared. Defaults: member→private, else shared." }
+                                    },
+                                    "required": ["scope", "body"]
+                                },
+                                "annotations": {
+                                    "title": "Write Page",
+                                    "readOnlyHint": false,
+                                    "destructiveHint": false,
+                                    "idempotentHint": false,
+                                    "openWorldHint": false,
+                                    "auraCapability": "auto"
+                                }
+                            },
+                            {
+                                "name": "aura_team_radar",
+                                "description": "Team Awareness radar — realtime view of who (human or agent) is building what, why, and what it impacts, BEFORE anyone commits/pushes. Returns two things: `events` (the ambient feed, newest-first) and `conflicts` (the REASONED layer — only genuine/possible collisions between YOUR current work and other actors). Call this before you start editing or before a commit: if `conflicts` is non-empty, another human or agent is working where you are. Conflicts are computed against your git-dirty files + symbols you've announced via aura_radar_emit; random edits to unrelated files never surface here, so a non-empty result is always worth acting on.",
+                                "inputSchema": {
+                                    "type": "object",
+                                    "properties": {
+                                        "focus": { "type": "string", "description": "Optional: narrow the ambient feed to events touching this file path fragment or symbol name." },
+                                        "as": { "type": "string", "description": "Your own actor label (e.g. 'claude@cursor') so YOUR events are excluded from conflicts. Defaults to the git user." },
+                                        "limit": { "type": "integer", "description": "Max feed events to return (default 20)." }
+                                    }
+                                },
+                                "annotations": {
+                                    "title": "Team Radar",
+                                    "readOnlyHint": true,
+                                    "destructiveHint": false,
+                                    "idempotentHint": true,
+                                    "openWorldHint": false,
+                                    "auraCapability": "auto"
+                                }
+                            },
+                            {
+                                "name": "aura_radar_emit",
+                                "description": "Announce in-flight work onto the Team Awareness radar so teammates and other agents are aware of it BEFORE you commit/push. Emit when you start on a symbol/file, declare an intent (the why), or report a projected impact. Events are Ed25519-signed with the repo-local identity so they can't be spoofed. Keep it meaningful, not chatty — one event per real unit of work (the radar dedups and ages events out, but a per-keystroke firehose defeats the point). Pass `agent` with your label so you're attributed as an agent, not the human.",
+                                "inputSchema": {
+                                    "type": "object",
+                                    "properties": {
+                                        "kind": { "type": "string", "description": "started | editing | intent | impact | zone | paused | abandoned | committed. Default: editing." },
+                                        "file": { "type": "string", "description": "File being touched (repo-relative)." },
+                                        "symbol": { "type": "string", "description": "AST symbol (function/class) being touched — the strongest collision signal." },
+                                        "intent": { "type": "string", "description": "The WHY — a short human-readable reason." },
+                                        "impact": { "type": "string", "description": "Projected blast-radius summary (e.g. '3 callers: checkout, subscriptions, refunds')." },
+                                        "agent": { "type": "string", "description": "Your agent label (e.g. 'claude@cursor'). Omit to emit as the human git user." }
+                                    }
+                                },
+                                "annotations": {
+                                    "title": "Radar Emit",
+                                    "readOnlyHint": false,
+                                    "destructiveHint": false,
+                                    "idempotentHint": false,
+                                    "openWorldHint": false,
+                                    "auraCapability": "auto"
                                 }
                             }
                         ]
                     }
                 })
+            }
+            // S1-P/1: canonical manifest of the tool surface. External
+            // agents (A2A callers, ACP clients) can pin
+            // `canonical_hash_sha256` to detect tool-surface drift. The
+            // `signature` field is reserved for S1-S — sigstore/Rekor wires
+            // up identity-bound signing once cosign keyless is in place.
+            // A null signature means "integrity-only, not identity-bound"
+            // and clients expecting a signing root of trust should warn.
+            "aura/manifest" => {
+                let tools_req = RpcRequest {
+                    jsonrpc: "2.0".to_string(),
+                    id: Some(serde_json::Value::Null),
+                    method: "tools/list".to_string(),
+                    params: None,
+                };
+                let tools_list = Self::handle_request(tools_req);
+                let tools = tools_list.get("result")
+                    .and_then(|r| r.get("tools"))
+                    .cloned()
+                    .unwrap_or_else(|| serde_json::Value::Array(vec![]));
+                let hash = Self::canonical_manifest_hash(&tools);
+                let mut manifest = json!({
+                    "protocolVersion": "2024-11-05",
+                    "serverInfo": {
+                        "name": "aura-semantic-vcs",
+                        "version": "1.0.0"
+                    },
+                    "tools": tools,
+                    "canonical_hash_sha256": hash,
+                    "algorithm": "jcs-rfc8785-v1+ed25519",
+                    "signature": serde_json::Value::Null,
+                    "signingNote": "Signed under JCS RFC 8785 + ed25519. Verify the 4-field envelope {algo,key_id,sig_b64,canonicalization} against key_id's pubkey."
+                });
+                // Try to load/create the local signing key and sign the
+                // manifest. If the key infrastructure is unavailable, leave
+                // `signature: null` and fall back to hash-only integrity —
+                // clients that require identity-bound trust should reject
+                // null signatures.
+                if let Ok(key_path) = crate::manifest_sig::default_signing_key_path() {
+                    if let Ok(key) = aura_attestation::load_or_create(&key_path) {
+                        match crate::manifest_sig::sign_manifest(manifest.clone(), &key) {
+                            Ok(signed) => manifest = signed,
+                            Err(_) => { /* leave signature: null */ }
+                        }
+                    }
+                }
+                json!({ "jsonrpc": "2.0", "id": req.id, "result": manifest })
             }
             // Execute a specific tool
             "tools/call" => {
@@ -524,12 +1897,19 @@ impl McpServer {
                 let mut result = match name {
                     "aura_read_history" => Self::tool_read_history(args),
                     "aura_log_intent" => Self::tool_log_intent(args),
+                    "aura_intent_query" => Self::tool_intent_query(args),
+                    "aura_intent_summary" => Self::tool_intent_summary(args),
                     "aura_pr_review" => Self::tool_pr_review(args),
                     "aura_status" => Self::tool_status(args),
                     "aura_snapshot" => Self::tool_snapshot(args),
                     "aura_snapshot_list" => Self::tool_snapshot_list(args),
                     "aura_handover" => Self::tool_handover(args),
+                    "aura_attest_verify" => Self::tool_attest_verify(args),
+                    "aura_attest_list" => Self::tool_attest_list(args),
                     "aura_prove" => Self::tool_prove(args),
+                    "aura_goals_prove" => Self::tool_goals_prove(args),
+                    "aura_goals_list" => Self::tool_goals_list(args),
+                    "aura_ask" => Self::tool_ask(args),
                     "aura_rewind" => Self::tool_rewind(args),
                     "aura_plan_discover" => Self::tool_plan_discover(args),
                     "aura_plan_lock" => Self::tool_plan_lock(args),
@@ -544,6 +1924,7 @@ impl McpServer {
                     "aura_session_resume" => Self::tool_session_resume(args),
                     "aura_doctor" => Self::tool_doctor(args),
                     "aura_session_summarize" => Self::tool_session_summarize(args),
+                    "aura_subagent_monitor" => Self::tool_subagent_monitor(args),
                     "aura_live_impacts" => Self::tool_live_impacts(args),
                     "aura_live_resolve" => Self::tool_live_resolve(args),
                     "aura_msg_send" => Self::tool_msg_send(args),
@@ -561,6 +1942,40 @@ impl McpServer {
                     "aura_memory_read" => Self::tool_memory_read(args),
                     "aura_memory_forget" => Self::tool_memory_forget(args),
                     "aura_memory_compact" => Self::tool_memory_compact(args),
+                    "aura_episodic_recall" => Self::tool_episodic_recall(args),
+                    "aura_episodic_narrate" => Self::tool_episodic_narrate(args),
+                    "aura_episodic_timeline" => Self::tool_episodic_timeline(args),
+                    "aura_episodic_agent_digest" => Self::tool_episodic_agent_digest(args),
+                    "aura_episodic_session_arc" => Self::tool_episodic_session_arc(args),
+                    "aura_episodic_multi_session_arc" => Self::tool_episodic_multi_session_arc(args),
+                    "aura_episodic_recall_cloud" => Self::tool_episodic_recall_cloud(args),
+                    "aura_pr_commit_review_generate" => Self::tool_pr_commit_review_generate(args),
+                    "aura_impacts_cross_repo" => Self::tool_impacts_cross_repo(args),
+                    "aura_a2a_task_create" => Self::tool_a2a_task_create(args),
+                    "aura_a2a_task_get" => Self::tool_a2a_task_get(args),
+                    "aura_a2a_task_list" => Self::tool_a2a_task_list(args),
+                    "aura_a2a_task_patch" => Self::tool_a2a_task_patch(args),
+                    "aura_loop_plan_context" => Self::tool_loop_plan_context(args),
+                    "aura_loop_plan_apply" => Self::tool_loop_plan_apply(args),
+                    "aura_pr_commit_review_list" => Self::tool_pr_commit_review_list(args),
+                    "aura_pr_commit_review_get" => Self::tool_pr_commit_review_get(args),
+                    "aura_handover_cloud_list" => Self::tool_handover_cloud_list(args),
+                    "aura_handover_cloud_push" => Self::tool_handover_cloud_push(args),
+                    "aura_memory_cloud_list" => Self::tool_memory_cloud_list(args),
+                    "aura_memory_cloud_push" => Self::tool_memory_cloud_push(args),
+                    "aura_refs" => Self::tool_refs(args),
+                    "aura_defs" => Self::tool_defs(args),
+                    "aura_taste_rules" => Self::tool_taste_rules(args),
+                    "aura_route_suggest" => Self::tool_route_suggest(args),
+                    "aura_tasks_list" => Self::tool_tasks_list(args),
+                    "aura_task_get" => Self::tool_task_get(args),
+                    "aura_task_update" => Self::tool_task_update(args),
+                    "aura_task_create" => Self::tool_task_create(args),
+                    "aura_pages_list" => Self::tool_pages_list(args),
+                    "aura_page_read" => Self::tool_page_read(args),
+                    "aura_page_write" => Self::tool_page_write(args),
+                    "aura_team_radar" => Self::tool_team_radar(args),
+                    "aura_radar_emit" => Self::tool_radar_emit(args),
                     _ => json!({ "isError": true, "content": [{ "type": "text", "text": "Unknown tool" }] })
                 };
 
@@ -660,6 +2075,38 @@ impl McpServer {
                                     extra
                                 )
                             }));
+                        }
+                    }
+                }
+
+                // Push-based: aura-guard backfill ask. The shell-side
+                // guard (aura-shell/src-tauri/src/agent_mutation_guard.rs)
+                // writes .aura/agent_pending_backfill.json when it
+                // auto-logs a stub intent for an unattributed mutation.
+                // We prepend the queued note here so the agent sees it
+                // in tool-result context — NOT via PTY stdin, which
+                // used to land mid-keystroke in the user's prompt and
+                // contaminate whatever they were typing.
+                //
+                // Self-clears after one read so the agent isn't
+                // re-pinged forever for the same edit.
+                if name != "aura_log_intent" {
+                    let backfill_path = std::path::Path::new(".aura/agent_pending_backfill.json");
+                    if backfill_path.exists() {
+                        if let Ok(text) = std::fs::read_to_string(backfill_path) {
+                            if let Ok(payload) = serde_json::from_str::<Value>(&text) {
+                                if let Some(ask) = payload.get("ask").and_then(|v| v.as_str()) {
+                                    if let Some(content) = result.get_mut("content").and_then(|c| c.as_array_mut()) {
+                                        content.push(json!({
+                                            "type": "text",
+                                            "text": format!("\n📝 INTENT BACKFILL: {}", ask)
+                                        }));
+                                    }
+                                }
+                            }
+                            // Clear the queue regardless of parse — we
+                            // tried, don't loop on a malformed file.
+                            let _ = std::fs::remove_file(backfill_path);
                         }
                     }
                 }
@@ -789,6 +2236,25 @@ impl McpServer {
         }
     }
 
+    /// SHA-256 over the tools array after round-tripping through
+    /// `serde_json::Value`, whose `Map` uses BTreeMap ordering. This gives
+    /// a deterministic digest independent of the key order the `json!`
+    /// macro happens to emit. Not strictly RFC 8785 JCS (no unicode
+    /// escape normalization), but sufficient for "is this the same tool
+    /// surface?" integrity checks. When S1-S lands full signing we can
+    /// switch to serde_jcs without changing the call sites.
+    fn canonical_manifest_hash(tools: &Value) -> String {
+        use sha2::{Digest, Sha256};
+        // Re-parse through Value to normalize key order.
+        let normalized = serde_json::to_string(tools)
+            .ok()
+            .and_then(|s| serde_json::from_str::<Value>(&s).ok())
+            .and_then(|v| serde_json::to_string(&v).ok())
+            .unwrap_or_default();
+        let digest = Sha256::digest(normalized.as_bytes());
+        format!("{:x}", digest)
+    }
+
     fn tool_read_history(_args: Value) -> Value {
         let repo = match Repository::open(".") {
             Ok(r) => r,
@@ -808,7 +2274,7 @@ impl McpServer {
                     })
                 }).collect();
                 let data = json!({ "history": entries });
-                let toon_text = crate::toon::encode(&data);
+                let toon_text = aura_toon::encode(&data);
                 return json!({ "content": [{ "type": "text", "text": toon_text }] });
             }
         }
@@ -816,27 +2282,317 @@ impl McpServer {
         json!({ "content": [{ "type": "text", "text": "No semantic history found." }] })
     }
 
+    /// Trimmed, non-empty string arg, or `None`. Shared by the board/pages
+    /// tools so an omitted-or-blank field reads as "leave it".
+    fn arg_str(args: &Value, key: &str) -> Option<String> {
+        args.get(key)
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+    }
+
+    /// Standard MCP error envelope for the board/pages tools.
+    fn board_err(msg: &str) -> Value {
+        json!({ "isError": true, "content": [{ "type": "text", "text": msg }] })
+    }
+
+    // ─── Tasks board — shared with the desktop app (.aura/tasks/tasks.json,
+    //     see board.rs). Lets a CLI agent pick up and move work on the same
+    //     kanban the human uses. ──────────────────────────────────────────
+
+    fn tool_tasks_list(args: Value) -> Value {
+        let status = Self::arg_str(&args, "status");
+        let limit = args
+            .get("limit")
+            .and_then(|v| v.as_u64())
+            .map(|n| n as usize)
+            .unwrap_or(50);
+        match crate::board::list_tasks(std::path::Path::new("."), status.as_deref(), limit) {
+            Ok(list) => {
+                let body =
+                    serde_json::to_string_pretty(&json!({ "count": list.len(), "tasks": list }))
+                        .unwrap_or_else(|_| "[]".into());
+                json!({ "content": [{ "type": "text", "text": body }] })
+            }
+            Err(e) => Self::board_err(&e),
+        }
+    }
+
+    // ─── Team Awareness radar — the cross-agent surface of the awareness plane
+    //     (awareness/*). Lets any MCP client (Claude Code, Cursor, Codex,
+    //     Gemini) and the desktop query "who's working where I am, right now"
+    //     and announce their own in-flight work, BEFORE a commit/PR. ──────────
+
+    fn tool_team_radar(args: Value) -> Value {
+        let focus = Self::arg_str(&args, "focus");
+        let as_actor = Self::arg_str(&args, "as");
+        let limit = args
+            .get("limit")
+            .and_then(|v| v.as_u64())
+            .map(|n| n as usize)
+            .unwrap_or(20);
+        let data = crate::awareness::api::radar(focus.as_deref(), limit, as_actor.as_deref());
+        let body = serde_json::to_string_pretty(&data).unwrap_or_else(|_| "{}".into());
+        json!({ "content": [{ "type": "text", "text": body }] })
+    }
+
+    fn tool_radar_emit(args: Value) -> Value {
+        let kind_s = Self::arg_str(&args, "kind").unwrap_or_else(|| "editing".to_string());
+        let Some(kind) = crate::awareness::model::AwarenessKind::parse(&kind_s) else {
+            return Self::board_err(
+                "unknown kind — use: started|editing|intent|impact|zone|paused|abandoned|committed",
+            );
+        };
+        let data = crate::awareness::api::emit(crate::awareness::emit::EmitInput {
+            kind,
+            file: Self::arg_str(&args, "file"),
+            symbol: Self::arg_str(&args, "symbol"),
+            intent: Self::arg_str(&args, "intent"),
+            impact: Self::arg_str(&args, "impact"),
+            agent: Self::arg_str(&args, "agent"),
+        });
+        let body = serde_json::to_string_pretty(&data).unwrap_or_else(|_| "{}".into());
+        json!({ "content": [{ "type": "text", "text": body }] })
+    }
+
+    fn tool_task_get(args: Value) -> Value {
+        let id = match Self::arg_str(&args, "id") {
+            Some(s) => s,
+            None => return Self::board_err("`id` is required."),
+        };
+        match crate::board::get_task(std::path::Path::new("."), &id) {
+            Ok(Some(t)) => json!({ "content": [{ "type": "text", "text": serde_json::to_string_pretty(&t).unwrap_or_default() }] }),
+            Ok(None) => Self::board_err(&format!("No task matching '{id}'.")),
+            Err(e) => Self::board_err(&e),
+        }
+    }
+
+    fn tool_task_update(args: Value) -> Value {
+        let id = match Self::arg_str(&args, "id") {
+            Some(s) => s,
+            None => return Self::board_err("`id` is required."),
+        };
+        // assignee / agent_assignee use the RAW arg (not arg_str): an explicit
+        // empty string means "unassign", which arg_str would swallow.
+        let unassignable = |key: &str| -> Option<Option<String>> {
+            args.get(key).and_then(|v| v.as_str()).map(|v| {
+                if v.trim().is_empty() {
+                    None
+                } else {
+                    Some(v.trim().to_string())
+                }
+            })
+        };
+        let patch = crate::board::TaskPatch {
+            status: Self::arg_str(&args, "status"),
+            priority: Self::arg_str(&args, "priority"),
+            assignee: unassignable("assignee"),
+            agent_assignee: unassignable("agent_assignee"),
+        };
+        match crate::board::update_task(std::path::Path::new("."), &id, patch) {
+            Ok(t) => json!({ "content": [{ "type": "text", "text": serde_json::to_string_pretty(&t).unwrap_or_default() }] }),
+            Err(e) => Self::board_err(&e),
+        }
+    }
+
+    fn tool_task_create(args: Value) -> Value {
+        let title = match Self::arg_str(&args, "title") {
+            Some(s) => s,
+            None => return Self::board_err("`title` is required."),
+        };
+        let description = Self::arg_str(&args, "description");
+        let status = Self::arg_str(&args, "status");
+        let priority = Self::arg_str(&args, "priority");
+        let agent_assignee = Self::arg_str(&args, "agent_assignee");
+        match crate::board::create_task(
+            std::path::Path::new("."),
+            &title,
+            description.as_deref(),
+            status.as_deref(),
+            priority.as_deref(),
+            agent_assignee.as_deref(),
+        ) {
+            Ok(t) => json!({ "content": [{ "type": "text", "text": serde_json::to_string_pretty(&t).unwrap_or_default() }] }),
+            Err(e) => Self::board_err(&e),
+        }
+    }
+
+    // ─── Pages wiki — shared with the desktop app (.aura/notes/). Lets a CLI
+    //     agent read and write the team's markdown docs. ──────────────────
+
+    fn tool_pages_list(args: Value) -> Value {
+        let scope = Self::arg_str(&args, "scope");
+        let bucket = Self::arg_str(&args, "bucket");
+        match crate::board::list_notes(
+            std::path::Path::new("."),
+            scope.as_deref(),
+            bucket.as_deref(),
+        ) {
+            Ok(list) => {
+                let body =
+                    serde_json::to_string_pretty(&json!({ "count": list.len(), "pages": list }))
+                        .unwrap_or_else(|_| "[]".into());
+                json!({ "content": [{ "type": "text", "text": body }] })
+            }
+            Err(e) => Self::board_err(&e),
+        }
+    }
+
+    fn tool_page_read(args: Value) -> Value {
+        let scope = match Self::arg_str(&args, "scope") {
+            Some(s) => s,
+            None => return Self::board_err("`scope` is required."),
+        };
+        let id = match Self::arg_str(&args, "id") {
+            Some(s) => s,
+            None => return Self::board_err("`id` is required."),
+        };
+        let bucket = Self::arg_str(&args, "bucket").unwrap_or_default();
+        match crate::board::read_note(std::path::Path::new("."), &scope, &bucket, &id) {
+            Ok(Some(n)) => json!({ "content": [{ "type": "text", "text": serde_json::to_string_pretty(&n).unwrap_or_default() }] }),
+            Ok(None) => Self::board_err(&format!("No page '{id}' in scope '{scope}'.")),
+            Err(e) => Self::board_err(&e),
+        }
+    }
+
+    fn tool_page_write(args: Value) -> Value {
+        let scope = match Self::arg_str(&args, "scope") {
+            Some(s) => s,
+            None => return Self::board_err("`scope` is required."),
+        };
+        let body = match args.get("body").and_then(|v| v.as_str()) {
+            Some(s) => s.to_string(),
+            None => return Self::board_err("`body` is required."),
+        };
+        let bucket = Self::arg_str(&args, "bucket").unwrap_or_default();
+        let id = Self::arg_str(&args, "id");
+        let title = Self::arg_str(&args, "title");
+        let visibility = Self::arg_str(&args, "visibility");
+        let tags = args.get("tags").and_then(|v| v.as_array()).map(|a| {
+            a.iter()
+                .filter_map(|x| x.as_str().map(String::from))
+                .collect::<Vec<_>>()
+        });
+        let author = caller_agent_id();
+        let w = crate::board::NoteWrite {
+            scope: &scope,
+            bucket: &bucket,
+            id: id.as_deref(),
+            title: title.as_deref(),
+            body: &body,
+            tags,
+            visibility: visibility.as_deref(),
+            author: &author,
+        };
+        match crate::board::write_note(std::path::Path::new("."), w) {
+            Ok(summary) => json!({ "content": [{ "type": "text", "text": serde_json::to_string_pretty(&summary).unwrap_or_default() }] }),
+            Err(e) => Self::board_err(&e),
+        }
+    }
+
     fn tool_log_intent(args: Value) -> Value {
         let intent = args["intent"].as_str().unwrap_or("No intent provided.").to_string();
 
+        // Optional canonical type. Validate against the closed set BEFORE
+        // touching any side-effecting state — invalid types are a hard
+        // reject so a typo'd "BugFx" doesn't get persisted alongside real
+        // typed entries and silently break aura_intent_query filters.
+        let intent_type: Option<String> = match args.get("intent_type") {
+            None | Some(Value::Null) => None,
+            Some(Value::String(s)) if s.is_empty() => None,
+            Some(Value::String(s)) => {
+                if !crate::intent_query::is_canonical_intent_type(s) {
+                    return json!({
+                        "isError": true,
+                        "content": [{
+                            "type": "text",
+                            "text": format!(
+                                "Invalid intent_type '{}'. Must be one of: {}",
+                                s,
+                                crate::intent_query::CANONICAL_INTENT_TYPES.join(", "),
+                            )
+                        }]
+                    });
+                }
+                Some(s.clone())
+            }
+            Some(other) => {
+                return json!({
+                    "isError": true,
+                    "content": [{
+                        "type": "text",
+                        "text": format!("intent_type must be a string, got {}", other)
+                    }]
+                });
+            }
+        };
+
+        // The real coding agent driving this MCP session (captured at
+        // initialize), used to attribute both the session and the intent row.
+        let agent = caller_agent_id();
+
         // Start/resume session and log transcript
-        let _sess = SessionManager::start_session("MCP Agent");
+        let _sess = SessionManager::start_session(&agent);
         SessionManager::append_transcript("assistant", &intent);
 
         // 1. Write the handshake file for the pre-commit hook
         let _ = std::fs::write(".gemini.intent", &intent);
 
-        // 2. Also append to the durable intent log (JSONL) so the watcher daemon
+        // 2. S1 sigstore-live: build a signed Block alongside the JSONL
+        //    entry so a third party can later prove this intent came from
+        //    the local signing identity. Best-effort — if signing fails
+        //    (no key, write error), we fall through to the JSONL-only
+        //    path that's existed since v0.1. The block_id is stamped
+        //    into the JSONL row so a verifier can find the signed file.
+        let signed = sign_intent_best_effort(&intent, intent_type.as_deref());
+        let signed_block_id: Option<String> = signed.as_ref().map(|(bid, _)| bid.clone());
+        let signed_key_id: Option<String> = signed.as_ref().map(|(_, kid)| kid.clone());
+
+        // 2b. S1-T sigstore-live (live tier): if AURA_REKOR_URL is set,
+        //     publish the block hash + signature to a Rekor transparency
+        //     log so a verifier can later prove inclusion. Off by default
+        //     so the v0 user path stays hermetic.
+        let rekor_entry: Option<crate::rekor::RekorEntryRef> = signed_block_id
+            .as_deref()
+            .and_then(publish_intent_to_rekor_best_effort);
+
+        // 3. Also append to the durable intent log (JSONL) so the watcher daemon
         //    can link file snapshots to this intent context
         let _ = std::fs::create_dir_all(".aura");
-        let log_entry = json!({
-            "agent_id": "MCP Agent",
+        let mut log_entry = json!({
+            "agent_id": agent,
             "intent": intent,
             "timestamp": std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap_or_default()
                 .as_secs()
         });
+        if let Some(bid) = &signed_block_id {
+            log_entry["signed_block_id"] = json!(bid);
+        }
+        if let Some(kid) = &signed_key_id {
+            log_entry["key_id"] = json!(kid);
+        }
+        if let Some(entry) = &rekor_entry {
+            log_entry["rekor_uuid"] = json!(entry.uuid);
+            log_entry["rekor_log_index"] = json!(entry.log_index);
+            log_entry["rekor_url"] = json!(entry.rekor_url);
+        }
+        if let Some(t) = &intent_type {
+            log_entry["intent_type"] = json!(t);
+        }
+        // Goal-alignment spine: stamp which task this reasoning served, so the
+        // commit's "why" carries its goal link. Resolved from the active-task
+        // marker / branch / board — best-effort, absent when there's no task.
+        if let Some((task_uuid, task_seq)) =
+            crate::goals::active::resolve(std::path::Path::new("."))
+        {
+            log_entry["task_id"] = json!(task_uuid);
+            if let Some(seq) = task_seq {
+                log_entry["task_seq"] = json!(seq);
+            }
+        }
         if let Ok(mut file) = std::fs::OpenOptions::new()
             .create(true).append(true).open(".aura/intent_log.jsonl")
         {
@@ -870,6 +2626,8 @@ impl McpServer {
                                                 function_kind: n.kind.clone(),
                                                 content_hash: n.content_hash.clone(),
                                                 body,
+                                                parent_hash: None,
+                                                ..Default::default()
                                             })
                                         }).collect();
                                     if !payloads.is_empty() {
@@ -888,17 +2646,118 @@ impl McpServer {
             }
         }
 
-        let msg = format!("Intent logged. Aura will bind this reasoning to your AST changes on the next commit.{}", auto_push_msg);
+        let typed = intent_type.as_deref().map(|t| format!(" [type={}]", t)).unwrap_or_default();
+        let msg = format!("Intent logged{}. Aura will bind this reasoning to your AST changes on the next commit.{}", typed, auto_push_msg);
         json!({ "content": [{ "type": "text", "text": msg }] })
     }
 
-    fn tool_pr_review(args: Value) -> Value {
+    /// S2-TI / doc 16 Phase B: typed-intent query over the local
+    /// .aura/intent_log.jsonl. Reads only the local file — no cloud round
+    /// trip — so this works on air-gapped boxes the same way
+    /// aura_log_intent does. Validates intent_type against the canonical
+    /// set so a typo bubbles up as isError instead of returning a silent
+    /// empty result.
+    fn tool_intent_query(args: Value) -> Value {
+        let intent_type: Option<String> = match args.get("intent_type") {
+            None | Some(Value::Null) => None,
+            Some(Value::String(s)) if s.is_empty() => None,
+            Some(Value::String(s)) => {
+                if !crate::intent_query::is_canonical_intent_type(s) {
+                    return json!({
+                        "isError": true,
+                        "content": [{
+                            "type": "text",
+                            "text": format!(
+                                "Invalid intent_type '{}'. Must be one of: {}",
+                                s,
+                                crate::intent_query::CANONICAL_INTENT_TYPES.join(", "),
+                            )
+                        }]
+                    });
+                }
+                Some(s.clone())
+            }
+            Some(other) => {
+                return json!({
+                    "isError": true,
+                    "content": [{
+                        "type": "text",
+                        "text": format!("intent_type must be a string, got {}", other)
+                    }]
+                });
+            }
+        };
+
+        let since_hours: i64 = args.get("since_hours")
+            .and_then(|v| v.as_i64())
+            .unwrap_or(168);
+
+        // Cap limit at 500 (matches aura_episodic_recall_cloud) so a
+        // misconfigured caller can't OOM us by asking for the whole log.
+        let limit: usize = args.get("limit")
+            .and_then(|v| v.as_u64())
+            .map(|n| n as usize)
+            .unwrap_or(50)
+            .min(500);
+
+        let path = std::path::Path::new(".aura/intent_log.jsonl");
+        let rows = crate::intent_query::read_all_rows(path);
+        let now_unix_secs = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+
+        let result = crate::intent_query::query_rows(
+            rows,
+            intent_type.as_deref(),
+            since_hours,
+            limit,
+            now_unix_secs,
+        );
+
+        let payload = result.to_json();
+        json!({ "content": [{ "type": "text", "text": payload.to_string() }] })
+    }
+
+    /// S2-TIM: structured typed-intent histogram. Same envelope shape as
+    /// `aura intents summary --json` so MCP and CLI consumers agree
+    /// byte-for-byte. Empty case returns `status: "empty"` with zeroed
+    /// counters so a downstream agent always parses one schema.
+    fn tool_intent_summary(args: Value) -> Value {
+        let since_hours: i64 = args.get("since_hours")
+            .and_then(|v| v.as_i64())
+            .unwrap_or(24);
+        let sample_per_type: usize = args.get("sample_per_type")
+            .and_then(|v| v.as_u64())
+            .map(|n| n as usize)
+            .unwrap_or(1)
+            .min(20);
+        let path = std::path::Path::new(".aura/intent_log.jsonl");
+        let payload = match crate::intent_query::build_typed_intent_summary(
+            path,
+            since_hours,
+            sample_per_type,
+        ) {
+            Some(s) => s.to_json(),
+            None => json!({
+                "status": "empty",
+                "since_hours": since_hours,
+                "typed_total": 0,
+                "untyped": 0,
+                "type_count": 0,
+                "buckets": [],
+            }),
+        };
+        json!({ "content": [{ "type": "text", "text": payload.to_string() }] })
+    }
+
+    pub(crate) fn tool_pr_review(args: Value) -> Value {
         let base = args["base"].as_str().unwrap_or("master");
         match crate::pr::PrReviewEngine::run_review(base, true, false) {
             Ok(Some(report_json)) => {
                 // Try to parse the JSON report and re-encode as TOON for token savings
                 if let Ok(parsed) = serde_json::from_str::<Value>(&report_json) {
-                    let toon_text = crate::toon::encode(&parsed);
+                    let toon_text = aura_toon::encode(&parsed);
                     json!({ "content": [{ "type": "text", "text": toon_text }] })
                 } else {
                     json!({ "content": [{ "type": "text", "text": report_json }] })
@@ -995,6 +2854,66 @@ impl McpServer {
                 "hint": "Call aura_live_impacts for details"
             });
         }
+
+        // W3 conflicts + W5 peer build markers written by live_ws.
+        {
+            let conflicts_path = std::path::Path::new(".aura/live/conflicts_pending");
+            if conflicts_path.exists() {
+                if let Some(n) = std::fs::read_to_string(conflicts_path).ok()
+                    .and_then(|s| s.trim().parse::<u64>().ok())
+                    .filter(|&n| n > 0)
+                {
+                    status_data["conflicts"] = json!({
+                        "pending": n,
+                        "hint": "Run `aura resolve --interactive` to settle"
+                    });
+                }
+            }
+
+            let build_path = std::path::Path::new(".aura/live/peer_build");
+            if build_path.exists() {
+                if let Ok(raw) = std::fs::read_to_string(build_path) {
+                    if let Ok(v) = serde_json::from_str::<serde_json::Value>(&raw) {
+                        status_data["peer_build"] = v;
+                    }
+                }
+            }
+        }
+
+        // S2-TIST: 24h typed-intent histogram. Attached only when at
+        // least one typed entry exists in the local log so untouched
+        // repos don't grow the status payload with empty buckets. Same
+        // builder the CLI/MCP summary tools use, so the numbers always
+        // agree.
+        if let Some(summary) = crate::intent_query::build_typed_intent_summary(
+            std::path::Path::new(".aura/intent_log.jsonl"),
+            24,
+            0,
+        ) {
+            let buckets: Vec<serde_json::Value> = summary
+                .buckets
+                .iter()
+                .map(|b| json!({"intent_type": b.intent_type, "count": b.count}))
+                .collect();
+            status_data["typed_intents_24h"] = json!({
+                "typed_total": summary.typed_total,
+                "untyped": summary.untyped,
+                "type_count": summary.buckets.len(),
+                "buckets": buckets,
+                "hint": "Call aura_intent_summary for samples, or aura_intent_query --type <T> to drill in.",
+            });
+        }
+
+        // S1-SH: signing-key health. An agent reading aura_status before
+        // any sign-bearing operation (aura_log_intent, manifest signing,
+        // attest verify) can preflight here instead of round-tripping a
+        // failed signature. Strictly read-only — uses `load_signing_key`
+        // (NOT `load_or_create`) so a status call never side-effects a
+        // key creation. The `key_id` mirrors the same did:aura:key/<b64>
+        // form the signed envelopes carry, so a verifier can cross-check
+        // "the key the agent thinks is in use" against "the key id stamped
+        // on its last block".
+        status_data["signing"] = Self::signing_health_payload();
 
         // Sentinel: show other active agents (presence already registered by global hook)
         {
@@ -1099,8 +3018,18 @@ impl McpServer {
             }
         }
 
-        let toon_text = crate::toon::encode(&status_data);
+        let toon_text = aura_toon::encode(&status_data);
         json!({ "content": [{ "type": "text", "text": toon_text }] })
+    }
+
+    /// S1-SH (Signing Health): inspect the local manifest-signing key
+    /// without side effects. Thin shim over `manifest_sig::signing_health`
+    /// — the read-only probe shared with the `aura doctor` "Signing key"
+    /// line and the `aura keys sigstore-status` CLI subcommand, so all
+    /// three surfaces report the same diagnosis from the same code.
+    /// See `manifest_sig::signing_health` for the payload shape.
+    fn signing_health_payload() -> Value {
+        crate::manifest_sig::signing_health()
     }
 
     fn tool_snapshot(args: Value) -> Value {
@@ -1218,7 +3147,7 @@ impl McpServer {
             })
         }).collect();
         let data = json!({ "count": snapshots.len(), "snapshots": entries });
-        let toon_text = crate::toon::encode(&data);
+        let toon_text = aura_toon::encode(&data);
 
         json!({ "content": [{ "type": "text", "text": toon_text }] })
     }
@@ -1235,12 +3164,51 @@ impl McpServer {
             Err(e) => return json!({ "isError": true, "content": [{ "type": "text", "text": format!("Failed to load checkpoints: {}", e) }] }),
         };
 
+        // A checkpoint's `ast_nodes` is the FULL AST snapshot (tens of thousands
+        // of nodes on a large repo), not a diff. Emitting all of it produced a
+        // ~43 MB handover payload — useless as an agent-to-agent paste. So we
+        // recover the *genuinely* modified nodes by diffing each checkpoint
+        // against the next-older one (results is newest-first), and emit only
+        // those — with a true `count` and a hard safety cap so a pathological
+        // diff can never re-introduce a giant dump.
+        const MAX_HANDOVER_NODES: usize = 60;
         let mut xml_payload = String::from("<aura_semantic_context>\n");
-        for data in results.iter().take(3) {
+        for (i, data) in results.iter().take(3).enumerate() {
             xml_payload.push_str(&format!("  <checkpoint id=\"{}\" agent=\"{}\">\n", data.id, data.agent_id));
             xml_payload.push_str(&format!("    <intent>{}</intent>\n", data.intent.replace('\n', " ")));
-            xml_payload.push_str("    <modified_nodes>\n");
-            for node in &data.ast_nodes {
+
+            // Identifiers changed vs the next-older checkpoint. The oldest
+            // checkpoint in the window has no baseline → empty (we don't dump
+            // the whole graph as "modified").
+            let changed: std::collections::HashSet<String> = match results.get(i + 1) {
+                Some(prev) => crate::parser::SemanticParser::diff_nodes(&prev.ast_nodes, &data.ast_nodes)
+                    .into_iter()
+                    .map(|(ident, _action)| ident)
+                    .collect(),
+                None => std::collections::HashSet::new(),
+            };
+            let modified: Vec<_> = data
+                .ast_nodes
+                .iter()
+                .filter(|n| {
+                    n.identifier
+                        .as_deref()
+                        .map(|id| changed.contains(id))
+                        .unwrap_or(false)
+                })
+                .collect();
+
+            let total = modified.len();
+            let shown_attr = if total > MAX_HANDOVER_NODES {
+                format!(" shown=\"{}\"", MAX_HANDOVER_NODES)
+            } else {
+                String::new()
+            };
+            xml_payload.push_str(&format!(
+                "    <modified_nodes count=\"{}\"{}>\n",
+                total, shown_attr
+            ));
+            for node in modified.iter().take(MAX_HANDOVER_NODES) {
                 let ident = node.identifier.clone().unwrap_or_else(|| "anonymous".to_string());
                 xml_payload.push_str(&format!("      <node type=\"{}\" name=\"{}\"", node.kind, ident));
                 if !node.dependencies.is_empty() {
@@ -1257,12 +3225,261 @@ impl McpServer {
             }
             xml_payload.push_str("    </modified_nodes>\n  </checkpoint>\n");
         }
+        // Append signed-intent provenance so a downstream agent can verify
+        // the chain of recent intents on its own (S1 sigstore-live).
+        // Pulls from .aura/blocks/ — silent no-op if directory missing or
+        // contents unparseable (best-effort, never blocks handover).
+        Self::append_signed_intents_xml(&mut xml_payload);
+        // Append the deterministic Block-window prose summary (S2-NH).
+        // Same `.aura/blocks/` source as signed_intents, but folded into
+        // a window summary (counts by kind/state/actor + recent intents)
+        // so the receiving agent reads a one-paragraph debrief in
+        // English instead of re-deriving it from raw IDs. CDATA-wrapped
+        // because the prose contains characters that would otherwise
+        // need XML escaping.
+        Self::append_block_window_summary_xml(&mut xml_payload, 24, 5);
+        // S2-TIH — typed-intent breakdown sourced from
+        // .aura/intent_log.jsonl (the JSONL is the source of truth for
+        // intent_type per S2-TI). Different shape than block_window_summary
+        // (which counts blocks, not the prose intents); both can co-exist
+        // and the receiving agent reads them independently. Suppressed
+        // when no rows in the window carry an intent_type so a brand-new
+        // repo's handover stays terse.
+        Self::append_typed_intents_summary_xml(&mut xml_payload, 24, 1);
         xml_payload.push_str("</aura_semantic_context>");
 
         json!({ "content": [{ "type": "text", "text": format!("Handover context for {}:\n\n{}", agent, xml_payload) }] })
     }
 
-    fn tool_prove(args: Value) -> Value {
+    /// Append a `<recent_signed_intents>` block listing the last 3 signed
+    /// intent blocks under `.aura/blocks/`. Each entry carries enough
+    /// material for a downstream agent to call `aura attest verify <id>`:
+    /// the block id, the intent text, the signing key_id, and the Rekor
+    /// stamps when present.
+    fn append_signed_intents_xml(out: &mut String) {
+        let dir = std::path::Path::new(".aura/blocks");
+        if !dir.exists() {
+            return;
+        }
+        let mut paths: Vec<std::path::PathBuf> = match std::fs::read_dir(dir) {
+            Ok(rd) => rd
+                .filter_map(|e| e.ok())
+                .map(|e| e.path())
+                .filter(|p| p.extension().and_then(|s| s.to_str()) == Some("json"))
+                .collect(),
+            Err(_) => return,
+        };
+        paths.sort();
+        // Newest-last in lex order is fine for UUID v4; a later iteration
+        // can sort by created_at if needed. Take the last 3 so the agent
+        // sees the freshest intents at the bottom.
+        let tail: Vec<_> = paths.iter().rev().take(3).collect();
+        if tail.is_empty() {
+            return;
+        }
+        out.push_str("  <recent_signed_intents>\n");
+        for path in tail.iter().rev() {
+            let raw = match std::fs::read_to_string(path) {
+                Ok(s) => s,
+                Err(_) => continue,
+            };
+            let v: Value = match serde_json::from_str(&raw) {
+                Ok(v) => v,
+                Err(_) => continue,
+            };
+            let id = v.get("id").and_then(|x| x.as_str()).unwrap_or("?");
+            let intent = v
+                .pointer("/payload/body/intent")
+                .and_then(|x| x.as_str())
+                .unwrap_or("?");
+            let key_id = v
+                .pointer("/provenance/signature/key_id")
+                .and_then(|x| x.as_str())
+                .unwrap_or("?");
+            // S1-W: surface dual identity. Read from payload first
+            // (canonical source); fall back to provenance.on_behalf_of so
+            // older blocks signed before payload-binding still render.
+            let human_id = v
+                .pointer("/payload/body/human_id")
+                .and_then(|x| x.as_str())
+                .or_else(|| {
+                    v.pointer("/provenance/on_behalf_of")
+                        .and_then(|x| x.as_str())
+                });
+            let rekor_uuid = v
+                .pointer("/attestations/rekor/uuid")
+                .and_then(|x| x.as_str());
+            let rekor_log_index = v
+                .pointer("/attestations/rekor/log_index")
+                .and_then(|x| x.as_i64());
+            out.push_str(&format!(
+                "    <intent block_id=\"{}\" key_id=\"{}\"",
+                xml_escape(id),
+                xml_escape(key_id)
+            ));
+            if let Some(h) = human_id {
+                out.push_str(&format!(" human_id=\"{}\"", xml_escape(h)));
+            }
+            if let (Some(u), Some(idx)) = (rekor_uuid, rekor_log_index) {
+                out.push_str(&format!(
+                    " rekor_uuid=\"{}\" rekor_log_index=\"{}\"",
+                    xml_escape(u),
+                    idx
+                ));
+            }
+            out.push_str(&format!(">{}</intent>\n", xml_escape(intent)));
+        }
+        out.push_str("  </recent_signed_intents>\n");
+    }
+
+    /// S2-NH — append a `<block_window_summary>` section to the
+    /// handover XML. Wraps `recall_narrate::narrate_recent_blocks_prose`
+    /// and emits CDATA so the prose's punctuation/dashes don't need XML
+    /// escaping. Best-effort: if the directory is missing, no blocks
+    /// fall in the window, or the helper returns None, we simply skip
+    /// the section (handover XML stays terse).
+    fn append_block_window_summary_xml(
+        out: &mut String,
+        since_hours: i64,
+        list_limit: usize,
+    ) {
+        let prose = match crate::recall_narrate::narrate_recent_blocks_prose(
+            std::path::Path::new(".aura/blocks"),
+            since_hours,
+            list_limit,
+        ) {
+            Some(p) => p,
+            None => return,
+        };
+        // Defend the CDATA section: a literal `]]>` inside would close
+        // the CDATA early. Splitting into `]]]]><![CDATA[>` is the
+        // standard escape — preserves the bytes the agent reads.
+        let safe = prose.replace("]]>", "]]]]><![CDATA[>");
+        out.push_str(&format!(
+            "  <block_window_summary since_hours=\"{}\" list_limit=\"{}\"><![CDATA[\n{}]]></block_window_summary>\n",
+            since_hours, list_limit, safe
+        ));
+    }
+
+    /// S2-TIH — append a `<typed_intent_summary>` section sourced from
+    /// `.aura/intent_log.jsonl` (the canonical home for intent_type per
+    /// S2-TI). Suppresses entirely when the helper returns None (file
+    /// missing, log empty, or no typed rows in window) so handovers from
+    /// brand-new repos don't carry a meaningless empty section.
+    fn append_typed_intents_summary_xml(
+        out: &mut String,
+        since_hours: i64,
+        sample_per_type: usize,
+    ) {
+        let prose = match crate::intent_query::narrate_typed_intents_prose(
+            std::path::Path::new(".aura/intent_log.jsonl"),
+            since_hours,
+            sample_per_type,
+        ) {
+            Some(p) => p,
+            None => return,
+        };
+        // Same `]]>` defense as block_window_summary — keeps any prose
+        // accidentally containing the CDATA terminator from breaking
+        // the XML.
+        let safe = prose.replace("]]>", "]]]]><![CDATA[>");
+        out.push_str(&format!(
+            "  <typed_intent_summary since_hours=\"{}\" sample_per_type=\"{}\"><![CDATA[\n{}]]></typed_intent_summary>\n",
+            since_hours, sample_per_type, safe
+        ));
+    }
+
+    /// MCP wrapper around `intent_block::verify_block_structured`.
+    /// Returns a JSON-serialized verification report when the block
+    /// passes both signature and (optional) Rekor checks; an isError
+    /// MCP response otherwise. Lets a downstream agent that received
+    /// an aura_handover XML payload verify each block_id without
+    /// shelling out to `aura attest verify`.
+    fn tool_attest_verify(args: Value) -> Value {
+        let block_id = match args.get("block_id").and_then(|v| v.as_str()) {
+            Some(s) if !s.is_empty() => s.to_string(),
+            _ => return json!({
+                "isError": true,
+                "content": [{ "type": "text", "text": "block_id is required (non-empty string)." }]
+            }),
+        };
+        let no_rekor = args.get("no_rekor").and_then(|v| v.as_bool()).unwrap_or(false);
+        match crate::intent_block::verify_block_structured(&block_id, no_rekor) {
+            Ok(report) => json!({
+                "content": [{
+                    "type": "text",
+                    "text": serde_json::to_string_pretty(&report).unwrap_or_else(|_| "{}".into())
+                }]
+            }),
+            Err(e) => json!({
+                "isError": true,
+                "content": [{
+                    "type": "text",
+                    "text": format!("verify failed: {}", e)
+                }]
+            }),
+        }
+    }
+
+    /// MCP wrapper around `intent_block::list_blocks_structured`.
+    /// Returns a JSON array (one row per signed block) inside the
+    /// standard MCP content[0].text envelope. Symmetric pair to
+    /// aura_attest_verify so an agent can enumerate-then-verify.
+    /// S2-TIL: optional intent_type filter and a per-row intent_type
+    /// field — same canonical-set validation as aura_intent_query so
+    /// the two surfaces stay in lockstep.
+    fn tool_attest_list(args: Value) -> Value {
+        let human = args
+            .get("human")
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty());
+        let intent_type = match args.get("intent_type") {
+            None | Some(Value::Null) => None,
+            Some(Value::String(s)) if s.is_empty() => None,
+            Some(Value::String(s)) => {
+                if !crate::intent_query::is_canonical_intent_type(s) {
+                    return json!({
+                        "isError": true,
+                        "content": [{
+                            "type": "text",
+                            "text": format!(
+                                "Invalid intent_type '{}'. Must be one of: {}",
+                                s,
+                                crate::intent_query::CANONICAL_INTENT_TYPES.join(", "),
+                            )
+                        }]
+                    });
+                }
+                Some(s.as_str())
+            }
+            Some(other) => {
+                return json!({
+                    "isError": true,
+                    "content": [{
+                        "type": "text",
+                        "text": format!("intent_type must be a string, got {}", other)
+                    }]
+                });
+            }
+        };
+        match crate::intent_block::list_blocks_structured(human, intent_type) {
+            Ok(rows) => json!({
+                "content": [{
+                    "type": "text",
+                    "text": serde_json::to_string_pretty(&rows).unwrap_or_else(|_| "[]".into())
+                }]
+            }),
+            Err(e) => json!({
+                "isError": true,
+                "content": [{
+                    "type": "text",
+                    "text": format!("attest list failed: {}", e)
+                }]
+            }),
+        }
+    }
+
+    pub(crate) fn tool_prove(args: Value) -> Value {
         let goal = match args["goal"].as_str() {
             Some(g) => g.to_string(),
             None => return json!({ "isError": true, "content": [{ "type": "text", "text": "goal is required." }] }),
@@ -1274,6 +3491,79 @@ impl McpServer {
         });
 
         json!({ "content": [{ "type": "text", "text": output }] })
+    }
+
+    /// Prove a goal through the DURABLE ledger: decompose-once (cached), prove
+    /// against the latest code, and record a lasting, commit-stamped run — the
+    /// agent-facing half of the goal-alignment spine. Returns each part in plain
+    /// language with the file:line where it lives, plus the verdict.
+    pub(crate) fn tool_goals_prove(args: Value) -> Value {
+        let goal = match args["goal"].as_str() {
+            Some(g) if !g.trim().is_empty() => g.to_string(),
+            _ => return json!({ "isError": true, "content": [{ "type": "text", "text": "goal is required." }] }),
+        };
+        let task = args["task"].as_str().map(|s| s.to_string());
+
+        if crate::goals::discover_repo_root().is_none() {
+            return json!({ "isError": true, "content": [{ "type": "text", "text": "Not in a project folder." }] });
+        }
+
+        // Run the durable prove (decompose-once + AST check + record run) and
+        // capture the structured JSON it prints, so we can reshape it for an agent.
+        let raw = Self::capture_stdout(|| {
+            let _ = crate::goals::cli::prove(&goal, task.as_deref(), true);
+        });
+        let outcome: Value = serde_json::from_str(raw.trim()).unwrap_or_else(|_| json!({}));
+
+        if let Some(err) = outcome["error"].as_str() {
+            return json!({ "content": [{ "type": "text", "text": format!("Couldn't check \"{}\" yet: {}", goal, err) }] });
+        }
+
+        let verdict = outcome["verdict"].as_str().unwrap_or("unknown");
+        let headline = match verdict {
+            "verified" => "built and checked",
+            "partial" => "almost there",
+            "not_wired" => "not started yet",
+            _ => "not checked yet",
+        };
+        let passed = outcome["passed"].as_u64().unwrap_or(0);
+        let total = outcome["total"].as_u64().unwrap_or(0);
+
+        let mut lines = vec![
+            format!("{} — {} ({} of {} parts in place)", goal, headline, passed, total),
+            String::new(),
+        ];
+        for check in outcome["checks"].as_array().into_iter().flatten() {
+            let reason = check["reason"].as_str().unwrap_or("");
+            let ok = check["passed"].as_bool().unwrap_or(false);
+            let glyph = if ok { "✓" } else { "·" };
+            let loc = match (check["file"].as_str(), check["line"].as_u64()) {
+                (Some(f), Some(l)) if !f.is_empty() => format!("  ({}:{})", f, l),
+                (Some(f), None) if !f.is_empty() => format!("  ({})", f),
+                _ => String::new(),
+            };
+            lines.push(format!("  {} {}{}", glyph, reason, loc));
+        }
+        lines.push(String::new());
+        lines.push("Recorded a durable run in .aura/goals.jsonl — it'll re-check itself for free on every build.".to_string());
+
+        json!({ "content": [{ "type": "text", "text": lines.join("\n") }] })
+    }
+
+    /// List every tracked goal from the durable ledger, in plain language.
+    pub(crate) fn tool_goals_list(_args: Value) -> Value {
+        if crate::goals::discover_repo_root().is_none() {
+            return json!({ "isError": true, "content": [{ "type": "text", "text": "Not in a project folder." }] });
+        }
+        let output = Self::capture_stdout(|| {
+            let _ = crate::goals::cli::list(false);
+        });
+        let text = if output.trim().is_empty() {
+            "No goals tracked yet. Prove one with aura_goals_prove to start the ledger.".to_string()
+        } else {
+            output
+        };
+        json!({ "content": [{ "type": "text", "text": text }] })
     }
 
     fn tool_rewind(args: Value) -> Value {
@@ -1328,16 +3618,17 @@ impl McpServer {
             }
         }
 
-        // Strategy B: Git history (up to 50 commits)
+        // Strategy B: Git history (HEAD + up to 49 ancestors).
+        // Read each commit's tree at the top of the loop so HEAD itself
+        // is searched — the "uncommitted local edit, HEAD is clean"
+        // case (most common AI-hallucination recovery shape) was being
+        // silently skipped because the previous loop walked to
+        // commit.parent(0) before ever reading a tree.
         if past_source.is_none() {
             if let Ok(head) = repo.head().and_then(|r| r.peel_to_commit()) {
                 let mut commit = head;
                 for _ in 0..50 {
-                    let parent = match commit.parent(0) {
-                        Ok(p) => p,
-                        Err(_) => break,
-                    };
-                    if let Ok(tree) = parent.tree() {
+                    if let Ok(tree) = commit.tree() {
                         if let Ok(entry) = tree.get_path(Path::new(&file_path)) {
                             if let Ok(obj) = entry.to_object(&repo) {
                                 if let Some(blob) = obj.as_blob() {
@@ -1355,7 +3646,10 @@ impl McpServer {
                             }
                         }
                     }
-                    commit = parent;
+                    match commit.parent(0) {
+                        Ok(p) => commit = p,
+                        Err(_) => break,
+                    }
                 }
             }
         }
@@ -1477,7 +3771,7 @@ impl McpServer {
         match crate::gsd::GsdEngine::generate_content(system_prompt, &user_prompt, 0.2, crate::gsd::CognitiveLabor::Auditor) {
             Some(response) => {
                 let data = json!({ "file": abs_path, "analysis": response });
-                let toon_text = crate::toon::encode(&data);
+                let toon_text = aura_toon::encode(&data);
                 json!({ "content": [{ "type": "text", "text": toon_text }] })
             }
             None => json!({ "isError": true, "content": [{ "type": "text", "text": "AI analysis failed. Check API key configuration with `aura config`." }] }),
@@ -1521,7 +3815,7 @@ impl McpServer {
         match crate::gsd::GsdEngine::generate_content(system_prompt, &user_prompt, 0.1, crate::gsd::CognitiveLabor::Auditor) {
             Some(response) => {
                 let data = json!({ "file": abs_path, "focus": focus, "deep_analysis": response });
-                let toon_text = crate::toon::encode(&data);
+                let toon_text = aura_toon::encode(&data);
                 json!({ "content": [{ "type": "text", "text": toon_text }] })
             }
             None => json!({ "isError": true, "content": [{ "type": "text", "text": "Deep analysis failed. Check API key configuration." }] }),
@@ -1569,7 +3863,7 @@ impl McpServer {
         match crate::gsd::GsdEngine::generate_content(system_prompt, &user_prompt, 0.2, crate::gsd::CognitiveLabor::Auditor) {
             Some(response) => {
                 let data = json!({ "files_analyzed": paths.len(), "question": question, "analysis": response });
-                let toon_text = crate::toon::encode(&data);
+                let toon_text = aura_toon::encode(&data);
                 json!({ "content": [{ "type": "text", "text": toon_text }] })
             }
             None => json!({ "isError": true, "content": [{ "type": "text", "text": "Batch analysis failed. Check API key configuration." }] }),
@@ -1620,7 +3914,7 @@ impl McpServer {
             }
         });
 
-        let toon_text = crate::toon::encode(&budget);
+        let toon_text = aura_toon::encode(&budget);
         json!({ "content": [{ "type": "text", "text": toon_text }] })
     }
 
@@ -1653,7 +3947,7 @@ impl McpServer {
             report_json["budget_alerts"] = json!(alerts_json);
         }
 
-        let toon_text = crate::toon::encode(&report_json);
+        let toon_text = aura_toon::encode(&report_json);
         json!({ "content": [{ "type": "text", "text": toon_text }] })
     }
 
@@ -1707,7 +4001,7 @@ impl McpServer {
         match crate::gsd::GsdEngine::generate_content(system_prompt, &user_prompt, 0.1, crate::gsd::CognitiveLabor::Architect) {
             Some(response) => {
                 let data = json!({ "file": file_path, "intent": intent, "suggestion": response });
-                let toon_text = crate::toon::encode(&data);
+                let toon_text = aura_toon::encode(&data);
                 json!({ "content": [{ "type": "text", "text": toon_text }] })
             }
             None => json!({ "isError": true, "content": [{ "type": "text", "text": "Edit suggestion failed. Check API key configuration." }] }),
@@ -1830,9 +4124,174 @@ impl McpServer {
             report.push_str(&format!("🧹 Cleaned {} stale sessions\n", cleaned));
         }
 
+        // 7. Signing-key health (S1-SHM)
+        // Same single-source helper as the MCP aura_status `signing` block,
+        // the `aura doctor` "Signing key" line, and `aura keys
+        // sigstore-status` — read-only, never load_or_create.
+        let sh = crate::manifest_sig::signing_health();
+        match sh.get("status").and_then(|s| s.as_str()).unwrap_or("") {
+            "ok" => {
+                let key_id = sh.get("key_id").and_then(|s| s.as_str()).unwrap_or("");
+                report.push_str(&format!("✓ Signing key healthy ({})\n", key_id));
+            }
+            "missing" => {
+                report.push_str("ℹ No signing key on disk yet — first sign-bearing op will mint one\n");
+            }
+            "unreadable" => {
+                let err = sh.get("error").and_then(|s| s.as_str()).unwrap_or("?");
+                report.push_str(&format!("⚠ Signing key unreadable — {}; rotate via `aura keys sigstore-rotate`\n", err));
+                issues += 1;
+            }
+            "no_path" => {
+                let err = sh.get("error").and_then(|s| s.as_str()).unwrap_or("?");
+                report.push_str(&format!("⚠ Signing key path unresolved — {}; set $HOME or use --key-path\n", err));
+                issues += 1;
+            }
+            other => {
+                report.push_str(&format!("⚠ Signing key: unexpected status '{}'\n", other));
+                issues += 1;
+            }
+        }
+
+        // 8. Skill-ledger health (UU-W1) — same `skill_rank::ledger_health`
+        // helper as the CLI `aura doctor` so the two surfaces never drift on
+        // what they report. The dirty backlog is surfaced as a warning but
+        // does NOT bump `issues` here: the MCP path can't tell whether the
+        // caller is signed in (so the backlog may be about to drain), and a
+        // false "needs attention" on a read-only probe is worse than a hint.
+        let ledger_raw = std::env::var("HOME")
+            .ok()
+            .map(|h| Path::new(&h).join(".aura").join("agent_skills.json"))
+            .and_then(|p| std::fs::read_to_string(p).ok());
+        match ledger_raw.as_deref().and_then(crate::skill_rank::ledger_health) {
+            None => {
+                report.push_str(
+                    "ℹ Skill ledger: none yet — routing falls back to the active brain\n",
+                );
+            }
+            Some(h) => {
+                if h.dirty == 0 {
+                    report.push_str(&format!(
+                        "✓ Skill ledger flushed ({} recorded)\n",
+                        h.recorded,
+                    ));
+                } else {
+                    report.push_str(&format!(
+                        "⚠ Skill ledger: {} row(s) pending cloud flush — sign in to cloud to drain\n",
+                        h.dirty,
+                    ));
+                }
+                if h.total_cells > 0 {
+                    if h.immature_cells.is_empty() {
+                        report.push_str(&format!(
+                            "✓ All {} routing cell(s) have ≥{} samples — auto-routing active\n",
+                            h.total_cells,
+                            crate::skill_rank::MIN_SAMPLES,
+                        ));
+                    } else {
+                        report.push_str(&format!(
+                            "ℹ {} of {} routing cell(s) below {} samples (won't auto-route yet)\n",
+                            h.immature_cells.len(),
+                            h.total_cells,
+                            crate::skill_rank::MIN_SAMPLES,
+                        ));
+                    }
+                }
+            }
+        }
+
         report.push_str(&format!("\nTotal issues: {}", issues));
 
         json!({ "content": [{ "type": "text", "text": report }] })
+    }
+
+    /// Bucket O — Tail the most recent stdout/stderr from a Manager
+    /// subagent. Reads `~/.aura/manager-sessions/<sid>-<tid>.tail`
+    /// written live by the shell as the subagent streams. Returns the
+    /// last `tail` lines (default 200) plus the running line count
+    /// from the persisted ManagerTask. Cross-process safe: no shared
+    /// memory needed; the tail file is the contract.
+    fn tool_subagent_monitor(args: Value) -> Value {
+        let session_id = match args["session_id"].as_str() {
+            Some(s) if !s.trim().is_empty() => s.to_string(),
+            _ => {
+                return json!({
+                    "isError": true,
+                    "content": [{ "type": "text", "text": "session_id is required." }]
+                });
+            }
+        };
+        let task_id = match args["task_id"].as_u64() {
+            Some(n) => n as usize,
+            None => {
+                return json!({
+                    "isError": true,
+                    "content": [{ "type": "text", "text": "task_id is required (integer)." }]
+                });
+            }
+        };
+        let tail = args["tail"].as_u64().map(|n| n as usize).unwrap_or(200);
+
+        let Some(home) = std::env::var_os("HOME") else {
+            return json!({ "isError": true, "content": [{ "type": "text", "text": "HOME not set." }] });
+        };
+        let mut path = std::path::PathBuf::from(home.clone());
+        path.push(".aura");
+        path.push("manager-sessions");
+        path.push(format!("{session_id}-{task_id}.tail"));
+        let raw = match std::fs::read_to_string(&path) {
+            Ok(s) => s,
+            Err(_) => {
+                return json!({
+                    "content": [{
+                        "type": "text",
+                        "text": format!("No tail for session {session_id} task {task_id}. The task hasn't started, or the ids are wrong.")
+                    }]
+                });
+            }
+        };
+        let lines: Vec<&str> = raw.lines().collect();
+        let total = lines.len();
+        let start = total.saturating_sub(tail.max(1));
+
+        // Persisted line_count (monotonic — survives ring rotation) and
+        // status come from the session JSON. Best-effort read.
+        let mut line_count: u64 = total as u64;
+        let mut status: String = "unknown".into();
+        let mut session_path = std::path::PathBuf::from(home);
+        session_path.push(".aura");
+        session_path.push("manager-sessions");
+        session_path.push(format!("{session_id}.json"));
+        if let Ok(raw_s) = std::fs::read_to_string(&session_path) {
+            if let Ok(v) = serde_json::from_str::<Value>(&raw_s) {
+                if let Some(tasks) = v.get("tasks").and_then(|t| t.as_array()) {
+                    for t in tasks {
+                        if t.get("id").and_then(|n| n.as_u64()) == Some(task_id as u64) {
+                            if let Some(c) = t.get("line_count").and_then(|n| n.as_u64()) {
+                                line_count = c;
+                            }
+                            if let Some(s) = t.get("status").and_then(|s| s.as_str()) {
+                                status = s.to_string();
+                            }
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+
+        let body: String = lines[start..].join("\n");
+        let header = format!(
+            "task #{task_id} status={status} line_count={line_count} (showing last {} of {} buffered)",
+            total - start,
+            total
+        );
+        json!({
+            "content": [{
+                "type": "text",
+                "text": format!("{header}\n\n{body}")
+            }]
+        })
     }
 
     fn tool_session_summarize(args: Value) -> Value {
@@ -1865,10 +4324,56 @@ impl McpServer {
         }
     }
 
-    fn tool_live_impacts(_args: Value) -> Value {
+    fn tool_ask(args: Value) -> Value {
+        let question = match args["question"].as_str() {
+            Some(s) if !s.trim().is_empty() => s.to_string(),
+            _ => return json!({ "isError": true, "content": [{ "type": "text", "text": "question is required." }] }),
+        };
+        let config = crate::config::ConfigManager::load();
+        let token = match config.cloud_api_token
+            .or_else(|| std::env::var("AURA_CLOUD_TOKEN").ok())
+        {
+            Some(t) => t,
+            None => return json!({ "isError": true, "content": [{ "type": "text", "text": "No cloud token configured. Run `aura cloud login`." }] }),
+        };
+        let cloud_url = config.cloud_url.unwrap_or_else(|| "https://auravcs.com".to_string());
+        let url = format!("{}/api/v2/ask", cloud_url.trim_end_matches('/'));
+        let client = reqwest::blocking::Client::builder()
+            .timeout(std::time::Duration::from_secs(30))
+            .build()
+            .unwrap_or_else(|_| reqwest::blocking::Client::new());
+        match client.post(&url)
+            .header("Authorization", format!("Bearer {}", token))
+            .json(&json!({ "question": question }))
+            .send()
+        {
+            Ok(resp) => match resp.json::<Value>() {
+                Ok(v) => {
+                    let answer = v["answer"].as_str().unwrap_or("(no answer)").to_string();
+                    let citations = v["citations"].as_array().cloned().unwrap_or_default();
+                    let cite_text: String = citations.iter().filter_map(|c| {
+                        Some(format!("  [{}] {} — {}",
+                            c["index"].as_i64()?,
+                            c["node_name"].as_str()?,
+                            c["rationale"].as_str().unwrap_or("")))
+                    }).collect::<Vec<_>>().join("\n");
+                    let text = if cite_text.is_empty() {
+                        answer
+                    } else {
+                        format!("{}\n\nCitations:\n{}", answer, cite_text)
+                    };
+                    json!({ "content": [{ "type": "text", "text": text }] })
+                }
+                Err(e) => json!({ "isError": true, "content": [{ "type": "text", "text": format!("Failed to parse response: {}", e) }] }),
+            },
+            Err(e) => json!({ "isError": true, "content": [{ "type": "text", "text": format!("Request failed: {}", e) }] }),
+        }
+    }
+
+    pub(crate) fn tool_live_impacts(_args: Value) -> Value {
         match crate::live_sync::fetch_impacts_json() {
             Ok(data) => {
-                let toon_text = crate::toon::encode(&data);
+                let toon_text = aura_toon::encode(&data);
                 json!({ "content": [{ "type": "text", "text": toon_text }] })
             }
             Err(e) => {
@@ -1928,7 +4433,7 @@ impl McpServer {
 
         match crate::live_sync::send_team_message(message, to) {
             Ok(resp) => {
-                let toon_text = crate::toon::encode(&resp);
+                let toon_text = aura_toon::encode(&resp);
                 json!({ "content": [{ "type": "text", "text": toon_text }] })
             }
             Err(e) => {
@@ -1947,7 +4452,7 @@ impl McpServer {
                 if marker.exists() {
                     let _ = std::fs::remove_file(marker);
                 }
-                let toon_text = crate::toon::encode(&data);
+                let toon_text = aura_toon::encode(&data);
                 json!({ "content": [{ "type": "text", "text": toon_text }] })
             }
             Err(e) => {
@@ -1996,6 +4501,8 @@ impl McpServer {
                         function_kind: node.kind.clone(),
                         content_hash: node.content_hash.clone(),
                         body,
+                        parent_hash: None,
+                        ..Default::default()
                     });
                 }
             }
@@ -2069,7 +4576,7 @@ impl McpServer {
     fn tool_sync_status(_args: Value) -> Value {
         match crate::live_sync::fetch_sync_status() {
             Ok(data) => {
-                let toon_text = crate::toon::encode(&data);
+                let toon_text = aura_toon::encode(&data);
                 json!({ "content": [{ "type": "text", "text": toon_text }] })
             }
             Err(e) => {
@@ -2086,7 +4593,7 @@ impl McpServer {
             .unwrap_or_else(|| "unknown".to_string());
 
         let status = crate::sentinel::SentinelManager::get_status(&session_id);
-        let toon_text = crate::toon::encode(&status);
+        let toon_text = aura_toon::encode(&status);
         json!({ "content": [{ "type": "text", "text": toon_text }] })
     }
 
@@ -2111,10 +4618,32 @@ impl McpServer {
             .map(|s| s.session_id)
             .unwrap_or_else(|| "unknown".to_string());
 
-        let zone = crate::sentinel::SentinelManager::create_zone(&session_id, patterns, mode);
+        let claim_kind = match mode {
+            crate::sentinel::ZoneMode::Block => "block",
+            _ => "warn",
+        };
+        let zone = crate::sentinel::SentinelManager::create_zone(&session_id, patterns.clone(), mode);
+
+        let mut cloud_note = String::new();
+        if crate::cloud_zones::cloud_routed_for_current_repo() {
+            let mut ok = 0usize;
+            let mut errs: Vec<String> = Vec::new();
+            for p in &patterns {
+                match crate::cloud_zones::claim_zone(p, claim_kind) {
+                    Ok(_) => ok += 1,
+                    Err(e) => errs.push(e),
+                }
+            }
+            cloud_note = if errs.is_empty() {
+                format!(" Cloud: {}/{} claimed.", ok, patterns.len())
+            } else {
+                format!(" Cloud: {}/{} claimed ({} error(s), first: {}).", ok, patterns.len(), errs.len(), errs[0])
+            };
+        }
+
         json!({ "content": [{ "type": "text", "text": format!(
-            "Zone '{}' created for session {}. Patterns: {:?}, Mode: {:?}",
-            zone.zone_id, zone.session_id, zone.patterns, zone.mode
+            "Zone '{}' created for session {}. Patterns: {:?}, Mode: {:?}.{}",
+            zone.zone_id, zone.session_id, zone.patterns, zone.mode, cloud_note
         ) }] })
     }
 
@@ -2370,8 +4899,18 @@ impl McpServer {
                     .map(|s| s.trim().to_string())
                     .filter(|s| !s.is_empty())
                     .collect();
-                let id = crate::memory::MemoryManager::add_entry(section, content, tags, &agent);
-                json!({ "content": [{ "type": "text", "text": format!("Memory '{}' added to '{}' section.", id, section) }] })
+                // W2: optional code anchor `<path>#<identifier>` — stamps a
+                // content fingerprint so reads can flag the memory stale
+                // when the symbol drifts.
+                let symbol = args["symbol"].as_str();
+                let id = crate::memory::MemoryManager::add_entry_with_symbol(
+                    section, content, tags, &agent, symbol,
+                );
+                let anchored = match symbol {
+                    Some(s) => format!(" (anchored to {})", s),
+                    None => String::new(),
+                };
+                json!({ "content": [{ "type": "text", "text": format!("Memory '{}' added to '{}' section{}.", id, section, anchored) }] })
             }
         }
     }
@@ -2383,11 +4922,11 @@ impl McpServer {
                 return json!({ "content": [{ "type": "text", "text": format!("No memories matching '{}'.", query) }] });
             }
             let data = serde_json::json!({ "query": query, "results": results });
-            let toon_text = crate::toon::encode(&data);
+            let toon_text = aura_toon::encode(&data);
             json!({ "content": [{ "type": "text", "text": toon_text }] })
         } else {
             let full = crate::memory::MemoryManager::full_view();
-            let toon_text = crate::toon::encode(&full);
+            let toon_text = aura_toon::encode(&full);
             json!({ "content": [{ "type": "text", "text": toon_text }] })
         }
     }
@@ -2423,6 +4962,1506 @@ impl McpServer {
             Err(e) => json!({ "isError": true, "content": [{ "type": "text", "text": format!("Compaction failed: {}", e) }] }),
         }
     }
+
+    /// S1-G — `aura_refs(symbol, files)`. Builds a stack-graph over
+    /// the supplied files and returns every reference that resolves
+    /// to a definition for the given symbol. Caller passes the file
+    /// set explicitly so the MCP surface stays stateless; later
+    /// phases will swap to a SQLite-backed index that keys off repo
+    /// + commit, at which point this signature simplifies to
+    /// `(symbol, repo?, commit?)`.
+    fn tool_refs(args: Value) -> Value {
+        Self::tool_stackgraph_query(args, /*defs_only=*/ false)
+    }
+
+    /// S1-G — `aura_defs(symbol, files)`. Same indexing pipeline as
+    /// `aura_refs`; returns definition sites instead of resolved
+    /// reference tuples.
+    fn tool_defs(args: Value) -> Value {
+        Self::tool_stackgraph_query(args, /*defs_only=*/ true)
+    }
+
+    /// Phase 1 — surface the distilled Taste Engine rules to agents.
+    /// Returns only Active + Provisional rules (plus user-approved
+    /// candidates so a freshly approved rule appears immediately),
+    /// optionally filtered by file_path scope. Output is plain JSON,
+    /// not toon-encoded, because the receiver is usually another agent
+    /// that will pattern-match on field names.
+    fn tool_taste_rules(args: Value) -> Value {
+        let limit = args.get("limit").and_then(|v| v.as_u64()).unwrap_or(10) as usize;
+
+        let repo_root = match git2::Repository::discover(".") {
+            Ok(r) => match r.workdir() {
+                Some(w) => w.to_path_buf(),
+                None => return json!({ "isError": true, "content": [{ "type": "text", "text": "bare repo — no workdir" }] }),
+            },
+            Err(e) => return json!({ "isError": true, "content": [{ "type": "text", "text": format!("not a git repo: {}", e) }] }),
+        };
+
+        let rules: Vec<crate::taste::aggregate::Rule> = if let Some(file_path) = args.get("file_path").and_then(|v| v.as_str()) {
+            crate::taste::aggregate::rules_for_path(&repo_root, file_path)
+        } else {
+            crate::taste::aggregate::load_rules(&repo_root).rules
+        };
+
+        let payload: Vec<serde_json::Value> = rules
+            .into_iter()
+            .filter(|r| !matches!(r.status, crate::taste::aggregate::RuleStatus::Deprecated))
+            .take(limit)
+            .map(|r| serde_json::json!({
+                "id": r.id,
+                "statement": r.statement,
+                "template": r.template,
+                "language": r.language,
+                "layer": r.layer,
+                "confidence": r.confidence,
+                "status": match r.status {
+                    crate::taste::aggregate::RuleStatus::Active => "active",
+                    crate::taste::aggregate::RuleStatus::Provisional => "provisional",
+                    crate::taste::aggregate::RuleStatus::Candidate => "candidate",
+                    crate::taste::aggregate::RuleStatus::Deprecated => "deprecated",
+                },
+                "user_approved": r.user_approved,
+                "support": r.positive_weight,
+            }))
+            .collect();
+
+        let text = if payload.is_empty() {
+            "No taste rules learned yet. Make a few commits and the post-commit hook will start mining patterns.".to_string()
+        } else {
+            serde_json::to_string_pretty(&payload).unwrap_or_default()
+        };
+        json!({ "content": [{ "type": "text", "text": text }] })
+    }
+
+    fn tool_stackgraph_query(args: Value, defs_only: bool) -> Value {
+        let symbol = match args.get("symbol").and_then(|v| v.as_str()) {
+            Some(s) if !s.trim().is_empty() => s.to_string(),
+            _ => {
+                return json!({
+                    "isError": true,
+                    "content": [{ "type": "text", "text": "missing required `symbol` (non-empty string)" }]
+                });
+            }
+        };
+        let files_raw = match args.get("files").and_then(|v| v.as_array()) {
+            Some(a) if !a.is_empty() => a.clone(),
+            _ => {
+                return json!({
+                    "isError": true,
+                    "content": [{ "type": "text", "text": "missing required `files` (non-empty array of {path, source})" }]
+                });
+            }
+        };
+        for entry in &files_raw {
+            let path = entry.get("path").and_then(|v| v.as_str()).unwrap_or("");
+            if path.is_empty() {
+                return json!({
+                    "isError": true,
+                    "content": [{ "type": "text", "text": "each file entry must include a non-empty `path`" }]
+                });
+            }
+        }
+        // aura-stackgraph runs out-of-process: stack-graphs pins
+        // tree-sitter 0.24 and our parser stack pins 0.26, which
+        // collide on `links = "tree-sitter"`. The standalone binary
+        // accepts `{symbol, kind, files}` on stdin and returns the
+        // same `{symbol, kind, count, rows, indexed_files}` envelope
+        // on stdout — same shape we'd build in-process.
+        let kind = if defs_only { "defs" } else { "refs" };
+        let request = json!({
+            "symbol": symbol,
+            "kind": kind,
+            "files": files_raw,
+        });
+        let bin = std::env::var("AURA_STACKGRAPH_BIN")
+            .unwrap_or_else(|_| "aura-stackgraph".to_string());
+        let mut child = match std::process::Command::new(&bin)
+            .arg("query")
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+        {
+            Ok(c) => c,
+            Err(e) => {
+                return json!({
+                    "isError": true,
+                    "content": [{ "type": "text", "text": format!(
+                        "aura-stackgraph binary not found ({}). Install via `cargo install --path aura-stackgraph` or set AURA_STACKGRAPH_BIN. Underlying: {}",
+                        bin, e
+                    ) }]
+                });
+            }
+        };
+        if let Some(mut stdin) = child.stdin.take() {
+            use std::io::Write;
+            if let Err(e) = stdin.write_all(request.to_string().as_bytes()) {
+                return json!({
+                    "isError": true,
+                    "content": [{ "type": "text", "text": format!("write to aura-stackgraph stdin failed: {}", e) }]
+                });
+            }
+        }
+        let output = match child.wait_with_output() {
+            Ok(o) => o,
+            Err(e) => {
+                return json!({
+                    "isError": true,
+                    "content": [{ "type": "text", "text": format!("aura-stackgraph wait failed: {}", e) }]
+                });
+            }
+        };
+        if !output.status.success() {
+            let err = String::from_utf8_lossy(&output.stderr);
+            return json!({
+                "isError": true,
+                "content": [{ "type": "text", "text": format!("aura-stackgraph exited {}: {}", output.status, err) }]
+            });
+        }
+        let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+        let parsed: serde_json::Value = serde_json::from_str(&stdout)
+            .unwrap_or_else(|_| json!({ "raw": stdout }));
+        let pretty = serde_json::to_string_pretty(&parsed).unwrap_or(stdout);
+        json!({ "content": [{ "type": "text", "text": pretty }] })
+    }
+
+    /// Bet 1 Phase C — proxies POST /api/v2/episodic/narrate. Cloud-side
+    /// because narration may call an LLM keyed at the org level, and the
+    /// AI key never leaves the cloud. Returns the raw response so agents
+    /// can read both the narration string and the per-type counts.
+    fn tool_episodic_narrate(args: Value) -> Value {
+        let config = crate::config::ConfigManager::load();
+        let token = match config.cloud_api_token
+            .clone()
+            .or_else(|| std::env::var("AURA_CLOUD_TOKEN").ok())
+        {
+            Some(t) => t,
+            None => return json!({ "isError": true, "content": [{ "type": "text", "text": "No cloud token configured. Run `aura cloud login`." }] }),
+        };
+        let cloud_url = config.cloud_url.unwrap_or_else(|| "https://auravcs.com".to_string());
+        let url = format!("{}/api/v2/episodic/narrate", cloud_url.trim_end_matches('/'));
+        let client = reqwest::blocking::Client::builder()
+            .timeout(std::time::Duration::from_secs(30))
+            .build()
+            .unwrap_or_else(|_| reqwest::blocking::Client::new());
+        match client
+            .post(&url)
+            .header("Authorization", format!("Bearer {}", token))
+            .json(&args)
+            .send()
+        {
+            Ok(resp) => {
+                let status = resp.status();
+                match resp.json::<Value>() {
+                    Ok(v) => {
+                        if !status.is_success() {
+                            return json!({ "isError": true, "content": [{ "type": "text", "text": format!("narrate HTTP {}: {}", status, v) }] });
+                        }
+                        let pretty = serde_json::to_string_pretty(&v).unwrap_or_else(|_| v.to_string());
+                        json!({ "content": [{ "type": "text", "text": pretty }] })
+                    }
+                    Err(e) => json!({ "isError": true, "content": [{ "type": "text", "text": format!("narrate parse failed (HTTP {}): {}", status, e) }] }),
+                }
+            }
+            Err(e) => json!({ "isError": true, "content": [{ "type": "text", "text": format!("narrate request failed: {}", e) }] }),
+        }
+    }
+
+    /// Bet 1 Phase E — proxies GET /api/v2/episodic/timeline. Read-only
+    /// per-function materialized view: counts_by_type, by_day buckets,
+    /// agents_seen, plus the events slice. function_name is required.
+    fn tool_episodic_timeline(args: Value) -> Value {
+        let function_name = match args.get("function_name").and_then(|v| v.as_str()) {
+            Some(s) if !s.trim().is_empty() => s.to_string(),
+            _ => return json!({ "isError": true, "content": [{ "type": "text", "text": "function_name is required." }] }),
+        };
+        let config = crate::config::ConfigManager::load();
+        let token = match config.cloud_api_token
+            .clone()
+            .or_else(|| std::env::var("AURA_CLOUD_TOKEN").ok())
+        {
+            Some(t) => t,
+            None => return json!({ "isError": true, "content": [{ "type": "text", "text": "No cloud token configured. Run `aura cloud login`." }] }),
+        };
+        let cloud_url = config.cloud_url.unwrap_or_else(|| "https://auravcs.com".to_string());
+        let mut url = format!(
+            "{}/api/v2/episodic/timeline?function_name={}",
+            cloud_url.trim_end_matches('/'),
+            percent_encode_unreserved(&function_name)
+        );
+        if let Some(w) = args.get("window_hours").and_then(|v| v.as_i64()) {
+            url.push_str(&format!("&window_hours={w}"));
+        }
+        if let Some(r) = args.get("repo").and_then(|v| v.as_str()) {
+            if !r.trim().is_empty() {
+                url.push_str(&format!("&repo={}", percent_encode_unreserved(r)));
+            }
+        }
+        if let Some(l) = args.get("limit").and_then(|v| v.as_i64()) {
+            url.push_str(&format!("&limit={l}"));
+        }
+        let client = reqwest::blocking::Client::builder()
+            .timeout(std::time::Duration::from_secs(20))
+            .build()
+            .unwrap_or_else(|_| reqwest::blocking::Client::new());
+        match client
+            .get(&url)
+            .header("Authorization", format!("Bearer {}", token))
+            .send()
+        {
+            Ok(resp) => {
+                let status = resp.status();
+                match resp.json::<Value>() {
+                    Ok(v) => {
+                        if !status.is_success() {
+                            return json!({ "isError": true, "content": [{ "type": "text", "text": format!("timeline HTTP {}: {}", status, v) }] });
+                        }
+                        let pretty = serde_json::to_string_pretty(&v).unwrap_or_else(|_| v.to_string());
+                        json!({ "content": [{ "type": "text", "text": pretty }] })
+                    }
+                    Err(e) => json!({ "isError": true, "content": [{ "type": "text", "text": format!("timeline parse failed (HTTP {}): {}", status, e) }] }),
+                }
+            }
+            Err(e) => json!({ "isError": true, "content": [{ "type": "text", "text": format!("timeline request failed: {}", e) }] }),
+        }
+    }
+
+    /// Bet 1 Phase G — proxies GET /api/v2/episodic/agent-digest. Same
+    /// shape contract as `tool_episodic_timeline`: read-only,
+    /// network-reaching, returns the cloud's structured response under
+    /// MCP `content[0].text` so the caller can `JSON.parse` it.
+    fn tool_episodic_agent_digest(args: Value) -> Value {
+        let agent_id = match args.get("agent_id").and_then(|v| v.as_str()) {
+            Some(s) if !s.trim().is_empty() => s.to_string(),
+            _ => return json!({ "isError": true, "content": [{ "type": "text", "text": "agent_id is required." }] }),
+        };
+        let config = crate::config::ConfigManager::load();
+        let token = match config.cloud_api_token
+            .clone()
+            .or_else(|| std::env::var("AURA_CLOUD_TOKEN").ok())
+        {
+            Some(t) => t,
+            None => return json!({ "isError": true, "content": [{ "type": "text", "text": "No cloud token configured. Run `aura cloud login`." }] }),
+        };
+        let cloud_url = config.cloud_url.unwrap_or_else(|| "https://auravcs.com".to_string());
+        let mut url = format!(
+            "{}/api/v2/episodic/agent-digest?agent_id={}",
+            cloud_url.trim_end_matches('/'),
+            percent_encode_unreserved(&agent_id)
+        );
+        if let Some(w) = args.get("window_hours").and_then(|v| v.as_i64()) {
+            url.push_str(&format!("&window_hours={w}"));
+        }
+        if let Some(r) = args.get("repo").and_then(|v| v.as_str()) {
+            if !r.trim().is_empty() {
+                url.push_str(&format!("&repo={}", percent_encode_unreserved(r)));
+            }
+        }
+        if let Some(l) = args.get("limit").and_then(|v| v.as_i64()) {
+            url.push_str(&format!("&limit={l}"));
+        }
+        let client = reqwest::blocking::Client::builder()
+            .timeout(std::time::Duration::from_secs(20))
+            .build()
+            .unwrap_or_else(|_| reqwest::blocking::Client::new());
+        match client
+            .get(&url)
+            .header("Authorization", format!("Bearer {}", token))
+            .send()
+        {
+            Ok(resp) => {
+                let status = resp.status();
+                match resp.json::<Value>() {
+                    Ok(v) => {
+                        if !status.is_success() {
+                            return json!({ "isError": true, "content": [{ "type": "text", "text": format!("agent-digest HTTP {}: {}", status, v) }] });
+                        }
+                        let pretty = serde_json::to_string_pretty(&v).unwrap_or_else(|_| v.to_string());
+                        json!({ "content": [{ "type": "text", "text": pretty }] })
+                    }
+                    Err(e) => json!({ "isError": true, "content": [{ "type": "text", "text": format!("agent-digest parse failed (HTTP {}): {}", status, e) }] }),
+                }
+            }
+            Err(e) => json!({ "isError": true, "content": [{ "type": "text", "text": format!("agent-digest request failed: {}", e) }] }),
+        }
+    }
+
+    /// S2-MS — proxies GET /api/v2/episodic/multi-session-arc. Same
+    /// shape contract as `tool_episodic_session_arc` but takes a
+    /// comma-separated agent_ids list and returns the merged timeline.
+    fn tool_episodic_multi_session_arc(args: Value) -> Value {
+        let agent_ids = match args.get("agent_ids").and_then(|v| v.as_str()) {
+            Some(s) if !s.trim().is_empty() => s.to_string(),
+            _ => return json!({ "isError": true, "content": [{ "type": "text", "text": "agent_ids is required (comma-separated list)." }] }),
+        };
+        let config = crate::config::ConfigManager::load();
+        let token = match config.cloud_api_token
+            .clone()
+            .or_else(|| std::env::var("AURA_CLOUD_TOKEN").ok())
+        {
+            Some(t) => t,
+            None => return json!({ "isError": true, "content": [{ "type": "text", "text": "No cloud token configured. Run `aura cloud login`." }] }),
+        };
+        let cloud_url = config.cloud_url.unwrap_or_else(|| "https://auravcs.com".to_string());
+        let mut url = format!(
+            "{}/api/v2/episodic/multi-session-arc?agent_ids={}",
+            cloud_url.trim_end_matches('/'),
+            percent_encode_unreserved(&agent_ids)
+        );
+        if let Some(w) = args.get("window_hours").and_then(|v| v.as_i64()) {
+            url.push_str(&format!("&window_hours={w}"));
+        }
+        if let Some(g) = args.get("gap_minutes").and_then(|v| v.as_i64()) {
+            url.push_str(&format!("&gap_minutes={g}"));
+        }
+        if let Some(r) = args.get("repo").and_then(|v| v.as_str()) {
+            if !r.trim().is_empty() {
+                url.push_str(&format!("&repo={}", percent_encode_unreserved(r)));
+            }
+        }
+        if let Some(l) = args.get("limit").and_then(|v| v.as_i64()) {
+            url.push_str(&format!("&limit={l}"));
+        }
+        let client = reqwest::blocking::Client::builder()
+            .timeout(std::time::Duration::from_secs(20))
+            .build()
+            .unwrap_or_else(|_| reqwest::blocking::Client::new());
+        match client
+            .get(&url)
+            .header("Authorization", format!("Bearer {}", token))
+            .send()
+        {
+            Ok(resp) => {
+                let status = resp.status();
+                match resp.json::<Value>() {
+                    Ok(v) => {
+                        if !status.is_success() {
+                            return json!({ "isError": true, "content": [{ "type": "text", "text": format!("multi-session-arc HTTP {}: {}", status, v) }] });
+                        }
+                        let pretty = serde_json::to_string_pretty(&v).unwrap_or_else(|_| v.to_string());
+                        json!({ "content": [{ "type": "text", "text": pretty }] })
+                    }
+                    Err(e) => json!({ "isError": true, "content": [{ "type": "text", "text": format!("multi-session-arc parse failed (HTTP {}): {}", status, e) }] }),
+                }
+            }
+            Err(e) => json!({ "isError": true, "content": [{ "type": "text", "text": format!("multi-session-arc request failed: {}", e) }] }),
+        }
+    }
+
+    /// S2-SA — proxies GET /api/v2/episodic/session-arc. Same shape
+    /// contract as `tool_episodic_agent_digest`: read-only,
+    /// network-reaching, returns the cloud's structured response under
+    /// MCP `content[0].text`. Required arg: agent_id (which doubles as
+    /// session id, matching the cloud schema's per-row identifier).
+    fn tool_episodic_session_arc(args: Value) -> Value {
+        let agent_id = match args.get("agent_id").and_then(|v| v.as_str()) {
+            Some(s) if !s.trim().is_empty() => s.to_string(),
+            _ => return json!({ "isError": true, "content": [{ "type": "text", "text": "agent_id is required." }] }),
+        };
+        let config = crate::config::ConfigManager::load();
+        let token = match config.cloud_api_token
+            .clone()
+            .or_else(|| std::env::var("AURA_CLOUD_TOKEN").ok())
+        {
+            Some(t) => t,
+            None => return json!({ "isError": true, "content": [{ "type": "text", "text": "No cloud token configured. Run `aura cloud login`." }] }),
+        };
+        let cloud_url = config.cloud_url.unwrap_or_else(|| "https://auravcs.com".to_string());
+        let mut url = format!(
+            "{}/api/v2/episodic/session-arc?agent_id={}",
+            cloud_url.trim_end_matches('/'),
+            percent_encode_unreserved(&agent_id)
+        );
+        if let Some(w) = args.get("window_hours").and_then(|v| v.as_i64()) {
+            url.push_str(&format!("&window_hours={w}"));
+        }
+        if let Some(g) = args.get("gap_minutes").and_then(|v| v.as_i64()) {
+            url.push_str(&format!("&gap_minutes={g}"));
+        }
+        if let Some(r) = args.get("repo").and_then(|v| v.as_str()) {
+            if !r.trim().is_empty() {
+                url.push_str(&format!("&repo={}", percent_encode_unreserved(r)));
+            }
+        }
+        if let Some(l) = args.get("limit").and_then(|v| v.as_i64()) {
+            url.push_str(&format!("&limit={l}"));
+        }
+        let client = reqwest::blocking::Client::builder()
+            .timeout(std::time::Duration::from_secs(20))
+            .build()
+            .unwrap_or_else(|_| reqwest::blocking::Client::new());
+        match client
+            .get(&url)
+            .header("Authorization", format!("Bearer {}", token))
+            .send()
+        {
+            Ok(resp) => {
+                let status = resp.status();
+                match resp.json::<Value>() {
+                    Ok(v) => {
+                        if !status.is_success() {
+                            return json!({ "isError": true, "content": [{ "type": "text", "text": format!("session-arc HTTP {}: {}", status, v) }] });
+                        }
+                        let pretty = serde_json::to_string_pretty(&v).unwrap_or_else(|_| v.to_string());
+                        json!({ "content": [{ "type": "text", "text": pretty }] })
+                    }
+                    Err(e) => json!({ "isError": true, "content": [{ "type": "text", "text": format!("session-arc parse failed (HTTP {}): {}", status, e) }] }),
+                }
+            }
+            Err(e) => json!({ "isError": true, "content": [{ "type": "text", "text": format!("session-arc request failed: {}", e) }] }),
+        }
+    }
+
+    /// S2-ER — proxies GET /api/v2/episodic/recall. Same shape contract
+    /// as `tool_episodic_timeline` and `tool_episodic_agent_digest`:
+    /// read-only, network-reaching, returns the cloud's structured
+    /// response under MCP `content[0].text` so the caller can JSON.parse
+    /// it. All filters are optional — when none are supplied the cloud
+    /// returns the unfiltered window. Named `_cloud` to disambiguate
+    /// from the older local-only `aura_episodic_recall` (which reads
+    /// .aura/intent_log.jsonl + sentinel + snapshot metadata directly).
+    fn tool_episodic_recall_cloud(args: Value) -> Value {
+        let config = crate::config::ConfigManager::load();
+        let token = match config.cloud_api_token
+            .clone()
+            .or_else(|| std::env::var("AURA_CLOUD_TOKEN").ok())
+        {
+            Some(t) => t,
+            None => return json!({ "isError": true, "content": [{ "type": "text", "text": "No cloud token configured. Run `aura cloud login`." }] }),
+        };
+        let cloud_url = config.cloud_url.unwrap_or_else(|| "https://auravcs.com".to_string());
+        let mut url = format!("{}/api/v2/episodic/recall", cloud_url.trim_end_matches('/'));
+        let mut sep = '?';
+        let mut push_str = |k: &str, v: &str, sep: &mut char| {
+            if v.trim().is_empty() {
+                return;
+            }
+            url.push(*sep);
+            url.push_str(k);
+            url.push('=');
+            url.push_str(&percent_encode_unreserved(v));
+            *sep = '&';
+        };
+        if let Some(s) = args.get("event_type").and_then(|v| v.as_str()) {
+            push_str("event_type", s, &mut sep);
+        }
+        if let Some(s) = args.get("agent_id").and_then(|v| v.as_str()) {
+            push_str("agent_id", s, &mut sep);
+        }
+        if let Some(s) = args.get("focus_fn").and_then(|v| v.as_str()) {
+            push_str("focus_fn", s, &mut sep);
+        }
+        if let Some(s) = args.get("focus_file").and_then(|v| v.as_str()) {
+            push_str("focus_file", s, &mut sep);
+        }
+        if let Some(s) = args.get("repo").and_then(|v| v.as_str()) {
+            push_str("repo", s, &mut sep);
+        }
+        // S2-TICRD: forward the canonical intent_type filter so the
+        // closed-vocabulary recall path (S2-TICR) is callable from MCP
+        // without dropping back to raw HTTP. The cloud handler
+        // validates against CANONICAL_INTENT_TYPES and returns 400 on a
+        // typo, which the existing error path surfaces as `isError` —
+        // no extra validation needed here.
+        if let Some(s) = args.get("intent_type").and_then(|v| v.as_str()) {
+            push_str("intent_type", s, &mut sep);
+        }
+        if let Some(w) = args.get("window_hours").and_then(|v| v.as_i64()) {
+            url.push(sep);
+            url.push_str(&format!("window_hours={w}"));
+            sep = '&';
+        }
+        if let Some(l) = args.get("limit").and_then(|v| v.as_i64()) {
+            url.push(sep);
+            url.push_str(&format!("limit={l}"));
+        }
+        let client = reqwest::blocking::Client::builder()
+            .timeout(std::time::Duration::from_secs(20))
+            .build()
+            .unwrap_or_else(|_| reqwest::blocking::Client::new());
+        match client
+            .get(&url)
+            .header("Authorization", format!("Bearer {}", token))
+            .send()
+        {
+            Ok(resp) => {
+                let status = resp.status();
+                match resp.json::<Value>() {
+                    Ok(v) => {
+                        if !status.is_success() {
+                            return json!({ "isError": true, "content": [{ "type": "text", "text": format!("recall HTTP {}: {}", status, v) }] });
+                        }
+                        let pretty = serde_json::to_string_pretty(&v).unwrap_or_else(|_| v.to_string());
+                        json!({ "content": [{ "type": "text", "text": pretty }] })
+                    }
+                    Err(e) => json!({ "isError": true, "content": [{ "type": "text", "text": format!("recall parse failed (HTTP {}): {}", status, e) }] }),
+                }
+            }
+            Err(e) => json!({ "isError": true, "content": [{ "type": "text", "text": format!("recall request failed: {}", e) }] }),
+        }
+    }
+
+    /// Bet 4 Phase C — proxies GET /api/v2/impacts/cross-repo. Read-only
+    /// lookup; no AI involved. Returns the raw cloud response so callers
+    /// see {function_name, total_matches, returned, repos_touched, matches[]}.
+    fn tool_impacts_cross_repo(args: Value) -> Value {
+        let function_name = match args.get("function_name").and_then(|v| v.as_str()) {
+            Some(s) if !s.trim().is_empty() => s.to_string(),
+            _ => return json!({ "isError": true, "content": [{ "type": "text", "text": "function_name is required." }] }),
+        };
+        let config = crate::config::ConfigManager::load();
+        let token = match config.cloud_api_token
+            .clone()
+            .or_else(|| std::env::var("AURA_CLOUD_TOKEN").ok())
+        {
+            Some(t) => t,
+            None => return json!({ "isError": true, "content": [{ "type": "text", "text": "No cloud token configured. Run `aura cloud login`." }] }),
+        };
+        let cloud_url = config.cloud_url.unwrap_or_else(|| "https://auravcs.com".to_string());
+        let mut url = format!(
+            "{}/api/v2/impacts/cross-repo?function_name={}",
+            cloud_url.trim_end_matches('/'),
+            percent_encode_unreserved(&function_name)
+        );
+        if let Some(s) = args.get("exclude_repo").and_then(|v| v.as_str()) {
+            url.push_str(&format!("&exclude_repo={}", percent_encode_unreserved(s)));
+        }
+        if let Some(s) = args.get("branch").and_then(|v| v.as_str()) {
+            url.push_str(&format!("&branch={}", percent_encode_unreserved(s)));
+        }
+        if let Some(n) = args.get("limit").and_then(|v| v.as_i64()) {
+            url.push_str(&format!("&limit={n}"));
+        }
+        let client = reqwest::blocking::Client::builder()
+            .timeout(std::time::Duration::from_secs(20))
+            .build()
+            .unwrap_or_else(|_| reqwest::blocking::Client::new());
+        match client
+            .get(&url)
+            .header("Authorization", format!("Bearer {}", token))
+            .send()
+        {
+            Ok(resp) => {
+                let status = resp.status();
+                match resp.json::<Value>() {
+                    Ok(v) => {
+                        if !status.is_success() {
+                            return json!({ "isError": true, "content": [{ "type": "text", "text": format!("cross-repo HTTP {}: {}", status, v) }] });
+                        }
+                        let pretty = serde_json::to_string_pretty(&v).unwrap_or_else(|_| v.to_string());
+                        json!({ "content": [{ "type": "text", "text": pretty }] })
+                    }
+                    Err(e) => json!({ "isError": true, "content": [{ "type": "text", "text": format!("cross-repo parse failed (HTTP {}): {}", status, e) }] }),
+                }
+            }
+            Err(e) => json!({ "isError": true, "content": [{ "type": "text", "text": format!("cross-repo request failed: {}", e) }] }),
+        }
+    }
+
+    /// Bet 2 Phase D — proxies POST /api/v2/a2a/tasks. Caller hands
+    /// `{agent_kind, input, repo?, context_id?, metadata?}`; cloud
+    /// stamps id + status="submitted". The id is what aura_a2a_task_get
+    /// then polls.
+    fn tool_a2a_task_create(args: Value) -> Value {
+        let config = crate::config::ConfigManager::load();
+        let token = match config.cloud_api_token
+            .clone()
+            .or_else(|| std::env::var("AURA_CLOUD_TOKEN").ok())
+        {
+            Some(t) => t,
+            None => return json!({ "isError": true, "content": [{ "type": "text", "text": "No cloud token configured. Run `aura cloud login`." }] }),
+        };
+        let cloud_url = config.cloud_url.unwrap_or_else(|| "https://auravcs.com".to_string());
+        let url = format!("{}/api/v2/a2a/tasks", cloud_url.trim_end_matches('/'));
+        let client = reqwest::blocking::Client::builder()
+            .timeout(std::time::Duration::from_secs(20))
+            .build()
+            .unwrap_or_else(|_| reqwest::blocking::Client::new());
+        match client
+            .post(&url)
+            .header("Authorization", format!("Bearer {}", token))
+            .json(&args)
+            .send()
+        {
+            Ok(resp) => {
+                let status = resp.status();
+                match resp.json::<Value>() {
+                    Ok(v) => {
+                        if !status.is_success() {
+                            return json!({ "isError": true, "content": [{ "type": "text", "text": format!("a2a-task-create HTTP {}: {}", status, v) }] });
+                        }
+                        let pretty = serde_json::to_string_pretty(&v).unwrap_or_else(|_| v.to_string());
+                        json!({ "content": [{ "type": "text", "text": pretty }] })
+                    }
+                    Err(e) => json!({ "isError": true, "content": [{ "type": "text", "text": format!("a2a-task-create parse failed (HTTP {}): {}", status, e) }] }),
+                }
+            }
+            Err(e) => json!({ "isError": true, "content": [{ "type": "text", "text": format!("a2a-task-create request failed: {}", e) }] }),
+        }
+    }
+
+    /// Bet 2 Phase D — proxies GET /api/v2/a2a/tasks/{id}. Read-only;
+    /// idempotent. 404 cleanly surfaces as an isError envelope so a
+    /// polling loop can decide whether to retry.
+    fn tool_a2a_task_get(args: Value) -> Value {
+        let id = match args.get("id").and_then(|v| v.as_str()) {
+            Some(s) if !s.trim().is_empty() => s.to_string(),
+            _ => return json!({ "isError": true, "content": [{ "type": "text", "text": "id is required." }] }),
+        };
+        let config = crate::config::ConfigManager::load();
+        let token = match config.cloud_api_token
+            .clone()
+            .or_else(|| std::env::var("AURA_CLOUD_TOKEN").ok())
+        {
+            Some(t) => t,
+            None => return json!({ "isError": true, "content": [{ "type": "text", "text": "No cloud token configured. Run `aura cloud login`." }] }),
+        };
+        let cloud_url = config.cloud_url.unwrap_or_else(|| "https://auravcs.com".to_string());
+        // Path segment encoding — UUIDs are URL-safe, but a defensive
+        // pass keeps the endpoint robust if a non-UUID id ever arrives.
+        let safe_id: String = id
+            .chars()
+            .filter(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_'))
+            .collect();
+        if safe_id.is_empty() {
+            return json!({ "isError": true, "content": [{ "type": "text", "text": "id contains no url-safe characters" }] });
+        }
+        let url = format!("{}/api/v2/a2a/tasks/{}", cloud_url.trim_end_matches('/'), safe_id);
+        let client = reqwest::blocking::Client::builder()
+            .timeout(std::time::Duration::from_secs(20))
+            .build()
+            .unwrap_or_else(|_| reqwest::blocking::Client::new());
+        match client
+            .get(&url)
+            .header("Authorization", format!("Bearer {}", token))
+            .send()
+        {
+            Ok(resp) => {
+                let status = resp.status();
+                match resp.json::<Value>() {
+                    Ok(v) => {
+                        if !status.is_success() {
+                            return json!({ "isError": true, "content": [{ "type": "text", "text": format!("a2a-task-get HTTP {}: {}", status, v) }] });
+                        }
+                        let pretty = serde_json::to_string_pretty(&v).unwrap_or_else(|_| v.to_string());
+                        json!({ "content": [{ "type": "text", "text": pretty }] })
+                    }
+                    Err(e) => json!({ "isError": true, "content": [{ "type": "text", "text": format!("a2a-task-get parse failed (HTTP {}): {}", status, e) }] }),
+                }
+            }
+            Err(e) => json!({ "isError": true, "content": [{ "type": "text", "text": format!("a2a-task-get request failed: {}", e) }] }),
+        }
+    }
+
+    /// Bet 2 Phase D — proxies GET /api/v2/a2a/tasks. Filters: status,
+    /// repo, limit. Read-only, idempotent.
+    fn tool_a2a_task_list(args: Value) -> Value {
+        let config = crate::config::ConfigManager::load();
+        let token = match config.cloud_api_token
+            .clone()
+            .or_else(|| std::env::var("AURA_CLOUD_TOKEN").ok())
+        {
+            Some(t) => t,
+            None => return json!({ "isError": true, "content": [{ "type": "text", "text": "No cloud token configured. Run `aura cloud login`." }] }),
+        };
+        let cloud_url = config.cloud_url.unwrap_or_else(|| "https://auravcs.com".to_string());
+        let url = build_a2a_task_list_url(cloud_url.trim_end_matches('/'), &args);
+        let client = reqwest::blocking::Client::builder()
+            .timeout(std::time::Duration::from_secs(20))
+            .build()
+            .unwrap_or_else(|_| reqwest::blocking::Client::new());
+        match client
+            .get(&url)
+            .header("Authorization", format!("Bearer {}", token))
+            .send()
+        {
+            Ok(resp) => {
+                let status = resp.status();
+                match resp.json::<Value>() {
+                    Ok(v) => {
+                        if !status.is_success() {
+                            return json!({ "isError": true, "content": [{ "type": "text", "text": format!("a2a-task-list HTTP {}: {}", status, v) }] });
+                        }
+                        let pretty = serde_json::to_string_pretty(&v).unwrap_or_else(|_| v.to_string());
+                        json!({ "content": [{ "type": "text", "text": pretty }] })
+                    }
+                    Err(e) => json!({ "isError": true, "content": [{ "type": "text", "text": format!("a2a-task-list parse failed (HTTP {}): {}", status, e) }] }),
+                }
+            }
+            Err(e) => json!({ "isError": true, "content": [{ "type": "text", "text": format!("a2a-task-list request failed: {}", e) }] }),
+        }
+    }
+
+    /// Bet 2 Phase D — proxies PATCH /api/v2/a2a/tasks/{id}. Body carries
+    /// any subset of {status, result, error_message}. Terminal states are
+    /// sticky cloud-side: re-patching a completed/failed/canceled/rejected
+    /// task surfaces as HTTP 409 in an isError envelope.
+    fn tool_a2a_task_patch(args: Value) -> Value {
+        let id = match args.get("id").and_then(|v| v.as_str()) {
+            Some(s) if !s.trim().is_empty() => s.to_string(),
+            _ => return json!({ "isError": true, "content": [{ "type": "text", "text": "id is required." }] }),
+        };
+        let config = crate::config::ConfigManager::load();
+        let token = match config.cloud_api_token
+            .clone()
+            .or_else(|| std::env::var("AURA_CLOUD_TOKEN").ok())
+        {
+            Some(t) => t,
+            None => return json!({ "isError": true, "content": [{ "type": "text", "text": "No cloud token configured. Run `aura cloud login`." }] }),
+        };
+        let cloud_url = config.cloud_url.unwrap_or_else(|| "https://auravcs.com".to_string());
+        let safe_id: String = id
+            .chars()
+            .filter(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_'))
+            .collect();
+        if safe_id.is_empty() {
+            return json!({ "isError": true, "content": [{ "type": "text", "text": "id contains no url-safe characters" }] });
+        }
+        let url = format!("{}/api/v2/a2a/tasks/{}", cloud_url.trim_end_matches('/'), safe_id);
+        let body = build_a2a_task_patch_body(&args);
+        let client = reqwest::blocking::Client::builder()
+            .timeout(std::time::Duration::from_secs(20))
+            .build()
+            .unwrap_or_else(|_| reqwest::blocking::Client::new());
+        match client
+            .patch(&url)
+            .header("Authorization", format!("Bearer {}", token))
+            .json(&Value::Object(body))
+            .send()
+        {
+            Ok(resp) => {
+                let status = resp.status();
+                match resp.json::<Value>() {
+                    Ok(v) => {
+                        if !status.is_success() {
+                            return json!({ "isError": true, "content": [{ "type": "text", "text": format!("a2a-task-patch HTTP {}: {}", status, v) }] });
+                        }
+                        let pretty = serde_json::to_string_pretty(&v).unwrap_or_else(|_| v.to_string());
+                        json!({ "content": [{ "type": "text", "text": pretty }] })
+                    }
+                    Err(e) => json!({ "isError": true, "content": [{ "type": "text", "text": format!("a2a-task-patch parse failed (HTTP {}): {}", status, e) }] }),
+                }
+            }
+            Err(e) => json!({ "isError": true, "content": [{ "type": "text", "text": format!("a2a-task-patch request failed: {}", e) }] }),
+        }
+    }
+
+    /// Read the work-loop's orderless pile, bucketed into focused chunks along
+    /// the seams already in the data (epic → sprint → batch), so a huge board
+    /// can be planned in FULL by the calling agent — who IS the planner here.
+    /// Mirrors the desktop "plan an order" chunking via `aura_loop::planning`.
+    pub(crate) fn tool_loop_plan_context(_args: Value) -> Value {
+        let repo_root = match crate::goals::discover_repo_root()
+            .or_else(|| std::env::current_dir().ok())
+        {
+            Some(p) => p,
+            None => {
+                return json!({ "isError": true, "content": [{ "type": "text", "text": "Not in a project folder." }] })
+            }
+        };
+        let graph = aura_loop::LoopGraph::at(&repo_root);
+        let all = graph.list();
+        let ctx = aura_loop::planning::plan_context(&all);
+        if ctx.chunks.is_empty() {
+            return json!({ "content": [{ "type": "text", "text": format!(
+                "{} orderless task(s) in the work graph — nothing to plan into a flow yet (you need at least two related tasks). Sync the board into the loop first if it looks empty.",
+                ctx.considered
+            ) }] });
+        }
+        // Resolve each chunk's ids to {id,title,detail} so the agent has the
+        // full text to reason over — never just opaque ids.
+        let chunks: Vec<Value> = ctx
+            .chunks
+            .iter()
+            .map(|c| {
+                let tasks: Vec<Value> = c
+                    .node_ids
+                    .iter()
+                    .map(|id| {
+                        let (title, detail) = graph
+                            .get(id)
+                            .map(|t| (t.title, t.input))
+                            .unwrap_or_default();
+                        json!({ "id": id, "title": title, "detail": detail })
+                    })
+                    .collect();
+                json!({ "label": c.label, "seed_goal": c.seed_goal, "tasks": tasks })
+            })
+            .collect();
+        let payload = json!({
+            "considered": ctx.considered,
+            "deferred": ctx.deferred,
+            "chunk_count": chunks.len(),
+            "chunks": chunks,
+            "how_to_apply": "Within EACH chunk, work out the REAL dependencies — which task must finish before which others can start, only where one genuinely needs another's output (when in doubt, leave it independent). Name the goal each connected group of tasks adds up to, and group those goals under a few larger objectives (most projects have 2–6). Then call aura_loop_plan_apply with edges:[{task,depends_on}] using the task ids above, goals:[{goal,tasks:[ids]}], and objectives:[{objective,goals:[goal names]}]. You can apply once for everything or per chunk."
+        });
+        let text = serde_json::to_string_pretty(&payload).unwrap_or_else(|_| payload.to_string());
+        json!({ "content": [{ "type": "text", "text": text }] })
+    }
+
+    /// Write a planned order back onto the work-loop graph: wire the edges
+    /// (cycle-checked), name the goals, roll them up under objectives. The same
+    /// graph the desktop "plan an order" button builds — applied by an agent.
+    pub(crate) fn tool_loop_plan_apply(args: Value) -> Value {
+        let repo_root = match crate::goals::discover_repo_root()
+            .or_else(|| std::env::current_dir().ok())
+        {
+            Some(p) => p,
+            None => {
+                return json!({ "isError": true, "content": [{ "type": "text", "text": "Not in a project folder." }] })
+            }
+        };
+        // Tolerant-but-honest parse: an absent field is empty; a malformed one
+        // is reported, never silently dropped.
+        let parse = |key: &str| -> Result<Value, String> {
+            match args.get(key) {
+                None | Some(Value::Null) => Ok(Value::Array(vec![])),
+                Some(v) => Ok(v.clone()),
+            }
+            .and_then(|v| {
+                if v.is_array() {
+                    Ok(v)
+                } else {
+                    Err(format!("`{key}` must be an array"))
+                }
+            })
+        };
+        let edges_v = match parse("edges") {
+            Ok(v) => v,
+            Err(e) => return json!({ "isError": true, "content": [{ "type": "text", "text": e }] }),
+        };
+        let goals_v = match parse("goals") {
+            Ok(v) => v,
+            Err(e) => return json!({ "isError": true, "content": [{ "type": "text", "text": e }] }),
+        };
+        let objectives_v = match parse("objectives") {
+            Ok(v) => v,
+            Err(e) => return json!({ "isError": true, "content": [{ "type": "text", "text": e }] }),
+        };
+        let edges: Vec<aura_loop::planning::PlanEdge> = match serde_json::from_value(edges_v) {
+            Ok(e) => e,
+            Err(e) => return json!({ "isError": true, "content": [{ "type": "text", "text": format!("`edges` shape: {e}. Each edge is {{\"task\": id, \"depends_on\": id}}.") }] }),
+        };
+        let goals: Vec<aura_loop::planning::PlanGoal> = match serde_json::from_value(goals_v) {
+            Ok(g) => g,
+            Err(e) => return json!({ "isError": true, "content": [{ "type": "text", "text": format!("`goals` shape: {e}. Each goal is {{\"goal\": name, \"tasks\": [ids]}}.") }] }),
+        };
+        let objectives: Vec<aura_loop::planning::PlanObjective> = match serde_json::from_value(objectives_v) {
+            Ok(o) => o,
+            Err(e) => return json!({ "isError": true, "content": [{ "type": "text", "text": format!("`objectives` shape: {e}. Each objective is {{\"objective\": name, \"goals\": [goal names]}}.") }] }),
+        };
+        if edges.is_empty() && goals.is_empty() && objectives.is_empty() {
+            return json!({ "isError": true, "content": [{ "type": "text", "text": "Nothing to apply — provide at least one of edges, goals, or objectives. Call aura_loop_plan_context first." }] });
+        }
+        let graph = aura_loop::LoopGraph::at(&repo_root);
+        let report = aura_loop::planning::apply_plan(&graph, &edges, &goals, &objectives);
+        let skipped = if report.skipped_edges > 0 {
+            format!(" ({} skipped — self-edge, unknown id, or would form a cycle)", report.skipped_edges)
+        } else {
+            String::new()
+        };
+        let text = format!(
+            "Plan applied to the work graph (.aura/a2a):\n\
+             · {} dependency edge(s) wired{}\n\
+             · {} task(s) now connected into a flow\n\
+             · {} goal(s) named\n\
+             · {} objective(s) rolled up\n\n\
+             These edges drive the loop's ready-set and the Crew board flow — the same graph the desktop planner builds. Run `aura loop ready` (or open Crew) to see what's now ready to start.",
+            report.edges, skipped, report.connected, report.goals, report.objectives
+        );
+        json!({ "content": [{ "type": "text", "text": text }] })
+    }
+
+    /// Bet 4 Phase B — proxies POST /api/v2/pr/commit-review-generate. Same
+    /// rationale as narrate: the AI call lives server-side. Caller passes
+    /// the commit list shape verbatim; cloud upserts each row and returns
+    /// the per-commit (id, risk_score, risk_label, model_used) summary.
+    fn tool_pr_commit_review_generate(args: Value) -> Value {
+        let config = crate::config::ConfigManager::load();
+        let token = match config.cloud_api_token
+            .clone()
+            .or_else(|| std::env::var("AURA_CLOUD_TOKEN").ok())
+        {
+            Some(t) => t,
+            None => return json!({ "isError": true, "content": [{ "type": "text", "text": "No cloud token configured. Run `aura cloud login`." }] }),
+        };
+        let cloud_url = config.cloud_url.unwrap_or_else(|| "https://auravcs.com".to_string());
+        let url = format!("{}/api/v2/pr/commit-review-generate", cloud_url.trim_end_matches('/'));
+        let client = reqwest::blocking::Client::builder()
+            .timeout(std::time::Duration::from_secs(60))
+            .build()
+            .unwrap_or_else(|_| reqwest::blocking::Client::new());
+        match client
+            .post(&url)
+            .header("Authorization", format!("Bearer {}", token))
+            .json(&args)
+            .send()
+        {
+            Ok(resp) => {
+                let status = resp.status();
+                match resp.json::<Value>() {
+                    Ok(v) => {
+                        if !status.is_success() {
+                            return json!({ "isError": true, "content": [{ "type": "text", "text": format!("commit-review-generate HTTP {}: {}", status, v) }] });
+                        }
+                        let pretty = serde_json::to_string_pretty(&v).unwrap_or_else(|_| v.to_string());
+                        json!({ "content": [{ "type": "text", "text": pretty }] })
+                    }
+                    Err(e) => json!({ "isError": true, "content": [{ "type": "text", "text": format!("commit-review-generate parse failed (HTTP {}): {}", status, e) }] }),
+                }
+            }
+            Err(e) => json!({ "isError": true, "content": [{ "type": "text", "text": format!("commit-review-generate request failed: {}", e) }] }),
+        }
+    }
+
+    /// Bet 4 Phase A — proxies GET /api/v2/pr/commit-reviews. Read-only
+    /// list of per-commit AI review rows for one PR. The list endpoint
+    /// requires repo + platform + pr_number; cloud-side it scopes by org
+    /// from the JWT and returns rows in commit order.
+    fn tool_pr_commit_review_list(args: Value) -> Value {
+        let repo = match args.get("repo").and_then(|v| v.as_str()) {
+            Some(s) if !s.trim().is_empty() => s.to_string(),
+            _ => return json!({ "isError": true, "content": [{ "type": "text", "text": "repo is required (github full_name)." }] }),
+        };
+        let platform = match args.get("platform").and_then(|v| v.as_str()) {
+            Some(s) if !s.trim().is_empty() => s.to_string(),
+            _ => return json!({ "isError": true, "content": [{ "type": "text", "text": "platform is required ('github' or 'gitlab')." }] }),
+        };
+        let pr_number = match args.get("pr_number").and_then(|v| v.as_i64()) {
+            Some(n) => n,
+            _ => return json!({ "isError": true, "content": [{ "type": "text", "text": "pr_number is required (integer)." }] }),
+        };
+        // Bet 4F (S2-PCRTM): optional intent_type filter forwarded as a query
+        // param. Validation lives cloud-side (Bet 4E) so a typo round-trips
+        // back as an HTTP 400 isError envelope — keep this layer dumb.
+        let intent_type = args
+            .get("intent_type")
+            .and_then(|v| v.as_str())
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty())
+            .map(|s| s.to_string());
+        let config = crate::config::ConfigManager::load();
+        let token = match config.cloud_api_token
+            .clone()
+            .or_else(|| std::env::var("AURA_CLOUD_TOKEN").ok())
+        {
+            Some(t) => t,
+            None => return json!({ "isError": true, "content": [{ "type": "text", "text": "No cloud token configured. Run `aura cloud login`." }] }),
+        };
+        let cloud_url = config.cloud_url.unwrap_or_else(|| "https://auravcs.com".to_string());
+        let mut url = format!(
+            "{}/api/v2/pr/commit-reviews?repo={}&platform={}&pr_number={}",
+            cloud_url.trim_end_matches('/'),
+            percent_encode_unreserved(&repo),
+            percent_encode_unreserved(&platform),
+            pr_number
+        );
+        if let Some(t) = intent_type.as_deref() {
+            url.push_str("&intent_type=");
+            url.push_str(&percent_encode_unreserved(t));
+        }
+        let client = reqwest::blocking::Client::builder()
+            .timeout(std::time::Duration::from_secs(20))
+            .build()
+            .unwrap_or_else(|_| reqwest::blocking::Client::new());
+        match client
+            .get(&url)
+            .header("Authorization", format!("Bearer {}", token))
+            .send()
+        {
+            Ok(resp) => {
+                let status = resp.status();
+                match resp.json::<Value>() {
+                    Ok(v) => {
+                        if !status.is_success() {
+                            return json!({ "isError": true, "content": [{ "type": "text", "text": format!("commit-review-list HTTP {}: {}", status, v) }] });
+                        }
+                        let pretty = serde_json::to_string_pretty(&v).unwrap_or_else(|_| v.to_string());
+                        json!({ "content": [{ "type": "text", "text": pretty }] })
+                    }
+                    Err(e) => json!({ "isError": true, "content": [{ "type": "text", "text": format!("commit-review-list parse failed (HTTP {}): {}", status, e) }] }),
+                }
+            }
+            Err(e) => json!({ "isError": true, "content": [{ "type": "text", "text": format!("commit-review-list request failed: {}", e) }] }),
+        }
+    }
+
+    /// Wave 1 (entire-parity) — routing decision over the Agent Skill
+    /// Ledger. Proxies GET /api/v2/skill/stats for a taxonomy cell, then
+    /// ranks the per-provider rollups with the canonical `skill_rank`
+    /// formula and returns the single best provider (or null when no
+    /// provider clears the sample threshold). Shares the exact ranker the
+    /// CLI `aura skill suggest` and the in-app dispatcher use.
+    fn tool_route_suggest(args: Value) -> Value {
+        let category = match args.get("category").and_then(|v| v.as_str()) {
+            Some(s) if !s.trim().is_empty() => s.to_string(),
+            _ => return json!({ "isError": true, "content": [{ "type": "text", "text": "category is required (frontend|backend|infra|refactor|security-review|architecture-review)." }] }),
+        };
+        let language = args
+            .get("language")
+            .and_then(|v| v.as_str())
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty())
+            .map(|s| s.to_string());
+        let layer = args
+            .get("layer")
+            .and_then(|v| v.as_str())
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty())
+            .map(|s| s.to_string());
+
+        let config = crate::config::ConfigManager::load();
+        let token = match config
+            .cloud_api_token
+            .clone()
+            .or_else(|| std::env::var("AURA_CLOUD_TOKEN").ok())
+        {
+            Some(t) => t,
+            None => return json!({ "isError": true, "content": [{ "type": "text", "text": "No cloud token configured. Run `aura cloud login`." }] }),
+        };
+        let cloud_url = config.cloud_url.unwrap_or_else(|| "https://auravcs.com".to_string());
+        let mut url = format!(
+            "{}/api/v2/skill/stats?category={}",
+            cloud_url.trim_end_matches('/'),
+            percent_encode_unreserved(&category),
+        );
+        if let Some(l) = language.as_deref() {
+            url.push_str("&language=");
+            url.push_str(&percent_encode_unreserved(l));
+        }
+        if let Some(y) = layer.as_deref() {
+            url.push_str("&layer=");
+            url.push_str(&percent_encode_unreserved(y));
+        }
+        let client = reqwest::blocking::Client::builder()
+            .timeout(std::time::Duration::from_secs(20))
+            .build()
+            .unwrap_or_else(|_| reqwest::blocking::Client::new());
+        match client
+            .get(&url)
+            .header("Authorization", format!("Bearer {}", token))
+            .send()
+        {
+            Ok(resp) => {
+                let status = resp.status();
+                match resp.json::<Value>() {
+                    Ok(v) => {
+                        if !status.is_success() {
+                            return json!({ "isError": true, "content": [{ "type": "text", "text": format!("route-suggest HTTP {}: {}", status, v) }] });
+                        }
+                        let rows = crate::skill_rank::parse_stats_rows(&v);
+                        let best = crate::skill_rank::best(&rows);
+                        let suggestion = match &best {
+                            Some(b) => serde_json::to_value(b).unwrap_or(Value::Null),
+                            None => Value::Null,
+                        };
+                        let text = serde_json::to_string_pretty(&suggestion)
+                            .unwrap_or_else(|_| "null".to_string());
+                        json!({ "content": [{ "type": "text", "text": text }] })
+                    }
+                    Err(e) => json!({ "isError": true, "content": [{ "type": "text", "text": format!("route-suggest parse failed (HTTP {}): {}", status, e) }] }),
+                }
+            }
+            Err(e) => json!({ "isError": true, "content": [{ "type": "text", "text": format!("route-suggest request failed: {}", e) }] }),
+        }
+    }
+
+    /// Bet 4 Phase A — proxies GET /api/v2/pr/commit-reviews/{commit_sha}.
+    /// Read-only single-row fetch. 404 surfaces as an isError envelope so a
+    /// generate-then-poll loop can decide whether to trigger generate.
+    fn tool_pr_commit_review_get(args: Value) -> Value {
+        let commit_sha = match args.get("commit_sha").and_then(|v| v.as_str()) {
+            Some(s) if !s.trim().is_empty() => s.to_string(),
+            _ => return json!({ "isError": true, "content": [{ "type": "text", "text": "commit_sha is required." }] }),
+        };
+        // S2-PCR fix: cloud's /pr/commit-reviews/{sha} requires PR scope on
+        // the query (axum query extraction would fail without them, returning
+        // 400 — which used to surface as a confusing empty error). Pull the
+        // same triplet the list path takes.
+        let repo = match args.get("repo").and_then(|v| v.as_str()) {
+            Some(s) if !s.trim().is_empty() => s.to_string(),
+            _ => return json!({ "isError": true, "content": [{ "type": "text", "text": "repo is required (github full_name)." }] }),
+        };
+        let platform = match args.get("platform").and_then(|v| v.as_str()) {
+            Some(s) if !s.trim().is_empty() => s.to_string(),
+            _ => return json!({ "isError": true, "content": [{ "type": "text", "text": "platform is required ('github' or 'gitlab')." }] }),
+        };
+        let pr_number = match args.get("pr_number").and_then(|v| v.as_i64()) {
+            Some(n) => n,
+            _ => return json!({ "isError": true, "content": [{ "type": "text", "text": "pr_number is required (integer)." }] }),
+        };
+        let config = crate::config::ConfigManager::load();
+        let token = match config.cloud_api_token
+            .clone()
+            .or_else(|| std::env::var("AURA_CLOUD_TOKEN").ok())
+        {
+            Some(t) => t,
+            None => return json!({ "isError": true, "content": [{ "type": "text", "text": "No cloud token configured. Run `aura cloud login`." }] }),
+        };
+        let cloud_url = config.cloud_url.unwrap_or_else(|| "https://auravcs.com".to_string());
+        // SHAs are hex; strip anything else defensively to keep the path
+        // segment URL-safe even if a caller smuggles in junk.
+        let safe_sha: String = commit_sha
+            .chars()
+            .filter(|c| c.is_ascii_alphanumeric())
+            .collect();
+        if safe_sha.is_empty() {
+            return json!({ "isError": true, "content": [{ "type": "text", "text": "commit_sha contains no url-safe characters" }] });
+        }
+        let url = format!(
+            "{}/api/v2/pr/commit-reviews/{}?repo={}&platform={}&pr_number={}",
+            cloud_url.trim_end_matches('/'),
+            safe_sha,
+            percent_encode_unreserved(&repo),
+            percent_encode_unreserved(&platform),
+            pr_number,
+        );
+        let client = reqwest::blocking::Client::builder()
+            .timeout(std::time::Duration::from_secs(20))
+            .build()
+            .unwrap_or_else(|_| reqwest::blocking::Client::new());
+        match client
+            .get(&url)
+            .header("Authorization", format!("Bearer {}", token))
+            .send()
+        {
+            Ok(resp) => {
+                let status = resp.status();
+                match resp.json::<Value>() {
+                    Ok(v) => {
+                        if !status.is_success() {
+                            return json!({ "isError": true, "content": [{ "type": "text", "text": format!("commit-review-get HTTP {}: {}", status, v) }] });
+                        }
+                        let pretty = serde_json::to_string_pretty(&v).unwrap_or_else(|_| v.to_string());
+                        json!({ "content": [{ "type": "text", "text": pretty }] })
+                    }
+                    Err(e) => json!({ "isError": true, "content": [{ "type": "text", "text": format!("commit-review-get parse failed (HTTP {}): {}", status, e) }] }),
+                }
+            }
+            Err(e) => json!({ "isError": true, "content": [{ "type": "text", "text": format!("commit-review-get request failed: {}", e) }] }),
+        }
+    }
+
+    /// Cloud project_memory store — proxies GET /api/v2/memory. Read
+    /// org-wide durable memory entries newest first. Distinct from the
+    /// per-machine local memory file the local memory tools operate on.
+    fn tool_memory_cloud_list(args: Value) -> Value {
+        let config = crate::config::ConfigManager::load();
+        let token = match config.cloud_api_token
+            .clone()
+            .or_else(|| std::env::var("AURA_CLOUD_TOKEN").ok())
+        {
+            Some(t) => t,
+            None => return json!({ "isError": true, "content": [{ "type": "text", "text": "No cloud token configured. Run `aura cloud login`." }] }),
+        };
+        let cloud_url = config.cloud_url.unwrap_or_else(|| "https://auravcs.com".to_string());
+        let mut url = format!("{}/api/v2/memory", cloud_url.trim_end_matches('/'));
+        let mut sep = '?';
+        if let Some(p) = args.get("page").and_then(|v| v.as_i64()) {
+            url.push_str(&format!("{sep}page={p}"));
+            sep = '&';
+        }
+        if let Some(l) = args.get("limit").and_then(|v| v.as_i64()) {
+            url.push_str(&format!("{sep}limit={l}"));
+        }
+        let client = reqwest::blocking::Client::builder()
+            .timeout(std::time::Duration::from_secs(20))
+            .build()
+            .unwrap_or_else(|_| reqwest::blocking::Client::new());
+        match client
+            .get(&url)
+            .header("Authorization", format!("Bearer {}", token))
+            .send()
+        {
+            Ok(resp) => {
+                let status = resp.status();
+                match resp.json::<Value>() {
+                    Ok(v) => {
+                        if !status.is_success() {
+                            return json!({ "isError": true, "content": [{ "type": "text", "text": format!("memory-cloud-list HTTP {}: {}", status, v) }] });
+                        }
+                        let pretty = serde_json::to_string_pretty(&v).unwrap_or_else(|_| v.to_string());
+                        json!({ "content": [{ "type": "text", "text": pretty }] })
+                    }
+                    Err(e) => json!({ "isError": true, "content": [{ "type": "text", "text": format!("memory-cloud-list parse failed (HTTP {}): {}", status, e) }] }),
+                }
+            }
+            Err(e) => json!({ "isError": true, "content": [{ "type": "text", "text": format!("memory-cloud-list request failed: {}", e) }] }),
+        }
+    }
+
+    /// Cloud project_memory store — proxies POST /api/v2/memory. Insert
+    /// a durable org-wide memory entry. Whitelists the documented body
+    /// fields so callers can't smuggle unknown keys through the insert.
+    fn tool_memory_cloud_push(args: Value) -> Value {
+        let body = match args.get("body").and_then(|v| v.as_str()) {
+            Some(s) if !s.trim().is_empty() => s.to_string(),
+            _ => return json!({ "isError": true, "content": [{ "type": "text", "text": "body is required and must be non-empty." }] }),
+        };
+        let config = crate::config::ConfigManager::load();
+        let token = match config.cloud_api_token
+            .clone()
+            .or_else(|| std::env::var("AURA_CLOUD_TOKEN").ok())
+        {
+            Some(t) => t,
+            None => return json!({ "isError": true, "content": [{ "type": "text", "text": "No cloud token configured. Run `aura cloud login`." }] }),
+        };
+        let cloud_url = config.cloud_url.unwrap_or_else(|| "https://auravcs.com".to_string());
+        let url = format!("{}/api/v2/memory", cloud_url.trim_end_matches('/'));
+        let payload = build_memory_push_body(&body, &args);
+        let client = reqwest::blocking::Client::builder()
+            .timeout(std::time::Duration::from_secs(20))
+            .build()
+            .unwrap_or_else(|_| reqwest::blocking::Client::new());
+        match client
+            .post(&url)
+            .header("Authorization", format!("Bearer {}", token))
+            .json(&Value::Object(payload))
+            .send()
+        {
+            Ok(resp) => {
+                let status = resp.status();
+                match resp.json::<Value>() {
+                    Ok(v) => {
+                        if !status.is_success() {
+                            return json!({ "isError": true, "content": [{ "type": "text", "text": format!("memory-cloud-push HTTP {}: {}", status, v) }] });
+                        }
+                        let pretty = serde_json::to_string_pretty(&v).unwrap_or_else(|_| v.to_string());
+                        json!({ "content": [{ "type": "text", "text": pretty }] })
+                    }
+                    Err(e) => json!({ "isError": true, "content": [{ "type": "text", "text": format!("memory-cloud-push parse failed (HTTP {}): {}", status, e) }] }),
+                }
+            }
+            Err(e) => json!({ "isError": true, "content": [{ "type": "text", "text": format!("memory-cloud-push request failed: {}", e) }] }),
+        }
+    }
+
+    /// Cloud-side handover ledger — proxies GET /api/v2/handovers. Read
+    /// the list of handover summaries pushed by other sessions so the
+    /// joining agent can pick which one to resume.
+    fn tool_handover_cloud_list(args: Value) -> Value {
+        let config = crate::config::ConfigManager::load();
+        let token = match config.cloud_api_token
+            .clone()
+            .or_else(|| std::env::var("AURA_CLOUD_TOKEN").ok())
+        {
+            Some(t) => t,
+            None => return json!({ "isError": true, "content": [{ "type": "text", "text": "No cloud token configured. Run `aura cloud login`." }] }),
+        };
+        let cloud_url = config.cloud_url.unwrap_or_else(|| "https://auravcs.com".to_string());
+        let mut url = format!("{}/api/v2/handovers", cloud_url.trim_end_matches('/'));
+        let mut sep = '?';
+        if let Some(p) = args.get("page").and_then(|v| v.as_i64()) {
+            url.push_str(&format!("{sep}page={p}"));
+            sep = '&';
+        }
+        if let Some(l) = args.get("limit").and_then(|v| v.as_i64()) {
+            url.push_str(&format!("{sep}limit={l}"));
+        }
+        let client = reqwest::blocking::Client::builder()
+            .timeout(std::time::Duration::from_secs(20))
+            .build()
+            .unwrap_or_else(|_| reqwest::blocking::Client::new());
+        match client
+            .get(&url)
+            .header("Authorization", format!("Bearer {}", token))
+            .send()
+        {
+            Ok(resp) => {
+                let status = resp.status();
+                match resp.json::<Value>() {
+                    Ok(v) => {
+                        if !status.is_success() {
+                            return json!({ "isError": true, "content": [{ "type": "text", "text": format!("handover-cloud-list HTTP {}: {}", status, v) }] });
+                        }
+                        let pretty = serde_json::to_string_pretty(&v).unwrap_or_else(|_| v.to_string());
+                        json!({ "content": [{ "type": "text", "text": pretty }] })
+                    }
+                    Err(e) => json!({ "isError": true, "content": [{ "type": "text", "text": format!("handover-cloud-list parse failed (HTTP {}): {}", status, e) }] }),
+                }
+            }
+            Err(e) => json!({ "isError": true, "content": [{ "type": "text", "text": format!("handover-cloud-list request failed: {}", e) }] }),
+        }
+    }
+
+    /// Cloud-side handover ledger — proxies POST /api/v2/handovers. Push
+    /// a summary so a joining agent on another machine can discover it.
+    /// Forwards only the documented body fields.
+    fn tool_handover_cloud_push(args: Value) -> Value {
+        let config = crate::config::ConfigManager::load();
+        let token = match config.cloud_api_token
+            .clone()
+            .or_else(|| std::env::var("AURA_CLOUD_TOKEN").ok())
+        {
+            Some(t) => t,
+            None => return json!({ "isError": true, "content": [{ "type": "text", "text": "No cloud token configured. Run `aura cloud login`." }] }),
+        };
+        let cloud_url = config.cloud_url.unwrap_or_else(|| "https://auravcs.com".to_string());
+        let url = format!("{}/api/v2/handovers", cloud_url.trim_end_matches('/'));
+        let body = build_handover_push_body(&args);
+        let client = reqwest::blocking::Client::builder()
+            .timeout(std::time::Duration::from_secs(20))
+            .build()
+            .unwrap_or_else(|_| reqwest::blocking::Client::new());
+        match client
+            .post(&url)
+            .header("Authorization", format!("Bearer {}", token))
+            .json(&Value::Object(body))
+            .send()
+        {
+            Ok(resp) => {
+                let status = resp.status();
+                match resp.json::<Value>() {
+                    Ok(v) => {
+                        if !status.is_success() {
+                            return json!({ "isError": true, "content": [{ "type": "text", "text": format!("handover-cloud-push HTTP {}: {}", status, v) }] });
+                        }
+                        let pretty = serde_json::to_string_pretty(&v).unwrap_or_else(|_| v.to_string());
+                        json!({ "content": [{ "type": "text", "text": pretty }] })
+                    }
+                    Err(e) => json!({ "isError": true, "content": [{ "type": "text", "text": format!("handover-cloud-push parse failed (HTTP {}): {}", status, e) }] }),
+                }
+            }
+            Err(e) => json!({ "isError": true, "content": [{ "type": "text", "text": format!("handover-cloud-push request failed: {}", e) }] }),
+        }
+    }
+
+    /// Bet 1 Phase B — local episodic recall over intent log, sentinel
+    /// inbox, and snapshot metadata. Returns both a narrated digest (for
+    /// agents to paste into handovers) and the structured events array
+    /// (so downstream tooling can filter / re-rank). Cloud-backed version
+    /// will replace the storage layer but keep this response shape.
+    fn tool_episodic_recall(args: Value) -> Value {
+        let window_hours = args.get("window_hours").and_then(|v| v.as_u64());
+        let focus_file = args.get("focus_file").and_then(|v| v.as_str());
+        let limit = args
+            .get("limit")
+            .and_then(|v| v.as_u64())
+            .map(|n| n as usize);
+        let result = crate::episodic::recall(window_hours, focus_file, limit);
+        let payload = match serde_json::to_value(&result) {
+            Ok(v) => v,
+            Err(e) => {
+                return json!({
+                    "isError": true,
+                    "content": [{ "type": "text", "text": format!("episodic recall failed: {}", e) }]
+                });
+            }
+        };
+        let pretty = serde_json::to_string_pretty(&payload)
+            .unwrap_or_else(|_| payload.to_string());
+        json!({
+            "content": [{ "type": "text", "text": pretty }]
+        })
+    }
+}
+
+/// Best-effort wrapper around `intent_block::sign_and_persist`. Returns
+/// the persisted block_id (as a string) on success, `None` on any failure.
+/// Failure modes intentionally swallowed so a missing signing key never
+/// breaks the JSONL intent log path that's existed since v0.1.
+///
+/// Side effects: creates `.aura/blocks/` and writes one
+/// `<block_id>.json` file per call. Touches no network.
+/// Minimal XML attribute / text escape so user-supplied intent strings
+/// don't break the handover XML payload. Only the five characters that
+/// matter inside an attribute or element body — no namespace handling
+/// because the handover payload has no namespaces.
+pub(crate) fn xml_escape(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        match c {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            '"' => out.push_str("&quot;"),
+            '\'' => out.push_str("&apos;"),
+            _ => out.push(c),
+        }
+    }
+    out
+}
+
+/// Returns (block_id, key_id) so the caller (tool_log_intent) can
+/// stamp both into the JSONL row. key_id is the same `did:aura:key/<b64>`
+/// string the verifier prints.
+///
+/// `intent_type` (S2-TIB) — when present, gets stamped into
+/// `payload.body.intent_type` so the on-disk Block envelope carries the
+/// same canonical type as the JSONL row. Caller validates against the
+/// canonical set BEFORE calling so this signing path stays a thin
+/// builder over already-trusted input.
+pub(crate) fn sign_intent_best_effort(
+    intent: &str,
+    intent_type: Option<&str>,
+) -> Option<(String, String)> {
+    let key_path = crate::manifest_sig::default_signing_key_path().ok()?;
+    let sk = aura_attestation::load_or_create(&key_path).ok()?;
+    let key_id = sk.verifying_key().key_id();
+    let host = std::env::var("HOSTNAME")
+        .or_else(|_| std::env::var("HOST"))
+        .unwrap_or_else(|_| "unknown".into());
+    // S1-D dual identity: bind the human operator into the signed
+    // payload when AURA_HUMAN_ID is set. Resolution order favours the
+    // explicit env var over implicit shell identity so an operator can
+    // override per-session without changing global config. Empty value
+    // is treated as unset.
+    let human_id = std::env::var("AURA_HUMAN_ID")
+        .ok()
+        .filter(|s| !s.trim().is_empty());
+    let now = time::OffsetDateTime::now_utc();
+    let block = crate::intent_block::build_intent_block(
+        intent,
+        "MCP Agent",
+        human_id.as_deref(),
+        &host,
+        now,
+        intent_type,
+    );
+    let dir = std::path::Path::new(".aura/blocks");
+    let (id, _path) = crate::intent_block::sign_and_persist(block, &sk, dir).ok()?;
+
+    // Make this seal re-checkable by the whole team:
+    //   1. Mirror the signed block into the git-tracked `.aura/attest/`
+    //      dir (`.aura/blocks/` is gitignored, so it never travels). Now a
+    //      teammate who pulls the repo HAS the signed payload to verify.
+    //   2. Publish our pubkey into the git-tracked team key registry so the
+    //      teammate also has the material — and the trusted binding — to
+    //      run the math. Both are best-effort: a failure here must never
+    //      break the intent-log path that's existed since v0.1.
+    crate::intent_block::mirror_block_to_attest(&id.0.to_string());
+    crate::intent_block::publish_self_to_registry(&sk, human_id.as_deref(), now.unix_timestamp());
+
+    Some((id.0.to_string(), key_id))
+}
+
+/// Best-effort publish of a freshly-signed intent block to a Rekor
+/// transparency log. Returns `Some(entry)` only if both:
+///   1. `AURA_REKOR_URL` is set (off-by-default keeps the v0 path hermetic)
+///   2. The HTTP POST + canonicalization round-trip succeeds
+///
+/// All errors are swallowed — a Rekor outage must not break the MCP
+/// `aura_log_intent` call. The signed block on disk is still durable; a
+/// later `aura attest verify` can republish.
+pub(crate) fn publish_intent_to_rekor_best_effort(
+    block_id: &str,
+) -> Option<crate::rekor::RekorEntryRef> {
+    let rekor_url = std::env::var("AURA_REKOR_URL").ok()?;
+    if rekor_url.is_empty() {
+        return None;
+    }
+    let key_path = crate::manifest_sig::default_signing_key_path().ok()?;
+    let sk = aura_attestation::load_or_create(&key_path).ok()?;
+    let pubkey_raw: [u8; 32] = sk.verifying_key().to_bytes();
+    let block_path =
+        std::path::PathBuf::from(format!(".aura/blocks/{}.json", block_id));
+    crate::intent_block::publish_signed_block_to_rekor(
+        &block_path,
+        &rekor_url,
+        &pubkey_raw,
+    )
+    .ok()
 }
 
 fn format_age(timestamp: u64) -> String {
@@ -2437,5 +6476,245 @@ fn format_age(timestamp: u64) -> String {
         format!("{}m ago", age / 60)
     } else {
         format!("{}h ago", age / 3600)
+    }
+}
+
+// RFC 3986 unreserved-set percent-encoder for query/path components.
+// Repo names contain "/", function names may contain ":" or "<", so a
+// naive `format!` would produce invalid URLs. Single shared
+// implementation — replaces four inlined copies that previously lived
+// inside the cloud-wrapper handlers.
+pub(crate) fn percent_encode_unreserved(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for b in s.bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(b as char)
+            }
+            _ => out.push_str(&format!("%{:02X}", b)),
+        }
+    }
+    out
+}
+
+// ── Body whitelisting for cloud-wrapper write tools. ──
+// The push/patch handlers all forward only an explicit set of body keys
+// to the cloud insert. An unknown caller-supplied key — `org_id`,
+// `actor_id`, anything else — must NOT make it through. Extracted as
+// pure helpers so the whitelist is unit-testable without standing up
+// HTTP. Any key listed here is the surface; anything else is dropped.
+
+pub(crate) fn build_a2a_task_patch_body(args: &Value) -> serde_json::Map<String, Value> {
+    let mut body = serde_json::Map::new();
+    for k in ["status", "result", "error_message"] {
+        if let Some(v) = args.get(k) {
+            body.insert(k.to_string(), v.clone());
+        }
+    }
+    body
+}
+
+pub(crate) fn build_memory_push_body(body_text: &str, args: &Value) -> serde_json::Map<String, Value> {
+    let mut payload = serde_json::Map::new();
+    payload.insert("body".to_string(), Value::String(body_text.to_string()));
+    for k in ["title", "kind", "repo_full_name"] {
+        if let Some(v) = args.get(k) {
+            payload.insert(k.to_string(), v.clone());
+        }
+    }
+    payload
+}
+
+pub(crate) fn build_handover_push_body(args: &Value) -> serde_json::Map<String, Value> {
+    let mut body = serde_json::Map::new();
+    for k in ["session_id", "agent_name", "summary", "token_count"] {
+        if let Some(v) = args.get(k) {
+            body.insert(k.to_string(), v.clone());
+        }
+    }
+    body
+}
+
+// ── URL builders for read-only cloud-wrapper tools (testable). ──
+// Caller passes the trimmed cloud base (no trailing slash) and the raw
+// JSON args. The builder is responsible for: applying the documented
+// query-param whitelist, percent-encoding any string values, picking
+// the correct ?/& separators, and dropping empty/missing values
+// instead of emitting `&key=`. This is the security-relevant
+// surface — anything not in the whitelist must NOT make it into the
+// outgoing URL.
+
+pub(crate) fn build_a2a_task_list_url(base: &str, args: &Value) -> String {
+    let mut url = format!("{base}/api/v2/a2a/tasks");
+    let mut sep = '?';
+    if let Some(s) = args.get("status").and_then(|v| v.as_str()) {
+        if !s.trim().is_empty() {
+            url.push_str(&format!("{sep}status={}", percent_encode_unreserved(s)));
+            sep = '&';
+        }
+    }
+    if let Some(r) = args.get("repo").and_then(|v| v.as_str()) {
+        if !r.trim().is_empty() {
+            url.push_str(&format!("{sep}repo={}", percent_encode_unreserved(r)));
+            sep = '&';
+        }
+    }
+    if let Some(l) = args.get("limit").and_then(|v| v.as_i64()) {
+        url.push_str(&format!("{sep}limit={l}"));
+    }
+    url
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn a2a_patch_body_passes_only_whitelisted_keys() {
+        let args = json!({
+            "id": "task-123",
+            "status": "completed",
+            "result": {"ok": true},
+            "error_message": null,
+            "org_id": "smuggled-org",
+            "actor_id": "smuggled-actor",
+        });
+        let body = build_a2a_task_patch_body(&args);
+        assert_eq!(body.get("status").and_then(|v| v.as_str()), Some("completed"));
+        assert!(body.get("result").is_some());
+        assert!(body.get("error_message").is_some());
+        assert!(body.get("id").is_none(), "id is in the URL path, must not appear in body");
+        assert!(body.get("org_id").is_none(), "unknown key org_id must be dropped");
+        assert!(body.get("actor_id").is_none(), "unknown key actor_id must be dropped");
+    }
+
+    #[test]
+    fn a2a_patch_body_omits_missing_keys() {
+        let args = json!({"id": "task-123", "status": "working"});
+        let body = build_a2a_task_patch_body(&args);
+        assert_eq!(body.len(), 1, "only the present whitelisted keys appear");
+        assert_eq!(body.get("status").and_then(|v| v.as_str()), Some("working"));
+        assert!(body.get("result").is_none());
+        assert!(body.get("error_message").is_none());
+    }
+
+    #[test]
+    fn memory_push_body_always_includes_body_text() {
+        let body = build_memory_push_body("durable note", &json!({}));
+        assert_eq!(body.get("body").and_then(|v| v.as_str()), Some("durable note"));
+        assert_eq!(body.len(), 1);
+    }
+
+    #[test]
+    fn memory_push_body_passes_only_whitelisted_optional_keys() {
+        let args = json!({
+            "title": "design decision",
+            "kind": "project",
+            "repo_full_name": "owner/repo",
+            "actor_id": "smuggled-actor",
+            "created_at": "smuggled-timestamp",
+        });
+        let body = build_memory_push_body("durable note", &args);
+        assert_eq!(body.get("title").and_then(|v| v.as_str()), Some("design decision"));
+        assert_eq!(body.get("kind").and_then(|v| v.as_str()), Some("project"));
+        assert_eq!(body.get("repo_full_name").and_then(|v| v.as_str()), Some("owner/repo"));
+        assert!(body.get("actor_id").is_none(), "unknown key actor_id must be dropped");
+        assert!(body.get("created_at").is_none(), "unknown key created_at must be dropped");
+    }
+
+    #[test]
+    fn handover_push_body_passes_only_whitelisted_keys() {
+        let args = json!({
+            "session_id": "s-abc",
+            "agent_name": "claude",
+            "summary": "did the thing",
+            "token_count": 12345,
+            "org_id": "smuggled-org",
+            "private_payload": "smuggled",
+        });
+        let body = build_handover_push_body(&args);
+        assert_eq!(body.get("session_id").and_then(|v| v.as_str()), Some("s-abc"));
+        assert_eq!(body.get("agent_name").and_then(|v| v.as_str()), Some("claude"));
+        assert_eq!(body.get("summary").and_then(|v| v.as_str()), Some("did the thing"));
+        assert_eq!(body.get("token_count").and_then(|v| v.as_i64()), Some(12345));
+        assert!(body.get("org_id").is_none(), "unknown key org_id must be dropped");
+        assert!(body.get("private_payload").is_none(), "unknown key must be dropped");
+    }
+
+    #[test]
+    fn handover_push_body_omits_missing_keys() {
+        let body = build_handover_push_body(&json!({"agent_name": "claude"}));
+        assert_eq!(body.len(), 1);
+        assert!(body.get("session_id").is_none());
+        assert!(body.get("summary").is_none());
+        assert!(body.get("token_count").is_none());
+    }
+
+    #[test]
+    fn percent_encode_passes_unreserved_unchanged() {
+        // RFC 3986 unreserved set must round-trip byte-for-byte.
+        assert_eq!(percent_encode_unreserved("apply_limiter"), "apply_limiter");
+        assert_eq!(percent_encode_unreserved("Foo.Bar-Baz_qux~quux"), "Foo.Bar-Baz_qux~quux");
+        assert_eq!(percent_encode_unreserved("0123456789"), "0123456789");
+    }
+
+    #[test]
+    fn percent_encode_escapes_path_separators_and_query_metachars() {
+        // Repo full names ("owner/repo") must not be left unencoded —
+        // an unencoded "/" splits the URL path.
+        assert_eq!(percent_encode_unreserved("owner/repo"), "owner%2Frepo");
+        // Query metachars that would corrupt the parse.
+        assert_eq!(percent_encode_unreserved("a&b=c"), "a%26b%3Dc");
+        // Whitespace + symbols common in function generics.
+        assert_eq!(percent_encode_unreserved("Foo<Bar>"), "Foo%3CBar%3E");
+        assert_eq!(percent_encode_unreserved("a b"), "a%20b");
+    }
+
+    #[test]
+    fn percent_encode_handles_multibyte_utf8() {
+        // Multi-byte UTF-8 must percent-encode each byte separately.
+        // "é" is 0xC3 0xA9 → "%C3%A9".
+        assert_eq!(percent_encode_unreserved("é"), "%C3%A9");
+    }
+
+    #[test]
+    fn a2a_list_url_no_args_is_bare() {
+        let url = build_a2a_task_list_url("http://cloud:3001", &json!({}));
+        assert_eq!(url, "http://cloud:3001/api/v2/a2a/tasks");
+    }
+
+    #[test]
+    fn a2a_list_url_full_args_uses_correct_separators() {
+        let url = build_a2a_task_list_url(
+            "http://cloud:3001",
+            &json!({"status": "submitted", "repo": "owner/repo", "limit": 25}),
+        );
+        // First param uses ?, subsequent use &. Repo slash is encoded.
+        assert_eq!(
+            url,
+            "http://cloud:3001/api/v2/a2a/tasks?status=submitted&repo=owner%2Frepo&limit=25"
+        );
+    }
+
+    #[test]
+    fn a2a_list_url_drops_empty_strings_and_unknown_keys() {
+        let url = build_a2a_task_list_url(
+            "http://cloud:3001",
+            &json!({"status": "  ", "repo": "", "actor_id": "smuggled", "limit": 10}),
+        );
+        // Empty/whitespace status + repo skipped; unknown actor_id never
+        // forwarded; limit lands on `?` since it's the first emitted param.
+        assert_eq!(url, "http://cloud:3001/api/v2/a2a/tasks?limit=10");
+    }
+
+    #[test]
+    fn a2a_list_url_partial_args_stable_order() {
+        let url = build_a2a_task_list_url(
+            "http://cloud:3001",
+            &json!({"repo": "owner/repo"}),
+        );
+        // Only repo present → it gets `?`.
+        assert_eq!(url, "http://cloud:3001/api/v2/a2a/tasks?repo=owner%2Frepo");
     }
 }

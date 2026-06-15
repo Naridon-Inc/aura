@@ -137,6 +137,15 @@ pub struct AgentSession {
     /// Project name (repo directory name) — used for cross-project usage tracking
     #[serde(default)]
     pub project: Option<String>,
+    /// Developer identity (git user.email, lowercased) — stamped at session
+    /// start so usage can be attributed per-teammate. One clone = one seat,
+    /// so sessions written before this field existed attribute to the
+    /// clone's current identity at aggregation time (see usage_by_dev).
+    #[serde(default)]
+    pub developer: Option<String>,
+    /// Display handle — the email's local part (team manifest convention).
+    #[serde(default)]
+    pub developer_handle: Option<String>,
 }
 
 /// A single turn in a conversation transcript
@@ -193,6 +202,16 @@ impl SessionManager {
                 head.shorthand().map(|s| s.to_string())
             });
 
+        // Stamp the developer driving this seat — git identity at session
+        // start, so usage rows attribute per-teammate even if git config
+        // changes later.
+        let identity = crate::usage_by_dev::dev_identity();
+        let (developer, developer_handle) = if identity.email.is_empty() {
+            (None, None)
+        } else {
+            (Some(identity.email), Some(identity.handle))
+        };
+
         let session = AgentSession {
             session_id: session_id.clone(),
             agent_id: agent_id.to_string(),
@@ -212,6 +231,8 @@ impl SessionManager {
             pid: Some(std::process::id()),
             project: std::env::current_dir().ok()
                 .and_then(|p| p.file_name().map(|n| n.to_string_lossy().to_string())),
+            developer,
+            developer_handle,
         };
 
         Self::save_session(&session);
@@ -800,6 +821,125 @@ impl SessionManager {
         if all_entries.is_empty() { None } else { Some(all_entries) }
     }
 
+    /// Capture transcript from Codex CLI rollout files.
+    ///
+    /// Codex writes one JSONL "rollout" per session under
+    /// `~/.codex/sessions/YYYY/MM/DD/rollout-<ts>-<uuid>.jsonl`. The first
+    /// line is a `session_meta` carrying the session id + the `cwd` the
+    /// session ran in; subsequent `response_item` lines carry the turns.
+    /// We pick the most-recently-modified rollout whose `cwd` matches the
+    /// current working directory — so Trace shows THIS repo's session, not
+    /// an unrelated one — then extract the user + assistant message turns.
+    ///
+    /// Filtered as noise: the `developer` role (Codex's permissions/system
+    /// preamble) and the auto-injected `<environment_context>` user turn —
+    /// neither is something the developer actually typed.
+    ///
+    /// (Format verified on-disk before writing this — unlike Gemini, whose
+    /// native `~/.gemini/tmp/<proj>/logs.json` is user-prompts-only with no
+    /// model turns, so it can't reconstruct a real transcript and is left
+    /// to the hook-capture path in `capture_gemini_transcript`.)
+    pub fn capture_codex_transcript() -> Option<Vec<TranscriptEntry>> {
+        let home = std::env::var("HOME").ok()?;
+        let sessions_dir = Path::new(&home).join(".codex").join("sessions");
+        if !sessions_dir.exists() {
+            return None;
+        }
+        let cwd = std::env::current_dir().ok()?.to_string_lossy().to_string();
+
+        // Iterative walk of the date-nested tree — collect every rollout.
+        let mut rollouts: Vec<std::path::PathBuf> = Vec::new();
+        let mut stack = vec![sessions_dir];
+        while let Some(dir) = stack.pop() {
+            let Ok(rd) = fs::read_dir(&dir) else { continue };
+            for entry in rd.flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    stack.push(path);
+                } else if path
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .map(|n| n.starts_with("rollout-") && n.ends_with(".jsonl"))
+                    .unwrap_or(false)
+                {
+                    rollouts.push(path);
+                }
+            }
+        }
+
+        // Newest-first so the first cwd match is the latest session here.
+        rollouts.sort_by_key(|p| {
+            fs::metadata(p)
+                .and_then(|m| m.modified())
+                .unwrap_or(SystemTime::UNIX_EPOCH)
+        });
+        rollouts.reverse();
+
+        for path in rollouts {
+            let Ok(file) = fs::File::open(&path) else { continue };
+            let reader = BufReader::new(file);
+            let mut lines = reader.lines().flatten();
+
+            // First line is the session_meta — gate on cwd + grab the id.
+            let Some(first) = lines.next() else { continue };
+            let Ok(meta) = serde_json::from_str::<serde_json::Value>(&first) else {
+                continue;
+            };
+            if meta.get("type").and_then(|t| t.as_str()) != Some("session_meta") {
+                continue;
+            }
+            let payload = meta.get("payload").unwrap_or(&serde_json::Value::Null);
+            if payload.get("cwd").and_then(|c| c.as_str()).unwrap_or("") != cwd {
+                continue;
+            }
+            let session_id = payload
+                .get("id")
+                .and_then(|s| s.as_str())
+                .unwrap_or("unknown")
+                .to_string();
+
+            let mut entries = Vec::new();
+            for line in lines {
+                let Ok(d) = serde_json::from_str::<serde_json::Value>(&line) else {
+                    continue;
+                };
+                if d.get("type").and_then(|t| t.as_str()) != Some("response_item") {
+                    continue;
+                }
+                let p = d.get("payload").unwrap_or(&serde_json::Value::Null);
+                if p.get("type").and_then(|t| t.as_str()) != Some("message") {
+                    continue;
+                }
+                let role = p.get("role").and_then(|r| r.as_str()).unwrap_or("");
+                if role != "user" && role != "assistant" {
+                    continue; // drop developer/system preamble
+                }
+                let content = extract_codex_content(p.get("content"));
+                if content.is_empty() {
+                    continue;
+                }
+                // The first user turn is an auto-injected environment block,
+                // not something the developer typed — drop it.
+                if role == "user" && content.starts_with("<environment_context>") {
+                    continue;
+                }
+                let ts = d.get("timestamp").and_then(|t| t.as_str()).unwrap_or("");
+                entries.push(TranscriptEntry {
+                    role: role.to_string(),
+                    content,
+                    timestamp: parse_timestamp(ts),
+                    session_id: session_id.clone(),
+                });
+            }
+
+            if !entries.is_empty() {
+                return Some(entries);
+            }
+        }
+
+        None
+    }
+
     /// Get transcript for a specific session
     pub fn get_transcript(session_id: &str) -> Vec<TranscriptEntry> {
         Self::ensure_dirs();
@@ -878,6 +1018,8 @@ impl SessionManager {
                     subagents: Vec::new(),
                     pid: None,
                     project: None,
+                    developer: None,
+                    developer_handle: None,
                 };
 
                 let transcript = vec![TranscriptEntry {
@@ -935,16 +1077,47 @@ impl SessionManager {
 pub fn capture_full_transcript() {
     // Claude Code
     if let Some(entries) = SessionManager::capture_claude_transcript() {
-        let session = SessionManager::start_session("Claude Code");
-        let path = format!("{}/{}.jsonl", &transcripts_dir(), session.session_id);
-        if let Ok(mut file) = fs::OpenOptions::new().create(true).append(true).open(&path) {
-            for entry in entries {
-                if let Ok(json) = serde_json::to_string(&entry) {
-                    let _ = writeln!(file, "{}", json);
-                }
+        write_captured_transcript("Claude Code", entries);
+    }
+    // Codex CLI
+    if let Some(entries) = SessionManager::capture_codex_transcript() {
+        write_captured_transcript("Codex", entries);
+    }
+}
+
+/// Open (or start) a session for `agent` and append the captured turns to
+/// its transcript JSONL. Shared by every per-CLI arm of
+/// [`capture_full_transcript`] so each reader only has to produce entries.
+fn write_captured_transcript(agent: &str, entries: Vec<TranscriptEntry>) {
+    let session = SessionManager::start_session(agent);
+    let path = format!("{}/{}.jsonl", &transcripts_dir(), session.session_id);
+    if let Ok(mut file) = fs::OpenOptions::new().create(true).append(true).open(&path) {
+        for entry in entries {
+            if let Ok(json) = serde_json::to_string(&entry) {
+                let _ = writeln!(file, "{}", json);
             }
         }
     }
+}
+
+/// Concatenate the text of every content block carrying a `text` field —
+/// Codex tags them `input_text` (user) / `output_text` (assistant), so a
+/// single field-name-agnostic pass covers both. Falls back to a bare
+/// string content for turns that aren't block-shaped.
+fn extract_codex_content(content: Option<&serde_json::Value>) -> String {
+    let Some(arr) = content.and_then(|c| c.as_array()) else {
+        return content.and_then(|c| c.as_str()).unwrap_or("").to_string();
+    };
+    let mut out = String::new();
+    for item in arr {
+        if let Some(text) = item.get("text").and_then(|t| t.as_str()) {
+            if !out.is_empty() {
+                out.push('\n');
+            }
+            out.push_str(text);
+        }
+    }
+    out
 }
 
 fn extract_message_content(msg: &serde_json::Value) -> String {

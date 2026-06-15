@@ -1,11 +1,20 @@
 use colored::Colorize;
-use git2::{Repository, DiffOptions, BranchType};
+use git2::{Repository, DiffOptions};
 use crate::parser::SemanticParser;
 use crate::checkpoint::CheckpointStore;
 use std::fs;
+use std::path::PathBuf;
 use std::collections::{HashSet, HashMap};
+use std::time::{SystemTime, UNIX_EPOCH};
 use regex::Regex;
 use serde::{Deserialize, Serialize};
+
+// Declared here (not in main.rs) so the humanizer lives next to its primary
+// caller and the module list in main.rs stays untouched. pub(crate) so
+// `distill` can reuse the intent-scoring (best_scored) instead of
+// duplicating it.
+#[path = "pr_humanize.rs"]
+pub(crate) mod pr_humanize;
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 struct InvariantRules {
@@ -25,6 +34,15 @@ struct LayerRule {
     cannot_call: String,
 }
 
+#[derive(Debug, Serialize, Clone)]
+pub struct PackDescriptor {
+    pub id: &'static str,
+    pub label: &'static str,
+    pub description: &'static str,
+    pub rule_count: usize,
+    pub category: &'static str,
+}
+
 #[derive(Serialize)]
 struct ReviewReport {
     base_branch: String,
@@ -33,13 +51,86 @@ struct ReviewReport {
     invariant_violations: Vec<String>,
     blast_radius: Vec<String>,
     cross_branch_conflicts: Vec<String>,
+    /// Phase 2 of the Taste Engine — coding-pattern violations
+    /// surfaced as advisory PR findings. Each entry is a one-line
+    /// human-readable summary; full structure is available via
+    /// `aura taste check --json`.
+    #[serde(default)]
+    taste_findings: Vec<String>,
     risk_score: usize,
     risk_label: String,
+    /// Plain-language one-paragraph overview, written for a reader who is not
+    /// the author and not necessarily a developer. See `pr_humanize`.
+    #[serde(default)]
+    summary: String,
+    /// The raw `*_violations` / `blast_radius` / `conflicts` streams folded
+    /// into deduped, plain-language cards (what / why it matters / where / how
+    /// bad / what to do). Additive — the legacy arrays above stay for back-compat.
+    #[serde(default)]
+    findings: Vec<pr_humanize::HumanFinding>,
+    /// Per-file "what changed and *why*" — the captured intent paired with each
+    /// change so a reviewer can decide without reading the code.
+    #[serde(default)]
+    changes: Vec<pr_humanize::ChangeIntent>,
 }
 
 pub struct PrReviewEngine;
 
 impl PrReviewEngine {
+    pub fn list_policy_packs() -> Vec<PackDescriptor> {
+        vec![
+            PackDescriptor {
+                id: "security",
+                label: "Security baseline",
+                description: "Block eval/unsafe_exec; protect authenticate, verify_token, hash_password.",
+                rule_count: 6,
+                category: "security",
+            },
+            PackDescriptor {
+                id: "payments",
+                label: "PCI / payments isolation",
+                description: "UI cannot call Stripe directly; protect process_payment, issue_refund.",
+                rule_count: 3,
+                category: "compliance",
+            },
+            PackDescriptor {
+                id: "web-app",
+                label: "Web app layering",
+                description: "Components cannot call DB or filesystem; bans fs and child_process imports.",
+                rule_count: 3,
+                category: "architecture",
+            },
+            PackDescriptor {
+                id: "owasp",
+                label: "OWASP Top-10",
+                description: "Block unsafe deserialization (pickle/yaml.load), XSS sinks (innerHTML), and protect auth/crypto nodes.",
+                rule_count: 15,
+                category: "security",
+            },
+            PackDescriptor {
+                id: "airbnb-js",
+                label: "Airbnb JS style",
+                description: "Discourage lodash/moment/underscore; ban fetch/axios calls inside components/.",
+                rule_count: 5,
+                category: "style",
+            },
+            PackDescriptor {
+                id: "google-style",
+                label: "Google style guide",
+                description: "Enforce api/internal isolation, public/private boundary, and ban blocking sleep calls.",
+                rule_count: 5,
+                category: "architecture",
+            },
+            PackDescriptor {
+                id: "pep-python",
+                label: "PEP Python",
+                description: "Block deprecated imp/__future__/execfile; protect __init__, __del__, main.",
+                rule_count: 7,
+                category: "style",
+            },
+        ]
+    }
+
     pub fn add_policy_pack(pack_name: &str) -> Result<(), Box<dyn std::error::Error>> {
         println!("{} {} {}", "📦".bold(), "Aura Policy Marketplace: Installing".bold().cyan(), pack_name.yellow());
 
@@ -75,8 +166,67 @@ impl PrReviewEngine {
                 rules.forbidden_imports.extend(vec!["fs".to_string(), "child_process".to_string()]);
                 println!("  {} Enforcing client-server separation (Components cannot call DB or FS).", "↳".dimmed());
             }
+            "owasp" => {
+                rules.forbidden_calls.extend(vec![
+                    "eval".to_string(),
+                    "exec".to_string(),
+                    "system".to_string(),
+                    "deserialize".to_string(),
+                    "pickle.loads".to_string(),
+                    "yaml.load".to_string(),
+                    "innerHTML".to_string(),
+                    "dangerouslySetInnerHTML".to_string(),
+                ]);
+                rules.protected_nodes.extend(vec![
+                    "authenticate".to_string(),
+                    "authorize".to_string(),
+                    "sanitize_input".to_string(),
+                    "csrf_token".to_string(),
+                    "verify_signature".to_string(),
+                    "encrypt".to_string(),
+                    "decrypt".to_string(),
+                ]);
+                println!("  {} OWASP Top-10: blocking unsafe deserialization, XSS sinks, and protecting auth/crypto nodes.", "↳".dimmed());
+            }
+            "airbnb-js" => {
+                rules.forbidden_imports.extend(vec![
+                    "lodash".to_string(),
+                    "underscore".to_string(),
+                    "moment".to_string(),
+                ]);
+                rules.layer_rules.push(LayerRule { from: "components".to_string(), cannot_call: "fetch".to_string() });
+                rules.layer_rules.push(LayerRule { from: "components".to_string(), cannot_call: "axios".to_string() });
+                println!("  {} Airbnb JS: nudging away from deprecated utility libs and direct fetch in components.", "↳".dimmed());
+            }
+            "google-style" => {
+                rules.layer_rules.push(LayerRule { from: "api".to_string(), cannot_call: "internal".to_string() });
+                rules.layer_rules.push(LayerRule { from: "public".to_string(), cannot_call: "private".to_string() });
+                rules.forbidden_calls.extend(vec![
+                    "sleep".to_string(),
+                    "time.sleep".to_string(),
+                    "Thread.sleep".to_string(),
+                ]);
+                println!("  {} Google style: enforcing api/internal isolation and banning blocking sleeps.", "↳".dimmed());
+            }
+            "pep-python" => {
+                rules.forbidden_imports.extend(vec![
+                    "imp".to_string(),
+                    "__future__".to_string(),
+                ]);
+                rules.forbidden_calls.extend(vec![
+                    "compile".to_string(),
+                    "execfile".to_string(),
+                ]);
+                rules.protected_nodes.extend(vec![
+                    "__init__".to_string(),
+                    "__del__".to_string(),
+                    "main".to_string(),
+                ]);
+                println!("  {} PEP Python: blocking deprecated dynamic exec and protecting module entry points.", "↳".dimmed());
+            }
             _ => {
-                println!("{} Unknown policy pack '{}'. Available: security, payments, web-app", "✗".red(), pack_name);
+                println!("{} Unknown policy pack '{}'. Available: security, payments, web-app, owasp, airbnb-js, google-style, pep-python", "✗".red(), pack_name);
+                println!("  {} Run {} for full descriptions.", "↳".dimmed(), "aura policy list".cyan());
                 return Ok(());
             }
         }
@@ -226,10 +376,18 @@ impl PrReviewEngine {
             if let Ok(rules) = serde_json::from_str::<InvariantRules>(&rules_json) {
                 for (path, node) in &modified_nodes {
                     let ident = node.identifier.clone().unwrap_or_else(|| "anonymous".to_string());
+                    // Exact location of this changed symbol on the NEW side
+                    // (nodes are parsed from head source). Appended as a
+                    // `(path:line)` token so the review layer can lift it into
+                    // a real inline-comment anchor — see review::findings.
+                    let loc = match node.start_line {
+                        Some(l) => format!(" ({path}:{l})"),
+                        None => format!(" ({path})"),
+                    };
 
                     for dep in &node.dependencies {
                         if rules.forbidden_calls.contains(&dep.name) {
-                            invariant_violations.push(format!("Forbidden Call: Node '{}' calls '{}'", ident, dep.name));
+                            invariant_violations.push(format!("Forbidden Call: Node '{}' calls '{}'{}", ident, dep.name, loc));
                         }
                     }
 
@@ -248,8 +406,8 @@ impl PrReviewEngine {
                                 
                                 if is_violation {
                                     invariant_violations.push(format!(
-                                        "Layer Violation: '{}' layer node '{}' eventually calls '{}' ({} hops)", 
-                                        rule.from, ident, rule.cannot_call, hop
+                                        "Layer Violation: '{}' layer node '{}' eventually calls '{}' ({} hops){}",
+                                        rule.from, ident, rule.cannot_call, hop, loc
                                     ));
                                     break;
                                 }
@@ -266,7 +424,7 @@ impl PrReviewEngine {
                     }
 
                     if rules.protected_nodes.contains(&ident) {
-                        invariant_violations.push(format!("Protected Node Modified: '{}' is a sensitive logic block.", ident));
+                        invariant_violations.push(format!("Protected Node Modified: '{}' is a sensitive logic block.{}", ident, loc));
                     }
                 }
 
@@ -278,64 +436,97 @@ impl PrReviewEngine {
             }
         }
 
-        // Wave 6: Cross-Branch Semantic Conflict Detection
-        let mut conflicts = Vec::new();
-        let head_name = if let Ok(head_ref) = repo.head() {
-            head_ref.shorthand().unwrap_or("HEAD").to_string()
-        } else { "HEAD".to_string() };
+        // Cross-branch conflict detection removed. The previous loop emitted
+        // one "graph-neighborhood overlap" finding per *existing local branch*
+        // (snapshot branches `aura/snapshot/*` included) whenever any node
+        // changed, while discarding the trees/checkpoints it loaded — so it
+        // was pure noise that ballooned into "N conflicts" and flipped the
+        // verdict to CRITICAL by branch count alone. Genuine cross-branch
+        // danger is surfaced by the live-impacts system (`aura_live_impacts`)
+        // instead. Kept as an empty vec so the JSON report shape is stable.
+        let conflicts: Vec<String> = Vec::new();
 
-        if let Ok(branches) = repo.branches(Some(BranchType::Local)) {
-            for branch_result in branches {
-                if let Ok((branch, _)) = branch_result {
-                    if let Some(branch_name) = branch.name()? {
-                        if branch_name != head_name && branch_name != base_branch {
-                            if let Ok(commit) = branch.get().peel_to_commit() {
-                                if let Ok(_checkpoints) = CheckpointStore::get_all_checkpoints(&repo) { 
-                                    if let Ok(_other_tree) = commit.tree() {
-                                        for (_, node) in &modified_nodes {
-                                            if let Some(ref _ident) = node.identifier {
-                                                conflicts.push(format!("MED: Graph-neighborhood overlap detected with branch '{}'", branch_name));
-                                                break; 
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
+        // Omni-Graph cross-repo federation removed. It fired a live blocking
+        // HTTP call to a hardcoded endpoint on every review and added a flat
+        // +100 to the risk score whenever it answered — phantom CRITICAL plus
+        // a network dependency inside a local command. Cross-repo impact is a
+        // real feature, but it belongs behind an explicit, authenticated
+        // federation flow, not a best-effort request here. Empty vec keeps the
+        // report shape stable.
+        let omni_graph_impact: Vec<String> = Vec::new();
 
-        // Feature 3: Omni-Graph Federation (Cross-Repo Blast Radius)
-        let mut omni_graph_impact = Vec::new();
-        // In the Enterprise version, this is guarded by a token check. For MVP, we simulate the federated query.
-        if !modified_nodes.is_empty() {
-            let client = reqwest::blocking::Client::builder().timeout(std::time::Duration::from_secs(3)).build().unwrap_or_default();
-            let modified_ids: Vec<String> = modified_nodes.iter().map(|(_, n)| n.node_id.clone()).collect();
-            let payload = serde_json::json!({ "modified_nodes": modified_ids });
-            
-            // Try to query the central Sovereign Vault for cross-repo dependencies
-            if let Ok(res) = client.post("http://api.auravcs.com/graph/query").json(&payload).send() {
-                if let Ok(json) = res.json::<serde_json::Value>() {
-                    if let Some(impacts) = json["impacted_repos"].as_array() {
-                        for impact in impacts {
-                            let repo_name = impact["repo"].as_str().unwrap_or("unknown_repo");
-                            let node_name = impact["node"].as_str().unwrap_or("unknown_node");
-                            omni_graph_impact.push(format!("Repo '{}' relies on this logic in '{}'", repo_name, node_name));
-                        }
-                    }
-                }
-            }
-        }
+        // Phase 2 — Taste Engine surfacing as advisory findings.
+        // Scan the cumulative base..head delta against active rules at
+        // a 0.85 confidence floor (informational threshold; pre-commit
+        // strict mode uses the same). Each violation contributes a
+        // small risk score bump (3 per finding) — not enough to flip
+        // a LOW review to CRITICAL on its own.
+        let taste_findings: Vec<String> = match crate::taste::check::check_tree_diff(
+            &repo,
+            Some(&base_tree),
+            &head_tree,
+            0.85,
+        ) {
+            Ok(report) => report
+                .violations
+                .into_iter()
+                .map(|v| {
+                    format!(
+                        "{}: {} (rule: {}, confidence {:.2})",
+                        v.file_path, v.reason, v.template, v.confidence,
+                    )
+                })
+                .collect(),
+            Err(_) => vec![],
+        };
 
+        // Risk now reflects only real signal: changed/tainted nodes, undocumented
+        // changes, architectural invariant violations, and advisory taste
+        // findings. The former conflicts*15 and omni-graph +100 terms are gone
+        // along with the phantom detectors that fed them.
         let mut risk_score = (modified_nodes.len() * 2) + (tainted_nodes.len() * 5);
         if !unverified_nodes.is_empty() { risk_score += 20; }
         if !invariant_violations.is_empty() { risk_score += 50; }
-        risk_score += conflicts.len() * 15;
-        if !omni_graph_impact.is_empty() { risk_score += 100; }
+        risk_score += taste_findings.len() * 3;
 
         let risk_label = if risk_score > 60 { "CRITICAL" } else if risk_score > 20 { "MODERATE" } else { "LOW" };
+
+        // Humanize: fold the raw finding streams into plain-language cards and
+        // pair each changed file with the intent behind it, so the review reads
+        // for a person — not as a developer-only dump. Computed once, used by
+        // both the JSON (app) and terminal surfaces.
+        let blast_vec: Vec<String> = tainted_nodes.iter().cloned().collect();
+        let human_findings = pr_humanize::humanize_findings(
+            &invariant_violations,
+            &taste_findings,
+            &blast_vec,
+            &conflicts,
+        );
+        let mut intent_log = pr_humanize::load_intent_log(std::path::Path::new("."));
+        // Reviewer fallback: someone who didn't author this branch has an
+        // empty local intent log, but rows mirrored onto refs/notes/aura-intent
+        // by `aura meta push` travel with the repo. Pull the review range's
+        // notes rows into the candidate pool — same scoring, tagged with their
+        // origin so local rows always win and the WHO field can say "via notes".
+        intent_log.extend(pr_humanize::load_notes_intents(
+            &repo,
+            base_commit.id(),
+            head.id(),
+        ));
+        let latest_cp = CheckpointStore::get_all_checkpoints(&repo)
+            .ok()
+            .and_then(|c| c.into_iter().next());
+        let cp_fallback = latest_cp
+            .as_ref()
+            .map(|c| (c.intent.as_str(), c.timestamp, c.agent_id.as_str()));
+        let change_intents =
+            pr_humanize::build_change_intents(&total_changes, &modified_nodes, &intent_log, cp_fallback);
+        let file_count = total_changes
+            .iter()
+            .map(|(f, _, _)| f.as_str())
+            .collect::<HashSet<_>>()
+            .len();
+        let summary = pr_humanize::build_summary(file_count, total_changes.len(), risk_label, &human_findings);
 
         if json_output {
             let mut report = serde_json::to_value(&ReviewReport {
@@ -343,20 +534,71 @@ impl PrReviewEngine {
                 total_changes: total_changes.len(),
                 unverified_nodes: unverified_by_kind.clone(),
                 invariant_violations: invariant_violations.clone(),
-                blast_radius: tainted_nodes.iter().cloned().collect(),
+                blast_radius: blast_vec.clone(),
                 cross_branch_conflicts: conflicts.clone(),
+                taste_findings: taste_findings.clone(),
                 risk_score,
                 risk_label: risk_label.to_string(),
+                summary: summary.clone(),
+                findings: human_findings.clone(),
+                changes: change_intents.clone(),
             })?;
-            
+
             // Inject Omni-Graph data dynamically
             report["omni_graph_impact"] = serde_json::json!(omni_graph_impact);
+
+            // Persist to .aura/reviews/<unix>.json for the PR Inbox UI.
+            // Best-effort: failing to write should never break the review
+            // command itself.
+            let _ = persist_review(&report);
+
             return Ok(Some(serde_json::to_string_pretty(&report)?));
         }
 
         // 6. Executive Report (Human-Readable)
         println!("\n{:-^80}\n", " SEMANTIC REVIEW REPORT ".bold().blue());
         println!("{} {} logic nodes changed.", "🗂️ ".bold(), total_changes.len());
+
+        // Plain-language lead: the review for a person, before the detailed
+        // engine sections below. Mirrors the JSON `summary`/`findings`/`changes`
+        // the app renders.
+        println!("\n{}", summary.white());
+
+        if !human_findings.is_empty() {
+            println!("\n{} {}", "📋".bold(), "What to look at".bold().cyan());
+            for f in &human_findings {
+                let (icon, sev) = match f.severity.as_str() {
+                    "critical" => ("🔴", "must fix".red().bold()),
+                    "warning" => ("🟠", "review".yellow().bold()),
+                    "advisory" => ("🔵", "style".blue().bold()),
+                    _ => ("⚪", "fyi".dimmed().bold()),
+                };
+                let count = if f.count > 1 { format!(" ×{}", f.count) } else { String::new() };
+                let loc = match (&f.file, f.line) {
+                    (Some(file), Some(l)) => format!(" {}", format!("({file}:{l})").dimmed()),
+                    (Some(file), None) => format!(" {}", format!("({file})").dimmed()),
+                    _ => String::new(),
+                };
+                println!("  {} [{}] {}{}{}", icon, sev, f.title.white().bold(), count.dimmed(), loc);
+                println!("      {}", f.detail.dimmed());
+                if let Some(s) = &f.suggestion {
+                    println!("      {} {}", "→".green(), s.green());
+                }
+            }
+        }
+
+        let with_why: Vec<_> = change_intents.iter().filter(|c| c.why.is_some()).collect();
+        if !with_why.is_empty() {
+            println!("\n{} {}", "🧭".bold(), "Why these changes".bold().cyan());
+            for c in &with_why {
+                println!("  {} {} {}", "•".blue(), c.file.white().bold(), format!("— {}", c.what).dimmed());
+                if let Some(why) = &c.why {
+                    println!("      {}", why.white());
+                }
+            }
+        }
+
+        println!("\n{:-^80}", "-".dimmed());
 
         let renames: Vec<_> = total_changes.iter().filter(|(_, _, a)| a == "renamed").collect();
         if !renames.is_empty() {
@@ -394,6 +636,16 @@ impl PrReviewEngine {
             }
         } else {
             println!("{} All architectural invariants satisfied.", "🏛️ ".green());
+        }
+
+        if !taste_findings.is_empty() {
+            println!("\n{} {} Taste Violations (advisory)", "🧪".yellow().bold(), taste_findings.len());
+            for finding in taste_findings.iter().take(8) {
+                println!("  • {}", finding.yellow());
+            }
+            if taste_findings.len() > 8 {
+                println!("  {} ...and {} more (run `aura taste check` to see all)", "↳".dimmed(), taste_findings.len() - 8);
+            }
         }
 
         if !tainted_nodes.is_empty() {
@@ -464,4 +716,84 @@ impl PrReviewEngine {
 
         Ok(None)
     }
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct ReviewSummary {
+    pub ts: i64,
+    pub base_branch: String,
+    pub total_changes: usize,
+    pub risk_score: usize,
+    pub risk_label: String,
+    pub invariant_violations: usize,
+    pub blast_radius: usize,
+    pub cross_branch_conflicts: usize,
+    pub omni_graph_impact: usize,
+}
+
+fn reviews_dir() -> PathBuf {
+    PathBuf::from(".aura").join("reviews")
+}
+
+fn persist_review(report: &serde_json::Value) -> std::io::Result<()> {
+    let dir = reviews_dir();
+    fs::create_dir_all(&dir)?;
+    let ts = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    let path = dir.join(format!("{}.json", ts));
+    let body = serde_json::to_string_pretty(report)
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+    fs::write(path, body)
+}
+
+pub fn list_review_summaries() -> std::io::Result<Vec<ReviewSummary>> {
+    let dir = reviews_dir();
+    if !dir.exists() {
+        return Ok(Vec::new());
+    }
+    let mut out: Vec<ReviewSummary> = Vec::new();
+    for entry in fs::read_dir(&dir)? {
+        let entry = entry?;
+        let path = entry.path();
+        if path.extension().and_then(|s| s.to_str()) != Some("json") {
+            continue;
+        }
+        let ts = path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .and_then(|s| s.parse::<i64>().ok())
+            .unwrap_or(0);
+        let body = match fs::read_to_string(&path) {
+            Ok(b) => b,
+            Err(_) => continue,
+        };
+        let v: serde_json::Value = match serde_json::from_str(&body) {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+        let count_array = |key: &str| -> usize {
+            v.get(key).and_then(|x| x.as_array()).map(|a| a.len()).unwrap_or(0)
+        };
+        out.push(ReviewSummary {
+            ts,
+            base_branch: v.get("base_branch").and_then(|x| x.as_str()).unwrap_or("").to_string(),
+            total_changes: v.get("total_changes").and_then(|x| x.as_u64()).unwrap_or(0) as usize,
+            risk_score: v.get("risk_score").and_then(|x| x.as_u64()).unwrap_or(0) as usize,
+            risk_label: v.get("risk_label").and_then(|x| x.as_str()).unwrap_or("LOW").to_string(),
+            invariant_violations: count_array("invariant_violations"),
+            blast_radius: count_array("blast_radius"),
+            cross_branch_conflicts: count_array("cross_branch_conflicts"),
+            omni_graph_impact: count_array("omni_graph_impact"),
+        });
+    }
+    out.sort_by(|a, b| b.ts.cmp(&a.ts));
+    Ok(out)
+}
+
+pub fn read_review(ts: i64) -> std::io::Result<serde_json::Value> {
+    let path = reviews_dir().join(format!("{}.json", ts));
+    let body = fs::read_to_string(path)?;
+    serde_json::from_str(&body).map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))
 }

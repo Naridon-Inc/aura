@@ -1,0 +1,306 @@
+# Aura work surface — policy configuration
+#
+# This file is the source of truth for what agents can do without human
+# gating. Every block proposal is evaluated against every rule below; the
+# most-restrictive matching verdict wins (Deny > Gate > Auto), ties broken
+# by explicit `priority` (higher wins), then rule `id` lexicographic.
+#
+# Editing rules:
+#   - Every change is a PR. No 2am tweaks.
+#   - Rules have stable `id` fields so audit logs survive reorders.
+#   - `version` at the top is bumped on every merged change.
+#   - The PolicyAdvisor may suggest rule diffs; the diff is still PR-reviewed.
+#
+# Evaluator guarantees:
+#   - Pure, sync, deterministic (except rate-limit sliding windows, which are
+#     scoped per-rule per-actor and reset on supervisor restart).
+#   - No I/O, no LLM calls, no network.
+#   - Every matching rule's verdict is recorded in PolicyDecision.rules_fired.
+#
+# When no rule matches (structural default):
+#   - Reversible by schema (only writes_paths + reads_paths inside repo,
+#     outside .aura/) → Auto
+#   - Anything else → Gate
+#   - .aura/ mutation → Deny (see rule `system-aura-sanctity` below,
+#     encoded explicitly so audit is loud)
+
+version = "2026-04-21.1"
+schema  = 1
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Agent capability grants
+# ─────────────────────────────────────────────────────────────────────────────
+# Every agent acting in Aura carries an AgentRef (did:aura:agent/…). This
+# section grants baseline capabilities by agent identity. Rules below may
+# further restrict.
+
+[[agents]]
+id          = "claude-code"
+did_pattern = "did:aura:agent/claude-code/*"
+trust_tier  = "standard"   # standard | privileged | untrusted
+can_propose_kinds = ["command", "proposal", "message", "skill", "branch"]
+
+[[agents]]
+id          = "codex"
+did_pattern = "did:aura:agent/codex/*"
+trust_tier  = "standard"
+can_propose_kinds = ["command", "proposal", "skill"]
+
+[[agents]]
+id          = "gemini-retrieval"
+did_pattern = "did:aura:agent/gemini/*"
+trust_tier  = "standard"
+can_propose_kinds = ["command", "proposal"]
+
+[[agents]]
+id          = "review-agent"
+did_pattern = "did:aura:agent/review/*"
+trust_tier  = "privileged"   # read-only; privileged because it reads diffs
+can_propose_kinds = ["sentinel_event", "message"]
+
+[[agents]]
+id          = "security-agent"
+did_pattern = "did:aura:agent/security/*"
+trust_tier  = "privileged"
+can_propose_kinds = ["sentinel_event", "message"]
+
+[[agents]]
+id          = "external-default"
+did_pattern = "did:ext:*"
+trust_tier  = "untrusted"    # cross-org agents start here
+can_propose_kinds = ["message", "sentinel_event"]
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Path rules — what can be written where
+# ─────────────────────────────────────────────────────────────────────────────
+
+[[rules]]
+id       = "system-aura-sanctity"
+kind     = "path-write"
+priority = 1000                # absolute floor; nothing overrides
+verdict  = "deny"
+match    = { paths = [".aura/**", "!.aura/blocks/**", "!.aura/outbox/**"] }
+reason   = "Agent may not modify its own supervisor. .aura/ writes are denied except to the ops-log directories."
+
+[[rules]]
+id       = "system-git-internals"
+kind     = "path-write"
+priority = 1000
+verdict  = "deny"
+match    = { paths = [".git/**"] }
+reason   = "Direct .git/ mutation bypasses git's own safety. Use git commands instead."
+
+[[rules]]
+id       = "out-of-repo-writes"
+kind     = "path-write"
+priority = 900
+verdict  = "gate"
+match    = { paths_outside_repo = true }
+reason   = "Writing outside the repository root is irreversible from Aura's perspective."
+
+[[rules]]
+id       = "secrets-files"
+kind     = "path-write"
+priority = 800
+verdict  = "gate"
+match    = { paths = [".env", ".env.*", "**/secrets.*", "**/credentials.*", "**/*.pem", "**/*.key"] }
+reason   = "Secret-adjacent files require human review."
+
+[[rules]]
+id       = "migrations-dir"
+kind     = "path-write"
+priority = 700
+verdict  = "gate"
+match    = { paths = ["migrations/**", "db/migrate/**", "prisma/migrations/**"] }
+reason   = "Database migrations are irreversible in production; gate even in dev."
+
+[[rules]]
+id       = "in-repo-reversible-writes"
+kind     = "path-write"
+priority = 100
+verdict  = "auto"
+match    = { paths_inside_repo = true, paths_exclude = [".aura/**", ".git/**"] }
+applies_to_agents = ["claude-code", "codex"]
+reason   = "In-repo writes are reversible via aura rewind. Agent is trusted for implementation work."
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Network rules — what agents can call out to
+# ─────────────────────────────────────────────────────────────────────────────
+
+[[rules]]
+id       = "network-allowlist-package-registries"
+kind     = "network"
+priority = 500
+verdict  = "auto"
+match    = { hosts = [
+    "registry.npmjs.org", "pypi.org", "files.pythonhosted.org",
+    "crates.io", "static.crates.io", "index.crates.io",
+    "github.com", "objects.githubusercontent.com",
+    "api.anthropic.com"
+], methods = ["GET", "HEAD"] }
+reason   = "Read-only access to package registries and official APIs is pre-approved."
+
+[[rules]]
+id       = "network-post-off-allowlist"
+kind     = "network"
+priority = 600
+verdict  = "gate"
+match    = { methods = ["POST", "PUT", "DELETE", "PATCH"], hosts_not_in_allowlist = true }
+reason   = "Mutating requests to non-allowlisted hosts require human review."
+
+[[rules]]
+id       = "network-untrusted-agents"
+kind     = "network"
+priority = 950
+verdict  = "deny"
+match    = { trust_tier = "untrusted" }
+reason   = "Untrusted (cross-org) agents have no network capability."
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Command-shape rules — irreversible shell patterns
+# ─────────────────────────────────────────────────────────────────────────────
+
+[[rules]]
+id       = "rm-rf-outside-snapshot"
+kind     = "command-pattern"
+priority = 850
+verdict  = "gate"
+match    = { pattern = '^(rm\s+(-[rRf]+\s+)+|rm\s+.*-[rRf])', scope = "any" }
+reason   = "Recursive/force deletes require human approval."
+
+[[rules]]
+id       = "git-push"
+kind     = "command-pattern"
+priority = 700
+verdict  = "gate"
+match    = { pattern = '^git\s+push' }
+reason   = "Publishing to remotes is irreversible."
+
+[[rules]]
+id       = "git-force-operations"
+kind     = "command-pattern"
+priority = 900
+verdict  = "gate"
+match    = { pattern = '^git\s+\w+.*(--force|--hard|-f\b|-D\b)' }
+reason   = "Force/hard git operations can destroy history."
+
+[[rules]]
+id       = "package-install"
+kind     = "command-pattern"
+priority = 600
+verdict  = "gate"
+match    = { pattern = '^(npm|pnpm|yarn|pip|pip3|cargo|gem|brew)\s+(install|add|i)\b' }
+reason   = "Package installs introduce supply-chain risk; review before landing."
+
+[[rules]]
+id       = "deploy-commands"
+kind     = "command-pattern"
+priority = 800
+verdict  = "gate"
+match    = { pattern = '^(kubectl\s+apply|helm\s+(install|upgrade)|terraform\s+apply|flyctl\s+deploy|vercel\s+deploy|wrangler\s+deploy)' }
+reason   = "Deploy commands affect live systems; human-in-the-loop mandatory."
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Declared-impact rules — read the agent's own manifest
+# ─────────────────────────────────────────────────────────────────────────────
+
+[[rules]]
+id       = "mutates-secrets"
+kind     = "declared-impact"
+priority = 850
+verdict  = "gate"
+match    = { has_nonempty = "mutates_secrets" }
+reason   = "Any secret mutation requires human approval."
+
+[[rules]]
+id       = "deploys-declared"
+kind     = "declared-impact"
+priority = 800
+verdict  = "gate"
+match    = { has_nonempty = "deploys" }
+reason   = "Declared deploy targets require review."
+
+[[rules]]
+id       = "no-declared-impacts"
+kind     = "declared-impact"
+priority = 400
+verdict  = "gate"
+match    = { empty_declared_impacts = true, kind_is = "command" }
+reason   = "Agent declared no impacts for a command. Suspicious — ask human."
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Zone rules — respect sentinel zone claims
+# ─────────────────────────────────────────────────────────────────────────────
+
+[[rules]]
+id       = "zone-conflict"
+kind     = "zone"
+priority = 950
+verdict  = "deny"
+match    = { writes_into_other_actor_zone = true }
+reason   = "Another actor owns this zone. Proposal rejected; coordinate via sentinel message instead."
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Intent-divergence rules — declared vs actual reconciliation
+# ─────────────────────────────────────────────────────────────────────────────
+
+[[rules]]
+id       = "intent-divergence"
+kind     = "intent-divergence"
+priority = 700
+verdict  = "gate"
+match    = { actual_exceeds_declared = true }
+reason   = "Execution touched paths/hosts/secrets the agent didn't declare. Review before the block closes."
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Rate limits — first-class rule kind
+# ─────────────────────────────────────────────────────────────────────────────
+# Sliding windows are scoped per (rule_id, actor, scope). State resets on
+# supervisor restart. Cross-machine limits ship in a later wave.
+
+[[rules]]
+id       = "deploy-rate-limit"
+kind     = "rate-limit"
+priority = 750
+verdict  = "gate"                          # trips → Gate, humans can override
+match    = { command_pattern = '^(kubectl\s+apply|helm\s+(install|upgrade)|terraform\s+apply)' }
+window   = { duration_seconds = 3600, max_count = 3, scope = "per_actor" }
+reason   = "More than 3 deploys in an hour from one actor — gate to catch runaway automation."
+
+[[rules]]
+id       = "agent-burst-limit"
+kind     = "rate-limit"
+priority = 500
+verdict  = "gate"
+match    = { trust_tier = "standard" }
+window   = { duration_seconds = 60, max_count = 60, scope = "per_actor" }
+reason   = "Standard agent proposing more than 60 blocks per minute — likely a loop."
+
+[[rules]]
+id       = "untrusted-strict-limit"
+kind     = "rate-limit"
+priority = 800
+verdict  = "gate"
+match    = { trust_tier = "untrusted" }
+window   = { duration_seconds = 3600, max_count = 10, scope = "per_actor" }
+reason   = "Untrusted agents capped at 10 proposals per hour."
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Human-state rules — context from the supervisor's clock and history
+# ─────────────────────────────────────────────────────────────────────────────
+
+[[rules]]
+id       = "after-hours-irreversibles"
+kind     = "human-state"
+priority = 600
+verdict  = "gate"
+match    = { verdict_so_far_is = "auto", local_hour_between = [22, 6], command_pattern = '^git\s+push.*\s+(main|master|prod)' }
+reason   = "Pushing to main between 10pm and 6am local — confirm."
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Advisor hints — read by PolicyAdvisor only, not the evaluator
+# ─────────────────────────────────────────────────────────────────────────────
+
+[advisor]
+suggest_rule_threshold_approvals = 10      # after N manual approvals of the same pattern, suggest an auto-rule
+suggest_rule_min_window_days     = 7

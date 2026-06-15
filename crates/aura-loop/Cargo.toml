@@ -1,0 +1,11 @@
+[package]
+name = "aura-loop"
+version = "0.1.0"
+edition = "2021"
+description = "Aura Loop — the dependency-graph + ready-set model over the A2A task spine. Shared by aura-cli (the CLI runner) and aura-shell (the native-brain loop driver) so both consume one ready_view and one on-disk store."
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+uuid = { version = "1", features = ["v4"] }
+chrono = { version = "0.4", default-features = false, features = ["clock", "serde"] }

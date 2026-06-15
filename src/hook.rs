@@ -56,6 +56,12 @@ impl HookInstaller {
         fs::create_dir_all(&hooks_dir)?;
 
         let current_exe = std::env::current_exe().unwrap_or_else(|_| std::path::PathBuf::from("aura"));
+        // The invocation in every generated hook MUST quote this path: a user's
+        // install dir or repo path can contain spaces (e.g. ".../New Git/...").
+        // Unquoted, /bin/sh word-splits it and the commit dies with
+        // "<first-word>: is a directory" — and because the pre-commit hook then
+        // `exit 1`s, it blocks the commit entirely. So we wrap `{aura_path}` in
+        // double quotes at every call site below.
         let aura_path = current_exe.to_string_lossy();
 
         // 1. The Pre-Commit Hook (Scrapes intent and ASTs)
@@ -63,7 +69,7 @@ impl HookInstaller {
         let pre_commit_script = format!(r#"
 # --- AURA SEMANTIC ENGINE ---
 echo "[Aura] Analyzing staged files semantically..."
-{} capture-context
+"{}" capture-context
 if [ $? -ne 0 ]; then
     echo "[Aura] Semantic analysis failed. Commit aborted."
     exit 1
@@ -76,7 +82,7 @@ fi
         let commit_msg_path = hooks_dir.join("commit-msg");
         let commit_msg_script = format!(r#"
 # --- AURA SEMANTIC ENGINE ---
-{} inject-trailer "$1"
+"{}" inject-trailer "$1"
 # ----------------------------
 "#, aura_path);
         Self::append_hook_safely(&commit_msg_path, &commit_msg_script, "inject-trailer")?;
@@ -85,10 +91,22 @@ fi
         let post_commit_path = hooks_dir.join("post-commit");
         let post_commit_script = format!(r#"
 # --- AURA SEMANTIC ENGINE ---
-{} persist-checkpoint
+"{}" persist-checkpoint
 # ----------------------------
 "#, aura_path);
         Self::append_hook_safely(&post_commit_path, &post_commit_script, "persist-checkpoint")?;
+
+        // 3b. The Post-Merge Hook (W4: reconcile hand-edits into CRDT after
+        // `git pull` / `git merge` so concurrent branches stay in sync).
+        let post_merge_path = hooks_dir.join("post-merge");
+        let post_merge_script = format!(r#"
+# --- AURA SEMANTIC ENGINE ---
+# W4: feed post-merge workdir state back into CRDT so hand-edits that
+# arrived via `git pull` are pushed to the cloud ops log.
+"{}" crdt reconcile >/dev/null 2>&1 || true
+# ----------------------------
+"#, aura_path);
+        Self::append_hook_safely(&post_merge_path, &post_merge_script, "crdt reconcile")?;
 
         // 4. The Pre-Push Hook (Auto-sync semantic metadata to remote)
         let pre_push_path = hooks_dir.join("pre-push");

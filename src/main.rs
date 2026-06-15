@@ -2,39 +2,105 @@
 mod models;
 mod parser;
 mod hook;
+mod enable;
 mod checkpoint;
 mod watcher;
 mod server;
 mod mcp;
 mod arbitrator;
+mod task;
+mod aura_loop_run;
+mod loop_accept;
+mod loop_worktree;
+mod board;
+mod goals;
+mod activity;
 mod stub;
 pub mod config;
 mod ecosystem;
 mod lsp;
 mod gsd;
 mod pr;
-mod toon;
 pub mod orchestrate;
 mod symphony;
 mod linear;
 mod exporter;
-mod redact;
 mod security;
 mod sync;
 mod session;
 mod plugin;
 mod plugins;
+mod cmd_plugin_dev;
+mod cmd_plugin_marketplace;
 mod live_events;
 mod live_sync;
+mod live_conflicts;
 mod agents;
+mod awareness;
+
+/// Shared serial lock for tests that mutate the process-global current
+/// directory (the CRDT and conflict stores are cwd-relative). Tests in
+/// different modules must lock the *same* mutex or they race on cwd.
+#[cfg(test)]
+pub(crate) static TEST_CWD_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 mod sentinel;
+mod embeddings;
 mod memory;
 mod usage;
+mod usage_by_dev;
 mod plan_tracker;
 mod host;
 mod host_db;
-mod merge_engine;
 mod responder;
+mod build_verify;
+mod cloud_connect;
+mod cloud_join;
+mod cloud_zones;
+mod crdt;
+mod crdt_daemon;
+mod crdt_kind;
+mod live_transport;
+mod crypto;
+mod daemon_install;
+mod keys_cmd;
+mod live_ws;
+mod outbox;
+mod pr_cmd;
+mod resolve;
+mod callgraph;
+mod entrypoints;
+mod impact;
+mod change_note;
+mod atlas;
+mod distill;
+mod acp_client;
+mod acp_server;
+mod manifest_sig;
+mod rekor;
+mod intent_block;
+mod team_keys;
+mod block_adapter;
+mod episodic;
+mod recall_narrate;
+mod intent_query;
+mod intent_vs_actual;
+mod subagent;
+mod ask_user;
+mod propose_plan;
+mod taste;
+mod cmd_taste;
+// Semantic CI — gathers the GateContext (staged AstNodes, goal/intent/taste
+// facts, the build_verify runner) and drives the aura-ci pipeline engine.
+mod ci;
+mod validate_tool;
+mod skill_rank;
+mod skills;
+mod replay;
+mod review;
+mod continuity;
+mod meta_refs;
+mod refs_sign;
+mod merge_driver;
 
 use clap::{Parser, Subcommand};
 use parser::SemanticParser;
@@ -153,77 +219,17 @@ fn setup_crash_reporter() {
     }));
 }
 
-// Real Vector Embeddings via Gemini API or OpenAI API
-// Generates a true mathematical vector representing the semantic meaning.
-fn generate_embedding(text: &str) -> Option<Vec<f32>> {
-    let client = reqwest::blocking::Client::new();
-
-    // Try OpenAI First (if configured)
-    if let Some(openai_key) = ConfigManager::get_api_key("openai") {
-        let body = serde_json::json!({
-            "model": "text-embedding-3-small",
-            "input": text
-        });
-
-        if let Ok(res) = client.post("https://api.openai.com/v1/embeddings")
-            .bearer_auth(openai_key)
-            .header("content-type", "application/json")
-            .json(&body)
-            .send() 
-        {
-            if let Ok(json) = res.json::<serde_json::Value>() {
-                if let Some(data) = json["data"].as_array() {
-                    if let Some(embedding) = data.get(0).and_then(|d| d["embedding"].as_array()) {
-                        let vec: Vec<f32> = embedding.iter().filter_map(|v| v.as_f64().map(|f| f as f32)).collect();
-                        if !vec.is_empty() {
-                            return Some(vec);
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    // Fallback to Gemini
-    if let Some(gemini_key) = ConfigManager::get_api_key("gemini") {
-        let url = format!("https://generativelanguage.googleapis.com/v1beta/models/gemini-embedding-001:embedContent?key={}", gemini_key);
-        let body = serde_json::json!({
-            "model": "models/gemini-embedding-001",
-            "content": {
-                "parts": [{ "text": text }]
-            }
-        });
-
-        if let Ok(res) = client.post(&url).json(&body).send() {
-            if let Ok(json) = res.json::<serde_json::Value>() {
-                if let Some(values) = json["embedding"]["values"].as_array() {
-                    let vec: Vec<f32> = values.iter().filter_map(|v| v.as_f64().map(|f| f as f32)).collect();
-                    if !vec.is_empty() {
-                        return Some(vec);
-                    }
-                }
-            }
-        }
-    }
-
-    None
-}
-
-fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
-    let dot: f32 = a.iter().zip(b.iter()).map(|(x, y)| x * y).sum();
-    let norm_a: f32 = a.iter().map(|x| x * x).sum::<f32>().sqrt();
-    let norm_b: f32 = b.iter().map(|x| x * x).sum::<f32>().sqrt();
-    if norm_a == 0.0 || norm_b == 0.0 { 0.0 } else { dot / (norm_a * norm_b) }
-}
-
 fn capture_env_fingerprint() -> Option<String> {
     ecosystem::Ecosystem::fingerprint()
 }
 
-const CURRENT_VERSION: &str = "0.14.1";
+// Single source of truth: the crate version in Cargo.toml. Bump it (and
+// every other component) with `scripts/set-version.sh <ver>` so `aura
+// --version`, the self-update check, and the desktop bundle never drift.
+const CURRENT_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 /// Build an HTTP client that respects accept_self_signed for mothership TLS.
-fn cloud_http_client() -> reqwest::blocking::Client {
+pub(crate) fn cloud_http_client() -> reqwest::blocking::Client {
     let config = ConfigManager::load();
     let mut builder = reqwest::blocking::Client::builder()
         .timeout(std::time::Duration::from_secs(10));
@@ -304,10 +310,22 @@ fn perform_update() -> Result<(), Box<dyn std::error::Error>> {
             
             let current_exe = std::env::current_exe()?;
             let tmp_exe = current_exe.with_extension("tmp");
-            
-            let mut file = fs::File::create(&tmp_exe)?;
+
+            // EPERM here almost always means the binary lives in a
+            // root-owned path (/usr/local/bin, /opt/homebrew/bin). Give
+            // a useful hint instead of raw `Os { code: 13 }`.
+            let mut file = fs::File::create(&tmp_exe).map_err(|e| {
+                if e.kind() == std::io::ErrorKind::PermissionDenied {
+                    format!(
+                        "Cannot write to {} — the aura binary is in a root-owned directory.\n   Re-run with: sudo aura update",
+                        tmp_exe.display()
+                    )
+                } else {
+                    format!("Failed to create temp file {}: {}", tmp_exe.display(), e)
+                }
+            })?;
             std::io::copy(&mut response, &mut file)?;
-            
+
             #[cfg(unix)]
             {
                 use std::os::unix::fs::PermissionsExt;
@@ -315,8 +333,18 @@ fn perform_update() -> Result<(), Box<dyn std::error::Error>> {
                 perms.set_mode(0o755);
                 fs::set_permissions(&tmp_exe, perms)?;
             }
-            
-            fs::rename(&tmp_exe, &current_exe)?;
+
+            fs::rename(&tmp_exe, &current_exe).map_err(|e| {
+                if e.kind() == std::io::ErrorKind::PermissionDenied {
+                    let _ = fs::remove_file(&tmp_exe);
+                    format!(
+                        "Cannot replace {} — the aura binary is in a root-owned directory.\n   Re-run with: sudo aura update",
+                        current_exe.display()
+                    )
+                } else {
+                    format!("Failed to install new binary: {}", e)
+                }
+            })?;
 
             // Re-sign on macOS to prevent SIGKILL from invalid adhoc signature
             #[cfg(target_os = "macos")]
@@ -401,7 +429,7 @@ fn refresh_integrations() {
 
 /// Create .aura/.gitignore to track only intents and memory in git.
 /// Everything else (snapshots, sessions, sentinel, transcripts) is local runtime state.
-fn ensure_aura_gitignore() {
+pub(crate) fn ensure_aura_gitignore() {
     let aura_dir = std::path::Path::new(".aura");
     if !aura_dir.exists() {
         return;
@@ -528,6 +556,18 @@ enum Commands {
         #[arg(long)]
         force_baseline: bool,
     },
+    /// Turn on passive semantic capture — the no-MCP, no-wizard drop-in.
+    /// Installs Aura's git hooks so every commit records a semantic
+    /// checkpoint (what changed, why, by which agent), working with whatever
+    /// coding agent you already use. Idempotent; `aura init` is the full setup.
+    Enable {
+        /// Install silently (for scripts / CI) — skip the summary output.
+        #[arg(long)]
+        quiet: bool,
+    },
+    /// Turn off passive capture — removes Aura's git hooks. Non-destructive:
+    /// your semantic history stays in git; run `aura enable` to resume.
+    Disable,
     /// Plan an architectural objective and decompose into atomic waves
     Plan {
         /// The architectural objective to break down
@@ -549,9 +589,25 @@ enum Commands {
     Handover {
         /// The target agent (e.g., "cursor", "aider")
         agent: String,
+        /// Bucket M5 — Manager session id whose anchored + working
+        /// chat should be embedded in the handover. Reads
+        /// `~/.aura/manager-sessions/<id>.json` produced by the shell.
+        /// When set, the XML carries `<manager_continuum>` so the next
+        /// agent (claude → gemini, gemini → kimi) inherits identical
+        /// memory: anchored turns + last K=24 working turns.
+        #[arg(long, value_name = "ID")]
+        manager_session: Option<String>,
     },
     /// View current gatekeeper status, semantic checkpoints, and configuration
     Status,
+    /// Semantic CI — run, list, and export the declarative .aura/pipelines that
+    /// orchestrate Aura's gates (secrets, half-finished code, goal-aligned,
+    /// build). The same pipeline drives your local git hooks and the GitHub
+    /// Action `aura ci export` generates.
+    Ci {
+        #[command(subcommand)]
+        cmd: CiCmd,
+    },
     /// Audit the Git history for unsanctioned code pushed without AI intent verification
     Audit,
     /// Explain the intent behind code — trace a function back to the AI conversation that created it
@@ -561,15 +617,118 @@ enum Commands {
         /// File path containing the identifier
         file: String,
     },
+    /// Spawn or list coding-agent subagents (used by the Aura Manager
+    /// CLI brain to fan out via Bash). See `aura subagent --help`.
+    Subagent {
+        #[command(subcommand)]
+        cmd: SubagentCmd,
+    },
+    /// (Bridge) Ask the user a question via the aura-shell QuestionCard
+    /// UI. Used by the Aura Manager CLI brain so it can pause mid-turn
+    /// for a real interactive answer instead of dumping a markdown bullet
+    /// list. Requires AURA_MANAGER_SESSION_ID + an open shell socket.
+    #[command(name = "ask-user")]
+    AskUser {
+        /// The question to render. Quote it.
+        question: String,
+        /// `choice` (single pick) | `multi_choice` (toggle several) | `text` (free input).
+        #[arg(long, default_value = "choice")]
+        kind: String,
+        /// Comma-separated options (required unless --kind text).
+        #[arg(long)]
+        options: Option<String>,
+    },
+    /// (Bridge) Render an interactive PlanCard in aura-shell so the user
+    /// can approve / cancel a multi-step plan before the Manager fans
+    /// out subagents. Prints `build` or `cancel` on stdout for the
+    /// brain's bash tool to read.
+    #[command(name = "propose-plan")]
+    ProposePlan {
+        /// Full plan as a JSON object: `{ "title": "...", "summary": "...", "todos": [...] }`.
+        /// Use `--json -` to read the envelope from stdin.
+        #[arg(long, conflicts_with_all = ["title", "summary", "file"])]
+        json: Option<String>,
+        /// Path to a file containing the plan JSON envelope. Preferred when the
+        /// envelope is large — sidesteps shell quoting / heredoc rejection by
+        /// AI bash sandboxes that flag brace-with-quote patterns as expansion
+        /// obfuscation.
+        #[arg(long, conflicts_with_all = ["title", "summary", "json"])]
+        file: Option<String>,
+        /// Short-form: plan title.
+        #[arg(long)]
+        title: Option<String>,
+        /// Short-form: plan summary (one paragraph).
+        #[arg(long)]
+        summary: Option<String>,
+        /// Short-form: a single todo, format `description::agent` (agent optional).
+        /// Pass `--todo` once per todo.
+        #[arg(long = "todo", value_name = "DESCRIPTION[::AGENT]")]
+        todos: Vec<String>,
+    },
     /// List and manage agent sessions
     Sessions,
-    /// Resume a previous session by switching to its branch and showing context
+    /// Resume work. With a branch: switch to it and show its session
+    /// context. With no branch: consume a cross-agent carryover that a
+    /// previous brain injected into this repo's context file (the Track-A
+    /// handoff `aura carryover --inject` wrote).
     Resume {
-        /// Branch name to resume (e.g., "feat/auth")
-        branch: String,
+        /// Branch to resume (e.g., "feat/auth"). Omit to instead consume
+        /// an injected `AURA:RESUME` carryover from the current repo.
+        branch: Option<String>,
+        /// No-branch mode only: print the injected carryover but leave it
+        /// in place. Default consumes it so a one-shot handoff never
+        /// lingers and re-triggers on the next launch.
+        #[arg(long)]
+        keep: bool,
+    },
+    /// Assemble a cross-agent carryover from Aura's semantic record (signed
+    /// intent log, AST checkpoints, session, working tree) so a *different*
+    /// brain (claude → gemini → kimi) resumes the work at the exact point.
+    /// Shelled by the shell brain-swap (`--json`) and used for portable
+    /// CLI handoff (`--inject --agent gemini` writes the target's context file).
+    Carryover {
+        /// Repo root to describe. Defaults to the current directory.
+        #[arg(long, default_value = ".")]
+        repo: String,
+        /// How much conversation rides along: `full` (verbatim tail) or
+        /// `semantic` (compact Aura-native reconstruction, short tail).
+        #[arg(long, default_value = "semantic")]
+        mode: String,
+        /// The agent being handed to (gemini, kimi, cursor, …). Required
+        /// for `--inject`; otherwise only sets the rendered header.
+        #[arg(long)]
+        agent: Option<String>,
+        /// Intent-log lookback window in hours (≤0 disables the cutoff).
+        #[arg(long, default_value_t = 48)]
+        since_hours: i64,
+        /// Emit the carryover as JSON (the shell-bridge IPC contract).
+        #[arg(long)]
+        json: bool,
+        /// Write the carryover into the target agent's startup-context file
+        /// (CLAUDE.md / GEMINI.md / KIMI.md / AGENTS.md) inside an idempotent
+        /// AURA:RESUME marker section. Requires `--agent`.
+        #[arg(long)]
+        inject: bool,
+        /// Skip secret redaction. LOCAL-ONLY escape hatch — only use when
+        /// the carryover never leaves this machine (in-app brain-swap). By
+        /// default credentials, private keys, and public IPs are scrubbed
+        /// before the payload is emitted, since it may be handed to an
+        /// external agent.
+        #[arg(long)]
+        no_redact: bool,
     },
     /// Diagnose and repair stuck sessions, orphaned data, and other issues
     Doctor,
+    /// Launch the Aura desktop shell (aura-shell — Tauri 2 superset of aura-term)
+    Ui {
+        /// Path to the aura-shell binary. Defaults to discovery via PATH then
+        /// `<workspace>/aura-shell/src-tauri/target/release/aura-shell`.
+        #[arg(long)]
+        binary: Option<String>,
+        /// Override the project directory the shell should open. Defaults to cwd.
+        #[arg(long)]
+        cwd: Option<String>,
+    },
     /// Generate shell completions for bash, zsh, or fish
     Completions {
         /// Shell to generate completions for
@@ -610,7 +769,88 @@ enum Commands {
         #[command(subcommand)]
         sub: PolicySubcommands,
     },
-    
+    /// Team task tickets — create, claim, assign, comment, close
+    Task {
+        #[command(subcommand)]
+        sub: TaskSubcommands,
+    },
+    /// Dependency graph + ready-set over the A2A task spine. `aura loop
+    /// ready` is the Beads-grade "what can I work on now"; `aura loop
+    /// add/dep` build the DAG. The autonomous runner consumes the ready
+    /// set (see `aura loop run`, added by the harness).
+    Loop {
+        #[command(subcommand)]
+        sub: LoopSubcommands,
+    },
+    /// Team activity feed — recent events emitted by the engine and tools
+    Activity {
+        #[command(subcommand)]
+        sub: ActivitySubcommands,
+    },
+    /// Team Radar — live awareness of who (human or agent) is building what,
+    /// why, and what it impacts, BEFORE a commit/PR. Bare `aura radar` shows the
+    /// feed; `aura radar emit ...` announces in-flight work (used by agents).
+    Radar {
+        #[command(subcommand)]
+        sub: Option<RadarSubcommands>,
+    },
+    /// Show the repo-local Ed25519 identity (`did:aura:key/...`) that signs your
+    /// awareness events so they can't be spoofed by another actor.
+    Identity {
+        #[arg(long)]
+        json: bool,
+    },
+    /// PR review inbox — list/show prior `pr-review --json` reports
+    Review {
+        #[command(subcommand)]
+        sub: ReviewSubcommands,
+    },
+    /// Intent Inspector — compare a commit's stated intent against its
+    /// actual AST delta. Powers the IntentInspector pane in aura-shell.
+    IntentVsActual {
+        #[command(subcommand)]
+        sub: IntentVsActualSubcommands,
+    },
+    /// Meaning plane over the wire — mirror the intent log onto standard
+    /// git notes (refs/notes/aura-intent) so WHO/WHY round-trips through
+    /// any git host alongside the code. push / pull / log.
+    Meta {
+        #[command(subcommand)]
+        sub: meta_refs::MetaSubcommands,
+    },
+    /// Signed canonical refs — endorse a branch tip with your repo-local
+    /// Ed25519 identity and verify endorsements cryptographically, carried
+    /// as standard git notes (refs/notes/aura-sigs). sign / verify / push / pull.
+    Refs {
+        #[command(subcommand)]
+        sub: refs_sign::RefsSubcommands,
+    },
+    /// Change Notes — per-file "what / why / where it affects" for a commit,
+    /// derived from the AST diff + reverse call graph. No AI tokens. Powers the
+    /// per-file change cards in aura-shell's Changes view.
+    ChangeNote {
+        /// Anything `git revparse` understands: full sha, short sha, HEAD,
+        /// HEAD~1, branch name. Defaults to HEAD.
+        #[arg(default_value = "HEAD")]
+        sha: String,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Taste Engine — observe and recall the project's coding patterns
+    /// (named exports vs default, error_handling style, indent, etc.).
+    Taste {
+        #[command(subcommand)]
+        sub: cmd_taste::TasteSubcommands,
+    },
+
+    /// Plugin marketplace — list / enable / disable installed plugins,
+    /// skills, and MCP servers under `~/.aura/plugins/`. Mirrors the
+    /// shell's Plugins panel and shares the same `.state.json` file.
+    Plugin {
+        #[command(subcommand)]
+        sub: cmd_plugin_marketplace::PluginSubcommands,
+    },
+
     // --- Internal / Hidden Commands ---
     
     /// (Internal) Extract AST metadata and stage AI chat history
@@ -658,12 +898,38 @@ enum Commands {
     /// (Internal) Restore project snapshot
     #[command(hide = true)]
     Restore { snapshot_id: String },
+    /// (Internal) Take a durable file-level snapshot. Bucket L1 — used
+    /// by aura-shell's Manager dispatch path to capture each zone file
+    /// before fan-out so `aura rewind --task <id>` can revert cleanly.
+    /// Idempotent on missing files (skipped, exits 0). Prints the
+    /// snapshot id for each successful snapshot, one per line.
+    #[command(hide = true, name = "snapshot-file")]
+    SnapshotFile {
+        /// Path(s) to snapshot. Multiple paths process sequentially;
+        /// missing files emit `skip:<path>` and don't fail the run.
+        #[arg(required = true)]
+        paths: Vec<String>,
+        /// Trigger label baked into the snapshot record. Default
+        /// `manual`. Common values: `pre_dispatch_guard`, `pre_rewind`,
+        /// `mcp_pre_edit`, `merge_conflict`.
+        #[arg(long, default_value = "manual")]
+        trigger: String,
+        /// Agent id baked into the snapshot record. Default
+        /// `aura-cli`. Manager dispatch uses `manager-<sid>#<task_id>`.
+        #[arg(long, default_value = "aura-cli")]
+        agent: String,
+    },
     /// Trace logic paths to verify if the codebase supports a behavioral goal (experimental)
     #[command(name = "goal-trace", alias = "prove")]
     GoalTrace {
         /// The goal to verify (e.g., "users can log in via Google")
         #[arg(short, long)]
-        goal: String
+        goal: String,
+        /// Emit the proof as structured JSON on stdout (verdict, per-check
+        /// reasons) instead of the human report. Backs the desktop Goals
+        /// surface and any script that wants the verdict without regex.
+        #[arg(long)]
+        json: bool,
     },
     /// (Internal) Verify semantic safety
     #[command(hide = true)]
@@ -691,6 +957,11 @@ enum Commands {
         #[command(subcommand)]
         sub: MsgSubcommands,
     },
+    /// Keep what you build tied to the goal it serves — and prove it in the code
+    Goals {
+        #[command(subcommand)]
+        sub: GoalsSubcommands,
+    },
     /// Connect to a self-hosted Aura Server for team collaboration
     Server {
         #[command(subcommand)]
@@ -704,6 +975,37 @@ enum Commands {
         #[arg(long)]
         no_git: bool,
     },
+    /// Append a single intent row to `.aura/intent_log.jsonl` (fire-and-forget;
+    /// called by the on-post-tool-use hook to capture autonomous agent work).
+    #[command(name = "log-intent")]
+    LogIntent {
+        /// What was changed and why (the intent text)
+        text: String,
+        /// File the intent is about (optional)
+        #[arg(long)]
+        file: Option<String>,
+        /// Tool that produced the change, e.g. "Edit" (optional)
+        #[arg(long)]
+        tool: Option<String>,
+        /// Originating session id (optional)
+        #[arg(long)]
+        session: Option<String>,
+        /// Source of the intent (default: "hook_auto")
+        #[arg(long)]
+        source: Option<String>,
+        /// Canonical intent type, e.g. "BugFix" (optional)
+        #[arg(long = "type")]
+        intent_type: Option<String>,
+    },
+    /// Classify a pending agent tool call (JSON on STDIN) and emit an
+    /// allow/ask/deny gate verdict (JSON on STDOUT).
+    #[command(name = "validate-tool")]
+    ValidateTool,
+    /// Inspect the local block substrate (S0.3+ spike surface).
+    Blocks {
+        #[command(subcommand)]
+        sub: BlocksSubcommands,
+    },
     /// Push all locally changed functions to the team immediately
     Share,
     /// Pull teammate changes and apply at function level
@@ -711,6 +1013,9 @@ enum Commands {
         /// Show what would change without applying
         #[arg(long)]
         dry_run: bool,
+        /// Include functions their author flagged as a red build
+        #[arg(long)]
+        allow_red: bool,
     },
     /// Semantic diff — function-level changes, not line-level
     Diff {
@@ -765,25 +1070,91 @@ enum Commands {
     },
     /// Check connection to mothership — latency, TLS status, online peers
     Ping,
-    /// Connect to a team mothership for P2P collaboration (advanced — use `aura join` instead)
+    /// Connect this CLI to Aura Cloud (browser approval), or to a team mothership (if --code)
     Connect {
-        /// Mothership URL (e.g., https://192.168.1.50:7700)
-        url: String,
-        /// Invite code from the mothership host
+        /// Mothership URL (e.g., https://192.168.1.50:7700). Omit for Aura Cloud login.
+        url: Option<String>,
+        /// Mothership invite code (triggers mothership mode)
         #[arg(long)]
-        code: String,
-        /// Your username
+        code: Option<String>,
+        /// Mothership username
         #[arg(long)]
-        username: String,
-        /// Your password
+        username: Option<String>,
+        /// Mothership password
         #[arg(long)]
-        password: String,
-        /// Expected TLS fingerprint (SHA-256) — verify against what the mothership shows
+        password: Option<String>,
+        /// Expected TLS fingerprint (SHA-256) for mothership
         #[arg(long)]
         fingerprint: Option<String>,
-        /// Accept self-signed TLS certificates without fingerprint verification (less secure)
+        /// Accept self-signed TLS certificates (mothership, less secure)
         #[arg(long)]
         accept_self_signed: bool,
+        /// Cloud mode: don't open a browser — print the approve URL instead
+        #[arg(long)]
+        no_browser: bool,
+    },
+    /// Join a cloud-routed team by org slug (zero-config; requires `aura connect`)
+    JoinTeam {
+        /// Org slug on Aura Cloud (e.g. "naridon")
+        org_slug: String,
+        /// Override the repo full name (default: derived from `git remote origin`)
+        #[arg(long)]
+        repo: Option<String>,
+    },
+    /// Inspect CRDT doc state (cloud-routed teams)
+    Crdt {
+        #[command(subcommand)]
+        action: CrdtAction,
+    },
+    /// Manage end-to-end encryption keys (W6)
+    Keys {
+        #[command(subcommand)]
+        action: KeysAction,
+    },
+    /// Verify signed Block attestations from `.aura/blocks/` (S1 sigstore-live).
+    Attest {
+        #[command(subcommand)]
+        action: AttestAction,
+    },
+    /// Trigger Aura's AI-synthesized PR reviews (W7)
+    Pr {
+        #[command(subcommand)]
+        action: PrAction,
+    },
+    /// Drain open function-body conflicts (cloud-routed teams)
+    Resolve {
+        /// List open conflicts and exit (no prompts)
+        #[arg(long)]
+        list: bool,
+        /// Walk each conflict and prompt for a winner
+        #[arg(long)]
+        interactive: bool,
+    },
+    /// Build a human-readable directory of every symbol — features, components,
+    /// atoms, and recurring patterns — written to .aura/atlas.json + atlas.md
+    Atlas {
+        /// Layer LLM-polished one-line summaries on top of the structural ones
+        #[arg(long)]
+        ai: bool,
+        /// Emit the JSON registry to stdout instead of the terminal story
+        #[arg(long)]
+        json: bool,
+    },
+    /// Distill the dirty working tree into clean, intent-grouped semantic
+    /// commits — WHAT from the AST diff, WHY from .aura/intent_log.jsonl
+    Distill {
+        /// Print the plan without committing anything
+        #[arg(long)]
+        dry_run: bool,
+        /// Emit the plan as stable JSON (plan only — nothing is committed)
+        #[arg(long)]
+        json: bool,
+        /// Also distill untracked files (default: tracked changes only)
+        #[arg(long)]
+        include_untracked: bool,
+        /// Maximum number of commits; overflow merges into the nearest group
+        #[arg(long, default_value_t = 8)]
+        max_groups: usize,
     },
     /// Track AI token usage, costs, and budgets across all your agent sessions
     Usage {
@@ -812,6 +1183,1190 @@ enum Commands {
         /// Export usage data as CSV to a file (e.g. --export usage.csv)
         #[arg(long)]
         export: Option<String>,
+        /// Break usage down per developer (team view — reads + refreshes
+        /// the git-shared .aura/usage_by_dev.jsonl aggregate)
+        #[arg(long)]
+        by_dev: bool,
+    },
+    /// Show the current cloud identity (user + org) for the stored token
+    Whoami,
+    /// Clear the stored cloud token from ~/.aura/config
+    Disconnect,
+    /// Serve Aura's semantic layer as a Zed ACP agent over stdio
+    AcpServe,
+    /// Run an external agent (claude, gemini, ...) over the Zed ACP protocol
+    AcpRun {
+        /// Binary to launch as an ACP agent (e.g. "claude-code", "gemini")
+        #[arg(long)]
+        cmd: String,
+        /// Extra args to pass to the agent binary (repeatable)
+        #[arg(long = "arg")]
+        args: Vec<String>,
+        /// User prompt to send once the session is live
+        #[arg(long)]
+        prompt: String,
+        /// Overall timeout in seconds (covers handshake + session + prompt)
+        #[arg(long, default_value_t = 120)]
+        timeout: u64,
+        /// Print session/update payloads as JSON lines (default: text only)
+        #[arg(long)]
+        json: bool,
+    },
+    /// Live WebSocket diagnostics — observe server frames or AG-UI events
+    Ws {
+        #[command(subcommand)]
+        action: WsAction,
+    },
+    /// Episodic recall — query the cloud's event timeline (events / arc
+    /// / multi-arc) or summarize a window of local Block envelopes
+    /// (narrate-blocks). Cloud subcommands need a token from
+    /// `~/.aura/config` or `AURA_CLOUD_TOKEN`; narrate-blocks reads
+    /// `.aura/blocks/*.json` directly.
+    Recall {
+        #[command(subcommand)]
+        action: RecallAction,
+    },
+    /// Typed-intent surface (S2-TI / doc 16). Reads only the local
+    /// `.aura/intent_log.jsonl` — air-gapped, no cloud roundtrip. Wraps
+    /// the same helpers as the `aura_intent_query` MCP tool so the CLI
+    /// and MCP outputs agree.
+    Intents {
+        #[command(subcommand)]
+        action: IntentsAction,
+    },
+    /// S2-HCL: cloud handover ledger CLI mirror of
+    /// aura_handover_cloud_list / aura_handover_cloud_push MCP tools.
+    /// Wraps GET/POST /api/v2/handovers — the cross-machine pickup
+    /// queue another agent can resume work from. Local
+    /// `aura handover <agent>` produces the payload; this surface
+    /// publishes the summary to a queue another machine can read.
+    HandoverCloud {
+        #[command(subcommand)]
+        action: HandoverCloudAction,
+    },
+    /// Local project memory (.aura/memory.json) — provenance-stamped
+    /// facts with hybrid ranked recall. `add` stamps every entry with
+    /// the HEAD commit, the latest signed intent and an optional code
+    /// symbol fingerprint; `search` ranks with BM25 + embeddings +
+    /// recency (RRF-fused) and flags entries whose source code has
+    /// drifted; `why` shows where a fact came from and whether it is
+    /// still true of the code. Sibling to `memory-cloud` (the org-wide
+    /// store) — this one is the per-repo file the MCP `aura_memory_*`
+    /// tools read and write.
+    Memory {
+        #[command(subcommand)]
+        action: memory::cli::MemoryAction,
+    },
+    /// S2-MCL: cloud project_memory store CLI mirror of
+    /// aura_memory_cloud_list / aura_memory_cloud_push MCP tools.
+    /// Wraps GET/POST /api/v2/memory — the org-wide durable memory
+    /// for design decisions, conventions, gotchas. Sibling to the
+    /// per-machine `aura_memory_*` MCP tools (which read/write a
+    /// local memory file); this surface is the team-shared
+    /// counterpart.
+    MemoryCloud {
+        #[command(subcommand)]
+        action: MemoryCloudAction,
+    },
+    /// S2-AT: A2A v1.2 task lifecycle CLI mirror of
+    /// aura_a2a_task_create / get / list / patch MCP tools. Wraps
+    /// POST/GET/PATCH /api/v2/a2a/tasks for fire-and-poll work
+    /// (cross-repo refactor, multi-step review) where the one-shot
+    /// `/a2a/messages` endpoint is not enough. Lifecycle states per
+    /// A2A v1.2 §4: submitted | working | input-required |
+    /// completed | failed | canceled | rejected | auth-required.
+    /// Terminal states are sticky cloud-side.
+    A2aTask {
+        #[command(subcommand)]
+        action: A2aTaskAction,
+    },
+    /// Cross-project agent-skill ledger. `record` writes one outcome
+    /// row (5 signals × 4 taxonomy lenses) to the cloud; `stats`
+    /// returns aggregated per-provider rows used for auto-routing.
+    /// See aura-cloud/migrations/029_agent_skill_outcomes.sql.
+    Skill {
+        #[command(subcommand)]
+        action: SkillAction,
+    },
+    /// Portable SKILL.md bundles (plural — distinct from `skill`, the
+    /// routing ledger). Package Aura's capabilities as installable skill
+    /// files any agent (Claude Code / Codex / Gemini / Cursor) can
+    /// discover and shell to. `list` shows the seed set; `emit` renders
+    /// SKILL.md files to a directory; `install <agent>` drops them into
+    /// that agent's skills directory.
+    Skills {
+        #[command(subcommand)]
+        action: skills::SkillsAction,
+    },
+    /// Replay Lab — re-run a logged objective across N coding agents in
+    /// isolated git worktrees, then rank the results by semantic
+    /// correctness (per-result `aura pr-review` risk), not just exit code.
+    /// `run` executes a replay; `report` shows a saved one. Each run is
+    /// fed back into the skill ledger so replaying improves auto-routing.
+    Replay {
+        #[command(subcommand)]
+        action: replay::ReplayAction,
+    },
+    /// S2-WH: webhook configs CLI mirror of the cloud /api/v1/webhooks*
+    /// endpoints. Operators who don't want to drive the dashboard can
+    /// list / create / delete / toggle Slack/Discord webhook configs
+    /// (impact_alert + live_event + presence channels) from the
+    /// terminal. Org-scoped via the cloud token.
+    Webhooks {
+        #[command(subcommand)]
+        action: WebhooksAction,
+    },
+    /// S2-AC: A2A v1.2 Agent Card discovery. Fetches the
+    /// unauthenticated `/.well-known/agent-card.json` from the
+    /// configured cloud (or from `--cloud <url>`) and renders the
+    /// advertised skills, capabilities, and the `/api/v2/a2a/messages`
+    /// endpoint URL. Useful for: (a) confirming a new deployment
+    /// advertises the skills you expect, (b) sanity-checking a
+    /// teammate's cloud before sending an A2A message, (c) capturing
+    /// the card into a fixture without curl + jq.
+    AgentCard {
+        /// Override the Host header sent to the cloud. The cloud
+        /// derives the advertised endpoint scheme + base URL from this,
+        /// so passing e.g. `--host cloud.example.com` returns the card
+        /// the public deployment would emit even when hitting a
+        /// loopback proxy.
+        #[arg(long)]
+        host: Option<String>,
+        /// Override the cloud base URL (defaults to the configured
+        /// cloud_url, then AURA_CLOUD_URL, then https://api.auravcs.com).
+        /// Unauthenticated — no token required.
+        #[arg(long)]
+        cloud: Option<String>,
+        #[arg(long)]
+        json: bool,
+    },
+    /// AST-aware git merge driver (AURA-44): parallel agents editing
+    /// DIFFERENT functions in the SAME file merge cleanly instead of
+    /// producing textual conflicts. Run `--install` once per clone, then
+    /// git invokes the driver automatically for *.rs/*.ts/*.tsx/*.py/*.go.
+    /// On any doubt (parse failure, unsupported language) it falls back to
+    /// `git merge-file` — never worse than stock git.
+    #[command(name = "merge-driver")]
+    MergeDriver {
+        /// %O — common-ancestor version (temp file written by git)
+        #[arg(value_name = "BASE", required_unless_present_any = ["install", "uninstall", "status"])]
+        base: Option<std::path::PathBuf>,
+        /// %A — current-branch version (temp file); the merged result is
+        /// written back into this file
+        #[arg(value_name = "OURS", required_unless_present_any = ["install", "uninstall", "status"])]
+        ours: Option<std::path::PathBuf>,
+        /// %B — other-branch version (temp file)
+        #[arg(value_name = "THEIRS", required_unless_present_any = ["install", "uninstall", "status"])]
+        theirs: Option<std::path::PathBuf>,
+        /// %P — real repo-relative path of the file being merged; its
+        /// extension selects the language grammar (the temp files have none)
+        #[arg(long)]
+        path: Option<String>,
+        /// %L — conflict marker length
+        #[arg(long, default_value_t = 7)]
+        marker_size: usize,
+        /// Configure this repository: writes [merge "aura"] to .git/config and
+        /// appends *.rs/*.ts/*.tsx/*.py/*.go patterns to .git/info/attributes
+        /// (repo-local, not a committed .gitattributes). Idempotent.
+        #[arg(long, conflicts_with = "uninstall")]
+        install: bool,
+        /// Remove the [merge "aura"] config section and the attribute
+        /// patterns --install added. Idempotent.
+        #[arg(long)]
+        uninstall: bool,
+        /// Report this repository's driver state: [merge "aura"] config line,
+        /// merge=aura attribute patterns, and whether `aura` resolves on
+        /// PATH. Read-only; exits 0 whether or not the driver is installed.
+        #[arg(long, conflicts_with_all = ["install", "uninstall"])]
+        status: bool,
+        /// With --status: emit one JSON object instead of the text report.
+        #[arg(long, requires = "status")]
+        json: bool,
+    },
+}
+
+/// `aura ci <…>` — Semantic CI subcommands.
+#[derive(Subcommand)]
+enum CiCmd {
+    /// Run the pipeline for a trigger and print the verdict. Exits non-zero
+    /// when a blocking step fails (so a git hook / CI job fails the build).
+    Run {
+        /// Which event to run for: pre-commit | pre-push | pr | manual.
+        #[arg(long, default_value = "manual")]
+        trigger: String,
+        /// Base ref for the `pr` trigger's diff + intent score.
+        #[arg(long, default_value = "HEAD")]
+        base: String,
+        /// Emit the PipelineRun(s) as JSON (for the desktop Checks surface).
+        #[arg(long)]
+        json: bool,
+    },
+    /// Show the declared pipelines (or the built-in default when none).
+    List {
+        #[arg(long)]
+        json: bool,
+    },
+    /// Quick verdict against the staged work (the pre-commit checks).
+    Status,
+    /// Write a GitHub Actions workflow that runs the SAME pipeline in the
+    /// cloud on every PR — single source of truth with your local hooks.
+    Export {
+        /// Output path for the workflow file.
+        #[arg(long, default_value = ".github/workflows/aura-checks.yml")]
+        out: String,
+    },
+}
+
+#[derive(Subcommand)]
+enum SubagentCmd {
+    /// Spawn a coding-agent subagent synchronously. Streams its output to
+    /// stdout, exits with the subagent's exit code. Used by the Aura
+    /// Manager CLI brain to fan work out via Bash.
+    Spawn {
+        /// Provider id (claude, gemini, codex, cursor, kimi, or any
+        /// id declared in `~/.aura/agents.toml`).
+        provider: String,
+        /// Prompt for the subagent. Quote it; it can be multi-paragraph.
+        prompt: String,
+        /// Comma-separated file globs the subagent will write to. Recorded
+        /// on the ManagerTask so the UI shows zone scope and (when the
+        /// worktree feature lands) the dispatch can claim them.
+        #[arg(long, value_delimiter = ',')]
+        zones: Vec<String>,
+        /// Comma-separated upstream task ids this dispatch depends on.
+        /// Cosmetic for now (CLI fan-out is naturally serial via
+        /// blocking spawn) but populated on the DAG so the UI can draw
+        /// edges.
+        #[arg(long = "depends-on", value_delimiter = ',')]
+        depends_on: Vec<usize>,
+        /// A2A v1.2 task id to attach to this dispatch. Set when the
+        /// brain is fanning out from a propose-plan Build that minted
+        /// remote a2a tasks — the local DAG row gets the remote id so
+        /// the UI can link them. Recorded on `ManagerTask.a2a_task_id`.
+        #[arg(long = "a2a-task-id")]
+        a2a_task_id: Option<String>,
+    },
+    /// Spawn a subagent in the background. Prints `task_id=<n>` to stdout
+    /// and returns immediately so the brain can fire multiple in
+    /// parallel and `wait` for them later.
+    SpawnBg {
+        provider: String,
+        prompt: String,
+        #[arg(long, value_delimiter = ',')]
+        zones: Vec<String>,
+        #[arg(long = "depends-on", value_delimiter = ',')]
+        depends_on: Vec<usize>,
+        #[arg(long = "a2a-task-id")]
+        a2a_task_id: Option<String>,
+    },
+    /// Block until a `spawn-bg`'d task reaches a terminal status. Prints
+    /// the task's captured output + a one-line summary, exits with the
+    /// subagent's exit code.
+    Wait {
+        /// Task id printed by `spawn-bg`.
+        task_id: usize,
+        /// Max seconds to wait. Default 1800 (30 min).
+        #[arg(long, default_value_t = 1800)]
+        timeout: u64,
+    },
+    /// Internal: re-enter as the detached child of `spawn-bg`. Hidden
+    /// from --help; not intended for direct invocation.
+    #[command(hide = true)]
+    RunDetached {
+        task_id: usize,
+        provider: String,
+        prompt: String,
+    },
+    /// List available subagent providers + their availability + version.
+    List,
+    /// Bucket O — Tail the most recent stdout/stderr lines from a live
+    /// or completed Manager subagent. Reads the dedicated tail file at
+    /// `~/.aura/manager-sessions/<sid>-<tid>.tail` written by the
+    /// shell as the subagent streams. Defaults to the last 200 lines;
+    /// pair with `--since` to skip ahead. Designed for the Manager
+    /// brain to call via Bash when a fan-out has been running >2 min
+    /// and the brain wants to know if it's progressing or stuck.
+    Monitor {
+        /// Manager session id.
+        session_id: String,
+        /// Task id within the session.
+        task_id: usize,
+        /// Max lines to print (newest last). Default 200.
+        #[arg(long, default_value_t = 200)]
+        tail: usize,
+    },
+}
+
+#[derive(Subcommand)]
+enum WebhooksAction {
+    /// List the org's webhook configs.
+    /// GET /api/v1/webhooks
+    List {
+        #[arg(long)]
+        json: bool,
+    },
+    /// Create a new webhook config.
+    /// POST /api/v1/webhooks
+    Create {
+        /// Webhook destination kind ("slack" | "discord").
+        #[arg(long)]
+        webhook_type: String,
+        /// Inbound webhook URL (e.g. https://hooks.slack.com/services/…).
+        #[arg(long)]
+        webhook_url: String,
+        /// Comma-separated event subscriptions (e.g.
+        /// "impact_alert,live_event,presence"). Defaults to
+        /// "impact_alert" when omitted.
+        #[arg(long)]
+        events: Option<String>,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Delete a webhook config by id.
+    /// DELETE /api/v1/webhooks/{id}
+    Delete {
+        id: String,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Enable or disable a webhook config.
+    /// POST /api/v1/webhooks/{id}/toggle
+    Toggle {
+        id: String,
+        /// `true` enables the webhook; `false` disables it. Required —
+        /// uses ArgAction::Set so clap reads the literal `true` /
+        /// `false` value (a bare `--enabled` would be ambiguous).
+        #[arg(long, action = clap::ArgAction::Set)]
+        enabled: bool,
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+#[derive(Subcommand)]
+enum WsAction {
+    /// Connect to /api/v2/live/ws and print received frames as JSON lines
+    Listen {
+        /// Maximum seconds to listen before disconnecting
+        #[arg(long, default_value_t = 30)]
+        seconds: u64,
+        /// Stop after N non-heartbeat frames (0 = no limit)
+        #[arg(long, default_value_t = 0)]
+        stop_after: usize,
+        /// Require at least N non-heartbeat frames; exit non-zero otherwise
+        #[arg(long, default_value_t = 0)]
+        expect_min: usize,
+        /// Server-side stream format. Omit for native ServerFrame; "ag-ui"
+        /// requests CopilotKit AG-UI event shapes.
+        #[arg(long)]
+        format: Option<String>,
+    },
+}
+
+#[derive(Subcommand)]
+enum RecallAction {
+    /// Filterable event timeline. Wraps GET /api/v2/episodic/recall.
+    /// All filters are optional — with no filters the cloud returns the
+    /// unfiltered window.
+    Events {
+        /// Filter by event_type (e.g. "block.signed", "snapshot.created").
+        #[arg(long = "event-type")]
+        event_type: Option<String>,
+        /// Filter by agent_id.
+        #[arg(long = "agent")]
+        agent: Option<String>,
+        /// Filter by focus_fn (function name in event metadata).
+        #[arg(long = "focus-fn")]
+        focus_fn: Option<String>,
+        /// Filter by focus_file (file path in event metadata).
+        #[arg(long = "focus-file")]
+        focus_file: Option<String>,
+        /// Filter by repo (defaults to cloud's view of all repos).
+        #[arg(long)]
+        repo: Option<String>,
+        /// S2-TICRE: filter by canonical intent_type. Mirrors --type on
+        /// `aura recall narrate-blocks` (S2-TINF) and the cloud recall's
+        /// `intent_type=` query param (S2-TICR/D). Untyped events are
+        /// dropped from the result when set. One of FeatureAdd, BugFix,
+        /// Refactor, Revert, Performance, Docs, Deps.
+        #[arg(long = "type")]
+        intent_type: Option<String>,
+        /// Lookback window in hours.
+        #[arg(long = "window-hours")]
+        window_hours: Option<i64>,
+        /// Cap returned rows.
+        #[arg(long)]
+        limit: Option<i64>,
+        /// Print raw JSON instead of a human-readable table.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Per-agent session arc. Wraps GET /api/v2/episodic/session-arc.
+    /// Segments events into sessions whenever there's a gap larger than
+    /// `--gap-minutes` between consecutive events.
+    Arc {
+        /// Required. agent_id whose arc to compute.
+        #[arg(long = "agent")]
+        agent: String,
+        /// Lookback window in hours.
+        #[arg(long = "window-hours")]
+        window_hours: Option<i64>,
+        /// Inactivity threshold (minutes) that splits one session from the next.
+        #[arg(long = "gap-minutes")]
+        gap_minutes: Option<i64>,
+        /// Filter by repo.
+        #[arg(long)]
+        repo: Option<String>,
+        /// Cap returned segments.
+        #[arg(long)]
+        limit: Option<i64>,
+        /// Print raw JSON instead of a human-readable table.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Local Block-range narration. Reads `.aura/blocks/*.json`,
+    /// filters by recency (`--since-hours`) and optional kind/actor
+    /// filters, then prints a deterministic prose summary suitable for
+    /// agent handover. Uses no LLM — the text is reproducible from the
+    /// same set of blocks.
+    NarrateBlocks {
+        /// Lookback window in hours. Defaults to 24.
+        #[arg(long = "since-hours", default_value_t = 24)]
+        since_hours: i64,
+        /// Optional kind filter (e.g. "command", "message", "sentinel_event").
+        /// Matches the on-wire snake_case discriminator. Repeatable.
+        #[arg(long)]
+        kind: Vec<String>,
+        /// Optional actor filter (matches AgentRef.id substring).
+        #[arg(long)]
+        actor: Option<String>,
+        /// Optional canonical intent_type filter (S2-TINF). One of
+        /// FeatureAdd, BugFix, Refactor, Revert, Performance, Docs, Deps.
+        /// Untyped blocks are dropped from the matched set when set.
+        #[arg(long = "type")]
+        intent_type: Option<String>,
+        /// Cap the number of blocks rendered in the per-block list
+        /// (the totals/aggregates always reflect every matched block).
+        #[arg(long, default_value_t = 10)]
+        list_limit: usize,
+        /// Print raw JSON (the structured summary) instead of prose.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Per-function timeline materialized view. Wraps
+    /// GET /api/v2/episodic/timeline?function_name=X.
+    /// Returns the events slice plus by_day buckets,
+    /// counts_by_type, counts_by_intent_type, and agents_seen — the
+    /// "what happened to function X" answer the agent_card advertises
+    /// as the `episodic-timeline` skill. CLI surface mirrors the
+    /// `episodic_timeline_url` on the agent card so a teammate or
+    /// follow-up agent can pull the same view via either path.
+    Timeline {
+        /// Required. Function name to look up.
+        #[arg(long = "function-name")]
+        function_name: String,
+        /// Lookback window in hours. Cloud default 168 (7 days).
+        #[arg(long = "window-hours")]
+        window_hours: Option<i64>,
+        /// Filter by repo.
+        #[arg(long)]
+        repo: Option<String>,
+        /// Cap returned events. Cloud default 50, max 500.
+        #[arg(long)]
+        limit: Option<i64>,
+        /// Print raw JSON (the structured response with by_day +
+        /// counts_by_type + counts_by_intent_type + agents_seen)
+        /// instead of a human-readable table.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Cloud-side compressed narration of an episodic-event window.
+    /// Wraps POST /api/v2/episodic/narrate. With an org LLM key
+    /// configured the cloud calls the chosen tier; without one it
+    /// returns a deterministic synthesized digest. Same filter shape
+    /// as `events` minus the agent filter (cloud narrate doesn't
+    /// scope by agent_id). Sibling to `narrate-blocks` (which reads
+    /// only local `.aura/blocks/*.json` and never calls an LLM).
+    NarrateCloud {
+        /// Lookback window in hours. Cloud default 168 (7 days).
+        #[arg(long = "window-hours")]
+        window_hours: Option<i64>,
+        /// Filter by event_type (e.g. "intent", "sentinel", "handover").
+        #[arg(long = "event-type")]
+        event_type: Option<String>,
+        /// Filter by focus_file (file path in event metadata).
+        #[arg(long = "focus-file")]
+        focus_file: Option<String>,
+        /// Filter by focus_fn (function name in event metadata).
+        #[arg(long = "focus-fn")]
+        focus_fn: Option<String>,
+        /// Filter by repo.
+        #[arg(long)]
+        repo: Option<String>,
+        /// LLM tier: "shallow" (cheap, default) or "deep" (more
+        /// capable). Ignored on the synthetic fallback path.
+        #[arg(long)]
+        tier: Option<String>,
+        /// Max events the narrator considers. Cloud default 100, max 500.
+        #[arg(long)]
+        limit: Option<i64>,
+        /// Print raw JSON (window_hours + event_count + counts_by_type
+        /// + counts_by_intent_type + narration + model_used) instead
+        /// of a human-readable digest.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Per-agent digest materialized view. Wraps
+    /// GET /api/v2/episodic/agent-digest?agent_id=X.
+    /// Same shape as the timeline view plus `top_functions` and
+    /// `top_files` rankings (deterministically ordered count desc,
+    /// name asc) — the "what has agent X been touching" answer.
+    /// CLI surface mirrors `episodic_agent_digest_url` on the
+    /// agent_card so a teammate or follow-up agent can pull the same
+    /// view via either path.
+    AgentDigest {
+        /// Required. agent_id whose digest to compute.
+        #[arg(long = "agent")]
+        agent: String,
+        /// Lookback window in hours. Cloud default 168 (7 days).
+        #[arg(long = "window-hours")]
+        window_hours: Option<i64>,
+        /// Filter by repo.
+        #[arg(long)]
+        repo: Option<String>,
+        /// Cap returned events. Cloud default 50, max 500.
+        #[arg(long)]
+        limit: Option<i64>,
+        /// Print raw JSON (the structured response with top_functions
+        /// + top_files + by_day + counts_by_intent_type) instead of a
+        /// human-readable table.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Multi-agent merged arc. Wraps GET /api/v2/episodic/multi-session-arc.
+    /// Computes the per-session arc for each agent and merges segments
+    /// into one timeline ordered by start_ts.
+    MultiArc {
+        /// Required. Comma-separated agent_ids (up to 16).
+        #[arg(long = "agents")]
+        agents: String,
+        /// Lookback window in hours.
+        #[arg(long = "window-hours")]
+        window_hours: Option<i64>,
+        /// Inactivity threshold (minutes) that splits one session from the next.
+        #[arg(long = "gap-minutes")]
+        gap_minutes: Option<i64>,
+        /// Filter by repo.
+        #[arg(long)]
+        repo: Option<String>,
+        /// Cap returned segments.
+        #[arg(long)]
+        limit: Option<i64>,
+        /// Print raw JSON instead of a human-readable table.
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+#[derive(Subcommand)]
+enum IntentsAction {
+    /// Filter the local intent log by canonical type and/or window.
+    /// Mirrors the `aura_intent_query` MCP tool's behavior so CLI and
+    /// MCP outputs agree.
+    Query {
+        /// Canonical type filter. One of: FeatureAdd, BugFix, Refactor,
+        /// Revert, Performance, Docs, Deps. Omit for all types.
+        #[arg(long = "type")]
+        intent_type: Option<String>,
+        /// Lookback window in hours. Default 168 (7 days). Set 0 to
+        /// disable the cutoff and return the entire log.
+        #[arg(long = "since-hours", default_value_t = 168)]
+        since_hours: i64,
+        /// Cap returned entries (newest first). Capped at 500 server-side
+        /// — total_matches reports the unbounded count.
+        #[arg(long, default_value_t = 50)]
+        limit: usize,
+        /// Print the raw JSON envelope instead of a human-readable table.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Print the deterministic typed-intent prose summary that the
+    /// handover XML embeds (S2-TIH). Same source-of-truth helper, so
+    /// the CLI output is byte-identical to what receiving agents see.
+    Summary {
+        /// Lookback window in hours. Default 24 (matches handover).
+        #[arg(long = "since-hours", default_value_t = 24)]
+        since_hours: i64,
+        /// Newest sample intents per type. 0 omits samples (counts only).
+        #[arg(long = "sample-per-type", default_value_t = 1)]
+        sample_per_type: usize,
+        /// Print the structured envelope (typed_total / untyped /
+        /// buckets[]) as pretty JSON instead of the prose form.
+        /// Same source-of-truth, just a different renderer.
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+/// S2-HCL: cloud handover ledger CLI mirror of
+/// aura_handover_cloud_list / aura_handover_cloud_push MCP tools.
+#[derive(Subcommand)]
+enum HandoverCloudAction {
+    /// List handovers in the cloud handover ledger (newest first).
+    /// Wraps GET /api/v2/handovers — returns paginated rows with
+    /// (id, session_id, agent_name, summary, token_count, created_at).
+    List {
+        /// 1-based page number. Default 1.
+        #[arg(long)]
+        page: Option<i64>,
+        /// Max rows per page. Cloud default 50, max 200.
+        #[arg(long)]
+        limit: Option<i64>,
+        /// Print raw JSON envelope instead of a human-readable table.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Push a handover summary to the cloud ledger so an agent on
+    /// another machine can discover and resume the work. Wraps
+    /// POST /api/v2/handovers. The local `aura handover <agent>`
+    /// command produces the dense XML payload; this surface persists
+    /// the summary line a receiving agent uses to pick which session
+    /// to resume.
+    Push {
+        /// Required. Session identifier the receiving agent will resume against.
+        #[arg(long = "session-id")]
+        session_id: String,
+        /// Required. Source agent name, e.g. 'claude', 'cursor', 'gemini'.
+        #[arg(long = "agent-name")]
+        agent_name: String,
+        /// Required. One-paragraph human-readable summary of where
+        /// the session was when the handover was generated.
+        #[arg(long)]
+        summary: String,
+        /// Optional: token count of the source session at handover
+        /// time, for downstream sizing.
+        #[arg(long = "token-count")]
+        token_count: Option<i64>,
+        /// Print the raw JSON response instead of a status line.
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+/// S2-MCL: cloud project_memory store CLI mirror of
+/// aura_memory_cloud_list / aura_memory_cloud_push MCP tools.
+#[derive(Subcommand)]
+enum MemoryCloudAction {
+    /// List entries in the cloud project_memory store (newest first).
+    /// Wraps GET /api/v2/memory — returns paginated rows with
+    /// (id, kind, title, body, created_at).
+    List {
+        /// 1-based page number. Default 1.
+        #[arg(long)]
+        page: Option<i64>,
+        /// Max rows per page. Cloud default 100, max 500.
+        #[arg(long)]
+        limit: Option<i64>,
+        /// Print raw JSON envelope instead of a human-readable table.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Insert a project_memory entry org-wide. Wraps POST /api/v2/memory.
+    /// Use when you've learned something durable the team should
+    /// see — design decisions, conventions, gotchas. Repo scope is
+    /// optional and resolves by github_full_name.
+    Push {
+        /// Required. Memory body (Markdown).
+        #[arg(long)]
+        body: String,
+        /// Optional short title for indexing.
+        #[arg(long)]
+        title: Option<String>,
+        /// Optional kind tag, e.g. 'decision', 'convention',
+        /// 'gotcha'. Defaults to 'project' server-side when omitted.
+        #[arg(long)]
+        kind: Option<String>,
+        /// Optional GitHub full_name (org/name) to scope the entry
+        /// to one repo.
+        #[arg(long = "repo-full-name")]
+        repo_full_name: Option<String>,
+        /// Print the raw JSON response instead of a status line.
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+/// S2-AT: A2A v1.2 task lifecycle CLI mirror of aura_a2a_task_*
+/// MCP tools. Each subcommand wraps one of the four endpoints
+/// under /api/v2/a2a/tasks.
+#[derive(Subcommand)]
+enum A2aTaskAction {
+    /// Create a new A2A v1.2 task. Returns the row in 'submitted'
+    /// state with a stable id the caller can poll via `aura
+    /// a2a-task get`. Wraps POST /api/v2/a2a/tasks.
+    Create {
+        /// Required. Agent kind label, e.g. 'aura-pr-review',
+        /// 'aura-cross-repo-refactor'. Server validates non-empty.
+        #[arg(long = "agent-kind")]
+        agent_kind: String,
+        /// Required. Free-form input the assigned worker will
+        /// process. Server validates non-empty.
+        #[arg(long)]
+        input: String,
+        /// Optional repo scope. Resolved by github_full_name;
+        /// unknown repo => HTTP 404.
+        #[arg(long)]
+        repo: Option<String>,
+        /// Optional context_id for grouping related tasks.
+        #[arg(long = "context-id")]
+        context_id: Option<String>,
+        /// Optional metadata as a JSON object string. Forwarded
+        /// verbatim into the input_metadata column.
+        #[arg(long = "metadata-json")]
+        metadata_json: Option<String>,
+        /// Bucket K1 — hierarchy parent. The brain sets this when
+        /// minting a wave under its plan, a task under its wave, or a
+        /// subtask under its task.
+        #[arg(long = "parent")]
+        parent: Option<String>,
+        /// Bucket K1 — `plan | wave | task | subtask`. Defaults to
+        /// `task` when omitted (server-side default).
+        #[arg(long = "kind")]
+        kind: Option<String>,
+        /// Bucket K1 — required (non-empty) when --kind is plan|wave|task.
+        /// What `aura prove` ultimately verifies.
+        #[arg(long = "acceptance-criteria")]
+        acceptance_criteria: Option<String>,
+        /// Bucket K1 — git branch the task is created on. Defaults to
+        /// the current branch (auto-detected via `git rev-parse
+        /// --abbrev-ref HEAD`) if --branch is omitted and we're inside
+        /// a git work tree.
+        #[arg(long = "branch")]
+        branch: Option<String>,
+        /// Bucket K1 — discovery tags. Repeat `--tag foo --tag bar` to
+        /// attach multiple. Server stores in `tags TEXT[]` (GIN-indexed).
+        #[arg(long = "tag")]
+        tag: Vec<String>,
+        /// Bucket K1 — assignee user UUID. Validated cross-org server-side.
+        #[arg(long = "assignee")]
+        assignee: Option<String>,
+        /// Print the full JSON envelope instead of a status line.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Read one task by id. Wraps GET /api/v2/a2a/tasks/{id}.
+    /// 404 surfaces as a CLI error so a polling loop can decide
+    /// whether to retry.
+    Get {
+        /// Required. Task UUID returned by `aura a2a-task create`.
+        id: String,
+        /// Print the full JSON envelope instead of a status line.
+        #[arg(long)]
+        json: bool,
+    },
+    /// List tasks. Wraps GET /api/v2/a2a/tasks. Read-only;
+    /// idempotent. Filters compose: --status + --repo narrow the
+    /// returned set.
+    List {
+        /// Filter by status. One of submitted | working |
+        /// input-required | completed | failed | canceled |
+        /// rejected | auth-required.
+        #[arg(long)]
+        status: Option<String>,
+        /// Filter by repo (github_full_name).
+        #[arg(long)]
+        repo: Option<String>,
+        /// Cap returned rows. Cloud default 100, max 500.
+        #[arg(long)]
+        limit: Option<i64>,
+        /// Print raw JSON envelope instead of a human-readable table.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Patch a task's status (and optionally result + error_message).
+    /// Wraps PATCH /api/v2/a2a/tasks/{id}. Terminal states (completed
+    /// | failed | canceled | rejected) are sticky cloud-side — re-
+    /// patching a terminal task surfaces as HTTP 409.
+    Patch {
+        /// Required. Task UUID returned by `aura a2a-task create`
+        /// or seen in `aura a2a-task list`.
+        id: String,
+        /// Required. New status. One of submitted | working |
+        /// input-required | completed | failed | canceled |
+        /// rejected | auth-required.
+        #[arg(long)]
+        status: String,
+        /// Optional result payload as a JSON object string. Most
+        /// commonly set on transition into `completed`.
+        #[arg(long = "result-json")]
+        result_json: Option<String>,
+        /// Optional error_message. Most commonly set on transition
+        /// into `failed`.
+        #[arg(long = "error-message")]
+        error_message: Option<String>,
+        /// Print the full JSON envelope instead of a status line.
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+#[derive(Subcommand)]
+enum PrAction {
+    /// Print the cloud install URL for a platform (github | gitlab)
+    Connect { platform: String },
+    /// Generate (and optionally post) an AI-synthesized review
+    Review {
+        #[arg(long)]
+        pr: i32,
+        #[arg(long)]
+        dry_run: bool,
+        #[arg(long)]
+        base: Option<String>,
+    },
+    /// List recent PR review events for the current repo
+    Status,
+    /// Record feedback on a review event
+    Feedback {
+        event_id: String,
+        verdict: String,
+        #[arg(long)]
+        note: Option<String>,
+    },
+    /// S2-PCR: per-commit AI review surface (list / get / generate).
+    /// Mirrors the 3 cloud /api/v2/pr/commit-reviews* endpoints so
+    /// the per-commit picture is operable from the terminal.
+    CommitReview {
+        #[command(subcommand)]
+        action: PrCommitReviewAction,
+    },
+}
+
+/// Cross-project agent-skill ledger CLI mirror. `record` POSTs one
+/// outcome to /api/v1/skill/outcomes; `stats` GETs aggregated rows
+/// per-provider for routing decisions. The Manager session writes
+/// each closed task's outcome via `aura skill record`; PlanCard reads
+/// /skill/stats via the same client to render the auto-routing badge.
+#[derive(Subcommand)]
+enum SkillAction {
+    /// POST /api/v1/skill/outcomes — JSON body is a `SkillOutcome`
+    /// struct. Falls back to writing into `~/.aura/agent_skills.json`
+    /// (with the dirty-row marker) when the cloud is unreachable.
+    Record {
+        /// Full SkillOutcome as a JSON object. Pass via `--json '<...>'`
+        /// or pipe `cat outcome.json | aura skill record --json -`.
+        #[arg(long)]
+        json: String,
+    },
+    /// GET /api/v1/skill/stats — returns one row per provider for the
+    /// requested taxonomy cell (filtered by user via the auth token).
+    Stats {
+        /// Coarse category filter — frontend|backend|infra|refactor|
+        /// security-review|architecture-review.
+        #[arg(long)]
+        category: String,
+        /// Optional fine_language filter.
+        #[arg(long)]
+        language: Option<String>,
+        /// Optional fine_layer filter — ui|api|db|cli.
+        #[arg(long)]
+        layer: Option<String>,
+    },
+    /// Rank the providers for a taxonomy cell and print the single best
+    /// one. This is the canonical routing decision — `aura skill stats`
+    /// returns the raw rollup, `suggest` applies the
+    /// `score = q·pr/(1+cost)`, n≥10 formula (see `skill_rank`) and
+    /// names a winner. aura-shell's dispatcher shells out to this so the
+    /// CLI and the in-app manager share exactly one ranker; any external
+    /// agent can ask "best brain for this kind of task?" the same way.
+    Suggest {
+        /// Coarse category — frontend|backend|infra|refactor|
+        /// security-review|architecture-review.
+        #[arg(long)]
+        category: String,
+        /// Optional fine_language filter.
+        #[arg(long)]
+        language: Option<String>,
+        /// Optional fine_layer filter — ui|api|db|cli.
+        #[arg(long)]
+        layer: Option<String>,
+        /// Emit the suggestion as a JSON object (`{provider_id, score,
+        /// sample_count}`) or `null` when no provider clears the sample
+        /// threshold. Without this, a human-readable line is printed.
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+#[derive(Subcommand)]
+enum PrCommitReviewAction {
+    /// List per-commit AI review rows for one PR.
+    /// GET /api/v2/pr/commit-reviews?repo=…&platform=…&pr_number=…
+    List {
+        #[arg(long)]
+        repo: String,
+        #[arg(long)]
+        platform: String,
+        #[arg(long)]
+        pr_number: i32,
+        /// Optional canonical intent_type filter (FeatureAdd | BugFix |
+        /// Refactor | Revert | Performance | Docs | Deps). The
+        /// counts_by_intent_type histogram still spans the whole PR.
+        #[arg(long)]
+        intent_type: Option<String>,
+        #[arg(long)]
+        limit: Option<i64>,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Fetch a single per-commit review row by commit SHA.
+    /// GET /api/v2/pr/commit-reviews/{commit_sha}?repo=…&platform=…&pr_number=…
+    /// (Cloud requires the PR scope on the query — the SHA alone is
+    /// not unique across repos/PRs, so the row resolution needs all
+    /// three.)
+    Get {
+        commit_sha: String,
+        #[arg(long)]
+        repo: String,
+        #[arg(long)]
+        platform: String,
+        #[arg(long)]
+        pr_number: i32,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Run the per-commit AI review pipeline over a list of commits.
+    /// POST /api/v2/pr/commit-review-generate. Commits come from a
+    /// JSON file shaped as the GenerateRequest.commits array.
+    Generate {
+        #[arg(long)]
+        repo: String,
+        #[arg(long)]
+        platform: String,
+        #[arg(long)]
+        pr_number: i32,
+        /// Path to a JSON file containing the `commits` array
+        /// (CommitInput[]). Use `-` to read from stdin.
+        #[arg(long)]
+        commits_json_file: String,
+        /// Optional umbrella PR review event UUID to link the rows to.
+        #[arg(long)]
+        pr_review_event_id: Option<String>,
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+#[derive(Subcommand)]
+enum KeysAction {
+    /// Generate an X25519 identity keypair, encrypt it with a passphrase,
+    /// upload the public key, and cache it locally.
+    Init {
+        /// Passphrase used to encrypt the private key at rest.
+        #[arg(long)]
+        passphrase: String,
+    },
+    /// Show the local identity public key (base64).
+    Show,
+    /// Fetch the wrapped org content key, unwrap it locally with your
+    /// passphrase, cache it, and mark it active. After this, every
+    /// `aura save` seals bodies and every `aura pull` decrypts them
+    /// automatically. Non-E2E orgs never need to call this.
+    Unlock {
+        /// Org slug whose content key to unlock.
+        org_slug: String,
+        /// Passphrase used when you ran `aura keys init`.
+        #[arg(long)]
+        passphrase: String,
+    },
+    /// Rotate the org content key (admin only).
+    Rotate {
+        #[arg(long)]
+        org_slug: String,
+    },
+    /// Export the encrypted identity file (portable across machines).
+    Export {
+        #[arg(long)]
+        out: String,
+    },
+    /// Import an encrypted identity file previously exported.
+    Import {
+        #[arg(long)]
+        file: String,
+    },
+    /// Verify a signed `aura/manifest` envelope (JCS RFC 8785 + ed25519).
+    ///
+    /// Reads a manifest JSON file, re-canonicalizes with `signature: null`,
+    /// and verifies the ed25519 signature. If `--pubkey-b64` is omitted the
+    /// local default signing key's public half is used.
+    SigstoreVerify {
+        /// Path to the signed manifest JSON file.
+        manifest: String,
+        /// Optional: base64-encoded ed25519 public key (32 bytes).
+        /// Defaults to the local identity's verifying key.
+        #[arg(long = "pubkey-b64")]
+        pubkey_b64: Option<String>,
+    },
+    /// Sign an unsigned `aura/manifest` envelope in place.
+    ///
+    /// Reads a manifest JSON file (any shape that has or lacks a
+    /// `signature` field), runs `manifest_sig::sign_manifest` with the
+    /// local default signing key, and writes the signed manifest back to
+    /// the same path (or to `--out` if specified).
+    SigstoreSign {
+        /// Path to the manifest JSON file to sign.
+        manifest: String,
+        /// Optional output path. Defaults to in-place rewrite.
+        #[arg(long)]
+        out: Option<String>,
+    },
+    /// Publish a signed `aura/manifest` to a Rekor transparency log.
+    ///
+    /// Reads the signed manifest, computes the canonical hash, POSTs a
+    /// hashedrekord v0.0.1 entry to Rekor, and writes the returned UUID +
+    /// log index to a sidecar file (`<manifest>.rekor.json` by default).
+    /// Requires the manifest to be already signed (call `aura keys
+    /// sigstore-sign` first — coming separately).
+    RekorPublish {
+        /// Path to the signed manifest JSON file.
+        manifest: String,
+        /// Rekor base URL. Defaults to public sigstore Rekor.
+        #[arg(long = "rekor-url", default_value = "https://rekor.sigstore.dev")]
+        rekor_url: String,
+        /// Where to write the returned RekorEntryRef sidecar.
+        /// Defaults to `<manifest>.rekor.json`.
+        #[arg(long)]
+        out: Option<String>,
+    },
+    /// Verify a manifest's Rekor entry by fetching it back and checking
+    /// that the logged hash + signature match the local manifest.
+    ///
+    /// Reads the manifest + its `<manifest>.rekor.json` sidecar, fetches
+    /// the entry from Rekor by UUID, and asserts no drift.
+    RekorVerify {
+        /// Path to the signed manifest JSON file.
+        manifest: String,
+        /// Path to the RekorEntryRef sidecar.
+        /// Defaults to `<manifest>.rekor.json`.
+        #[arg(long)]
+        sidecar: Option<String>,
+    },
+    /// Rotate the local sigstore signing key. Generates a fresh ed25519
+    /// keypair, replaces the keyfile atomically, and persists a
+    /// `key_rotation` SentinelEvent block signed by the OLD key so a
+    /// verifier can chain a future intent (signed by the NEW key) back
+    /// to the prior identity.
+    SigstoreRotate {
+        /// Output as structured JSON envelope instead of text.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Pull the rotation chain from the cloud mirror and materialize
+    /// each block under `.aura/blocks/<id>.json`. Lets a fresh machine
+    /// recover historical pubkeys that the chain-walk verifier needs to
+    /// validate intents signed by rotated-out keys. Idempotent.
+    SigstorePull {
+        /// Output as structured JSON envelope instead of text.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Read-only health probe for the local sigstore signing key.
+    /// Mirrors the MCP `aura_status.signing` block and the `aura doctor`
+    /// "Signing key" line — same single-source helper, so all three
+    /// surfaces report the same diagnosis. Never mints a key as a
+    /// side-effect (use `aura keys sigstore-rotate` to mint/rotate).
+    /// Exits 0 on `ok`, 1 on `missing`/`unreadable`/`no_path`.
+    SigstoreStatus {
+        /// Output as structured JSON envelope instead of text.
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+#[derive(Subcommand)]
+enum CrdtAction {
+    /// Show cached CRDT cursor state + doc-path mappings
+    Status,
+    /// Force-pull latest ops for the current branch
+    Pull,
+}
+
+#[derive(Subcommand)]
+enum AttestAction {
+    /// Verify a signed intent block by ID.
+    ///
+    /// Reads `.aura/blocks/<block_id>.json`, checks the ed25519 signature
+    /// against the local signing key's public half, and — when the block
+    /// carries `attestations.rekor` — also fetches the Rekor entry and
+    /// asserts no drift (uuid, log_index, hash, signature).
+    Verify {
+        /// The block ID (UUID hex). Resolved against `.aura/blocks/`.
+        block_id: String,
+        /// Skip the Rekor inclusion check even if `attestations.rekor` is present.
+        #[arg(long = "no-rekor")]
+        no_rekor: bool,
+        /// Emit the verification report as JSON instead of human-readable
+        /// text. Mirrors the response shape of the aura_attest_verify
+        /// MCP tool, so a shell script can parse it without regex.
+        #[arg(long)]
+        json: bool,
+    },
+    /// List signed intent blocks under `.aura/blocks/`.
+    ///
+    /// Prints one row per block (id, kind, created_at, sig?, rekor?,
+    /// intent_type) so a user can quickly see which intents have
+    /// signatures + transparency log entries + canonical type tags
+    /// without opening each JSON file by hand.
+    List {
+        /// Output the listing as JSON (one object per row) instead of text.
+        #[arg(long)]
+        json: bool,
+        /// Filter to blocks signed for a specific human DID. Accepts
+        /// either the raw env value (e.g. "ashiq@naridon") or the
+        /// canonical DID form (e.g. "did:aura:human/ashiq-naridon") —
+        /// matched case-sensitive against either slot in the block.
+        #[arg(long)]
+        human: Option<String>,
+        /// S2-TIL filter: restrict to blocks whose canonical intent_type
+        /// matches. One of FeatureAdd, BugFix, Refactor, Revert,
+        /// Performance, Docs, Deps. Validated CLI-side; invalid values
+        /// fail with the canonical list. Untyped blocks are excluded
+        /// when this filter is present.
+        #[arg(long = "type")]
+        intent_type: Option<String>,
+    },
+    /// Make your AI-work records checkable by your teammates.
+    ///
+    /// Two things happen, both written into files your team already
+    /// shares through git:
+    ///   1. Your verification key is published to `.aura/team/keys.jsonl`
+    ///      (just the public half — your teammates need it to re-check
+    ///      your work; the secret half never leaves your machine).
+    ///   2. Every signed record you've made is copied into `.aura/attest/`
+    ///      so teammates have the proof itself, not only a reference to it.
+    ///
+    /// After you commit + push, anyone on the team can run
+    /// `aura attest verify <id>` and independently confirm the record is
+    /// genuine — on their own machine, without trusting yours.
+    Share {
+        /// Emit the report as JSON instead of human-readable text.
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+#[derive(Subcommand)]
+enum BlocksSubcommands {
+    /// List recent blocks from the local store, newest first.
+    List {
+        /// Filter to a specific kind (e.g. command, message, proposal).
+        #[arg(long)]
+        kind: Option<String>,
+        /// Max blocks to show.
+        #[arg(long, default_value = "20")]
+        limit: u32,
+        /// Output the raw JSON envelopes instead of the digest.
+        #[arg(long)]
+        json: bool,
     },
 }
 
@@ -833,6 +2388,50 @@ enum MsgSubcommands {
         /// Output raw JSON
         #[arg(long)]
         json: bool,
+    },
+}
+
+#[derive(Subcommand)]
+enum GoalsSubcommands {
+    /// Check whether the code actually delivers a goal — and remember the result
+    Prove {
+        /// What you're building, in plain words ("users can sign in via Google")
+        text: String,
+        /// Optionally tie this goal to a board task (e.g. AURA-42)
+        #[arg(long)]
+        task: Option<String>,
+        /// Output raw JSON
+        #[arg(long)]
+        json: bool,
+    },
+    /// List every tracked goal with whether the code backs it up
+    List {
+        /// Output raw JSON
+        #[arg(long)]
+        json: bool,
+    },
+    /// Show one goal: what it needs, and what's in place
+    Show {
+        /// Goal id (goal_…) or its text
+        goal: String,
+        /// Output raw JSON
+        #[arg(long)]
+        json: bool,
+    },
+    /// Re-check a goal against the code right now and explain how we know
+    Why {
+        /// Goal id (goal_…) or its text
+        goal: String,
+        /// Output raw JSON
+        #[arg(long)]
+        json: bool,
+    },
+    /// Tie an existing goal to a board task
+    Link {
+        /// Goal id (goal_…) or its text
+        goal: String,
+        /// Board task ref (e.g. AURA-42)
+        task: String,
     },
 }
 
@@ -993,6 +2592,9 @@ enum KnowledgeSubcommands {
         /// Max results
         #[arg(long, default_value = "10")]
         limit: usize,
+        /// Emit JSON instead of human-formatted output (for shell consumers).
+        #[arg(long)]
+        json: bool,
     },
     /// Upvote a knowledge entry (pass the ID)
     Upvote {
@@ -1031,7 +2633,13 @@ enum ZoneSubcommands {
 #[derive(Subcommand)]
 enum LiveSubcommands {
     /// Start streaming function-level changes to Aura Cloud in real-time
-    Start,
+    Start {
+        /// Go Live with whole-file CRDT collaboration: the entire working tree
+        /// syncs conflict-free (not just function bodies), with the CRDT daemon
+        /// as the sole disk writer for this repo. Persists until `live stop`.
+        #[arg(long)]
+        collab: bool,
+    },
     /// Stop live streaming
     Stop,
     /// Show current team presence and what functions are being worked on
@@ -1067,9 +2675,15 @@ enum SyncSubcommands {
         /// Dry run — show what would change without applying
         #[arg(long)]
         dry_run: bool,
+        /// Include functions their author flagged as a red (broken) build.
+        /// Default is to skip them so your tree stays green.
+        #[arg(long)]
+        allow_red: bool,
     },
     /// Show sync status: pending changes, active pushers, synced functions
     Status,
+    /// Backfill existing local .aura/snapshots/*.json to the cloud dashboard
+    Backfill,
 }
 
 #[derive(Subcommand)]
@@ -1093,8 +2707,510 @@ enum ConfigSubcommands {
 enum PolicySubcommands {
     /// Add a standard architectural policy pack to your production.aura.json
     Add {
-        /// The name of the pack (e.g., 'security', 'payments', 'web-app')
+        /// The name of the pack (e.g., 'security', 'payments', 'web-app', 'owasp', 'airbnb-js', 'google-style', 'pep-python')
         pack_name: String,
+    },
+    /// List all available policy packs (with --json for machine output)
+    List {
+        /// Emit JSON instead of a pretty table
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+#[derive(Subcommand)]
+enum LoopSubcommands {
+    /// Mint a node into the dependency graph (`.aura/a2a/`).
+    Add {
+        /// Short title for the work item.
+        title: String,
+        /// The work spec / prompt the runner hands the agent.
+        #[arg(short, long, default_value = "")]
+        input: String,
+        /// Priority: low | medium | high | critical.
+        #[arg(short, long, default_value = "medium")]
+        priority: String,
+        /// Kind: plan | wave | task | subtask.
+        #[arg(short, long, default_value = "task")]
+        kind: String,
+        /// Depends-on ids (repeatable). The node stays blocked until each
+        /// is completed.
+        #[arg(long = "dep")]
+        deps: Vec<String>,
+        /// Acceptance criteria the verify gate proves against.
+        #[arg(long)]
+        ac: Option<String>,
+        /// Agent to dispatch for this node (e.g. claude | aura | codex).
+        #[arg(long)]
+        agent: Option<String>,
+        /// Comma-separated tags.
+        #[arg(long, default_value = "")]
+        tags: String,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Add or remove a dependency edge between two nodes.
+    Dep {
+        /// The dependent node (the one that waits).
+        id: String,
+        /// The node it depends on (must complete first).
+        on: String,
+        /// Remove the edge instead of adding it.
+        #[arg(long)]
+        rm: bool,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Print the READY SET — nodes whose dependencies are all completed
+    /// and which aren't done or in flight. This is `bd ready`, native.
+    Ready {
+        #[arg(long)]
+        json: bool,
+    },
+    /// List every node grouped by ready / blocked / working / done.
+    List {
+        #[arg(long)]
+        json: bool,
+    },
+    /// Show one node's full detail (deps, status, lease, acceptance).
+    Show {
+        id: String,
+        #[arg(long)]
+        json: bool,
+    },
+    /// One-line counts: ready / blocked / working / done / other.
+    Status {
+        #[arg(long)]
+        json: bool,
+    },
+    /// Set a node's status directly (submitted | working | completed |
+    /// failed | canceled | rejected | input-required | auth-required).
+    Set {
+        id: String,
+        status: String,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Run the autonomous loop: claim the ready set, dispatch each node to
+    /// its agent through the harness, record the commit + verify, repeat
+    /// until nothing is ready. This is the native `hew`/Ralph loop.
+    Run {
+        /// Default agent for nodes that don't name their own.
+        #[arg(long, default_value = "claude")]
+        agent: String,
+        /// Lease duration (seconds). A crashed runner's node is reclaimed
+        /// after this elapses.
+        #[arg(long, default_value_t = 1800)]
+        lease_secs: i64,
+        /// Stop after this many nodes (0 = until the ready set drains).
+        #[arg(long, default_value_t = 0)]
+        max: usize,
+        /// Verify command run in the repo after each node; non-zero fails
+        /// the node (e.g. "cargo check" or "bun run tsc").
+        #[arg(long)]
+        verify: Option<String>,
+        /// Print what would be dispatched without spawning any agent.
+        #[arg(long)]
+        dry_run: bool,
+        /// Keep polling for newly-ready nodes instead of exiting when the
+        /// ready set drains (Ctrl-C to stop).
+        #[arg(long)]
+        watch: bool,
+        /// How many nodes to work at once. 1 (default) is the classic
+        /// sequential loop; >1 runs each ready node in its own throwaway git
+        /// worktree and merges the good ones back — independent tasks build in
+        /// parallel without branch-switch churn.
+        #[arg(long, default_value_t = 1)]
+        jobs: usize,
+        /// On a failed acceptance gate (verify command or goal proof), revert
+        /// the node's commit instead of leaving broken code on the branch. In
+        /// `--jobs` mode rollback is automatic (the bad work dies with its
+        /// worktree); this flag governs the sequential, commit-in-place path.
+        #[arg(long)]
+        rollback: bool,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Seed the graph from an existing plan file — each wave becomes a node
+    /// and waves chain via dependency edges (brownfield bootstrap).
+    Seed {
+        /// Path to a plan markdown/XML file (defaults to
+        /// .aura/plans/PLAN.md).
+        #[arg(long)]
+        from: Option<String>,
+        /// Default agent for the seeded nodes.
+        #[arg(long, default_value = "claude")]
+        agent: String,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Read the ORDERLESS pile bucketed into focused chunks (epic → sprint →
+    /// batch) so a big board can be planned in FULL — prints JSON a planner
+    /// agent reasons over, then writes back with `loop plan-apply`. This is the
+    /// same context Aura's desktop "plan an order" uses; here the agent is the
+    /// planner.
+    PlanContext {
+        #[arg(long)]
+        json: bool,
+    },
+    /// Apply a planned order from JSON ({ "edges": [{task,depends_on}],
+    /// "goals": [{goal,tasks}], "objectives": [{objective,goals}] }) read from
+    /// --file or stdin. Wires cycle-checked dependency edges and stamps
+    /// goal:/objective: tags — the same graph the desktop builds.
+    PlanApply {
+        /// Path to a plan JSON file. Reads stdin when omitted.
+        #[arg(long)]
+        file: Option<String>,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Reality-check the pile BEFORE planning: flag tasks that are already
+    /// finished (a finished task shares the name, or recent commits delivered
+    /// it), duplicates of another pending task, or empty stubs. Honest signals
+    /// only — it never guesses the code is done. The planner (or a human) drops
+    /// or keeps each. `--commits N` widens the finished-work evidence window.
+    Review {
+        /// How many recent commit subjects to treat as finished-work evidence.
+        #[arg(long, default_value_t = 40)]
+        commits: usize,
+        #[arg(long)]
+        json: bool,
+    },
+    /// List existing goals on the board that NEW tasks could attach to instead
+    /// of starting a disconnected island — each with the tail steps to hang the
+    /// new work after. Empty when nothing's grouped under a goal yet.
+    AttachTargets {
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+#[derive(Subcommand)]
+enum TaskSubcommands {
+    /// Create a new task
+    New {
+        /// Task title
+        title: String,
+        /// Optional body / description
+        #[arg(short, long, default_value = "")]
+        body: String,
+        /// Priority: low | medium | high | critical
+        #[arg(short, long, default_value = "medium")]
+        priority: String,
+        /// Comma-separated labels
+        #[arg(short, long, default_value = "")]
+        labels: String,
+        /// Author (defaults to git config user.name / "anon")
+        #[arg(long)]
+        author: Option<String>,
+        /// Emit JSON
+        #[arg(long)]
+        json: bool,
+    },
+    /// List tasks
+    List {
+        /// Filter by status: open | in_progress | blocked | done | cancelled
+        #[arg(short, long)]
+        status: Option<String>,
+        /// Filter by assignee
+        #[arg(short, long)]
+        assignee: Option<String>,
+        /// Filter by claimed_by
+        #[arg(long)]
+        claimed_by: Option<String>,
+        /// Emit JSON
+        #[arg(long)]
+        json: bool,
+    },
+    /// Show full task detail
+    Show {
+        id: String,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Claim a task (assigns to current user/agent and marks in_progress)
+    Claim {
+        id: String,
+        /// Override claimer name (defaults to git config user.name / "anon")
+        #[arg(long)]
+        as_who: Option<String>,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Release claim on a task
+    Unclaim {
+        id: String,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Assign a task to someone (without claiming)
+    Assign {
+        id: String,
+        /// Assignee name; pass "none" to clear
+        who: String,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Add a comment to a task
+    Comment {
+        id: String,
+        body: String,
+        /// Override author name
+        #[arg(long)]
+        as_who: Option<String>,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Mark task done
+    Close {
+        id: String,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Reopen a closed task
+    Reopen {
+        id: String,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Update task status manually (open|in_progress|blocked|done|cancelled)
+    Status {
+        id: String,
+        status: String,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Link a task to a PR or branch
+    Link {
+        id: String,
+        /// PR identifier (e.g. "#123" or URL)
+        #[arg(long)]
+        pr: Option<String>,
+        /// Branch name
+        #[arg(long)]
+        branch: Option<String>,
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+#[derive(Subcommand)]
+enum ActivitySubcommands {
+    /// Show recent activity (newest first)
+    Tail {
+        /// Number of events to show
+        #[arg(short, long, default_value = "30")]
+        n: usize,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Manually emit an activity event (used by hooks / agents)
+    Emit {
+        /// Verb (e.g. "snapshot", "intent", "review")
+        verb: String,
+        /// Target (task id, file path, etc)
+        target: String,
+        /// Optional summary
+        #[arg(short, long)]
+        summary: Option<String>,
+        /// Override actor
+        #[arg(long)]
+        actor: Option<String>,
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+#[derive(Subcommand)]
+enum RadarSubcommands {
+    /// Show the team awareness feed (newest first). Same as bare `aura radar`.
+    Show {
+        /// Only show events touching this path fragment or symbol.
+        #[arg(long)]
+        focus: Option<String>,
+        /// Max events to show.
+        #[arg(short, long, default_value = "20")]
+        limit: usize,
+        #[arg(long)]
+        json: bool,
+    },
+    /// The reasoned layer: show ONLY genuine/possible collisions against your
+    /// own current work (dirty files + symbols you've announced). Quiet by
+    /// design — random edits to unrelated files never surface here.
+    Conflicts {
+        /// Treat this agent label as "me" too, so your own events are skipped
+        /// (e.g. `--as claude@cursor`).
+        #[arg(long = "as")]
+        as_actor: Option<String>,
+        /// Include weaker (possible) signals as well as direct/likely ones.
+        #[arg(long)]
+        all: bool,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Announce in-flight work so teammates and other agents are aware before a
+    /// commit/PR. Any agent can shell out to this.
+    Emit {
+        /// What kind: started|editing|intent|impact|zone|paused|abandoned|committed
+        #[arg(default_value = "editing")]
+        kind: String,
+        /// File being touched.
+        #[arg(long)]
+        file: Option<String>,
+        /// AST symbol (function/class) being touched.
+        #[arg(long)]
+        symbol: Option<String>,
+        /// The *why* — a short human-readable intent.
+        #[arg(long)]
+        intent: Option<String>,
+        /// Projected blast-radius summary.
+        #[arg(long)]
+        impact: Option<String>,
+        /// Emit as an AI agent under this label (e.g. `claude@cursor`). When
+        /// omitted, the human git user is the actor.
+        #[arg(long)]
+        agent: Option<String>,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Wire `aura validate-tool` into Claude Code's PreToolUse hook (project
+    /// `.claude/settings.json`) so edits emit live `editing` events on the
+    /// radar — and destructive ops hit the safety gate — with ZERO MCP. Git
+    /// hooks already cover `committed`; this is the live half.
+    Wire {
+        /// Remove Aura's PreToolUse hook instead of installing it.
+        #[arg(long)]
+        undo: bool,
+        /// Suppress success output (for scripted/`aura enable` use).
+        #[arg(long)]
+        quiet: bool,
+    },
+    /// Report whether the awareness plane is live WITHOUT MCP: signing
+    /// identity, git hooks (`committed`), Claude Code PreToolUse (`editing`),
+    /// and event volume — naming the fix for any missing piece.
+    Status {
+        #[arg(long)]
+        json: bool,
+    },
+    /// Show or set this repo's broadcast privacy: off | intent-only |
+    /// symbols (default) | diffs. Below `diffs`, Live function-body sync is
+    /// blocked; `off` makes the repo fully dark (no push, no pull).
+    Privacy {
+        /// New level. Omit to show the current policy.
+        level: Option<String>,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Push pending local events to the team relay and pull teammates' in,
+    /// through the active LiveTransport. Runs detached after each emit; call
+    /// it directly to force a round now.
+    Sync {
+        #[arg(long)]
+        json: bool,
+        /// Suppress all output (used by the detached auto-sync).
+        #[arg(long)]
+        quiet: bool,
+    },
+}
+
+#[derive(Subcommand)]
+enum ReviewSubcommands {
+    /// List persisted reviews (newest first)
+    List {
+        #[arg(long)]
+        json: bool,
+    },
+    /// Show a single persisted review by unix timestamp
+    Show {
+        ts: i64,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Configure reviewer/fixer roles for this repo (.aura/review_roles.json)
+    Setup {
+        /// Reviewer agents, comma-separated (e.g. claude,gemini,codex)
+        #[arg(long)]
+        reviewers: Option<String>,
+        /// Fixer agent applied by `aura review fix`
+        #[arg(long)]
+        fixer: Option<String>,
+        /// Base branch to diff reviews against
+        #[arg(long)]
+        base: Option<String>,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Show the configured review roles
+    Roles {
+        #[arg(long)]
+        json: bool,
+    },
+    /// Run role-driven review: Aura engine + reviewer agents over the diff
+    Run {
+        /// Override the configured reviewer agents (comma-separated)
+        #[arg(long)]
+        reviewers: Option<String>,
+        /// Override the configured fixer agent
+        #[arg(long)]
+        fixer: Option<String>,
+        /// Override the base branch
+        #[arg(long)]
+        base: Option<String>,
+        /// Per-reviewer timeout in seconds
+        #[arg(long, default_value = "900")]
+        timeout_secs: u64,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Pick findings from the last review and apply them via the fixer
+    Fix {
+        /// Override the base branch
+        #[arg(long)]
+        base: Option<String>,
+        /// Override the fixer agent
+        #[arg(long)]
+        fixer: Option<String>,
+        /// Apply all findings without prompting (CI-friendly)
+        #[arg(long)]
+        yes: bool,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Post the last review's findings to a GitHub PR as line-anchored
+    /// inline comments (one PR review, via `gh`)
+    Post {
+        /// PR number to post to (default: the PR for the current branch)
+        #[arg(long)]
+        pr: Option<u64>,
+        /// Override the base branch (used only for the standalone Aura pass
+        /// when there is no prior `aura review run`)
+        #[arg(long)]
+        base: Option<String>,
+        /// Build and print the exact review payload without contacting GitHub
+        #[arg(long)]
+        dry_run: bool,
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+#[derive(Subcommand)]
+enum IntentVsActualSubcommands {
+    /// List recent commits with their commit-time intent counts (cheap)
+    List {
+        /// How many commits to walk back (default 50)
+        #[arg(short, long, default_value = "50")]
+        n: usize,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Score a single commit — full AST diff + intent alignment
+    Show {
+        /// Anything `git revparse` understands: full sha, short sha,
+        /// HEAD, HEAD~1, branch name.
+        sha: String,
+        #[arg(long)]
+        json: bool,
     },
 }
 
@@ -1225,16 +3341,24 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Log telemetry (non-blocking)
     let cmd_name = match &cli.command {
         Commands::Init { .. } => "init",
+        Commands::Enable { .. } => "enable",
+        Commands::Disable => "disable",
         Commands::Plan { .. } => "plan",
         Commands::Execute => "execute",
         Commands::Rewind { .. } => "rewind",
         Commands::Handover { .. } => "handover",
         Commands::Status => "status",
+        Commands::Ci { .. } => "ci",
         Commands::Audit => "audit",
         Commands::Explain { .. } => "explain",
         Commands::Sessions => "sessions",
+        Commands::Subagent { .. } => "subagent",
+        Commands::AskUser { .. } => "ask-user",
+        Commands::ProposePlan { .. } => "propose-plan",
         Commands::Resume { .. } => "resume",
+        Commands::Carryover { .. } => "carryover",
         Commands::Doctor => "doctor",
+        Commands::Ui { .. } => "ui",
         Commands::Completions { .. } => "completions",
         Commands::RequestAccess { .. } => "request-access",
         Commands::GoalTrace { .. } => "goal-trace",
@@ -1242,6 +3366,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         Commands::Live { .. } => "live",
         Commands::Server { .. } => "server",
         Commands::Save { .. } => "save",
+        Commands::LogIntent { .. } => "log-intent",
+        Commands::ValidateTool => "validate-tool",
+        Commands::Blocks { .. } => "blocks",
         Commands::Share => "share",
         Commands::Pull { .. } => "pull",
         Commands::Merge { .. } => "merge",
@@ -1253,7 +3380,33 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         Commands::Ping => "ping",
         Commands::Join { .. } => "join",
         Commands::Connect { .. } => "connect",
+        Commands::JoinTeam { .. } => "join-team",
+        Commands::Crdt { .. } => "crdt",
+        Commands::Keys { .. } => "keys",
+        Commands::Attest { .. } => "attest",
+        Commands::Pr { .. } => "pr",
+        Commands::Resolve { .. } => "resolve",
+        Commands::Atlas { .. } => "atlas",
+        Commands::Goals { .. } => "goals",
+        Commands::ChangeNote { .. } => "change-note",
+        Commands::Whoami => "whoami",
+        Commands::Disconnect => "disconnect",
         Commands::Usage { .. } => "usage",
+        Commands::AcpServe => "acp-serve",
+        Commands::AcpRun { .. } => "acp-run",
+        Commands::Ws { .. } => "ws",
+        Commands::Recall { .. } => "recall",
+        Commands::Intents { .. } => "intents",
+        Commands::HandoverCloud { .. } => "handover-cloud",
+        Commands::Memory { .. } => "memory",
+        Commands::MemoryCloud { .. } => "memory-cloud",
+        Commands::A2aTask { .. } => "a2a-task",
+        Commands::Skill { .. } => "skill",
+        Commands::Skills { .. } => "skills",
+        Commands::Replay { .. } => "replay",
+        Commands::Webhooks { .. } => "webhooks",
+        Commands::AgentCard { .. } => "agent-card",
+        Commands::MergeDriver { .. } => "merge-driver",
         _ => "internal_command"
     };
     track_event("cli_execution", Some(cmd_name));
@@ -1269,6 +3422,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         Commands::Update => {
             perform_update()?;
+        }
+        Commands::Enable { quiet } => {
+            enable::run(*quiet)?;
+        }
+        Commands::Disable => {
+            enable::disable()?;
         }
         Commands::Init { force_baseline } => {
             println!("{}", r#"
@@ -1751,6 +3910,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     intent: "[Aura Baseline] Initialized Merkle-Graph for existing codebase.".to_string(),
                     ast_nodes: staged_nodes,
                     intent_vector: None,
+                    intent_vector_model: None,
                     env_fingerprint: capture_env_fingerprint(),
                 };
 
@@ -1833,7 +3993,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let ext = detect_lang_ext(&path_str); if ext.is_empty() { continue }; let ext = ext.as_str();
 
                 if let Ok(source_code) = fs::read_to_string(&path_str) {
-                    if let Ok(ast_nodes) = parser.parse_file(&source_code, ext) {
+                    if let Ok(ast_nodes) = parser.parse_file_with_path(&source_code, ext, &path_str) {
                         for node in ast_nodes {
                             if node.contains_secret {
                                 let ident = node.identifier.clone().unwrap_or_else(|| "Anonymous".to_string());
@@ -2153,16 +4313,39 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 // Check if aura_log_intent was actually called (marker file must exist)
                 let intent_was_logged = std::path::Path::new(".aura/.intent_logged").exists();
 
-                // Block if intent was never logged via aura_log_intent
-                // Always block — intent logging is mandatory for all commits with logic changes
+                // Intent logging is ENFORCED only in strict gatekeeper mode.
+                // In the default passive / warn-only mode — which is the whole
+                // no-MCP `aura enable` drop-in path — a missing marker must
+                // NEVER block the commit: capture is meant to be invisible and
+                // frictionless (Entire-parity). The marker is only ever written
+                // by the MCP tool `aura_log_intent` / CLI `aura log-intent`, so
+                // a plain `git commit` with no MCP server attached legitimately
+                // has no marker. Warn once and proceed so the checkpoint still
+                // records. Strict mode keeps the hard block for teams that opt
+                // into mandatory reasoning trails.
                 if !intent_was_logged {
-                    spinner.finish_and_clear();
-                    println!("{} Intent Not Logged: You must call {} before committing.", "🚨".red().bold(), "aura_log_intent".cyan().bold());
-                    println!("  {} {} logic nodes were modified but no intent was logged via the MCP tool.", "↳".dimmed(), staged_nodes.len());
-                    println!("\n  {} {}", "How to Fix:".bold().green(), "Call aura_log_intent with a description of your changes:");
-                    println!("    {} aura_log_intent(\"<describe what you changed and why>\")", "→".dimmed());
-                    println!("\n{} Commit halted.", "✗".red().bold());
-                    std::process::exit(1);
+                    if config.strict_gatekeeper_mode {
+                        spinner.finish_and_clear();
+                        println!("{} Intent Not Logged: You must call {} before committing.", "🚨".red().bold(), "aura_log_intent".cyan().bold());
+                        println!("  {} {} logic nodes were modified but no intent was logged via the MCP tool.", "↳".dimmed(), staged_nodes.len());
+                        println!("\n  {} {}", "How to Fix:".bold().green(), "Call aura_log_intent with a description of your changes:");
+                        println!("    {} aura_log_intent(\"<describe what you changed and why>\")", "→".dimmed());
+                        println!("\n{} Commit halted.", "✗".red().bold());
+                        std::process::exit(1);
+                    }
+                    // Warn-only (default): record the checkpoint without an
+                    // explicit intent rather than halting the commit.
+                    spinner.println(format!(
+                        "{} {} logic node(s) changed without a logged intent — capturing anyway (warn-only mode).",
+                        "ℹ".blue(),
+                        staged_nodes.len()
+                    ));
+                    spinner.println(format!(
+                        "  {} For an explicit reasoning trail run {}, or enforce it with {}.",
+                        "↳".dimmed(),
+                        "aura log-intent \"…\"".cyan(),
+                        "aura config set strict-mode true".italic()
+                    ));
                 }
 
                 // Intent was logged — consume the marker so it isn't reused for a later commit
@@ -2328,8 +4511,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
             }
 
-            spinner.set_message(format!("{}", "Generating Neural Embeddings (Gemini API)...".bold()));
-            let intent_vector = generate_embedding(&intent);
+            spinner.set_message(format!("{}", "Generating Neural Embeddings...".bold()));
+            let (intent_vector, intent_vector_model) = match embeddings::embed(&intent) {
+                Some((v, m)) => (Some(v), Some(m)),
+                None => (None, None),
+            };
 
             // Generate UUID and save temporary checkpoint
             let id = Uuid::new_v4().to_string();
@@ -2345,6 +4531,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 ast_nodes: staged_nodes.clone(),
                 timestamp,
                 intent_vector,
+                intent_vector_model,
                 env_fingerprint,
             };
 
@@ -2354,6 +4541,105 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             session::SessionManager::increment_checkpoint();
 
             spinner.finish_and_clear();
+
+            // Taste Engine — Phase 3 strict-mode gate. Block the commit
+            // when:
+            //   1. strict_gatekeeper_mode is on (parent strict toggle), AND
+            //   2. taste_strict is on (taste-specific opt-in), AND
+            //   3. the staged diff violates any rule at the configured
+            //      confidence threshold.
+            // Otherwise: surface a warning. `--force` (and Dev Mode)
+            // skip the check entirely so a power-user override still
+            // works through the same channel as the secret guard above.
+            if !*force && !config.dev_mode {
+                if let Ok(report) = crate::taste::check::check_staged(&repo, config.taste_strict_threshold) {
+                    if !report.violations.is_empty() {
+                        let blocking = config.strict_gatekeeper_mode && config.taste_strict;
+                        if blocking {
+                            println!("\n{} {} taste violation(s) at confidence ≥ {:.2}. Commit halted.",
+                                "🚨".red().bold(),
+                                report.violations.len(),
+                                config.taste_strict_threshold,
+                            );
+                            for v in report.violations.iter().take(8) {
+                                println!("  {} {}", "•".red(), v.file_path.bold());
+                                println!("    rule: {}", v.rule_statement);
+                                println!("    issue: {}", v.reason.yellow());
+                            }
+                            if report.violations.len() > 8 {
+                                println!("  {} ...and {} more", "↳".dimmed(), report.violations.len() - 8);
+                            }
+                            println!("  {} Either fix the diff or commit with {} to bypass.", "💡".blue(), "aura capture-context --force".italic());
+                            std::process::exit(1);
+                        } else {
+                            println!("{} {} taste finding(s) (advisory).",
+                                "🧪".yellow().bold(),
+                                report.violations.len(),
+                            );
+                            for v in report.violations.iter().take(3) {
+                                println!("  {} {}: {}", "•".yellow(), v.file_path.dimmed(), v.reason);
+                            }
+                            if report.violations.len() > 3 {
+                                println!("  {} `aura taste check` for the full list.", "↳".dimmed());
+                            }
+                        }
+                    }
+                }
+            }
+
+            // ── Semantic CI (additive) ───────────────────────────────────
+            // The inline gates above already enforced blocking with their exact
+            // strict/dev-mode semantics. Run the declared .aura/pipelines
+            // pipeline ALONGSIDE them — reusing the AstNodes we just parsed — so
+            // the commit is now a named Semantic CI run (the pipeline IS the
+            // gate). Additive by design: it records + summarizes, it does NOT
+            // re-block (no double-flagging). Best-effort; never affects commit.
+            if let Some(root) = repo.workdir() {
+                let _ = ci::run_pre_commit_additive(&repo, root, &staged_nodes);
+            }
+
+            // ── Awareness: announce committed symbols (M3c) ──────────────
+            // A successful checkpoint means these symbols just landed. Emit a
+            // `committed` awareness event per distinct named definition so a
+            // teammate editing the same function sees "landed under you" (a
+            // likely-rebase collision) instead of silence. Best-effort, silent,
+            // capped, deduped — attribution is the git user (`agent: None`) and
+            // the awareness store is self-bounded, so this can't firehose.
+            {
+                let mut seen: std::collections::HashSet<&str> = std::collections::HashSet::new();
+                for node in &staged_nodes {
+                    if seen.len() >= 25 {
+                        break;
+                    }
+                    let Some(ident) = node.identifier.as_deref() else { continue };
+                    if ident.is_empty() || ident.eq_ignore_ascii_case("anonymous") || ident.starts_with("__") {
+                        continue;
+                    }
+                    if !node.top_level {
+                        continue;
+                    }
+                    // Definitions only — not call-sites, locals, or expressions.
+                    let k = node.kind.as_str();
+                    let is_def = k.contains("function")
+                        || k.contains("method")
+                        || k.contains("class")
+                        || k.contains("struct")
+                        || k.contains("interface")
+                        || k.contains("enum")
+                        || k.contains("trait");
+                    if !is_def || !seen.insert(ident) {
+                        continue;
+                    }
+                    let _ = awareness::emit::emit(awareness::emit::EmitInput {
+                        kind: awareness::AwarenessKind::Committed,
+                        file: node.file_path.clone(),
+                        symbol: Some(ident.to_string()),
+                        intent: None,
+                        impact: None,
+                        agent: None,
+                    });
+                }
+            }
 
             println!("{} Checkpoint logic staged.", "✓".green().bold());
             println!("  {} {} semantic nodes tracked", "↳".dimmed(), staged_nodes.len().to_string().cyan());
@@ -2388,6 +4674,67 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                 // Track base commit for migration detection
                 let _ = CheckpointStore::migrate_shadow_if_needed(&repo);
+
+                // Backfill the commit-keyed rationale store: replace any
+                // "pending" SHAs written pre-commit (live path) with the real
+                // HEAD SHA now that the commit exists. Best-effort, no-op when
+                // the store is absent or has nothing pending.
+                if let Ok(head_oid) = repo.head().and_then(|r| r.peel_to_commit().map(|c| c.id())) {
+                    crate::live_events::backfill_commit_shas(&head_oid.to_string());
+                }
+
+                // Taste Engine — observe the new HEAD commit. Idempotent
+                // (skips if the sha is already in observations.jsonl) and
+                // non-fatal so a template bug never blocks a commit.
+                if let Ok(head_oid) = repo.head().and_then(|r| r.peel_to_commit().map(|c| c.id())) {
+                    let agent_id = session::SessionManager::get_active_session()
+                        .map(|s| s.agent_id)
+                        .unwrap_or_else(|| "human".to_string());
+                    // intent_id binding lives in Phase 1 (via intent_vs_actual);
+                    // Phase 0 leaves it None — observations still aggregate fine.
+                    if let Err(e) = taste::observe_commit(
+                        &repo,
+                        &head_oid.to_string(),
+                        &agent_id,
+                        None,
+                    ) {
+                        eprintln!("Taste observation skipped: {}", e);
+                    }
+                }
+
+                // Goal-alignment spine — keep the work tied to the goal it
+                // serves and prove it against the just-committed code. Resolves
+                // the active task, makes sure it has a goal (born from the task
+                // if needed), decomposes once from the live reasons, then
+                // re-proves (AST-only) and records the result against this sha.
+                // Fully non-blocking: the commit already happened.
+                if let Ok(head_oid) = repo.head().and_then(|r| r.peel_to_commit().map(|c| c.id())) {
+                    if let Some(root) = repo.workdir() {
+                        let proofs = goals::build::prove_active_on_commit(root, &head_oid.to_string());
+                        for p in &proofs {
+                            let (glyph, word) = match p.verdict {
+                                goals::Verdict::Verified => ("✓".green(), "built and checked"),
+                                goals::Verdict::Partial => ("◐".yellow(), "almost there"),
+                                goals::Verdict::NotWired => ("○".red(), "not started yet"),
+                                goals::Verdict::Unknown => ("·".dimmed(), "noted"),
+                            };
+                            let lead = if p.freshly_decomposed { "Goal" } else { "Goal re-checked" };
+                            println!(
+                                "{} {} — {} ({} of {} parts)",
+                                glyph,
+                                format!("{}: {}", lead, p.goal_text).dimmed(),
+                                word,
+                                p.ok,
+                                p.total
+                            );
+                        }
+                        // Record those same proofs as the named `goal-aligned`
+                        // Semantic CI step — the post-commit goal check is now a
+                        // pipeline step result, not a one-off print. Additive,
+                        // best-effort; reuses the proofs (no re-prove).
+                        let _ = ci::record_goal_aligned_post_commit(&proofs);
+                    }
+                }
 
                 // End session on commit — capture final state first
                 let final_session = session::SessionManager::get_active_session();
@@ -2445,30 +4792,31 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             if query != "recent" {
                 println!("{} Generating embedding for query: \"{}\"\n", "🔍".cyan(), query.italic());
                 
-                let query_vector = generate_embedding(&query);
+                let query_embedding = embeddings::embed(&query);
 
-                if let Some(qv) = query_vector {
-                    results.sort_by(|a, b| {
-                        let score_a = if let Some(ref av) = a.intent_vector { cosine_similarity(&av, &qv) } else { 0.0 };
-                        let score_b = if let Some(ref bv) = b.intent_vector { cosine_similarity(&bv, &qv) } else { 0.0 };
-                        // Sort descending by score
-                        score_b.partial_cmp(&score_a).unwrap_or(std::cmp::Ordering::Equal)
-                    });
-                    
-                    // Filter out low relevance using cosine similarity threshold
-                    results.retain(|r| {
-                        if let Some(ref rv) = r.intent_vector {
-                            cosine_similarity(&rv, &qv) > 0.3 // Standard threshold
-                        } else {
-                            false
+                if let Some((qv, qmodel)) = query_embedding {
+                    // Vectors from different models live in different spaces —
+                    // only compare same-model. Legacy checkpoints carry no
+                    // stamp; cosine_similarity's length guard (→ 0.0 on dim
+                    // mismatch) keeps cross-space noise out for those.
+                    let score = |cp: &CheckpointData| -> f32 {
+                        match (&cp.intent_vector, &cp.intent_vector_model) {
+                            (Some(v), Some(m)) if *m == qmodel => {
+                                embeddings::cosine_similarity(v, &qv)
+                            }
+                            (Some(v), None) => embeddings::cosine_similarity(v, &qv),
+                            _ => 0.0,
                         }
+                    };
+                    results.sort_by(|a, b| {
+                        // Sort descending by score
+                        score(b).partial_cmp(&score(a)).unwrap_or(std::cmp::Ordering::Equal)
                     });
+
+                    // Filter out low relevance using cosine similarity threshold
+                    results.retain(|r| score(r) > 0.3); // Standard threshold
                 } else {
-                    println!("{} Failed to initialize embedding model.", "✗".red());
-                    println!("  {} {}", "ℹ️ ".blue(), "Required: API Key (Gemini or OpenAI)".bold());
-                    println!("    To use semantic search, Aura needs an API key to generate vector embeddings.");
-                    println!("    1. Export it: `export GEMINI_API_KEY=...` or `export OPENAI_API_KEY=...`");
-                    println!("    2. Or set it via the CLI: `aura config` -> `Update API Keys`\n");
+                    println!("{} Empty query — nothing to search.", "✗".red());
                     return Ok(());
                 }
             }
@@ -2508,39 +4856,156 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 println!("  {} Read {} checkpoints from `aura/checkpoints/v1`\n", "↳".dimmed(), results.len().to_string().dimmed());
             }
         }
-        Commands::Handover { agent } => {
+        Commands::Handover { agent, manager_session } => {
             let repo = open_repo()?;
-            let results = CheckpointStore::get_all_checkpoints(&repo)?;
-            
+
             println!("{} Generating dense XML context payload for {}...", "🔄".cyan(), agent.bold());
-            
-            let mut xml_payload = String::from("<aura_semantic_context>\n");
-            for data in results.iter().take(3) {
-                xml_payload.push_str(&format!("  <checkpoint id=\"{}\" agent=\"{}\">\n", data.id, data.agent_id));
-                xml_payload.push_str(&format!("    <intent>{}</intent>\n", data.intent.replace("\n", " ")));
-                xml_payload.push_str("    <modified_nodes>\n");
-                for node in &data.ast_nodes {
-                    let ident = node.identifier.clone().unwrap_or_else(|| "anonymous".to_string());
-                    xml_payload.push_str(&format!("      <node type=\"{}\" name=\"{}\"", node.kind, ident));
-                    if !node.dependencies.is_empty() {
-                        let deps: Vec<String> = node.dependencies.iter().map(|d| {
-                            if let Some(ref uri) = d.uri {
-                                format!("{}={}", d.name, uri)
-                            } else {
-                                d.name.clone()
+
+            // Carryover is the core. `aura handover` is now a thin XML
+            // renderer over the one assembler the in-app brain-swap and
+            // the portable CLI handoff both share — no hand-rolled
+            // checkpoint walk. We get the strict superset the old block
+            // never had: signed intents, function-level intent on each
+            // touched node (with is_stub flagging unfinished work), the
+            // working-tree diff, the session digest, project memory and
+            // the transcript tail. Full mode (200 turns) because a
+            // handover paste-block wants maximum fidelity; redaction
+            // runs unconditionally since the payload leaves the box.
+            let opts = continuity::AssembleOpts::for_mode(
+                continuity::CarryoverMode::Full,
+                Some(agent.clone()),
+                0,
+            );
+            let mut carryover = continuity::assemble::assemble(&opts);
+            continuity::redact::redact_carryover(&mut carryover);
+            let mut xml_payload = continuity::render::to_xml(&carryover);
+
+            // Bucket M5 — Manager Continuum tier (anchored + working
+            // window) rendered as a top-level sibling so the next agent
+            // inherits identical manager memory. Read straight from the
+            // persisted session JSON; the shell flushes via persist::save
+            // on every chat push. Lives outside <aura_semantic_context>
+            // because it's manager-loop chat state, not the semantic
+            // record the carryover assembles.
+            if let Some(sid) = &manager_session {
+                if let Some(home) = std::env::var_os("HOME") {
+                    let mut path = std::path::PathBuf::from(home);
+                    path.push(".aura");
+                    path.push("manager-sessions");
+                    path.push(format!("{sid}.json"));
+                    match std::fs::read_to_string(&path) {
+                        Ok(raw) => {
+                            match serde_json::from_str::<serde_json::Value>(&raw) {
+                                Ok(session) => {
+                                    let chat = session.get("chat")
+                                        .and_then(|c| c.as_array())
+                                        .cloned()
+                                        .unwrap_or_default();
+                                    const HOT: usize = 24;
+                                    let split = chat.len().saturating_sub(HOT);
+                                    let (older, working) = chat.split_at(split);
+                                    let anchored: Vec<&serde_json::Value> = older.iter()
+                                        .filter(|t| t.get("anchor").map(|a| !a.is_null()).unwrap_or(false))
+                                        .collect();
+                                    xml_payload.push_str(&format!(
+                                        "<manager_continuum session=\"{}\">\n",
+                                        sid.replace('"', "&quot;")
+                                    ));
+                                    xml_payload.push_str("  <anchored>\n");
+                                    for t in &anchored {
+                                        let role = t.get("role").and_then(|r| r.as_str()).unwrap_or("user");
+                                        let text = t.get("text").and_then(|s| s.as_str()).unwrap_or("");
+                                        let anchor = t.get("anchor").and_then(|a| a.as_str()).unwrap_or("user_pin");
+                                        xml_payload.push_str(&format!(
+                                            "    <turn role=\"{}\" anchor=\"{}\">{}</turn>\n",
+                                            role,
+                                            anchor,
+                                            text.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;")
+                                        ));
+                                    }
+                                    xml_payload.push_str("  </anchored>\n  <working>\n");
+                                    for t in working {
+                                        let role = t.get("role").and_then(|r| r.as_str()).unwrap_or("user");
+                                        let text = t.get("text").and_then(|s| s.as_str()).unwrap_or("");
+                                        xml_payload.push_str(&format!(
+                                            "    <turn role=\"{}\">{}</turn>\n",
+                                            role,
+                                            text.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;")
+                                        ));
+                                    }
+                                    xml_payload.push_str("  </working>\n");
+                                    xml_payload.push_str("</manager_continuum>\n");
+                                }
+                                Err(e) => eprintln!("warn: parse manager session {sid}: {e}"),
                             }
-                        }).collect();
-                        xml_payload.push_str(&format!(" calls=\"{}\"", deps.join(",")));
+                        }
+                        Err(e) => eprintln!("warn: read manager session {sid}: {e}"),
                     }
-                    xml_payload.push_str("/>\n");
                 }
-                xml_payload.push_str("    </modified_nodes>\n  </checkpoint>\n");
             }
-            xml_payload.push_str("</aura_semantic_context>");
-            
+
+            // Taste Engine — inject the learned coding patterns alongside
+            // the semantic context. Cheap (file read) and bounded to the
+            // top 20 active rules so the handover stays compact. Block
+            // is emitted unconditionally — empty rules still render a
+            // self-explaining stub so the receiving agent sees the
+            // surface and doesn't ask "what taste?".
+            {
+                let repo_root = repo.workdir().map(|w| w.to_path_buf());
+                if let Some(root) = repo_root {
+                    let set = taste::aggregate::load_rules(&root);
+                    let active: Vec<&taste::aggregate::Rule> = set
+                        .rules
+                        .iter()
+                        .filter(|r| matches!(
+                            r.status,
+                            taste::aggregate::RuleStatus::Active
+                                | taste::aggregate::RuleStatus::Provisional
+                        ))
+                        .take(20)
+                        .collect();
+                    xml_payload.push_str("\n<learned_taste>\n");
+                    if active.is_empty() {
+                        xml_payload.push_str("  <!-- No taste rules learned yet. Make a few commits and rerun handover. -->\n");
+                    } else {
+                        for r in &active {
+                            xml_payload.push_str(&format!(
+                                "  <rule id=\"{}\" template=\"{}\" language=\"{}\" confidence=\"{:.2}\">{}</rule>\n",
+                                r.id,
+                                r.template,
+                                r.language,
+                                r.confidence,
+                                r.statement.replace('<', "&lt;").replace('>', "&gt;"),
+                            ));
+                        }
+                    }
+                    xml_payload.push_str("</learned_taste>\n");
+                }
+            }
+
             // In a real product, we would pipe this into pbcopy or directly into the target agent's config file
             println!("\n{}", xml_payload.dimmed());
             println!("\n{} Handover block ready. Paste this into {}'s prompt or system rules.", "✓".green().bold(), agent);
+
+            let config = crate::config::ConfigManager::load();
+            if config.sync_enabled && config.cloud_api_token.is_some() {
+                let session_id = session::SessionManager::get_active_session().map(|s| s.session_id);
+                let token_count = xml_payload.len() as u64 / 4;
+                const MAX_PUSH: usize = 256 * 1024;
+                let summary_push = if xml_payload.len() > MAX_PUSH {
+                    let mut end = MAX_PUSH;
+                    while !xml_payload.is_char_boundary(end) { end -= 1; }
+                    format!("{}\n<!-- truncated: original {} bytes -->", &xml_payload[..end], xml_payload.len())
+                } else {
+                    xml_payload.clone()
+                };
+                crate::sync::GlobalSync::push_handover(
+                    session_id.as_deref(),
+                    agent,
+                    &summary_push,
+                    token_count,
+                );
+            }
         }
         Commands::Rewind { identifier, file_path, amnesia } => {
             println!("\n{} {} {}", "⏪".bold(), "Aura Semantic Time Machine: Rewinding".bold().cyan(), identifier.bold().yellow());
@@ -2598,9 +5063,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
             }
 
-            // Strategy B: Walk full git history (up to 50 commits back)
+            // Strategy B: Walk git history (HEAD + up to 49 ancestors).
+            // Read each commit's tree at the top of the loop so HEAD
+            // itself is searched — the "uncommitted local edit, HEAD
+            // is clean" case (most common AI-hallucination recovery
+            // shape) was being silently skipped because the previous
+            // loop walked to commit.parent(0) before ever reading a
+            // tree.
             if past_node_source.is_none() {
-                println!("  {} Searching git history (up to 50 commits)...", "↳".dimmed());
+                println!("  {} Searching git history (HEAD + up to 49 ancestors)...", "↳".dimmed());
                 let mut commit = match repo.head().and_then(|r| r.peel_to_commit()) {
                     Ok(c) => c,
                     Err(_) => {
@@ -2610,12 +5081,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 };
 
                 for depth in 0..50 {
-                    let parent = match commit.parent(0) {
-                        Ok(p) => p,
-                        Err(_) => break,
-                    };
-
-                    let tree = parent.tree()?;
+                    let tree = commit.tree()?;
                     if let Ok(entry) = tree.get_path(Path::new(file_path)) {
                         let obj = entry.to_object(&repo)?;
                         if let Some(blob) = obj.as_blob() {
@@ -2624,8 +5090,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     // Make sure it's different from current
                                     if let Some((current_src, _)) = parser.retrieve_node_source(&current_source, ext, identifier)? {
                                         if src != current_src {
-                                            println!("  {} Found in commit ~{} ({})",
-                                                "✓".green(), depth + 1, &parent.id().to_string()[..8]);
+                                            let label = if depth == 0 {
+                                                "HEAD".to_string()
+                                            } else {
+                                                format!("HEAD~{}", depth)
+                                            };
+                                            println!("  {} Found in commit {} ({})",
+                                                "✓".green(), label, &commit.id().to_string()[..8]);
                                             past_node_source = Some(src);
                                             break;
                                         }
@@ -2634,8 +5105,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             }
                         }
                     }
-
-                    commit = parent;
+                    match commit.parent(0) {
+                        Ok(p) => commit = p,
+                        Err(_) => break,
+                    }
                 }
             }
 
@@ -2664,6 +5137,26 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
             println!("{} Surgically reverted '{}' to its previous logic state.", "✓".green().bold(), identifier);
             println!("  {} The rest of {} remains untouched.", "↳".dimmed(), file_path);
+
+            // Taste Engine — rewind is the strongest negative signal
+            // we capture (weight -3.0 via signal_weight). Apply it to
+            // every rule scoping to this file's language+layer so the
+            // aggregator can decay confidence on the next mine.
+            if let Some(root) = repo.workdir() {
+                let head_sha = repo
+                    .head()
+                    .and_then(|r| r.peel_to_commit().map(|c| c.id().to_string()))
+                    .unwrap_or_default();
+                if !head_sha.is_empty() {
+                    let _ = taste::record_negative_signal(
+                        &root.to_path_buf(),
+                        &head_sha,
+                        file_path,
+                        "rewind",
+                        "human",
+                    );
+                }
+            }
 
             if *amnesia {
                 println!("  {} Executing Amnesia Protocol: Wiping AI hallucination context...", "↳".dimmed().magenta());
@@ -2763,8 +5256,40 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 println!("{} Failed to find snapshot {}.", "✗".red(), snapshot_id);
             }
         }
-        Commands::GoalTrace { goal } => {
-            crate::gsd::GsdEngine::prove_goal(goal);
+        Commands::SnapshotFile { paths, trigger, agent } => {
+            // Bucket L1 — durable file-level snapshot. Wraps the same
+            // `SnapshotStore::snapshot_file` the MCP tool + watcher
+            // already use; this CLI surface lets aura-shell's Manager
+            // dispatch path snapshot zones via process spawn (it
+            // doesn't depend on the `aura` library directly).
+            //
+            // Missing files emit `skip:<path>` and exit 0 — pre-dispatch
+            // zone globs may include not-yet-created files (the subagent's
+            // job is to create them); skipping is the intended behaviour.
+            let mut had_failure = false;
+            for path in paths {
+                if !std::path::Path::new(path).exists() {
+                    println!("skip:{path}");
+                    continue;
+                }
+                match checkpoint::SnapshotStore::snapshot_file(path, trigger, agent) {
+                    Ok(snap_id) => println!("ok:{path}:{snap_id}"),
+                    Err(e) => {
+                        eprintln!("snapshot {path} failed: {e}");
+                        had_failure = true;
+                    }
+                }
+            }
+            if had_failure {
+                std::process::exit(2);
+            }
+        }
+        Commands::GoalTrace { goal, json } => {
+            if *json {
+                crate::gsd::GsdEngine::prove_goal_json(goal);
+            } else {
+                crate::gsd::GsdEngine::prove_goal(goal);
+            }
         }
         Commands::VerifyEnv { target, pos_target } => {            let env_target = target.clone().unwrap_or_else(|| {
                 pos_target.first().cloned().unwrap_or_else(|| "production".to_string())
@@ -2877,6 +5402,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         Commands::Plan { prompt } => {
             gsd::GsdEngine::plan_milestone(prompt);
+            let config = crate::config::ConfigManager::load();
+            if config.sync_enabled && config.cloud_api_token.is_some() {
+                let plan_path = ".aura/plans/ACTIVE_MILESTONE.xml";
+                let waves = std::fs::read_to_string(plan_path)
+                    .map(|s| serde_json::json!({ "xml": s }))
+                    .unwrap_or_else(|_| serde_json::json!([]));
+                let repo_full = git2::Repository::open(".").ok()
+                    .and_then(|r| r.find_remote("origin").ok().and_then(|rem| rem.url().map(String::from)));
+                crate::sync::GlobalSync::push_plan(prompt, waves, "active", repo_full.as_deref());
+            }
         }
         Commands::Execute => {
             gsd::GsdEngine::execute_wave();
@@ -2975,7 +5510,68 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
             }
 
+            // S1-SHN: signing-key health one-liner. Same single-source helper
+            // as MCP aura_status.signing, MCP aura_doctor, CLI aura doctor,
+            // CLI aura keys sigstore-status. Read-only — never mints a key.
+            {
+                let sh = manifest_sig::signing_health();
+                match sh.get("status").and_then(|s| s.as_str()).unwrap_or("") {
+                    "ok" => {
+                        let key_id = sh.get("key_id").and_then(|s| s.as_str()).unwrap_or("");
+                        println!(
+                            "  {} {}: {} ({})",
+                            "🔑".bold(),
+                            "Signing Key".bold(),
+                            "healthy".green(),
+                            key_id.dimmed(),
+                        );
+                    }
+                    "missing" => {
+                        println!(
+                            "  {} {}: {} ({})",
+                            "🔑".bold(),
+                            "Signing Key".bold(),
+                            "not yet minted".dimmed(),
+                            "next sign-bearing op auto-creates".dimmed(),
+                        );
+                    }
+                    "unreadable" => {
+                        let err = sh.get("error").and_then(|s| s.as_str()).unwrap_or("?");
+                        println!(
+                            "  {} {}: {} — {}",
+                            "🔑".bold(),
+                            "Signing Key".bold(),
+                            "UNREADABLE".red().bold(),
+                            err.yellow(),
+                        );
+                    }
+                    "no_path" => {
+                        println!(
+                            "  {} {}: {}",
+                            "🔑".bold(),
+                            "Signing Key".bold(),
+                            "PATH UNRESOLVED — set $HOME".red().bold(),
+                        );
+                    }
+                    _ => {}
+                }
+            }
+
             println!();
+        }
+        Commands::Ci { cmd } => {
+            // Semantic CI — gather facts here, run the aura-ci pipeline engine.
+            // The handlers return a process exit code: non-zero when a blocking
+            // step failed, so a git hook / CI job fails the build.
+            let code = match cmd {
+                CiCmd::Run { trigger, base, json } => ci::cmd_run(trigger, base, *json),
+                CiCmd::List { json } => ci::cmd_list(*json),
+                CiCmd::Status => ci::cmd_status(),
+                CiCmd::Export { out } => ci::cmd_export(out),
+            };
+            if code != 0 {
+                std::process::exit(code);
+            }
         }
         Commands::Audit => {
             println!("\n{} {}", "🕵️ ".bold(), "Aura Semantic Audit: Scanning Git History for Bypasses...".bold().magenta());
@@ -3075,6 +5671,39 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
             }
         }
+        Commands::Subagent { cmd } => {
+            let code = match cmd {
+                SubagentCmd::Spawn { provider, prompt, zones, depends_on, a2a_task_id } => {
+                    subagent::spawn(&provider, &prompt, &zones, &depends_on, a2a_task_id.as_deref())
+                }
+                SubagentCmd::SpawnBg { provider, prompt, zones, depends_on, a2a_task_id } => {
+                    subagent::spawn_bg(&provider, &prompt, &zones, &depends_on, a2a_task_id.as_deref())
+                }
+                SubagentCmd::Wait { task_id, timeout } => subagent::wait(*task_id, *timeout),
+                SubagentCmd::RunDetached { task_id, provider, prompt } => {
+                    subagent::run_detached(*task_id, provider, prompt)
+                }
+                SubagentCmd::List => subagent::list(),
+                SubagentCmd::Monitor { session_id, task_id, tail } => {
+                    subagent::monitor(&session_id, *task_id, *tail)
+                }
+            };
+            std::process::exit(code);
+        }
+        Commands::AskUser { question, kind, options } => {
+            let code = ask_user::run(&question, &kind, options.as_deref());
+            std::process::exit(code);
+        }
+        Commands::ProposePlan { json, file, title, summary, todos } => {
+            let code = propose_plan::run(
+                json.as_deref(),
+                file.as_deref(),
+                title.as_deref(),
+                summary.as_deref(),
+                &todos,
+            );
+            std::process::exit(code);
+        }
         Commands::Sessions => {
             println!("\n{} {}\n", a11y_label("📋", "SESSIONS"), "Aura Agent Sessions".bold().cyan());
 
@@ -3139,7 +5768,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
             }
         }
-        Commands::Resume { branch } => {
+        Commands::Resume { branch: Some(branch), .. } => {
             println!("\n{} {}\n", "🔄".bold(), format!("Resuming work on branch: {}", branch).bold().cyan());
 
             // Check for uncommitted changes
@@ -3219,6 +5848,77 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     }
                 }
             }
+        }
+        Commands::Resume { branch: None, keep } => {
+            // WW-A2 — consume an injected cross-agent carryover. The
+            // previous brain ran `aura carryover --inject --agent <name>`,
+            // writing an AURA:RESUME block into this repo's context file;
+            // here the resuming brain pulls it out and (by default) clears
+            // it so the one-shot handoff never lingers and re-triggers.
+            let repo_root = std::env::current_dir()?;
+            let blocks = continuity::render::find_resume_blocks(&repo_root);
+            let basename = |p: &str| {
+                std::path::Path::new(p)
+                    .file_name()
+                    .and_then(|f| f.to_str())
+                    .unwrap_or(p)
+                    .to_string()
+            };
+
+            if blocks.is_empty() {
+                println!("\n{} No injected carryover found in this repo.", "↳".dimmed());
+                println!(
+                    "  {} A previous brain leaves one with: {}",
+                    "↳".dimmed(),
+                    "aura carryover --inject --agent <name>".cyan()
+                );
+                println!(
+                    "  {} Or resume a branch's session with: {}",
+                    "↳".dimmed(),
+                    "aura resume <branch>".cyan()
+                );
+                return Ok(());
+            }
+
+            let block = &blocks[0];
+            let file = basename(&block.path);
+            println!(
+                "\n{} {}\n",
+                "🔄".bold(),
+                format!("Resuming carryover injected for {}", block.agent).bold().cyan()
+            );
+            if blocks.len() > 1 {
+                println!(
+                    "  {} {} context files carry a carryover; using the freshest ({}).\n",
+                    "ℹ".blue().bold(),
+                    blocks.len(),
+                    file.cyan()
+                );
+            }
+
+            // Surface the carryover so the resuming brain (and the user)
+            // reads the exact handoff state.
+            println!("{}", block.body);
+
+            if *keep {
+                println!(
+                    "\n{} Left the AURA:RESUME block in {} (--keep).",
+                    "✓".green().bold(),
+                    file.cyan()
+                );
+            } else {
+                match continuity::render::consume(std::path::Path::new(&block.path)) {
+                    Ok(_) => println!(
+                        "\n{} Consumed — cleared the carryover from {} so it won't re-trigger.",
+                        "✓".green().bold(),
+                        file.cyan()
+                    ),
+                    Err(e) => eprintln!("warn: could not clear carryover from {file}: {e}"),
+                }
+            }
+        }
+        Commands::Carryover { repo, mode, agent, since_hours, json, inject, no_redact } => {
+            continuity::run_carryover(repo, mode, agent.clone(), *since_hours, *json, *inject, *no_redact)?;
         }
         Commands::Doctor => {
             println!("\n{} {}\n", a11y_label("🩺", "DOCTOR"), "Aura Doctor: Diagnosing repository health...".bold().cyan());
@@ -3375,6 +6075,298 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
             }
 
+            // ────────────────────────────────────────────────
+            // Check 10: signing-key health (S1-SHD)
+            // ────────────────────────────────────────────────
+            // Reads `manifest_sig::signing_health` — the same read-only
+            // probe the MCP `aura_status.signing` block and `aura keys
+            // sigstore-status` CLI use. Doctor never mints a key as a
+            // side-effect (load_signing_key, NOT load_or_create). `missing`
+            // is informational, not an error — first sign-bearing op
+            // auto-mints.
+            println!("\n  {} Signing key", "▸".cyan().bold());
+            let sh = manifest_sig::signing_health();
+            let sh_status = sh.get("status").and_then(|s| s.as_str()).unwrap_or("");
+            let sh_path = sh.get("key_path").and_then(|s| s.as_str()).unwrap_or("");
+            match sh_status {
+                "ok" => {
+                    let key_id = sh.get("key_id").and_then(|s| s.as_str()).unwrap_or("");
+                    println!(
+                        "  {} Signing key healthy ({})",
+                        "✓".green().bold(),
+                        key_id.dimmed(),
+                    );
+                }
+                "missing" => {
+                    println!(
+                        "  {} No signing key on disk yet ({})",
+                        "ℹ".blue(),
+                        sh_path.dimmed(),
+                    );
+                    println!(
+                        "    {} First {} or manifest sign will mint one automatically.",
+                        "↳".dimmed(),
+                        "aura_log_intent".cyan(),
+                    );
+                }
+                "unreadable" => {
+                    let err = sh.get("error").and_then(|s| s.as_str()).unwrap_or("?");
+                    println!(
+                        "  {} Signing key unreadable at {}: {}",
+                        "✗".red().bold(),
+                        sh_path.dimmed(),
+                        err.yellow(),
+                    );
+                    println!(
+                        "    {} Inspect permissions or rotate via {}",
+                        "↳".dimmed(),
+                        "aura keys sigstore-rotate".cyan(),
+                    );
+                    issues_found += 1;
+                }
+                "no_path" => {
+                    let err = sh.get("error").and_then(|s| s.as_str()).unwrap_or("?");
+                    println!(
+                        "  {} Signing key path unresolved: {}",
+                        "✗".red().bold(),
+                        err.dimmed(),
+                    );
+                    println!("    {} Set $HOME or pass --key-path to sign-bearing commands.", "↳".dimmed());
+                    issues_found += 1;
+                }
+                other => {
+                    println!(
+                        "  {} Signing key: unexpected status '{}' from signing_health",
+                        "✗".red().bold(),
+                        other.dimmed(),
+                    );
+                    issues_found += 1;
+                }
+            }
+
+            // ────────────────────────────────────────────────
+            // Check 11: cloud rotation-chain drift (S1-CS-D)
+            // ────────────────────────────────────────────────
+            // Compares the local rotation-block set under .aura/blocks/
+            // against the cloud's rotation mirror. Drift = a teammate
+            // pushed a rotation we haven't pulled, or a local rotation
+            // hasn't reached the cloud. Read-only — never mutates disk.
+            println!("\n  {} Cloud rotation-chain", "▸".cyan().bold());
+            let drift = intent_block::cloud_rotation_chain_drift("MCP Agent");
+            match drift.get("status").and_then(|s| s.as_str()) {
+                Some("ok") => {
+                    let local_count = drift.get("local_count").and_then(|x| x.as_u64()).unwrap_or(0);
+                    let cloud_count = drift.get("cloud_count").and_then(|x| x.as_u64()).unwrap_or(0);
+                    let local_only = drift.get("local_only").and_then(|x| x.as_array()).cloned().unwrap_or_default();
+                    let cloud_only = drift.get("cloud_only").and_then(|x| x.as_array()).cloned().unwrap_or_default();
+                    if local_only.is_empty() && cloud_only.is_empty() {
+                        println!(
+                            "  {} Cloud rotation chain in sync ({} local, {} cloud)",
+                            "✓".green().bold(),
+                            local_count,
+                            cloud_count,
+                        );
+                    } else {
+                        println!(
+                            "  {} Cloud rotation chain drift detected",
+                            "⚠".yellow().bold(),
+                        );
+                        if !cloud_only.is_empty() {
+                            println!(
+                                "    {} {} rotation(s) in cloud not pulled locally",
+                                "✗".red(),
+                                cloud_only.len(),
+                            );
+                            for id in cloud_only.iter().take(3) {
+                                if let Some(s) = id.as_str() {
+                                    println!("      • {}", s.dimmed());
+                                }
+                            }
+                            if cloud_only.len() > 3 {
+                                println!("      • … and {} more", cloud_only.len() - 3);
+                            }
+                            println!("      Fix: run {}", "aura keys sigstore-pull".cyan());
+                            issues_found += 1;
+                        }
+                        if !local_only.is_empty() {
+                            println!(
+                                "    {} {} local rotation(s) not mirrored in cloud",
+                                "⚠".yellow(),
+                                local_only.len(),
+                            );
+                            for id in local_only.iter().take(3) {
+                                if let Some(s) = id.as_str() {
+                                    println!("      • {}", s.dimmed());
+                                }
+                            }
+                            if local_only.len() > 3 {
+                                println!("      • … and {} more", local_only.len() - 3);
+                            }
+                            println!(
+                                "      Fix: re-rotate with {} (push retries on rotate)",
+                                "aura keys sigstore-rotate".cyan(),
+                            );
+                            issues_found += 1;
+                        }
+                    }
+                }
+                Some("skipped") => {
+                    let reason = drift.get("reason").and_then(|x| x.as_str()).unwrap_or("");
+                    println!(
+                        "  {} Cloud rotation chain: skipped ({})",
+                        "○".dimmed(),
+                        reason,
+                    );
+                }
+                Some("error") => {
+                    let err = drift.get("error").and_then(|x| x.as_str()).unwrap_or("?");
+                    println!(
+                        "  {} Cloud rotation chain: error — {}",
+                        "✗".red(),
+                        err,
+                    );
+                    issues_found += 1;
+                }
+                _ => {
+                    println!(
+                        "  {} Cloud rotation chain: unexpected response shape",
+                        "✗".red(),
+                    );
+                    issues_found += 1;
+                }
+            }
+
+            // ────────────────────────────────────────────────
+            // Check 12: skill-ledger health (UU-W1)
+            // ────────────────────────────────────────────────
+            // Read-only probe of the local Agent Skill Ledger
+            // (`~/.aura/agent_skills.json`, written by the shell's
+            // `manager::skill`). Reports the dirty-flush backlog (rows
+            // recorded locally but not yet POSTed to the cloud), whether
+            // a stuck backlog can ever drain (cloud sign-in), and how
+            // many taxonomy cells are still below the n≥10 auto-routing
+            // threshold. Parsed as untyped JSON so the CLI stays
+            // decoupled from the shell's struct definitions. Mirrors
+            // entire's doctor mirror-staleness check.
+            println!("\n  {} Skill ledger", "▸".cyan().bold());
+            let ledger_path = {
+                let home = std::env::var("HOME").unwrap_or_default();
+                Path::new(&home).join(".aura").join("agent_skills.json")
+            };
+            match fs::read_to_string(&ledger_path) {
+                Err(_) => {
+                    println!(
+                        "  {} No local skill ledger yet — routing falls back to the active brain until tasks accrue.",
+                        "ℹ".blue(),
+                    );
+                }
+                Ok(raw) => match skill_rank::ledger_health(&raw) {
+                    None => {
+                        println!(
+                            "  {} Skill ledger file present but unreadable — routing falls back to the active brain.",
+                            "ℹ".blue(),
+                        );
+                    }
+                    Some(h) => {
+                        // Dirty-flush backlog.
+                        if h.dirty == 0 {
+                            println!(
+                                "  {} Ledger flushed — no rows pending cloud sync ({} recorded).",
+                                "✓".green().bold(),
+                                h.recorded,
+                            );
+                        } else {
+                            println!(
+                                "  {} {} outcome row(s) pending cloud flush.",
+                                "⚠".yellow().bold(),
+                                h.dirty,
+                            );
+                            if recall_cloud_creds().is_ok() {
+                                println!(
+                                    "    {} The app retries the flush every 30s; running a Manager task also triggers one.",
+                                    "↳".dimmed(),
+                                );
+                            } else {
+                                println!(
+                                    "    {} Not signed in to cloud — the backlog can't drain. Fix: run {}",
+                                    "✗".red(),
+                                    "aura login".cyan(),
+                                );
+                                issues_found += 1;
+                            }
+                        }
+
+                        // n<10 cells — locally observed sample counts per
+                        // taxonomy cell. Informational: a young ledger is
+                        // expected to have immature cells, so this never
+                        // bumps `issues_found`.
+                        if h.total_cells > 0 {
+                            let mature = h.total_cells - h.immature_cells.len();
+                            if h.immature_cells.is_empty() {
+                                println!(
+                                    "  {} All {} routing cell(s) have ≥{} samples — auto-routing fully active.",
+                                    "✓".green().bold(),
+                                    h.total_cells,
+                                    skill_rank::MIN_SAMPLES,
+                                );
+                            } else {
+                                println!(
+                                    "  {} {} of {} routing cell(s) below the {}-sample threshold (won't auto-route yet):",
+                                    "ℹ".blue(),
+                                    h.immature_cells.len(),
+                                    h.total_cells,
+                                    skill_rank::MIN_SAMPLES,
+                                );
+                                for (cell, n) in h.immature_cells.iter().take(5) {
+                                    println!(
+                                        "    {} {} ({}/{})",
+                                        "·".dimmed(),
+                                        cell.dimmed(),
+                                        n,
+                                        skill_rank::MIN_SAMPLES,
+                                    );
+                                }
+                                if h.immature_cells.len() > 5 {
+                                    println!(
+                                        "    {} … and {} more",
+                                        "·".dimmed(),
+                                        h.immature_cells.len() - 5,
+                                    );
+                                }
+                                if mature > 0 {
+                                    println!("    {} {} cell(s) already mature.", "↳".dimmed(), mature);
+                                }
+                            }
+                        }
+                    }
+                },
+            }
+
+            // Check 13: orphaned Replay-Lab worktrees (UU-W3). Each
+            // `aura replay` run isolates an agent in a temp worktree that
+            // is removed on completion; a crash mid-run can leak one.
+            // Folds entire's Checkpoints-v1.1 clean/orphan parity.
+            println!("\n  {} Replay worktrees", "▸".cyan().bold());
+            let replay_orphans = replay::worktree::list_orphans(Path::new("."));
+            if replay_orphans.is_empty() {
+                println!("  {} No orphaned replay worktrees.", "✓".green().bold());
+            } else {
+                println!(
+                    "  {} {} orphaned replay worktree(s) left by an interrupted run:",
+                    "⚠".yellow().bold(),
+                    replay_orphans.len(),
+                );
+                for o in replay_orphans.iter().take(5) {
+                    println!("    {} {} ({})", "·".dimmed(), o.branch.dimmed(), o.path);
+                }
+                let removed = replay::worktree::prune_orphans(Path::new("."));
+                println!(
+                    "    {} cleaned {} worktree(s).",
+                    "↳".dimmed(),
+                    removed.len()
+                );
+            }
+
             println!("\n  {} Doctor complete. {} issue(s) found.\n",
                 if issues_found == 0 { "✓".green().bold() } else { "⚠".yellow().bold() },
                 issues_found
@@ -3388,6 +6380,85 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 "aura",
                 &mut std::io::stdout(),
             );
+        }
+        Commands::Ui { binary, cwd } => {
+            // Locate the aura-shell binary. Resolution order:
+            //   1. --binary if explicitly passed
+            //   2. PATH lookup
+            //   3. Workspace fallback at aura-shell/src-tauri/target/release/
+            //
+            // The shell reads its working directory via std::env::current_dir
+            // on launch, so we set the child's cwd to the requested project
+            // root (or our own cwd as default) before spawning.
+            use std::process::Command;
+
+            // Best-effort PATH lookup without the `which` crate.
+            fn find_in_path(name: &str) -> Option<std::path::PathBuf> {
+                let path_var = std::env::var_os("PATH")?;
+                for dir in std::env::split_paths(&path_var) {
+                    let candidate = dir.join(name);
+                    if candidate.is_file() {
+                        return Some(candidate);
+                    }
+                }
+                None
+            }
+
+            let resolved = if let Some(p) = binary {
+                std::path::PathBuf::from(p)
+            } else if let Some(p) = find_in_path("aura-shell") {
+                p
+            } else {
+                // Walk up from the current cwd looking for the workspace root.
+                let mut here = std::env::current_dir().unwrap_or_else(|_| ".".into());
+                let mut found: Option<std::path::PathBuf> = None;
+                for _ in 0..6 {
+                    let candidate = here
+                        .join("aura-shell/src-tauri/target/release/aura-shell");
+                    if candidate.exists() {
+                        found = Some(candidate);
+                        break;
+                    }
+                    if !here.pop() {
+                        break;
+                    }
+                }
+                found.unwrap_or_else(|| {
+                    eprintln!(
+                        "{} aura-shell binary not found. Build it with:\n    cd aura-shell && bun install && bun run tauri build",
+                        "⚠".yellow()
+                    );
+                    std::process::exit(1);
+                })
+            };
+
+            let target_cwd = cwd
+                .clone()
+                .map(std::path::PathBuf::from)
+                .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| ".".into()));
+
+            println!(
+                "{} Launching {} in {}",
+                "▶".cyan(),
+                resolved.display(),
+                target_cwd.display()
+            );
+
+            let status = Command::new(&resolved)
+                .current_dir(&target_cwd)
+                .status();
+
+            match status {
+                Ok(s) if s.success() => {}
+                Ok(s) => {
+                    eprintln!("{} aura-shell exited with status {:?}", "⚠".yellow(), s.code());
+                    std::process::exit(s.code().unwrap_or(1));
+                }
+                Err(e) => {
+                    eprintln!("{} failed to spawn aura-shell: {}", "✗".red(), e);
+                    std::process::exit(1);
+                }
+            }
         }
         Commands::RequestAccess { identifier } => {
             println!("\n{} {}", "🗝️ ".bold(), "Aura Access Protocol: Requesting Sentinel Override...".bold().cyan());
@@ -3685,6 +6756,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         Commands::PrReview { base, json, verbose } => {
             let result = crate::pr::PrReviewEngine::run_review(base, *json, *verbose)?;
 
+            if *json {
+                if let Some(ref json_str) = result {
+                    println!("{}", json_str);
+                }
+            }
+
             // Cloud sync review result (if configured)
             if let Some(ref json_str) = result {
                 let config = crate::config::ConfigManager::load();
@@ -3721,7 +6798,94 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 PolicySubcommands::Add { pack_name } => {
                     crate::pr::PrReviewEngine::add_policy_pack(&pack_name)?;
                 }
+                PolicySubcommands::List { json } => {
+                    let packs = crate::pr::PrReviewEngine::list_policy_packs();
+                    if *json {
+                        println!("{}", serde_json::to_string(&packs)?);
+                    } else {
+                        use colored::Colorize;
+                        println!("\n{}", "Available policy packs".bold().cyan());
+                        for p in &packs {
+                            println!("  {} {} {}",
+                                p.id.yellow().bold(),
+                                format!("[{}]", p.category).dimmed(),
+                                format!("({} rules)", p.rule_count).dimmed());
+                            println!("    {} {}", "↳".dimmed(), p.description);
+                        }
+                        println!("\n{} {}", "↳".dimmed(), format!("Install with: aura policy add <id>").italic());
+                    }
+                }
             }
+        }
+        Commands::Task { sub } => {
+            handle_task_command(sub)?;
+        }
+        Commands::Loop { sub } => {
+            handle_loop_command(sub)?;
+        }
+        Commands::Activity { sub } => {
+            handle_activity_command(sub)?;
+        }
+        Commands::Radar { sub } => match sub {
+            None => awareness::cmd::run_show(None, 20, false),
+            Some(RadarSubcommands::Show { focus, limit, json }) => {
+                awareness::cmd::run_show(focus.as_deref(), *limit, *json);
+            }
+            Some(RadarSubcommands::Conflicts { as_actor, all, json }) => {
+                awareness::cmd::run_conflicts(as_actor.as_deref(), *all, *json);
+            }
+            Some(RadarSubcommands::Emit {
+                kind,
+                file,
+                symbol,
+                intent,
+                impact,
+                agent,
+                json,
+            }) => {
+                awareness::cmd::run_emit(
+                    kind,
+                    file.as_deref(),
+                    symbol.as_deref(),
+                    intent.as_deref(),
+                    impact.as_deref(),
+                    agent.as_deref(),
+                    *json,
+                );
+            }
+            Some(RadarSubcommands::Wire { undo, quiet }) => {
+                awareness::cmd::run_wire(*undo, *quiet);
+            }
+            Some(RadarSubcommands::Status { json }) => {
+                awareness::cmd::run_status(*json);
+            }
+            Some(RadarSubcommands::Privacy { level, json }) => {
+                awareness::cmd::run_privacy(level.as_deref(), *json);
+            }
+            Some(RadarSubcommands::Sync { json, quiet }) => {
+                awareness::cmd::run_sync(*json, *quiet);
+            }
+        },
+        Commands::Identity { json } => {
+            awareness::identity::run_show(*json);
+        }
+        Commands::Review { sub } => {
+            handle_review_command(sub)?;
+        }
+        Commands::IntentVsActual { sub } => {
+            handle_intent_vs_actual_command(sub)?;
+        }
+        Commands::Meta { sub } => {
+            meta_refs::run(sub)?;
+        }
+        Commands::Refs { sub } => {
+            refs_sign::run(sub)?;
+        }
+        Commands::Taste { sub } => {
+            cmd_taste::run(sub)?;
+        }
+        Commands::Plugin { sub } => {
+            cmd_plugin_marketplace::run(sub)?;
         }
         Commands::Orchestrate { sub } => {
             match sub {
@@ -3730,11 +6894,37 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         "round-robin" => orchestrate::AssignmentStrategy::RoundRobin,
                         "smart" | _ => orchestrate::AssignmentStrategy::Smart,
                     };
-                    if *duo {
-                        orchestrate::run_duo(&objective, &base)?;
-                    } else {
-                        orchestrate::run(&objective, strat, &base)?;
+                    let config = crate::config::ConfigManager::load();
+                    let push_enabled = config.sync_enabled && config.cloud_api_token.is_some();
+                    let mode = if *duo { "duo" } else { "symphony" };
+                    let session_id_hint = format!("{}-{}", mode, std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|d| d.as_millis()).unwrap_or(0));
+                    if push_enabled {
+                        crate::sync::GlobalSync::push_orchestration(
+                            mode,
+                            serde_json::json!({ "objective": objective, "strategy": strategy, "base": base }),
+                            "running",
+                            Some(&session_id_hint),
+                            false,
+                        );
                     }
+                    let result = if *duo {
+                        orchestrate::run_duo(&objective, &base)
+                    } else {
+                        orchestrate::run(&objective, strat, &base)
+                    };
+                    if push_enabled {
+                        let status = if result.is_ok() { "completed" } else { "failed" };
+                        crate::sync::GlobalSync::push_orchestration(
+                            mode,
+                            serde_json::json!({}),
+                            status,
+                            Some(&session_id_hint),
+                            true,
+                        );
+                    }
+                    result?;
                 }
                 OrchestrateSubcommands::Status => {
                     let summary = orchestrate::get_status_summary()?;
@@ -3798,6 +6988,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             println!("{} Failed to send message: {}", "✗".red().bold(), e);
                         }
                     }
+                    // S0.4 spike: also emit a Message block envelope into
+                    // the per-repo block store. Independent of cloud send
+                    // success — the block is the local truth.
+                    let channel = live_events::current_branch();
+                    match block_adapter::emit_message_block(message, to.as_deref(), Some(&channel)) {
+                        Ok(id) => println!("  {} Block recorded: {}", "✓".green().bold(), format!("{:?}", id).dimmed()),
+                        Err(e) => println!("  {} Block store skipped: {}", "•".dimmed(), e.dimmed()),
+                    }
                 }
                 MsgSubcommands::List { limit, json } => {
                     match live_sync::fetch_team_messages(*limit) {
@@ -3858,18 +7056,47 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
             }
         }
+        Commands::Goals { sub } => {
+            let res = match sub {
+                GoalsSubcommands::Prove { text, task, json } => {
+                    goals::cli::prove(text, task.as_deref(), *json)
+                }
+                GoalsSubcommands::List { json } => goals::cli::list(*json),
+                GoalsSubcommands::Show { goal, json } => goals::cli::show(goal, *json),
+                GoalsSubcommands::Why { goal, json } => goals::cli::why(goal, *json),
+                GoalsSubcommands::Link { goal, task } => goals::cli::link(goal, task),
+            };
+            if let Err(e) = res {
+                println!("{} {}", "✗".red().bold(), e);
+                std::process::exit(1);
+            }
+        }
         Commands::Live { sub } => {
             match sub {
-                LiveSubcommands::Start => {
+                LiveSubcommands::Start { collab } => {
                     use colored::Colorize;
                     use std::sync::atomic::{AtomicBool, Ordering};
                     use std::sync::Arc;
+
+                    // Go Live: enable whole-file CRDT before the worker starts so
+                    // `LiveSyncWorker::start` sees `live_crdt_enabled()` and spawns
+                    // the CRDT daemon (sole disk writer). Persisted via marker.
+                    if *collab {
+                        crate::crdt_daemon::set_crdt_enabled(true);
+                    }
 
                     println!("{}", "🔴 Aura Live — Real-time Collaborative Code Awareness".bold());
                     println!();
                     println!("  {} {}", "User:".dimmed(), live_events::git_user().cyan());
                     println!("  {} {}", "Branch:".dimmed(), live_events::current_branch().cyan());
                     println!("  {} {}", "Repo:".dimmed(), live_events::repo_name().cyan());
+                    if crate::crdt_daemon::live_crdt_enabled() {
+                        println!(
+                            "  {} {}",
+                            "Collab:".dimmed(),
+                            "whole-file CRDT — entire tree syncs conflict-free".green()
+                        );
+                    }
                     live_sync::print_sync_status();
                     live_sync::print_mothership_status_line();
                     println!();
@@ -3907,6 +7134,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
                 LiveSubcommands::Stop => {
                     use colored::Colorize;
+                    // Go Live → off: clear the explicit whole-file CRDT marker so
+                    // a later restart won't respawn the daemon (cloud-routed repos
+                    // stay CRDT-enabled by their routing; this only undoes the
+                    // additive Go Live opt-in).
+                    crate::crdt_daemon::set_crdt_enabled(false);
                     // Kill any running aura live/daemon process
                     let _ = std::process::Command::new("pkill")
                         .args(["-f", "aura live start"])
@@ -3970,7 +7202,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                     if let Some(token) = token {
                         let cloud_url = config.cloud_url
-                            .unwrap_or_else(|| "https://auravcs.com".to_string());
+                            .unwrap_or_else(|| "https://api.auravcs.com".to_string());
                         let url = format!("{}/api/v1/live/presence?repo={}",
                             cloud_url.trim_end_matches('/'), repo);
 
@@ -4062,7 +7294,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                     if let Some(token) = token {
                         let cloud_url = config.cloud_url
-                            .unwrap_or_else(|| "https://auravcs.com".to_string());
+                            .unwrap_or_else(|| "https://api.auravcs.com".to_string());
                         let url = format!("{}/api/v1/live/impacts?repo={}",
                             cloud_url.trim_end_matches('/'), repo);
 
@@ -4278,6 +7510,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                             function_kind: node.kind.clone(),
                                             content_hash: node.content_hash.clone(),
                                             body,
+                                            parent_hash: None,
+                                            ..Default::default()
                                         });
                                     }
                                 }
@@ -4302,7 +7536,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 }
                             }
                         }
-                        SyncSubcommands::Pull { dry_run } => {
+                        SyncSubcommands::Pull { dry_run, allow_red } => {
                             use colored::Colorize;
                             println!("{}", "🔄 Aura Sync — Pull".bold());
                             println!();
@@ -4311,7 +7545,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             println!("  {} Pulling changes on branch {}...",
                                 "↳".dimmed(), branch.cyan());
 
-                            match live_sync::pull_function_bodies() {
+                            match live_sync::pull_function_bodies_opts(*allow_red) {
                                 Ok(data) => {
                                     let functions = data["functions"].as_array();
                                     let total = data["total"].as_u64().unwrap_or(0);
@@ -4402,6 +7636,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     println!("  {} Could not fetch sync status: {}", "⚠".yellow(), e);
                                 }
                             }
+                        }
+                        SyncSubcommands::Backfill => {
+                            use colored::Colorize;
+                            println!("{}", "🔄 Aura Sync — Backfill Snapshots".bold());
+                            let repo_full = git2::Repository::open(".").ok()
+                                .and_then(|r| r.find_remote("origin").ok().and_then(|rem| rem.url().map(String::from)));
+                            let n = crate::sync::GlobalSync::backfill_snapshots(repo_full.as_deref());
+                            println!("  {} Pushed {} snapshot{} to cloud",
+                                "✓".green().bold(),
+                                n.to_string().cyan(),
+                                if n == 1 { "" } else { "s" });
                         }
                     }
                 }
@@ -4747,11 +7992,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
             // 3. Log intent
             let _ = std::fs::create_dir_all(".aura");
-            let log_entry = serde_json::json!({
+            let mut log_entry = serde_json::json!({
                 "agent_id": "user",
                 "intent": message,
                 "timestamp": SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs()
             });
+            // Stamp the developer (git identity) so the row attributes
+            // per-teammate in the Trace team overview.
+            let identity = usage_by_dev::dev_identity();
+            if !identity.email.is_empty() {
+                log_entry["developer"] = serde_json::json!(identity.email);
+                log_entry["developer_handle"] = serde_json::json!(identity.handle);
+            }
             if let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true).open(".aura/intent_log.jsonl") {
                 let _ = writeln!(file, "{}", log_entry.to_string());
             }
@@ -4777,6 +8029,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 println!("  {} Skipped git commit (--no-git)", "•".dimmed());
             }
 
+            // 4b. S0.3 spike — record this save as a Command block in the
+            // local block substrate. Best-effort: a store write failure
+            // never aborts a save (the rest of the pipeline already
+            // succeeded). Visible via `aura blocks list`.
+            match block_adapter::emit_save_command(message, &modified_files) {
+                Ok(id) => println!("  {} Block recorded: {}", "✓".green().bold(), format!("{:?}", id).dimmed()),
+                Err(e) => println!("  {} Block store skipped: {}", "•".dimmed(), e.dimmed()),
+            }
+
             // 5. Auto-push changed functions to mothership
             let mut total_pushed: u64 = 0;
             for file_path in &modified_files {
@@ -4796,6 +8057,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                             function_kind: n.kind.clone(),
                                             content_hash: n.content_hash.clone(),
                                             body,
+                                            parent_hash: None,
+                                            ..Default::default()
                                         })
                                     }).collect();
                                 if !payloads.is_empty() {
@@ -4816,11 +8079,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let mut scaffold_payloads = Vec::new();
             for file_path in &modified_files {
                 if std::path::Path::new(file_path.as_str()).exists() {
-                    let ft = merge_engine::detect_file_type(file_path);
+                    let ft = aura_merge::detect_file_type(file_path);
                     match ft {
-                        merge_engine::FileType::Json | merge_engine::FileType::Yaml
-                        | merge_engine::FileType::Toml | merge_engine::FileType::Text
-                        | merge_engine::FileType::Env => {
+                        aura_merge::FileType::Json | aura_merge::FileType::Yaml
+                        | aura_merge::FileType::Toml | aura_merge::FileType::Text
+                        | aura_merge::FileType::Env => {
                             // Non-code: push entire file as scaffold
                             if let Ok(content) = std::fs::read_to_string(file_path) {
                                 use sha2::{Digest, Sha256};
@@ -4833,7 +8096,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 });
                             }
                         }
-                        merge_engine::FileType::Code => {
+                        aura_merge::FileType::Code => {
                             // Code: extract scaffold (non-function parts)
                             if let Ok(source) = std::fs::read_to_string(file_path) {
                                 let ext = std::path::Path::new(file_path.as_str())
@@ -4846,7 +8109,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                                 let body = live_sync::extract_function_body(&source, ident)?;
                                                 Some((ident.clone(), body))
                                             }).collect();
-                                        let scaffold = merge_engine::extract_scaffold(&source, &fn_bodies);
+                                        let scaffold = aura_merge::extract_scaffold(&source, &fn_bodies);
                                         use sha2::{Digest, Sha256};
                                         let hash = hex::encode(Sha256::digest(scaffold.as_bytes()));
                                         scaffold_payloads.push(live_sync::ScaffoldPushPayload {
@@ -4873,6 +8136,142 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
 
             println!();
+        }
+        Commands::LogIntent { text, file, tool, session, source, intent_type } => {
+            // Fire-and-forget intent capture. Called by the post-tool-use hook:
+            //   aura log-intent "..." >/dev/null 2>&1 &
+            // Appends ONE row to <repo>/.aura/intent_log.jsonl matching the
+            // shape `aura save` / the shell's aura_log_intent write, drops the
+            // `.aura/.intent_logged` marker, and ALWAYS exits 0. Prints nothing
+            // on success; warnings go to stderr only.
+            let trimmed = text.trim();
+            if trimmed.is_empty() {
+                eprintln!("aura log-intent: empty intent, nothing logged");
+                return Ok(());
+            }
+
+            // Resolve the repo root the way the rest of the CLI does: discover
+            // upward from cwd; fall back to "." so the hook never hard-fails.
+            let repo_root = Repository::discover(".")
+                .ok()
+                .and_then(|r| r.workdir().map(|w| w.to_path_buf()))
+                .unwrap_or_else(|| std::path::PathBuf::from("."));
+
+            let aura_dir = repo_root.join(".aura");
+            if let Err(e) = fs::create_dir_all(&aura_dir) {
+                eprintln!("aura log-intent: could not create .aura: {}", e);
+                return Ok(());
+            }
+
+            let ts = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0);
+
+            // Match the existing row shape: {agent_id, intent, timestamp} as
+            // the minimum, plus `source` (default "hook_auto") and the optional
+            // file/tool/session_id/intent_type fields when supplied. agent_id
+            // honours AURA_AGENT if the hook set it, else defaults to
+            // "hook_auto" to mark autonomous capture.
+            let agent_id = std::env::var("AURA_AGENT")
+                .ok()
+                .filter(|s| !s.is_empty())
+                .unwrap_or_else(|| "hook_auto".to_string());
+            let src = source.clone().unwrap_or_else(|| "hook_auto".to_string());
+
+            let mut entry = serde_json::json!({
+                "agent_id": agent_id,
+                "intent": trimmed,
+                "timestamp": ts,
+                "source": src,
+            });
+            if let Some(f) = file {
+                entry["file"] = serde_json::json!(f);
+            }
+            if let Some(t) = tool {
+                entry["tool"] = serde_json::json!(t);
+            }
+            if let Some(s) = session {
+                entry["session_id"] = serde_json::json!(s);
+            }
+            if let Some(it) = intent_type {
+                entry["intent_type"] = serde_json::json!(it);
+            }
+            // Stamp the developer (git identity) — matches the `aura save`
+            // row shape so per-teammate attribution covers hook captures too.
+            let identity = usage_by_dev::dev_identity();
+            if !identity.email.is_empty() {
+                entry["developer"] = serde_json::json!(identity.email);
+                entry["developer_handle"] = serde_json::json!(identity.handle);
+            }
+
+            let log_path = aura_dir.join("intent_log.jsonl");
+            match OpenOptions::new().create(true).append(true).open(&log_path) {
+                Ok(mut f) => {
+                    if let Err(e) = writeln!(f, "{}", entry) {
+                        eprintln!("aura log-intent: write failed: {}", e);
+                        return Ok(());
+                    }
+                }
+                Err(e) => {
+                    eprintln!("aura log-intent: open {} failed: {}", log_path.display(), e);
+                    return Ok(());
+                }
+            }
+
+            // Drop the marker the pre-commit hook checks, exactly as `aura save`
+            // does. Best-effort — a marker write failure is non-fatal.
+            let _ = fs::write(aura_dir.join(".intent_logged"), "1");
+            // Exit 0, silent on success.
+        }
+        Commands::ValidateTool => {
+            // Reads a tool-call JSON object from STDIN and prints a single-line
+            // gate verdict to STDOUT. All logic (classification, policy
+            // evaluation, intent coverage, strict-mode escalation) lives in the
+            // validate_tool module so the dispatch stays thin.
+            validate_tool::run()?;
+        }
+        Commands::Blocks { sub } => {
+            use colored::Colorize;
+            match sub {
+                BlocksSubcommands::List { kind, limit, json } => {
+                    let kind_filter = kind.as_deref().and_then(|k| {
+                        // BlockKind is internally tagged as {"kind": "<wire>"},
+                        // so wrap the user's string before deserializing.
+                        serde_json::from_value::<aura_blocks::BlockKind>(
+                            serde_json::json!({"kind": k}),
+                        )
+                        .ok()
+                    });
+                    if kind.is_some() && kind_filter.is_none() {
+                        eprintln!("Unknown --kind '{}'. See `aura-blocks::BlockKind`.", kind.as_ref().unwrap());
+                        std::process::exit(2);
+                    }
+                    let blocks = match block_adapter::list_recent(kind_filter, *limit) {
+                        Ok(b) => b,
+                        Err(e) => {
+                            eprintln!("list blocks: {}", e);
+                            std::process::exit(1);
+                        }
+                    };
+                    if *json {
+                        println!("{}", serde_json::to_string_pretty(&blocks).unwrap_or_else(|_| "[]".into()));
+                    } else if blocks.is_empty() {
+                        println!("{}", "(no blocks recorded yet — try `aura save \"...\"`)".dimmed());
+                    } else {
+                        println!("{} {} block{}", "📦".cyan(), blocks.len(), if blocks.len() == 1 { "" } else { "s" });
+                        for b in &blocks {
+                            println!(
+                                "  {} {:?}  {}  {}",
+                                format!("{:?}", b.kind).cyan(),
+                                b.id,
+                                b.intent.summary.dimmed(),
+                                format!("@ {}", b.created_at).dimmed(),
+                            );
+                        }
+                    }
+                }
+            }
         }
         Commands::Share => {
             use colored::Colorize;
@@ -4921,11 +8320,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                             function_kind: n.kind.clone(),
                                             content_hash: n.content_hash.clone(),
                                             body,
+                                            parent_hash: None,
+                                            ..Default::default()
                                         })
                                     }).collect();
                                 if !payloads.is_empty() {
-                                    if let Ok(resp) = live_sync::push_function_bodies(&payloads) {
-                                        total_pushed += resp["pushed"].as_u64().unwrap_or(0);
+                                    match live_sync::push_function_bodies(&payloads) {
+                                        Ok(resp) => {
+                                            total_pushed += resp["pushed"].as_u64().unwrap_or(0);
+                                        }
+                                        Err(e) => {
+                                            eprintln!("  {} Push failed for {}: {}",
+                                                "✗".red().bold(), file_path, e);
+                                        }
                                     }
                                 }
                             }
@@ -4940,12 +8347,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
             println!();
         }
-        Commands::Pull { dry_run } => {
+        Commands::Pull { dry_run, allow_red } => {
             use colored::Colorize;
             println!("{}", "🔄 Aura Pull".bold());
             println!();
 
-            match live_sync::pull_function_bodies() {
+            match live_sync::pull_function_bodies_opts(allow_red.clone()) {
                 Ok(resp) => {
                     let functions = resp["functions"].as_array();
                     let total = functions.map(|a| a.len()).unwrap_or(0);
@@ -5182,14 +8589,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     }
 
                     // Use merge engine
-                    match merge_engine::merge_file(file_path, &local_content, remote_content, None) {
-                        merge_engine::MergeResult::Merged(result) => {
+                    match aura_merge::merge_file(file_path, &local_content, remote_content, None) {
+                        aura_merge::MergeResult::Merged(result) => {
                             let _ = checkpoint::SnapshotStore::snapshot_file(file_path, "merge", "aura-merge");
                             let _ = std::fs::write(file_path, result);
                             println!("    {} {} — merged cleanly", "✓".green(), file_path.cyan());
                             scaffold_merged += 1;
                         }
-                        merge_engine::MergeResult::Conflicts { merged, conflict_count, conflict_details } => {
+                        aura_merge::MergeResult::Conflicts { merged, conflict_count, conflict_details } => {
                             let _ = checkpoint::SnapshotStore::snapshot_file(file_path, "merge_conflict", "aura-merge");
                             let _ = std::fs::write(file_path, &merged);
                             println!("    {} {} — {} conflict{} (markers inserted)", "⚠".yellow(), file_path.cyan(), conflict_count, if conflict_count == 1 { "" } else { "s" });
@@ -5198,10 +8605,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             }
                             scaffold_conflicts += conflict_count;
                         }
-                        merge_engine::MergeResult::Identical => {
+                        aura_merge::MergeResult::Identical => {
                             // Skip
                         }
-                        merge_engine::MergeResult::CannotMerge(reason) => {
+                        aura_merge::MergeResult::CannotMerge(reason) => {
                             println!("    {} {} — {}", "⚠".yellow(), file_path.cyan(), reason);
                         }
                     }
@@ -5265,11 +8672,27 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                 if let Ok(mut parser) = SemanticParser::new() {
                     if let Ok(nodes) = parser.parse_file(&source, ext) {
-                        // Get the last snapshot for comparison
+                        // Baseline to diff against: prefer the most recent durable
+                        // snapshot; if there is none (e.g. a repo adopted mid-stream
+                        // where commits bypassed Aura), fall back to the file's
+                        // committed state at git HEAD. Only when BOTH are absent is
+                        // the file genuinely new/untracked.
                         let snapshots = checkpoint::SnapshotStore::get_snapshots_for_file(file_path);
-                        if let Some(snap) = snapshots.first() {
-                            let old_source = &snap.content;
-                            if let Ok(old_nodes) = parser.parse_file(old_source, ext) {
+                        let baseline: Option<String> = snapshots
+                            .first()
+                            .map(|snap| snap.content.clone())
+                            .or_else(|| {
+                                let repo = Repository::open(".").ok()?;
+                                let head_tree = repo.head().ok()?.peel_to_tree().ok()?;
+                                let entry = head_tree
+                                    .get_path(std::path::Path::new(file_path))
+                                    .ok()?;
+                                let obj = entry.to_object(&repo).ok()?;
+                                let blob = obj.as_blob()?;
+                                std::str::from_utf8(blob.content()).ok().map(String::from)
+                            });
+                        if let Some(old_source) = baseline {
+                            if let Ok(old_nodes) = parser.parse_file(&old_source, ext) {
                                 // Compare
                                 let mut cache = live_events::AstStateCache::new();
                                 cache.mark_initial_scan_done();
@@ -5291,7 +8714,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 }
                             }
                         } else {
-                            // No snapshot — show all functions as new
+                            // No baseline (no snapshot AND not present at git HEAD)
+                            // — this file is genuinely new/untracked.
                             println!("  {} {} (new file — {} functions)", "📄".bold(), file_path.cyan(), nodes.len());
                             total_changes += nodes.len();
                         }
@@ -5488,25 +8912,38 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 }
                                 Err(e) => eprintln!("{} Failed: {}", "✗".red().bold(), e),
                             }
+                            let cfg = crate::config::ConfigManager::load();
+                            if cfg.sync_enabled && cfg.cloud_api_token.is_some() {
+                                crate::sync::GlobalSync::push_memory_entry(
+                                    category,
+                                    Some(question),
+                                    answer,
+                                    None,
+                                );
+                            }
                         }
-                        KnowledgeSubcommands::Query { search, category, limit } => {
+                        KnowledgeSubcommands::Query { search, category, limit, json } => {
                             match live_sync::query_team_knowledge(search.as_deref(), category.as_deref(), *limit) {
                                 Ok(resp) => {
-                                    let results = resp["results"].as_array();
-                                    let total = results.map(|a| a.len()).unwrap_or(0);
-                                    println!("\n  {} Team Knowledge ({} result{})", "Knowledge".bold(), total, if total == 1 { "" } else { "s" });
-                                    if let Some(items) = results {
-                                        for item in items {
-                                            let q = item["question"].as_str().unwrap_or("?");
-                                            let a = item["answer"].as_str().unwrap_or("");
-                                            let by = item["username"].as_str().unwrap_or("?");
-                                            let cat = item["category"].as_str().unwrap_or("");
-                                            let up = item["upvotes"].as_i64().unwrap_or(0);
-                                            let id = item["id"].as_str().unwrap_or("");
-                                            println!("  {} [{}] {} (by {}, {} upvotes)", "Q:".cyan().bold(), cat.dimmed(), q, by.dimmed(), up);
-                                            println!("  {} {}", "A:".green().bold(), a);
-                                            println!("     {}", format!("id: {}", id).dimmed());
-                                            println!();
+                                    if *json {
+                                        println!("{}", serde_json::to_string(&resp).unwrap_or_else(|_| "{}".to_string()));
+                                    } else {
+                                        let results = resp["results"].as_array();
+                                        let total = results.map(|a| a.len()).unwrap_or(0);
+                                        println!("\n  {} Team Knowledge ({} result{})", "Knowledge".bold(), total, if total == 1 { "" } else { "s" });
+                                        if let Some(items) = results {
+                                            for item in items {
+                                                let q = item["question"].as_str().unwrap_or("?");
+                                                let a = item["answer"].as_str().unwrap_or("");
+                                                let by = item["username"].as_str().unwrap_or("?");
+                                                let cat = item["category"].as_str().unwrap_or("");
+                                                let up = item["upvotes"].as_i64().unwrap_or(0);
+                                                let id = item["id"].as_str().unwrap_or("");
+                                                println!("  {} [{}] {} (by {}, {} upvotes)", "Q:".cyan().bold(), cat.dimmed(), q, by.dimmed(), up);
+                                                println!("  {} {}", "A:".green().bold(), a);
+                                                println!("     {}", format!("id: {}", id).dimmed());
+                                                println!();
+                                            }
                                         }
                                     }
                                 }
@@ -5533,6 +8970,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     }
                                 }
                                 Err(e) => eprintln!("{} Failed: {}", "✗".red().bold(), e),
+                            }
+                            let cfg = crate::config::ConfigManager::load();
+                            if cfg.sync_enabled && cfg.cloud_api_token.is_some() {
+                                for p in patterns {
+                                    crate::sync::GlobalSync::push_zone(p, mode);
+                                }
                             }
                         }
                         ZoneSubcommands::List => {
@@ -5925,7 +9368,25 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
             }
         }
-        Commands::Connect { url, code, username, password, fingerprint, accept_self_signed } => {
+        Commands::Connect { url, code, username, password, fingerprint, accept_self_signed, no_browser } => {
+            // Cloud mode: no URL or URL looks like app.auravcs.com / auravcs.com and no invite code.
+            let is_mothership = code.is_some() || username.is_some() || password.is_some();
+            if !is_mothership {
+                let cloud_url = url.clone();
+                if let Err(e) = cloud_connect::connect(cloud_url, *no_browser) {
+                    println!("{} {}", "✗".red().bold(), e);
+                    std::process::exit(1);
+                }
+                return Ok(());
+            }
+            let url = url.clone().expect("--code requires a mothership URL");
+            let code = code.clone().expect("mothership connect requires --code");
+            let username = username.clone().expect("mothership connect requires --username");
+            let password = password.clone().expect("mothership connect requires --password");
+            let url = &url;
+            let code = &code;
+            let username = &username;
+            let password = &password;
             println!("{} Joining mothership at {}...", "🔗".bold(), url.cyan());
 
             // Build client that can handle self-signed certs
@@ -6030,7 +9491,184 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
             }
         }
-        Commands::Usage { period, json, project, plan, budget_daily, budget_weekly, budget_session, export } => {
+        Commands::JoinTeam { org_slug, repo } => {
+            if let Err(e) = cloud_join::join_team(org_slug, repo.as_deref()) {
+                println!("{} {}", "✗".red().bold(), e);
+                std::process::exit(1);
+            }
+        }
+        Commands::Resolve { list, interactive } => {
+            let interactive = *interactive || !*list;
+            if let Err(e) = resolve::run(*list, interactive) {
+                println!("{} {}", "✗".red().bold(), e);
+                std::process::exit(1);
+            }
+        }
+        Commands::Atlas { ai, json } => {
+            let code = atlas::run(*ai, *json);
+            if code != 0 {
+                std::process::exit(code);
+            }
+        }
+        Commands::Distill { dry_run, json, include_untracked, max_groups } => {
+            let code = distill::run(*dry_run, *json, *include_untracked, *max_groups);
+            if code != 0 {
+                std::process::exit(code);
+            }
+        }
+        Commands::MergeDriver {
+            base,
+            ours,
+            theirs,
+            path,
+            marker_size,
+            install,
+            uninstall,
+            status,
+            json,
+        } => {
+            let code = merge_driver::run(
+                base.as_deref(),
+                ours.as_deref(),
+                theirs.as_deref(),
+                path.as_deref(),
+                *marker_size,
+                *install,
+                *uninstall,
+                *status,
+                *json,
+            );
+            if code != 0 {
+                std::process::exit(code);
+            }
+        }
+        Commands::ChangeNote { sha, json } => {
+            handle_change_note_command(sha, *json)?;
+        }
+        Commands::Pr { action } => {
+            let res = match action {
+                PrAction::Connect { platform } => pr_cmd::connect(platform),
+                PrAction::Review { pr, dry_run, base } => {
+                    pr_cmd::review(*pr, *dry_run, base.as_deref())
+                }
+                PrAction::Status => pr_cmd::status(),
+                PrAction::Feedback { event_id, verdict, note } => {
+                    pr_cmd::feedback(event_id, verdict, note.as_deref())
+                }
+                PrAction::CommitReview { action } => run_pr_commit_review(action),
+            };
+            if let Err(e) = res {
+                println!("{} {}", "✗".red().bold(), e);
+                std::process::exit(1);
+            }
+        }
+        Commands::Keys { action } => {
+            let res = match action {
+                KeysAction::Init { passphrase } => keys_cmd::init(passphrase),
+                KeysAction::Show => keys_cmd::show(),
+                KeysAction::Unlock { org_slug, passphrase } => keys_cmd::unlock(org_slug, passphrase),
+                KeysAction::Rotate { org_slug } => keys_cmd::rotate(org_slug),
+                KeysAction::Export { out } => keys_cmd::export(out),
+                KeysAction::Import { file } => keys_cmd::import(file),
+                KeysAction::SigstoreVerify { manifest, pubkey_b64 } => {
+                    keys_cmd::sigstore_verify(manifest, pubkey_b64.as_deref())
+                }
+                KeysAction::SigstoreSign { manifest, out } => {
+                    keys_cmd::sigstore_sign(manifest, out.as_deref())
+                }
+                KeysAction::RekorPublish { manifest, rekor_url, out } => {
+                    keys_cmd::rekor_publish(manifest, rekor_url, out.as_deref())
+                }
+                KeysAction::RekorVerify { manifest, sidecar } => {
+                    keys_cmd::rekor_verify(manifest, sidecar.as_deref())
+                }
+                KeysAction::SigstoreRotate { json } => {
+                    intent_block::rotate_signing_key_cli(*json)
+                }
+                KeysAction::SigstorePull { json } => {
+                    intent_block::pull_rotation_chain_cli(*json)
+                }
+                KeysAction::SigstoreStatus { json } => {
+                    manifest_sig::signing_status_cli(*json)
+                }
+            };
+            if let Err(e) = res {
+                println!("{} {}", "✗".red().bold(), e);
+                std::process::exit(1);
+            }
+        }
+        Commands::Attest { action } => {
+            let res = match action {
+                AttestAction::Verify { block_id, no_rekor, json } => {
+                    intent_block::verify_block_cli(block_id, *no_rekor, *json)
+                }
+                AttestAction::List { json, human, intent_type } => {
+                    // S2-TIL: validate --type at the CLI boundary so a
+                    // typo fails fast with the canonical list rather
+                    // than returning an empty filtered set.
+                    if let Some(t) = intent_type.as_deref() {
+                        if !intent_query::is_canonical_intent_type(t) {
+                            println!(
+                                "{} Invalid --type '{}'. Must be one of: {}",
+                                "✗".red().bold(),
+                                t,
+                                intent_query::CANONICAL_INTENT_TYPES.join(", "),
+                            );
+                            std::process::exit(1);
+                        }
+                    }
+                    intent_block::list_blocks_cli(*json, human.as_deref(), intent_type.as_deref())
+                }
+                AttestAction::Share { json } => {
+                    intent_block::share_attestations_cli(*json)
+                }
+            };
+            if let Err(e) = res {
+                println!("{} {}", "✗".red().bold(), e);
+                std::process::exit(1);
+            }
+        }
+        Commands::Crdt { action } => match action {
+            CrdtAction::Status => {
+                let cursors = crdt::load_cursors();
+                println!("{}", serde_json::to_string_pretty(&cursors).unwrap_or_default());
+            }
+            CrdtAction::Pull => {
+                let branch = std::process::Command::new("git")
+                    .args(["rev-parse", "--abbrev-ref", "HEAD"])
+                    .output()
+                    .ok()
+                    .and_then(|o| String::from_utf8(o.stdout).ok())
+                    .map(|s| s.trim().to_string())
+                    .unwrap_or_else(|| "main".to_string());
+                let mut cursors = crdt::load_cursors();
+                let since = *cursors.by_branch.get(&branch).unwrap_or(&0);
+                match crdt::pull_ops(&branch, since) {
+                    Ok((ops, cursor)) => {
+                        println!("pulled {} op(s), cursor {} → {}", ops.len(), since, cursor);
+                        cursors.by_branch.insert(branch, cursor);
+                        crdt::save_cursors(&cursors);
+                    }
+                    Err(e) => {
+                        println!("{} {}", "✗".red().bold(), e);
+                        std::process::exit(1);
+                    }
+                }
+            }
+        },
+        Commands::Whoami => {
+            if let Err(e) = cloud_connect::whoami() {
+                println!("{} {}", "✗".red().bold(), e);
+                std::process::exit(1);
+            }
+        }
+        Commands::Disconnect => {
+            if let Err(e) = cloud_connect::disconnect() {
+                println!("{} {}", "✗".red().bold(), e);
+                std::process::exit(1);
+            }
+        }
+        Commands::Usage { period, json, project, plan, budget_daily, budget_weekly, budget_session, export, by_dev } => {
             // If any budget flags were passed, save them to config
             if budget_daily.is_some() || budget_weekly.is_some() || budget_session.is_some() {
                 let mut config = ConfigManager::load();
@@ -6086,10 +9724,33 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     usage::build_report(since_secs, period)
                 };
 
+                // Refresh the git-shared per-developer aggregate
+                // (.aura/usage_by_dev.jsonl) on every run — idempotent,
+                // atomic, and a no-op outside a repo with .aura. Window the
+                // rows to the requested period (month granularity).
+                let dev_rows = usage_by_dev::refresh();
+                let cutoff_ts = if since_secs == u64::MAX {
+                    None
+                } else {
+                    Some(
+                        SystemTime::now()
+                            .duration_since(UNIX_EPOCH)
+                            .unwrap_or_default()
+                            .as_secs()
+                            .saturating_sub(since_secs),
+                    )
+                };
+                let windowed = usage_by_dev::rows_in_window(&dev_rows, cutoff_ts);
+
                 if *json {
-                    println!("{}", serde_json::to_string_pretty(&usage::report_to_json(&report)).unwrap_or_default());
+                    let mut out = usage::report_to_json(&report);
+                    out["by_developer"] = usage_by_dev::rows_to_json(&windowed);
+                    println!("{}", serde_json::to_string_pretty(&out).unwrap_or_default());
                 } else {
                     usage::print_report(&report);
+                    if *by_dev {
+                        usage_by_dev::print_by_dev(&windowed);
+                    }
 
                     // Check budget alerts
                     let config = ConfigManager::load();
@@ -6118,10 +9779,2332 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
             }
         }
+        Commands::AcpServe => {
+            acp_server::AcpServer::serve();
+        }
+        Commands::AcpRun { cmd, args, prompt, timeout, json } => {
+            use colored::Colorize;
+            let timeout_dur = std::time::Duration::from_secs(*timeout);
+            let mut session = match acp_client::spawn(cmd, args) {
+                Ok(s) => s,
+                Err(e) => {
+                    eprintln!("{} failed to spawn `{}`: {}", "✗".red().bold(), cmd, e);
+                    std::process::exit(1);
+                }
+            };
+            if let Err(e) = session.initialize(timeout_dur) {
+                eprintln!("{} initialize failed: {}", "✗".red().bold(), e);
+                std::process::exit(1);
+            }
+            let sid = match session.session_new(timeout_dur) {
+                Ok(s) => s,
+                Err(e) => {
+                    eprintln!("{} session/new failed: {}", "✗".red().bold(), e);
+                    std::process::exit(1);
+                }
+            };
+            if *json {
+                println!("{}", serde_json::json!({"event":"session_started","sessionId":sid}));
+            } else {
+                println!("{} session {}", "▶".cyan().bold(), sid.dimmed());
+            }
+            let json_mode = *json;
+            let result = session.prompt(prompt, timeout_dur, |update| {
+                if json_mode {
+                    if let Ok(s) = serde_json::to_string(&update) {
+                        println!("{}", s);
+                    }
+                } else if let Some(text) = update
+                    .get("params")
+                    .and_then(|p| p.get("update"))
+                    .and_then(|u| u.get("content"))
+                    .and_then(|c| c.get("text"))
+                    .and_then(|t| t.as_str())
+                {
+                    print!("{}", text);
+                    let _ = std::io::Write::flush(&mut std::io::stdout());
+                }
+            });
+            if !json_mode {
+                println!();
+            }
+            match result {
+                Ok(_) => {
+                    let _ = session.shutdown(std::time::Duration::from_secs(2));
+                }
+                Err(e) => {
+                    eprintln!("{} prompt failed: {}", "✗".red().bold(), e);
+                    let _ = session.shutdown(std::time::Duration::from_secs(2));
+                    std::process::exit(1);
+                }
+            }
+        }
+        Commands::Recall { action } => {
+            if let Err(e) = run_recall(action) {
+                eprintln!("{} {}", "✗".red().bold(), e);
+                std::process::exit(1);
+            }
+        }
+        Commands::Intents { action } => {
+            if let Err(e) = run_intents(action) {
+                eprintln!("{} {}", "✗".red().bold(), e);
+                std::process::exit(1);
+            }
+        }
+        Commands::HandoverCloud { action } => {
+            if let Err(e) = run_handover_cloud(action) {
+                eprintln!("{} {}", "✗".red().bold(), e);
+                std::process::exit(1);
+            }
+        }
+        Commands::Memory { action } => {
+            if let Err(e) = memory::cli::run(action) {
+                eprintln!("{} {}", "✗".red().bold(), e);
+                std::process::exit(1);
+            }
+        }
+        Commands::MemoryCloud { action } => {
+            if let Err(e) = run_memory_cloud(action) {
+                eprintln!("{} {}", "✗".red().bold(), e);
+                std::process::exit(1);
+            }
+        }
+        Commands::A2aTask { action } => {
+            if let Err(e) = run_a2a_task(action) {
+                eprintln!("{} {}", "✗".red().bold(), e);
+                std::process::exit(1);
+            }
+        }
+        Commands::Skill { action } => {
+            if let Err(e) = run_skill(action) {
+                eprintln!("{} {}", "✗".red().bold(), e);
+                std::process::exit(1);
+            }
+        }
+        Commands::Skills { action } => {
+            if let Err(e) = skills::run(action) {
+                eprintln!("{} {}", "✗".red().bold(), e);
+                std::process::exit(1);
+            }
+        }
+        Commands::Replay { action } => {
+            if let Err(e) = replay::run(action) {
+                eprintln!("{} {}", "✗".red().bold(), e);
+                std::process::exit(1);
+            }
+        }
+        Commands::Webhooks { action } => {
+            if let Err(e) = run_webhooks(action) {
+                eprintln!("{} {}", "✗".red().bold(), e);
+                std::process::exit(1);
+            }
+        }
+        Commands::AgentCard { host, cloud, json } => {
+            if let Err(e) = run_agent_card(host.as_deref(), cloud.as_deref(), *json) {
+                eprintln!("{} {}", "✗".red().bold(), e);
+                std::process::exit(1);
+            }
+        }
+        Commands::Ws { action } => {
+            match action {
+                WsAction::Listen { seconds, stop_after, expect_min, format } => {
+                    let config = ConfigManager::load();
+                    let cloud_url = config
+                        .cloud_url
+                        .clone()
+                        .or_else(|| std::env::var("AURA_CLOUD_URL").ok())
+                        .unwrap_or_else(|| "http://127.0.0.1:3001".to_string());
+                    let token = config
+                        .cloud_api_token
+                        .clone()
+                        .or_else(|| std::env::var("AURA_CLOUD_TOKEN").ok())
+                        .unwrap_or_default();
+                    let report = match live_ws::listen_blocking(
+                        &cloud_url,
+                        &token,
+                        *seconds,
+                        *stop_after,
+                        format.as_deref(),
+                    ) {
+                        Ok(r) => r,
+                        Err(e) => {
+                            eprintln!("✗ ws listen: {}", e);
+                            std::process::exit(1);
+                        }
+                    };
+                    for frame in &report.frames {
+                        println!("{}", frame);
+                    }
+                    let payload_count = report
+                        .frames
+                        .iter()
+                        .filter(|s| {
+                            !s.contains("\"type\":\"heartbeat\"")
+                                && !s.contains("\"type\":\"pong\"")
+                                && !s.contains("\"type\":\"RAW\"")
+                                && !s.contains("\"type\":\"ready\"")
+                                && !s.contains("\"type\":\"RUN_STARTED\"")
+                        })
+                        .count();
+                    if *expect_min > 0 && payload_count < *expect_min {
+                        eprintln!(
+                            "✗ ws listen: expected ≥{} payload frames, got {}",
+                            expect_min, payload_count
+                        );
+                        std::process::exit(1);
+                    }
+                }
+            }
+        }
     }
 
     Ok(())
 }
+
+// ── `aura recall` — thin human surface over the cloud's episodic v2 endpoints. ──
+//
+// Mirrors the three MCP cloud tools (aura_episodic_recall_cloud /
+// _session_arc / _multi_session_arc) so a developer at a terminal can
+// inspect their own (or a teammate's) cloud event history without an
+// MCP client. Read-only; reuses the same cloud-token resolution as the
+// rest of the CLI (config first, then `AURA_CLOUD_TOKEN` env).
+fn run_recall(action: &RecallAction) -> Result<(), String> {
+    // narrate-blocks is local-only and never touches the cloud — service
+    // it BEFORE we demand a cloud token (which would block users on
+    // air-gapped boxes from running handover narration).
+    if let RecallAction::NarrateBlocks {
+        since_hours,
+        kind,
+        actor,
+        intent_type,
+        list_limit,
+        json,
+    } = action
+    {
+        // Validate --type against the canonical set so a typo bubbles
+        // up immediately instead of returning a silent zero-match
+        // narration. Mirrors `aura intents query --type` behavior.
+        if let Some(t) = intent_type.as_deref() {
+            if !intent_query::is_canonical_intent_type(t) {
+                println!(
+                    "{} Invalid --type '{}'. Must be one of: {}",
+                    "✗".red().bold(),
+                    t,
+                    intent_query::CANONICAL_INTENT_TYPES.join(", "),
+                );
+                std::process::exit(1);
+            }
+        }
+        let blocks = read_blocks_dir(std::path::Path::new(".aura/blocks"))?;
+        let summaries = collect_block_summaries(&blocks);
+        let now_ms = current_unix_ms();
+        let report = recall_narrate::build_block_narration_typed(
+            &summaries,
+            now_ms,
+            *since_hours,
+            kind,
+            actor.as_deref(),
+            intent_type.as_deref(),
+            *list_limit,
+        );
+        if *json {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&report.to_json())
+                    .unwrap_or_else(|_| "{}".to_string())
+            );
+        } else {
+            println!("{}", report.to_prose());
+        }
+        return Ok(());
+    }
+    let (cloud_url, token) = recall_cloud_creds()?;
+    let client = cloud_http_client();
+    match action {
+        RecallAction::Events {
+            event_type,
+            agent,
+            focus_fn,
+            focus_file,
+            repo,
+            intent_type,
+            window_hours,
+            limit,
+            json,
+        } => {
+            // S2-TICRE: validate at the CLI boundary before issuing the
+            // cloud request so a typo'd --type fails fast and locally,
+            // not after a 400 round-trip. Mirrors `aura intents query
+            // --type` and `aura recall narrate-blocks --type`.
+            if let Some(t) = intent_type.as_deref() {
+                if !intent_query::is_canonical_intent_type(t) {
+                    return Err(format!(
+                        "Invalid --type '{}'. Must be one of: {}",
+                        t,
+                        intent_query::CANONICAL_INTENT_TYPES.join(", "),
+                    ));
+                }
+            }
+            let mut url = format!("{}/api/v2/episodic/recall", cloud_url.trim_end_matches('/'));
+            let mut sep = '?';
+            recall_push_str(&mut url, &mut sep, "event_type", event_type.as_deref());
+            recall_push_str(&mut url, &mut sep, "agent_id", agent.as_deref());
+            recall_push_str(&mut url, &mut sep, "focus_fn", focus_fn.as_deref());
+            recall_push_str(&mut url, &mut sep, "focus_file", focus_file.as_deref());
+            recall_push_str(&mut url, &mut sep, "repo", repo.as_deref());
+            recall_push_str(&mut url, &mut sep, "intent_type", intent_type.as_deref());
+            recall_push_i64(&mut url, &mut sep, "window_hours", *window_hours);
+            recall_push_i64(&mut url, &mut sep, "limit", *limit);
+            let body = recall_get(&client, &url, &token)?;
+            if *json {
+                println!("{}", serde_json::to_string_pretty(&body).unwrap_or_else(|_| body.to_string()));
+            } else {
+                println!("{}", format_recall_events_table(&body));
+            }
+            Ok(())
+        }
+        RecallAction::Arc {
+            agent,
+            window_hours,
+            gap_minutes,
+            repo,
+            limit,
+            json,
+        } => {
+            if agent.trim().is_empty() {
+                return Err("--agent is required".to_string());
+            }
+            let mut url = format!(
+                "{}/api/v2/episodic/session-arc?agent_id={}",
+                cloud_url.trim_end_matches('/'),
+                mcp::percent_encode_unreserved(agent)
+            );
+            let mut sep = '&';
+            recall_push_i64(&mut url, &mut sep, "window_hours", *window_hours);
+            recall_push_i64(&mut url, &mut sep, "gap_minutes", *gap_minutes);
+            recall_push_str(&mut url, &mut sep, "repo", repo.as_deref());
+            recall_push_i64(&mut url, &mut sep, "limit", *limit);
+            let body = recall_get(&client, &url, &token)?;
+            if *json {
+                println!("{}", serde_json::to_string_pretty(&body).unwrap_or_else(|_| body.to_string()));
+            } else {
+                println!("{}", format_arc_segments_table(&body, false));
+            }
+            Ok(())
+        }
+        RecallAction::NarrateBlocks { .. } => unreachable!("handled above"),
+        RecallAction::Timeline {
+            function_name,
+            window_hours,
+            repo,
+            limit,
+            json,
+        } => {
+            if function_name.trim().is_empty() {
+                return Err("--function-name is required".to_string());
+            }
+            let mut url = format!(
+                "{}/api/v2/episodic/timeline?function_name={}",
+                cloud_url.trim_end_matches('/'),
+                mcp::percent_encode_unreserved(function_name)
+            );
+            let mut sep = '&';
+            recall_push_i64(&mut url, &mut sep, "window_hours", *window_hours);
+            recall_push_str(&mut url, &mut sep, "repo", repo.as_deref());
+            recall_push_i64(&mut url, &mut sep, "limit", *limit);
+            let body = recall_get(&client, &url, &token)?;
+            if *json {
+                println!("{}", serde_json::to_string_pretty(&body).unwrap_or_else(|_| body.to_string()));
+            } else {
+                println!("{}", format_timeline_table(&body));
+            }
+            Ok(())
+        }
+        RecallAction::NarrateCloud {
+            window_hours,
+            event_type,
+            focus_file,
+            focus_fn,
+            repo,
+            tier,
+            limit,
+            json,
+        } => {
+            let url = format!(
+                "{}/api/v2/episodic/narrate",
+                cloud_url.trim_end_matches('/')
+            );
+            let mut body_obj = serde_json::Map::new();
+            if let Some(v) = window_hours { body_obj.insert("window_hours".into(), serde_json::json!(v)); }
+            if let Some(v) = event_type { body_obj.insert("event_type".into(), serde_json::json!(v)); }
+            if let Some(v) = focus_file { body_obj.insert("focus_file".into(), serde_json::json!(v)); }
+            if let Some(v) = focus_fn { body_obj.insert("focus_fn".into(), serde_json::json!(v)); }
+            if let Some(v) = repo { body_obj.insert("repo".into(), serde_json::json!(v)); }
+            if let Some(v) = tier { body_obj.insert("tier".into(), serde_json::json!(v)); }
+            if let Some(v) = limit { body_obj.insert("limit".into(), serde_json::json!(v)); }
+            let req_body = serde_json::Value::Object(body_obj);
+            let body = recall_post(&client, &url, &token, &req_body)?;
+            if *json {
+                println!("{}", serde_json::to_string_pretty(&body).unwrap_or_else(|_| body.to_string()));
+            } else {
+                println!("{}", format_narrate_cloud(&body));
+            }
+            Ok(())
+        }
+        RecallAction::AgentDigest {
+            agent,
+            window_hours,
+            repo,
+            limit,
+            json,
+        } => {
+            if agent.trim().is_empty() {
+                return Err("--agent is required".to_string());
+            }
+            let mut url = format!(
+                "{}/api/v2/episodic/agent-digest?agent_id={}",
+                cloud_url.trim_end_matches('/'),
+                mcp::percent_encode_unreserved(agent)
+            );
+            let mut sep = '&';
+            recall_push_i64(&mut url, &mut sep, "window_hours", *window_hours);
+            recall_push_str(&mut url, &mut sep, "repo", repo.as_deref());
+            recall_push_i64(&mut url, &mut sep, "limit", *limit);
+            let body = recall_get(&client, &url, &token)?;
+            if *json {
+                println!("{}", serde_json::to_string_pretty(&body).unwrap_or_else(|_| body.to_string()));
+            } else {
+                println!("{}", format_agent_digest_table(&body));
+            }
+            Ok(())
+        }
+        RecallAction::MultiArc {
+            agents,
+            window_hours,
+            gap_minutes,
+            repo,
+            limit,
+            json,
+        } => {
+            if agents.trim().is_empty() {
+                return Err("--agents is required (comma-separated list)".to_string());
+            }
+            let mut url = format!(
+                "{}/api/v2/episodic/multi-session-arc?agent_ids={}",
+                cloud_url.trim_end_matches('/'),
+                mcp::percent_encode_unreserved(agents)
+            );
+            let mut sep = '&';
+            recall_push_i64(&mut url, &mut sep, "window_hours", *window_hours);
+            recall_push_i64(&mut url, &mut sep, "gap_minutes", *gap_minutes);
+            recall_push_str(&mut url, &mut sep, "repo", repo.as_deref());
+            recall_push_i64(&mut url, &mut sep, "limit", *limit);
+            let body = recall_get(&client, &url, &token)?;
+            if *json {
+                println!("{}", serde_json::to_string_pretty(&body).unwrap_or_else(|_| body.to_string()));
+            } else {
+                println!("{}", format_arc_segments_table(&body, true));
+            }
+            Ok(())
+        }
+    }
+}
+
+/// S2-HCL: dispatch arm for cloud handover ledger CLI. Both
+/// subcommands require a cloud token (handover ledger is server-
+/// side, not local). Reuses recall_get / recall_post + the existing
+/// creds + http client helpers so the request/error shape matches
+/// every other cloud-touching CLI surface.
+fn run_handover_cloud(action: &HandoverCloudAction) -> Result<(), String> {
+    let (cloud_url, token) = recall_cloud_creds()?;
+    let client = cloud_http_client();
+    match action {
+        HandoverCloudAction::List { page, limit, json } => {
+            let mut url = format!("{}/api/v2/handovers", cloud_url.trim_end_matches('/'));
+            let mut sep = '?';
+            recall_push_i64(&mut url, &mut sep, "page", *page);
+            recall_push_i64(&mut url, &mut sep, "limit", *limit);
+            let body = recall_get(&client, &url, &token)?;
+            if *json {
+                println!("{}", serde_json::to_string_pretty(&body).unwrap_or_else(|_| body.to_string()));
+            } else {
+                println!("{}", format_handover_cloud_list(&body));
+            }
+            Ok(())
+        }
+        HandoverCloudAction::Push {
+            session_id,
+            agent_name,
+            summary,
+            token_count,
+            json,
+        } => {
+            if session_id.trim().is_empty() {
+                return Err("--session-id is required".to_string());
+            }
+            if agent_name.trim().is_empty() {
+                return Err("--agent-name is required".to_string());
+            }
+            if summary.trim().is_empty() {
+                return Err("--summary is required".to_string());
+            }
+            let url = format!("{}/api/v2/handovers", cloud_url.trim_end_matches('/'));
+            let mut body_obj = serde_json::Map::new();
+            body_obj.insert("session_id".into(), serde_json::json!(session_id));
+            body_obj.insert("agent_name".into(), serde_json::json!(agent_name));
+            body_obj.insert("summary".into(), serde_json::json!(summary));
+            if let Some(v) = token_count {
+                body_obj.insert("token_count".into(), serde_json::json!(v));
+            }
+            let req_body = serde_json::Value::Object(body_obj);
+            let resp = recall_post(&client, &url, &token, &req_body)?;
+            if *json {
+                println!("{}", serde_json::to_string_pretty(&resp).unwrap_or_else(|_| resp.to_string()));
+            } else {
+                let id = resp.get("id").and_then(|v| v.as_str()).unwrap_or("?");
+                let status = resp.get("status").and_then(|v| v.as_str()).unwrap_or("ok");
+                println!("✓ handover-cloud push {} id={}", status, id);
+            }
+            Ok(())
+        }
+    }
+}
+
+/// S2-HCL: render the cloud handover ledger as a per-row table.
+/// Header line names total. Per-row: created_at, agent_name,
+/// session_id (truncated), summary (truncated). Empty list falls
+/// back to "(no handovers)".
+fn format_handover_cloud_list(body: &serde_json::Value) -> String {
+    let total = body.get("total").and_then(|v| v.as_i64()).unwrap_or(0);
+    let rows = match body.get("handovers").and_then(|v| v.as_array()) {
+        Some(arr) => arr,
+        None => {
+            return format!("Cloud handover ledger — total={}\n  (malformed response — missing 'handovers' field)\n", total);
+        }
+    };
+    let mut out = String::new();
+    out.push_str(&format!(
+        "Cloud handover ledger — total={} returned={}\n",
+        total,
+        rows.len(),
+    ));
+    if rows.is_empty() {
+        out.push_str("  (no handovers)\n");
+        return out;
+    }
+    out.push_str(&format!(
+        "  {:<24}  {:<14}  {:<22}  {:>6}  {}\n",
+        "created_at", "agent_name", "session_id", "tokens", "summary"
+    ));
+    for row in rows {
+        let created = row.get("created_at").and_then(|v| v.as_str()).unwrap_or("?");
+        let agent = row.get("agent_name").and_then(|v| v.as_str()).unwrap_or("-");
+        let session = row.get("session_id").and_then(|v| v.as_str()).unwrap_or("-");
+        let tokens = row.get("token_count").and_then(|v| v.as_i64()).unwrap_or(0);
+        let summary = row.get("summary").and_then(|v| v.as_str()).unwrap_or("-");
+        out.push_str(&format!(
+            "  {:<24}  {:<14}  {:<22}  {:>6}  {}\n",
+            truncate(created, 24),
+            truncate(agent, 14),
+            truncate(session, 22),
+            tokens,
+            truncate(summary, 60),
+        ));
+    }
+    out
+}
+
+/// S2-MCL: dispatch arm for cloud project_memory CLI. Sibling to
+/// run_handover_cloud — same template, different endpoint and body
+/// shape. Reuses the recall_get / recall_post / recall_cloud_creds
+/// helpers for auth + error symmetry.
+fn run_memory_cloud(action: &MemoryCloudAction) -> Result<(), String> {
+    let (cloud_url, token) = recall_cloud_creds()?;
+    let client = cloud_http_client();
+    match action {
+        MemoryCloudAction::List { page, limit, json } => {
+            let mut url = format!("{}/api/v2/memory", cloud_url.trim_end_matches('/'));
+            let mut sep = '?';
+            recall_push_i64(&mut url, &mut sep, "page", *page);
+            recall_push_i64(&mut url, &mut sep, "limit", *limit);
+            let body = recall_get(&client, &url, &token)?;
+            if *json {
+                println!("{}", serde_json::to_string_pretty(&body).unwrap_or_else(|_| body.to_string()));
+            } else {
+                println!("{}", format_memory_cloud_list(&body));
+            }
+            Ok(())
+        }
+        MemoryCloudAction::Push {
+            body,
+            title,
+            kind,
+            repo_full_name,
+            json,
+        } => {
+            if body.trim().is_empty() {
+                return Err("--body is required and must be non-empty".to_string());
+            }
+            let url = format!("{}/api/v2/memory", cloud_url.trim_end_matches('/'));
+            let mut body_obj = serde_json::Map::new();
+            body_obj.insert("body".into(), serde_json::json!(body));
+            if let Some(v) = title { body_obj.insert("title".into(), serde_json::json!(v)); }
+            if let Some(v) = kind { body_obj.insert("kind".into(), serde_json::json!(v)); }
+            if let Some(v) = repo_full_name {
+                body_obj.insert("repo_full_name".into(), serde_json::json!(v));
+            }
+            let req_body = serde_json::Value::Object(body_obj);
+            let resp = recall_post(&client, &url, &token, &req_body)?;
+            if *json {
+                println!("{}", serde_json::to_string_pretty(&resp).unwrap_or_else(|_| resp.to_string()));
+            } else {
+                let id = resp.get("id").and_then(|v| v.as_str()).unwrap_or("?");
+                let status = resp.get("status").and_then(|v| v.as_str()).unwrap_or("ok");
+                println!("✓ memory-cloud push {} id={}", status, id);
+            }
+            Ok(())
+        }
+    }
+}
+
+/// S2-MCL: render the cloud project_memory list as a per-row table.
+/// Cloud response carries both `memory` (legacy) and `entries` (new)
+/// keys with the same content for back-compat — prefer `entries`,
+/// fall back to `memory`. Empty list falls back to "(no entries)".
+/// Body is shown as a 60-char preview; full text is in --json mode.
+fn format_memory_cloud_list(body: &serde_json::Value) -> String {
+    let total = body.get("total").and_then(|v| v.as_i64()).unwrap_or(0);
+    let rows = body
+        .get("entries")
+        .and_then(|v| v.as_array())
+        .or_else(|| body.get("memory").and_then(|v| v.as_array()));
+    let rows = match rows {
+        Some(arr) => arr,
+        None => {
+            return format!(
+                "Cloud project memory — total={}\n  (malformed response — missing 'entries' / 'memory' field)\n",
+                total,
+            );
+        }
+    };
+    let mut out = String::new();
+    out.push_str(&format!(
+        "Cloud project memory — total={} returned={}\n",
+        total,
+        rows.len(),
+    ));
+    if rows.is_empty() {
+        out.push_str("  (no entries)\n");
+        return out;
+    }
+    out.push_str(&format!(
+        "  {:<24}  {:<12}  {:<22}  {}\n",
+        "created_at", "kind", "title", "body"
+    ));
+    for row in rows {
+        let created = row.get("created_at").and_then(|v| v.as_str()).unwrap_or("?");
+        let kind = row.get("kind").and_then(|v| v.as_str()).unwrap_or("-");
+        let title = row.get("title").and_then(|v| v.as_str()).unwrap_or("-");
+        let body_text = row.get("body").and_then(|v| v.as_str()).unwrap_or("-");
+        out.push_str(&format!(
+            "  {:<24}  {:<12}  {:<22}  {}\n",
+            truncate(created, 24),
+            truncate(kind, 12),
+            truncate(title, 22),
+            truncate(body_text, 60),
+        ));
+    }
+    out
+}
+
+/// S2-AT: PATCH sibling of recall_get / recall_post for endpoints
+/// that take a JSON body via PATCH (currently the A2A task patch
+/// route). Same auth + error shape so the dispatch stays symmetric.
+fn recall_patch(
+    client: &reqwest::blocking::Client,
+    url: &str,
+    token: &str,
+    body: &serde_json::Value,
+) -> Result<serde_json::Value, String> {
+    let resp = client
+        .patch(url)
+        .header("Authorization", format!("Bearer {}", token))
+        .json(body)
+        .send()
+        .map_err(|e| format!("request failed: {}", e))?;
+    let status = resp.status();
+    let resp_body = resp
+        .json::<serde_json::Value>()
+        .map_err(|e| format!("response parse failed (HTTP {}): {}", status, e))?;
+    if !status.is_success() {
+        return Err(format!("HTTP {}: {}", status, resp_body));
+    }
+    Ok(resp_body)
+}
+
+/// S2-AT: filter task ids to the URL-safe ascii subset before
+/// stitching them into the path segment. UUIDs are URL-safe so the
+/// happy path is a no-op; this is defense-in-depth so a malformed
+/// id can't escape the path. Empty result is rejected at the
+/// dispatch level.
+fn a2a_safe_id(id: &str) -> String {
+    id.chars()
+        .filter(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_'))
+        .collect()
+}
+
+/// Bucket K1 — auto-detect the current branch for `aura a2a-task
+/// create` when --branch isn't passed. Errors propagate up so the
+/// caller can decide to omit the field; success None covers
+/// detached HEAD.
+fn detect_current_branch_for_a2a() -> Result<Option<String>, ()> {
+    let out = std::process::Command::new("git")
+        .args(["rev-parse", "--abbrev-ref", "HEAD"])
+        .output()
+        .map_err(|_| ())?;
+    if !out.status.success() {
+        return Ok(None);
+    }
+    let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    if s.is_empty() || s == "HEAD" {
+        Ok(None)
+    } else {
+        Ok(Some(s))
+    }
+}
+
+/// S2-AT: dispatch arm for A2A v1.2 task lifecycle. All four
+/// subcommands require a cloud token. Reuses recall_get /
+/// recall_post / recall_patch + recall_cloud_creds + cloud_http_client
+/// so the request/error shape matches every other cloud-touching CLI
+/// surface.
+fn run_a2a_task(action: &A2aTaskAction) -> Result<(), String> {
+    let (cloud_url, token) = recall_cloud_creds()?;
+    let client = cloud_http_client();
+    match action {
+        A2aTaskAction::Create {
+            agent_kind,
+            input,
+            repo,
+            context_id,
+            metadata_json,
+            parent,
+            kind,
+            acceptance_criteria,
+            branch,
+            tag,
+            assignee,
+            json,
+        } => {
+            if agent_kind.trim().is_empty() {
+                return Err("--agent-kind is required".to_string());
+            }
+            if input.trim().is_empty() {
+                return Err("--input is required".to_string());
+            }
+            // Bucket K8 — kind/AC pairing validation client-side too so
+            // the user gets a fast `exit 4` without a network round-trip.
+            const KINDS_REQUIRING_AC: &[&str] = &["plan", "wave", "task"];
+            if let Some(k) = kind.as_deref() {
+                if !matches!(k, "plan" | "wave" | "task" | "subtask") {
+                    return Err(format!(
+                        "--kind must be one of plan|wave|task|subtask, got '{k}'"
+                    ));
+                }
+                if KINDS_REQUIRING_AC.contains(&k)
+                    && acceptance_criteria
+                        .as_deref()
+                        .map(|s| s.trim().is_empty())
+                        .unwrap_or(true)
+                {
+                    return Err(format!(
+                        "--acceptance-criteria is required (non-empty) when --kind={k}"
+                    ));
+                }
+            }
+            let url = format!("{}/api/v2/a2a/tasks", cloud_url.trim_end_matches('/'));
+            let mut body_obj = serde_json::Map::new();
+            body_obj.insert("agent_kind".into(), serde_json::json!(agent_kind));
+            body_obj.insert("input".into(), serde_json::json!(input));
+            if let Some(v) = repo { body_obj.insert("repo".into(), serde_json::json!(v)); }
+            if let Some(v) = context_id { body_obj.insert("context_id".into(), serde_json::json!(v)); }
+            if let Some(raw) = metadata_json {
+                let parsed: serde_json::Value = serde_json::from_str(raw)
+                    .map_err(|e| format!("--metadata-json is not valid JSON: {}", e))?;
+                body_obj.insert("metadata".into(), parsed);
+            }
+            if let Some(v) = parent {
+                body_obj.insert("parent_task_id".into(), serde_json::json!(v));
+            }
+            if let Some(v) = kind {
+                body_obj.insert("task_kind".into(), serde_json::json!(v));
+            }
+            if let Some(v) = acceptance_criteria {
+                body_obj.insert("acceptance_criteria".into(), serde_json::json!(v));
+            }
+            // Branch defaults to current HEAD when omitted and we're in
+            // a git work tree.
+            let resolved_branch = branch
+                .clone()
+                .or_else(|| detect_current_branch_for_a2a().ok().flatten());
+            if let Some(v) = resolved_branch {
+                body_obj.insert("branch".into(), serde_json::json!(v));
+            }
+            if !tag.is_empty() {
+                body_obj.insert("tags".into(), serde_json::json!(tag));
+            }
+            if let Some(v) = assignee {
+                body_obj.insert("assignee_user_id".into(), serde_json::json!(v));
+            }
+            let req_body = serde_json::Value::Object(body_obj);
+            let resp = recall_post(&client, &url, &token, &req_body)?;
+            if *json {
+                println!("{}", serde_json::to_string_pretty(&resp).unwrap_or_else(|_| resp.to_string()));
+            } else {
+                let id = resp.get("id").and_then(|v| v.as_str()).unwrap_or("?");
+                let status = resp.get("status").and_then(|v| v.as_str()).unwrap_or("?");
+                println!("✓ a2a-task create id={} status={}", id, status);
+            }
+            Ok(())
+        }
+        A2aTaskAction::Get { id, json } => {
+            let safe_id = a2a_safe_id(id);
+            if safe_id.is_empty() {
+                return Err("id contains no url-safe characters".to_string());
+            }
+            let url = format!(
+                "{}/api/v2/a2a/tasks/{}",
+                cloud_url.trim_end_matches('/'),
+                safe_id
+            );
+            let body = recall_get(&client, &url, &token)?;
+            if *json {
+                println!("{}", serde_json::to_string_pretty(&body).unwrap_or_else(|_| body.to_string()));
+            } else {
+                println!("{}", format_a2a_task_one(&body));
+            }
+            Ok(())
+        }
+        A2aTaskAction::List {
+            status,
+            repo,
+            limit,
+            json,
+        } => {
+            let mut url = format!("{}/api/v2/a2a/tasks", cloud_url.trim_end_matches('/'));
+            let mut sep = '?';
+            recall_push_str(&mut url, &mut sep, "status", status.as_deref());
+            recall_push_str(&mut url, &mut sep, "repo", repo.as_deref());
+            recall_push_i64(&mut url, &mut sep, "limit", *limit);
+            let body = recall_get(&client, &url, &token)?;
+            if *json {
+                println!("{}", serde_json::to_string_pretty(&body).unwrap_or_else(|_| body.to_string()));
+            } else {
+                println!("{}", format_a2a_task_list(&body));
+            }
+            Ok(())
+        }
+        A2aTaskAction::Patch {
+            id,
+            status,
+            result_json,
+            error_message,
+            json,
+        } => {
+            let safe_id = a2a_safe_id(id);
+            if safe_id.is_empty() {
+                return Err("id contains no url-safe characters".to_string());
+            }
+            if status.trim().is_empty() {
+                return Err("--status is required".to_string());
+            }
+            let url = format!(
+                "{}/api/v2/a2a/tasks/{}",
+                cloud_url.trim_end_matches('/'),
+                safe_id
+            );
+            let mut body_obj = serde_json::Map::new();
+            body_obj.insert("status".into(), serde_json::json!(status));
+            if let Some(raw) = result_json {
+                let parsed: serde_json::Value = serde_json::from_str(raw)
+                    .map_err(|e| format!("--result-json is not valid JSON: {}", e))?;
+                body_obj.insert("result".into(), parsed);
+            }
+            if let Some(v) = error_message {
+                body_obj.insert("error_message".into(), serde_json::json!(v));
+            }
+            let req_body = serde_json::Value::Object(body_obj);
+            let resp = recall_patch(&client, &url, &token, &req_body)?;
+            if *json {
+                println!("{}", serde_json::to_string_pretty(&resp).unwrap_or_else(|_| resp.to_string()));
+            } else {
+                let new_status = resp.get("status").and_then(|v| v.as_str()).unwrap_or("?");
+                println!("✓ a2a-task patch id={} status={}", safe_id, new_status);
+            }
+            Ok(())
+        }
+    }
+}
+
+/// Bucket E4 — `aura skill record` / `aura skill stats`.
+///
+/// `record` POSTs a SkillOutcome JSON to the cloud. The local-fallback
+/// dirty-row store lives in `manager::skill::append_local`; this CLI
+/// just does the round-trip and propagates the cloud's status so
+/// `flush_cloud()` (in aura-shell) can decide whether to keep the row
+/// dirty.
+///
+/// `stats` GETs the per-provider rollup for an auto-routing taxonomy
+/// cell (filtered by user via the auth token) and pretty-prints the
+/// JSON so callers (PlanCard suggest_provider) can parse without an
+/// extra schema layer.
+fn run_skill(action: &SkillAction) -> Result<(), String> {
+    let (cloud_url, token) = recall_cloud_creds()?;
+    let client = cloud_http_client();
+    match action {
+        SkillAction::Record { json } => {
+            if json.trim().is_empty() {
+                return Err("--json is required".to_string());
+            }
+            let body: serde_json::Value = serde_json::from_str(json)
+                .map_err(|e| format!("--json is not valid JSON: {}", e))?;
+            let url = format!(
+                "{}/api/v2/skill/outcomes",
+                cloud_url.trim_end_matches('/')
+            );
+            let resp = recall_post(&client, &url, &token, &body)?;
+            println!(
+                "{}",
+                serde_json::to_string(&resp).unwrap_or_else(|_| resp.to_string())
+            );
+            Ok(())
+        }
+        SkillAction::Stats {
+            category,
+            language,
+            layer,
+        } => {
+            if category.trim().is_empty() {
+                return Err("--category is required".to_string());
+            }
+            let mut url = format!(
+                "{}/api/v2/skill/stats",
+                cloud_url.trim_end_matches('/')
+            );
+            let mut sep = '?';
+            recall_push_str(&mut url, &mut sep, "category", Some(category.as_str()));
+            recall_push_str(&mut url, &mut sep, "language", language.as_deref());
+            recall_push_str(&mut url, &mut sep, "layer", layer.as_deref());
+            let resp = recall_get(&client, &url, &token)?;
+            println!(
+                "{}",
+                serde_json::to_string(&resp).unwrap_or_else(|_| resp.to_string())
+            );
+            Ok(())
+        }
+        SkillAction::Suggest {
+            category,
+            language,
+            layer,
+            json,
+        } => {
+            if category.trim().is_empty() {
+                return Err("--category is required".to_string());
+            }
+            let mut url = format!(
+                "{}/api/v2/skill/stats",
+                cloud_url.trim_end_matches('/')
+            );
+            let mut sep = '?';
+            recall_push_str(&mut url, &mut sep, "category", Some(category.as_str()));
+            recall_push_str(&mut url, &mut sep, "language", language.as_deref());
+            recall_push_str(&mut url, &mut sep, "layer", layer.as_deref());
+            let resp = recall_get(&client, &url, &token)?;
+            let rows = skill_rank::parse_stats_rows(&resp);
+            let best = skill_rank::best(&rows);
+            if *json {
+                // `null` when no provider clears the threshold — callers
+                // (aura-shell suggest_provider) treat that as "no
+                // suggestion, fall back to the active brain".
+                let payload = match &best {
+                    Some(b) => serde_json::to_value(b).unwrap_or(serde_json::Value::Null),
+                    None => serde_json::Value::Null,
+                };
+                println!("{}", serde_json::to_string(&payload).unwrap_or_else(|_| "null".into()));
+            } else {
+                match &best {
+                    Some(b) => {
+                        let cell = describe_cell(category, language.as_deref(), layer.as_deref());
+                        println!(
+                            "{} {} (score {:.3}, {} samples) for {}",
+                            "→".green(),
+                            b.provider_id.bold(),
+                            b.score,
+                            b.sample_count,
+                            cell,
+                        );
+                    }
+                    None => {
+                        println!(
+                            "{} no provider has ≥{} samples in this cell yet — routing falls back to the active brain",
+                            "·".dimmed(),
+                            skill_rank::MIN_SAMPLES,
+                        );
+                    }
+                }
+            }
+            Ok(())
+        }
+    }
+}
+
+/// Human label for a taxonomy cell — `backend/rust/api`, dropping the
+/// `None` fine dimensions so the line reads cleanly.
+fn describe_cell(category: &str, language: Option<&str>, layer: Option<&str>) -> String {
+    let mut parts = vec![category.to_string()];
+    if let Some(l) = language {
+        parts.push(l.to_string());
+    }
+    if let Some(y) = layer {
+        parts.push(y.to_string());
+    }
+    parts.join("/")
+}
+
+fn run_pr_commit_review(action: &PrCommitReviewAction) -> Result<(), String> {
+    let (cloud_url, token) = recall_cloud_creds()?;
+    let client = cloud_http_client();
+    match action {
+        PrCommitReviewAction::List {
+            repo,
+            platform,
+            pr_number,
+            intent_type,
+            limit,
+            json,
+        } => {
+            if repo.trim().is_empty() {
+                return Err("--repo is required".to_string());
+            }
+            if platform.trim().is_empty() {
+                return Err("--platform is required".to_string());
+            }
+            let mut url = format!(
+                "{}/api/v2/pr/commit-reviews?repo={}&platform={}&pr_number={}",
+                cloud_url.trim_end_matches('/'),
+                mcp::percent_encode_unreserved(repo),
+                mcp::percent_encode_unreserved(platform),
+                pr_number,
+            );
+            let mut sep = '&';
+            recall_push_str(&mut url, &mut sep, "intent_type", intent_type.as_deref());
+            recall_push_i64(&mut url, &mut sep, "limit", *limit);
+            let body = recall_get(&client, &url, &token)?;
+            if *json {
+                println!("{}", serde_json::to_string_pretty(&body).unwrap_or_else(|_| body.to_string()));
+            } else {
+                println!("{}", format_pr_commit_review_list(&body));
+            }
+            Ok(())
+        }
+        PrCommitReviewAction::Get {
+            commit_sha,
+            repo,
+            platform,
+            pr_number,
+            json,
+        } => {
+            if repo.trim().is_empty() {
+                return Err("--repo is required".to_string());
+            }
+            if platform.trim().is_empty() {
+                return Err("--platform is required".to_string());
+            }
+            let safe_sha: String = commit_sha
+                .chars()
+                .filter(|c| c.is_ascii_alphanumeric())
+                .collect();
+            if safe_sha.is_empty() {
+                return Err("commit_sha contains no url-safe characters".to_string());
+            }
+            let url = format!(
+                "{}/api/v2/pr/commit-reviews/{}?repo={}&platform={}&pr_number={}",
+                cloud_url.trim_end_matches('/'),
+                safe_sha,
+                mcp::percent_encode_unreserved(repo),
+                mcp::percent_encode_unreserved(platform),
+                pr_number,
+            );
+            let body = recall_get(&client, &url, &token)?;
+            if *json {
+                println!("{}", serde_json::to_string_pretty(&body).unwrap_or_else(|_| body.to_string()));
+            } else {
+                println!("{}", format_pr_commit_review_one(&body));
+            }
+            Ok(())
+        }
+        PrCommitReviewAction::Generate {
+            repo,
+            platform,
+            pr_number,
+            commits_json_file,
+            pr_review_event_id,
+            json,
+        } => {
+            if repo.trim().is_empty() {
+                return Err("--repo is required".to_string());
+            }
+            if platform.trim().is_empty() {
+                return Err("--platform is required".to_string());
+            }
+            if commits_json_file.trim().is_empty() {
+                return Err("--commits-json-file is required".to_string());
+            }
+            let raw = if commits_json_file == "-" {
+                let mut buf = String::new();
+                std::io::Read::read_to_string(&mut std::io::stdin(), &mut buf)
+                    .map_err(|e| format!("failed to read --commits-json-file from stdin: {}", e))?;
+                buf
+            } else {
+                std::fs::read_to_string(commits_json_file)
+                    .map_err(|e| format!("failed to read {}: {}", commits_json_file, e))?
+            };
+            let commits: serde_json::Value = serde_json::from_str(&raw)
+                .map_err(|e| format!("--commits-json-file is not valid JSON: {}", e))?;
+            if !commits.is_array() {
+                return Err("--commits-json-file must contain a JSON array (CommitInput[])".to_string());
+            }
+            let url = format!("{}/api/v2/pr/commit-review-generate", cloud_url.trim_end_matches('/'));
+            let mut body_obj = serde_json::Map::new();
+            body_obj.insert("repo".into(), serde_json::json!(repo));
+            body_obj.insert("platform".into(), serde_json::json!(platform));
+            body_obj.insert("pr_number".into(), serde_json::json!(pr_number));
+            if let Some(v) = pr_review_event_id {
+                body_obj.insert("pr_review_event_id".into(), serde_json::json!(v));
+            }
+            body_obj.insert("commits".into(), commits);
+            let req_body = serde_json::Value::Object(body_obj);
+            let resp = recall_post(&client, &url, &token, &req_body)?;
+            if *json {
+                println!("{}", serde_json::to_string_pretty(&resp).unwrap_or_else(|_| resp.to_string()));
+            } else {
+                println!("{}", format_pr_commit_review_generate(&resp));
+            }
+            Ok(())
+        }
+    }
+}
+
+/// S2-PCR: render a per-commit-review GET (single row) as a labeled
+/// block. Skips functions_modified/deleted/impacts payloads (they can
+/// be large) — the user can pass --json for the full row.
+fn format_pr_commit_review_one(body: &serde_json::Value) -> String {
+    let sha = body.get("commit_sha").and_then(|v| v.as_str()).unwrap_or("?");
+    let parent = body.get("parent_sha").and_then(|v| v.as_str()).unwrap_or("-");
+    let pr = body.get("pr_number").and_then(|v| v.as_i64()).unwrap_or(0);
+    let platform = body.get("platform").and_then(|v| v.as_str()).unwrap_or("-");
+    let author = body.get("author_login").and_then(|v| v.as_str()).unwrap_or("-");
+    let intent_summary = body.get("intent_summary").and_then(|v| v.as_str()).unwrap_or("-");
+    let ai_summary = body.get("ai_summary").and_then(|v| v.as_str()).unwrap_or("-");
+    let intent_type = body.get("intent_type").and_then(|v| v.as_str()).unwrap_or("untyped");
+    let risk_score = body.get("risk_score").and_then(|v| v.as_i64()).unwrap_or(0);
+    let risk_label = body.get("risk_label").and_then(|v| v.as_str()).unwrap_or("?");
+    let model = body.get("model_used").and_then(|v| v.as_str()).unwrap_or("-");
+    let files = body.get("files_touched").and_then(|v| v.as_i64()).unwrap_or(0);
+    let generated = body.get("generated_at").and_then(|v| v.as_str()).unwrap_or("?");
+    let mods_n = body.get("functions_modified").and_then(|v| v.as_array()).map(|a| a.len()).unwrap_or(0);
+    let dels_n = body.get("functions_deleted").and_then(|v| v.as_array()).map(|a| a.len()).unwrap_or(0);
+    let mut out = String::new();
+    out.push_str(&format!("Commit {} (parent {})\n", &sha[..sha.len().min(12)], &parent[..parent.len().min(12)]));
+    out.push_str(&format!("  pr:           {} ({})\n", pr, platform));
+    out.push_str(&format!("  author:       {}\n", author));
+    out.push_str(&format!("  intent_type:  {}\n", intent_type));
+    out.push_str(&format!("  risk:         {} ({}/200)\n", risk_label, risk_score));
+    out.push_str(&format!("  files:        {} touched, {} fn modified, {} fn deleted\n", files, mods_n, dels_n));
+    out.push_str(&format!("  model:        {}\n", model));
+    out.push_str(&format!("  generated_at: {}\n", generated));
+    out.push_str(&format!("  intent:       {}\n", truncate(intent_summary, 200)));
+    out.push_str(&format!("  ai_summary:   {}\n", truncate(ai_summary, 400)));
+    out
+}
+
+/// S2-PCR: render a per-commit-review LIST as a header line + table.
+/// Mirrors the `aura recall narrate-blocks` shape (header tells you
+/// total/returned/max_risk, then per-row table).
+fn format_pr_commit_review_list(body: &serde_json::Value) -> String {
+    let repo = body.get("repo").and_then(|v| v.as_str()).unwrap_or("?");
+    let platform = body.get("platform").and_then(|v| v.as_str()).unwrap_or("?");
+    let pr = body.get("pr_number").and_then(|v| v.as_i64()).unwrap_or(0);
+    let total = body.get("total").and_then(|v| v.as_i64()).unwrap_or(0);
+    let returned = body.get("returned").and_then(|v| v.as_i64()).unwrap_or(0);
+    let max_risk = body.get("max_risk_score").and_then(|v| v.as_i64());
+    let mut out = String::new();
+    out.push_str(&format!(
+        "PR commit reviews — {} / {} #{} — total={} returned={} max_risk={}\n",
+        repo,
+        platform,
+        pr,
+        total,
+        returned,
+        max_risk.map(|n| n.to_string()).unwrap_or_else(|| "-".to_string()),
+    ));
+    if let Some(buckets) = body.get("counts_by_intent_type").and_then(|v| v.as_object()) {
+        if !buckets.is_empty() {
+            let mut parts: Vec<String> = buckets
+                .iter()
+                .map(|(k, v)| format!("{}={}", k, v.as_i64().unwrap_or(0)))
+                .collect();
+            parts.sort();
+            out.push_str(&format!("  intent_type buckets: {}\n", parts.join(", ")));
+        }
+    }
+    let rows = match body.get("commits").and_then(|v| v.as_array()) {
+        Some(arr) => arr,
+        None => {
+            out.push_str("  (malformed response — missing 'commits' field)\n");
+            return out;
+        }
+    };
+    if rows.is_empty() {
+        out.push_str("  (no commits)\n");
+        return out;
+    }
+    out.push_str(&format!(
+        "  {:<12}  {:<8}  {:<6}  {:<14}  {}\n",
+        "sha", "risk", "score", "intent_type", "ai_summary",
+    ));
+    for row in rows {
+        let sha = row.get("commit_sha").and_then(|v| v.as_str()).unwrap_or("?");
+        let label = row.get("risk_label").and_then(|v| v.as_str()).unwrap_or("-");
+        let score = row.get("risk_score").and_then(|v| v.as_i64()).unwrap_or(0);
+        let it = row.get("intent_type").and_then(|v| v.as_str()).unwrap_or("untyped");
+        let ai = row.get("ai_summary").and_then(|v| v.as_str()).unwrap_or("-");
+        out.push_str(&format!(
+            "  {:<12}  {:<8}  {:<6}  {:<14}  {}\n",
+            &sha[..sha.len().min(12)],
+            truncate(label, 8),
+            score,
+            truncate(it, 14),
+            truncate(ai, 80),
+        ));
+    }
+    out
+}
+
+/// S2-PCR: render a generate response — header + per-commit short row.
+fn format_pr_commit_review_generate(body: &serde_json::Value) -> String {
+    let repo = body.get("repo").and_then(|v| v.as_str()).unwrap_or("?");
+    let platform = body.get("platform").and_then(|v| v.as_str()).unwrap_or("?");
+    let pr = body.get("pr_number").and_then(|v| v.as_i64()).unwrap_or(0);
+    let generated = body.get("generated").and_then(|v| v.as_i64()).unwrap_or(0);
+    let max_risk = body.get("max_risk_score").and_then(|v| v.as_i64());
+    let mut out = String::new();
+    out.push_str(&format!(
+        "Generated {} commit review(s) for {} / {} #{} — max_risk={}\n",
+        generated,
+        repo,
+        platform,
+        pr,
+        max_risk.map(|n| n.to_string()).unwrap_or_else(|| "-".to_string()),
+    ));
+    if let Some(rows) = body.get("commits").and_then(|v| v.as_array()) {
+        if rows.is_empty() {
+            out.push_str("  (no commits returned)\n");
+            return out;
+        }
+        out.push_str(&format!(
+            "  {:<12}  {:<8}  {:<6}  {:<36}  {}\n",
+            "sha", "risk", "score", "id", "model",
+        ));
+        for row in rows {
+            let sha = row.get("commit_sha").and_then(|v| v.as_str()).unwrap_or("?");
+            let label = row.get("risk_label").and_then(|v| v.as_str()).unwrap_or("-");
+            let score = row.get("risk_score").and_then(|v| v.as_i64()).unwrap_or(0);
+            let id = row.get("id").and_then(|v| v.as_str()).unwrap_or("?");
+            let model = row.get("model_used").and_then(|v| v.as_str()).unwrap_or("-");
+            out.push_str(&format!(
+                "  {:<12}  {:<8}  {:<6}  {:<36}  {}\n",
+                &sha[..sha.len().min(12)],
+                truncate(label, 8),
+                score,
+                id,
+                truncate(model, 40),
+            ));
+        }
+    }
+    out
+}
+
+fn run_webhooks(action: &WebhooksAction) -> Result<(), String> {
+    let (cloud_url, token) = recall_cloud_creds()?;
+    let client = cloud_http_client();
+    match action {
+        WebhooksAction::List { json } => {
+            let url = format!("{}/api/v1/webhooks", cloud_url.trim_end_matches('/'));
+            let body = recall_get(&client, &url, &token)?;
+            if *json {
+                println!("{}", serde_json::to_string_pretty(&body).unwrap_or_else(|_| body.to_string()));
+            } else {
+                println!("{}", format_webhooks_list(&body));
+            }
+            Ok(())
+        }
+        WebhooksAction::Create {
+            webhook_type,
+            webhook_url,
+            events,
+            json,
+        } => {
+            if webhook_type.trim().is_empty() {
+                return Err("--webhook-type is required (e.g. 'slack' or 'discord')".to_string());
+            }
+            if webhook_url.trim().is_empty() {
+                return Err("--webhook-url is required".to_string());
+            }
+            let events_vec: Vec<String> = events
+                .as_deref()
+                .map(|s| {
+                    s.split(',')
+                        .map(|e| e.trim().to_string())
+                        .filter(|e| !e.is_empty())
+                        .collect()
+                })
+                .unwrap_or_else(|| vec!["impact_alert".to_string()]);
+            let url = format!("{}/api/v1/webhooks", cloud_url.trim_end_matches('/'));
+            let req_body = serde_json::json!({
+                "webhook_type": webhook_type,
+                "webhook_url": webhook_url,
+                "events": events_vec,
+            });
+            let resp = recall_post(&client, &url, &token, &req_body)?;
+            if *json {
+                println!("{}", serde_json::to_string_pretty(&resp).unwrap_or_else(|_| resp.to_string()));
+            } else {
+                println!("{}", format_webhook_one(&resp));
+            }
+            Ok(())
+        }
+        WebhooksAction::Delete { id, json } => {
+            let safe_id = a2a_safe_id(id);
+            if safe_id.is_empty() {
+                return Err("id contains no url-safe characters".to_string());
+            }
+            let url = format!(
+                "{}/api/v1/webhooks/{}",
+                cloud_url.trim_end_matches('/'),
+                safe_id
+            );
+            let resp = recall_delete(&client, &url, &token)?;
+            if *json {
+                println!("{}", serde_json::to_string_pretty(&resp).unwrap_or_else(|_| resp.to_string()));
+            } else {
+                println!("✓ webhook deleted id={}", safe_id);
+            }
+            Ok(())
+        }
+        WebhooksAction::Toggle { id, enabled, json } => {
+            let safe_id = a2a_safe_id(id);
+            if safe_id.is_empty() {
+                return Err("id contains no url-safe characters".to_string());
+            }
+            let url = format!(
+                "{}/api/v1/webhooks/{}/toggle",
+                cloud_url.trim_end_matches('/'),
+                safe_id
+            );
+            let req_body = serde_json::json!({ "enabled": enabled });
+            let resp = recall_post(&client, &url, &token, &req_body)?;
+            if *json {
+                println!("{}", serde_json::to_string_pretty(&resp).unwrap_or_else(|_| resp.to_string()));
+            } else {
+                let new_enabled = resp
+                    .get("enabled")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(*enabled);
+                println!("✓ webhook toggle id={} enabled={}", safe_id, new_enabled);
+            }
+            Ok(())
+        }
+    }
+}
+
+/// S2-WH: render one webhook config as a labeled block. Used by `create`
+/// (and `toggle` via --json bypass). Surfaces every load-bearing field
+/// in a stable order so an operator can copy-paste id/url quickly.
+fn format_webhook_one(body: &serde_json::Value) -> String {
+    let inner = body.get("webhook").unwrap_or(body);
+    let id = inner.get("id").and_then(|v| v.as_str()).unwrap_or("?");
+    let kind = inner.get("webhook_type").and_then(|v| v.as_str()).unwrap_or("-");
+    let url = inner.get("webhook_url").and_then(|v| v.as_str()).unwrap_or("-");
+    let enabled = inner.get("enabled").and_then(|v| v.as_bool()).unwrap_or(false);
+    let events = inner
+        .get("events")
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|e| e.as_str())
+                .collect::<Vec<_>>()
+                .join(",")
+        })
+        .unwrap_or_else(|| "-".to_string());
+    let mut out = String::new();
+    out.push_str(&format!("Webhook {}\n", id));
+    out.push_str(&format!("  type:    {}\n", kind));
+    out.push_str(&format!("  url:     {}\n", url));
+    out.push_str(&format!("  events:  {}\n", events));
+    out.push_str(&format!("  enabled: {}\n", enabled));
+    out
+}
+
+/// S2-WH: render a webhooks-list response — header line with the
+/// count, then one row per config. Empty list falls back to a
+/// "(no webhooks configured)" placeholder so an operator can tell
+/// the difference between "the cloud sent zero rows" and "the
+/// renderer is broken".
+fn format_webhooks_list(body: &serde_json::Value) -> String {
+    let total = body.get("total").and_then(|v| v.as_i64()).unwrap_or(0);
+    let rows = match body.get("webhooks").and_then(|v| v.as_array()) {
+        Some(arr) => arr,
+        None => {
+            return format!(
+                "Webhooks — total={}\n  (malformed response — missing 'webhooks' field)\n",
+                total,
+            );
+        }
+    };
+    let mut out = String::new();
+    out.push_str(&format!("Webhooks — total={}\n", total));
+    if rows.is_empty() {
+        out.push_str("  (no webhooks configured)\n");
+        return out;
+    }
+    out.push_str(&format!(
+        "  {:<36}  {:<10}  {:<7}  {:<30}  {}\n",
+        "id", "type", "enabled", "events", "url",
+    ));
+    for row in rows {
+        let id = row.get("id").and_then(|v| v.as_str()).unwrap_or("?");
+        let kind = row.get("webhook_type").and_then(|v| v.as_str()).unwrap_or("-");
+        let enabled = row.get("enabled").and_then(|v| v.as_bool()).unwrap_or(false);
+        let url = row.get("webhook_url").and_then(|v| v.as_str()).unwrap_or("-");
+        let events = row
+            .get("events")
+            .and_then(|v| v.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|e| e.as_str())
+                    .collect::<Vec<_>>()
+                    .join(",")
+            })
+            .unwrap_or_else(|| "-".to_string());
+        out.push_str(&format!(
+            "  {:<36}  {:<10}  {:<7}  {:<30}  {}\n",
+            id,
+            truncate(kind, 10),
+            if enabled { "true" } else { "false" },
+            truncate(&events, 30),
+            truncate(url, 60),
+        ));
+    }
+    out
+}
+
+/// S2-WH: DELETE sibling of recall_get/recall_post/recall_patch.
+/// Same auth + error shape so the dispatch handlers stay symmetric.
+/// Some cloud DELETE handlers return an empty body on success — we
+/// treat any 2xx without parseable JSON as `{}` rather than an error
+/// so the caller can still print "deleted" without surfacing a
+/// confusing parse failure.
+fn recall_delete(
+    client: &reqwest::blocking::Client,
+    url: &str,
+    token: &str,
+) -> Result<serde_json::Value, String> {
+    let resp = client
+        .delete(url)
+        .header("Authorization", format!("Bearer {}", token))
+        .send()
+        .map_err(|e| format!("request failed: {}", e))?;
+    let status = resp.status();
+    let text = resp
+        .text()
+        .map_err(|e| format!("response read failed (HTTP {}): {}", status, e))?;
+    let parsed: serde_json::Value = if text.trim().is_empty() {
+        serde_json::Value::Object(Default::default())
+    } else {
+        serde_json::from_str(&text).map_err(|e| {
+            format!("response parse failed (HTTP {}): {} — body: {}", status, e, text)
+        })?
+    };
+    if !status.is_success() {
+        return Err(format!("HTTP {}: {}", status, parsed));
+    }
+    Ok(parsed)
+}
+
+/// S2-AC: dispatch for `aura agent-card`. Hits the unauthenticated
+/// `/.well-known/agent-card.json` on the configured cloud (or the
+/// `--cloud` override) and renders the card. Skips the cloud token
+/// path entirely — the route is unauthenticated by A2A v1.2 spec so
+/// any external runtime can discover capabilities. The optional
+/// `--host` arg is forwarded as the HTTP `Host` header so the card
+/// the cloud builds reflects the public hostname even when the
+/// caller is hitting a loopback or proxy.
+fn run_agent_card(
+    host: Option<&str>,
+    cloud: Option<&str>,
+    json: bool,
+) -> Result<(), String> {
+    let cloud_url = cloud
+        .map(|s| s.to_string())
+        .or_else(|| ConfigManager::load().cloud_url)
+        .or_else(|| std::env::var("AURA_CLOUD_URL").ok())
+        .unwrap_or_else(|| "https://api.auravcs.com".to_string());
+    let trimmed = cloud_url.trim_end_matches('/');
+    let url = format!("{}/.well-known/agent-card.json", trimmed);
+    let client = cloud_http_client();
+    let mut req = client.get(&url);
+    if let Some(h) = host {
+        let h = h.trim();
+        if h.is_empty() {
+            return Err("--host cannot be empty".to_string());
+        }
+        req = req.header("host", h);
+    }
+    let resp = req.send().map_err(|e| format!("request failed: {}", e))?;
+    let status = resp.status();
+    let body = resp
+        .json::<serde_json::Value>()
+        .map_err(|e| format!("response parse failed (HTTP {}): {}", status, e))?;
+    if !status.is_success() {
+        return Err(format!("HTTP {}: {}", status, body));
+    }
+    if json {
+        println!("{}", serde_json::to_string_pretty(&body).unwrap_or_default());
+    } else {
+        print!("{}", format_agent_card(&body));
+    }
+    Ok(())
+}
+
+/// S2-AC: render the Agent Card as a CLI digest. Header line names
+/// the agent + version + protocolVersion + endpoint URL. Capabilities
+/// row mirrors the spec's three booleans (streaming, pushNotifications,
+/// stateTransitionHistory). Aura-specific extended capabilities are
+/// pulled from `metadata.aura.capabilities_extended` when present so
+/// operators can confirm flags like `typed-intent` or
+/// `signing-health-readonly` are advertised. Skills are listed
+/// id+name with truncated descriptions; pass `--json` for the full
+/// payload.
+fn format_agent_card(body: &serde_json::Value) -> String {
+    let mut out = String::new();
+    let name = body.get("name").and_then(|v| v.as_str()).unwrap_or("?");
+    let version = body.get("version").and_then(|v| v.as_str()).unwrap_or("?");
+    let protocol = body
+        .get("protocolVersion")
+        .and_then(|v| v.as_str())
+        .unwrap_or("?");
+    let url = body.get("url").and_then(|v| v.as_str()).unwrap_or("?");
+    out.push_str(&format!(
+        "Agent Card — {} v{} (A2A protocol {})\n",
+        name, version, protocol,
+    ));
+    out.push_str(&format!("  endpoint: {}\n", url));
+    if let Some(desc) = body.get("description").and_then(|v| v.as_str()) {
+        out.push_str(&format!("  description: {}\n", truncate(desc, 200)));
+    }
+    if let Some(caps) = body.get("capabilities") {
+        let streaming = caps.get("streaming").and_then(|v| v.as_bool()).unwrap_or(false);
+        let push = caps
+            .get("pushNotifications")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        let history = caps
+            .get("stateTransitionHistory")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        out.push_str(&format!(
+            "  capabilities: streaming={} pushNotifications={} stateTransitionHistory={}\n",
+            streaming, push, history,
+        ));
+    }
+    if let Some(ext) = body
+        .get("metadata")
+        .and_then(|m| m.get("aura"))
+        .and_then(|a| a.get("capabilities_extended"))
+        .and_then(|c| c.as_array())
+    {
+        let joined = ext
+            .iter()
+            .filter_map(|v| v.as_str())
+            .collect::<Vec<_>>()
+            .join(", ");
+        if !joined.is_empty() {
+            out.push_str(&format!("  capabilities_extended: {}\n", joined));
+        }
+    }
+    let skills = body
+        .get("skills")
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default();
+    out.push_str(&format!("  skills: {}\n", skills.len()));
+    if skills.is_empty() {
+        out.push_str("    (none advertised)\n");
+    } else {
+        for skill in &skills {
+            let id = skill.get("id").and_then(|v| v.as_str()).unwrap_or("?");
+            let sname = skill.get("name").and_then(|v| v.as_str()).unwrap_or("?");
+            let sdesc = skill
+                .get("description")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            out.push_str(&format!("    - {} ({})\n", id, sname));
+            if !sdesc.is_empty() {
+                out.push_str(&format!("        {}\n", truncate(sdesc, 140)));
+            }
+        }
+    }
+    out
+}
+
+/// S2-AT: render one task as a labeled block. Used by the `get`
+/// subcommand. Surfaces every load-bearing field without dumping
+/// the result blob (which can be large) — for the full payload use
+/// --json.
+fn format_a2a_task_one(body: &serde_json::Value) -> String {
+    let id = body.get("id").and_then(|v| v.as_str()).unwrap_or("?");
+    let status = body.get("status").and_then(|v| v.as_str()).unwrap_or("?");
+    let kind = body.get("agent_kind").and_then(|v| v.as_str()).unwrap_or("-");
+    let created = body.get("created_at").and_then(|v| v.as_str()).unwrap_or("?");
+    let updated = body.get("updated_at").and_then(|v| v.as_str()).unwrap_or("?");
+    let input_text = body.get("input_text").and_then(|v| v.as_str()).unwrap_or("-");
+    let context = body.get("context_id").and_then(|v| v.as_str()).unwrap_or("-");
+    let mut out = String::new();
+    out.push_str(&format!("Task {}\n", id));
+    out.push_str(&format!("  status:     {}\n", status));
+    out.push_str(&format!("  agent_kind: {}\n", kind));
+    out.push_str(&format!("  context_id: {}\n", context));
+    out.push_str(&format!("  created_at: {}\n", created));
+    out.push_str(&format!("  updated_at: {}\n", updated));
+    out.push_str(&format!("  input:      {}\n", truncate(input_text, 200)));
+    if let Some(err) = body.get("error_message").and_then(|v| v.as_str()) {
+        out.push_str(&format!("  error:      {}\n", err));
+    }
+    if body.get("result").map(|v| !v.is_null()).unwrap_or(false) {
+        out.push_str("  result:     (set — use --json for full payload)\n");
+    }
+    out
+}
+
+/// S2-AT: render a ListResponse as a table. The cloud envelope
+/// carries `returned` + `tasks[]`; keep alignment via fixed column
+/// widths and truncate long input_text. Empty list falls back to
+/// "(no tasks)".
+fn format_a2a_task_list(body: &serde_json::Value) -> String {
+    let returned = body.get("returned").and_then(|v| v.as_i64()).unwrap_or(0);
+    let rows = match body.get("tasks").and_then(|v| v.as_array()) {
+        Some(arr) => arr,
+        None => {
+            return format!(
+                "A2A tasks — returned={}\n  (malformed response — missing 'tasks' field)\n",
+                returned,
+            );
+        }
+    };
+    let mut out = String::new();
+    out.push_str(&format!("A2A tasks — returned={}\n", returned));
+    if rows.is_empty() {
+        out.push_str("  (no tasks)\n");
+        return out;
+    }
+    out.push_str(&format!(
+        "  {:<24}  {:<14}  {:<22}  {:<36}  {}\n",
+        "created_at", "status", "agent_kind", "id", "input"
+    ));
+    for row in rows {
+        let created = row.get("created_at").and_then(|v| v.as_str()).unwrap_or("?");
+        let status = row.get("status").and_then(|v| v.as_str()).unwrap_or("-");
+        let kind = row.get("agent_kind").and_then(|v| v.as_str()).unwrap_or("-");
+        let id = row.get("id").and_then(|v| v.as_str()).unwrap_or("?");
+        let input_text = row.get("input_text").and_then(|v| v.as_str()).unwrap_or("-");
+        out.push_str(&format!(
+            "  {:<24}  {:<14}  {:<22}  {:<36}  {}\n",
+            truncate(created, 24),
+            truncate(status, 14),
+            truncate(kind, 22),
+            id, // UUID width is exactly 36 — no truncation
+            truncate(input_text, 60),
+        ));
+    }
+    out
+}
+
+/// S2-TIC: terminal surface for the typed-intent helpers. Pure CLI
+/// plumbing — every byte of behavior lives in `intent_query` so the
+/// MCP and CLI outputs stay in lockstep. Reads only the local JSONL,
+/// no cloud roundtrip, no token required.
+fn run_intents(action: &IntentsAction) -> Result<(), String> {
+    let path = std::path::Path::new(".aura/intent_log.jsonl");
+    match action {
+        IntentsAction::Query {
+            intent_type,
+            since_hours,
+            limit,
+            json,
+        } => {
+            // Validate at the CLI boundary before reading anything from
+            // disk so a typo'd --type fails fast with the canonical list.
+            if let Some(t) = intent_type.as_deref() {
+                if !intent_query::is_canonical_intent_type(t) {
+                    return Err(format!(
+                        "Invalid --type '{}'. Must be one of: {}",
+                        t,
+                        intent_query::CANONICAL_INTENT_TYPES.join(", "),
+                    ));
+                }
+            }
+            let rows = intent_query::read_all_rows(path);
+            let now_unix_secs = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0);
+            let result = intent_query::query_rows(
+                rows,
+                intent_type.as_deref(),
+                *since_hours,
+                (*limit).min(500),
+                now_unix_secs,
+            );
+            if *json {
+                let body = result.to_json();
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&body).unwrap_or_else(|_| body.to_string())
+                );
+            } else {
+                let scope = match &result.intent_type {
+                    Some(t) => format!("type={}", t),
+                    None => "all types".to_string(),
+                };
+                println!(
+                    "Intent log query: {} (since_hours={}) — {} match(es), showing {}.",
+                    scope, result.since_hours, result.total_matches, result.entries.len(),
+                );
+                if result.entries.is_empty() {
+                    println!("  (no entries)");
+                } else {
+                    for r in &result.entries {
+                        let ttag = r
+                            .intent_type
+                            .as_deref()
+                            .map(|t| format!(" [{}]", t))
+                            .unwrap_or_default();
+                        let preview = if r.intent.len() > 100 {
+                            let mut s = r.intent.clone();
+                            s.truncate(97);
+                            s.push_str("...");
+                            s
+                        } else {
+                            r.intent.clone()
+                        };
+                        println!(
+                            "  ts={} agent={}{} :: {}",
+                            r.timestamp, r.agent_id, ttag, preview,
+                        );
+                    }
+                }
+            }
+            Ok(())
+        }
+        IntentsAction::Summary {
+            since_hours,
+            sample_per_type,
+            json,
+        } => {
+            if *json {
+                // Structured envelope mirrors the prose form's bucketing.
+                // Empty case: emit a deterministic "nothing to say" object
+                // (status=empty) instead of a None — tooling consumers
+                // shouldn't have to special-case missing-output vs empty.
+                let v = match intent_query::build_typed_intent_summary(
+                    path,
+                    *since_hours,
+                    *sample_per_type,
+                ) {
+                    Some(s) => s.to_json(),
+                    None => serde_json::json!({
+                        "status": "empty",
+                        "since_hours": since_hours,
+                        "typed_total": 0,
+                        "untyped": 0,
+                        "type_count": 0,
+                        "buckets": [],
+                    }),
+                };
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&v).unwrap_or_else(|_| "{}".into())
+                );
+                return Ok(());
+            }
+            match intent_query::narrate_typed_intents_prose(path, *since_hours, *sample_per_type) {
+                Some(prose) => {
+                    print!("{}", prose);
+                    Ok(())
+                }
+                None => {
+                    println!(
+                        "(no typed intents in the last {}h — log missing, empty, or all entries untyped)",
+                        since_hours
+                    );
+                    Ok(())
+                }
+            }
+        }
+    }
+}
+
+pub(crate) fn recall_cloud_creds() -> Result<(String, String), String> {
+    let config = ConfigManager::load();
+    let token = config
+        .cloud_api_token
+        .clone()
+        .or_else(|| std::env::var("AURA_CLOUD_TOKEN").ok())
+        .ok_or_else(|| {
+            "No cloud token configured. Run `aura cloud login` or set AURA_CLOUD_TOKEN.".to_string()
+        })?;
+    let cloud_url = config
+        .cloud_url
+        .clone()
+        .or_else(|| std::env::var("AURA_CLOUD_URL").ok())
+        .unwrap_or_else(|| "https://api.auravcs.com".to_string());
+    Ok((cloud_url, token))
+}
+
+fn recall_push_str(url: &mut String, sep: &mut char, key: &str, value: Option<&str>) {
+    if let Some(v) = value {
+        if v.trim().is_empty() {
+            return;
+        }
+        url.push(*sep);
+        url.push_str(key);
+        url.push('=');
+        url.push_str(&mcp::percent_encode_unreserved(v));
+        *sep = '&';
+    }
+}
+
+fn recall_push_i64(url: &mut String, sep: &mut char, key: &str, value: Option<i64>) {
+    if let Some(v) = value {
+        url.push(*sep);
+        url.push_str(&format!("{key}={v}"));
+        *sep = '&';
+    }
+}
+
+pub(crate) fn recall_get(
+    client: &reqwest::blocking::Client,
+    url: &str,
+    token: &str,
+) -> Result<serde_json::Value, String> {
+    let resp = client
+        .get(url)
+        .header("Authorization", format!("Bearer {}", token))
+        .send()
+        .map_err(|e| format!("request failed: {}", e))?;
+    let status = resp.status();
+    let body = resp
+        .json::<serde_json::Value>()
+        .map_err(|e| format!("response parse failed (HTTP {}): {}", status, e))?;
+    if !status.is_success() {
+        return Err(format!("HTTP {}: {}", status, body));
+    }
+    Ok(body)
+}
+
+/// S2-RNC: POST sibling of recall_get for endpoints that take a JSON
+/// body (currently /api/v2/episodic/narrate). Same auth + error
+/// shape so the dispatch handlers stay symmetric.
+pub(crate) fn recall_post(
+    client: &reqwest::blocking::Client,
+    url: &str,
+    token: &str,
+    body: &serde_json::Value,
+) -> Result<serde_json::Value, String> {
+    let resp = client
+        .post(url)
+        .header("Authorization", format!("Bearer {}", token))
+        .json(body)
+        .send()
+        .map_err(|e| format!("request failed: {}", e))?;
+    let status = resp.status();
+    let resp_body = resp
+        .json::<serde_json::Value>()
+        .map_err(|e| format!("response parse failed (HTTP {}): {}", status, e))?;
+    if !status.is_success() {
+        return Err(format!("HTTP {}: {}", status, resp_body));
+    }
+    Ok(resp_body)
+}
+
+/// S2-RNC: render a NarrateResponse as a CLI-friendly digest. Header
+/// line names the window + event_count + model_used (so the user can
+/// tell at a glance whether the cloud actually called an LLM or fell
+/// back to the synthetic digest), histogram below it, then the
+/// narration paragraph. Empty narration falls back to a placeholder
+/// rather than printing nothing.
+fn format_narrate_cloud(body: &serde_json::Value) -> String {
+    let window = body
+        .get("window_hours")
+        .and_then(|v| v.as_i64())
+        .unwrap_or(0);
+    let event_count = body
+        .get("event_count")
+        .and_then(|v| v.as_i64())
+        .unwrap_or(0);
+    let model_used = body
+        .get("model_used")
+        .and_then(|v| v.as_str())
+        .unwrap_or("?");
+    let narration = body
+        .get("narration")
+        .and_then(|v| v.as_str())
+        .unwrap_or("(empty narration)");
+    let mut out = String::new();
+    out.push_str(&format!(
+        "Episodic narrate — window_hours={} event_count={} model_used={}\n",
+        window, event_count, model_used,
+    ));
+    if let Some(line) = format_intent_histogram(body.get("counts_by_intent_type")) {
+        out.push_str(&format!("  {}\n", line));
+    }
+    out.push('\n');
+    out.push_str(narration);
+    if !narration.ends_with('\n') {
+        out.push('\n');
+    }
+    out
+}
+
+fn format_recall_events_table(body: &serde_json::Value) -> String {
+    let total = body.get("total").and_then(|v| v.as_i64()).unwrap_or(0);
+    let returned = body.get("returned").and_then(|v| v.as_i64()).unwrap_or(0);
+    let mut out = String::new();
+    out.push_str(&format!(
+        "Episodic recall — total={} returned={}\n",
+        total, returned
+    ));
+    // S2-TICRE: surface the typed-intent histogram from the cloud
+    // response right under the totals so a CLI user sees the typed
+    // breakdown at a glance, not just per-row tags. Suppressed when
+    // the bucket is empty or absent (older cloud build, or all rows
+    // untyped on a brand-new corpus). Shared helper with arc table.
+    if let Some(line) = format_intent_histogram(body.get("counts_by_intent_type")) {
+        out.push_str(&format!("  {}\n", line));
+    }
+    let events = match body.get("events").and_then(|v| v.as_array()) {
+        Some(arr) if !arr.is_empty() => arr,
+        _ => {
+            out.push_str("  (no events)\n");
+            return out;
+        }
+    };
+    // S2-TICRE: include an intent_type column. "-" for untyped rows so
+    // the column lines up — an absent JSON field is the cloud's signal
+    // for untyped (per the EpisodicEvent skip_serializing_if contract).
+    out.push_str(&format!(
+        "  {:<24}  {:<22}  {:<18}  {:<11}  {}\n",
+        "ts", "event_type", "agent_id", "intent_type", "focus"
+    ));
+    for ev in events {
+        let ts = ev.get("ts").and_then(|v| v.as_str()).unwrap_or("?");
+        let et = ev.get("event_type").and_then(|v| v.as_str()).unwrap_or("?");
+        let ag = ev.get("agent_id").and_then(|v| v.as_str()).unwrap_or("-");
+        let it = ev.get("intent_type").and_then(|v| v.as_str()).unwrap_or("-");
+        let focus_fn = ev.get("focus_fn").and_then(|v| v.as_str()).unwrap_or("");
+        let focus_file = ev.get("focus_file").and_then(|v| v.as_str()).unwrap_or("");
+        let focus = match (focus_fn.is_empty(), focus_file.is_empty()) {
+            (true, true) => "-".to_string(),
+            (false, true) => focus_fn.to_string(),
+            (true, false) => focus_file.to_string(),
+            (false, false) => format!("{}@{}", focus_fn, focus_file),
+        };
+        out.push_str(&format!(
+            "  {:<24}  {:<22}  {:<18}  {:<11}  {}\n",
+            truncate(ts, 24),
+            truncate(et, 22),
+            truncate(ag, 18),
+            truncate(it, 11),
+            truncate(&focus, 60)
+        ));
+    }
+    out
+}
+
+fn format_arc_segments_table(body: &serde_json::Value, multi: bool) -> String {
+    let total_events = body
+        .get("total_events")
+        .and_then(|v| v.as_i64())
+        .unwrap_or(0);
+    let segment_count = body
+        .get("segment_count")
+        .and_then(|v| v.as_i64())
+        .unwrap_or(0);
+    let window = body
+        .get("window_hours")
+        .and_then(|v| v.as_i64())
+        .unwrap_or(0);
+    let gap = body
+        .get("gap_minutes")
+        .and_then(|v| v.as_i64())
+        .unwrap_or(0);
+    let mut out = String::new();
+    if multi {
+        let agent_ids = body
+            .get("agent_ids")
+            .and_then(|v| v.as_array())
+            .map(|a| {
+                a.iter()
+                    .filter_map(|x| x.as_str())
+                    .collect::<Vec<_>>()
+                    .join(",")
+            })
+            .unwrap_or_default();
+        out.push_str(&format!(
+            "Multi-agent arc — agents=[{}] window_hours={} gap_minutes={} segments={} events={}\n",
+            agent_ids, window, gap, segment_count, total_events
+        ));
+    } else {
+        let agent_id = body
+            .get("agent_id")
+            .and_then(|v| v.as_str())
+            .unwrap_or("?");
+        out.push_str(&format!(
+            "Session arc — agent={} window_hours={} gap_minutes={} segments={} events={}\n",
+            agent_id, window, gap, segment_count, total_events
+        ));
+    }
+    // S2-TICRAH: symmetric to recall events — surface the cross-arc
+    // typed-intent histogram right under the totals so a CLI user
+    // sees the typed shape without inspecting per-segment buckets.
+    // Suppressed when absent or fully untyped.
+    if let Some(line) = format_intent_histogram(body.get("counts_by_intent_type")) {
+        out.push_str(&format!("  {}\n", line));
+    }
+    let segments = match body.get("segments").and_then(|v| v.as_array()) {
+        Some(arr) if !arr.is_empty() => arr,
+        _ => {
+            out.push_str("  (no segments)\n");
+            return out;
+        }
+    };
+    if multi {
+        out.push_str(&format!(
+            "  {:<22}  {:<24}  {:<24}  {:>5}  {:<28}  {}\n",
+            "agent_id", "start_ts", "end_ts", "evts", "intent_types", "top_refs"
+        ));
+    } else {
+        out.push_str(&format!(
+            "  {:<24}  {:<24}  {:>5}  {:<28}  {}\n",
+            "start_ts", "end_ts", "evts", "intent_types", "top_refs"
+        ));
+    }
+    for seg in segments {
+        let start = seg.get("start_ts").and_then(|v| v.as_str()).unwrap_or("?");
+        let end = seg.get("end_ts").and_then(|v| v.as_str()).unwrap_or("?");
+        let evts = seg.get("event_count").and_then(|v| v.as_i64()).unwrap_or(0);
+        let refs = seg
+            .get("top_refs")
+            .and_then(|v| v.as_array())
+            .map(|a| {
+                a.iter()
+                    .filter_map(|x| x.as_str())
+                    .collect::<Vec<_>>()
+                    .join(",")
+            })
+            .unwrap_or_default();
+        // S2-TICRAH: per-segment typed-intent bucket compressed into a
+        // single column. "-" when the segment is fully untyped or the
+        // bucket is absent — keeps the column lined up.
+        let seg_intents = format_intent_histogram_inline(seg.get("counts_by_intent_type"))
+            .unwrap_or_else(|| "-".to_string());
+        if multi {
+            let ag = seg.get("agent_id").and_then(|v| v.as_str()).unwrap_or("-");
+            out.push_str(&format!(
+                "  {:<22}  {:<24}  {:<24}  {:>5}  {:<28}  {}\n",
+                truncate(ag, 22),
+                truncate(start, 24),
+                truncate(end, 24),
+                evts,
+                truncate(&seg_intents, 28),
+                truncate(&refs, 60)
+            ));
+        } else {
+            out.push_str(&format!(
+                "  {:<24}  {:<24}  {:>5}  {:<28}  {}\n",
+                truncate(start, 24),
+                truncate(end, 24),
+                evts,
+                truncate(&seg_intents, 28),
+                truncate(&refs, 60)
+            ));
+        }
+    }
+    out
+}
+
+/// S2-RT: render a TimelineResponse as a per-function timeline table.
+/// Mirrors the shape of format_recall_events_table but leads with a
+/// header naming the function + window, and includes a by_day bucket
+/// list right under the histograms so a CLI user sees the temporal
+/// distribution at a glance. Falls back to "(no events)" when the
+/// timeline window is empty for the function.
+fn format_timeline_table(body: &serde_json::Value) -> String {
+    let function_name = body
+        .get("function_name")
+        .and_then(|v| v.as_str())
+        .unwrap_or("?");
+    let window = body
+        .get("window_hours")
+        .and_then(|v| v.as_i64())
+        .unwrap_or(0);
+    let total = body
+        .get("total_events")
+        .and_then(|v| v.as_i64())
+        .unwrap_or(0);
+    let returned = body
+        .get("returned")
+        .and_then(|v| v.as_i64())
+        .unwrap_or(0);
+    let mut out = String::new();
+    out.push_str(&format!(
+        "Per-function timeline — function={} window_hours={} total={} returned={}\n",
+        function_name, window, total, returned,
+    ));
+    if let Some(line) = format_intent_histogram(body.get("counts_by_intent_type")) {
+        out.push_str(&format!("  {}\n", line));
+    }
+    // by_day buckets: temporal shape over the window, oldest → newest.
+    if let Some(days) = body.get("by_day").and_then(|v| v.as_array()) {
+        if !days.is_empty() {
+            let pretty = days
+                .iter()
+                .filter_map(|d| {
+                    let day = d.get("day").and_then(|v| v.as_str())?;
+                    let count = d.get("count").and_then(|v| v.as_i64()).unwrap_or(0);
+                    Some(format!("{}={}", day, count))
+                })
+                .collect::<Vec<_>>()
+                .join(", ");
+            if !pretty.is_empty() {
+                out.push_str(&format!("  by_day: {}\n", pretty));
+            }
+        }
+    }
+    if let Some(agents) = body.get("agents_seen").and_then(|v| v.as_array()) {
+        let names = agents
+            .iter()
+            .filter_map(|x| x.as_str())
+            .collect::<Vec<_>>()
+            .join(", ");
+        if !names.is_empty() {
+            out.push_str(&format!("  agents_seen: {}\n", names));
+        }
+    }
+    let events = match body.get("events").and_then(|v| v.as_array()) {
+        Some(arr) if !arr.is_empty() => arr,
+        _ => {
+            out.push_str("  (no events)\n");
+            return out;
+        }
+    };
+    out.push_str(&format!(
+        "  {:<24}  {:<22}  {:<18}  {:<11}  {}\n",
+        "ts", "event_type", "agent_id", "intent_type", "summary"
+    ));
+    for ev in events {
+        let ts = ev.get("ts").and_then(|v| v.as_str()).unwrap_or("?");
+        let et = ev.get("event_type").and_then(|v| v.as_str()).unwrap_or("?");
+        let ag = ev.get("agent_id").and_then(|v| v.as_str()).unwrap_or("-");
+        let it = ev.get("intent_type").and_then(|v| v.as_str()).unwrap_or("-");
+        let summary = ev.get("summary").and_then(|v| v.as_str()).unwrap_or("-");
+        out.push_str(&format!(
+            "  {:<24}  {:<22}  {:<18}  {:<11}  {}\n",
+            truncate(ts, 24),
+            truncate(et, 22),
+            truncate(ag, 18),
+            truncate(it, 11),
+            truncate(summary, 60),
+        ));
+    }
+    out
+}
+
+/// S2-RAD: render an AgentDigestResponse as a per-agent digest table.
+/// Same layout as format_timeline_table but leads with agent= header
+/// and surfaces the digest-specific top_functions / top_files
+/// rankings (already sorted server-side count desc, name asc) right
+/// under the histograms — they're the whole point of the digest view
+/// over the bare event list.
+fn format_agent_digest_table(body: &serde_json::Value) -> String {
+    let agent_id = body
+        .get("agent_id")
+        .and_then(|v| v.as_str())
+        .unwrap_or("?");
+    let window = body
+        .get("window_hours")
+        .and_then(|v| v.as_i64())
+        .unwrap_or(0);
+    let total = body
+        .get("total_events")
+        .and_then(|v| v.as_i64())
+        .unwrap_or(0);
+    let returned = body
+        .get("returned")
+        .and_then(|v| v.as_i64())
+        .unwrap_or(0);
+    let mut out = String::new();
+    out.push_str(&format!(
+        "Per-agent digest — agent={} window_hours={} total={} returned={}\n",
+        agent_id, window, total, returned,
+    ));
+    if let Some(line) = format_intent_histogram(body.get("counts_by_intent_type")) {
+        out.push_str(&format!("  {}\n", line));
+    }
+    if let Some(days) = body.get("by_day").and_then(|v| v.as_array()) {
+        if !days.is_empty() {
+            let pretty = days
+                .iter()
+                .filter_map(|d| {
+                    let day = d.get("day").and_then(|v| v.as_str())?;
+                    let count = d.get("count").and_then(|v| v.as_i64()).unwrap_or(0);
+                    Some(format!("{}={}", day, count))
+                })
+                .collect::<Vec<_>>()
+                .join(", ");
+            if !pretty.is_empty() {
+                out.push_str(&format!("  by_day: {}\n", pretty));
+            }
+        }
+    }
+    if let Some(line) = format_ref_count_line("top_functions", body.get("top_functions")) {
+        out.push_str(&format!("  {}\n", line));
+    }
+    if let Some(line) = format_ref_count_line("top_files", body.get("top_files")) {
+        out.push_str(&format!("  {}\n", line));
+    }
+    let events = match body.get("events").and_then(|v| v.as_array()) {
+        Some(arr) if !arr.is_empty() => arr,
+        _ => {
+            out.push_str("  (no events)\n");
+            return out;
+        }
+    };
+    out.push_str(&format!(
+        "  {:<24}  {:<22}  {:<11}  {}\n",
+        "ts", "event_type", "intent_type", "summary"
+    ));
+    for ev in events {
+        let ts = ev.get("ts").and_then(|v| v.as_str()).unwrap_or("?");
+        let et = ev.get("event_type").and_then(|v| v.as_str()).unwrap_or("?");
+        let it = ev.get("intent_type").and_then(|v| v.as_str()).unwrap_or("-");
+        let summary = ev.get("summary").and_then(|v| v.as_str()).unwrap_or("-");
+        out.push_str(&format!(
+            "  {:<24}  {:<22}  {:<11}  {}\n",
+            truncate(ts, 24),
+            truncate(et, 22),
+            truncate(it, 11),
+            truncate(summary, 60),
+        ));
+    }
+    out
+}
+
+/// S2-RAD: pretty-print top_functions / top_files RefCount arrays as
+/// a one-liner like "top_functions: apply_limiter=3, retry_loop=2".
+/// Returns None when the array is missing or empty so the caller can
+/// suppress the line entirely (avoids printing "top_functions: " with
+/// no payload on agents whose events carry no refs_fn / refs_file).
+fn format_ref_count_line(label: &str, v: Option<&serde_json::Value>) -> Option<String> {
+    let arr = v.and_then(|val| val.as_array())?;
+    if arr.is_empty() {
+        return None;
+    }
+    let pretty = arr
+        .iter()
+        .filter_map(|x| {
+            let name = x.get("name").and_then(|v| v.as_str())?;
+            let count = x.get("count").and_then(|v| v.as_i64()).unwrap_or(0);
+            Some(format!("{}={}", name, count))
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    if pretty.is_empty() {
+        None
+    } else {
+        Some(format!("{}: {}", label, pretty))
+    }
+}
+
+/// S2-TICRAH/TICRE shared helper. Collect a counts_by_intent_type
+/// JSON object into a (name, count) Vec sorted count desc, name asc
+/// (matches the ordering used in recall_narrate). Returns None when
+/// the value is missing, not an object, or has no positive bucket —
+/// caller decides what to print in that case (suppress entirely on
+/// top-level, "-" placeholder per-segment).
+fn collect_intent_histogram(v: Option<&serde_json::Value>) -> Option<Vec<(String, i64)>> {
+    let buckets = v.and_then(|val| val.as_object())?;
+    let mut pairs: Vec<(String, i64)> = buckets
+        .iter()
+        .filter_map(|(k, v)| v.as_i64().map(|n| (k.clone(), n)))
+        .filter(|(_, n)| *n > 0)
+        .collect();
+    if pairs.is_empty() {
+        return None;
+    }
+    pairs.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+    Some(pairs)
+}
+
+/// Top-level header form: `intent_types: Refactor=2, BugFix=1`.
+/// Comma-space separator since the line gets the full terminal width.
+fn format_intent_histogram(v: Option<&serde_json::Value>) -> Option<String> {
+    let pairs = collect_intent_histogram(v)?;
+    let pretty = pairs
+        .iter()
+        .map(|(k, n)| format!("{}={}", k, n))
+        .collect::<Vec<_>>()
+        .join(", ");
+    Some(format!("intent_types: {}", pretty))
+}
+
+/// Inline per-cell form: `Refactor=2,BugFix=1`. Comma-only since the
+/// per-segment column is narrow and we'd lose pairs to truncation.
+fn format_intent_histogram_inline(v: Option<&serde_json::Value>) -> Option<String> {
+    let pairs = collect_intent_histogram(v)?;
+    Some(
+        pairs
+            .iter()
+            .map(|(k, n)| format!("{}={}", k, n))
+            .collect::<Vec<_>>()
+            .join(","),
+    )
+}
+
+fn truncate(s: &str, max: usize) -> String {
+    recall_narrate::truncate(s, max)
+}
+
+// Block-range narration helpers moved to `crate::recall_narrate` so the
+// MCP wrapper (`aura_handover`) can embed the same prose without
+// duplicating the implementation. Re-export the names that
+// `run_recall` needs so the local match arm reads naturally.
+use crate::recall_narrate::{
+    build_block_narration, collect_block_summaries, current_unix_ms,
+    parse_block_summary, parse_iso8601_to_ms, read_blocks_dir, top_count_pairs,
+    BlockSummary,
+};
 
 fn export_usage_csv(path: &str, report: &usage::UsageReport) {
     let mut csv = String::from("session_id,agent,model,project,started_at,duration_secs,input_tokens,output_tokens,api_calls,cost_usd,files_touched,phase\n");
@@ -6157,5 +12140,1569 @@ fn export_plan_csv(path: &str, report: &plan_tracker::PlanReport) {
     match fs::write(path, &csv) {
         Ok(_) => println!("  {} Exported plan usage to {}", "✓".green().bold(), path.cyan()),
         Err(e) => eprintln!("  {} Failed to write {}: {}", "✗".red(), path, e),
+    }
+}
+
+/// Color a lifecycle status for terminal output.
+fn loop_status_color(status: &str) -> colored::ColoredString {
+    match status {
+        aura_loop::STATE_COMPLETED => status.green().bold(),
+        aura_loop::STATE_WORKING => status.cyan().bold(),
+        aura_loop::STATE_SUBMITTED => status.normal(),
+        aura_loop::STATE_FAILED | aura_loop::STATE_REJECTED => status.red().bold(),
+        aura_loop::STATE_CANCELED => status.dimmed(),
+        _ => status.yellow(),
+    }
+}
+
+fn print_loop_task(t: &aura_loop::LoopTask) {
+    let prio = match t.priority.as_str() {
+        "critical" => "critical".red().bold(),
+        "high" => "high".yellow(),
+        "medium" => "medium".normal(),
+        _ => "low".dimmed(),
+    };
+    println!(
+        "  {}  {}  [{}] {}",
+        t.short_id().yellow().bold(),
+        t.title.bold(),
+        loop_status_color(&t.status),
+        prio,
+    );
+    if !t.depends_on.is_empty() {
+        let deps: Vec<String> = t
+            .depends_on
+            .iter()
+            .map(|d| d.strip_prefix("t-").unwrap_or(d).to_string())
+            .collect();
+        println!("       {} {}", "depends on:".dimmed(), deps.join(", ").dimmed());
+    }
+}
+
+fn handle_loop_command(sub: &LoopSubcommands) -> Result<(), Box<dyn std::error::Error>> {
+    let repo_root = std::env::current_dir()?;
+    let graph = aura_loop::LoopGraph::at(&repo_root);
+
+    match sub {
+        LoopSubcommands::Add {
+            title,
+            input,
+            priority,
+            kind,
+            deps,
+            ac,
+            agent,
+            tags,
+            json,
+        } => {
+            let tags_vec = tags
+                .split(',')
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect::<Vec<_>>();
+            // Validate every declared dep exists before minting so the
+            // graph never holds a dangling edge from `add`.
+            let idx = graph.index();
+            for d in deps {
+                if !idx.contains_key(d) {
+                    return Err(format!("dependency {d} not found").into());
+                }
+            }
+            let body = if input.is_empty() { title.clone() } else { input.clone() };
+            let task = graph.create(
+                title.clone(),
+                body,
+                priority.clone(),
+                kind.clone(),
+                deps.clone(),
+                ac.clone(),
+                agent.clone(),
+                tags_vec,
+            )?;
+            if *json {
+                println!("{}", serde_json::to_string(&task)?);
+            } else {
+                println!("{} minted", task.short_id().green().bold());
+                print_loop_task(&task);
+            }
+        }
+        LoopSubcommands::Dep { id, on, rm, json } => {
+            let task = if *rm {
+                graph.rm_dep(id, on).map_err(|e| -> Box<dyn std::error::Error> { e.into() })?
+            } else {
+                graph.add_dep(id, on).map_err(|e| -> Box<dyn std::error::Error> { e.into() })?
+            };
+            if *json {
+                println!("{}", serde_json::to_string(&task)?);
+            } else {
+                let verb = if *rm { "removed" } else { "added" };
+                println!("edge {verb}: {} → {}", id.yellow(), on.yellow());
+                print_loop_task(&task);
+            }
+        }
+        LoopSubcommands::Ready { json } => {
+            let ready = aura_loop::ready_set(&graph.list());
+            if *json {
+                println!("{}", serde_json::to_string(&ready)?);
+            } else if ready.is_empty() {
+                println!("{}", "Ready set is empty — nothing unblocked to work on.".dimmed());
+            } else {
+                println!("{} ({})", "READY".green().bold(), ready.len());
+                for t in &ready {
+                    print_loop_task(t);
+                }
+            }
+        }
+        LoopSubcommands::List { json } => {
+            let view = aura_loop::ready_view(&graph.list());
+            if *json {
+                let all = graph.list();
+                println!("{}", serde_json::to_string(&all)?);
+            } else {
+                let section = |label: colored::ColoredString, items: &[aura_loop::LoopTask]| {
+                    if !items.is_empty() {
+                        println!("\n{} ({})", label, items.len());
+                        for t in items {
+                            print_loop_task(t);
+                        }
+                    }
+                };
+                section("READY".green().bold(), &view.ready);
+                section("WORKING".cyan().bold(), &view.working);
+                if !view.blocked.is_empty() {
+                    println!("\n{} ({})", "BLOCKED".yellow().bold(), view.blocked.len());
+                    for (t, unmet) in &view.blocked {
+                        print_loop_task(t);
+                        let u: Vec<String> = unmet
+                            .iter()
+                            .map(|d| d.strip_prefix("t-").unwrap_or(d).to_string())
+                            .collect();
+                        println!("       {} {}", "waiting on:".red().dimmed(), u.join(", ").red().dimmed());
+                    }
+                }
+                section("DONE".dimmed(), &view.done);
+                section("OTHER".yellow(), &view.other);
+                if graph.list().is_empty() {
+                    println!("{}", "Graph is empty. `aura loop add <title>` to mint a node.".dimmed());
+                }
+            }
+        }
+        LoopSubcommands::Show { id, json } => {
+            let task = graph
+                .get(id)
+                .ok_or_else(|| -> Box<dyn std::error::Error> { format!("node {id} not found").into() })?;
+            if *json {
+                println!("{}", serde_json::to_string_pretty(&task)?);
+            } else {
+                print_loop_task(&task);
+                if let Some(ac) = &task.acceptance_criteria {
+                    println!("       {} {}", "accept:".dimmed(), ac);
+                }
+                if let Some(agent) = &task.agent_kind {
+                    println!("       {} {}", "agent:".dimmed(), agent);
+                }
+                if let Some(sha) = &task.commit_sha {
+                    println!("       {} {}", "commit:".dimmed(), sha);
+                }
+                if let Some(lease) = &task.lease {
+                    println!("       {} held by {} until {}", "lease:".dimmed(), lease.holder, lease.expires_at);
+                }
+                if let Some(err) = &task.error_message {
+                    println!("       {} {}", "error:".red().dimmed(), err);
+                }
+            }
+        }
+        LoopSubcommands::Status { json } => {
+            let view = aura_loop::ready_view(&graph.list());
+            if *json {
+                let obj = serde_json::json!({
+                    "ready": view.ready.len(),
+                    "blocked": view.blocked.len(),
+                    "working": view.working.len(),
+                    "done": view.done.len(),
+                    "other": view.other.len(),
+                });
+                println!("{}", serde_json::to_string(&obj)?);
+            } else {
+                println!(
+                    "{} ready · {} blocked · {} working · {} done · {} other",
+                    view.ready.len().to_string().green().bold(),
+                    view.blocked.len().to_string().yellow(),
+                    view.working.len().to_string().cyan(),
+                    view.done.len().to_string().dimmed(),
+                    view.other.len().to_string().dimmed(),
+                );
+            }
+        }
+        LoopSubcommands::Set { id, status, json } => {
+            if !aura_loop::TERMINAL_STATES.contains(&status.as_str())
+                && ![
+                    aura_loop::STATE_SUBMITTED,
+                    aura_loop::STATE_WORKING,
+                    aura_loop::STATE_INPUT_REQUIRED,
+                    aura_loop::STATE_AUTH_REQUIRED,
+                ]
+                .contains(&status.as_str())
+            {
+                return Err(format!("invalid status '{status}'").into());
+            }
+            let task = graph
+                .set_status(id, status)
+                .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
+            if *json {
+                println!("{}", serde_json::to_string(&task)?);
+            } else {
+                println!("{} → {}", task.short_id().yellow().bold(), loop_status_color(&task.status));
+            }
+        }
+        LoopSubcommands::Run {
+            agent,
+            lease_secs,
+            max,
+            verify,
+            dry_run,
+            watch,
+            jobs,
+            rollback,
+            json,
+        } => {
+            let opts = aura_loop_run::RunOpts {
+                agent: agent.clone(),
+                lease_secs: *lease_secs,
+                max: *max,
+                verify: verify.clone(),
+                dry_run: *dry_run,
+                watch: *watch,
+                jobs: *jobs,
+                rollback: *rollback,
+                json: *json,
+            };
+            aura_loop_run::run(&repo_root, &opts)?;
+        }
+        LoopSubcommands::Seed { from, agent, json } => {
+            let plan_path = match from {
+                Some(p) => std::path::PathBuf::from(p),
+                None => repo_root.join(".aura").join("plans").join("PLAN.md"),
+            };
+            let ids = aura_loop_run::seed_from_plan(&repo_root, &plan_path, agent)?;
+            if *json {
+                println!("{}", serde_json::to_string(&ids)?);
+            } else {
+                println!(
+                    "{} seeded {} wave node(s) from {}",
+                    "✓".green().bold(),
+                    ids.len(),
+                    plan_path.display()
+                );
+                let graph = aura_loop::LoopGraph::at(&repo_root);
+                for id in &ids {
+                    if let Some(t) = graph.get(id) {
+                        print_loop_task(&t);
+                    }
+                }
+            }
+        }
+        LoopSubcommands::PlanContext { json } => {
+            // The orderless pile, chunked exactly as the desktop planner sees
+            // it (`aura_loop::planning`). An agent reads this, reasons the real
+            // dependencies, then writes them back with `loop plan-apply`.
+            let all = graph.list();
+            let ctx = aura_loop::planning::plan_context(&all);
+            let chunks: Vec<serde_json::Value> = ctx
+                .chunks
+                .iter()
+                .map(|c| {
+                    let tasks: Vec<serde_json::Value> = c
+                        .node_ids
+                        .iter()
+                        .map(|id| {
+                            let (title, detail) = graph
+                                .get(id)
+                                .map(|t| (t.title, t.input))
+                                .unwrap_or_default();
+                            serde_json::json!({ "id": id, "title": title, "detail": detail })
+                        })
+                        .collect();
+                    serde_json::json!({ "label": c.label, "seed_goal": c.seed_goal, "tasks": tasks })
+                })
+                .collect();
+            let payload = serde_json::json!({
+                "considered": ctx.considered,
+                "deferred": ctx.deferred,
+                "chunk_count": chunks.len(),
+                "chunks": chunks,
+                "how_to_apply": "Within each chunk, work out the REAL dependencies (only where one task needs another's output), name the goal each connected group adds up to, group goals under a few larger objectives, then pipe { \"edges\": [{task,depends_on}], \"goals\": [{goal,tasks}], \"objectives\": [{objective,goals}] } into `aura loop plan-apply`.",
+            });
+            if *json {
+                println!("{}", serde_json::to_string(&payload)?);
+            } else {
+                println!("{}", serde_json::to_string_pretty(&payload)?);
+            }
+        }
+        LoopSubcommands::PlanApply { file, json } => {
+            let raw = match file {
+                Some(p) => std::fs::read_to_string(p)?,
+                None => {
+                    use std::io::Read;
+                    let mut s = String::new();
+                    std::io::stdin().read_to_string(&mut s)?;
+                    s
+                }
+            };
+            let doc: serde_json::Value = serde_json::from_str(raw.trim())
+                .map_err(|e| -> Box<dyn std::error::Error> { format!("plan JSON: {e}").into() })?;
+            let take = |key: &str| -> serde_json::Value {
+                doc.get(key).cloned().unwrap_or_else(|| serde_json::json!([]))
+            };
+            let edges: Vec<aura_loop::planning::PlanEdge> = serde_json::from_value(take("edges"))?;
+            let goals: Vec<aura_loop::planning::PlanGoal> = serde_json::from_value(take("goals"))?;
+            let objectives: Vec<aura_loop::planning::PlanObjective> =
+                serde_json::from_value(take("objectives"))?;
+            if edges.is_empty() && goals.is_empty() && objectives.is_empty() {
+                return Err("nothing to apply — provide at least one of edges, goals, objectives".into());
+            }
+            let report = aura_loop::planning::apply_plan(&graph, &edges, &goals, &objectives);
+            if *json {
+                println!("{}", serde_json::to_string(&report)?);
+            } else {
+                println!(
+                    "{} wired {} edge(s){}, {} task(s) connected, {} goal(s), {} objective(s)",
+                    "✓".green().bold(),
+                    report.edges,
+                    if report.skipped_edges > 0 {
+                        format!(" ({} skipped)", report.skipped_edges)
+                    } else {
+                        String::new()
+                    },
+                    report.connected,
+                    report.goals,
+                    report.objectives
+                );
+            }
+        }
+        LoopSubcommands::Review { commits, json } => {
+            // Reality-check before planning. Finished-work evidence = recent
+            // commit subjects (cheap, honest); the engine also folds in the
+            // graph's own terminal nodes. We never claim code is done — only
+            // that a name collides with finished work or another pending task.
+            let all = graph.list();
+            let done_titles = recent_commit_subjects(*commits);
+            let flags = aura_loop::planning::review_tasks(&all, &done_titles);
+            if *json {
+                println!("{}", serde_json::to_string(&flags)?);
+            } else if flags.is_empty() {
+                println!(
+                    "{} Nothing to drop — every task looks like real, unfinished work.",
+                    "✓".green().bold()
+                );
+            } else {
+                use aura_loop::planning::FlagKind;
+                let label = |k: FlagKind| match k {
+                    FlagKind::AlreadyDone => "already done".yellow().bold(),
+                    FlagKind::Duplicate => "duplicate".yellow().bold(),
+                    FlagKind::Thin => "empty stub".yellow().bold(),
+                };
+                println!(
+                    "{} {} task(s) worth a second look before you run them:\n",
+                    "⚑".yellow().bold(),
+                    flags.len()
+                );
+                for f in &flags {
+                    println!("  [{}] {}", label(f.kind), f.title.bold());
+                    println!("      {}", f.reason.dimmed());
+                    if let Some(ev) = &f.evidence {
+                        println!("      {} {}", "↔".dimmed(), ev.dimmed());
+                    }
+                }
+            }
+        }
+        LoopSubcommands::AttachTargets { json } => {
+            // Offer existing goals new work can hang off, so adding tasks +
+            // Plan can extend a flow instead of always starting an island.
+            let all = graph.list();
+            let targets = aura_loop::planning::attach_targets(&all);
+            if *json {
+                let payload: Vec<serde_json::Value> = targets
+                    .iter()
+                    .map(|t| {
+                        let tails: Vec<serde_json::Value> = t
+                            .tail_ids
+                            .iter()
+                            .map(|id| {
+                                let title = graph.get(id).map(|n| n.title).unwrap_or_default();
+                                serde_json::json!({ "id": id, "title": title })
+                            })
+                            .collect();
+                        serde_json::json!({ "goal": t.goal, "size": t.size, "tails": tails })
+                    })
+                    .collect();
+                println!("{}", serde_json::to_string(&payload)?);
+            } else if targets.is_empty() {
+                println!(
+                    "{} No existing goals yet — new tasks start their own flow.",
+                    "·".dimmed()
+                );
+            } else {
+                println!("Goals you can attach new work to:\n");
+                for t in &targets {
+                    println!(
+                        "  {} {}",
+                        t.goal.bold(),
+                        format!("({} step{})", t.size, if t.size == 1 { "" } else { "s" }).dimmed()
+                    );
+                    for id in &t.tail_ids {
+                        let title = graph.get(id).map(|n| n.title).unwrap_or_default();
+                        println!("      {} {}", "↳ after".dimmed(), title);
+                    }
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Recent commit subjects (HEAD-first), used as finished-work evidence for
+/// `aura loop review` so "already done" catches work finished outside the
+/// graph. Best-effort: an empty vec when git isn't readable.
+fn recent_commit_subjects(n: usize) -> Vec<String> {
+    let out = std::process::Command::new("git")
+        .args(["log", &format!("-{n}"), "--pretty=format:%s"])
+        .output();
+    match out {
+        Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout)
+            .lines()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
+fn current_actor() -> String {
+    if let Ok(out) = std::process::Command::new("git")
+        .args(["config", "user.name"])
+        .output()
+    {
+        if out.status.success() {
+            let name = String::from_utf8_lossy(&out.stdout).trim().to_string();
+            if !name.is_empty() {
+                return name;
+            }
+        }
+    }
+    std::env::var("USER").unwrap_or_else(|_| "anon".to_string())
+}
+
+fn handle_task_command(sub: &TaskSubcommands) -> Result<(), Box<dyn std::error::Error>> {
+    use crate::activity::ActivityStore;
+    use crate::task::{TaskStatus, TaskStore};
+    use colored::Colorize;
+    let repo_root = std::env::current_dir()?;
+    let store = TaskStore::at(&repo_root);
+    let activity = ActivityStore::at(&repo_root);
+    let actor = current_actor();
+
+    fn print_task_pretty(t: &task::Task) {
+        let status_label = t.status().label();
+        let claim = t
+            .claimed_by
+            .clone()
+            .unwrap_or_else(|| "—".to_string());
+        let assign = t
+            .assignee
+            .clone()
+            .unwrap_or_else(|| "—".to_string());
+        println!(
+            "{} {}  {}  by:{}  claim:{}  assign:{}",
+            t.id.yellow().bold(),
+            format!("[{}]", t.priority).dimmed(),
+            t.title,
+            t.author.dimmed(),
+            claim.cyan(),
+            assign.cyan(),
+        );
+        println!(
+            "   {} {}  {}",
+            "status:".dimmed(),
+            status_label,
+            if t.labels.is_empty() {
+                String::new()
+            } else {
+                format!("labels: {}", t.labels.join(", "))
+            }
+            .dimmed()
+        );
+    }
+
+    match sub {
+        TaskSubcommands::New {
+            title,
+            body,
+            priority,
+            labels,
+            author,
+            json,
+        } => {
+            let labels_vec = labels
+                .split(',')
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect::<Vec<_>>();
+            let task_author = author.clone().unwrap_or_else(|| actor.clone());
+            let task = store.create(
+                title.clone(),
+                body.clone(),
+                priority.clone(),
+                task_author.clone(),
+                labels_vec,
+            )?;
+            activity.quick(&task_author, "created", &task.id, Some(&task.title));
+            if *json {
+                println!("{}", serde_json::to_string(&task)?);
+            } else {
+                println!("{} created", task.id.green().bold());
+                print_task_pretty(&task);
+            }
+        }
+        TaskSubcommands::List {
+            status,
+            assignee,
+            claimed_by,
+            json,
+        } => {
+            let mut tasks = store.list();
+            if let Some(s) = status {
+                if let Some(want) = TaskStatus::parse(s) {
+                    tasks.retain(|t| t.status() == want);
+                }
+            }
+            if let Some(a) = assignee {
+                tasks.retain(|t| t.assignee.as_deref() == Some(a.as_str()));
+            }
+            if let Some(c) = claimed_by {
+                tasks.retain(|t| t.claimed_by.as_deref() == Some(c.as_str()));
+            }
+            if *json {
+                println!("{}", serde_json::to_string(&tasks)?);
+            } else if tasks.is_empty() {
+                println!("{}", "No tasks.".dimmed());
+            } else {
+                for t in &tasks {
+                    print_task_pretty(t);
+                }
+            }
+        }
+        TaskSubcommands::Show { id, json } => {
+            let task = store
+                .get(id)
+                .ok_or_else(|| format!("task {} not found", id))?;
+            if *json {
+                println!("{}", serde_json::to_string(&task)?);
+            } else {
+                print_task_pretty(&task);
+                if !task.body.is_empty() {
+                    println!("\n{}", task.body);
+                }
+                if !task.comments.is_empty() {
+                    println!("\n{}", "Comments".bold());
+                    for c in &task.comments {
+                        println!("  {} {}: {}", c.author.cyan(), c.at.to_string().dimmed(), c.body);
+                    }
+                }
+            }
+        }
+        TaskSubcommands::Claim { id, as_who, json } => {
+            let who = as_who.clone().unwrap_or_else(|| actor.clone());
+            let task = store.claim(id, who.clone())?;
+            activity.quick(&who, "claimed", &task.id, Some(&task.title));
+            if *json {
+                println!("{}", serde_json::to_string(&task)?);
+            } else {
+                println!("{} claimed by {}", task.id.green().bold(), task.claimed_by.as_deref().unwrap_or("?"));
+            }
+        }
+        TaskSubcommands::Unclaim { id, json } => {
+            let task = store.unclaim(id)?;
+            activity.quick(&actor, "unclaimed", &task.id, Some(&task.title));
+            if *json {
+                println!("{}", serde_json::to_string(&task)?);
+            } else {
+                println!("{} unclaimed", task.id.green().bold());
+            }
+        }
+        TaskSubcommands::Assign { id, who, json } => {
+            let assignee = if who.eq_ignore_ascii_case("none") || who.is_empty() {
+                None
+            } else {
+                Some(who.clone())
+            };
+            let task = store.assign(id, assignee)?;
+            let summary = match &task.assignee {
+                Some(a) => format!("{} → {}", task.title, a),
+                None => format!("{} (cleared)", task.title),
+            };
+            activity.quick(&actor, "assigned", &task.id, Some(&summary));
+            if *json {
+                println!("{}", serde_json::to_string(&task)?);
+            } else {
+                println!(
+                    "{} assigned to {}",
+                    task.id.green().bold(),
+                    task.assignee.as_deref().unwrap_or("(none)")
+                );
+            }
+        }
+        TaskSubcommands::Comment { id, body, as_who, json } => {
+            let author = as_who.clone().unwrap_or_else(|| actor.clone());
+            let task = store.comment(id, author.clone(), body.clone())?;
+            let preview: String = body.chars().take(80).collect();
+            activity.quick(&author, "commented", &task.id, Some(&preview));
+            if *json {
+                println!("{}", serde_json::to_string(&task)?);
+            } else {
+                println!("{} +1 comment", task.id.green().bold());
+            }
+        }
+        TaskSubcommands::Close { id, json } => {
+            let task = store.set_status(id, TaskStatus::Done)?;
+            activity.quick(&actor, "closed", &task.id, Some(&task.title));
+            if *json {
+                println!("{}", serde_json::to_string(&task)?);
+            } else {
+                println!("{} done", task.id.green().bold());
+            }
+        }
+        TaskSubcommands::Reopen { id, json } => {
+            let task = store.set_status(id, TaskStatus::Open)?;
+            activity.quick(&actor, "reopened", &task.id, Some(&task.title));
+            if *json {
+                println!("{}", serde_json::to_string(&task)?);
+            } else {
+                println!("{} reopened", task.id.green().bold());
+            }
+        }
+        TaskSubcommands::Status { id, status, json } => {
+            let parsed = TaskStatus::parse(status)
+                .ok_or_else(|| format!("unknown status: {} (open|in_progress|blocked|done|cancelled)", status))?;
+            let task = store.set_status(id, parsed)?;
+            if *json {
+                println!("{}", serde_json::to_string(&task)?);
+            } else {
+                println!("{} {}", task.id.green().bold(), task.status().label());
+            }
+        }
+        TaskSubcommands::Link { id, pr, branch, json } => {
+            let task = store.link(id, pr.clone(), branch.clone())?;
+            if *json {
+                println!("{}", serde_json::to_string(&task)?);
+            } else {
+                println!(
+                    "{} linked → pr:{} branch:{}",
+                    task.id.green().bold(),
+                    task.linked_pr.as_deref().unwrap_or("—"),
+                    task.linked_branch.as_deref().unwrap_or("—")
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
+fn handle_activity_command(sub: &ActivitySubcommands) -> Result<(), Box<dyn std::error::Error>> {
+    use crate::activity::ActivityStore;
+    use colored::Colorize;
+    let repo_root = std::env::current_dir()?;
+    let store = ActivityStore::at(&repo_root);
+
+    match sub {
+        ActivitySubcommands::Tail { n, json } => {
+            let events = store.tail(*n);
+            if *json {
+                println!("{}", serde_json::to_string(&events)?);
+            } else if events.is_empty() {
+                println!("{}", "No activity yet.".dimmed());
+            } else {
+                for ev in &events {
+                    let when = format_relative_seconds(ev.at);
+                    let summary = ev.summary.as_deref().unwrap_or("");
+                    println!(
+                        "  {} {} {} {} {}",
+                        when.dimmed(),
+                        ev.actor.cyan(),
+                        ev.verb.yellow(),
+                        ev.target.bold(),
+                        summary.dimmed()
+                    );
+                }
+            }
+        }
+        ActivitySubcommands::Emit {
+            verb,
+            target,
+            summary,
+            actor: actor_override,
+            json,
+        } => {
+            let actor = actor_override.clone().unwrap_or_else(current_actor);
+            let event = crate::activity::ActivityEvent {
+                at: chrono::Utc::now().timestamp(),
+                actor: actor.clone(),
+                verb: verb.clone(),
+                target: target.clone(),
+                summary: summary.clone(),
+                link: None,
+            };
+            store.emit(event.clone())?;
+            if *json {
+                println!("{}", serde_json::to_string(&event)?);
+            } else {
+                println!("{} emitted", "✓".green());
+            }
+        }
+    }
+    Ok(())
+}
+
+fn handle_review_command(sub: &ReviewSubcommands) -> Result<(), Box<dyn std::error::Error>> {
+    use colored::Colorize;
+    match sub {
+        ReviewSubcommands::List { json } => {
+            let items = pr::list_review_summaries()?;
+            if *json {
+                println!("{}", serde_json::to_string(&items)?);
+            } else if items.is_empty() {
+                println!("{}", "No persisted reviews. Run `aura pr-review --base main --json`.".dimmed());
+            } else {
+                println!("\n{}", "PR Review Inbox".bold().cyan());
+                for item in &items {
+                    let when = format_relative_seconds(item.ts);
+                    let badge = match item.risk_label.as_str() {
+                        "CRITICAL" => item.risk_label.red().bold(),
+                        "MODERATE" => item.risk_label.yellow().bold(),
+                        _ => item.risk_label.green().bold(),
+                    };
+                    println!(
+                        "  {} {} {} score={} changes={} viol={} blast={} omni={} base={}",
+                        when.dimmed(),
+                        item.ts.to_string().dimmed(),
+                        badge,
+                        item.risk_score,
+                        item.total_changes,
+                        item.invariant_violations,
+                        item.blast_radius,
+                        item.omni_graph_impact,
+                        item.base_branch.cyan(),
+                    );
+                }
+            }
+        }
+        ReviewSubcommands::Show { ts, json } => {
+            let v = pr::read_review(*ts)?;
+            if *json {
+                println!("{}", serde_json::to_string_pretty(&v)?);
+            } else {
+                println!("{}", serde_json::to_string_pretty(&v)?);
+            }
+        }
+        ReviewSubcommands::Setup { reviewers, fixer, base, json } => {
+            review::run_setup(reviewers.as_deref(), fixer.as_deref(), base.as_deref(), *json)
+                .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
+        }
+        ReviewSubcommands::Roles { json } => {
+            review::show_roles(*json).map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
+        }
+        ReviewSubcommands::Run { reviewers, fixer, base, timeout_secs, json } => {
+            review::run_roles_review(
+                reviewers.as_deref(),
+                fixer.as_deref(),
+                base.as_deref(),
+                *timeout_secs,
+                *json,
+            )
+            .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
+        }
+        ReviewSubcommands::Fix { base, fixer, yes, json } => {
+            review::run_fix(base.as_deref(), fixer.as_deref(), *yes, *json)
+                .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
+        }
+        ReviewSubcommands::Post { pr, base, dry_run, json } => {
+            review::run_post(*pr, base.as_deref(), *dry_run, *json)
+                .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
+        }
+    }
+    Ok(())
+}
+
+fn handle_intent_vs_actual_command(
+    sub: &IntentVsActualSubcommands,
+) -> Result<(), Box<dyn std::error::Error>> {
+    use colored::Colorize;
+    match sub {
+        IntentVsActualSubcommands::List { n, json } => {
+            let entries = intent_vs_actual::list_commits(*n)?;
+            if *json {
+                println!("{}", serde_json::to_string(&entries)?);
+            } else if entries.is_empty() {
+                println!("{}", "No commits in this repo.".dimmed());
+            } else {
+                println!("\n{}", "Recent commits".bold().cyan());
+                for e in &entries {
+                    let when = format_relative_seconds(e.commit_time);
+                    let line = e
+                        .commit_message
+                        .lines()
+                        .next()
+                        .unwrap_or("(no message)")
+                        .chars()
+                        .take(60)
+                        .collect::<String>();
+                    let intent_chip = if e.stated_count == 0 {
+                        "no intent".red().to_string()
+                    } else {
+                        format!("{} intent{}", e.stated_count, if e.stated_count == 1 { "" } else { "s" })
+                            .green()
+                            .to_string()
+                    };
+                    println!(
+                        "  {} {} {} {} {}",
+                        when.dimmed(),
+                        e.commit_short.yellow(),
+                        e.author.cyan(),
+                        line.white(),
+                        intent_chip,
+                    );
+                }
+            }
+        }
+        IntentVsActualSubcommands::Show { sha, json } => {
+            let report = intent_vs_actual::run(sha)?;
+            if *json {
+                println!("{}", serde_json::to_string_pretty(&report)?);
+            } else {
+                let banner_text = match report.banner {
+                    "aligned" => "✓ ALIGNED".green().bold(),
+                    "drift" => "⚠ DRIFT".yellow().bold(),
+                    _ => "✗ DIVERGED".red().bold(),
+                };
+                println!(
+                    "\n{}  {}  {}",
+                    banner_text,
+                    report.commit_short.yellow(),
+                    report.commit_message.lines().next().unwrap_or("").bold()
+                );
+                println!(
+                    "  alignment_score = {:.2}  ({} aligned / {} mismatched)",
+                    report.alignment_score,
+                    report.aligned_nodes.len(),
+                    report.mismatched_nodes.len()
+                );
+                if !report.stated.is_empty() {
+                    println!("\n  {}", "Stated:".bold());
+                    for s in &report.stated {
+                        println!("    {} {} {}", "↳".dimmed(), s.agent_id.cyan(), s.intent.white());
+                    }
+                }
+                if !report.mismatched_nodes.is_empty() {
+                    println!("\n  {} {}", "Mismatched:".bold().red(), report.mismatched_nodes.join(", "));
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+fn handle_change_note_command(
+    sha: &str,
+    json: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    use colored::Colorize;
+    let report = change_note::run(sha)?;
+    if json {
+        println!("{}", serde_json::to_string_pretty(&report)?);
+        return Ok(());
+    }
+
+    println!(
+        "\n{}  {}  {}",
+        "Change notes".bold().cyan(),
+        report.commit_short.yellow(),
+        report
+            .commit_message
+            .lines()
+            .next()
+            .unwrap_or("")
+            .bold()
+    );
+    if report.files.is_empty() {
+        println!("  {}", "No code symbols changed in this commit.".dimmed());
+    }
+    for f in &report.files {
+        println!("\n  {}", f.file.white().bold());
+        println!("    {}", f.note.dimmed());
+        for s in &f.symbols {
+            let verb = match s.change.as_str() {
+                "added" => "+".green().to_string(),
+                "deleted" => "−".red().to_string(),
+                _ => "~".yellow().to_string(),
+            };
+            let line = format!("      {} {} {}", verb, s.identifier.cyan(), s.kind.dimmed());
+            match &s.rationale {
+                Some(r) if !r.is_empty() => println!("{line}  {}", format!("— {r}").dimmed()),
+                _ => println!("{line}"),
+            }
+        }
+        if !f.features.is_empty() {
+            let names: Vec<String> = f.features.iter().map(|x| x.name.clone()).collect();
+            println!("    {} {}", "affects:".dimmed(), names.join(", ").white());
+        } else if f.leaf {
+            println!("    {}", "affects: nothing else calls it".dimmed());
+        }
+    }
+    if !report.other_files.is_empty() {
+        println!(
+            "\n  {} {}",
+            "Other files:".dimmed(),
+            report.other_files.join(", ").dimmed()
+        );
+    }
+    Ok(())
+}
+
+fn format_relative_seconds(unix: i64) -> String {
+    let now = chrono::Utc::now().timestamp();
+    let diff = now - unix;
+    if diff < 60 {
+        "just now".to_string()
+    } else if diff < 3600 {
+        format!("{}m", diff / 60)
+    } else if diff < 86400 {
+        format!("{}h", diff / 3600)
+    } else if diff < 86400 * 30 {
+        format!("{}d", diff / 86400)
+    } else {
+        let dt = chrono::DateTime::<chrono::Utc>::from_timestamp(unix, 0)
+            .unwrap_or_else(|| chrono::Utc::now());
+        dt.format("%Y-%m-%d").to_string()
+    }
+}
+
+#[cfg(test)]
+mod recall_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn truncate_under_limit_passthrough() {
+        assert_eq!(truncate("hello", 10), "hello");
+    }
+
+    #[test]
+    fn truncate_over_limit_appends_ellipsis() {
+        let out = truncate("abcdefghijk", 5);
+        assert_eq!(out.chars().count(), 5);
+        assert!(out.ends_with('…'));
+    }
+
+    #[test]
+    fn format_agent_card_renders_core_digest() {
+        let card = json!({
+            "name": "aura-semantic-vcs",
+            "version": "0.2.1",
+            "protocolVersion": "1.2",
+            "url": "https://cloud.example.com/api/v2/a2a/messages",
+            "description": "Aura card",
+            "capabilities": {
+                "streaming": false,
+                "pushNotifications": false,
+                "stateTransitionHistory": true
+            },
+            "metadata": {
+                "aura": {
+                    "capabilities_extended": [
+                        "typed-intent",
+                        "signing-health-readonly"
+                    ]
+                }
+            },
+            "skills": [
+                {
+                    "id": "task-lifecycle",
+                    "name": "A2A v1.2 task lifecycle",
+                    "description": "Create and poll tasks."
+                }
+            ]
+        });
+
+        let out = format_agent_card(&card);
+        assert!(out.contains("Agent Card"));
+        assert!(out.contains("aura-semantic-vcs v0.2.1"));
+        assert!(out.contains("A2A protocol 1.2"));
+        assert!(out.contains("endpoint: https://cloud.example.com/api/v2/a2a/messages"));
+        assert!(out.contains("stateTransitionHistory=true"));
+        assert!(out.contains("capabilities_extended: typed-intent, signing-health-readonly"));
+        assert!(out.contains("- task-lifecycle (A2A v1.2 task lifecycle)"));
+    }
+
+    #[test]
+    fn recall_push_str_skips_empty_and_advances_sep() {
+        let mut url = String::from("http://x/y");
+        let mut sep = '?';
+        recall_push_str(&mut url, &mut sep, "agent_id", Some(""));
+        assert_eq!(url, "http://x/y");
+        assert_eq!(sep, '?');
+        recall_push_str(&mut url, &mut sep, "agent_id", Some("claude-1"));
+        assert_eq!(url, "http://x/y?agent_id=claude-1");
+        assert_eq!(sep, '&');
+        recall_push_str(&mut url, &mut sep, "repo", Some("aura/main"));
+        assert_eq!(url, "http://x/y?agent_id=claude-1&repo=aura%2Fmain");
+    }
+
+    #[test]
+    fn recall_push_i64_appends_and_advances_sep() {
+        let mut url = String::from("http://x/y");
+        let mut sep = '?';
+        recall_push_i64(&mut url, &mut sep, "window_hours", None);
+        assert_eq!(url, "http://x/y");
+        recall_push_i64(&mut url, &mut sep, "window_hours", Some(24));
+        assert_eq!(url, "http://x/y?window_hours=24");
+        assert_eq!(sep, '&');
+        recall_push_i64(&mut url, &mut sep, "limit", Some(50));
+        assert_eq!(url, "http://x/y?window_hours=24&limit=50");
+    }
+
+    #[test]
+    fn format_recall_events_table_renders_focus_combination() {
+        let body = json!({
+            "total": 3,
+            "returned": 2,
+            "events": [
+                {
+                    "ts": "2026-04-27T10:00:00Z",
+                    "event_type": "block.signed",
+                    "agent_id": "claude-1",
+                    "focus_fn": "apply_limiter",
+                    "focus_file": "lib.rs"
+                },
+                {
+                    "ts": "2026-04-27T10:01:00Z",
+                    "event_type": "snapshot.created",
+                    "agent_id": "gemini-1",
+                    "focus_fn": null,
+                    "focus_file": "main.rs"
+                }
+            ]
+        });
+        let rendered = format_recall_events_table(&body);
+        assert!(rendered.contains("total=3 returned=2"));
+        assert!(rendered.contains("apply_limiter@lib.rs"));
+        assert!(rendered.contains("main.rs"));
+        assert!(rendered.contains("claude-1"));
+        assert!(rendered.contains("gemini-1"));
+    }
+
+    #[test]
+    fn format_recall_events_table_handles_empty() {
+        let body = json!({"total": 0, "returned": 0, "events": []});
+        let rendered = format_recall_events_table(&body);
+        assert!(rendered.contains("(no events)"));
+    }
+
+    #[test]
+    fn format_recall_events_table_surfaces_typed_intent_columns() {
+        // S2-TICRE: when the cloud response carries counts_by_intent_type
+        // the header line shows the histogram (count desc, name asc) and
+        // each event row shows its intent_type column. Untyped rows
+        // render "-" so the column lines up. Suppressed when the bucket
+        // is absent or empty.
+        let body = json!({
+            "total": 3,
+            "returned": 3,
+            "counts_by_intent_type": { "Refactor": 2, "BugFix": 1 },
+            "events": [
+                {
+                    "ts": "2026-04-27T10:00:00Z",
+                    "event_type": "intent",
+                    "agent_id": "claude-ticre",
+                    "intent_type": "Refactor",
+                    "focus_fn": "apply_limiter"
+                },
+                {
+                    "ts": "2026-04-27T10:01:00Z",
+                    "event_type": "intent",
+                    "agent_id": "claude-ticre",
+                    "intent_type": "BugFix"
+                },
+                {
+                    "ts": "2026-04-27T10:02:00Z",
+                    "event_type": "intent",
+                    "agent_id": "claude-ticre"
+                    // untyped — no intent_type key (matches cloud's
+                    // skip_serializing_if contract)
+                }
+            ]
+        });
+        let rendered = format_recall_events_table(&body);
+        assert!(rendered.contains("intent_types: Refactor=2, BugFix=1"));
+        // Header column present.
+        assert!(rendered.contains("intent_type"));
+        // Typed rows render the value.
+        assert!(rendered.contains("Refactor"));
+        assert!(rendered.contains("BugFix"));
+        // Untyped row renders "-" placeholder, not the literal "untyped".
+        assert!(!rendered.contains("untyped"));
+    }
+
+    #[test]
+    fn format_recall_events_table_omits_intent_header_when_empty() {
+        // When the cloud bucket is absent (older builds) or fully zero,
+        // the header histogram line is suppressed — keeps the output
+        // clean for repos that haven't started typing intents yet.
+        let body = json!({
+            "total": 1,
+            "returned": 1,
+            "counts_by_intent_type": {},
+            "events": [{
+                "ts": "2026-04-27T10:00:00Z",
+                "event_type": "snapshot.created",
+                "agent_id": "claude-1"
+            }]
+        });
+        let rendered = format_recall_events_table(&body);
+        assert!(!rendered.contains("intent_types:"));
+    }
+
+    #[test]
+    fn format_arc_segments_table_single_omits_agent_column() {
+        let body = json!({
+            "agent_id": "claude-1",
+            "window_hours": 24,
+            "gap_minutes": 30,
+            "total_events": 4,
+            "segment_count": 1,
+            "segments": [{
+                "start_ts": "2026-04-27T10:00:00Z",
+                "end_ts": "2026-04-27T10:05:00Z",
+                "event_count": 4,
+                "top_refs": ["apply_limiter", "parse_token"]
+            }]
+        });
+        let rendered = format_arc_segments_table(&body, false);
+        assert!(rendered.contains("Session arc — agent=claude-1"));
+        assert!(rendered.contains("apply_limiter,parse_token"));
+        // Header row in single-arc mode does not include the agent_id column.
+        assert!(!rendered.lines().nth(1).unwrap_or("").contains("agent_id"));
+    }
+
+    #[test]
+    fn format_arc_segments_table_multi_includes_agent_column() {
+        let body = json!({
+            "agent_ids": ["claude-1", "gemini-1"],
+            "window_hours": 24,
+            "gap_minutes": 30,
+            "total_events": 5,
+            "segment_count": 2,
+            "segments": [
+                {
+                    "agent_id": "claude-1",
+                    "start_ts": "2026-04-27T10:00:00Z",
+                    "end_ts": "2026-04-27T10:05:00Z",
+                    "event_count": 4,
+                    "top_refs": ["apply_limiter"]
+                },
+                {
+                    "agent_id": "gemini-1",
+                    "start_ts": "2026-04-27T10:06:00Z",
+                    "end_ts": "2026-04-27T10:07:00Z",
+                    "event_count": 1,
+                    "top_refs": ["parse_token"]
+                }
+            ]
+        });
+        let rendered = format_arc_segments_table(&body, true);
+        assert!(rendered.contains("Multi-agent arc — agents=[claude-1,gemini-1]"));
+        assert!(rendered.lines().nth(1).unwrap_or("").contains("agent_id"));
+        assert!(rendered.contains("claude-1"));
+        assert!(rendered.contains("gemini-1"));
+    }
+
+    #[test]
+    fn format_arc_segments_table_handles_empty() {
+        let body = json!({
+            "agent_id": "x",
+            "window_hours": 24,
+            "gap_minutes": 30,
+            "total_events": 0,
+            "segment_count": 0,
+            "segments": []
+        });
+        let rendered = format_arc_segments_table(&body, false);
+        assert!(rendered.contains("(no segments)"));
+    }
+
+    #[test]
+    fn format_arc_segments_table_surfaces_typed_intent() {
+        // S2-TICRAH: arc table renders both the top-level
+        // counts_by_intent_type histogram (under the summary line)
+        // and a per-segment intent_types column. Typed segments
+        // show their bucket; fully-untyped segments show "-".
+        let body = json!({
+            "agent_id": "claude-ticra",
+            "window_hours": 24,
+            "gap_minutes": 30,
+            "total_events": 3,
+            "segment_count": 2,
+            "counts_by_intent_type": { "Refactor": 2, "BugFix": 1 },
+            "segments": [
+                {
+                    "start_ts": "2026-04-27T10:00:00Z",
+                    "end_ts": "2026-04-27T10:05:00Z",
+                    "event_count": 2,
+                    "counts_by_intent_type": { "Refactor": 1, "BugFix": 1 },
+                    "top_refs": ["apply_limiter"]
+                },
+                {
+                    "start_ts": "2026-04-27T11:00:00Z",
+                    "end_ts": "2026-04-27T11:01:00Z",
+                    "event_count": 1,
+                    "counts_by_intent_type": { "Refactor": 1 },
+                    "top_refs": ["parse_token"]
+                }
+            ]
+        });
+        let rendered = format_arc_segments_table(&body, false);
+        // Top-level histogram (count desc, name asc, comma-space).
+        // Refactor=2 wins on count; BugFix=1 second.
+        assert!(rendered.contains("intent_types: Refactor=2, BugFix=1"));
+        // First segment: Refactor=1 and BugFix=1 tie on count, so
+        // name asc → BugFix first. Comma-only separator (narrow col).
+        assert!(rendered.contains("BugFix=1,Refactor=1"));
+        // Second segment: just Refactor=1.
+        assert!(rendered.contains("Refactor=1 "));
+        // Header column present (line index 2: summary, top-level
+        // histogram, then header row).
+        let header = rendered.lines().nth(2).unwrap_or("");
+        assert!(header.contains("intent_types"), "header was: {}", header);
+    }
+
+    #[test]
+    fn format_arc_segments_table_segment_renders_dash_when_untyped() {
+        // A segment with no counts_by_intent_type bucket renders "-"
+        // in the column so the table stays aligned. Top-level header
+        // still suppressed when its own bucket is absent.
+        let body = json!({
+            "agent_id": "claude-1",
+            "window_hours": 24,
+            "gap_minutes": 30,
+            "total_events": 1,
+            "segment_count": 1,
+            "segments": [{
+                "start_ts": "2026-04-27T10:00:00Z",
+                "end_ts": "2026-04-27T10:01:00Z",
+                "event_count": 1,
+                "top_refs": ["x"]
+            }]
+        });
+        let rendered = format_arc_segments_table(&body, false);
+        // No top-level histogram line — bucket absent.
+        assert!(!rendered.contains("intent_types:"));
+        // Per-segment row carries "-" placeholder somewhere on the row.
+        let row = rendered.lines().last().unwrap_or("");
+        assert!(row.contains(" - "), "row was: {}", row);
+    }
+
+    // ── narrate-blocks helpers (S2-NB) ──
+
+    fn make_block(
+        id: &str,
+        kind: &str,
+        state: &str,
+        intent: &str,
+        actor: &str,
+        anchor_kind: &str,
+        anchor_id: &str,
+        created_at: &str,
+        signed: bool,
+    ) -> serde_json::Value {
+        let mut prov = serde_json::json!({
+            "actor": { "id": actor, "kind": "agent" },
+            "origin_host": "host"
+        });
+        if signed {
+            prov["signature"] = json!({
+                "algo": "ed25519",
+                "key_id": "did:aura:key/test",
+                "sig_b64": "AAAA"
+            });
+        }
+        json!({
+            "id": id,
+            "kind": kind,
+            "state": state,
+            "intent": { "summary": intent },
+            "anchor": { "kind": anchor_kind, "id": anchor_id },
+            "provenance": prov,
+            "created_at": created_at
+        })
+    }
+
+    #[test]
+    fn parse_iso8601_round_trip_basic() {
+        let ms = parse_iso8601_to_ms("2026-04-27T10:00:00Z").expect("parse");
+        // Sanity bounds: 2026-04-27 in unix-ms must sit in this decade.
+        assert!(ms > 1_700_000_000_000);
+        assert!(ms < 2_000_000_000_000);
+        assert!(parse_iso8601_to_ms("not-a-date").is_none());
+        assert!(parse_iso8601_to_ms("").is_none());
+    }
+
+    #[test]
+    fn parse_block_summary_extracts_all_fields() {
+        let v = make_block(
+            "blk1",
+            "command",
+            "completed",
+            "ran cargo test",
+            "did:aura:agent/claude",
+            "function",
+            "apply_limiter",
+            "2026-04-27T10:00:00Z",
+            true,
+        );
+        let s = parse_block_summary(&v).expect("summary");
+        assert_eq!(s.id, "blk1");
+        assert_eq!(s.kind, "command");
+        assert_eq!(s.state, "completed");
+        assert_eq!(s.intent_summary, "ran cargo test");
+        assert_eq!(s.actor, "did:aura:agent/claude");
+        assert_eq!(s.anchor, "function:apply_limiter");
+        assert!(s.has_signature);
+        assert!(s.created_at_ms.is_some());
+    }
+
+    #[test]
+    fn parse_block_summary_handles_anchor_none_and_missing_intent() {
+        let v = json!({
+            "id": "blk2",
+            "kind": "message",
+            "state": "completed",
+            "anchor": { "kind": "none" },
+            "provenance": { "actor": { "id": "did:x", "kind": "agent" }, "origin_host": "h" },
+            "created_at": "2026-04-27T11:00:00Z"
+        });
+        let s = parse_block_summary(&v).expect("summary");
+        assert_eq!(s.anchor, "none");
+        assert_eq!(s.intent_summary, "");
+        assert!(!s.has_signature);
+    }
+
+    #[test]
+    fn top_count_pairs_orders_by_count_then_key() {
+        let items = vec!["a", "a", "b", "c", "c", "c"]
+            .into_iter()
+            .map(String::from);
+        let pairs = top_count_pairs(items, 5);
+        assert_eq!(
+            pairs,
+            vec![
+                ("c".to_string(), 3),
+                ("a".to_string(), 2),
+                ("b".to_string(), 1),
+            ]
+        );
+        // top_n caps the list.
+        let many = (0..10)
+            .map(|i| format!("k{}", i))
+            .collect::<Vec<_>>();
+        let pairs = top_count_pairs(many.into_iter(), 3);
+        assert_eq!(pairs.len(), 3);
+    }
+
+    #[test]
+    fn build_block_narration_filters_by_recency() {
+        // Cutoff = now - 24h. Old block (now - 48h) drops; recent stays.
+        let now_ms: i64 = 1_750_000_000_000;
+        let recent = make_block(
+            "r",
+            "command",
+            "completed",
+            "recent",
+            "did:a",
+            "function",
+            "f1",
+            "",
+            false,
+        );
+        let mut recent_summary = parse_block_summary(&recent).expect("s");
+        recent_summary.created_at_ms = Some(now_ms - 1_000); // 1s ago
+        let mut old_summary = recent_summary.clone();
+        old_summary.id = "o".to_string();
+        old_summary.created_at_ms = Some(now_ms - 48 * 3_600_000); // 48h ago
+        let report = build_block_narration(
+            &[recent_summary.clone(), old_summary],
+            now_ms,
+            24,
+            &[],
+            None,
+            10,
+        );
+        assert_eq!(report.matched, 1);
+        assert_eq!(report.listed.len(), 1);
+        assert_eq!(report.listed[0].id, "r");
+    }
+
+    #[test]
+    fn build_block_narration_filters_by_kind_and_actor() {
+        let now_ms: i64 = 1_750_000_000_000;
+        let mut a = parse_block_summary(&make_block(
+            "a", "command", "completed", "i", "did:agent/claude", "none", "", "", false,
+        ))
+        .unwrap();
+        a.created_at_ms = Some(now_ms - 100);
+        let mut b = a.clone();
+        b.id = "b".into();
+        b.kind = "message".into();
+        let mut c = a.clone();
+        c.id = "c".into();
+        c.actor = "did:agent/gemini".into();
+        let summaries = vec![a, b, c];
+
+        let only_command = build_block_narration(
+            &summaries,
+            now_ms,
+            24,
+            &["command".to_string()],
+            None,
+            10,
+        );
+        assert_eq!(only_command.matched, 2);
+        assert!(only_command.listed.iter().all(|s| s.kind == "command"));
+
+        let only_claude = build_block_narration(
+            &summaries,
+            now_ms,
+            24,
+            &[],
+            Some("claude"),
+            10,
+        );
+        assert_eq!(only_claude.matched, 2);
+        assert!(only_claude
+            .listed
+            .iter()
+            .all(|s| s.actor.contains("claude")));
+    }
+
+    #[test]
+    fn build_block_narration_collects_failed_separately() {
+        let now_ms: i64 = 1_750_000_000_000;
+        let mut ok = parse_block_summary(&make_block(
+            "ok", "command", "completed", "good", "did:a", "none", "", "", false,
+        ))
+        .unwrap();
+        ok.created_at_ms = Some(now_ms - 100);
+        let mut bad = ok.clone();
+        bad.id = "bad".into();
+        bad.state = "failed".into();
+        let mut rb = ok.clone();
+        rb.id = "rb".into();
+        rb.state = "rolled_back".into();
+        let report =
+            build_block_narration(&[ok, bad, rb], now_ms, 24, &[], None, 10);
+        assert_eq!(report.matched, 3);
+        assert_eq!(report.failed.len(), 2);
+        let failed_ids: Vec<&str> = report.failed.iter().map(|s| s.id.as_str()).collect();
+        assert!(failed_ids.contains(&"bad"));
+        assert!(failed_ids.contains(&"rb"));
+    }
+
+    #[test]
+    fn build_block_narration_lists_newest_first_capped() {
+        let now_ms: i64 = 1_750_000_000_000;
+        let mut summaries = Vec::new();
+        for i in 0..5 {
+            let mut s = parse_block_summary(&make_block(
+                &format!("b{}", i),
+                "command",
+                "completed",
+                &format!("intent {}", i),
+                "did:a",
+                "none",
+                "",
+                "",
+                false,
+            ))
+            .unwrap();
+            s.created_at_ms = Some(now_ms - (i as i64) * 1_000);
+            summaries.push(s);
+        }
+        let report = build_block_narration(&summaries, now_ms, 24, &[], None, 3);
+        assert_eq!(report.matched, 5);
+        assert_eq!(report.listed.len(), 3);
+        // Newest-first → b0 (oldest offset=0 from now), b1, b2.
+        assert_eq!(report.listed[0].id, "b0");
+        assert_eq!(report.listed[1].id, "b1");
+        assert_eq!(report.listed[2].id, "b2");
+    }
+
+    #[test]
+    fn block_narration_empty_prose_is_explicit() {
+        let report = build_block_narration(&[], 1_750_000_000_000, 24, &[], None, 10);
+        let prose = report.to_prose();
+        assert!(prose.contains("no blocks matched"));
+    }
+
+    #[test]
+    fn block_narration_prose_summarizes_kinds_and_actors() {
+        let now_ms: i64 = 1_750_000_000_000;
+        let mut a = parse_block_summary(&make_block(
+            "a", "command", "completed", "ran tests", "did:a", "function", "f1", "", true,
+        ))
+        .unwrap();
+        a.created_at_ms = Some(now_ms - 100);
+        let mut b = a.clone();
+        b.id = "b".into();
+        b.kind = "message".into();
+        b.intent_summary = "left a note".into();
+        let report = build_block_narration(&[a, b], now_ms, 24, &[], None, 10);
+        let prose = report.to_prose();
+        assert!(prose.contains("2 blocks across 1 actor, 2 signed"));
+        assert!(prose.contains("Kinds: "));
+        assert!(prose.contains("command (1)"));
+        assert!(prose.contains("message (1)"));
+        assert!(prose.contains("Recent intents"));
+    }
+
+    #[test]
+    fn read_blocks_dir_handles_missing_and_returns_json() {
+        // Missing dir returns Ok(empty), not Err.
+        let nonexistent = std::path::Path::new("/tmp/aura_recall_nb_nope_xyz");
+        let blocks = read_blocks_dir(nonexistent).expect("missing dir is ok");
+        assert!(blocks.is_empty());
+
+        // Real tempdir with one valid block + one non-json file → returns 1.
+        let tmp =
+            std::env::temp_dir().join(format!("aura_nb_test_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+        std::fs::write(
+            tmp.join("a.json"),
+            serde_json::to_string(&make_block(
+                "x",
+                "command",
+                "completed",
+                "i",
+                "did:a",
+                "none",
+                "",
+                "2026-04-27T10:00:00Z",
+                false,
+            ))
+            .unwrap(),
+        )
+        .unwrap();
+        std::fs::write(tmp.join("ignore.txt"), "not json").unwrap();
+        let blocks = read_blocks_dir(&tmp).unwrap();
+        assert_eq!(blocks.len(), 1);
+        let _ = std::fs::remove_dir_all(&tmp);
     }
 }

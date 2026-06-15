@@ -1,0 +1,25 @@
+[package]
+name    = "aura-policy"
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0 OR MIT"
+description = "Deterministic policy evaluator for Aura work-surface block proposals."
+publish = false
+
+[dependencies]
+aura-blocks = { path = "../aura-blocks" }
+serde       = { version = "1", features = ["derive"] }
+serde_json  = "1"
+toml        = "0.8"
+regex       = "1"
+glob        = "0.3"
+time        = { version = "0.3", features = ["serde", "formatting", "parsing"] }
+uuid        = { version = "1", features = ["v7", "serde"] }
+thiserror   = "1"
+cedar-policy = "4.10.0"
+schemars = "1.2.1"
+jsonschema = "0.46.2"
+
+[dev-dependencies]
+serde_json  = "1"
+tokio = { version = "1.52.1", features = ["full"] }

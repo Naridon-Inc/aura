@@ -107,7 +107,7 @@ fn now_secs() -> u64 {
         .as_secs()
 }
 
-fn secs_to_date(ts: u64) -> String {
+pub(crate) fn secs_to_date(ts: u64) -> String {
     // Simple date without chrono dependency: YYYY-MM-DD
     // We use the same approach as session.rs
     let days_since_epoch = ts / 86400;
