@@ -435,4 +435,4 @@ Rust, Python, TypeScript, JavaScript, Go, Java, C#, C++, C, Ruby, PHP, Swift, Ko
 
 Apache License 2.0 — Copyright (c) 2026 Naridon, Inc.
 
-Built by [Naridon](https://naridon.com) in Switzerland.
+Built by [Naridon, Inc.](https://naridon.com) in Switzerland.
