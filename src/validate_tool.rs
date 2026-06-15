@@ -43,7 +43,7 @@ use crate::parser::SemanticParser;
 
 /// The bundled default policy — used when no `.aura/policy.toml` is present
 /// in the repo. Identical to the one the daemon compiles, so verdicts match.
-const DEFAULT_POLICY_TOML: &str = include_str!("../../aura-policy/policy.toml");
+const DEFAULT_POLICY_TOML: &str = include_str!("../crates/aura-policy/policy.toml");
 
 /// How far back (seconds) a logged intent is allowed to be and still "cover"
 /// a destructive action. One hour mirrors the intent_vs_actual window and is
