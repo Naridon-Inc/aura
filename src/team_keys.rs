@@ -297,7 +297,7 @@ mod tests {
         SelfIdentity {
             human_id: Some("did:aura:human/ashiq".into()),
             display_name: Some("Ashiq".into()),
-            email: Some("ashiq@naridon.com".into()),
+            email: Some("mo@auravcs.com".into()),
             github_login: Some("MHASK".into()),
             agent_id: Some("MCP Agent".into()),
         }

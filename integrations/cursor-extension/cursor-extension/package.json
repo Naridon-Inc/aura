@@ -3,7 +3,7 @@
   "displayName": "Aura Semantic VCS",
   "description": "Invisible intent tracking and semantic version control for Cursor and VS Code.",
   "version": "1.0.0",
-  "publisher": "AuraLabs",
+  "publisher": "naridon",
   "engines": {
     "vscode": "^1.80.0"
   },
