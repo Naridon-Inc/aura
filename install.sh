@@ -67,9 +67,9 @@ else
         exit 1
     fi
     
-    # Clone and build
+    # Clone and build (shallow + single-branch: skip ~1GB of history we don't need)
     TMP_DIR=$(mktemp -d)
-    git clone https://github.com/${REPO}.git "$TMP_DIR"
+    git clone --depth 1 --single-branch https://github.com/${REPO}.git "$TMP_DIR"
     cd "$TMP_DIR"
     cargo install --path . --locked
     echo "✓ Aura compiled and installed successfully to ~/.cargo/bin/aura"
