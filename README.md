@@ -14,6 +14,12 @@ Block AI drift. Catch architectural leaks. Rewind one function, not the whole co
 <strong>See exactly where your AI credits go.</strong>
 </p>
 
+<p align="center">
+  <img src=".github/assets/semantic-diff.png" width="100%" alt="Aura's semantic diff — a side-by-side change with a plain-language 'what changed / why it changed' header over the raw diff" />
+  <br>
+  <em>The desktop app: a semantic diff that says <strong>what</strong> changed and <strong>why</strong> — not just which lines.</em>
+</p>
+
 ---
 
 Aura is a semantic layer on top of Git. It builds an **AST Merkle-Graph** of your codebase — tracking functions, classes, and their relationships instead of text diffs. It also gives you **complete visibility into AI token consumption** across all your projects.
@@ -87,6 +93,23 @@ home for coding agents that keeps the same meaning-plane audit trail the CLI doe
 with Tauri 2 + React 19 + Rust; ships for macOS, Linux, and Windows with auto-updates.
 
 **Get a signed build for your platform at [auravcs.com](https://auravcs.com).**
+
+<table>
+  <tr>
+    <td width="50%"><img src=".github/assets/mission-control.png" alt="Mission Control — many coding agents in one window, with a session handed off from Claude to Gemini" /></td>
+    <td width="50%"><img src=".github/assets/crew-board.png" alt="The Crew board — the autonomous work-loop as columns from Triage to Done, with a Run crew button" /></td>
+  </tr>
+  <tr>
+    <td align="center"><em>Mission Control — every agent in one window, handoffs and all.</em></td>
+    <td align="center"><em>Crew — the autonomous work-loop as a board you can run.</em></td>
+  </tr>
+  <tr>
+    <td colspan="2"><img src=".github/assets/trace-provenance.png" alt="Trace — a team activity feed where every change is sealed with who, which agent, and why" /></td>
+  </tr>
+  <tr>
+    <td colspan="2" align="center"><em>Trace — every change sealed with who, which agent, and why.</em></td>
+  </tr>
+</table>
 
 What's inside:
 
