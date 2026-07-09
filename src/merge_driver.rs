@@ -250,6 +250,70 @@ fn do_install() -> Result<(), String> {
     Ok(())
 }
 
+/// Quiet, idempotent install into a SPECIFIC repo — the programmatic twin of
+/// `do_install` for callers that aren't the `--install` CLI (e.g. the loop's
+/// worktree drain, which configures the AST merge driver before it merges N
+/// agents' branches back so overlapping edits auto-resolve at the node level
+/// instead of conflicting). Operates on `repo_root` rather than the process
+/// cwd, and prints nothing. Re-running is a no-op.
+pub fn ensure_installed(repo_root: &Path) -> Result<(), String> {
+    let git = |args: &[&str]| -> Result<String, String> {
+        let out = Command::new("git")
+            .args(args)
+            .current_dir(repo_root)
+            .output()
+            .map_err(|e| format!("failed to run git: {}", e))?;
+        if !out.status.success() {
+            return Err(format!(
+                "git {} failed: {}",
+                args.join(" "),
+                String::from_utf8_lossy(&out.stderr).trim()
+            ));
+        }
+        Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
+    };
+
+    git(&["rev-parse", "--git-dir"]).map_err(|_| "not inside a git repository".to_string())?;
+    git(&["config", "merge.aura.name", "Aura semantic AST merge"])?;
+    git(&[
+        "config",
+        "merge.aura.driver",
+        "aura merge-driver %O %A %B --marker-size %L --path %P",
+    ])?;
+
+    let attributes_path = git(&["rev-parse", "--git-path", "info/attributes"])?;
+    let attributes_path = Path::new(&attributes_path);
+    if let Some(parent) = attributes_path.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| format!("cannot create {}: {}", parent.display(), e))?;
+    }
+    let existing = std::fs::read_to_string(attributes_path).unwrap_or_default();
+    let existing_lines: Vec<&str> = existing.lines().map(str::trim).collect();
+
+    let additions: Vec<&str> = ATTRIBUTE_PATTERNS
+        .iter()
+        .copied()
+        .filter(|p| !existing_lines.contains(p))
+        .collect();
+    if !additions.is_empty() {
+        let mut content = existing.clone();
+        if !content.is_empty() && !content.ends_with('\n') {
+            content.push('\n');
+        }
+        if !existing_lines.contains(&ATTRIBUTE_HEADER) {
+            content.push_str(ATTRIBUTE_HEADER);
+            content.push('\n');
+        }
+        for pattern in &additions {
+            content.push_str(pattern);
+            content.push('\n');
+        }
+        std::fs::write(attributes_path, content)
+            .map_err(|e| format!("cannot write {}: {}", attributes_path.display(), e))?;
+    }
+    Ok(())
+}
+
 /// Remove the `[merge "aura"]` section and our attribute lines. Idempotent;
 /// other people's attribute lines are left untouched.
 fn do_uninstall() -> Result<(), String> {

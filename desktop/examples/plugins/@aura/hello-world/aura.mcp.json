@@ -1,0 +1,11 @@
+{
+  "schema": "https://aura.dev/schemas/plugin@1",
+  "id": "@aura/hello-world-mcp",
+  "version": "0.1.0",
+  "engines": { "aura": ">=0.17.0" },
+  "command": "node",
+  "args": ["mcp-server.js"],
+  "env": { "HELLO_PREFIX": "Hello" },
+  "capabilities": [],
+  "tools": ["echo"]
+}

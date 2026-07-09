@@ -1201,8 +1201,8 @@ fn collaborative_plan(objective: &str, available: &[AgentType], handover: &str) 
 <objective>{objective}</objective>
 
 <instructions>
-You are a senior software architect planning this objective.
-Break it into 2-6 concrete, actionable tasks. Return ONLY a valid JSON array:
+You are a senior software architect planning this objective. Commit to one concrete breakdown — don't hedge or list alternatives.
+Break it into 2-6 concrete, actionable tasks. Run independent tasks in parallel; chain only the ones that truly depend on earlier output. Return ONLY a valid JSON array:
 [{{"action": "description of task", "files": ["file1.rs"], "depends_on": [], "complexity": 3}}]
 
 Rules:

@@ -61,7 +61,7 @@ impl Arbitrator {
         println!("--- TARGET FILES PASSED TO LLM ---\n{}\n----------------------------------", diff_files);
         
         let prompt = format!(
-            "CRITICAL DIRECTIVE: You are the Aura Arbitrator. The current codebase violates strict architectural invariants.\n\
+            "CRITICAL DIRECTIVE: You are the Aura Arbitrator. The current codebase violates strict architectural invariants. Fix exactly those violations — change only what each one requires, and never strip or weaken logic, tests, or assertions to make the build pass.\n\
             \n\
             <invariant_violations>\n{}\n</invariant_violations>\n\
             \n\
@@ -130,7 +130,7 @@ impl Arbitrator {
         
         let prompt = format!(
             r#"<aura_arbitrator_protocol>
-  <directive>You are an autonomous code arbitrator fixing a merge conflict or logic error.</directive>
+  <directive>You are an autonomous code arbitrator fixing a merge conflict or logic error. Fix the smallest change that resolves it; touch nothing else.</directive>
   <constraints>
     - Output ONLY the raw, fixed source code.
     - Do not include markdown formatting like ```python.

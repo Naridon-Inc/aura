@@ -1,9 +1,9 @@
 [package]
 name        = "aura-attestation"
-version     = "0.1.0"
+version     = "0.19.21"
 edition     = "2024"
 license     = "Apache-2.0 OR MIT"
-description = "ed25519 signing + verification + keyfile management for Aura block provenance."
+description = "ed25519 signing + verification + per-actor identity + keyfile management for Aura block provenance."
 repository  = "https://github.com/Naridon-Inc/aura"
 publish     = false
 
@@ -12,11 +12,22 @@ aura-blocks   = { path = "../aura-blocks" }
 ed25519-dalek = { version = "2", default-features = false, features = ["std", "rand_core"] }
 rand          = { version = "0.8", features = ["std_rng"] }
 base64        = "0.22"
+bs58          = "0.5"
 serde         = { version = "1", features = ["derive"] }
 serde_bytes   = "0.11"
 serde_json    = "1"
 thiserror     = "1"
 zeroize       = { version = "1", features = ["derive"] }
+# OS keychain backing for per-actor identities. Same backend the desktop
+# app uses for MCP OAuth + Brain keys (apple-native / windows-native /
+# linux-native keyutils — no secret-service / dbus, so it works headless).
+# Optional + default-on: pure verifiers can `default-features = false` to
+# drop the OS-keyring dependency.
+keyring       = { version = "3", features = ["apple-native", "windows-native", "linux-native"], optional = true }
+
+[features]
+default  = ["keychain"]
+keychain = ["dep:keyring"]
 
 [dev-dependencies]
 tempfile      = "3"

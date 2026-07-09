@@ -1,0 +1,497 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <!--
+      @aura/tic-tac-toe — right-rail panel sandbox.
+
+      Same sandbox model as @aura/hello-world: srcdoc iframe with
+      sandbox="allow-scripts" (NO allow-same-origin), opaque "null"
+      origin, postMessage bridge as the only host channel.
+
+      What this panel demonstrates beyond hello-world: the
+      `realtime.channel` method (capability `realtime:channel:tictactoe`)
+      and a convergent game protocol on top of an EPHEMERAL, at-least-
+      once, ~2s-latency transport. The rules that make it converge:
+
+      · SINGLE RECEIVE PATH — clicking a cell only SENDS. The move is
+        applied when the host's loopback echo (`self: true`) arrives,
+        exactly like a peer's move. One code path, no optimistic state
+        to reconcile.
+      · MOVES ARRAY, NOT BOARD — state is `epoch` + an ordered list of
+        moves {n, cell, sid, name}. The board is a pure projection;
+        mark is parity (even n = X). Seats are derived: whoever made
+        move 0 owns X, move 1 owns O.
+      · DETERMINISTIC CONFLICT RULE — two peers may both claim turn n.
+        First writer wins, UNLESS the rival has the lexicographically
+        lower sid: then it replaces moves[n], everything after n is
+        truncated, and the board rebuilds. Every replica applies the
+        same rule, so all replicas converge on the same history.
+      · GAP REPAIR — a move arriving with n > moves.length is buffered
+        and a {t:"join"} is broadcast; any peer with state answers
+        {t:"sync"} (after 0–400ms jitter, squelched only if someone
+        else already answered with state at least as new). A replica
+        adopts a sync if it is strictly newer (higher epoch, or same
+        epoch with more moves).
+      · RESET = NEW EPOCH — {t:"reset", epoch+1} clears the board;
+        stale-epoch messages are dropped.
+    -->
+    <style>
+      :root {
+        color-scheme: dark;
+      }
+      body {
+        margin: 0;
+        padding: 14px;
+        background: #111316;
+        color: #d7dade;
+        font:
+          12px/1.5 ui-sans-serif,
+          system-ui,
+          sans-serif;
+      }
+      h1 {
+        font-size: 13px;
+        margin: 0 0 4px;
+      }
+      .sub {
+        margin: 0 0 12px;
+        color: #8b919a;
+      }
+      #seat {
+        display: inline-block;
+        margin-left: 6px;
+        padding: 1px 8px;
+        border: 1px solid #2c3038;
+        border-radius: 999px;
+        font-size: 11px;
+        color: #8b919a;
+        vertical-align: 1px;
+      }
+      #board {
+        display: grid;
+        grid-template-columns: repeat(3, 52px);
+        gap: 6px;
+        margin: 0 0 12px;
+      }
+      #board button {
+        width: 52px;
+        height: 52px;
+        background: #16181d;
+        border: 1px solid #23262d;
+        border-radius: 8px;
+        font: 600 22px/1 ui-monospace, SFMono-Regular, Menlo, monospace;
+        color: #d7dade;
+        cursor: pointer;
+      }
+      #board button:not(:disabled):hover {
+        border-color: #5aa9e6;
+      }
+      #board button:disabled {
+        cursor: default;
+      }
+      #board button.x {
+        color: #5aa9e6;
+      }
+      #board button.o {
+        color: #e6a05a;
+      }
+      #board button.win {
+        border-color: #5aa9e6;
+        background: #1a2430;
+      }
+      #status {
+        min-height: 18px;
+        margin: 0 0 10px;
+        font-size: 12px;
+      }
+      #status .muted {
+        color: #8b919a;
+      }
+      .row {
+        display: flex;
+        gap: 8px;
+        align-items: center;
+      }
+      .row button {
+        background: #1d2026;
+        color: #d7dade;
+        border: 1px solid #2c3038;
+        border-radius: 6px;
+        padding: 4px 12px;
+        font: inherit;
+        cursor: pointer;
+      }
+      .row button:hover {
+        border-color: #5aa9e6;
+      }
+      .foot {
+        margin-top: 12px;
+        font-size: 10px;
+        color: #5c626b;
+      }
+    </style>
+  </head>
+  <body>
+    <h1>Tic-Tac-Toe<span id="seat">connecting…</span></h1>
+    <p class="sub">Multiplayer over the team rail · solo plays both seats.</p>
+    <div id="board"></div>
+    <div id="status"><span class="muted">waiting for handshake…</span></div>
+    <div class="row">
+      <button id="reset-btn" type="button">New game</button>
+    </div>
+    <div class="foot">ephemeral · realtime:channel:tictactoe · ~2s between peers</div>
+
+    <script>
+      // ── bridge plumbing (same raw protocol as hello-world) ─────────
+      const V = 1;
+      const TOPIC = "tictactoe";
+      let nextId = 1;
+      const pending = new Map();
+
+      function call(method, args, target) {
+        return new Promise((resolve, reject) => {
+          const id = "p" + nextId++;
+          pending.set(id, { resolve, reject });
+          window.parent.postMessage(
+            { v: V, kind: "call", id, method, target, args },
+            "*",
+          );
+        });
+      }
+
+      // The envelope `target` the ACL checks must equal the topic sent.
+      function send(payload) {
+        return call(
+          "realtime.channel",
+          { op: "send", topic: TOPIC, payload },
+          TOPIC,
+        );
+      }
+
+      // ── game state ──────────────────────────────────────────────────
+      // sid: this panel instance's identity for seats + conflict ties.
+      const sid = (() => {
+        const a = new Uint8Array(8);
+        crypto.getRandomValues(a);
+        return Array.from(a, (b) => (b % 36).toString(36)).join("");
+      })();
+
+      let epoch = 0;
+      let moves = []; // [{ n, cell, sid, name }] — n always equals index
+      let future = {}; // n -> buffered out-of-order move
+      let board = Array(9).fill(null); // projection of moves
+      let winLine = null;
+      // Last sync seen on the wire — used to squelch redundant replies.
+      // Content matters, not just recency: a sync only counts as "the
+      // room was answered" if it carried state at least as new as ours.
+      let lastSyncSeen = { ts: 0, epoch: -1, len: 0 };
+      let sendFailure = null;
+
+      const LINES = [
+        [0, 1, 2], [3, 4, 5], [6, 7, 8],
+        [0, 3, 6], [1, 4, 7], [2, 5, 8],
+        [0, 4, 8], [2, 4, 6],
+      ];
+
+      const markOf = (n) => (n % 2 === 0 ? "X" : "O");
+      const seatX = () => (moves.length > 0 ? moves[0] : null);
+      const seatO = () => (moves.length > 1 ? moves[1] : null);
+
+      function rebuild() {
+        board = Array(9).fill(null);
+        for (const m of moves) board[m.cell] = markOf(m.n);
+        winLine = null;
+        for (const line of LINES) {
+          const [a, b, c] = line;
+          if (board[a] && board[a] === board[b] && board[a] === board[c]) {
+            winLine = line;
+            break;
+          }
+        }
+        render();
+      }
+
+      function myTurn() {
+        if (winLine || moves.length >= 9) return false;
+        const owner = moves.length % 2 === 0 ? seatX() : seatO();
+        return owner === null || owner.sid === sid;
+      }
+
+      // ── convergence rules ───────────────────────────────────────────
+      function validMove(msg) {
+        return (
+          Number.isInteger(msg.n) &&
+          msg.n >= 0 &&
+          msg.n < 9 &&
+          Number.isInteger(msg.cell) &&
+          msg.cell >= 0 &&
+          msg.cell < 9 &&
+          typeof msg.sid === "string" &&
+          msg.sid.length > 0
+        );
+      }
+
+      function adoptEpoch(e) {
+        epoch = e;
+        moves = [];
+        future = {};
+        rebuild();
+      }
+
+      function handleMove(msg, name) {
+        if (!validMove(msg) || !Number.isInteger(msg.epoch)) return;
+        if (msg.epoch < epoch) return; // stale game
+        if (msg.epoch > epoch) adoptEpoch(msg.epoch); // missed a reset
+        const m = { n: msg.n, cell: msg.cell, sid: msg.sid, name };
+
+        if (m.n < moves.length) {
+          const cur = moves[m.n];
+          if (cur.sid === m.sid && cur.cell === m.cell) return; // duplicate
+          if (m.sid < cur.sid) {
+            // Deterministic tie-break: lower sid claims turn n; later
+            // moves were built on the loser's history — truncate.
+            moves = moves.slice(0, m.n);
+            moves.push(m);
+            rebuild();
+            drainFuture();
+          }
+          return;
+        }
+
+        if (m.n > moves.length) {
+          future[m.n] = m; // gap — hold it and ask the room for a sync
+          send({ t: "join", sid }).catch(noteSendFailure);
+          return;
+        }
+
+        // In-order. An occupied cell means our histories diverged in a
+        // way the index rule can't repair — solicit a sync instead.
+        if (board[m.cell] !== null) {
+          send({ t: "join", sid }).catch(noteSendFailure);
+          return;
+        }
+        moves.push(m);
+        rebuild();
+        drainFuture();
+      }
+
+      function drainFuture() {
+        let next;
+        while ((next = future[moves.length])) {
+          delete future[moves.length];
+          if (board[next.cell] !== null) break;
+          moves.push(next);
+          rebuild();
+        }
+      }
+
+      function sanitizeSync(list) {
+        // Longest valid prefix: sequential n, empty target cells.
+        const out = [];
+        const seen = new Set();
+        for (let i = 0; i < Math.min(list.length, 9); i++) {
+          const m = list[i];
+          if (!validMove(m) || m.n !== i || seen.has(m.cell)) break;
+          seen.add(m.cell);
+          out.push({
+            n: m.n,
+            cell: m.cell,
+            sid: m.sid,
+            name: typeof m.name === "string" ? m.name : "",
+          });
+        }
+        return out;
+      }
+
+      function handleSync(msg) {
+        lastSyncSeen = {
+          ts: Date.now(),
+          epoch: Number.isInteger(msg.epoch) ? msg.epoch : -1,
+          len: Array.isArray(msg.moves) ? msg.moves.length : 0,
+        };
+        if (!Number.isInteger(msg.epoch) || !Array.isArray(msg.moves)) return;
+        const incoming = sanitizeSync(msg.moves);
+        const newer =
+          msg.epoch > epoch ||
+          (msg.epoch === epoch && incoming.length > moves.length);
+        if (!newer) return;
+        epoch = msg.epoch;
+        moves = incoming;
+        future = {};
+        rebuild();
+      }
+
+      function handleJoin() {
+        if (moves.length === 0 && epoch === 0) return; // nothing to share
+        // Jittered reply, squelched only if another holder already
+        // answered with state at least as new as ours — a stale sync
+        // (older epoch / fewer moves) must not silence a needed reply.
+        const delay = Math.floor(Math.random() * 400);
+        const epochAtSchedule = epoch;
+        setTimeout(() => {
+          if (
+            Date.now() - lastSyncSeen.ts < 500 &&
+            lastSyncSeen.epoch === epoch &&
+            lastSyncSeen.len >= moves.length
+          )
+            return;
+          if (epoch !== epochAtSchedule) return;
+          send({
+            t: "sync",
+            epoch,
+            moves: moves.map((m) => ({
+              n: m.n,
+              cell: m.cell,
+              sid: m.sid,
+              name: m.name,
+            })),
+            sid,
+          }).catch(noteSendFailure);
+        }, delay);
+      }
+
+      function handleReset(msg) {
+        if (!Number.isInteger(msg.epoch) || msg.epoch <= epoch) return;
+        adoptEpoch(msg.epoch);
+      }
+
+      // ── event intake ────────────────────────────────────────────────
+      // evt = { topic, payload, from: { device, display }, ts, self }
+      function onRealtime(evt) {
+        if (!evt || typeof evt !== "object") return;
+        const msg = evt.payload;
+        if (!msg || typeof msg !== "object") return;
+        const name =
+          evt.from && typeof evt.from.display === "string"
+            ? evt.from.display
+            : "";
+        switch (msg.t) {
+          case "move":
+            // Self moves apply HERE (loopback) — the single receive path.
+            handleMove(msg, name);
+            break;
+          case "reset":
+            handleReset(msg);
+            break;
+          case "sync":
+            if (evt.self !== true) handleSync(msg);
+            break;
+          case "join":
+            if (evt.self !== true) handleJoin();
+            break;
+        }
+      }
+
+      function noteSendFailure(e) {
+        sendFailure = e && e.message ? e.message : "send failed";
+        render();
+      }
+
+      // ── UI ──────────────────────────────────────────────────────────
+      const boardEl = document.getElementById("board");
+      const statusEl = document.getElementById("status");
+      const seatEl = document.getElementById("seat");
+      const cells = [];
+      for (let i = 0; i < 9; i++) {
+        const b = document.createElement("button");
+        b.type = "button";
+        b.addEventListener("click", () => {
+          if (!myTurn() || board[i] !== null) return;
+          sendFailure = null;
+          send({ t: "move", epoch, n: moves.length, cell: i, sid }).catch(
+            noteSendFailure,
+          );
+        });
+        boardEl.appendChild(b);
+        cells.push(b);
+      }
+
+      document.getElementById("reset-btn").addEventListener("click", () => {
+        sendFailure = null;
+        // Reset also routes through loopback — no local mutation here.
+        send({ t: "reset", epoch: epoch + 1 }).catch(noteSendFailure);
+      });
+
+      function seatLabel() {
+        const x = seatX();
+        const o = seatO();
+        if (x && x.sid === sid) return "you are X";
+        if (o && o.sid === sid) return "you are O";
+        if (!x || !o) return "board open";
+        return "watching";
+      }
+
+      function statusText() {
+        if (sendFailure) return `⚠ ${sendFailure}`;
+        if (winLine) {
+          const mark = board[winLine[0]];
+          const owner = mark === "X" ? seatX() : seatO();
+          const who = owner && owner.name ? ` (${owner.name})` : "";
+          return `${mark}${who} wins`;
+        }
+        if (moves.length >= 9) return "draw — new game?";
+        const mark = markOf(moves.length);
+        return myTurn() ? `${mark} to move — your turn` : `${mark} to move`;
+      }
+
+      function render() {
+        for (let i = 0; i < 9; i++) {
+          const v = board[i];
+          cells[i].textContent = v ?? "";
+          cells[i].className = v ? v.toLowerCase() : "";
+          if (winLine && winLine.includes(i)) cells[i].classList.add("win");
+          cells[i].disabled = v !== null || !!winLine || !myTurn();
+        }
+        seatEl.textContent = seatLabel();
+        statusEl.innerHTML = "";
+        const span = document.createElement("span");
+        if (!winLine && !myTurn() && !sendFailure) span.className = "muted";
+        span.textContent = statusText();
+        statusEl.appendChild(span);
+      }
+
+      // ── handshake ───────────────────────────────────────────────────
+      window.addEventListener("message", (ev) => {
+        const env = ev.data;
+        if (!env || typeof env !== "object") return;
+        if (env.kind === "handshake/hello") {
+          window.parent.postMessage(
+            {
+              v: V,
+              kind: "handshake/ready",
+              pluginId: "@aura/tic-tac-toe",
+              sdkVersion: "0.1.0-raw",
+            },
+            "*",
+          );
+          boot();
+          return;
+        }
+        if (env.kind === "result") {
+          const p = pending.get(env.id);
+          if (!p) return;
+          pending.delete(env.id);
+          if (env.ok) p.resolve(env.value);
+          else p.reject(new Error(env.error ? env.error.message : "failed"));
+          return;
+        }
+        if (env.kind === "event" && env.channel === "realtime." + TOPIC) {
+          onRealtime(env.payload);
+        }
+      });
+
+      async function boot() {
+        render();
+        try {
+          // Prefix subscription: "realtime" matches realtime.tictactoe.
+          await call("host.event.subscribe", { channel: "realtime" });
+          // Announce — peers with a game in flight answer with a sync.
+          await send({ t: "join", sid });
+        } catch (e) {
+          noteSendFailure(e);
+        }
+      }
+    </script>
+  </body>
+</html>

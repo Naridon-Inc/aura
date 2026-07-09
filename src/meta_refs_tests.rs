@@ -5,8 +5,10 @@
 // mirroring exactly what the commands do.
 
 use super::notes::{
-    attribute_rows, collect_log, merge_incoming_notes, parse_note_line, render_note_line,
-    union_lines, write_notes_for_range, CommitWindow, NoteLine, INCOMING_REF, NOTES_REF,
+    attribute_rows, build_proof_note, collect_log, merge_incoming_notes, parse_note_line,
+    parse_proof_note, render_note_line, render_proof_note, union_lines, verify_range,
+    write_notes_for_range, write_proof_for_range, CommitWindow, NoteLine, INCOMING_REF, NOTES_REF,
+    PROOF_REF,
 };
 use crate::intent_query::IntentRow;
 use git2::{Oid, Repository, Signature, Time};
@@ -425,4 +427,257 @@ fn meta_pull_merges_divergent_notes_as_union() {
     assert!(intents.contains(&"row from A"));
     assert!(intents.contains(&"row from B"));
     assert_eq!(entries[0].rows.len(), 2);
+}
+
+// ---------- proof plane (M4 — refs/notes/aura-proof) ----------
+
+/// Write a `.aura/goals.jsonl` with a single goal whose newest run binds to
+/// `commit` (a sha prefix) with the given verdict. Deterministic `at`.
+fn write_goal_ledger(
+    workdir: &Path,
+    goal_text: &str,
+    commit_prefix: &str,
+    verdict: &str,
+    ok: usize,
+    total: usize,
+    at: u64,
+) {
+    let aura = workdir.join(".aura");
+    std::fs::create_dir_all(&aura).unwrap();
+    // id is djb2 of normalized text — any stable string works for the test
+    // since we round-trip through build_proof_note which doesn't recompute it.
+    let id = crate::goals::store::id_for_text(goal_text);
+    let record = serde_json::json!({
+        "id": id,
+        "text": goal_text,
+        "runs": [
+            {
+                "run_key": "build",
+                "verdict": verdict,
+                "ok": ok,
+                "total": total,
+                "commit": commit_prefix,
+                "at": at,
+            }
+        ],
+        "created_at": at,
+        "updated_at": at,
+    });
+    std::fs::write(
+        aura.join("goals.jsonl"),
+        format!("{}\n", serde_json::to_string(&record).unwrap()),
+    )
+    .unwrap();
+}
+
+#[test]
+fn proof_note_render_round_trips() {
+    let note = build_proof_note_fixture();
+    let body = render_proof_note(&note);
+    let parsed = parse_proof_note(&body).unwrap();
+    assert_eq!(parsed, note);
+    // Compact single line — no pretty-printing.
+    assert!(!body.contains('\n'));
+}
+
+fn build_proof_note_fixture() -> super::notes::ProofNote {
+    super::notes::ProofNote {
+        commit: "a".repeat(40),
+        verdict: "verified".to_string(),
+        ok: 3,
+        total: 3,
+        goals: vec![super::notes::ProofGoal {
+            id: "goal_x".to_string(),
+            text: "users can sign in".to_string(),
+            verdict: "verified".to_string(),
+            ok: 3,
+            total: 3,
+        }],
+        at: 1_700_000_000_000,
+    }
+}
+
+#[test]
+fn proof_round_trip_write_and_verify_through_repo() {
+    let tmp = tempfile::tempdir().unwrap();
+    let origin = tmp.path().join("origin.git");
+    let a_dir = tmp.path().join("clone_a");
+    sh_git(tmp.path(), &["init", "--bare", origin.to_str().unwrap()]);
+    sh_git(
+        tmp.path(),
+        &["clone", origin.to_str().unwrap(), a_dir.to_str().unwrap()],
+    );
+
+    let repo = Repository::open(&a_dir).unwrap();
+    let t1: i64 = 3_000_000;
+    let c1 = commit_file(
+        &repo, "f.txt", "f", "feat: provable", t1, "Claude Agent", "claude@anthropic.com",
+    );
+
+    // Goal proven against a sha-prefix of c1 (mirrors the auto-prove path,
+    // which records the short sha).
+    let prefix: String = c1.to_string().chars().take(12).collect();
+    write_goal_ledger(
+        &a_dir,
+        "users can sign in via google",
+        &prefix,
+        "verified",
+        3,
+        3,
+        1_700_000_000_000,
+    );
+
+    // build_proof_note selects the goal by prefix and rolls up to verified.
+    let note = build_proof_note(&a_dir, &c1.to_string()).expect("a proof note for c1");
+    assert_eq!(note.commit, c1.to_string());
+    assert_eq!(note.verdict, "verified");
+    assert_eq!(note.ok, 3);
+    assert_eq!(note.total, 3);
+    assert_eq!(note.goals.len(), 1);
+
+    // A commit with no matching goal gets no note.
+    assert!(build_proof_note(&a_dir, &"f".repeat(40)).is_none());
+
+    // write_proof_for_range creates the note under PROOF_REF.
+    let report = write_proof_for_range(&repo, None).unwrap();
+    assert_eq!(report.commits_in_range, 1);
+    assert_eq!(report.commits_proven, 1);
+    assert_eq!(report.commits_changed, 1);
+    assert!(repo.find_note(Some(PROOF_REF), c1).is_ok());
+
+    // Idempotent: an unchanged snapshot writes nothing the second time.
+    let again = write_proof_for_range(&repo, None).unwrap();
+    assert_eq!(again.commits_proven, 1);
+    assert_eq!(again.commits_changed, 0);
+
+    // verify_range reports the commit as proven AND bound.
+    let v = verify_range(&repo, None).unwrap();
+    assert_eq!(v.commits, 1);
+    assert_eq!(v.proven, 1);
+    assert!(v.ok);
+    assert!(v.issues.is_empty());
+    assert_eq!(v.per_commit.len(), 1);
+    assert!(v.per_commit[0].binding_ok);
+    assert_eq!(
+        v.per_commit[0].proof.as_ref().unwrap().verdict,
+        "verified"
+    );
+
+    // render/parse round-trips the exact snapshot build produced.
+    let reparsed = parse_proof_note(&render_proof_note(&note)).unwrap();
+    assert_eq!(reparsed, note);
+
+    // collect_log carries the proof on a commit that ALSO has intent: write
+    // an intent row in c1's window, push intent notes, and confirm the log
+    // entry surfaces the proof snapshot alongside the rows.
+    std::fs::write(
+        a_dir.join(".aura").join("intent_log.jsonl"),
+        format!(
+            "{}\n",
+            format!(
+                r#"{{"timestamp":{},"agent_id":"claude","intent":"wire sign-in"}}"#,
+                t1 - 1
+            )
+        ),
+    )
+    .unwrap();
+    write_notes_for_range(&repo, None).unwrap();
+    let entries = collect_log(&repo, 10).unwrap();
+    assert_eq!(entries.len(), 1);
+    let proof = entries[0].proof.as_ref().expect("log entry carries proof");
+    assert_eq!(proof.verdict, "verified");
+    assert_eq!(proof.commit, c1.to_string());
+}
+
+#[test]
+fn proof_verify_rejects_a_tampered_binding() {
+    let tmp = tempfile::tempdir().unwrap();
+    let origin = tmp.path().join("origin.git");
+    let a_dir = tmp.path().join("clone_a");
+    sh_git(tmp.path(), &["init", "--bare", origin.to_str().unwrap()]);
+    sh_git(
+        tmp.path(),
+        &["clone", origin.to_str().unwrap(), a_dir.to_str().unwrap()],
+    );
+    let repo = Repository::open(&a_dir).unwrap();
+    let t1: i64 = 3_100_000;
+    let c1 = commit_file(
+        &repo, "f.txt", "f", "feat: tampered", t1, "Dev", "dev@x.com",
+    );
+
+    // Hand-write a proof note whose `commit` field points at the WRONG oid.
+    let bogus = super::notes::ProofNote {
+        commit: "0".repeat(40), // not c1
+        verdict: "verified".to_string(),
+        ok: 1,
+        total: 1,
+        goals: vec![],
+        at: 1_700_000_000_000,
+    };
+    let sig = Signature::new("aura", "meta@aura.local", &Time::new(t1, 0)).unwrap();
+    let body = render_proof_note(&bogus);
+    repo.note(&sig, &sig, Some(PROOF_REF), c1, &body, true).unwrap();
+
+    let v = verify_range(&repo, None).unwrap();
+    assert_eq!(v.commits, 1);
+    assert_eq!(v.proven, 1, "a (mis-bound) proof note is still present");
+    assert!(!v.ok, "tampered binding makes the report not-ok");
+    assert_eq!(v.issues.len(), 1);
+    assert!(!v.per_commit[0].binding_ok);
+    assert!(v.issues[0].contains("binds to"));
+}
+
+#[test]
+fn proof_pull_resolves_newest_at_wins() {
+    use super::notes::{merge_incoming_proof, INCOMING_PROOF_REF};
+    let tmp = tempfile::tempdir().unwrap();
+    let origin = tmp.path().join("origin.git");
+    let a_dir = tmp.path().join("clone_a");
+    let b_dir = tmp.path().join("clone_b");
+    sh_git(tmp.path(), &["init", "--bare", origin.to_str().unwrap()]);
+    sh_git(
+        tmp.path(),
+        &["clone", origin.to_str().unwrap(), a_dir.to_str().unwrap()],
+    );
+    let repo_a = Repository::open(&a_dir).unwrap();
+    let t1: i64 = 3_200_000;
+    let c1 = commit_file(
+        &repo_a, "f.txt", "f", "feat: shared proof", t1, "Dev", "dev@x.com",
+    );
+    sh_git(&a_dir, &["push", "origin", "HEAD"]);
+
+    // A proves NEWER (verified, at=200) and pushes the proof ref.
+    let prefix: String = c1.to_string().chars().take(12).collect();
+    write_goal_ledger(&a_dir, "shared goal", &prefix, "verified", 2, 2, 200);
+    write_proof_for_range(&repo_a, None).unwrap();
+    sh_git(&a_dir, &["push", "origin", PROOF_REF]);
+
+    // B clones, proves OLDER locally (partial, at=100), then pulls A's proof:
+    // newest-at (A's verified, 200) must win over B's local (partial, 100).
+    sh_git(
+        tmp.path(),
+        &["clone", origin.to_str().unwrap(), b_dir.to_str().unwrap()],
+    );
+    let repo_b = Repository::open(&b_dir).unwrap();
+    write_goal_ledger(&b_dir, "shared goal", &prefix, "partial", 1, 2, 100);
+    write_proof_for_range(&repo_b, None).unwrap();
+
+    let refspec = format!("+{}:{}", PROOF_REF, INCOMING_PROOF_REF);
+    sh_git(&b_dir, &["fetch", "origin", &refspec]);
+    let pull = merge_incoming_proof(&repo_b).unwrap();
+    assert!(pull.incoming_present);
+    assert_eq!(pull.commits_seen, 1);
+    assert_eq!(pull.commits_updated, 1, "A's newer snapshot wins");
+    assert!(repo_b.find_reference(INCOMING_PROOF_REF).is_err());
+
+    // The resolved local note is A's verified snapshot.
+    let body = super::notes::note_body(&repo_b, PROOF_REF, c1).unwrap();
+    let resolved = parse_proof_note(&body).unwrap();
+    assert_eq!(resolved.verdict, "verified");
+    assert_eq!(resolved.at, 200);
+
+    // Pulling again resolves nothing new (incoming is not strictly newer).
+    sh_git(&b_dir, &["fetch", "origin", &refspec]);
+    let pull2 = merge_incoming_proof(&repo_b).unwrap();
+    assert_eq!(pull2.commits_updated, 0);
 }

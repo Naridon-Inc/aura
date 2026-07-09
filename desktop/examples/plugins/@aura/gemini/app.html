@@ -1,0 +1,532 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <!--
+      @aura/gemini — full-surface mini-app sandbox.
+
+      Same sandbox model as every Aura plugin surface: srcdoc iframe with
+      sandbox="allow-scripts" (NO allow-same-origin), opaque "null" origin,
+      postMessage bridge as the ONLY host channel. The difference from a
+      rail panel is purely size — this fills the center WorkSurface.
+
+      What this app demonstrates: HOST-SIDE CREDENTIAL INJECTION. The app
+      calls the Gemini REST API through `net.fetch`, but it NEVER holds the
+      API key. The manifest's `netAuth` binding tells the host to append
+      `?key=<secret>` to the outbound request, resolving the secret from the
+      OS keychain. So:
+
+        · The key is never in this HTML, never in storage.kv, never crosses
+          the bridge. A compromised/curious app literally cannot read it.
+        · The app can only reach generativelanguage.googleapis.com — the one
+          host its `net:fetch:` capability grants. Any other URL is denied
+          in the bridge AND re-denied in Rust.
+
+      Conversation history is persisted via storage.kv (capability
+      `storage:kv`) so the chat survives reload — but that store holds only
+      the messages, never credentials.
+    -->
+    <style>
+      :root {
+        color-scheme: dark;
+      }
+      * {
+        box-sizing: border-box;
+      }
+      html,
+      body {
+        height: 100%;
+        margin: 0;
+      }
+      body {
+        display: flex;
+        flex-direction: column;
+        background: #0e1013;
+        color: #d7dade;
+        font:
+          13px/1.55 ui-sans-serif,
+          system-ui,
+          -apple-system,
+          sans-serif;
+      }
+      header {
+        flex: 0 0 auto;
+        display: flex;
+        align-items: center;
+        gap: 9px;
+        padding: 11px 18px;
+        border-bottom: 1px solid #1d2127;
+      }
+      .glyph {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        width: 26px;
+        height: 26px;
+        border-radius: 7px;
+        background: linear-gradient(135deg, #1a73e8 0%, #8e44ec 100%);
+        color: #fff;
+        font-size: 15px;
+      }
+      header h1 {
+        font-size: 13.5px;
+        font-weight: 600;
+        margin: 0;
+      }
+      header .sub {
+        margin: 0;
+        font-size: 11px;
+        color: #7e8590;
+      }
+      header .spacer {
+        flex: 1;
+      }
+      header button.ghost {
+        background: none;
+        border: 1px solid #2a2f37;
+        color: #9aa1ab;
+        border-radius: 6px;
+        padding: 4px 10px;
+        font-size: 11.5px;
+        cursor: pointer;
+      }
+      header button.ghost:hover {
+        color: #d7dade;
+        border-color: #3a4049;
+      }
+      #stream {
+        flex: 1 1 auto;
+        overflow-y: auto;
+        padding: 20px 18px 8px;
+        display: flex;
+        flex-direction: column;
+        gap: 14px;
+      }
+      .msg {
+        max-width: 760px;
+        width: 100%;
+        margin: 0 auto;
+        display: flex;
+        gap: 11px;
+      }
+      .msg .who {
+        flex: 0 0 auto;
+        width: 26px;
+        height: 26px;
+        border-radius: 7px;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        font-size: 12px;
+        font-weight: 600;
+      }
+      .msg.user .who {
+        background: #23272e;
+        color: #c3c8d0;
+      }
+      .msg.model .who {
+        background: linear-gradient(135deg, #1a73e8 0%, #8e44ec 100%);
+        color: #fff;
+      }
+      .msg .body {
+        flex: 1;
+        min-width: 0;
+        padding-top: 2px;
+        white-space: pre-wrap;
+        word-wrap: break-word;
+      }
+      .msg.model .body {
+        color: #e6e9ed;
+      }
+      .msg .role {
+        font-size: 11px;
+        color: #7e8590;
+        margin-bottom: 2px;
+      }
+      .empty {
+        max-width: 480px;
+        margin: 40px auto;
+        text-align: center;
+        color: #7e8590;
+      }
+      .empty .big {
+        font-size: 15px;
+        color: #c3c8d0;
+        margin-bottom: 6px;
+      }
+      .error {
+        max-width: 760px;
+        width: 100%;
+        margin: 0 auto;
+        background: #2a1416;
+        border: 1px solid #5a2026;
+        color: #f0b4b9;
+        border-radius: 8px;
+        padding: 10px 12px;
+        font-size: 12px;
+      }
+      .error a {
+        color: #ffd1d5;
+      }
+      footer {
+        flex: 0 0 auto;
+        padding: 12px 18px 16px;
+        border-top: 1px solid #1d2127;
+      }
+      .composer {
+        max-width: 760px;
+        margin: 0 auto;
+        display: flex;
+        gap: 8px;
+        align-items: flex-end;
+        background: #16181d;
+        border: 1px solid #272c34;
+        border-radius: 10px;
+        padding: 8px 8px 8px 12px;
+      }
+      .composer:focus-within {
+        border-color: #3a72d4;
+      }
+      #input {
+        flex: 1;
+        resize: none;
+        background: none;
+        border: none;
+        outline: none;
+        color: #e6e9ed;
+        font: inherit;
+        max-height: 160px;
+        line-height: 1.5;
+      }
+      #send {
+        flex: 0 0 auto;
+        background: #1a73e8;
+        color: #fff;
+        border: none;
+        border-radius: 8px;
+        width: 32px;
+        height: 32px;
+        font-size: 15px;
+        cursor: pointer;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+      }
+      #send:disabled {
+        opacity: 0.45;
+        cursor: default;
+      }
+      .hint {
+        max-width: 760px;
+        margin: 6px auto 0;
+        font-size: 10.5px;
+        color: #6b727c;
+      }
+      .typing {
+        display: inline-flex;
+        gap: 3px;
+      }
+      .typing span {
+        width: 5px;
+        height: 5px;
+        border-radius: 50%;
+        background: #7e8590;
+        animation: blink 1.2s infinite both;
+      }
+      .typing span:nth-child(2) {
+        animation-delay: 0.2s;
+      }
+      .typing span:nth-child(3) {
+        animation-delay: 0.4s;
+      }
+      @keyframes blink {
+        0%,
+        80%,
+        100% {
+          opacity: 0.25;
+        }
+        40% {
+          opacity: 1;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <header>
+      <span class="glyph">✦</span>
+      <div>
+        <h1>Gemini</h1>
+        <p class="sub">gemini-1.5-flash · key stays host-side</p>
+      </div>
+      <span class="spacer"></span>
+      <button class="ghost" id="clear" type="button">Clear</button>
+    </header>
+
+    <div id="stream"></div>
+
+    <footer>
+      <div class="composer">
+        <textarea
+          id="input"
+          rows="1"
+          placeholder="Message Gemini…  (Enter to send, Shift+Enter for newline)"
+        ></textarea>
+        <button id="send" type="button" title="Send">↑</button>
+      </div>
+      <div class="hint">
+        Your API key is stored in the OS keychain and attached by the host —
+        this app never sees it.
+      </div>
+    </footer>
+
+    <script>
+      // ── bridge plumbing (raw protocol, same as the other sample apps) ──
+      const V = 1;
+      const MODEL = "gemini-1.5-flash";
+      const ENDPOINT =
+        "https://generativelanguage.googleapis.com/v1beta/models/" +
+        MODEL +
+        ":generateContent";
+      const KV_KEY = "gemini.history.v1";
+
+      let nextId = 1;
+      const pending = new Map();
+
+      function call(method, args) {
+        return new Promise((resolve, reject) => {
+          const id = "p" + nextId++;
+          pending.set(id, { resolve, reject });
+          window.parent.postMessage({ v: V, kind: "call", id, method, args }, "*");
+        });
+      }
+
+      // ── conversation state ───────────────────────────────────────────
+      // turns: [{ role: "user" | "model", text }]
+      let turns = [];
+      let busy = false;
+
+      const streamEl = document.getElementById("stream");
+      const inputEl = document.getElementById("input");
+      const sendEl = document.getElementById("send");
+      const clearEl = document.getElementById("clear");
+
+      function esc(s) {
+        return String(s).replace(
+          /[&<>]/g,
+          (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" })[c],
+        );
+      }
+
+      function render(extra) {
+        if (turns.length === 0 && !extra) {
+          streamEl.innerHTML =
+            '<div class="empty"><div class="big">Ask Gemini anything</div>' +
+            "Runs in a sandbox. The only thing it can reach is the Gemini API.</div>";
+          return;
+        }
+        let html = "";
+        for (const t of turns) {
+          const who = t.role === "user" ? "You" : "✦";
+          const role = t.role === "user" ? "You" : "Gemini";
+          html +=
+            '<div class="msg ' +
+            t.role +
+            '"><div class="who">' +
+            esc(who) +
+            '</div><div><div class="role">' +
+            role +
+            '</div><div class="body">' +
+            esc(t.text) +
+            "</div></div></div>";
+        }
+        if (extra) html += extra;
+        streamEl.innerHTML = html;
+        streamEl.scrollTop = streamEl.scrollHeight;
+      }
+
+      function typingBubble() {
+        return (
+          '<div class="msg model"><div class="who">✦</div>' +
+          '<div><div class="role">Gemini</div><div class="body">' +
+          '<span class="typing"><span></span><span></span><span></span></span>' +
+          "</div></div></div>"
+        );
+      }
+
+      function errorBubble(msg, withKeyHelp) {
+        const help = withKeyHelp
+          ? '<br /><br />Add your Google AI Studio API key in <b>Settings → Plugins → Gemini</b> ' +
+            '(<a href="https://aistudio.google.com/app/apikey" target="_blank" rel="noopener">get a key</a>).'
+          : "";
+        return '<div class="error">' + esc(msg) + help + "</div>";
+      }
+
+      async function persist() {
+        try {
+          await call("storage.kv", { op: "set", key: KV_KEY, value: turns });
+        } catch (e) {
+          /* non-fatal — history just won't survive reload */
+        }
+      }
+
+      async function restore() {
+        try {
+          const r = await call("storage.kv", { op: "get", key: KV_KEY });
+          if (r && Array.isArray(r.value)) {
+            turns = r.value.filter(
+              (t) =>
+                t &&
+                (t.role === "user" || t.role === "model") &&
+                typeof t.text === "string",
+            );
+          }
+        } catch (e) {
+          /* first run / no store — empty history */
+        }
+        render();
+      }
+
+      function setBusy(b) {
+        busy = b;
+        sendEl.disabled = b;
+        inputEl.disabled = b;
+      }
+
+      async function send() {
+        const text = inputEl.value.trim();
+        if (!text || busy) return;
+        inputEl.value = "";
+        autosize();
+        turns.push({ role: "user", text });
+        render(typingBubble());
+        setBusy(true);
+        void persist();
+
+        // Build the Gemini `contents` array from history. The host appends
+        // ?key=<secret> — we send NO credential of any kind.
+        const contents = turns.map((t) => ({
+          role: t.role === "model" ? "model" : "user",
+          parts: [{ text: t.text }],
+        }));
+
+        try {
+          const res = await call("net.fetch", {
+            url: ENDPOINT,
+            method: "POST",
+            headers: [["content-type", "application/json"]],
+            body: JSON.stringify({ contents }),
+          });
+
+          if (res.status === 401 || res.status === 403) {
+            render(errorBubble("Gemini rejected the request (auth).", true));
+            setBusy(false);
+            return;
+          }
+          if (res.status < 200 || res.status >= 300) {
+            render(
+              errorBubble(
+                "Gemini error " + res.status + ": " + briefBody(res.body),
+                res.status === 400,
+              ),
+            );
+            setBusy(false);
+            return;
+          }
+
+          const data = JSON.parse(res.body || "{}");
+          const reply = extractText(data);
+          if (!reply) {
+            render(errorBubble("Gemini returned no text.", false));
+            setBusy(false);
+            return;
+          }
+          turns.push({ role: "model", text: reply });
+          render();
+          void persist();
+        } catch (e) {
+          // net.fetch rejects when the key isn't configured (the host can't
+          // resolve the secret) or the host is unreachable.
+          const m = String(e && e.message ? e.message : e);
+          const keyish = /secret|unset|capability|gemini_api_key/i.test(m);
+          render(
+            errorBubble(
+              keyish ? "No Gemini API key configured." : "Request failed: " + m,
+              keyish,
+            ),
+          );
+        } finally {
+          setBusy(false);
+        }
+      }
+
+      function extractText(data) {
+        try {
+          const parts = data.candidates[0].content.parts;
+          return parts
+            .map((p) => (typeof p.text === "string" ? p.text : ""))
+            .join("")
+            .trim();
+        } catch (e) {
+          return "";
+        }
+      }
+
+      function briefBody(body) {
+        try {
+          const j = JSON.parse(body || "{}");
+          if (j.error && j.error.message) return j.error.message;
+        } catch (e) {
+          /* not json */
+        }
+        return (body || "").slice(0, 200);
+      }
+
+      function autosize() {
+        inputEl.style.height = "auto";
+        inputEl.style.height = Math.min(inputEl.scrollHeight, 160) + "px";
+      }
+
+      // ── events ─────────────────────────────────────────────────────
+      inputEl.addEventListener("input", autosize);
+      inputEl.addEventListener("keydown", (e) => {
+        if (e.key === "Enter" && !e.shiftKey) {
+          e.preventDefault();
+          void send();
+        }
+      });
+      sendEl.addEventListener("click", () => void send());
+      clearEl.addEventListener("click", () => {
+        turns = [];
+        render();
+        void persist();
+      });
+
+      window.addEventListener("message", (ev) => {
+        const env = ev.data;
+        if (!env || typeof env !== "object") return;
+        if (env.kind === "handshake/hello") {
+          window.parent.postMessage(
+            {
+              v: V,
+              kind: "handshake/ready",
+              pluginId: "@aura/gemini",
+              sdkVersion: "0.1.0-raw",
+            },
+            "*",
+          );
+          void restore();
+          return;
+        }
+        if (env.kind === "result") {
+          const p = pending.get(env.id);
+          if (!p) return;
+          pending.delete(env.id);
+          if (env.ok) p.resolve(env.value);
+          else p.reject(new Error(env.error ? env.error.message : "failed"));
+        }
+      });
+
+      render();
+    </script>
+  </body>
+</html>

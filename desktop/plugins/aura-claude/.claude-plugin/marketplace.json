@@ -1,0 +1,18 @@
+{
+  "name": "aura-claude",
+  "description": "Aura Shell terminal integrations for Claude Code",
+  "owner": {
+    "name": "Naridon Inc.",
+    "url": "https://auravcs.com"
+  },
+  "plugins": [
+    {
+      "name": "aura",
+      "description": "Native Aura Shell notifications when Claude completes tasks or needs input",
+      "source": "./plugins/aura",
+      "version": "1.0.0",
+      "category": "productivity",
+      "tags": ["notifications", "terminal", "aura"]
+    }
+  ]
+}

@@ -484,7 +484,7 @@ mod tests {
             state: BlockState::Proposed,
             policy: None,
             provenance: Provenance {
-                actor: AgentRef("did:aura:user/muhammed".into()),
+                actor: AgentRef("did:aura:user/you".into()),
                 on_behalf_of: None,
                 origin_host: "laptop".into(),
                 signature: None,
@@ -569,7 +569,7 @@ mod tests {
     #[test]
     fn list_filter_by_actor_matches_exact_did() {
         let store = BlockStore::open(Path::new(":memory:")).unwrap();
-        let mut b1 = mk_block(); // actor = did:aura:user/muhammed
+        let mut b1 = mk_block(); // actor = did:aura:user/you
         let mut b2 = mk_block();
         b2.id = BlockId::new();
         b2.provenance.actor = AgentRef("did:aura:agent/claude".into());

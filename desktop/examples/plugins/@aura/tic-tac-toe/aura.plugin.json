@@ -1,0 +1,23 @@
+{
+  "schema": "https://aura.dev/schemas/plugin@1",
+  "id": "@aura/tic-tac-toe",
+  "name": "Tic-Tac-Toe",
+  "version": "0.1.0",
+  "publisher": "aura",
+  "engines": { "aura": ">=0.17.0" },
+  "description": "Multiplayer tic-tac-toe over the realtime:channel capability — the reference plugin for ephemeral team-rail messaging. Open the panel on two teammates' machines and play; solo workspaces play both seats via loopback.",
+  "entry": "worker.js",
+  "capabilities": ["realtime:channel:tictactoe", "ui:toast"],
+  "activationEvents": ["onStartup"],
+  "contributes": {
+    "railTiles": [{ "id": "ttt-tile", "label": "Tic-Tac-Toe", "icon": "⭕" }],
+    "rightRailPanels": [
+      {
+        "id": "ttt-panel",
+        "title": "Tic-Tac-Toe",
+        "entry": "panel.html",
+        "linkedRailTile": "ttt-tile"
+      }
+    ]
+  }
+}

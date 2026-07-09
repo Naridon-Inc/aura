@@ -1,0 +1,62 @@
+# Aura desktop — Linux (AppImage) build image.
+#
+# Tauri v2 on Ubuntu 22.04. Used by scripts/build-linux.sh to compile the
+# aura-shell app + the workspace-excluded `aura` CLI for Linux and bundle an
+# AppImage. Arch follows the build platform: `--platform linux/arm64` builds
+# natively on Apple Silicon (fast, used for the compile-fix loop); `linux/amd64`
+# builds the shippable x86_64 artifact under qemu.
+#
+# Rust toolchain + bun are baked in; the repo is mounted at /work at run time so
+# source edits don't require an image rebuild. Cargo registry + target live on
+# named volumes (see build-linux.sh) so iterative builds stay warm.
+FROM ubuntu:22.04
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+# Tauri v2 Linux system dependencies (webkit2gtk-4.1 is the v2 webview), plus
+# the toolchain prerequisites and the bits AppImage bundling needs.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      build-essential \
+      curl wget file ca-certificates git \
+      libwebkit2gtk-4.1-dev \
+      libgtk-3-dev \
+      libgtk-3-bin \
+      libayatana-appindicator3-dev \
+      librsvg2-dev \
+      librsvg2-common \
+      libxdo-dev \
+      libssl-dev \
+      pkg-config \
+      libfuse2 \
+      desktop-file-utils \
+      xdg-utils \
+      patchelf \
+      unzip xz-utils \
+    && rm -rf /var/lib/apt/lists/*
+
+# Rust (stable) via rustup — pinned channel comes from the repo's
+# rust-toolchain if present; otherwise stable.
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | \
+      sh -s -- -y --default-toolchain stable --profile minimal
+ENV PATH="/root/.cargo/bin:${PATH}"
+
+# Bun (the project's JS runtime / package manager + `bun run tauri`).
+RUN curl -fsSL https://bun.sh/install | bash
+ENV PATH="/root/.bun/bin:${PATH}"
+
+# Node 20 (vite 7 needs >=18). The repo's `build` npm script and tauri's
+# beforeBuildCommand invoke node by the macOS Homebrew absolute path
+# (/opt/homebrew/bin/node); symlink a real node there so the pipeline runs on
+# Linux byte-for-byte identically without editing the shared build scripts.
+RUN curl -fsSL https://deb.nodesource.com/setup_20.x | bash - \
+    && apt-get install -y --no-install-recommends nodejs \
+    && rm -rf /var/lib/apt/lists/* \
+    && mkdir -p /opt/homebrew/bin \
+    && ln -sf "$(command -v node)" /opt/homebrew/bin/node
+
+# AppImage tooling refuses to run FUSE inside an unprivileged container; this
+# env makes appimagetool self-extract instead of mounting.
+ENV APPIMAGE_EXTRACT_AND_RUN=1
+
+WORKDIR /work
+CMD ["/bin/bash"]

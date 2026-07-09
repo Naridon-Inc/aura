@@ -1,0 +1,39 @@
+[package]
+name        = "aura-daemon"
+version     = "0.1.0"
+edition     = "2024"
+license     = "Apache-2.0 OR MIT"
+description = "aura-daemon — state authority for blocks, policy, sync. Speaks aura-ipc v1 over a local Unix socket."
+repository  = "https://github.com/Naridon-Inc/aura"
+publish     = false
+
+[[bin]]
+name = "aura-daemon"
+path = "src/main.rs"
+
+[dependencies]
+aura-daemon-client = { path = "../aura-daemon-client" }
+aura-blocks        = { path = "../aura-blocks" }
+aura-blockstore    = { path = "../aura-blockstore" }
+tokio       = { version = "1", features = ["rt", "rt-multi-thread", "macros", "net", "io-util", "sync", "time", "fs", "signal"] }
+serde       = { version = "1", features = ["derive"] }
+serde_bytes = "0.11"
+serde_json  = "1"
+ciborium    = "0.2"
+thiserror   = "1"
+uuid        = { version = "1", features = ["v4", "v7", "serde"] }
+time        = { version = "0.3", features = ["serde", "formatting"] }
+tracing     = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+rand        = "0.8"
+rusqlite = { version = "0.38", features = ["bundled"] }
+
+[dev-dependencies]
+aura-blocks     = { path = "../aura-blocks" }
+aura-blockstore = { path = "../aura-blockstore" }
+tempfile        = "3"
+serde_json      = "1"
+tokio           = { version = "1", features = ["macros", "rt-multi-thread", "time"] }
+time            = { version = "0.3", features = ["serde"] }
+uuid            = { version = "1", features = ["v7", "serde"] }
+base64          = "0.22"

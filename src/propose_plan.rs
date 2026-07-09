@@ -244,27 +244,16 @@ pub fn run(
         .unwrap_or("cancel")
         .to_string();
     println!("{action}");
-    // On Build, the shell mints one A2A v1.2 task per todo and ships
-    // the ids back. Print them on subsequent lines as `tid:<uuid>` —
-    // the brain's Bash tool captures them and threads them into
-    // `aura subagent spawn --a2a-task-id <id>` so the DAG links the
-    // local run to the remote a2a task. Empty list (cloud off / mint
-    // failure) means the brain spawns without an a2a tag.
+    // Crew is the runner. On Build the shell mirrors the plan onto the local
+    // board, syncs it into the loop graph, and AUTO-STARTS the Crew runner —
+    // real coding agents work each task in dependency order, with proof, in
+    // the Build rail. The brain must NOT fan out its own subagents for a built
+    // plan (that would double-run the work). We print a single `runner:crew`
+    // marker the brain's prompt keys on to know execution is owned by the Crew
+    // — and we deliberately no longer emit `pid:`/`tid:` spawn handles, since
+    // there's nothing for the brain to dispatch.
     if action == "build" {
-        // Bucket K2 — emit `pid:<uuid>` for the parent plan task before
-        // the per-todo `tid:` lines. Brain captures both: pid is what
-        // it posts status against ("plan completed"); tids are the
-        // per-todo subagent dispatch handles.
-        if let Some(pid) = resp.get("plan_task_id").and_then(|v| v.as_str()) {
-            println!("pid:{pid}");
-        }
-        if let Some(ids) = resp.get("a2a_task_ids").and_then(|v| v.as_array()) {
-            for v in ids {
-                if let Some(id) = v.as_str() {
-                    println!("tid:{id}");
-                }
-            }
-        }
+        println!("runner:crew");
     }
     0
 }

@@ -1,0 +1,42 @@
+[package]
+name        = "aura-term"
+version     = "0.1.0"
+edition     = "2024"
+license     = "Apache-2.0 OR MIT"
+description = "Aura work surface — terminal + block renderer. Three-pane iced shell, alacritty_terminal PTY, BlockStore-backed."
+repository  = "https://github.com/Naridon-Inc/aura"
+publish     = false
+
+[dependencies]
+aura-blocks        = { path = "../aura-blocks" }
+aura-blockstore    = { path = "../aura-blockstore" }
+aura-attestation   = { path = "../aura-attestation" }
+aura-daemon        = { path = "../aura-daemon" }
+aura-daemon-client = { path = "../aura-daemon-client" }
+alacritty_terminal = "0.26"
+iced             = { version = "0.14", features = ["tokio", "advanced", "canvas", "svg", "highlighter"] }
+tokio            = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "signal", "io-util", "process"] }
+bytes            = "1"
+futures          = "0.3"
+libc             = "0.2"
+base64           = "0.22"
+uuid             = { version = "1", features = ["v7"] }
+time             = { version = "0.3", features = ["serde"] }
+serde            = { version = "1", features = ["derive"] }
+serde_json       = "1"
+directories      = "5"
+thiserror        = "1"
+tracing          = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+nucleo-matcher    = "0.3"
+rfd              = "0.15"
+
+# Native OS menubar. On macOS this installs an NSMenu so users get
+# real menu items at the top of the screen (File/Edit/View/Terminal/…)
+# instead of hunting for keybinds. On other platforms muda is a no-op
+# here — we still ship the accelerators via `dispatch_key_event`.
+[target.'cfg(target_os = "macos")'.dependencies]
+muda = "0.16"
+
+[dev-dependencies]
+tempfile = "3"

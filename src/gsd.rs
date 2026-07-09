@@ -328,8 +328,8 @@ impl GsdEngine {
             let handle = thread::spawn(move || {
                 let res_prompt = format!(
                     "You are the Aura Researcher for the domain: {}. \n\
-                    Investigate the codebase context and provide 3-5 critical insights for the objective: '{}'. \n\
-                    Focus purely on technical implementation details and potential pitfalls in your specific domain.",
+                    Examine the codebase context and report 3-5 critical, concrete insights for the objective: '{}'. \n\
+                    Ground every insight in what the provided context actually shows — cite the specific file, symbol, or pattern you saw. If the context is thin or silent on your domain, say so plainly; do not invent findings or pad with generic best-practice. Stay in your domain and surface real implementation details and pitfalls, not a survey.",
                     domain_str, prompt_clone
                 );
 
@@ -352,8 +352,8 @@ impl GsdEngine {
         eprintln!("\n{} {}", "🤔".bold(), "Aura Architect: Establishing Phase Context...".cyan());
         
         let discovery_prompt = format!(
-            "CRITICAL: You are the Aura Architect in 'Discovery Mode'. \n\
-            Your task is to analyze the following objective and the AST graph to identify 3 critical implementation 'Gray Areas' (e.g., UI, UX, Architecture, Edge Cases).\n\
+            "You are the Aura Architect in 'Discovery Mode'. \n\
+            Analyze the objective, the AST graph, and the research to surface the 3 decisions that most change the implementation — genuine forks where a human's call matters (UI, UX, architecture, edge cases). Anchor each in what the AST and research actually show; do not raise generic questions the context already answers.\n\
             \n\
             <objective>\n{}\n</objective>\n\
             \n\
@@ -476,7 +476,8 @@ impl GsdEngine {
         eprintln!("\n  {} Synthesizing atomic execution waves based on your decisions...", "↳".dimmed());
         
         let system_prompt = format!(
-            "You are the Aura Architect. Use the provided research, AST context, and the locked user decisions to generate a flawless execution plan.\n\
+            "You are the Aura Architect. Turn the locked user decisions, AST context, and research into a concrete, atomic execution plan.\n\
+            Commit to one approach per wave — the decisions are already made; do not re-open them or list alternatives. Every wave must name the real files and symbols it touches (drawn from the AST context, not invented) and order waves so each depends only on earlier ones. Plan only what the objective needs; no speculative scope.\n\
             \n\
             <objective>\n{}\n</objective>\n\
             \n\
@@ -525,9 +526,9 @@ impl GsdEngine {
         eprintln!("{} Verifying plan integrity via Aura Auditor...", "🔍".cyan());
         
         let check_prompt = format!(
-            "You are the Aura Plan Checker. Review the following execution plan for logical consistency, dependency deadlocks, and requirement coverage. \n\
-            Output 'PASS' if the plan is perfect. \n\
-            Otherwise, output a bulleted list of specific issues to fix.\n\n\
+            "You are the Aura Plan Checker. Audit the execution plan below; do not summarize or rubber-stamp it. Assume it has defects until you have checked each one: logical consistency, dependency deadlocks or cycles, waves that depend on work no earlier wave produces, and requirements from the objective that no wave covers. \n\
+            Output 'PASS' only if you find no real issue after that check. \n\
+            Otherwise, output a bulleted list naming each issue specifically — the wave or step at fault and what is wrong. Report only defects you can point to in the plan; do not invent problems to look thorough.\n\n\
             <plan>\n{}\n</plan>", cleaned_xml
         );
 
@@ -722,12 +723,12 @@ impl GsdEngine {
         // requirements after code that's really there (or genuinely absent).
         let catalog = Self::repo_symbol_catalog(goal, context);
 
-        let system_prompt = "You are the Aura Semantic Auditor. Analyze the user's software goal and break it down into 3-5 'Semantic Requirements'. \n\
-            Each requirement must be: \n\
-            - A specific Logic Node (Function, Class, or Struct) that must exist.\n\
-            - A connection (dependency) that must be wired.\n\
+        let system_prompt = "You are the Aura Semantic Auditor. Break the user's software goal into 3-5 'Semantic Requirements' — the specific code that must exist for the goal to be met. \n\
+            Each requirement is: \n\
+            - One specific Logic Node (Function, Class, or Struct) that must exist.\n\
+            - The connection (dependency) it must be wired to.\n\
             \n\
-            CRITICAL: When the goal is about code that already exists, you will be given an 'Existing symbols' list of REAL identifiers from this repository. Prefer those exact names for `node_name` whenever one fits the goal — do not invent a synonym for a symbol that is already named. Only introduce a new name when the goal genuinely requires code that is not yet in the list.\n\
+            Name requirements after code the goal genuinely needs — not aspirational extras and not a generic checklist. When an 'Existing symbols' list of REAL identifiers from this repository is provided, use those exact names for `node_name` wherever one fits; never coin a synonym for a symbol that already has a name. Introduce a new name only when the goal needs code that is not yet in the list.\n\
             \n\
             Format your response as a valid JSON array of objects: \n\
             [{\"node_name\": \"string\", \"type\": \"Function|Class|Struct\", \"must_call\": \"node_name_or_none\"}]";

@@ -242,6 +242,7 @@ pub fn upsert_by_text(root: &Path, text: &str) -> Result<GoalRecord, String> {
         text: trimmed,
         task_id: None,
         task_seq: None,
+        acceptance: Vec::new(),
         decomposition: None,
         runs: Vec::new(),
         created_at: ts,
@@ -286,6 +287,23 @@ pub fn record_run(root: &Path, goal_id: &str, run: GoalRun) -> Result<(), String
         g.runs.retain(|r| r.run_key != run.run_key);
         g.runs.insert(0, run);
         g.runs.truncate(RUN_CAP);
+        g.updated_at = now_millis();
+        save(root, &goals)?;
+    }
+    Ok(())
+}
+
+/// Set/replace the plain-language acceptance / verify plan on a goal. Empties
+/// are dropped; the list is stored verbatim otherwise (order preserved).
+pub fn set_acceptance(root: &Path, goal_id: &str, checks: Vec<String>) -> Result<(), String> {
+    let _lock = lock_ledger(root)?;
+    let mut goals = load(root);
+    if let Some(g) = goals.iter_mut().find(|g| g.id == goal_id) {
+        g.acceptance = checks
+            .into_iter()
+            .map(|c| c.trim().to_string())
+            .filter(|c| !c.is_empty())
+            .collect();
         g.updated_at = now_millis();
         save(root, &goals)?;
     }

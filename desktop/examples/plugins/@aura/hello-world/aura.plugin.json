@@ -1,0 +1,30 @@
+{
+  "schema": "https://aura.dev/schemas/plugin@1",
+  "id": "@aura/hello-world",
+  "name": "Hello World",
+  "version": "0.1.0",
+  "publisher": "aura",
+  "engines": { "aura": ">=0.17.0" },
+  "description": "Smallest possible Aura plugin: a worker, a right-rail panel, a slash command, and a rail tile — written against the raw bridge protocol with no build step.",
+  "entry": "worker.js",
+  "capabilities": ["ui:toast", "storage:kv", "aura:status", "mcp:call:echo"],
+  "activationEvents": ["onStartup"],
+  "contributes": {
+    "slashCommands": [
+      {
+        "id": "hello",
+        "title": "Hello World",
+        "description": "Toast the current Aura repo status"
+      },
+      {
+        "id": "hello-mcp",
+        "title": "Hello via MCP",
+        "description": "Round-trip text through the bundled echo MCP server"
+      }
+    ],
+    "railTiles": [{ "id": "hello-tile", "label": "Hello", "icon": "👋" }],
+    "rightRailPanels": [
+      { "id": "hello-panel", "title": "Hello", "entry": "panel.html" }
+    ]
+  }
+}

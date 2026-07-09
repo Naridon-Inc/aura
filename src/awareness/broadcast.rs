@@ -304,7 +304,7 @@ mod tests {
 
         // Local store: my event. Remote cache: a peer's event + an echo of mine.
         assert!(store::append(&ev("mine", "claude@here", 10)));
-        write_remote(&[ev("mine", "claude@here", 10), ev("peer", "ashiq", 20)]);
+        write_remote(&[ev("mine", "claude@here", 10), ev("peer", "owner", 20)]);
 
         let merged = merged_events();
         assert_eq!(merged.len(), 2, "echo of my own event must dedup away");
@@ -347,7 +347,7 @@ mod tests {
         let (_g, _d) = enter_tmp();
 
         let many: Vec<AwarenessEvent> = (0..REMOTE_MAX + 50)
-            .map(|i| ev(&format!("e{i}"), "ashiq", i as u64))
+            .map(|i| ev(&format!("e{i}"), "owner", i as u64))
             .collect();
         write_remote(&many);
         // write_remote itself doesn't cap (pull_remote does), but reading back

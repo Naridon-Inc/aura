@@ -188,7 +188,7 @@ fn read_snapshots(since_ts: u64, now_ts: u64) -> Vec<EpisodicEvent> {
 
 /// Snapshot file names are `<path>__<ms_epoch>.json` where path uses
 /// double-underscore as the directory separator. Example:
-/// `__Users__muhammed__Documents__x.rs__1777020482259.json`.
+/// `__Users__you__Documents__x.rs__1777020482259.json`.
 fn parse_snapshot_filename(name: &str) -> Option<(String, u64)> {
     let stem = name.strip_suffix(".json")?;
     let (path_part, ts_part) = stem.rsplit_once("__")?;
@@ -277,10 +277,10 @@ mod tests {
     #[test]
     fn parse_snapshot_filename_happy_path() {
         let (path, ts) = parse_snapshot_filename(
-            "__Users__muhammed__src__lib.rs__1777020482259.json",
+            "__Users__you__src__lib.rs__1777020482259.json",
         )
         .unwrap();
-        assert_eq!(path, "/Users/muhammed/src/lib.rs");
+        assert_eq!(path, "/Users/you/src/lib.rs");
         assert_eq!(ts, 1_777_020_482);
     }
 

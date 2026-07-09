@@ -166,7 +166,7 @@ mod tests {
         let (_g, _d) = enter_tmp();
 
         assert!(append(&ev("claude", AwarenessKind::Editing, 1)));
-        assert!(append(&ev("ashiq", AwarenessKind::Intent, 2)));
+        assert!(append(&ev("owner", AwarenessKind::Intent, 2)));
 
         let rows = read_all();
         assert_eq!(rows.len(), 2);
@@ -190,7 +190,7 @@ mod tests {
         // different symbol, kind, or actor are all distinct targets.
         assert!(!has_recent("claude", AwarenessKind::Editing, None, Some("logout"), 5000, 2000));
         assert!(!has_recent("claude", AwarenessKind::Intent, None, Some("login"), 5000, 2000));
-        assert!(!has_recent("ashiq", AwarenessKind::Editing, None, Some("login"), 5000, 2000));
+        assert!(!has_recent("owner", AwarenessKind::Editing, None, Some("login"), 5000, 2000));
     }
 
     #[test]
@@ -206,14 +206,14 @@ mod tests {
         b.symbol = Some("logout".into());
         let mut stale = ev("claude", AwarenessKind::Editing, 10);
         stale.symbol = Some("old".into());
-        let peer = ev("ashiq", AwarenessKind::Editing, 1600);
+        let peer = ev("owner", AwarenessKind::Editing, 1600);
         for e in [&a, &b, &stale, &peer] {
             assert!(append(e));
         }
 
         assert_eq!(count_recent_by_actor("claude", 1000, 2000), 2);
         assert_eq!(count_recent_by_actor("CLAUDE", 1000, 2000), 2, "case-insensitive");
-        assert_eq!(count_recent_by_actor("ashiq", 1000, 2000), 1);
+        assert_eq!(count_recent_by_actor("owner", 1000, 2000), 1);
         assert_eq!(count_recent_by_actor("claude", 10_000, 2000), 3, "wider window sees stale");
     }
 

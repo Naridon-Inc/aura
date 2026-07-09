@@ -365,6 +365,112 @@ impl SessionManager {
         }
     }
 
+    /// Record one completed turn's token usage into a stable, repo-local
+    /// session file — creating it on the first turn and ACCUMULATING on
+    /// every later turn. This is the write path the desktop app drives (via
+    /// `aura usage-record`) at end-of-turn so the team usage surface lights
+    /// up without a cloud account.
+    ///
+    /// Project-scoped by construction: the session lives in this repo's
+    /// `.aura/sessions/`, so `usage_by_dev::refresh` (run on every usage
+    /// read) attributes it to THIS project only — never a global,
+    /// cross-project pool, and never a teammate. The developer is stamped
+    /// from git `user.email` so the row lines up with the right roster seat.
+    pub fn record_turn_usage(
+        session_id: &str,
+        agent_id: &str,
+        model: Option<&str>,
+        input: u64,
+        output: u64,
+        cache_read: u64,
+    ) {
+        Self::ensure_dirs();
+        let path = format!("{}/{}.json", &sessions_dir(), session_id);
+        let now = now_secs();
+
+        // Load + accumulate, or start a fresh session for this id.
+        let mut session: AgentSession = fs::read_to_string(&path)
+            .ok()
+            .and_then(|s| serde_json::from_str(&s).ok())
+            .unwrap_or_else(|| AgentSession {
+                session_id: session_id.to_string(),
+                agent_id: agent_id.to_string(),
+                phase: SessionPhase::Active,
+                started_at: now,
+                last_activity: now,
+                files_touched: Vec::new(),
+                checkpoint_count: 0,
+                base_commit: None,
+                worktree: None,
+                token_usage: None,
+                summary: None,
+                model_name: model.map(|m| m.to_string()),
+                branch: None,
+                first_prompt: None,
+                subagents: Vec::new(),
+                pid: None,
+                project: std::env::current_dir()
+                    .ok()
+                    .and_then(|d| d.file_name().map(|n| n.to_string_lossy().to_string())),
+                developer: None,
+                developer_handle: None,
+            });
+
+        // Stamp the developer (git user.email) once, so aggregation credits
+        // the right teammate's row rather than the clone's fallback identity.
+        let id = crate::usage_by_dev::dev_identity();
+        Self::accumulate_turn(
+            &mut session,
+            agent_id,
+            model,
+            input,
+            output,
+            cache_read,
+            now,
+            Some((id.email, id.handle)),
+        );
+        Self::save_session(&session);
+    }
+
+    /// Fold one turn's usage into a session in memory — the pure core of
+    /// `record_turn_usage`, split out so it's unit-testable without touching
+    /// the filesystem or git. `dev` (email, handle) is applied only when the
+    /// session doesn't already carry an identity (stamp-once).
+    fn accumulate_turn(
+        session: &mut AgentSession,
+        agent_id: &str,
+        model: Option<&str>,
+        input: u64,
+        output: u64,
+        cache_read: u64,
+        now: u64,
+        dev: Option<(String, String)>,
+    ) {
+        let usage = session.token_usage.get_or_insert_with(TokenUsage::default);
+        usage.input_tokens += input;
+        usage.output_tokens += output;
+        usage.cache_read_tokens += cache_read;
+        usage.api_call_count += 1;
+        session.last_activity = now;
+        // Keep the latest known agent; fill the model once if we learn it.
+        if !agent_id.is_empty() {
+            session.agent_id = agent_id.to_string();
+        }
+        if session.model_name.is_none() {
+            if let Some(m) = model {
+                session.model_name = Some(m.to_string());
+            }
+        }
+        if session.developer.is_none() {
+            if let Some((email, handle)) = dev {
+                if !email.is_empty() {
+                    session.developer = Some(email);
+                    session.developer_handle = Some(handle);
+                }
+            }
+        }
+    }
+
     /// Set the model name for the active session
     pub fn set_model(model: &str) {
         if let Some(mut session) = Self::get_active_session() {
@@ -1164,4 +1270,102 @@ fn parse_timestamp(ts: &str) -> u64 {
     }
     // Fallback: current time
     now_secs()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn blank_session(id: &str) -> AgentSession {
+        AgentSession {
+            session_id: id.to_string(),
+            agent_id: String::new(),
+            phase: SessionPhase::Active,
+            started_at: 1000,
+            last_activity: 1000,
+            files_touched: Vec::new(),
+            checkpoint_count: 0,
+            base_commit: None,
+            worktree: None,
+            token_usage: None,
+            summary: None,
+            model_name: None,
+            branch: None,
+            first_prompt: None,
+            subagents: Vec::new(),
+            pid: None,
+            project: None,
+            developer: None,
+            developer_handle: None,
+        }
+    }
+
+    #[test]
+    fn accumulate_turn_creates_then_sums_across_turns() {
+        let mut s = blank_session("sess-1");
+
+        SessionManager::accumulate_turn(
+            &mut s,
+            "aura",
+            Some("claude-opus-4-8"),
+            100,
+            40,
+            10,
+            2000,
+            Some(("dev@example.com".into(), "dev".into())),
+        );
+        // First turn seeds the row.
+        let u = s.token_usage.as_ref().unwrap();
+        assert_eq!(u.input_tokens, 100);
+        assert_eq!(u.output_tokens, 40);
+        assert_eq!(u.cache_read_tokens, 10);
+        assert_eq!(u.api_call_count, 1);
+        assert_eq!(s.agent_id, "aura");
+        assert_eq!(s.model_name.as_deref(), Some("claude-opus-4-8"));
+        assert_eq!(s.developer.as_deref(), Some("dev@example.com"));
+        assert_eq!(s.developer_handle.as_deref(), Some("dev"));
+        assert_eq!(s.last_activity, 2000);
+
+        // Second turn accumulates — never overwrites identity already stamped.
+        SessionManager::accumulate_turn(
+            &mut s,
+            "aura",
+            Some("claude-sonnet-4-6"),
+            50,
+            20,
+            5,
+            3000,
+            Some(("other@example.com".into(), "other".into())),
+        );
+        let u = s.token_usage.as_ref().unwrap();
+        assert_eq!(u.input_tokens, 150);
+        assert_eq!(u.output_tokens, 60);
+        assert_eq!(u.cache_read_tokens, 15);
+        assert_eq!(u.api_call_count, 2);
+        // Model is stamped once (first non-empty), developer stays the seat.
+        assert_eq!(s.model_name.as_deref(), Some("claude-opus-4-8"));
+        assert_eq!(s.developer.as_deref(), Some("dev@example.com"));
+        assert_eq!(s.last_activity, 3000);
+    }
+
+    #[test]
+    fn accumulate_turn_skips_blank_developer_identity() {
+        let mut s = blank_session("sess-2");
+        // No usable git identity (empty email) — leave developer unset rather
+        // than stamp a blank seat that would mis-bucket the usage row.
+        SessionManager::accumulate_turn(
+            &mut s,
+            "claude",
+            None,
+            10,
+            5,
+            0,
+            2000,
+            Some((String::new(), String::new())),
+        );
+        assert!(s.developer.is_none());
+        assert!(s.developer_handle.is_none());
+        assert!(s.model_name.is_none());
+        assert_eq!(s.token_usage.as_ref().unwrap().input_tokens, 10);
+    }
 }

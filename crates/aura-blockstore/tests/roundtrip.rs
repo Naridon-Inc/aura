@@ -41,7 +41,7 @@ fn mk_block(kind: BlockKind, summary: &str) -> Block {
         state: BlockState::Proposed,
         policy: None,
         provenance: Provenance {
-            actor: AgentRef("did:aura:user/muhammed".into()),
+            actor: AgentRef("did:aura:user/you".into()),
             on_behalf_of: None,
             origin_host: "laptop".into(),
             signature: None,
@@ -130,7 +130,7 @@ async fn roundtrip_and_rebuild_and_subscribe_and_deselect() {
         );
         ring.append(mk_op(
             id,
-            "did:aura:user/muhammed",
+            "did:aura:user/you",
             10 + i,
             BlockOpPayload::AppendOutput {
                 stream: "stdout".into(),
@@ -233,7 +233,7 @@ async fn roundtrip_and_rebuild_and_subscribe_and_deselect() {
     store
         .apply_op(&mk_op(
             parent_id,
-            "did:aura:user/muhammed",
+            "did:aura:user/you",
             1,
             BlockOpPayload::SetExtension {
                 key: "gate.excluded_children".into(),

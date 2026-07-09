@@ -480,7 +480,7 @@ mod tests {
         Focus {
             files: files.iter().map(|s| s.to_string()).collect(),
             symbols: symbols.iter().map(|s| s.to_string()).collect(),
-            me: vec!["ashiq".into()],
+            me: vec!["owner".into()],
             dep_edges: Vec::new(),
         }
     }
@@ -514,7 +514,7 @@ mod tests {
     #[test]
     fn own_events_never_collide() {
         let f = focus(&["src/payments.rs"], &["charge_card"]);
-        let evs = vec![ev("Ashiq", AwarenessKind::Editing, Some("src/payments.rs"), Some("charge_card"), 100)];
+        let evs = vec![ev("Owner", AwarenessKind::Editing, Some("src/payments.rs"), Some("charge_card"), 100)];
         assert!(detect(&f, &evs, 200, DEFAULT_WINDOW_MS).is_empty());
     }
 

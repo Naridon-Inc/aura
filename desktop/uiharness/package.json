@@ -1,0 +1,12 @@
+{
+  "name": "aura-uiharness",
+  "private": true,
+  "type": "module",
+  "description": "Headless browser harness — drives the real aura-shell frontend (localhost:1420) in its own Chrome via a Tauri IPC shim. Never touches the user's mouse/keyboard.",
+  "scripts": {
+    "drive": "node drive.mjs"
+  },
+  "dependencies": {
+    "playwright-core": "^1.49.1"
+  }
+}

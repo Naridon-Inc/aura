@@ -66,13 +66,94 @@ pub fn create(repo_root: &Path, task_id: &str, base: Option<&str>) -> Result<Loo
 
 /// Merge the worktree's branch back into the current branch of `repo_root` with
 /// a no-fast-forward merge: `git -C <repo_root> merge --no-ff --no-edit <branch>`.
-/// On conflict (non-zero exit), returns `Err` with the git stderr so the caller
-/// can decide (the aura AST merge-driver, if configured, resolves clean cases
-/// automatically).
+///
+/// The main repo's working tree is often *dirty* while the loop runs — live
+/// `.aura/` churn, a half-edited file, the user mid-keystroke. A plain `git
+/// merge` refuses to start in that state ("Your local changes … would be
+/// overwritten by merge"), which would fail a lane that actually produced good
+/// work. So when (and only when) the merge is blocked by a dirty tree, we park
+/// the uncommitted changes on the stash, merge onto the now-clean tree, then
+/// restore them. A real content conflict (overlapping edits in the merge
+/// itself) still returns `Err` so the caller drops the lane — the aura AST
+/// merge-driver, if configured, resolves the clean cases automatically.
 pub fn merge_back(repo_root: &Path, wt: &LoopWorktree) -> Result<(), String> {
+    match run_merge(repo_root, &wt.branch) {
+        Ok(()) => Ok(()),
+        Err(e) if blocked_by_dirty_tree(&e) => {
+            // Park the user's uncommitted work (tracked + untracked), merge onto
+            // the clean tree, then pop it back. A pop conflict leaves the parked
+            // changes on the stash for the user to recover by hand — the merge
+            // itself has already landed.
+            let parked = stash_park(repo_root)?;
+            let merged = run_merge(repo_root, &wt.branch);
+            if parked {
+                let _ = stash_pop(repo_root);
+            }
+            merged
+        }
+        Err(e) => Err(e),
+    }
+}
+
+/// One `git merge --no-ff --no-edit <branch>` in `repo_root`. On failure returns
+/// the combined message — git prints the "would be overwritten" hint to stdout,
+/// real conflicts to stderr, so we surface whichever is non-empty.
+fn run_merge(repo_root: &Path, branch: &str) -> Result<(), String> {
     let repo_str = repo_root.to_string_lossy().into_owned();
     let out = Command::new("git")
-        .args(["-C", &repo_str, "merge", "--no-ff", "--no-edit", &wt.branch])
+        .args(["-C", &repo_str, "merge", "--no-ff", "--no-edit", branch])
+        .output()
+        .map_err(|e| format!("spawn git: {e}"))?;
+    if !out.status.success() {
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        let msg = if stderr.trim().is_empty() { stdout } else { stderr };
+        return Err(msg.to_string());
+    }
+    Ok(())
+}
+
+/// True when git refused the merge because the main working tree is dirty (not
+/// because of a real content conflict). These are the messages git emits when
+/// uncommitted local changes overlap the incoming merge.
+fn blocked_by_dirty_tree(e: &str) -> bool {
+    let e = e.to_lowercase();
+    e.contains("would be overwritten by merge")
+        || e.contains("would be overwritten by checkout")
+        || e.contains("please commit your changes or stash them")
+        || e.contains("your local changes to the following files")
+}
+
+/// Stash the main tree's uncommitted changes (tracked + untracked) so the merge
+/// has a clean tree to land on. Returns `Ok(true)` when something was actually
+/// stashed, `Ok(false)` when there was nothing to save.
+fn stash_park(repo_root: &Path) -> Result<bool, String> {
+    let repo_str = repo_root.to_string_lossy().into_owned();
+    let out = Command::new("git")
+        .args([
+            "-C",
+            &repo_str,
+            "stash",
+            "push",
+            "--include-untracked",
+            "-m",
+            "aura-loop merge-back park",
+        ])
+        .output()
+        .map_err(|e| format!("spawn git: {e}"))?;
+    if !out.status.success() {
+        return Err(String::from_utf8_lossy(&out.stderr).to_string());
+    }
+    let said = String::from_utf8_lossy(&out.stdout);
+    Ok(!said.contains("No local changes to save"))
+}
+
+/// Restore the parked changes after the merge. Best-effort: on a pop conflict
+/// git keeps the stash entry, so the user's work is never lost.
+fn stash_pop(repo_root: &Path) -> Result<(), String> {
+    let repo_str = repo_root.to_string_lossy().into_owned();
+    let out = Command::new("git")
+        .args(["-C", &repo_str, "stash", "pop"])
         .output()
         .map_err(|e| format!("spawn git: {e}"))?;
     if !out.status.success() {

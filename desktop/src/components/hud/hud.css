@@ -1,0 +1,1375 @@
+/* Floating HUD — a single Apple-glass pill summoned with ⌘⇧A. Collapsed it's
+   ONE glance row (status · what the agent just said · workspace); on hover or
+   composer focus it grows upward into the full surface (the exchange + a docked
+   composer). The frameless OS window is transparent; a native NSVisualEffectView
+   (hud.rs `apply_vibrancy`) paints the frosted glass behind the pill, and a wide
+   transparent GUTTER around it gives the soft drop shadow room so it can't clip
+   at the window edge. The window grows/shrinks to the pill via `hud_resize`.
+
+   The glass theme tracks the BACKDROP in realtime (hud.rs `adapt_to_backdrop`
+   samples the screen brightness behind the bar and pins the window appearance),
+   which flips the native frost AND the WKWebView's `prefers-color-scheme` — so
+   the token set below switches in lockstep: light glass over a bright page, dark
+   over a movie. This is a chat surface, so the accent is Aura chat's green. */
+
+/* ── Dark theme (default) ── */
+:root {
+  color-scheme: light dark;
+  --text-1: #ededee;
+  --text-2: #c4c4c7;
+  --text-3: #8a8a8f;
+  --text-4: #5b5b60;
+  /* The native HUDWindow frost (hud.rs) IS the glass — these add only the
+     faintest flat darkening so text holds, plus the rim + sheen edge. */
+  --glass-fill: rgba(18, 20, 24, 0.06);
+  --glass-rim: rgba(255, 255, 255, 0.16);
+  --glass-sheen: rgba(255, 255, 255, 0.22);
+  --glass-shadow:
+    0 6px 16px rgba(0, 0, 0, 0.16),
+    0 14px 30px rgba(0, 0, 0, 0.22);
+  --divider: rgba(255, 255, 255, 0.09);
+  --placeholder: rgba(255, 255, 255, 0.42);
+  /* Hover wash for the workspace control — a light glass highlight, not a dark
+     chip, so it stays "fully glass". */
+  --chip-bg: rgba(255, 255, 255, 0.1);
+  --chip-border: rgba(255, 255, 255, 0.14);
+  --accent: #4dc1a4;
+  --accent-ink: #07130f;
+  --st-idle: #9a9a9f;
+  --st-work: #d59f4f;
+  /* "Needs you" — a warm yellow-orange call for attention (not the calm work
+     gold, not a passive blue): your turn. */
+  --st-needs: #ef9a3c;
+  --st-done: #4dc1a4;
+  --st-error: #d05a76;
+}
+
+/* ── Light theme (bright backdrop) ── */
+@media (prefers-color-scheme: light) {
+  :root {
+    --text-1: #1b1b1f;
+    --text-2: #36363c;
+    --text-3: #6a6a73;
+    --text-4: #9b9ba3;
+    --glass-fill: rgba(250, 251, 253, 0.14);
+    --glass-rim: rgba(255, 255, 255, 0.6);
+    --glass-sheen: rgba(255, 255, 255, 0.7);
+    --glass-shadow:
+      0 6px 16px rgba(18, 28, 38, 0.08),
+      0 14px 30px rgba(18, 28, 38, 0.1);
+    --divider: rgba(0, 0, 0, 0.08);
+    --placeholder: rgba(0, 0, 0, 0.42);
+    --chip-bg: rgba(0, 0, 0, 0.05);
+    --chip-border: rgba(0, 0, 0, 0.1);
+    --accent-ink: #06251c;
+    --st-idle: #7a7a82;
+    --st-work: #b07414;
+    --st-needs: #d07e12;
+    --st-done: #1f9e7e;
+    --st-error: #c23a5b;
+  }
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  margin: 0;
+  height: 100%;
+  background: transparent;
+  overflow: hidden;
+}
+
+.hud-root {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  justify-content: flex-end;
+  height: 100vh;
+  font-family:
+    ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI",
+    "Helvetica Neue", sans-serif;
+  font-size: 13px;
+  color: var(--text-1);
+  -webkit-user-select: none;
+  user-select: none;
+}
+
+/* ── The glass pill ── */
+/* Content-sized: the React side measures it and drives the OS window + native
+   frost to match (hud_resize). The 48px margin is the GUTTER (hud.rs) — shadow
+   room + the frost inset. Radius matches the native frost cornerRadius. */
+.hud-pill {
+  position: relative;
+  margin: 0 48px 48px;
+  display: flex;
+  flex-direction: column;
+  border-radius: 22px;
+  background: var(--glass-fill);
+  border: 1px solid var(--glass-rim);
+  box-shadow:
+    inset 0 0.5px 0 var(--glass-sheen),
+    var(--glass-shadow);
+  overflow: hidden; /* clip rows to the rounded pill (the dropdown portals out) */
+}
+
+/* ── Top row (always present): status · [glance when collapsed] · workspace ──
+   Collapsed it's the WHOLE pill — one tall glance row. Expanded it shrinks to a
+   compact header and the exchange + composer appear beneath it. */
+.hud-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 9px;
+  min-height: 52px;
+  padding: 0 12px 0 15px;
+}
+
+.hud-pill.is-expanded .hud-head {
+  min-height: 0;
+  padding: 11px 12px 6px 15px;
+}
+
+/* What the agent last said — the heart of the collapsed glance. */
+.hud-glance {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--text-2);
+}
+
+.hud-glance .hud-msg {
+  color: var(--text-1);
+}
+
+.hud-lines {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  padding: 0 15px;
+}
+
+.hud-line {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  line-height: 1.4;
+  min-width: 0;
+}
+
+.hud-line-muted .hud-msg {
+  color: var(--text-3);
+}
+
+/* A small avatar slot — the agent's brand mark, or the "you" dot. */
+.hud-avatar {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 17px;
+  height: 17px;
+}
+
+.hud-avatar-you {
+  border-radius: 50%;
+  background: color-mix(in srgb, var(--text-2) 22%, transparent);
+  color: var(--text-2);
+  font-size: 9px;
+  font-weight: 700;
+}
+
+.hud-msg {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text-2);
+  min-width: 0;
+}
+
+/* ── "Read full response" affordance — a quiet expand glyph trailing the
+   glance / agent line; opens the reader popover. ── */
+.hud-expand {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 19px;
+  height: 19px;
+  margin-left: 2px;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text-3);
+  cursor: pointer;
+  transition:
+    background 120ms ease,
+    color 120ms ease;
+}
+
+.hud-expand:hover {
+  color: var(--text-1);
+  background: color-mix(in srgb, var(--text-1) 10%, transparent);
+}
+
+.hud-caret {
+  display: inline-block;
+  width: 6px;
+  height: 13px;
+  margin-left: 3px;
+  vertical-align: text-bottom;
+  background: var(--accent);
+  animation: hud-blink 1s steps(2, start) infinite;
+}
+
+@keyframes hud-blink {
+  50% {
+    opacity: 0;
+  }
+}
+
+/* ── Status (dot + label) — plain text on the glass, no chip ── */
+.hud-status {
+  --st: var(--st-idle);
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex: none;
+  font-size: 11.5px;
+  font-weight: 500;
+  color: var(--st);
+}
+
+/* The state glyph (pie/ring per status, like a task board) — inherits the
+   per-status tone via currentColor. */
+.hud-status-glyph {
+  flex: none;
+  display: block;
+}
+
+.hud-status-glyph.is-busy {
+  animation: hud-pulse 1.4s ease-in-out infinite;
+}
+
+@keyframes hud-pulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.3;
+  }
+}
+
+.hud-status-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Per-status tone (matches the app's StatusChip state→tone maps). */
+.hud-status-idle .hud-status {
+  --st: var(--st-idle);
+}
+.hud-status-thinking .hud-status,
+.hud-status-running .hud-status {
+  --st: var(--st-work);
+}
+.hud-status-awaiting_input .hud-status {
+  --st: var(--st-needs);
+}
+.hud-status-done .hud-status {
+  --st: var(--st-done);
+}
+.hud-status-error .hud-status {
+  --st: var(--st-error);
+}
+
+/* ── Collapsed subcaption — small status + workspace labels OUTSIDE the pill,
+   centered in the bottom gutter like a Siri subtitle. Purely informational
+   (no pointer events), and it rides the adaptive theme so it stays legible
+   over any backdrop (dark text on bright, light on dark) + a faint shadow. */
+.hud-subcaption {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 27px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  font-size: 11px;
+  font-weight: 500;
+  color: var(--text-3);
+  pointer-events: none;
+  text-shadow: 0 1px 3px rgba(0, 0, 0, 0.32);
+}
+
+@media (prefers-color-scheme: light) {
+  .hud-subcaption {
+    text-shadow: 0 1px 2px rgba(255, 255, 255, 0.5);
+  }
+}
+
+.hud-subcaption .hud-status-label {
+  color: var(--st);
+}
+
+.hud-subcaption-sep {
+  color: var(--text-4);
+}
+
+.hud-subcaption-ws {
+  max-width: 48%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* ── Fleet tally (replaces the single status when >1 agent is in play) — a
+   clickable strip of per-state counts that pops the native agent switcher.
+   The subcaption is pointer-events:none; this re-enables them for the click. */
+.hud-counts {
+  pointer-events: auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 9px;
+  font: inherit;
+  font-size: 11px;
+  font-weight: 500;
+  color: var(--text-3);
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 8px;
+  padding: 2px 6px;
+  cursor: pointer;
+  transition:
+    background 120ms ease,
+    border-color 120ms ease;
+}
+
+.hud-counts:hover,
+.hud-counts:focus-visible {
+  background: var(--chip-bg);
+  border-color: var(--chip-border);
+  outline: none;
+}
+
+.hud-count {
+  --st: var(--st-idle);
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  color: var(--st);
+}
+
+.hud-count-awaiting_input {
+  --st: var(--st-needs);
+}
+.hud-count-working {
+  --st: var(--st-work);
+}
+.hud-count-done {
+  --st: var(--st-done);
+}
+.hud-count-error {
+  --st: var(--st-error);
+}
+.hud-count-idle {
+  --st: var(--st-idle);
+}
+
+.hud-count-n {
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+}
+
+.hud-count-label {
+  color: var(--text-3);
+  font-weight: 500;
+}
+
+/* Lead bucket ("Needs you") keeps its alarm tone on the label too. */
+.hud-count-awaiting_input .hud-count-label {
+  color: var(--st-needs);
+}
+
+.hud-count-caret {
+  color: var(--text-4);
+  font-size: 9px;
+  margin-left: 1px;
+}
+
+/* ── Workspace switcher (Medusa DropdownMenu trigger) — text until hovered ── */
+.hud-workspace {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  flex: none;
+  max-width: 55%;
+  font: inherit;
+  font-size: 11.5px;
+  font-weight: 500;
+  color: var(--text-3);
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 8px;
+  padding: 3px 7px;
+  cursor: pointer;
+  transition:
+    background 120ms ease,
+    color 120ms ease,
+    border-color 120ms ease;
+}
+
+.hud-workspace:hover:not(:disabled),
+.hud-workspace[data-state="open"] {
+  background: var(--chip-bg);
+  border-color: var(--chip-border);
+  color: var(--text-1);
+}
+
+.hud-workspace:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.hud-workspace-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.hud-workspace-caret {
+  flex: none;
+  color: var(--text-4);
+  font-size: 9px;
+  margin-top: 1px;
+}
+
+/* ── Composer — bleeds full-width into the pill's bottom. No floating card:
+   it bleeds to the left, right and bottom edges (the pill's overflow:hidden +
+   22px radius clip its bottom corners), separated from the exchange above by a
+   single top divider. Input stacked over a control dock. ── */
+.hud-compose {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  margin: 8px 0 0;
+  padding: 9px 14px 12px;
+  border: none;
+  border-top: 1px solid var(--divider);
+  background: color-mix(in srgb, var(--text-1) 4%, transparent);
+  transition:
+    border-color 140ms ease,
+    background 140ms ease;
+}
+
+.hud-compose:focus-within {
+  border-top-color: color-mix(in srgb, var(--accent) 38%, transparent);
+  background: color-mix(in srgb, var(--text-1) 6%, transparent);
+}
+
+/* The control dock — chips hug the left, send hugs the right — sits flush along
+   the card's bottom edge so the selectors read as part of the composer. */
+.hud-compose-dock {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+/* ── Compact glass toolbar — full ManagerComposer parity, HUD-sized ── */
+.hud-toolbar {
+  display: flex;
+  flex-wrap: nowrap;
+  align-items: center;
+  gap: 5px;
+  min-width: 0;
+}
+
+/* Ghost controls — bare text + caret at rest so the dock stays quiet on the
+   card; a soft neutral fill appears only on hover. The accent is reserved for
+   real state (Fast on) and the send glyph, so the row never looks busy. */
+.hud-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  height: 22px;
+  padding: 0 7px;
+  border: 1px solid transparent;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--text-2);
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 1;
+  white-space: nowrap;
+  cursor: pointer;
+  transition:
+    background 120ms ease,
+    border-color 120ms ease,
+    color 120ms ease;
+}
+
+.hud-chip:hover {
+  color: var(--text-1);
+  background: color-mix(in srgb, var(--text-1) 9%, transparent);
+}
+
+.hud-chip-caret {
+  flex: none;
+  color: var(--text-3);
+  font-size: 9px;
+  margin-top: 0.5px;
+}
+
+/* Fast is a toggle, not a menu — lit green when on. */
+.hud-chip-toggle.is-on {
+  color: var(--accent);
+  border-color: color-mix(in srgb, var(--accent) 55%, transparent);
+  background: color-mix(in srgb, var(--accent) 16%, transparent);
+}
+
+.hud-input {
+  flex: 1;
+  resize: none;
+  max-height: 72px;
+  padding: 4px 2px;
+  border: none;
+  background: transparent;
+  color: var(--text-1);
+  font: inherit;
+  font-size: 13px;
+  line-height: 1.45;
+  outline: none;
+  -webkit-user-select: text;
+  user-select: text;
+}
+
+.hud-input::placeholder {
+  color: var(--placeholder);
+}
+
+/* Compact glass send — translucent like the chips, not a solid green slab. The
+   accent lives on the glyph; the surface only warms on hover. */
+.hud-send {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 25px;
+  height: 25px;
+  border: 1px solid color-mix(in srgb, var(--accent) 32%, transparent);
+  border-radius: 7px;
+  background: color-mix(in srgb, var(--accent) 13%, transparent);
+  color: var(--accent);
+  font-size: 14px;
+  font-weight: 800;
+  cursor: pointer;
+  -webkit-backdrop-filter: blur(8px);
+  backdrop-filter: blur(8px);
+  transition:
+    background 120ms ease,
+    border-color 120ms ease,
+    opacity 120ms ease;
+}
+
+.hud-send:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--accent) 24%, transparent);
+  border-color: color-mix(in srgb, var(--accent) 52%, transparent);
+}
+
+.hud-send:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+/* ── Live-agent count badge — reused inside the workspace dropdown items ── */
+.hud-agents {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  height: 16px;
+  padding: 0 6px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--st-done);
+  background: color-mix(in srgb, var(--st-done) 14%, transparent);
+}
+
+.hud-agents-dot {
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: currentColor;
+}
+
+/* Trailing check on the active worktree instance in the dropdown. */
+.hud-inst-check {
+  flex: none;
+  margin-left: auto;
+  color: var(--accent);
+  font-size: 12px;
+}
+
+/* ── Full-response reader — the agent's truncated line expands IN PLACE into
+   its whole reply. No separate card: the same row, the message now wraps and
+   scrolls. The ResizeObserver grows the window to fit; past the cap it scrolls
+   internally. Avatar + collapse glyph pin to the top since the text can be
+   tall. ── */
+.hud-line-reader {
+  align-items: flex-start;
+}
+
+.hud-response {
+  flex: 1;
+  min-width: 0;
+  max-height: 300px;
+  overflow-y: auto;
+  color: var(--text-1);
+  -webkit-user-select: text;
+  user-select: text;
+  /* room so the last line clears the scroll fade / glyph */
+  padding-bottom: 2px;
+}
+
+/* Rendered markdown (MarkdownInline) — trim the prose's outer margins so the
+   reply sits flush at the top/bottom of the small response area. */
+.hud-response .hud-md {
+  font-size: 12.5px;
+}
+.hud-response .hud-md > :first-child {
+  margin-top: 0;
+}
+.hud-response .hud-md > :last-child {
+  margin-bottom: 0;
+}
+
+.hud-response-loading {
+  font-size: 12.5px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  word-break: break-word;
+  color: var(--text-3);
+}
+
+/* The trailing glyph flips to read as "collapse" while the reader is open. */
+.hud-expand.is-open svg {
+  transform: rotate(180deg);
+}
+
+/* ════════════════════════════════════════════════════════════════════════
+   Presentation modes — the HUD's shape is a setting (Settings → HUD). The
+   default rules above ARE the Capsule branch (bottom-center green-glass bar);
+   these override geometry for Sidebar + Minimal. `data-hud-mode` rides on
+   <html> (HudApp sets it from the saved pref + `hud:settings`); the native
+   window is re-anchored / re-frosted in lockstep by `hud_set_mode` (hud.rs).
+   ════════════════════════════════════════════════════════════════════════ */
+
+/* ── Sidebar — a floating right-edge panel that lives collapsed as a FAB nub.
+   The Rust side docks the window to the right edge + vertically centres it and
+   sizes it to the measured content (FAB ↔ panel). ── */
+:root[data-hud-mode="sidebar"] .hud-root {
+  justify-content: center;
+}
+
+:root[data-hud-mode="sidebar"] .hud-pill {
+  margin: 48px;
+}
+
+/* Expanded sidebar = a SOLID light "paper" panel (its own skin, scoped here so
+   the capsule/minimal dark glass is untouched). No glass/translucency — flat
+   dark-on-light shades, which read far cleaner at panel size. Width + height are
+   user-tunable (Settings → HUD) via CSS vars; the body scrolls inside the fixed
+   height while the chips + composer stay pinned to the bottom. Native frost is
+   OFF for this mode (hud.rs). */
+:root[data-hud-mode="sidebar"] .hud-pill.is-expanded {
+  width: var(--hud-sidebar-w, 320px);
+  height: var(--hud-sidebar-h, 520px);
+  /* The pill is a flex child of a 100vh column root. Without this it would
+     shrink-to-fit the (initially tiny) window — its measured height stays small,
+     the window never grows, and the panel never reaches its set height (a
+     resize deadlock). `flex: none` pins it to the var height so the
+     ResizeObserver can grow the OS window to match. */
+  flex: none;
+  flex-direction: column;
+  background: #faf8f4;
+  border: 1px solid rgba(0, 0, 0, 0.07);
+  border-radius: 20px;
+  box-shadow: 0 24px 60px -20px rgba(0, 0, 0, 0.55);
+  overflow: hidden;
+  color: #1c1d1a;
+}
+
+/* Header — status + title (workspace), a hairline divider, collapse on the
+   right. */
+:root[data-hud-mode="sidebar"] .hud-pill.is-expanded .hud-head {
+  padding: 12px 11px 11px 14px;
+  border-bottom: 1px solid #e6e2d8;
+  gap: 9px;
+}
+:root[data-hud-mode="sidebar"] .hud-workspace {
+  flex: 1;
+  min-width: 0;
+}
+:root[data-hud-mode="sidebar"] .hud-workspace-name {
+  color: #1c1d1a;
+  font-weight: 600;
+}
+:root[data-hud-mode="sidebar"] .hud-workspace-caret {
+  color: #8d8f86;
+}
+:root[data-hud-mode="sidebar"] .hud-status-label {
+  color: #565851;
+}
+.hud-sb-collapse {
+  flex: none;
+  width: 28px;
+  height: 28px;
+  display: grid;
+  place-items: center;
+  border: none;
+  background: transparent;
+  border-radius: 8px;
+  color: #8d8f86;
+  cursor: pointer;
+}
+.hud-sb-collapse:hover {
+  background: #f2efe8;
+  color: #565851;
+}
+
+/* Body — scrolls vertically; holds the full markdown reply + the action
+   card/buttons. overflow-x is pinned hidden: without it, `overflow-y: auto`
+   makes overflow-x compute to `auto` too, so any wide markdown child gives the
+   whole panel a stray horizontal scrollbar. */
+.hud-sb-body {
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
+  padding: 13px 15px 6px;
+}
+.hud-sb-body::-webkit-scrollbar {
+  width: 7px;
+}
+.hud-sb-body::-webkit-scrollbar-thumb {
+  background: #d9d4c8;
+  border-radius: 4px;
+}
+.hud-sb-empty {
+  font-size: 13px;
+  color: #8d8f86;
+}
+
+/* ── Thread (recent turns) ──────────────────────────────────────────────
+   A scrollable chat log: user turns right-aligned (tinted), agent turns
+   left-aligned (white) + a meta row (time-taken · copy · open). No brand mark
+   on either side — the bubble colour already says who spoke. */
+.hud-sb-turn {
+  display: flex;
+  margin-bottom: 12px;
+}
+.hud-sb-turn-user {
+  justify-content: flex-end;
+}
+.hud-sb-turn-agent {
+  align-items: flex-start;
+}
+.hud-sb-bubble {
+  min-width: 0;
+  max-width: 100%;
+  border-radius: 13px;
+  padding: 9px 11px;
+  font-size: 13.5px;
+  line-height: 1.5;
+}
+.hud-sb-bubble-user {
+  max-width: 84%;
+  background: #ece8df;
+  color: #1c1d1a;
+  border: 1px solid #e0dbcf;
+}
+.hud-sb-bubble-agent {
+  flex: 1;
+  background: #ffffff;
+  color: #1c1d1a;
+  border: 1px solid #ece8de;
+}
+
+/* Markdown inside any bubble: force ink text (the HUD heap is dark-themed) and
+   contain wide children so prose can't force a horizontal scrollbar. */
+.hud-sb-bubble .hud-md {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+.hud-sb-bubble .hud-md :where(pre, table) {
+  display: block;
+  max-width: 100%;
+  overflow-x: auto;
+}
+.hud-sb-bubble .hud-md :where(img) {
+  max-width: 100%;
+  height: auto;
+}
+.hud-sb-bubble
+  .hud-md
+  :where(p, li, h1, h2, h3, h4, h5, strong, em, blockquote, td, th) {
+  color: #1c1d1a;
+}
+.hud-sb-bubble .hud-md :where(a) {
+  color: #2f8f78;
+}
+.hud-sb-bubble .hud-md :where(code) {
+  color: #1c1d1a;
+  background: #f2efe8;
+  border: 1px solid #e6e2d8;
+}
+.hud-sb-bubble .hud-md :where(pre) {
+  background: #f4f1ea;
+  border: 1px solid #e6e2d8;
+  color: #1c1d1a;
+}
+
+/* Per-message footer: time-taken + copy + open. */
+.hud-sb-meta {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 4px 6px;
+  margin-top: 7px;
+}
+.hud-sb-took {
+  font-size: 11px;
+  font-weight: 550;
+  color: #8d8f86;
+  margin-right: 2px;
+}
+.hud-sb-act {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  background: transparent;
+  color: #565851;
+  border: none;
+  border-radius: 7px;
+  padding: 3px 7px;
+  font-size: 11.5px;
+  font-weight: 550;
+  cursor: pointer;
+}
+.hud-sb-act:hover {
+  background: #f0ece4;
+  color: #1c1d1a;
+}
+
+/* Suggestion chips — a single non-wrapping row above the composer. */
+.hud-sb-chips {
+  display: flex;
+  gap: 8px;
+  overflow: hidden;
+  padding: 9px 15px;
+  border-top: 1px solid #e6e2d8;
+}
+.hud-sb-chip {
+  flex: none;
+  white-space: nowrap;
+  background: #faf8f4;
+  color: #565851;
+  border: 1px solid #d9d4c8;
+  border-radius: 999px;
+  padding: 7px 13px;
+  font-size: 12px;
+  cursor: pointer;
+}
+.hud-sb-chip:hover {
+  background: #f2efe8;
+  color: #1c1d1a;
+}
+
+/* Composer — light card; keep mode + model chips, hide effort/fast/approval to
+   match the clean mock; solid-ink send circle (no gradient, no green). */
+:root[data-hud-mode="sidebar"] .hud-compose {
+  margin: 8px 12px 12px;
+  padding: 10px 12px 9px;
+  background: #ffffff;
+  border: 1px solid #d9d4c8;
+  border-top: 1px solid #d9d4c8;
+  border-radius: 14px;
+}
+:root[data-hud-mode="sidebar"] .hud-compose:focus-within {
+  border-color: #b9b3a4;
+}
+:root[data-hud-mode="sidebar"] .hud-input {
+  color: #1c1d1a;
+}
+:root[data-hud-mode="sidebar"] .hud-input::placeholder {
+  color: #9a9c92;
+}
+:root[data-hud-mode="sidebar"] .hud-chip {
+  color: #565851;
+  background: transparent;
+  border-color: transparent;
+}
+:root[data-hud-mode="sidebar"] .hud-chip:hover {
+  background: #f2efe8;
+}
+/* Trim the dock to mode + model (drop effort / fast / approvals). */
+:root[data-hud-mode="sidebar"] .hud-toolbar .hud-chip:nth-child(n + 3) {
+  display: none;
+}
+:root[data-hud-mode="sidebar"] .hud-send {
+  background: #1c1d1a;
+  color: #faf8f4;
+  border: none;
+}
+:root[data-hud-mode="sidebar"] .hud-send:hover:not(:disabled) {
+  background: #000;
+}
+
+/* ── Sidebar — DARK skin. The light "paper" panel above is the default; when the
+   app's resolved theme is dark (`data-hud-theme="dark"` on <html>, set by HudApp
+   from the shared `aura.theme`) the same panel flips to a warm near-black so it
+   sits with a dark desktop instead of glaring white. Scoped tight to the sidebar
+   so Capsule/Minimal (their own glass) are untouched; the extra attribute lifts
+   specificity above the light rules so these win. The collapsed FAB keeps its
+   glass either way. ── */
+:root[data-hud-mode="sidebar"][data-hud-theme="dark"] .hud-pill.is-expanded {
+  background: #1c1e1d;
+  border-color: rgba(255, 255, 255, 0.08);
+  color: #e9e7e1;
+}
+:root[data-hud-mode="sidebar"][data-hud-theme="dark"]
+  .hud-pill.is-expanded
+  .hud-head {
+  border-bottom-color: rgba(255, 255, 255, 0.08);
+}
+:root[data-hud-mode="sidebar"][data-hud-theme="dark"] .hud-workspace-name {
+  color: #f3f1ec;
+}
+:root[data-hud-mode="sidebar"][data-hud-theme="dark"] .hud-workspace-caret {
+  color: #8c8f88;
+}
+:root[data-hud-mode="sidebar"][data-hud-theme="dark"] .hud-status-label {
+  color: #9a9c92;
+}
+:root[data-hud-mode="sidebar"][data-hud-theme="dark"] .hud-sb-collapse {
+  color: #8c8f88;
+}
+:root[data-hud-mode="sidebar"][data-hud-theme="dark"] .hud-sb-collapse:hover {
+  background: rgba(255, 255, 255, 0.06);
+  color: #e9e7e1;
+}
+:root[data-hud-mode="sidebar"][data-hud-theme="dark"]
+  .hud-sb-body::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.14);
+}
+:root[data-hud-mode="sidebar"][data-hud-theme="dark"] .hud-sb-empty {
+  color: #8c8f88;
+}
+:root[data-hud-mode="sidebar"][data-hud-theme="dark"] .hud-sb-bubble-user {
+  background: #2a2d2b;
+  color: #e9e7e1;
+  border-color: rgba(255, 255, 255, 0.08);
+}
+:root[data-hud-mode="sidebar"][data-hud-theme="dark"] .hud-sb-bubble-agent {
+  background: #232624;
+  color: #e9e7e1;
+  border-color: rgba(255, 255, 255, 0.07);
+}
+:root[data-hud-mode="sidebar"][data-hud-theme="dark"]
+  .hud-sb-bubble
+  .hud-md
+  :where(p, li, h1, h2, h3, h4, h5, strong, em, blockquote, td, th) {
+  color: #e3e1db;
+}
+:root[data-hud-mode="sidebar"][data-hud-theme="dark"]
+  .hud-sb-bubble
+  .hud-md
+  :where(a) {
+  color: #5bd0b3;
+}
+:root[data-hud-mode="sidebar"][data-hud-theme="dark"]
+  .hud-sb-bubble
+  .hud-md
+  :where(code) {
+  color: #e9e7e1;
+  background: rgba(255, 255, 255, 0.07);
+  border-color: rgba(255, 255, 255, 0.1);
+}
+:root[data-hud-mode="sidebar"][data-hud-theme="dark"]
+  .hud-sb-bubble
+  .hud-md
+  :where(pre) {
+  background: #141615;
+  border-color: rgba(255, 255, 255, 0.08);
+  color: #e3e1db;
+}
+:root[data-hud-mode="sidebar"][data-hud-theme="dark"] .hud-sb-took {
+  color: #8c8f88;
+}
+:root[data-hud-mode="sidebar"][data-hud-theme="dark"] .hud-sb-act {
+  color: #9a9c92;
+}
+:root[data-hud-mode="sidebar"][data-hud-theme="dark"] .hud-sb-act:hover {
+  background: rgba(255, 255, 255, 0.06);
+  color: #e9e7e1;
+}
+:root[data-hud-mode="sidebar"][data-hud-theme="dark"] .hud-sb-chips {
+  border-top-color: rgba(255, 255, 255, 0.08);
+}
+:root[data-hud-mode="sidebar"][data-hud-theme="dark"] .hud-sb-chip {
+  background: #232624;
+  color: #a7a99f;
+  border-color: rgba(255, 255, 255, 0.1);
+}
+:root[data-hud-mode="sidebar"][data-hud-theme="dark"] .hud-sb-chip:hover {
+  background: #2a2d2b;
+  color: #e9e7e1;
+}
+:root[data-hud-mode="sidebar"][data-hud-theme="dark"] .hud-compose {
+  background: #1f211f;
+  border-color: rgba(255, 255, 255, 0.1);
+  border-top-color: rgba(255, 255, 255, 0.1);
+}
+:root[data-hud-mode="sidebar"][data-hud-theme="dark"] .hud-compose:focus-within {
+  border-color: rgba(255, 255, 255, 0.22);
+}
+:root[data-hud-mode="sidebar"][data-hud-theme="dark"] .hud-input {
+  color: #e9e7e1;
+}
+:root[data-hud-mode="sidebar"][data-hud-theme="dark"] .hud-input::placeholder {
+  color: #7e807a;
+}
+:root[data-hud-mode="sidebar"][data-hud-theme="dark"] .hud-chip {
+  color: #a7a99f;
+}
+:root[data-hud-mode="sidebar"][data-hud-theme="dark"] .hud-chip:hover {
+  background: rgba(255, 255, 255, 0.06);
+}
+:root[data-hud-mode="sidebar"][data-hud-theme="dark"] .hud-send {
+  background: #f3f1ec;
+  color: #1c1d1a;
+}
+:root[data-hud-mode="sidebar"][data-hud-theme="dark"] .hud-send:hover:not(:disabled) {
+  background: #fff;
+}
+
+/* Collapsed, the pill is just the FAB — drop its own chrome so the FAB's
+   glass circle is the only surface. */
+:root[data-hud-mode="sidebar"] .hud-pill:not(.is-expanded) {
+  background: transparent;
+  border-color: transparent;
+  box-shadow: none;
+  overflow: visible;
+}
+
+/* Drag-to-resize grips — thin invisible strips on the panel's left + bottom
+   edges (and a bottom-left corner for both axes). Dragging updates the size
+   vars live; the ResizeObserver carries it to the OS window. They sit above the
+   content but outside the drag-region so they don't move the window. */
+.hud-sb-grip {
+  position: absolute;
+  z-index: 5;
+  touch-action: none;
+}
+.hud-sb-grip-l {
+  left: 0;
+  top: 8px;
+  bottom: 8px;
+  width: 8px;
+  cursor: ew-resize;
+}
+.hud-sb-grip-b {
+  left: 8px;
+  right: 8px;
+  bottom: 0;
+  height: 8px;
+  cursor: ns-resize;
+}
+.hud-sb-grip-bl {
+  left: 0;
+  bottom: 0;
+  width: 16px;
+  height: 16px;
+  z-index: 6;
+  cursor: nesw-resize;
+}
+
+.hud-fab {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 56px;
+  height: 56px;
+  border-radius: 50%;
+  background: var(--glass-fill);
+  border: 1px solid var(--glass-rim);
+  box-shadow:
+    inset 0 0.5px 0 var(--glass-sheen),
+    var(--glass-shadow);
+  color: var(--text-1);
+  cursor: pointer;
+  -webkit-backdrop-filter: blur(10px);
+  backdrop-filter: blur(10px);
+  transition:
+    border-color 140ms ease,
+    box-shadow 140ms ease,
+    transform 140ms ease;
+}
+
+.hud-fab:hover {
+  border-color: color-mix(in srgb, var(--accent) 50%, var(--glass-rim));
+  box-shadow:
+    inset 0 0.5px 0 var(--glass-sheen),
+    0 0 0 4px color-mix(in srgb, var(--accent) 14%, transparent),
+    var(--glass-shadow);
+  transform: translateY(-1px);
+}
+
+.hud-fab .hud-avatar {
+  width: 24px;
+  height: 24px;
+}
+
+/* A small status pip on the FAB's lower-right rim that pulses while the agent
+   is working (sits on the circle edge, not a clipped corner). */
+.hud-fab-pulse {
+  position: absolute;
+  bottom: 3px;
+  right: 3px;
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  background: var(--st-work);
+  box-shadow: 0 0 0 2.5px var(--glass-fill);
+  animation: hud-pulse 1.4s ease-in-out infinite;
+}
+
+/* ── Minimal ("nerd") — no glass at all (the native frost is hidden in Rust),
+   tighter + smaller, text floating over the screen with a legibility shadow.
+   Keeps the capsule's bottom-center placement. ── */
+:root[data-hud-mode="minimal"] .hud-root {
+  font-size: 12px;
+}
+
+:root[data-hud-mode="minimal"] .hud-pill {
+  background: transparent;
+  border-color: transparent;
+  box-shadow: none;
+}
+
+:root[data-hud-mode="minimal"] .hud-head {
+  min-height: 34px;
+  padding: 0 8px;
+}
+
+:root[data-hud-mode="minimal"] .hud-pill.is-expanded .hud-head {
+  padding: 7px 8px 4px;
+}
+
+/* Minimal means minimal: drop the chip dock (mode / model / effort / Fast /
+   approvals) entirely — just a bare input + send, no chrome, no [Auto mode]
+   clutter. The composer loses its fill + divider so it floats over the screen
+   like the rest of the minimal text. */
+:root[data-hud-mode="minimal"] .hud-toolbar {
+  display: none;
+}
+
+:root[data-hud-mode="minimal"] .hud-compose {
+  margin: 2px 0 0;
+  padding: 5px 8px 6px;
+  border-top-color: transparent;
+  background: transparent;
+}
+
+:root[data-hud-mode="minimal"] .hud-input {
+  font-size: 12px;
+}
+
+:root[data-hud-mode="minimal"] .hud-input::placeholder {
+  text-shadow: 0 1px 3px rgba(0, 0, 0, 0.5);
+}
+
+/* Without glass behind it, the text needs its own shadow to hold over any
+   backdrop (mirrors the subcaption's adaptive treatment). */
+:root[data-hud-mode="minimal"] .hud-glance,
+:root[data-hud-mode="minimal"] .hud-glance .hud-msg,
+:root[data-hud-mode="minimal"] .hud-line,
+:root[data-hud-mode="minimal"] .hud-status {
+  text-shadow: 0 1px 3px rgba(0, 0, 0, 0.5);
+}
+
+@media (prefers-color-scheme: light) {
+  :root[data-hud-mode="minimal"] .hud-glance,
+  :root[data-hud-mode="minimal"] .hud-glance .hud-msg,
+  :root[data-hud-mode="minimal"] .hud-line,
+  :root[data-hud-mode="minimal"] .hud-status {
+    text-shadow: 0 1px 2px rgba(255, 255, 255, 0.55);
+  }
+}
+
+/* ── Ambient — a wide, immersive surface (Gemini-style). A dark panel with a
+   brand-accent glow blooming from the bottom, a dotted "halftone" dissolve
+   rising behind a floating composer, and (when idle) a centred spark + an
+   invitation. Native frost is OFF (hud.rs) — the whole look is CSS. The window
+   is the wide HUD_AMBIENT_W, bottom-centred; the pill height is fixed so the
+   content-sized resize stays stable (no vh feedback loop). ── */
+:root[data-hud-mode="ambient"] .hud-root {
+  justify-content: flex-end;
+}
+
+:root[data-hud-mode="ambient"] .hud-pill {
+  position: relative;
+  width: auto;
+  margin: 48px;
+  height: 600px;
+  display: flex;
+  flex-direction: column;
+  border-radius: 30px;
+  border: 1px solid color-mix(in srgb, var(--accent) 20%, rgba(255, 255, 255, 0.06));
+  background:
+    radial-gradient(
+      135% 80% at 50% 116%,
+      color-mix(in srgb, var(--accent) 30%, transparent) 0%,
+      transparent 58%
+    ),
+    linear-gradient(
+      180deg,
+      rgba(12, 14, 18, 0.66) 0%,
+      rgba(10, 12, 16, 0.74) 46%,
+      rgba(8, 10, 14, 0.86) 100%
+    );
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.06),
+    inset 0 -60px 90px -40px color-mix(in srgb, var(--accent) 40%, transparent),
+    0 24px 70px -10px color-mix(in srgb, var(--accent) 26%, transparent),
+    0 30px 80px rgba(0, 0, 0, 0.5);
+  -webkit-backdrop-filter: blur(18px);
+  backdrop-filter: blur(18px);
+  overflow: hidden;
+}
+
+/* Dotted halftone dissolve rising from the bottom-centre, faded by a radial
+   mask — the glowing field behind the composer. */
+:root[data-hud-mode="ambient"] .hud-pill::after {
+  content: "";
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  height: 58%;
+  pointer-events: none;
+  z-index: 0;
+  background-image: radial-gradient(
+    circle,
+    color-mix(in srgb, var(--accent) 60%, transparent) 1px,
+    transparent 1.7px
+  );
+  background-size: 13px 13px;
+  -webkit-mask-image: radial-gradient(78% 100% at 50% 112%, #000 0%, transparent 66%);
+  mask-image: radial-gradient(78% 100% at 50% 112%, #000 0%, transparent 66%);
+  opacity: 0.55;
+}
+
+/* Content rides above the dotted field. */
+:root[data-hud-mode="ambient"] .hud-head,
+:root[data-hud-mode="ambient"] .hud-greeting,
+:root[data-hud-mode="ambient"] .hud-lines,
+:root[data-hud-mode="ambient"] .hud-compose {
+  position: relative;
+  z-index: 1;
+}
+
+:root[data-hud-mode="ambient"] .hud-head {
+  min-height: 0;
+  padding: 16px 20px 4px;
+}
+
+/* The exchange fills the middle and scrolls; newest sits low (near the
+   composer), like a chat settling at the bottom. */
+:root[data-hud-mode="ambient"] .hud-lines {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  justify-content: flex-end;
+  padding: 0 24px;
+  font-size: 14px;
+}
+
+/* ── Idle greeting — centred spark + invitation. ── */
+.hud-greeting {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 20px;
+  padding: 0 24px;
+}
+
+.hud-spark {
+  filter: drop-shadow(0 0 16px color-mix(in srgb, var(--accent) 65%, transparent));
+}
+
+.hud-greeting-text {
+  font-size: 30px;
+  font-weight: 600;
+  letter-spacing: -0.015em;
+  line-height: 1.15;
+  text-align: center;
+  color: var(--text-1);
+}
+
+/* Ambient composer — a floating rounded-full bar (no chip dock; just input +
+   send), like the reference's "Ask Gemini" pill. */
+:root[data-hud-mode="ambient"] .hud-toolbar {
+  display: none;
+}
+
+:root[data-hud-mode="ambient"] .hud-compose {
+  flex-direction: row;
+  align-items: center;
+  gap: 8px;
+  margin: 10px 24px 24px;
+  padding: 8px 8px 8px 20px;
+  border: 1px solid color-mix(in srgb, var(--text-1) 16%, transparent);
+  border-radius: 28px;
+  background: color-mix(in srgb, #0a0c10 52%, transparent);
+  -webkit-backdrop-filter: blur(16px);
+  backdrop-filter: blur(16px);
+}
+
+:root[data-hud-mode="ambient"] .hud-compose:focus-within {
+  border-color: color-mix(in srgb, var(--accent) 45%, transparent);
+  background: color-mix(in srgb, #0a0c10 60%, transparent);
+}
+
+:root[data-hud-mode="ambient"] .hud-input {
+  font-size: 15px;
+}
+
+:root[data-hud-mode="ambient"] .hud-compose-dock {
+  flex: none;
+  width: auto;
+}
+
+:root[data-hud-mode="ambient"] .hud-send {
+  width: 38px;
+  height: 38px;
+  border-radius: 50%;
+}

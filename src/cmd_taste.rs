@@ -568,7 +568,7 @@ fn check(reference: &str, staged: bool, threshold: f64, json: bool) -> Result<()
     std::process::exit(2);
 }
 
-/// Resolve the repo handle (e.g. "your-org/your-repo") from the
+/// Resolve the repo handle (e.g. "OWNER/aura-sovereign") from the
 /// `origin` remote URL. Mothership push/pull keys on this so the same
 /// repo across multiple clones lands on the same rule bundle.
 fn detect_repo_full_name(repo: &Repository) -> Option<String> {

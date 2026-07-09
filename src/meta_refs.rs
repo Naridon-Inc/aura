@@ -25,7 +25,7 @@ pub(crate) mod notes;
 #[path = "meta_refs_tests.rs"]
 mod tests;
 
-pub use notes::{NOTES_REF, INCOMING_REF};
+pub use notes::{INCOMING_PROOF_REF, INCOMING_REF, NOTES_REF, PROOF_REF};
 
 #[derive(Subcommand)]
 pub enum MetaSubcommands {
@@ -63,6 +63,19 @@ pub enum MetaSubcommands {
         #[arg(long)]
         json: bool,
     },
+    /// Audit the meaning + proof planes offline: per commit, does it carry
+    /// intent, is it proven, and does its proof note bind to the right
+    /// commit? Pure local — no server, no network.
+    Verify {
+        /// Rev range to verify, e.g. `main..HEAD`. Default: HEAD (capped).
+        #[arg(long)]
+        range: Option<String>,
+        /// Fail (non-zero exit) if any commit in range lacks a proof note.
+        #[arg(long)]
+        strict: bool,
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 pub fn run(sub: &MetaSubcommands) -> Result<(), Box<dyn std::error::Error>> {
@@ -75,6 +88,11 @@ pub fn run(sub: &MetaSubcommands) -> Result<(), Box<dyn std::error::Error>> {
         } => run_push(remote, range.as_deref(), *no_push, *json),
         MetaSubcommands::Pull { remote, json } => run_pull(remote, *json),
         MetaSubcommands::Log { limit, json } => run_log(*limit, *json),
+        MetaSubcommands::Verify {
+            range,
+            strict,
+            json,
+        } => run_verify(range.as_deref(), *strict, *json),
     }
 }
 
@@ -115,15 +133,28 @@ fn run_push(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let repo = open_repo()?;
     let report = notes::write_notes_for_range(&repo, range)?;
+    // The proof plane rides alongside intent: snapshot each commit's goal
+    // verdict onto refs/notes/aura-proof (newest wins, force-replace).
+    let proof_report = notes::write_proof_for_range(&repo, range)?;
 
     let ref_exists = repo.find_reference(NOTES_REF).is_ok();
+    let proof_ref_exists = repo.find_reference(PROOF_REF).is_ok();
     let mut pushed = false;
+    let mut proof_pushed = false;
     let mut push_error: Option<String> = None;
     if !no_push {
+        let dir = repo_dir(&repo);
         if ref_exists {
-            let dir = repo_dir(&repo);
             match git_transport(&dir, &["push", remote, NOTES_REF]) {
                 Ok(_) => pushed = true,
+                Err(e) => push_error = Some(e),
+            }
+        }
+        // Push proof independently: a proof ref can exist even when no new
+        // intent landed, and an intent push failure shouldn't strand proof.
+        if proof_ref_exists && push_error.is_none() {
+            match git_transport(&dir, &["push", remote, PROOF_REF]) {
+                Ok(_) => proof_pushed = true,
                 Err(e) => push_error = Some(e),
             }
         }
@@ -134,6 +165,9 @@ fn run_push(
         v["pushed"] = serde_json::json!(pushed);
         v["remote"] = serde_json::json!(remote);
         v["notes_ref"] = serde_json::json!(NOTES_REF);
+        v["proof"] = serde_json::to_value(&proof_report)?;
+        v["proof_pushed"] = serde_json::json!(proof_pushed);
+        v["proof_ref"] = serde_json::json!(PROOF_REF);
         if let Some(e) = &push_error {
             v["push_error"] = serde_json::json!(e);
         }
@@ -149,16 +183,33 @@ fn run_push(
             report.rows_unmatched,
             report.rows_already_noted,
         );
+        println!(
+            "  {} proof: {} commit(s) proven · {} snapshot(s) written",
+            "·".dimmed(),
+            proof_report.commits_proven,
+            proof_report.commits_changed,
+        );
         if no_push {
             println!("  {} push skipped (--no-push)", "·".dimmed());
-        } else if pushed {
-            println!("  {} pushed {} → {}", "✓".green(), NOTES_REF, remote);
-        } else if !ref_exists {
-            println!(
-                "  {} nothing to push — no {} ref yet",
-                "·".dimmed(),
-                NOTES_REF
-            );
+        } else {
+            if pushed {
+                println!("  {} pushed {} → {}", "✓".green(), NOTES_REF, remote);
+            } else if !ref_exists {
+                println!(
+                    "  {} nothing to push — no {} ref yet",
+                    "·".dimmed(),
+                    NOTES_REF
+                );
+            }
+            if proof_pushed {
+                println!("  {} pushed {} → {}", "✓".green(), PROOF_REF, remote);
+            } else if !proof_ref_exists {
+                println!(
+                    "  {} nothing to push — no {} ref yet",
+                    "·".dimmed(),
+                    PROOF_REF
+                );
+            }
         }
     }
 
@@ -206,26 +257,69 @@ fn run_pull(remote: &str, json: bool) -> Result<(), Box<dyn std::error::Error>> 
         notes::merge_incoming_notes(&repo)?
     };
 
+    // Proof plane: fetch the parallel ref into its own staging ref and
+    // resolve newest-wins. A missing remote proof ref is tolerated exactly
+    // like the intent ref's missing-ref handling.
+    let proof_refspec = format!("+{}:{}", PROOF_REF, INCOMING_PROOF_REF);
+    let mut proof_remote_missing = false;
+    if let Err(e) = git_transport(&dir, &["fetch", remote, &proof_refspec]) {
+        let lowered = e.to_lowercase();
+        if lowered.contains("couldn't find remote ref")
+            || lowered.contains("could not find remote ref")
+        {
+            proof_remote_missing = true;
+        } else {
+            return Err(format!(
+                "fetch of {} from '{}' failed: {}",
+                PROOF_REF, remote, e
+            )
+            .into());
+        }
+    }
+    let proof_report = if proof_remote_missing {
+        notes::ProofPullReport {
+            incoming_present: false,
+            commits_seen: 0,
+            commits_updated: 0,
+        }
+    } else {
+        notes::merge_incoming_proof(&repo)?
+    };
+
     if json {
         let mut v = serde_json::to_value(&report)?;
         v["remote"] = serde_json::json!(remote);
         v["notes_ref"] = serde_json::json!(NOTES_REF);
+        v["proof"] = serde_json::to_value(&proof_report)?;
+        v["proof_ref"] = serde_json::json!(PROOF_REF);
         println!("{}", serde_json::to_string_pretty(&v)?);
-    } else if !report.incoming_present {
-        println!(
-            "{} no {} on '{}' yet — nothing to merge",
-            "meta pull".bold(),
-            NOTES_REF,
-            remote
-        );
     } else {
-        println!(
-            "{} {} noted commit(s) fetched · {} updated · {} line(s) merged",
-            "meta pull".bold(),
-            report.commits_seen,
-            report.commits_updated,
-            report.lines_added,
-        );
+        if !report.incoming_present {
+            println!(
+                "{} no {} on '{}' yet — nothing to merge",
+                "meta pull".bold(),
+                NOTES_REF,
+                remote
+            );
+        } else {
+            println!(
+                "{} {} noted commit(s) fetched · {} updated · {} line(s) merged",
+                "meta pull".bold(),
+                report.commits_seen,
+                report.commits_updated,
+                report.lines_added,
+            );
+        }
+        if !proof_report.incoming_present {
+            println!("  {} no {} on '{}' yet", "·".dimmed(), PROOF_REF, remote);
+        } else {
+            println!(
+                "  {} proof: {} commit(s) fetched · {} updated (newest wins)",
+                "·".dimmed(),
+                proof_report.commits_seen,
+                proof_report.commits_updated,
+            );
+        }
     }
     Ok(())
 }
@@ -261,6 +355,90 @@ fn run_log(limit: usize, json: bool) -> Result<(), Box<dyn std::error::Error>> {
                 row.intent,
                 kind.dimmed(),
             );
+        }
+        if let Some(proof) = &entry.proof {
+            let line = match proof.verdict.as_str() {
+                "verified" => {
+                    format!("✓ Proven {}/{}", proof.ok, proof.total).green().to_string()
+                }
+                "partial" => {
+                    format!("◐ Almost {}/{}", proof.ok, proof.total).yellow().to_string()
+                }
+                _ => "· Not wired".dimmed().to_string(),
+            };
+            println!("         {}", line);
+        }
+    }
+    Ok(())
+}
+
+fn run_verify(
+    range: Option<&str>,
+    strict: bool,
+    json: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let repo = open_repo()?;
+    let report = notes::verify_range(&repo, range)?;
+
+    if json {
+        println!("{}", serde_json::to_string_pretty(&report)?);
+    } else {
+        if report.per_commit.is_empty() {
+            println!("no commits to verify in range");
+        }
+        for c in &report.per_commit {
+            let intent_mark = if c.has_intent {
+                "intent".green()
+            } else {
+                "no-intent".dimmed()
+            };
+            let proof_mark = match &c.proof {
+                Some(p) if c.binding_ok => match p.verdict.as_str() {
+                    "verified" => format!("✓ proven {}/{}", p.ok, p.total).green(),
+                    "partial" => format!("◐ partial {}/{}", p.ok, p.total).yellow(),
+                    _ => "· not wired".dimmed(),
+                },
+                Some(_) => "✗ proof mis-bound".red(),
+                None => "· unproven".dimmed(),
+            };
+            println!(
+                "{}  {}  {} · {}",
+                c.short.yellow(),
+                c.summary,
+                intent_mark,
+                proof_mark,
+            );
+        }
+        for issue in &report.issues {
+            println!("  {} {}", "✗".red(), issue);
+        }
+        println!(
+            "{} {} commits · {} with intent · {} proven",
+            "meta verify".bold(),
+            report.commits,
+            report.intent_covered,
+            report.proven,
+        );
+        if !report.ok {
+            println!("  {} binding issues found — see above", "✗".red());
+        }
+    }
+
+    if !report.ok {
+        return Err(format!(
+            "verify failed: {} commit(s) carry a mis-bound proof note",
+            report.issues.len()
+        )
+        .into());
+    }
+    if strict {
+        let unproven = report.commits.saturating_sub(report.proven);
+        if unproven > 0 {
+            return Err(format!(
+                "verify --strict: {} of {} commit(s) lack a proof note",
+                unproven, report.commits
+            )
+            .into());
         }
     }
     Ok(())

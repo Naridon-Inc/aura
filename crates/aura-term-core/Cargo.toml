@@ -1,0 +1,16 @@
+[package]
+name        = "aura-term-core"
+version     = "0.1.0"
+edition     = "2024"
+license     = "Apache-2.0 OR MIT"
+description = "UI-agnostic terminal engine — PTY + alacritty_terminal grid model + immutable snapshot API. Shared by the iced work surface and the Tauri shell's native GPU terminal."
+repository  = "https://github.com/Naridon-Inc/aura"
+publish     = false
+
+[dependencies]
+alacritty_terminal = "0.26"
+bytes              = "1"
+tokio              = { version = "1", features = ["rt", "rt-multi-thread", "macros", "sync", "time"] }
+libc               = "0.2"
+thiserror          = "1"
+tracing            = "0.1"

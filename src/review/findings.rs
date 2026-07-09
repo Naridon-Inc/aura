@@ -29,6 +29,20 @@ impl Severity {
         }
     }
 
+    /// Map an explicit severity word (from a structured JSON finding) onto the
+    /// engine's 5-level scale. The specialist prompts emit
+    /// `critical|high|medium|low|nit`; older agents may say `moderate`/`advisory`.
+    pub fn from_label(s: &str) -> Severity {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "critical" | "crit" | "blocker" => Severity::Critical,
+            "high" | "major" => Severity::High,
+            "medium" | "moderate" | "warn" | "warning" => Severity::Moderate,
+            "low" | "minor" | "advisory" => Severity::Advisory,
+            "nit" | "nitpick" | "info" | "trivial" | "style" => Severity::Info,
+            _ => Severity::Moderate,
+        }
+    }
+
     /// Best-effort severity from a free-text reviewer line.
     pub fn from_text(line: &str) -> Severity {
         let l = line.to_ascii_lowercase();
@@ -74,6 +88,32 @@ pub struct Finding {
     /// no line anchor.
     #[serde(default)]
     pub side: Option<String>,
+    /// Which specialist pass raised it ("security", "performance", …). `None`
+    /// for the deterministic engine's own findings and legacy line-parsed ones.
+    #[serde(default)]
+    pub dimension: Option<String>,
+    /// The reviewer's self-reported probability (0–1) that this is a true
+    /// positive, adjusted by the verifier. Drives the keep/drop threshold and
+    /// the display order within a severity band.
+    #[serde(default)]
+    pub confidence: Option<f32>,
+    /// Why it's wrong + the concrete trigger scenario (the structured
+    /// `rationale` from a JSON finding). Posted as the inline comment body.
+    #[serde(default)]
+    pub rationale: Option<String>,
+    /// The minimal suggested fix, when the reviewer was confident enough to
+    /// offer one. Rendered as a GitHub ```suggestion block downstream.
+    #[serde(default)]
+    pub suggestion: Option<String>,
+    /// How many independent reviewers flagged the same issue (1 = a single
+    /// pass). Bumped during [`aggregate`]; a higher count is corroboration.
+    #[serde(default = "one")]
+    pub agreement: u8,
+}
+
+/// serde default for `agreement` — a fresh finding was seen exactly once.
+fn one() -> u8 {
+    1
 }
 
 impl Finding {
@@ -86,7 +126,18 @@ impl Finding {
             line: None,
             start_line: None,
             side: None,
+            dimension: None,
+            confidence: None,
+            rationale: None,
+            suggestion: None,
+            agreement: 1,
         }
+    }
+
+    /// Tag the specialist dimension that raised this finding (builder).
+    pub fn with_dimension(mut self, dim: impl Into<String>) -> Self {
+        self.dimension = Some(dim.into());
+        self
     }
 
     /// Anchor this finding to an exact 1-based line span on the new side of the
@@ -123,6 +174,11 @@ impl Finding {
             line,
             start_line,
             side,
+            dimension: None,
+            confidence: None,
+            rationale: None,
+            suggestion: None,
+            agreement: 1,
         }
     }
 
@@ -173,9 +229,178 @@ pub fn parse_agent_output(source: &str, text: &str) -> Vec<Finding> {
             line,
             start_line,
             side,
+            dimension: None,
+            confidence: None,
+            rationale: None,
+            suggestion: None,
+            agreement: 1,
         });
     }
     out
+}
+
+/// One finding as a specialist emits it in the structured JSON contract (see
+/// [`super::dimensions::build_prompt`]). Every field but `file`/`line`/`title`
+/// is optional, so a terse reviewer still parses.
+#[derive(Debug, Deserialize)]
+struct JsonFinding {
+    #[serde(default)]
+    file: Option<String>,
+    #[serde(default)]
+    line: Option<u32>,
+    #[serde(default)]
+    start_line: Option<u32>,
+    #[serde(default)]
+    quoted_line: Option<String>,
+    #[serde(default)]
+    severity: Option<String>,
+    #[serde(default)]
+    confidence: Option<f32>,
+    #[serde(default)]
+    title: Option<String>,
+    #[serde(default)]
+    rationale: Option<String>,
+    #[serde(default)]
+    suggested_fix: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct JsonFindings {
+    findings: Vec<JsonFinding>,
+}
+
+/// Parse a specialist's structured-JSON output into findings, tagged with the
+/// `dimension` that produced them.
+///
+/// Agents wrap their JSON in stray prose or a ```json fence, so we locate the
+/// first balanced `{...}` object that contains a `"findings"` key and parse
+/// that. If no such object is present (a misbehaving agent emitted bullets
+/// instead), we fall back to the line-based [`parse_agent_output`] so a useful
+/// reviewer is never silently dropped.
+pub fn parse_json_findings(source: &str, dimension: &str, text: &str) -> Vec<Finding> {
+    let Some(block) = extract_json_block(text) else {
+        return parse_agent_output(source, text)
+            .into_iter()
+            .map(|f| f.with_dimension(dimension))
+            .collect();
+    };
+    let parsed: JsonFindings = match serde_json::from_str(&block) {
+        Ok(p) => p,
+        Err(_) => {
+            return parse_agent_output(source, text)
+                .into_iter()
+                .map(|f| f.with_dimension(dimension))
+                .collect()
+        }
+    };
+
+    let mut out = Vec::new();
+    for jf in parsed.findings {
+        let title = jf
+            .title
+            .as_deref()
+            .map(str::trim)
+            .filter(|t| !t.is_empty())
+            .map(|t| clip(t, 200))
+            .unwrap_or_else(|| {
+                // No title — synthesise one from the rationale's first clause.
+                jf.rationale
+                    .as_deref()
+                    .map(|r| clip(r, 120))
+                    .unwrap_or_else(|| "finding".to_string())
+            });
+        let severity = jf
+            .severity
+            .as_deref()
+            .map(Severity::from_label)
+            .unwrap_or(Severity::Moderate);
+
+        // Anchor: trust an explicit numeric line over text-scraping. A
+        // start/end pair becomes a span; a lone line is single-line.
+        let (start_line, line, side) = match (jf.start_line, jf.line) {
+            (Some(s), Some(e)) => anchor_fields(Some(s), Some(e)),
+            (None, Some(e)) => anchor_fields(Some(e), Some(e)),
+            _ => (None, None, None),
+        };
+        let file = jf.file.map(|f| f.trim().to_string()).filter(|f| !f.is_empty());
+
+        out.push(Finding {
+            source: source.to_string(),
+            severity,
+            title,
+            file,
+            line,
+            start_line,
+            side,
+            dimension: Some(dimension.to_string()),
+            confidence: jf.confidence.map(|c| c.clamp(0.0, 1.0)),
+            rationale: jf.rationale.map(|r| clip(&r, 600)).filter(|r| !r.is_empty()),
+            suggestion: jf
+                .suggested_fix
+                .map(|s| clip(&s, 600))
+                .filter(|s| !s.is_empty()),
+            agreement: 1,
+        });
+        // `quoted_line` is advisory context; the numeric anchor drives posting.
+        let _ = &jf.quoted_line;
+    }
+    out
+}
+
+/// Find the first balanced `{...}` substring that mentions `"findings"`.
+/// Brace-counts so a nested object inside a rationale doesn't end it early;
+/// ignores braces inside double-quoted strings (with escape handling).
+fn extract_json_block(text: &str) -> Option<String> {
+    let bytes = text.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'{' {
+            if let Some(end) = balanced_end(bytes, i) {
+                let slice = &text[i..=end];
+                if slice.contains("\"findings\"") {
+                    return Some(slice.to_string());
+                }
+                i = end + 1;
+                continue;
+            }
+        }
+        i += 1;
+    }
+    None
+}
+
+/// Index of the `}` that closes the `{` at `open`, or `None` if unbalanced.
+fn balanced_end(bytes: &[u8], open: usize) -> Option<usize> {
+    let mut depth = 0i32;
+    let mut in_str = false;
+    let mut escaped = false;
+    let mut i = open;
+    while i < bytes.len() {
+        let c = bytes[i];
+        if in_str {
+            if escaped {
+                escaped = false;
+            } else if c == b'\\' {
+                escaped = true;
+            } else if c == b'"' {
+                in_str = false;
+            }
+        } else {
+            match c {
+                b'"' => in_str = true,
+                b'{' => depth += 1,
+                b'}' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return Some(i);
+                    }
+                }
+                _ => {}
+            }
+        }
+        i += 1;
+    }
+    None
 }
 
 /// Drop a leading list marker (`- `, `* `, `1. `, `2) `) from a line.
@@ -307,7 +532,13 @@ pub fn aggregate(mut all: Vec<Finding>) -> Vec<Finding> {
             }
             if !existing.source.split(", ").any(|s| s == f.source) {
                 existing.source = format!("{}, {}", existing.source, f.source);
+                // Two independent reviewers on the same issue is corroboration.
+                existing.agreement = existing.agreement.saturating_add(1);
+                // Keep the higher confidence — corroboration raises trust.
+                existing.confidence = max_opt(existing.confidence, f.confidence);
             }
+            // Record every distinct specialist that flagged it.
+            existing.dimension = merge_dimension(existing.dimension.take(), f.dimension);
             // Adopt the first concrete line anchor any reviewer supplies — a
             // line-anchored duplicate is strictly more useful than a
             // file-level or anchorless one for posting an inline comment.
@@ -321,12 +552,144 @@ pub fn aggregate(mut all: Vec<Finding>) -> Vec<Finding> {
             } else if existing.file.is_none() {
                 existing.file = f.file;
             }
+            // Keep the richer rationale / suggestion if we didn't have one.
+            if existing.rationale.is_none() {
+                existing.rationale = f.rationale;
+            }
+            if existing.suggestion.is_none() {
+                existing.suggestion = f.suggestion;
+            }
         } else {
             merged.push(f);
         }
     }
-    merged.sort_by(|a, b| b.severity.cmp(&a.severity));
+    // Sort worst-first, then by corroboration, then by confidence — so the most
+    // serious, most-agreed, most-confident findings lead.
+    merged.sort_by(|a, b| {
+        b.severity
+            .cmp(&a.severity)
+            .then(b.agreement.cmp(&a.agreement))
+            .then(
+                b.confidence
+                    .unwrap_or(0.0)
+                    .partial_cmp(&a.confidence.unwrap_or(0.0))
+                    .unwrap_or(std::cmp::Ordering::Equal),
+            )
+    });
     merged
+}
+
+/// The larger of two optional confidences (either-or when one is absent).
+fn max_opt(a: Option<f32>, b: Option<f32>) -> Option<f32> {
+    match (a, b) {
+        (Some(x), Some(y)) => Some(x.max(y)),
+        (x, None) => x,
+        (None, y) => y,
+    }
+}
+
+/// Union two comma-joined dimension tags without duplicates.
+fn merge_dimension(a: Option<String>, b: Option<String>) -> Option<String> {
+    match (a, b) {
+        (Some(x), Some(y)) => {
+            if x.split(", ").any(|d| d == y) {
+                Some(x)
+            } else {
+                Some(format!("{x}, {y}"))
+            }
+        }
+        (x, None) => x,
+        (None, y) => y,
+    }
+}
+
+/// True when a path points at non-production code (tests, fixtures, mocks,
+/// examples, generated). A serious finding here is far less urgent than the
+/// same one on a live path, so calibration downgrades it.
+fn is_non_prod_path(path: &str) -> bool {
+    let p = path.to_ascii_lowercase();
+    p.contains("/test")
+        || p.contains("test/")
+        || p.ends_with("_test.rs")
+        || p.ends_with(".test.ts")
+        || p.ends_with(".test.tsx")
+        || p.ends_with(".spec.ts")
+        || p.ends_with(".spec.tsx")
+        || p.contains("/tests/")
+        || p.contains("/__tests__/")
+        || p.contains("fixture")
+        || p.contains("/mocks/")
+        || p.contains("__mocks__")
+        || p.contains("/examples/")
+        || p.ends_with(".snap")
+}
+
+/// True when a path is on a security-/safety-critical surface, where a finding
+/// deserves a severity *bump* rather than a downgrade.
+fn is_critical_path(path: &str) -> bool {
+    let p = path.to_ascii_lowercase();
+    p.contains("auth")
+        || p.contains("login")
+        || p.contains("session")
+        || p.contains("token")
+        || p.contains("secret")
+        || p.contains("crypt")
+        || p.contains("password")
+        || p.contains("payment")
+        || p.contains("billing")
+        || p.contains("permission")
+}
+
+fn downgrade(s: Severity) -> Severity {
+    match s {
+        Severity::Critical => Severity::High,
+        Severity::High => Severity::Moderate,
+        Severity::Moderate => Severity::Advisory,
+        Severity::Advisory => Severity::Info,
+        Severity::Info => Severity::Info,
+    }
+}
+
+fn upgrade(s: Severity) -> Severity {
+    match s {
+        Severity::Info => Severity::Advisory,
+        Severity::Advisory => Severity::Moderate,
+        Severity::Moderate => Severity::High,
+        Severity::High => Severity::Critical,
+        Severity::Critical => Severity::Critical,
+    }
+}
+
+/// Calibrate severity by context: a finding in test/fixture/example code drops
+/// one level (it can't break production); a finding on an auth/crypto/payment
+/// path climbs one (blast radius). Engine findings (no `file`) pass through.
+/// Returns the calibrated, re-sorted list.
+pub fn calibrate(findings: Vec<Finding>) -> Vec<Finding> {
+    let mut out: Vec<Finding> = findings
+        .into_iter()
+        .map(|mut f| {
+            if let Some(path) = f.file.clone() {
+                if is_non_prod_path(&path) {
+                    f.severity = downgrade(f.severity);
+                } else if is_critical_path(&path) && f.severity < Severity::Critical {
+                    f.severity = upgrade(f.severity);
+                }
+            }
+            f
+        })
+        .collect();
+    out.sort_by(|a, b| {
+        b.severity
+            .cmp(&a.severity)
+            .then(b.agreement.cmp(&a.agreement))
+            .then(
+                b.confidence
+                    .unwrap_or(0.0)
+                    .partial_cmp(&a.confidence.unwrap_or(0.0))
+                    .unwrap_or(std::cmp::Ordering::Equal),
+            )
+    });
+    out
 }
 
 #[cfg(test)]

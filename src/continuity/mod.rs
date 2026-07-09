@@ -89,6 +89,14 @@ pub fn run_carryover(
         } else {
             let verb = if result.created { "created" } else { "updated" };
             println!("✓ {verb} {} (AURA:RESUME section for {agent})", result.path);
+            // Carry the "how to actually run me" footer so a handoff to an
+            // un-signed-in CLI fails forward with the one action that fixes it,
+            // instead of dead-ending in a provider 402 inside the target.
+            println!("  → launch:  `{}`  (resumes from the injected context)", result.launch);
+            println!("  → auth:    {}", result.auth);
+            if !result.on_path {
+                println!("  ⚠ `{}` not found on PATH — install it before launching", result.launch);
+            }
         }
         return Ok(());
     }

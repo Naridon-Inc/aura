@@ -52,6 +52,12 @@ use uuid::Uuid;
 /// agent-facing `aura loop plan` surface (CLI + MCP).
 pub mod planning;
 
+/// The Crew run ledger — one durable record per `aura loop run`.
+pub mod run_log;
+
+/// The crew registry — durable identity for parallel crews (`.aura/crew/crews.json`).
+pub mod crew;
+
 // ── A2A v1.2 lifecycle states. Kept spelling-identical to
 // `aura-cloud/src/a2a_tasks.rs` so a local node and its cloud mirror
 // share one status vocabulary.
@@ -63,6 +69,11 @@ pub const STATE_FAILED: &str = "failed";
 pub const STATE_CANCELED: &str = "canceled";
 pub const STATE_REJECTED: &str = "rejected";
 pub const STATE_AUTH_REQUIRED: &str = "auth-required";
+/// Held-back state: a human (or the goal control surface) parked this node so
+/// the runner skips it. NOT terminal — `resume` moves it back to `submitted`
+/// and it re-enters the ready set. Aura-native; has no cloud A2A mirror, so it
+/// is treated as `submitted` when syncing up.
+pub const STATE_PAUSED: &str = "paused";
 
 pub const TERMINAL_STATES: &[&str] =
     &[STATE_COMPLETED, STATE_FAILED, STATE_CANCELED, STATE_REJECTED];
@@ -163,6 +174,13 @@ pub struct LoopTask {
     /// issue id or key). Lets the surface show "JIRA PROJ-123".
     #[serde(default)]
     pub external_id: Option<String>,
+    /// Which **crew** this node belongs to. A crew is an independently
+    /// runnable slice of the graph — `aura loop run --crew <id>` drains only
+    /// its nodes, so several crews can run side-by-side without one's runner
+    /// claiming another's work. `None` is the default ("main") crew, which is
+    /// every node that was never assigned one.
+    #[serde(default)]
+    pub crew_id: Option<String>,
     pub created_at: i64,
     pub updated_at: i64,
 }
@@ -257,11 +275,14 @@ impl LoopGraph {
             if path.extension().and_then(|s| s.to_str()) != Some("json") {
                 continue;
             }
-            if path.file_name().and_then(|s| s.to_str()) == Some("_meta.json") {
+            let name = path.file_name().and_then(|s| s.to_str()).unwrap_or("");
+            // Skip the crew meta file and the gitignored lease sidecars.
+            if name == "_meta.json" || name.ends_with(".lease.json") {
                 continue;
             }
             if let Ok(text) = fs::read_to_string(&path) {
-                if let Ok(t) = serde_json::from_str::<LoopTask>(&text) {
+                if let Ok(mut t) = serde_json::from_str::<LoopTask>(&text) {
+                    self.overlay_lease(&mut t);
                     out.push(t);
                 }
             }
@@ -275,22 +296,65 @@ impl LoopGraph {
         self.list().into_iter().map(|t| (t.id.clone(), t)).collect()
     }
 
+    fn lease_path_for(&self, id: &str) -> PathBuf {
+        // Ephemeral lease state lives in a gitignored sidecar so the durable
+        // task graph (`<id>.json`) can be git-tracked and synced between
+        // machines without lease churn or cross-runner conflicts.
+        self.dir.join(format!("{}.lease.json", id))
+    }
+
+    /// Overlay the gitignored lease sidecar onto a task read from its durable
+    /// graph file. A task pulled from a peer arrives with no sidecar (leases
+    /// never travel), so its `lease` stays `None` and a stale `working` node is
+    /// reclaimed by `reclaim_stale`.
+    fn overlay_lease(&self, task: &mut LoopTask) {
+        if let Ok(text) = fs::read_to_string(self.lease_path_for(&task.id)) {
+            if let Ok(lease) = serde_json::from_str::<Lease>(&text) {
+                task.lease = Some(lease);
+            }
+        }
+    }
+
     pub fn get(&self, id: &str) -> Option<LoopTask> {
         let text = fs::read_to_string(self.path_for(id)).ok()?;
-        serde_json::from_str(&text).ok()
+        let mut task: LoopTask = serde_json::from_str(&text).ok()?;
+        self.overlay_lease(&mut task);
+        Some(task)
     }
 
     pub fn save(&self, task: &LoopTask) -> std::io::Result<()> {
         self.ensure_dir()?;
-        let body = serde_json::to_string_pretty(task)
+        // Split the ephemeral lease out of the durable graph file so the graph
+        // stays clean for git. The lease, if any, goes to a gitignored sidecar.
+        let mut for_disk = task.clone();
+        let lease = for_disk.lease.take();
+        let body = serde_json::to_string_pretty(&for_disk)
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
-        fs::write(self.path_for(&task.id), body)
+        fs::write(self.path_for(&task.id), body)?;
+        let lease_path = self.lease_path_for(&task.id);
+        match lease {
+            Some(l) => {
+                let lb = serde_json::to_string_pretty(&l)
+                    .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+                fs::write(lease_path, lb)?;
+            }
+            None => {
+                if lease_path.exists() {
+                    fs::remove_file(lease_path)?;
+                }
+            }
+        }
+        Ok(())
     }
 
     pub fn delete(&self, id: &str) -> std::io::Result<()> {
         let p = self.path_for(id);
         if p.exists() {
             fs::remove_file(p)?;
+        }
+        let lp = self.lease_path_for(id);
+        if lp.exists() {
+            fs::remove_file(lp)?;
         }
         Ok(())
     }
@@ -332,6 +396,7 @@ impl LoopGraph {
             board_task_id: None,
             external_source: None,
             external_id: None,
+            crew_id: None,
             created_at: now,
             updated_at: now,
         };
@@ -461,6 +526,80 @@ impl LoopGraph {
         Ok(task)
     }
 
+    /// Park a node so the runner skips it. A `submitted` node moves to
+    /// `paused`; a `working` node is paused and its lease dropped so it won't
+    /// be re-dispatched (its in-flight agent, if any, finishes on its own —
+    /// pause is advisory, not a kill). Terminal nodes are left as-is. Returns
+    /// the (possibly unchanged) node so callers can report idempotently.
+    pub fn pause(&self, id: &str) -> Result<LoopTask, String> {
+        let mut task = self.get(id).ok_or_else(|| format!("task {id} not found"))?;
+        if is_terminal(&task.status) || task.status == STATE_PAUSED {
+            return Ok(task);
+        }
+        task.status = STATE_PAUSED.to_string();
+        task.lease = None;
+        Self::touch(&mut task);
+        self.save(&task).map_err(|e| e.to_string())?;
+        Ok(task)
+    }
+
+    /// Un-park a paused node back to `submitted` so it re-enters the ready
+    /// set. A node that isn't paused is returned unchanged (idempotent).
+    pub fn resume(&self, id: &str) -> Result<LoopTask, String> {
+        let mut task = self.get(id).ok_or_else(|| format!("task {id} not found"))?;
+        if task.status != STATE_PAUSED {
+            return Ok(task);
+        }
+        task.status = STATE_SUBMITTED.to_string();
+        Self::touch(&mut task);
+        self.save(&task).map_err(|e| e.to_string())?;
+        Ok(task)
+    }
+
+    /// Assign a node to a crew (or clear it with `None`). Lets a planner carve
+    /// the graph into independently-runnable crews after the fact.
+    pub fn set_crew(&self, id: &str, crew_id: Option<String>) -> Result<LoopTask, String> {
+        let mut task = self.get(id).ok_or_else(|| format!("task {id} not found"))?;
+        task.crew_id = crew_id;
+        Self::touch(&mut task);
+        self.save(&task).map_err(|e| e.to_string())?;
+        Ok(task)
+    }
+
+    /// Pause every non-terminal node in `scope` (a goal and/or a crew). This
+    /// is what "pause this goal" does — it parks the goal's whole member set in
+    /// one call. Returns the ids actually paused (already-paused/terminal nodes
+    /// are skipped), so the caller can report "paused 4 tasks".
+    pub fn pause_scope(&self, scope: &RunScope) -> Vec<String> {
+        let mut paused = Vec::new();
+        for t in self.list() {
+            if !scope.matches(&t) {
+                continue;
+            }
+            if is_terminal(&t.status) || t.status == STATE_PAUSED {
+                continue;
+            }
+            if self.pause(&t.id).is_ok() {
+                paused.push(t.id);
+            }
+        }
+        paused
+    }
+
+    /// Resume every paused node in `scope`. Returns the ids re-armed.
+    pub fn resume_scope(&self, scope: &RunScope) -> Vec<String> {
+        let mut resumed = Vec::new();
+        for t in self.list() {
+            if !scope.matches(&t) || t.status != STATE_PAUSED {
+                continue;
+            }
+            if self.resume(&t.id).is_ok() {
+                resumed.push(t.id);
+            }
+        }
+        resumed
+    }
+
     /// Find the graph node a board task was projected into, if any. Keyed
     /// on `board_task_id` so the board→DAG sync is idempotent.
     pub fn by_board_task(&self, board_task_id: &str) -> Option<LoopTask> {
@@ -528,6 +667,7 @@ impl LoopGraph {
                 board_task_id: Some(p.board_task_id),
                 external_source: p.external_source,
                 external_id: p.external_id,
+                crew_id: None,
                 created_at: now,
                 updated_at: now,
             };
@@ -581,6 +721,10 @@ pub struct ReadyView {
     pub blocked: Vec<(LoopTask, Vec<String>)>, // task + unmet dep ids
     pub working: Vec<LoopTask>,
     pub done: Vec<LoopTask>,
+    /// Nodes a human parked with `pause`. Not ready, not blocked, not
+    /// terminal — held back until `resume`. Kept in its own bucket so the
+    /// surface can show "paused by you" distinctly from a failure.
+    pub paused: Vec<LoopTask>,
     pub other: Vec<LoopTask>, // failed / canceled / rejected / input-required
 }
 
@@ -593,12 +737,14 @@ pub fn ready_view(tasks: &[LoopTask]) -> ReadyView {
         blocked: Vec::new(),
         working: Vec::new(),
         done: Vec::new(),
+        paused: Vec::new(),
         other: Vec::new(),
     };
     for t in tasks {
         match t.status.as_str() {
             STATE_WORKING => view.working.push(t.clone()),
             STATE_COMPLETED => view.done.push(t.clone()),
+            STATE_PAUSED => view.paused.push(t.clone()),
             STATE_SUBMITTED => {
                 let unmet: Vec<String> = t
                     .depends_on
@@ -634,6 +780,214 @@ pub fn ready_set(tasks: &[LoopTask]) -> Vec<LoopTask> {
     ready_view(tasks).ready
 }
 
+// ── Goal / crew grouping ───────────────────────────────────────────────
+// A *goal* is the `goal:<slug>` tag that `plan-apply` stamps on every task
+// that adds up to it (see `planning.rs`). An *objective* is the coarser
+// `objective:<name>` tag. A *crew* is an explicit `crew_id` slice. These
+// pure readers let the runner scope a run and the surface group the board
+// without re-deriving the convention everywhere.
+
+fn tag_value(task: &LoopTask, prefix: &str) -> Option<String> {
+    task.tags.iter().find_map(|t| {
+        let lower = t.to_lowercase();
+        lower
+            .strip_prefix(prefix)
+            .map(|rest| rest.trim().to_string())
+            .filter(|s| !s.is_empty())
+    })
+}
+
+/// The `goal:<slug>` a node belongs to, if tagged.
+pub fn goal_of(task: &LoopTask) -> Option<String> {
+    tag_value(task, "goal:")
+}
+
+/// The `objective:<name>` a node rolls up to, if tagged.
+pub fn objective_of(task: &LoopTask) -> Option<String> {
+    tag_value(task, "objective:")
+}
+
+/// The crew a node belongs to — its explicit `crew_id`, else the default
+/// "main" crew. Always returns a concrete name so callers can group cleanly.
+pub fn crew_of(task: &LoopTask) -> String {
+    task.crew_id.clone().unwrap_or_else(|| "main".to_string())
+}
+
+/// Does this node match the given scope? A `None` scope matches everything;
+/// otherwise the node must carry the goal/crew the scope names.
+#[derive(Debug, Clone, Default)]
+pub struct RunScope {
+    pub goal: Option<String>,
+    pub crew: Option<String>,
+}
+
+impl RunScope {
+    pub fn is_unscoped(&self) -> bool {
+        self.goal.is_none() && self.crew.is_none()
+    }
+    pub fn matches(&self, task: &LoopTask) -> bool {
+        if let Some(g) = &self.goal {
+            if goal_of(task).as_deref() != Some(g.as_str()) {
+                return false;
+            }
+        }
+        if let Some(c) = &self.crew {
+            // A scope on the default crew ("main") also matches untagged nodes.
+            if &crew_of(task) != c {
+                return false;
+            }
+        }
+        true
+    }
+    /// Narrow a node list to this scope.
+    pub fn filter(&self, tasks: &[LoopTask]) -> Vec<LoopTask> {
+        if self.is_unscoped() {
+            return tasks.to_vec();
+        }
+        tasks.iter().filter(|t| self.matches(t)).cloned().collect()
+    }
+}
+
+/// A rolled-up summary of one goal across the graph — counts by lifecycle so
+/// the surface can show "Spot unusual numbers · 2/5 done · 1 paused" and the
+/// goal node can carry its own Run/Pause controls.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GoalSummary {
+    pub goal: String,
+    pub total: usize,
+    pub ready: usize,
+    pub working: usize,
+    pub done: usize,
+    pub paused: usize,
+    pub blocked: usize,
+    pub failed: usize,
+    /// Task ids in this goal, creation order — the goal's member set.
+    pub task_ids: Vec<String>,
+}
+
+/// Group every tagged node into its goal and tally lifecycle counts. Nodes
+/// with no `goal:` tag are skipped (they belong to no goal). Ordered by first
+/// appearance so the surface lists goals in plan order.
+pub fn goals_summary(tasks: &[LoopTask]) -> Vec<GoalSummary> {
+    let mut order: Vec<String> = Vec::new();
+    let mut by_goal: HashMap<String, GoalSummary> = HashMap::new();
+    for t in tasks {
+        let Some(goal) = goal_of(t) else { continue };
+        let entry = by_goal.entry(goal.clone()).or_insert_with(|| {
+            order.push(goal.clone());
+            GoalSummary {
+                goal: goal.clone(),
+                total: 0,
+                ready: 0,
+                working: 0,
+                done: 0,
+                paused: 0,
+                blocked: 0,
+                failed: 0,
+                task_ids: Vec::new(),
+            }
+        });
+        entry.total += 1;
+        entry.task_ids.push(t.id.clone());
+        match t.status.as_str() {
+            STATE_WORKING => entry.working += 1,
+            STATE_COMPLETED => entry.done += 1,
+            STATE_PAUSED => entry.paused += 1,
+            STATE_FAILED => entry.failed += 1,
+            STATE_SUBMITTED => {
+                // ready vs blocked needs the whole-graph dependency check.
+                let unmet = t.depends_on.iter().any(|d| {
+                    tasks
+                        .iter()
+                        .find(|x| &x.id == d)
+                        .map(|dep| dep.status != STATE_COMPLETED)
+                        .unwrap_or(true)
+                });
+                if unmet {
+                    entry.blocked += 1;
+                } else {
+                    entry.ready += 1;
+                }
+            }
+            _ => {}
+        }
+    }
+    order
+        .into_iter()
+        .filter_map(|g| by_goal.remove(&g))
+        .collect()
+}
+
+/// A rolled-up summary of one crew — the unit `--crew` runs and the surface
+/// shows side-by-side. Same lifecycle tally as a goal, plus the goals inside.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CrewSummary {
+    pub crew: String,
+    pub total: usize,
+    pub ready: usize,
+    pub working: usize,
+    pub done: usize,
+    pub paused: usize,
+    pub blocked: usize,
+    pub failed: usize,
+    pub goals: Vec<String>,
+}
+
+/// Group every node into its crew (`crew_id`, default "main") and tally.
+pub fn crews_summary(tasks: &[LoopTask]) -> Vec<CrewSummary> {
+    let mut order: Vec<String> = Vec::new();
+    let mut by_crew: HashMap<String, CrewSummary> = HashMap::new();
+    let mut goals_seen: HashMap<String, HashSet<String>> = HashMap::new();
+    for t in tasks {
+        let crew = crew_of(t);
+        let entry = by_crew.entry(crew.clone()).or_insert_with(|| {
+            order.push(crew.clone());
+            CrewSummary {
+                crew: crew.clone(),
+                total: 0,
+                ready: 0,
+                working: 0,
+                done: 0,
+                paused: 0,
+                blocked: 0,
+                failed: 0,
+                goals: Vec::new(),
+            }
+        });
+        entry.total += 1;
+        if let Some(g) = goal_of(t) {
+            if goals_seen.entry(crew.clone()).or_default().insert(g.clone()) {
+                entry.goals.push(g);
+            }
+        }
+        match t.status.as_str() {
+            STATE_WORKING => entry.working += 1,
+            STATE_COMPLETED => entry.done += 1,
+            STATE_PAUSED => entry.paused += 1,
+            STATE_FAILED => entry.failed += 1,
+            STATE_SUBMITTED => {
+                let unmet = t.depends_on.iter().any(|d| {
+                    tasks
+                        .iter()
+                        .find(|x| &x.id == d)
+                        .map(|dep| dep.status != STATE_COMPLETED)
+                        .unwrap_or(true)
+                });
+                if unmet {
+                    entry.blocked += 1;
+                } else {
+                    entry.ready += 1;
+                }
+            }
+            _ => {}
+        }
+    }
+    order
+        .into_iter()
+        .filter_map(|c| by_crew.remove(&c))
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -659,6 +1013,42 @@ mod tests {
                 vec![],
             )
             .unwrap()
+    }
+
+    #[test]
+    fn lease_lives_in_gitignored_sidecar_not_the_graph_file() {
+        let repo = tmp_repo();
+        let g = LoopGraph::at(&repo);
+        let t = mk(&g, "ship it", "high");
+        let a2a = repo.join(".aura").join("a2a");
+        let graph_file = a2a.join(format!("{}.json", t.id));
+        let sidecar = a2a.join(format!("{}.lease.json", t.id));
+
+        // Claiming stamps a lease — in memory and in the sidecar, NEVER in the
+        // durable graph file (which must stay git-clean).
+        let claimed = g.claim(&t.id, "runner-a", 1800).unwrap();
+        assert!(claimed.lease.is_some());
+        let graph_json = fs::read_to_string(&graph_file).unwrap();
+        assert!(
+            graph_json.contains("\"lease\": null"),
+            "graph file must not carry the lease: {graph_json}"
+        );
+        assert!(sidecar.exists(), "lease sidecar must exist while working");
+
+        // get() overlays the sidecar back onto the task.
+        assert_eq!(g.get(&t.id).unwrap().lease.unwrap().holder, "runner-a");
+
+        // A peer pulls the graph file but NOT the gitignored sidecar — it sees
+        // no lease, so a node stuck `working` is reclaimed back to the ready set.
+        fs::remove_file(&sidecar).unwrap();
+        assert!(g.get(&t.id).unwrap().lease.is_none());
+        assert!(g.reclaim_stale().contains(&t.id));
+
+        // Completing a node clears its lease sidecar.
+        g.claim(&t.id, "runner-a", 1800).unwrap();
+        assert!(sidecar.exists());
+        g.complete(&t.id, Some("abc123".into()), None).unwrap();
+        assert!(!sidecar.exists(), "completing clears the lease sidecar");
     }
 
     #[test]
@@ -703,6 +1093,75 @@ mod tests {
         // a→b would close a cycle a→b→a.
         let err = g.add_dep(&a.id, &b.id);
         assert!(err.is_err(), "cycle must be rejected");
+        let _ = fs::remove_dir_all(&repo);
+    }
+
+    #[test]
+    fn paused_node_leaves_the_ready_set_and_resumes() {
+        let repo = tmp_repo();
+        let g = LoopGraph::at(&repo);
+        let a = mk(&g, "A", "high");
+        assert_eq!(ready_set(&g.list()).len(), 1, "ready before pause");
+        g.pause(&a.id).unwrap();
+        assert_eq!(g.get(&a.id).unwrap().status, STATE_PAUSED);
+        let view = ready_view(&g.list());
+        assert!(view.ready.is_empty(), "paused node is not ready");
+        assert_eq!(view.paused.len(), 1, "paused node in its own bucket");
+        // Resume → back in the ready set.
+        g.resume(&a.id).unwrap();
+        assert_eq!(ready_set(&g.list()).len(), 1, "ready again after resume");
+        let _ = fs::remove_dir_all(&repo);
+    }
+
+    #[test]
+    fn pause_scope_parks_a_whole_goal() {
+        let repo = tmp_repo();
+        let g = LoopGraph::at(&repo);
+        // Two tasks tagged goal:alerts, one tagged goal:export.
+        let tag = |t: &LoopTask, tag: &str| {
+            let mut t = t.clone();
+            t.tags.push(tag.into());
+            g.save(&t).unwrap();
+        };
+        let a = mk(&g, "A", "high");
+        tag(&a, "goal:alerts");
+        let b = mk(&g, "B", "high");
+        tag(&b, "goal:alerts");
+        let c = mk(&g, "C", "high");
+        tag(&c, "goal:export");
+
+        let scope = RunScope { goal: Some("alerts".into()), crew: None };
+        let paused = g.pause_scope(&scope);
+        assert_eq!(paused.len(), 2, "both alerts tasks paused");
+        assert_eq!(g.get(&c.id).unwrap().status, STATE_SUBMITTED, "export untouched");
+
+        let goals = goals_summary(&g.list());
+        let alerts = goals.iter().find(|x| x.goal == "alerts").unwrap();
+        assert_eq!(alerts.paused, 2);
+        assert_eq!(alerts.total, 2);
+
+        let resumed = g.resume_scope(&scope);
+        assert_eq!(resumed.len(), 2, "both alerts tasks resumed");
+        let _ = fs::remove_dir_all(&repo);
+    }
+
+    #[test]
+    fn crew_scope_isolates_runnable_slices() {
+        let repo = tmp_repo();
+        let g = LoopGraph::at(&repo);
+        let a = mk(&g, "A", "high");
+        let _b = mk(&g, "B", "high");
+        g.set_crew(&a.id, Some("blue".into())).unwrap();
+        // b stays in the default "main" crew.
+        let blue = RunScope { goal: None, crew: Some("blue".into()) };
+        let only_blue = blue.filter(&g.list());
+        assert_eq!(only_blue.len(), 1);
+        assert_eq!(only_blue[0].id, a.id);
+
+        let crews = crews_summary(&g.list());
+        assert_eq!(crews.len(), 2, "blue + main");
+        assert!(crews.iter().any(|c| c.crew == "blue" && c.total == 1));
+        assert!(crews.iter().any(|c| c.crew == "main" && c.total == 1));
         let _ = fs::remove_dir_all(&repo);
     }
 

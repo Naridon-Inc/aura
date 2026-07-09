@@ -24,7 +24,9 @@ pub fn to_markdown(c: &AuraCarryover) -> String {
         "# Aura carryover → {who}\n\n\
          You are continuing work that was in progress under a different brain. \
          The state below is reconstructed from Aura's semantic record (signed intent log, \
-         AST checkpoints, session, working tree) — continue the *work*, don't restart it.\n\n"
+         AST checkpoints, session, working tree) — continue the *work*, don't restart it. \
+         Pick up from the open items; re-verify before assuming earlier steps landed, and \
+         report plainly if the reconstructed state doesn't match what you find.\n\n"
     ));
     s.push_str(&format!(
         "- **mode**: {} · **generated**: {} · **branch**: {}\n",
@@ -275,6 +277,16 @@ fn xml_attr(s: &str) -> String {
 pub struct InjectResult {
     pub path: String,
     pub created: bool,
+    /// The command that launches the target agent so it consumes the block.
+    pub launch: String,
+    /// One-line reminder of how the target agent authenticates — so a handoff
+    /// to an un-signed-in CLI fails *forward* with an actionable note instead
+    /// of a cryptic provider error deep inside the target.
+    pub auth: String,
+    /// Whether the target agent's launch binary is on `PATH`. `false` is the
+    /// one preflight we can run without touching any credential store: the
+    /// handoff is moot if the CLI isn't even installed.
+    pub on_path: bool,
 }
 
 /// Write the carryover markdown into the target agent's context file,
@@ -289,9 +301,67 @@ pub fn inject(c: &AuraCarryover, agent: &str, repo_root: &Path) -> Result<Inject
     let merged = upsert_marker_section(&existing, &body);
 
     write_atomic(&file, &merged)?;
+    let hint = launch_hint(agent);
     Ok(InjectResult {
         path: file.to_string_lossy().to_string(),
         created,
+        on_path: bin_on_path(&hint.bin),
+        launch: hint.run,
+        auth: hint.auth,
+    })
+}
+
+/// How to launch and authenticate a target agent CLI after a carryover is
+/// injected into its startup file.
+pub struct LaunchHint {
+    /// The bare executable name, used for the `PATH` preflight.
+    pub bin: String,
+    /// The command a user types to resume from the injected context.
+    pub run: String,
+    /// A one-line auth reminder grounded in each provider's real failure mode.
+    pub auth: String,
+}
+
+/// Map an agent name to its launch command and auth reminder. The auth notes
+/// mirror the exact one-time actions each CLI demands when unauthenticated —
+/// so an injected handoff carries its own "how to actually run me" footer
+/// instead of dead-ending in a provider 402 / "set an Auth method".
+pub fn launch_hint(agent: &str) -> LaunchHint {
+    let h = |bin: &str, run: &str, auth: &str| LaunchHint {
+        bin: bin.to_string(),
+        run: run.to_string(),
+        auth: auth.to_string(),
+    };
+    match agent.trim().to_ascii_lowercase().as_str() {
+        "claude" | "claude_code" | "claude-code" => {
+            h("claude", "claude", "sign in with `claude` (Anthropic account) if not already")
+        }
+        "gemini" | "gemini_cli" | "gemini-cli" => h(
+            "gemini",
+            "gemini",
+            "run `gemini` once for Google OAuth, or export GEMINI_API_KEY",
+        ),
+        "codex" => h(
+            "codex",
+            "codex",
+            "run `codex login` and ensure the OpenAI workspace is active (billing)",
+        ),
+        "kimi" => h("kimi", "kimi", "set the provider key kimi is configured for (e.g. MOONSHOT_API_KEY)"),
+        "cursor" => h("cursor", "cursor .", "open Cursor and sign in"),
+        other => h(other, other, "ensure the target agent CLI is installed and signed in"),
+    }
+}
+
+/// Whether `bin` resolves on `PATH`. Scans the `PATH` directories for an
+/// executable file — it never runs the binary and never reads any credential
+/// or config, so it's a safe preflight to print alongside an injected handoff.
+fn bin_on_path(bin: &str) -> bool {
+    let Some(path) = std::env::var_os("PATH") else { return false };
+    std::env::split_paths(&path).any(|dir| {
+        let candidate = dir.join(bin);
+        candidate.is_file()
+            || candidate.with_extension("exe").is_file()
+            || candidate.with_extension("cmd").is_file()
     })
 }
 

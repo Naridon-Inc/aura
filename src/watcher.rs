@@ -14,6 +14,16 @@ use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 use uuid::Uuid;
 
+/// The background daemon is silent by default. Per-file and per-AST-node tracing
+/// is opt-in via `AURA_DAEMON_VERBOSE=1` — without this gate the per-node "Found …"
+/// print fires once per parsed symbol and can balloon the daemon log into the
+/// multi-gigabyte range on a busy tree.
+fn daemon_verbose() -> bool {
+    std::env::var("AURA_DAEMON_VERBOSE")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false)
+}
+
 pub struct ContinuousTracker {
     parser: Arc<Mutex<SemanticParser>>,
     ast_cache: Arc<Mutex<AstStateCache>>,
@@ -130,7 +140,9 @@ impl ContinuousTracker {
                     else if path_str.ends_with(".php") { "php" }
                     else { continue; };
 
-                println!("\n[Aura Daemon] Detected file activity: {:?}", path.file_name().unwrap());
+                if daemon_verbose() {
+                    println!("\n[Aura Daemon] Detected file activity: {:?}", path.file_name().unwrap());
+                }
 
                 if let Ok(source_code) = fs::read_to_string(&path) {
                     // Link snapshot to the latest AI intent
@@ -177,12 +189,17 @@ impl ContinuousTracker {
         };
 
         if let Ok(ast_nodes) = parser.parse_file(source_code, ext) {
-            println!("  --> Re-parsing {} Abstract Syntax Tree...", lang_name);
+            let verbose = daemon_verbose();
+            if verbose {
+                println!("  --> Re-parsing {} Abstract Syntax Tree...", lang_name);
+            }
 
             let mut staged_nodes = Vec::new();
             for node in &ast_nodes {
-                let name = node.identifier.clone().unwrap_or_else(|| "Anonymous".to_string());
-                println!("      Found {}: '{}' (Hash: {})", node.kind, name, node.content_hash);
+                if verbose {
+                    let name = node.identifier.clone().unwrap_or_else(|| "Anonymous".to_string());
+                    println!("      Found {}: '{}' (Hash: {})", node.kind, name, node.content_hash);
+                }
                 staged_nodes.push(node.clone());
             }
 
@@ -286,10 +303,12 @@ impl ContinuousTracker {
         };
 
         if let Ok(repo) = Repository::open(".") {
-            if let Ok(_) = CheckpointStore::commit_direct(&repo, &data) {
-                println!("  --> Continuous micro-state persisted to hidden branch: {}", &id[0..8]);
-            } else {
-                println!("  --> Failed to write continuous micro-state to Git.");
+            match CheckpointStore::commit_direct(&repo, &data) {
+                Ok(_) if daemon_verbose() => {
+                    println!("  --> Continuous micro-state persisted to hidden branch: {}", &id[0..8]);
+                }
+                Ok(_) => {}
+                Err(_) => eprintln!("  --> Failed to write continuous micro-state to Git."),
             }
         }
     }

@@ -292,3 +292,51 @@ pub fn link(id_or_text: &str, task_ref: &str) -> Result<(), String> {
     println!("{} Linked goal to {}", "✓".green().bold(), task_ref.cyan());
     Ok(())
 }
+
+// ── Subcommand: add ─────────────────────────────────────────────────────────
+
+/// Create-or-find a goal by text, attach a plain-language verify plan, and
+/// (optionally) link it to a board task — WITHOUT running the expensive
+/// decompose+prove. This is the lightweight seam the Plan→Build minter (and the
+/// task-detail "set a goal" composer) use to attach a real goal the instant a
+/// task is born; a later `aura goals prove` checks it against the code. Unlike
+/// `prove`, this never calls a model, so it's safe to fan out across every task
+/// a plan mints in one Build click.
+pub fn add(
+    text: &str,
+    task_ref: Option<&str>,
+    checks: &[String],
+    as_json: bool,
+) -> Result<(), String> {
+    let root = super::discover_repo_root().ok_or("Not in a project folder.")?;
+    let rec = store::upsert_by_text(&root, text)?;
+    let clean: Vec<String> = checks
+        .iter()
+        .map(|c| c.trim().to_string())
+        .filter(|c| !c.is_empty())
+        .collect();
+    if !clean.is_empty() {
+        store::set_acceptance(&root, &rec.id, clean.clone())?;
+    }
+    let mut linked_seq: Option<u64> = None;
+    if let Some(tr) = task_ref.map(str::trim).filter(|s| !s.is_empty()) {
+        if let Some((uuid, seq)) = resolve_task(&root, tr) {
+            store::link_task(&root, &rec.id, &uuid, seq)?;
+            linked_seq = seq;
+        }
+    }
+    if as_json {
+        println!(
+            "{}",
+            json!({
+                "id": rec.id,
+                "text": rec.text,
+                "checks": clean,
+                "task_seq": linked_seq,
+            })
+        );
+    } else {
+        println!("{} Added goal {}", "✓".green().bold(), rec.text.cyan());
+    }
+    Ok(())
+}
