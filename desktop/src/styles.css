@@ -1,0 +1,5791 @@
+@import "tailwindcss";
+@import "tw-animate-css";
+
+/* Bridge @medusajs/ui's classic Tailwind-v3 preset into this v4 build so
+ * the package's real components render with their own token universe
+ * (`bg-ui-bg-base`, `shadow-elevation-flyout`, `--bg-base`/`--fg-base`,
+ * the `ui-*` scale). The legacy preset + content globs live in
+ * tailwind.config.cjs; Medusa scopes its dark tokens under `.dark`, which
+ * <html> already carries. NOTE: once `@config` is present, v4 scans the
+ * config's `content` globs instead of auto-detecting — that file's globs
+ * therefore also cover ./src and ./index.html so our own utilities keep
+ * generating. */
+@config "../tailwind.config.cjs";
+
+/*
+ * Design tokens — port of aura-term/src/theme.rs verbatim. Token names
+ * mirror the Rust constants so the migration is one-to-one (BG_0 → bg-0,
+ * etc.). The L-shape design language: chrome (titlebar + rails + statusbar)
+ * is BG_1, everything *inside* the L (sidebar body, editor, review) is
+ * BG_0. Panels have R_PANEL=12px corners that bend inward into the chrome.
+ */
+@theme {
+  /* surfaces — chrome + inset (Superset-style minimal contrast).
+     bg-1 is the outer chrome shared by the workspace rail + topbar so
+     they read as one continuous L-frame. bg-0 is the content surface
+     (sidebar + work + review + statusbar) that nests inside the chrome
+     with a subtle rounded top-left corner — no gap, just a visual
+     bend. The contrast between the two is intentionally tiny (~3-4%
+     luminance) so the shell still reads as one unified piece, just
+     with a chrome-vs-content distinction at the corner. */
+  --color-bg-0:       #161618;  /* content — sidebar/work/review/statusbar */
+  --color-bg-1:       #0f0f11;  /* chrome — workspace rail + topbar */
+  --color-bg-2:       #1f1f22;  /* hover — icon buttons, popover rows */
+  --color-bg-3:       #25252a;  /* elevated — composer, dialog cards */
+  /* Plane-aligned: one step elevated from bg-3, used by table headers,
+     callouts, and the Pages "block frame" treatment. */
+  --color-bg-layer-3: #2a2a2f;
+
+  /* role aliases (kept for older components) */
+  --color-bg-deep:    var(--color-bg-1);
+  --color-bg-chrome:  var(--color-bg-0);
+  --color-bg-content: var(--color-bg-0);
+  --color-bg-card:    var(--color-bg-3);
+  --color-bg-hover:   var(--color-bg-2);
+
+  /* text — 4-step ramp */
+  --color-text-1: #ededee;
+  --color-text-2: #b5b5b8;
+  --color-text-3: #7e7e82;
+  --color-text-4: #555558;
+  --color-text-5: #3a3a3a;  /* shell-only disabled tier */
+
+  /* lines — pane separators. With a single canvas bg, borders are now
+     the *only* divider between regions, so they need a touch more
+     contrast than the old L-chrome era. LINE for visible seams between
+     columns/rows; LINE_SOFT for inner subtle dividers. */
+  --color-line:      #2a2a2e;
+  --color-line-soft: #232326;
+
+  /* semantic / brand — cool palette retheme.
+     Olive/orange traded for arctic blues; warm dirty-state amber traded
+     for a cool slate-cyan so file-modified glyphs read as "in flight"
+     not "warning". Anthropic's caret orange remains for the agent
+     monogram only (one ref) — not promoted to a UI accent. */
+  --color-accent:        #6aa5ff;  /* arctic blue — primary accent */
+  --color-accent-soft:   #1c2a3d;  /* deep navy — accent-tinted bg */
+  --color-accent-green:  #4dc1a4;  /* teal status dot */
+  --color-amber:         #7eb6c8;  /* slate-cyan — dirty/modified marker */
+  --color-red:           #d05a76;  /* cool magenta-red — error */
+  --color-violet:        #a78bfa;
+  --color-blue:          #78a6df;
+  --color-pink:          #c4a4e8;  /* cooler pink, plum-leaning */
+  /* Plane "AI summary" pill accent — distinct from --color-pink so the
+     sparkles row reads as AI-action, not generic decoration. */
+  --color-ai-pink:       #ec4899;
+  --color-green:         #5fb38a;  /* diff-add, cool green */
+  --color-caret-orange:  #d97757;  /* Anthropic brand — agent only */
+
+  /* priority ladder — 1:1 with docs/plane-app-examples.html `--priority-*`.
+     Used by the `.pri` row chip + `.signal` board bars. oklch verbatim so
+     the desktop surface matches the mockup exactly (WebKit renders oklch). */
+  --color-pri-urgent: oklch(0.5798 0.1766 26.99);
+  --color-pri-high:   oklch(0.6802 0.1633 50.67);
+  --color-pri-medium: oklch(0.79 0.1466 82.04);
+  --color-pri-low:    oklch(0.579 0.1807 262.31);
+  --color-pri-none:   oklch(0.6376 0.0129 231.77);
+
+  /* composer surface — slightly cool slate */
+  --color-composer-bg:           #181a22;
+  --color-composer-border:       #262a35;
+  --color-composer-border-focus: #3a4258;
+  --color-pill-bg:               #2b2f38;
+  --color-pill-bg-hover:         #353a45;
+  --color-pill-fg:               #b9c1cc;
+  --color-kbd-bg:                #353a45;
+  --color-kbd-fg:                #b5bcc6;
+
+  /* popover */
+  --color-popover-bg:        #1a1c22;
+  --color-popover-border:    #2a2d35;
+  --color-popover-row-hover: #262a32;
+
+  /* avatar — cool indigo-violet, project-identity tile */
+  --color-avatar-bg: #2c2750;
+  --color-avatar-fg: #a59ce0;
+
+  /* radii — sharp block design. Halved from the previous arctic scale so
+     every surface reads as a crisp block (Linear/Cursor parity), not a
+     soft rounded card. xs=0 makes inline pills (kbd/codeword) fully
+     boxy; the rest of the ladder still gives a hairline of softness on
+     panels so corners aren't visually razor-sharp. */
+  --radius-xs: 0px;
+  --radius-sm: 2px;
+  --radius-md: 3px;
+  --radius-lg: 4px;
+  --radius-xl: 5px;
+  --radius-panel: 4px;  /* inner-content top-left bend into chrome */
+
+  /* fonts — JetBrains Mono leads the stack on identifier-heavy surfaces
+     (CodeMirror, BlockCard payloads, file names) so dev users with it
+     installed get the punchier identifier rendering Phase H targets;
+     others fall through to SF Mono / Menlo / Consolas without download
+     or layout shift. No webfont link to keep cold-start fast and
+     offline-clean. */
+  --font-mono: "JetBrains Mono", ui-monospace, "SF Mono", "Menlo", "Consolas", monospace;
+  --font-sans: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont,
+               "Segoe UI", "Helvetica Neue", sans-serif;
+
+  /* motion — Phase H polish: every transition snaps to ≤150ms with an
+     ease-out curve so panels feel decisive rather than draggy. Pair
+     with `transition: var(--motion-fast) all` or use the .aura-motion
+     helper. Tailwind's `transition-*` utilities already default to
+     150ms ease-in-out; we override the timing function below. */
+  --motion-fast:    120ms cubic-bezier(0.2, 0, 0, 1);
+  --motion-medium:  160ms cubic-bezier(0.2, 0, 0, 1);
+
+  /* focus ring — Primer-style 2px ring with offset. Honours
+     :focus-visible only so mouse clicks don't paint rings on buttons. */
+  --focus-ring-color: color-mix(in srgb, var(--color-accent) 65%, transparent);
+  --focus-ring-width: 2px;
+  --focus-ring-offset: 2px;
+
+  /* Medusa-style "raised field" borders — form controls (Input/Textarea/
+   * Select) render their edge as a box-shadow instead of a CSS border, so we
+   * get a crisp 1px outline plus a hair of depth, and a 4px accent halo on
+   * focus that doesn't shift layout. Defined once here; the var() refs resolve
+   * against whichever theme's --color-line / --color-accent is in scope, so
+   * they turn ember-green automatically in ADE v2. Consumed via
+   * `shadow-[var(--shadow-field)]` etc. */
+  --shadow-field:
+    0 0 0 1px var(--color-line),
+    0 1px 1px 0 rgba(0, 0, 0, 0.22);
+  --shadow-field-hover:
+    0 0 0 1px color-mix(in srgb, var(--color-line) 100%, var(--color-text-1) 12%),
+    0 1px 1px 0 rgba(0, 0, 0, 0.22);
+  --shadow-field-focus:
+    0 0 0 1px var(--color-accent),
+    0 0 0 4px var(--focus-ring-color);
+  --shadow-field-error:
+    0 0 0 1px var(--color-red),
+    0 0 0 4px color-mix(in srgb, var(--color-red) 25%, transparent);
+  /* Flyout panels (Select/Popover menus) — 1px hairline + layered depth. */
+  --shadow-flyout:
+    0 0 0 1px var(--color-line),
+    0 4px 8px 0 rgba(0, 0, 0, 0.34),
+    0 8px 16px 0 rgba(0, 0, 0, 0.34);
+  /* The floating FocusModal surface (FullscreenOverlay). */
+  --shadow-modal:
+    0 0 0 1px var(--color-line),
+    0 8px 24px 0 rgba(0, 0, 0, 0.40),
+    0 24px 48px 0 rgba(0, 0, 0, 0.46);
+  /* Medusa-style card surface — a hairline ring + a hair of lift, so a card
+   * reads as a distinct surface ON the content canvas (bg-content) instead of
+   * needing a lighter fill. The ring uses line-soft (quieter than a CSS
+   * border) and follows whichever theme's --color-line-soft is in scope.
+   * Consumed via `shadow-[var(--shadow-card)]`. */
+  --shadow-card:
+    0 0 0 1px var(--color-line-soft),
+    0 1px 2px 0 rgba(0, 0, 0, 0.40);
+
+  /* ── shadcn token aliases ──────────────────────────────────────────
+   * Names follow the shadcn/ui convention so primitives copied from
+   * upstream (Button/Dialog/Popover/etc.) compose against our existing
+   * arctic palette without rewrites. Values point at the same arctic
+   * tokens above — no duplicate hex codes; renaming a base color
+   * propagates through both naming schemes. */
+  --color-background:           var(--color-bg-0);
+  --color-foreground:           var(--color-text-1);
+  --color-card:                 var(--color-bg-3);
+  --color-card-foreground:      var(--color-text-1);
+  --color-popover:              var(--color-popover-bg);
+  --color-popover-foreground:   var(--color-text-1);
+  --color-primary:              var(--color-text-1);
+  --color-primary-foreground:   var(--color-bg-0);
+  --color-secondary:            var(--color-bg-2);
+  --color-secondary-foreground: var(--color-text-1);
+  --color-muted:                var(--color-bg-2);
+  --color-muted-foreground:     var(--color-text-3);
+  --color-accent-foreground:    var(--color-bg-0);
+  --color-destructive:          var(--color-red);
+  --color-destructive-foreground: var(--color-text-1);
+  --color-border:               var(--color-line);
+  --color-input:                var(--color-line);
+  --color-ring:                 var(--color-accent);
+
+  /* sidebar slot — used by shadcn Sidebar component family. We treat
+     the L-chrome bg-1 as the sidebar surface. */
+  --color-sidebar:                       var(--color-bg-1);
+  --color-sidebar-foreground:            var(--color-text-2);
+  --color-sidebar-primary:               var(--color-accent);
+  --color-sidebar-primary-foreground:    var(--color-bg-0);
+  --color-sidebar-accent:                var(--color-bg-2);
+  --color-sidebar-accent-foreground:     var(--color-text-1);
+  --color-sidebar-border:                var(--color-line-soft);
+  --color-sidebar-ring:                  var(--color-accent);
+
+  /* shadcn radius scale — derives sm/md/lg/xl from a single base.
+     Tracks --radius-lg (4px) so primitives line up visually with the
+     rest of the sharp-block panels. */
+  --radius: 4px;
+
+  /* ── typography scale ────────────────────────────────────────────────
+   * Single source of truth for font-size, line-height and weight across
+   * every surface. The shell historically grew per-component sizes
+   * (12px here, 12.5px there, 13px elsewhere) — collapsing them onto
+   * one ladder so a Linear-grade typographic rhythm holds across chat,
+   * sidebars, dialogs, statusbar, palette.
+   *
+   *   2xs  10px / 14px  — statusbar, footers, kbd labels
+   *   xs   11px / 16px  — chips, system lines, micro-meta
+   *   sm   12px / 18px  — sidebar items, secondary UI, dense rows
+   *   base 13px / 20px  — chat body, dialog body, default UI
+   *   md   14px / 22px  — section labels, headers, primary UI
+   *   lg   16px / 24px  — empty-state headlines
+   *   xl   20px / 28px  — page titles
+   *
+   * Weights collapse to 4 stops: 400 body, 500 ui-strong, 600 heading,
+   * 700 numeric/accent. No 300/800/900 anywhere in the shell. */
+  --font-size-2xs:  10px;
+  --font-size-xs:   11px;
+  --font-size-sm:   12px;
+  --font-size-base: 13px;
+  --font-size-md:   14px;
+  --font-size-lg:   16px;
+  --font-size-xl:   20px;
+
+  --line-height-2xs:  14px;
+  --line-height-xs:   16px;
+  --line-height-sm:   18px;
+  --line-height-base: 20px;
+  --line-height-md:   22px;
+  --line-height-lg:   24px;
+  --line-height-xl:   28px;
+
+  --font-weight-body:    400;
+  --font-weight-ui:      500;
+  --font-weight-heading: 600;
+  --font-weight-accent:  700;
+
+  /* tracking — tight for headings, neutral for body, slightly open for
+     small caps / micro UI so 10–11px copy stays legible. */
+  --letter-spacing-tight:  -0.01em;
+  --letter-spacing-normal:  0;
+  --letter-spacing-wide:    0.02em;
+}
+
+/* Light theme stub — Phase 3 fills these in with proper oklch values.
+ * The `.light` class on <html> swaps to this scope. Keeping the names
+ * stable means no component code changes when light values land. */
+.light {
+  --color-bg-0:       #ffffff;
+  --color-bg-1:       #f7f7f8;
+  --color-bg-2:       #efeff1;
+  --color-bg-3:       #e7e7ea;
+  --color-text-1:     #1a1a1d;
+  --color-text-2:     #4a4a50;
+  --color-text-3:     #7a7a82;
+  --color-text-4:     #a8a8b0;
+  --color-text-5:     #d0d0d6;
+  --color-line:       #e1e1e6;
+  --color-line-soft:  #ececf1;
+}
+
+/* Modal-inspired variant — homage to modal.com's notebook/dashboard
+ * look (Whisper Audio Analysis, Notebooks featured grid). Two moves:
+ *   1. Push surfaces toward near-black so the single accent reads as
+ *      the only "live" color on screen.
+ *   2. Swap the arctic-blue accent for Modal's bright mint-green,
+ *      including the soft-accent backdrop used on selected rows and
+ *      empty-state callouts.
+ * Dark-only — the variant pins resolved scheme to dark in
+ * themeStore.ts so .light + .theme-modal never coexist. */
+.theme-modal {
+  --color-bg-0:       #0a0a0a;  /* content — notebook canvas */
+  --color-bg-1:       #050505;  /* chrome — rail + topbar near-black */
+  --color-bg-2:       #161616;  /* hover */
+  --color-bg-3:       #1a1a1a;  /* elevated cards */
+
+  --color-bg-deep:    var(--color-bg-1);
+  --color-bg-chrome:  var(--color-bg-0);
+  --color-bg-content: var(--color-bg-0);
+  --color-bg-card:    var(--color-bg-3);
+  --color-bg-hover:   var(--color-bg-2);
+
+  --color-text-1: #f3f3f3;
+  --color-text-2: #b8b8b8;
+  --color-text-3: #7a7a7a;
+  --color-text-4: #4d4d4d;
+  --color-text-5: #2a2a2a;
+
+  --color-line:      #1f1f1f;
+  --color-line-soft: #161616;
+
+  /* The single hero color. Modal uses a vivid mint that pops against
+     true-black — close to gh-style #7ee787 but pulled slightly cooler
+     so it reads "Modal" rather than "GitHub diff". */
+  --color-accent:        #7ef0a0;
+  --color-accent-soft:   #0e2418;  /* selected-row / banner backdrop */
+  --color-accent-green:  #7ef0a0;
+  --color-amber:         #c8d4b8;  /* dirty marker — green-tinted */
+  --color-red:           #f07a8c;
+  --color-violet:        #a78bfa;
+  --color-blue:          #78a6df;
+  --color-pink:          #c4a4e8;
+  --color-green:         #7ef0a0;
+
+  --color-composer-bg:           #0e0e0e;
+  --color-composer-border:       #1c1c1c;
+  --color-composer-border-focus: #2d4d36;
+  --color-pill-bg:               #161616;
+  --color-pill-bg-hover:         #1f1f1f;
+  --color-pill-fg:               #c8c8c8;
+  --color-kbd-bg:                #1c1c1c;
+  --color-kbd-fg:                #c8c8c8;
+
+  --color-popover-bg:        #0e0e0e;
+  --color-popover-border:    #1c1c1c;
+  --color-popover-row-hover: #161616;
+
+  /* Avatar tile — green-tinted to match Modal's left-nav project chip */
+  --color-avatar-bg: #102014;
+  --color-avatar-fg: #7ef0a0;
+
+  /* Re-point shadcn aliases so primitives (Dialog/Popover/Button)
+     adopt the variant without component-level rewrites. */
+  --color-background:           var(--color-bg-0);
+  --color-foreground:           var(--color-text-1);
+  --color-card:                 var(--color-bg-3);
+  --color-card-foreground:      var(--color-text-1);
+  --color-popover:              var(--color-popover-bg);
+  --color-popover-foreground:   var(--color-text-1);
+  --color-primary:              var(--color-accent);
+  --color-primary-foreground:   #062012;
+  --color-secondary:            var(--color-bg-2);
+  --color-secondary-foreground: var(--color-text-1);
+  --color-muted:                var(--color-bg-2);
+  --color-muted-foreground:     var(--color-text-3);
+  --color-accent-foreground:    #062012;
+  --color-destructive:          var(--color-red);
+  --color-destructive-foreground: var(--color-text-1);
+  --color-border:               var(--color-line);
+  --color-input:                var(--color-line);
+  --color-ring:                 var(--color-accent);
+
+  --color-sidebar:                       var(--color-bg-1);
+  --color-sidebar-foreground:            var(--color-text-2);
+  --color-sidebar-primary:               var(--color-accent);
+  --color-sidebar-primary-foreground:    #062012;
+  --color-sidebar-accent:                var(--color-bg-2);
+  --color-sidebar-accent-foreground:     var(--color-text-1);
+  --color-sidebar-border:                var(--color-line-soft);
+  --color-sidebar-ring:                  var(--color-accent);
+
+  --focus-ring-color: color-mix(in srgb, var(--color-accent) 55%, transparent);
+}
+
+/* Ember variant — Superset-inspired "ember" pack for the ADE surface
+ * redesign (W0). Warm near-black surfaces traded for the arctic dark
+ * default, with a single clay-orange hero accent (#e07850). Gated on
+ * the `aura.ade.v2` master flag in themeStore.ts so the whole redesign
+ * (colours now; chrome + IA in later waves) flips on one switch; the
+ * old themes stay untouched and default. Dark-only — pinned to dark in
+ * themeStore so .light never fights the palette.
+ *
+ * Values mirror docs/plan/ade-superset-redesign.html `:root`. Only the
+ * colour axis is overridden here — radii, fonts, type scale and the
+ * priority oklch ladder stay shared with the base @theme so density and
+ * rhythm don't shift, only hue/temperature. */
+.theme-ember {
+  /* Deep-green theme (class name kept as `theme-ember` so themeStore /
+     the aura.ade.v2 gate stay untouched; visually this is forest green
+     now, not ember). Surfaces are a faint green-black — green channel a
+     hair above red/blue at this darkness, so the L-frame reads cool, not
+     warm. bg-1 (chrome) sits one notch under bg-0 (content). */
+  --color-bg-0:       #0f1311;  /* content — sidebar/work/review/statusbar */
+  --color-bg-1:       #0a0e0c;  /* chrome — workspace rail + topbar */
+  --color-bg-2:       #1a201c;  /* hover — icon buttons, popover rows */
+  --color-bg-3:       #1e251f;  /* elevated — composer, dialog cards */
+  --color-bg-layer-3: #232a25;
+
+  --color-bg-deep:    var(--color-bg-1);
+  --color-bg-chrome:  var(--color-bg-0);
+  --color-bg-content: var(--color-bg-0);
+  --color-bg-card:    var(--color-bg-3);
+  --color-bg-hover:   var(--color-bg-2);
+
+  /* text — cool-neutral grey ramp (faintly green to sit on the surfaces) */
+  --color-text-1: #e8ebe8;
+  --color-text-2: #b2b6b2;
+  --color-text-3: #a3a8a3;
+  --color-text-4: #676b67;
+  --color-text-5: #383b38;
+
+  --color-line:      #282b27;
+  --color-line-soft: #1f221f;
+
+  /* semantic / brand — deep-green palette. The forest green is the
+     primary UI accent. Success/verified/running is a brighter emerald so
+     "good/done" stays distinct from the interactive brand green. WARNING
+     stays warm amber and ERROR stays red on purpose — a green "warning"
+     would read as success and break the verify surfaces' honesty. */
+  --color-accent:        #2f9e6b;  /* deep green — primary accent */
+  --color-accent-soft:   #10231a;  /* green-tinted bg — selected rows/banners */
+  --color-accent-green:  #34d399;  /* brighter emerald — success / verified / running */
+  --color-amber:         #f59e0b;  /* warm amber — warning / dirty (unchanged) */
+  --color-red:           #cc4444;
+  --color-violet:        #7b68ee;  /* indigo */
+  --color-blue:          #78a6df;
+  --color-pink:          #c4a4e8;
+  --color-green:         #6fc096;  /* diff-add, green */
+  /* --color-caret-orange inherits the base clay (#d97757) — agent only */
+
+  /* composer surface — green slate */
+  --color-composer-bg:           #141815;
+  --color-composer-border:       #262926;
+  --color-composer-border-focus: #343834;
+  --color-pill-bg:               #1e251f;
+  --color-pill-bg-hover:         #28302a;
+  --color-pill-fg:               #c4c8c4;
+  --color-kbd-bg:                #1e251f;
+  --color-kbd-fg:                #c4c8c4;
+
+  /* popover */
+  --color-popover-bg:        #141815;
+  --color-popover-border:    #262926;
+  --color-popover-row-hover: #1f231f;
+
+  /* avatar — green-tinted project-identity tile */
+  --color-avatar-bg: #14271c;
+  --color-avatar-fg: #88d9a8;
+
+  /* Re-point shadcn aliases so primitives (Dialog/Popover/Button) adopt
+     the variant without component-level rewrites. */
+  --color-background:           var(--color-bg-0);
+  --color-foreground:           var(--color-text-1);
+  --color-card:                 var(--color-bg-3);
+  --color-card-foreground:      var(--color-text-1);
+  --color-popover:              var(--color-popover-bg);
+  --color-popover-foreground:   var(--color-text-1);
+  --color-primary:              var(--color-accent);
+  --color-primary-foreground:   #04140d;
+  --color-secondary:            var(--color-bg-2);
+  --color-secondary-foreground: var(--color-text-1);
+  --color-muted:                var(--color-bg-2);
+  --color-muted-foreground:     var(--color-text-3);
+  --color-accent-foreground:    #04140d;
+  --color-destructive:          var(--color-red);
+  --color-destructive-foreground: var(--color-text-1);
+  --color-border:               var(--color-line);
+  --color-input:                var(--color-line);
+  --color-ring:                 var(--color-accent);
+
+  --color-sidebar:                       var(--color-bg-1);
+  --color-sidebar-foreground:            var(--color-text-2);
+  --color-sidebar-primary:               var(--color-accent);
+  --color-sidebar-primary-foreground:    #04140d;
+  --color-sidebar-accent:                var(--color-bg-2);
+  --color-sidebar-accent-foreground:     var(--color-text-1);
+  --color-sidebar-border:                var(--color-line-soft);
+  --color-sidebar-ring:                  var(--color-accent);
+
+  --focus-ring-color: color-mix(in srgb, var(--color-accent) 55%, transparent);
+}
+
+/* Conductor variant — homage to Conductor's (Melty Labs) all-projects
+ * dashboard. Two moves that make it read "Conductor" not "Aura":
+ *   1. A WARM near-black ramp (red channel a hair above green above blue
+ *      at every darkness) instead of the arctic/forest cool defaults —
+ *      values sampled straight from the app (#151110 → #2c2826).
+ *   2. A green primary (Conductor's "New"/success green) with a brighter
+ *      mint for live status, and a yellow "working" amber. Selectable,
+ *      dark-only — pinned to dark in themeStore so .light never fights
+ *      the palette. Only the colour axis is overridden; radii, fonts and
+ *      the type scale stay shared with the base @theme so density holds. */
+.theme-conductor {
+  /* warm near-black surfaces. bg-1 (chrome — rail/topbar) is the deepest
+     board-canvas black; bg-0 (content) sits a notch up; cards lift again. */
+  --color-bg-0:       #1a1615;  /* content — sidebar/work/review/statusbar */
+  --color-bg-1:       #141110;  /* chrome — workspace rail + topbar (deepest) */
+  --color-bg-2:       #26221f;  /* hover — icon buttons, popover rows, selected */
+  --color-bg-3:       #2b2724;  /* elevated — cards, composer, dialog surfaces */
+  --color-bg-layer-3: #322d2a;
+
+  --color-bg-deep:    var(--color-bg-1);
+  --color-bg-chrome:  var(--color-bg-0);
+  --color-bg-content: var(--color-bg-0);
+  --color-bg-card:    var(--color-bg-3);
+  --color-bg-hover:   var(--color-bg-2);
+
+  /* text — warm-neutral grey ramp (a hair of red so it sits on the warm
+     surfaces rather than looking blue-grey against them). */
+  --color-text-1: #f3efeb;
+  --color-text-2: #b3aaa1;
+  --color-text-3: #8a827a;
+  --color-text-4: #5c554f;
+  --color-text-5: #37322e;
+
+  --color-line:      #322d29;
+  --color-line-soft: #221e1b;
+
+  /* semantic / brand — Conductor greens + working-yellow. The medium
+     green is Conductor's "New"/primary. Success/verified/running is the
+     brighter mint status dot. WARNING stays warm yellow-amber (Conductor's
+     "in progress" glyph) and ERROR stays red so the verify surfaces keep
+     their honesty. */
+  --color-accent:        #2ea15a;  /* Conductor green — primary accent */
+  --color-accent-soft:   #16281c;  /* green-tinted bg — selected rows/banners */
+  --color-accent-green:  #4be885;  /* bright mint — success / verified / running */
+  --color-amber:         #ffd23d;  /* Conductor yellow — working / dirty */
+  --color-red:           #e8675c;
+  --color-violet:        #b39ae0;
+  --color-blue:          #7fb0e0;
+  --color-pink:          #d9a4d0;
+  --color-green:         #4be885;  /* diff-add, green */
+
+  /* composer surface — warm slate */
+  --color-composer-bg:           #1a1615;
+  --color-composer-border:       #2a2521;
+  --color-composer-border-focus: #2f4a37;
+  --color-pill-bg:               #2b2724;
+  --color-pill-bg-hover:         #332e2a;
+  --color-pill-fg:               #cbc3ba;
+  --color-kbd-bg:                #2b2724;
+  --color-kbd-fg:                #cbc3ba;
+
+  /* popover */
+  --color-popover-bg:        #1a1615;
+  --color-popover-border:    #2a2521;
+  --color-popover-row-hover: #26221f;
+
+  /* avatar — green-tinted project-identity tile */
+  --color-avatar-bg: #16281c;
+  --color-avatar-fg: #7fe0a0;
+
+  /* Re-point shadcn aliases so primitives (Dialog/Popover/Button) adopt
+     the variant without component-level rewrites. */
+  --color-background:           var(--color-bg-0);
+  --color-foreground:           var(--color-text-1);
+  --color-card:                 var(--color-bg-3);
+  --color-card-foreground:      var(--color-text-1);
+  --color-popover:              var(--color-popover-bg);
+  --color-popover-foreground:   var(--color-text-1);
+  --color-primary:              var(--color-accent);
+  --color-primary-foreground:   #06180d;
+  --color-secondary:            var(--color-bg-2);
+  --color-secondary-foreground: var(--color-text-1);
+  --color-muted:                var(--color-bg-2);
+  --color-muted-foreground:     var(--color-text-3);
+  --color-accent-foreground:    #06180d;
+  --color-destructive:          var(--color-red);
+  --color-destructive-foreground: var(--color-text-1);
+  --color-border:               var(--color-line);
+  --color-input:                var(--color-line);
+  --color-ring:                 var(--color-accent);
+
+  --color-sidebar:                       var(--color-bg-1);
+  --color-sidebar-foreground:            var(--color-text-2);
+  --color-sidebar-primary:               var(--color-accent);
+  --color-sidebar-primary-foreground:    #06180d;
+  --color-sidebar-accent:                var(--color-bg-2);
+  --color-sidebar-accent-foreground:     var(--color-text-1);
+  --color-sidebar-border:                var(--color-line-soft);
+  --color-sidebar-ring:                  var(--color-accent);
+
+  --focus-ring-color: color-mix(in srgb, var(--color-accent) 55%, transparent);
+}
+
+/* ── Metallic 3D buttons ──────────────────────────────────────────────
+   One recipe for every filled action button, themed via vars so it
+   tracks the active palette. A gentle top→bottom gradient + a 1px inner
+   sheen reads as brushed metal; a soft lift shadow floats it; :active
+   presses it in (translateY + inset). Subtle on purpose — sleek, not
+   skeuomorphic. Wired to the shared Button primitive's filled variants
+   (default / secondary / destructive); ghost/outline/link stay flat so
+   the emphasis hierarchy still reads. Rules are unlayered so they win
+   over Tailwind's utility layer (the bg and transition utilities). */
+.btn3d {
+  border: 1px solid var(--btn3d-border);
+  background-image: linear-gradient(180deg, var(--btn3d-top), var(--btn3d-bot));
+  /* top sheen + a chiseled bottom inner edge read as a raised key; the
+     stacked drop shadows float it a touch above the surface. */
+  box-shadow:
+    inset 0 1px 0 var(--btn3d-sheen),
+    inset 0 -1px 0 rgba(0, 0, 0, 0.20),
+    0 1px 1px rgba(0, 0, 0, 0.28),
+    0 2px 4px rgba(0, 0, 0, 0.22),
+    0 4px 9px rgba(0, 0, 0, 0.13);
+  transition: box-shadow 130ms ease, transform 80ms ease, filter 130ms ease;
+}
+.btn3d:hover:not(:disabled) {
+  filter: brightness(1.10);
+  box-shadow:
+    inset 0 1px 0 var(--btn3d-sheen),
+    inset 0 -1px 0 rgba(0, 0, 0, 0.20),
+    0 1px 2px rgba(0, 0, 0, 0.30),
+    0 3px 6px rgba(0, 0, 0, 0.24),
+    0 6px 13px rgba(0, 0, 0, 0.17);
+}
+.btn3d:active:not(:disabled) {
+  transform: translateY(1px);
+  filter: brightness(0.96);
+  box-shadow:
+    inset 0 1.5px 3px rgba(0, 0, 0, 0.36),
+    inset 0 1px 0 var(--btn3d-sheen);
+}
+.btn3d:disabled,
+.btn3d[disabled] {
+  background-image: none;
+  background-color: var(--color-bg-2);
+  border-color: var(--color-line);
+  color: var(--color-text-4);
+  box-shadow: none;
+  filter: none;
+}
+.btn3d-primary {
+  --btn3d-top: color-mix(in oklab, var(--color-accent) 82%, white 18%);
+  --btn3d-bot: color-mix(in oklab, var(--color-accent) 86%, black 14%);
+  --btn3d-border: color-mix(in oklab, var(--color-accent) 50%, black 50%);
+  --btn3d-sheen: rgba(255, 255, 255, 0.28);
+  color: var(--color-primary-foreground);
+}
+.btn3d-neutral {
+  --btn3d-top: color-mix(in oklab, var(--color-bg-3) 88%, white 12%);
+  --btn3d-bot: color-mix(in oklab, var(--color-bg-3) 80%, black 20%);
+  --btn3d-border: var(--color-line);
+  --btn3d-sheen: rgba(255, 255, 255, 0.08);
+  color: var(--color-text-1);
+}
+.btn3d-danger {
+  --btn3d-top: color-mix(in oklab, var(--color-red) 82%, white 18%);
+  --btn3d-bot: color-mix(in oklab, var(--color-red) 86%, black 14%);
+  --btn3d-border: color-mix(in oklab, var(--color-red) 50%, black 50%);
+  --btn3d-sheen: rgba(255, 255, 255, 0.26);
+  color: #fff;
+}
+/* Calm brand-green metallic — same 3D skin as the family, muted vs the
+   full-saturation primary so a full-width sidebar create CTA (New
+   workspace, New task) reads as "has color" without shouting. */
+.btn3d-accent {
+  --btn3d-top: color-mix(in oklab, var(--color-accent) 46%, var(--color-bg-3) 54%);
+  --btn3d-bot: color-mix(in oklab, var(--color-accent) 60%, black 40%);
+  --btn3d-border: color-mix(in oklab, var(--color-accent) 44%, black 56%);
+  --btn3d-sheen: rgba(255, 255, 255, 0.16);
+  color: var(--color-text-1);
+}
+/* Subtle level — a flat fill that sits one step below the metallic
+   family. No gradient, just a hairline top sheen + a single soft drop so
+   it reads as raised-but-quiet (Medusa "secondary" emphasis). Overrides
+   the .btn3d base box-shadow because it's declared afterward at equal
+   specificity. For supporting actions: row buttons, "View on GitHub". */
+.btn3d-subtle {
+  --btn3d-top: var(--color-bg-2);
+  --btn3d-bot: var(--color-bg-2);
+  --btn3d-border: var(--color-line-soft);
+  --btn3d-sheen: rgba(255, 255, 255, 0.04);
+  color: var(--color-text-2);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.03),
+    0 1px 1px rgba(0, 0, 0, 0.20),
+    0 1px 2px rgba(0, 0, 0, 0.12);
+}
+.btn3d-subtle:hover:not(:disabled) {
+  filter: brightness(1.05);
+  background-image: linear-gradient(180deg, var(--color-bg-3), var(--color-bg-2));
+  color: var(--color-text-1);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.04),
+    0 1px 2px rgba(0, 0, 0, 0.24),
+    0 2px 5px rgba(0, 0, 0, 0.16);
+}
+.btn3d-subtle:active:not(:disabled) {
+  transform: translateY(1px);
+  filter: brightness(0.97);
+  box-shadow:
+    inset 0 1.5px 3px rgba(0, 0, 0, 0.30),
+    inset 0 1px 0 rgba(255, 255, 255, 0.03);
+}
+
+/* Chrome dimensions — keep in sync with aura-term/src/theme.rs (TOPBAR_H,
+ * STATUSBAR_H, NAV_RAIL_W). Custom properties so JS can read them too. */
+:root {
+  --topbar-h:   30px;  /* macOS Overlay title bar — slim. Traffic-lights vertically centered on the icon row. tao insets the lights by resizing the titlebar container to (closeBtnH + y) and centering the buttons in it, so light-center = (closeBtnH + y)/2 from the window top. The header is h tall with a 1px bottom border (border-box) → icon-center = (h−1)/2. Solve (closeBtnH + y)/2 = (h−1)/2 → y = h − 1 − closeBtnH. On macOS 26 (Tahoe / Darwin 25.x) the close-button container measures ≈13 (smaller than the ≈18 of earlier builds), so at h=30 → y:16, level with the sidebar toggle + search. NOTE: trafficLightPosition is a native window attribute — changing it needs an app rebuild/restart (it is NOT picked up by webview HMR). Keep trafficLightPosition.y in tauri.conf.json in sync (y = h − 1 − closeBtnH). */
+  --statusbar-h: 28px; /* footer strip — inset rounded chips centered in a 28px bar (branch switcher, activity) */
+  --nav-rail-w: 48px;
+  --gap:        0px;   /* unified canvas: no gap between panes, borders separate them */
+
+  /* Plane-aligned content rhythm — used by Pages, rich task descriptions,
+     and any long-form reading surface. 720px keeps comfortable line
+     length for paragraph text without the page feeling cramped.
+     --content-width-wide is the 1152px reading width Plane swaps in when
+     the user toggles the page out of "normal" mode (full-bleed tables,
+     wide media). */
+  --content-width-normal: 720px;
+  --content-width-wide:   1152px;
+  --callout-bg: var(--color-bg-layer-3);
+
+  /* Plane block-editor spacing — paragraph blocks sit on a 1px vertical
+     rhythm with a 1.45 line-height, leaving room for the drag-handle
+     rail to clear the prose by 2px on the left gutter. Keeping these as
+     tokens means a single tweak here re-flows every block surface
+     (NotesWorkpane, TaskDetailPane description, page renderers). */
+  --block-padding-y:      1px;
+  --block-list-line-height: 1.45;
+  --block-rail-gap:       2px;
+
+  /* Plane table spacing — Plane tables are denser than Tiptap's default,
+     leaning on a 7×10 cell pad that holds a single line of body text
+     comfortably without doubling row height when a cell wraps. */
+  --table-cell-padding-y: 7px;
+  --table-cell-padding-x: 10px;
+
+  /* Floating pill heights — used by FloatingPill (page-doc-toolbar).
+     28px for the inner buttons matches the action-bar size so a primary
+     CTA dropped into the pill reads as one family. */
+  --pill-h:          36px;
+  --pill-btn:        28px;
+  --pill-icon:       16px;
+  --pill-radius:     6px;
+  --pill-btn-radius: 2px;
+
+  /* Action bar — base sizing for PageActionBar (the
+     [PrimaryButton] · sep-v · IconButton × N · KebabMenu cluster used
+     by TaskActionBar + pages/PageActionBar consumers). The 0.5px
+     vertical separator is the Plane hairline; outlined for parity even
+     though some browsers will round it up. */
+  --action-btn:        28px;
+  --action-btn-radius: 6px;
+  --action-sep-w:      0.5px;
+  --action-sep-h:      14px;
+
+  /* ── SS.1 — Plane state/priority/elevation tokens ──────────────────
+   * State-group colours (Plane's canonical 5-stop ontology) and the
+   * 5-stop priority scale, exposed as CSS variables so card chips,
+   * status dots, and the kanban column header swatches can share one
+   * source of truth instead of hard-coding hex per surface. The
+   * raised-shadow scale ports Plane's `--shadow-raised-100/200`
+   * elevation pair — used by the kanban TaskCard on hover (raised-200)
+   * to lift cards above the column background. */
+  --color-state-backlog:    #9ca3af;
+  --color-state-unstarted:  #6aa5ff;
+  --color-state-started:    #f59e0b;
+  --color-state-completed:  #4dc1a4;
+  --color-state-cancelled:  #d05a76;
+
+  --color-priority-urgent:  #d05a76;
+  --color-priority-high:    #d97757;
+  --color-priority-medium:  #f59e0b;
+  --color-priority-low:     #6aa5ff;
+  --color-priority-none:    #555558;
+
+  --shadow-raised-100: 0 1px 2px rgba(0,0,0,0.18);
+  --shadow-raised-200: 0 4px 12px rgba(0,0,0,0.28);
+}
+
+html, body, #root {
+  height: 100%;
+  margin: 0;
+}
+
+/* ── macOS vibrancy: translucent sidebar over live desktop-blur ──────────
+ * Active ONLY in the main window on macOS — main.tsx adds `.vibrancy` to
+ * <html> there, and hud.rs puts a native NSVisualEffectView behind the
+ * (transparent) window. Here we punch the ADE shell wrappers transparent so
+ * the frost shows through, while every content island keeps a solid bg so
+ * code / chat / diffs never sit over blur. If the class is absent (non-mac,
+ * HUD, popout, or the frost failed) the shell keeps its opaque bg and looks
+ * exactly as before — it can never render black or see-through. */
+html.vibrancy,
+html.vibrancy body,
+html.vibrancy #root,
+html.vibrancy .ade-shell-root,
+html.vibrancy .ade-shell-main,
+html.vibrancy .ade-shell-mid {
+  background: transparent;
+}
+html.vibrancy .ade-shell-work,
+html.vibrancy .ade-shell-review {
+  background: var(--color-bg-0);
+}
+html.vibrancy .ade-side {
+  /* Translucent so the native frost reads through, but dark enough that the
+     roster rows + text stay legible over an arbitrary desktop. */
+  background: color-mix(in srgb, var(--color-bg-1) 66%, transparent);
+}
+/* The full-height ADE sidebar column carries the frost (Layout.tsx), and the
+   AdeSidebar it wraps is itself an .ade-side — so blank the INNER (nested)
+   layer, else two 66% tints stack into a near-opaque slab that kills the
+   blur. Only the outermost .ade-side keeps the tint. */
+html.vibrancy .ade-side .ade-side {
+  background: transparent;
+}
+/* Team surface mounted in the frost sidebar reads as glass like the Build
+   file tree + Plan section — its own opaque bg (bg-content root, bg-1 list)
+   would block the blur, so blank both to reveal the outer .ade-side frost.
+   Scoped to `.ade-side` so the SAME surface stays solid when it mounts in the
+   center work area (a content island with no frost behind it). The message
+   stream keeps its own bg-content, so chat prose never sits over blur. */
+html.vibrancy .ade-side .ade-team-surface,
+html.vibrancy .ade-side .ade-team-list {
+  background: transparent;
+}
+body {
+  background: var(--color-bg-1);   /* the chrome color shows through gaps */
+  color: var(--color-text-1);
+  font-family: var(--font-sans);
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+  user-select: none;
+}
+input, textarea {
+  user-select: text;
+}
+/* Chat transcripts are readable content, not app chrome — the agent's prose,
+   code, and tool output must be selectable/copyable even though the rest of
+   the app is `user-select: none` for a native feel. Scoped to the chat
+   surfaces (native Aura brain + the engine-agnostic agent transcript both
+   carry `.aura-chat`). */
+.aura-chat {
+  -webkit-user-select: text;
+  user-select: text;
+}
+
+/* Scrollbar — Apple-Notes restraint. Hidden by default, glides in on
+ * hover. WebKit-only (fine for the macOS-first phase). */
+::-webkit-scrollbar { width: 10px; height: 10px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: transparent; border-radius: 5px; }
+*:hover > ::-webkit-scrollbar-thumb,
+:hover::-webkit-scrollbar-thumb { background: var(--color-bg-hover); }
+
+/* Hide scrollbars on horizontally-scrolling chip rows (sidebar headers). */
+.no-scrollbar { scrollbar-width: none; }
+.no-scrollbar::-webkit-scrollbar { display: none; }
+
+/* CodeMirror's One Dark theme overrides — blend the editor with the
+ * inset panel instead of sitting in a contrasting box. */
+.cm-editor {
+  background: var(--color-bg-0) !important;
+  font-family: var(--font-mono) !important;
+  font-size: 13px !important;
+}
+.cm-gutters {
+  background: var(--color-bg-0) !important;
+  border-right: 1px solid var(--color-line-soft) !important;
+}
+
+/* MergeView (source-control diff) needs explicit sizing — without it the
+ * root collapses to content height inside flex parents and the diff stops
+ * scrolling at the viewport. Mirror the cm-editor sizing so both halves
+ * fill the host. */
+.cm-mergeView {
+  height: 100%;
+  min-height: 0;
+}
+.cm-mergeView .cm-mergeViewEditors,
+.cm-mergeView .cm-mergeViewEditor {
+  height: 100%;
+  min-height: 0;
+}
+.cm-mergeView .cm-editor {
+  height: 100%;
+}
+.cm-mergeView .cm-scroller {
+  overflow: auto;
+}
+
+/* ── Phase H polish layer ─────────────────────────────────────────────
+ * Global motion + focus-ring + shortcut-pill rules. Kept at the bottom
+ * so Tailwind utilities defined earlier still apply in the cascade
+ * order, with these acting as token-aware refinements on top.
+ */
+
+/* Override Tailwind's transition timing to ease-out (decisive, not
+ * draggy) and clamp duration so no component drifts past 200ms without
+ * an explicit override. Anything that needs longer should opt out by
+ * setting its own `transition-duration`. */
+*,
+*::before,
+*::after {
+  transition-timing-function: cubic-bezier(0.2, 0, 0, 1);
+}
+
+/* Primer-flavoured focus ring. Only paints on keyboard focus
+ * (:focus-visible) so click-to-press buttons don't get a permanent
+ * outline. Anchors, buttons, inputs, selects, textareas all share the
+ * same ring spec for muscle-memory consistency across the shell. */
+:focus {
+  outline: none;
+}
+button:focus-visible,
+a:focus-visible,
+[role="button"]:focus-visible,
+[role="menuitem"]:focus-visible,
+[role="tab"]:focus-visible,
+[tabindex]:not([tabindex="-1"]):focus-visible {
+  outline: var(--focus-ring-width) solid var(--focus-ring-color);
+  outline-offset: var(--focus-ring-offset);
+  border-radius: var(--radius-sm);
+}
+
+/* Form fields (input, textarea, select, contenteditable) almost always
+ * live inside wrapper components that paint their own focus-within
+ * styling (border colour shift, glow, etc). A second outline on the
+ * field itself would just stack a hard ring on top of a soft border —
+ * which is the artefact users were seeing on the dashboard composer
+ * and elsewhere. Components that want a ring on the bare field can
+ * opt back in with `focus-visible:ring-*` Tailwind utilities. */
+input:focus,
+input:focus-visible,
+select:focus,
+select:focus-visible,
+textarea:focus,
+textarea:focus-visible,
+[contenteditable]:focus,
+[contenteditable]:focus-visible {
+  outline: none;
+}
+
+/* ── unified typography utilities ─────────────────────────────────────
+ * Class hooks for components to opt onto the shared scale instead of
+ * baking inline px/rem values. Use `text-*` (Tailwind) for normal flow;
+ * these variants exist for components that want to bind to the token
+ * directly (so renaming a stop here propagates everywhere).
+ */
+.t-2xs  { font-size: var(--font-size-2xs);  line-height: var(--line-height-2xs); }
+.t-xs   { font-size: var(--font-size-xs);   line-height: var(--line-height-xs); }
+.t-sm   { font-size: var(--font-size-sm);   line-height: var(--line-height-sm); }
+.t-base { font-size: var(--font-size-base); line-height: var(--line-height-base); }
+.t-md   { font-size: var(--font-size-md);   line-height: var(--line-height-md); }
+.t-lg   { font-size: var(--font-size-lg);   line-height: var(--line-height-lg); }
+.t-xl   { font-size: var(--font-size-xl);   line-height: var(--line-height-xl); }
+
+.t-body    { font-weight: var(--font-weight-body); }
+.t-ui      { font-weight: var(--font-weight-ui); }
+.t-heading { font-weight: var(--font-weight-heading); letter-spacing: var(--letter-spacing-tight); }
+.t-accent  { font-weight: var(--font-weight-accent); }
+
+/* Code-identifier helper — for inline names inside otherwise-prose
+ * UI (block payloads, finding messages, status banners). Picks up
+ * the JetBrains Mono lead and tightens letter-spacing so identifiers
+ * read crisp without a dedicated <code> wrapper everywhere. */
+.aura-ident {
+  font-family: var(--font-mono);
+  font-feature-settings: "calt", "ss01", "ss02";
+  letter-spacing: -0.01em;
+}
+
+/* ── Forge chat-panel shell (Stage 11.6) ──────────────────────────────
+ * Direct port of the prototype design (Chat States.html). Class names
+ * mirror the prototype 1:1 so the JSX reads identically; values map to
+ * our existing arctic-blue tokens instead of the prototype's warm
+ * orange. Scoped under `.aura-chat` so these names cannot leak.
+ *
+ * Shell layout: .aura-chat .panel { flex column } > .p-tabs (38px) +
+ * .p-scroll (flex 1) + .p-dock (auto, with .composer inside).
+ */
+
+/* Chat redesign (2026-06) — the native chat surface is GREEN-branded, no
+ * blue (user: "no blue our own green is fine"). Rather than re-skin a dozen
+ * controls, remap the accent token *within the chat scope only*. Every
+ * `--color-accent` use below (p-tab dot, caret, send-btn, mode chip, quick
+ * hover, composer-atom) AND every inline `var(--color-accent)` in the React
+ * tool/thinking components (they render inside `.aura-chat .p-scroll`) flips
+ * to Aura green with zero blast radius on the rest of the app. accent-soft is
+ * remapped in step so the mode chip's tinted fill tracks the new hue. */
+.aura-chat {
+  --color-accent: var(--color-accent-green);
+  --color-accent-soft: color-mix(in srgb, var(--color-accent-green) 14%, transparent);
+  /* Reading-column width shared by the message stream AND the composer dock.
+     The conversation lives in a centered column (Conductor/Claude-style) rather
+     than stretching edge-to-edge — calmer to read and it gives the interactive
+     cards (questions, plans) a sane, designable width instead of a full-bleed
+     band. Messages keep their own intra-column alignment (user bubbles hug the
+     right via margin-left:auto, agent prose hugs the left). */
+  --chat-col: 740px;
+}
+
+/* Aura-themed Medusa menu/select surface. The genuine @medusajs/ui
+ * DropdownMenu / Select render off Medusa's own design-token CSS variables
+ * (--bg-component, --fg-base, --border-base …); this scope remaps just those
+ * to our arctic-dark palette so the real Medusa component wears the app's
+ * colors — surface, row-hover, text, border, and the arctic-blue accent —
+ * instead of Medusa's neutral gray. Set on the (portaled) Content element;
+ * the custom properties cascade to every row inside it. Same zero-blast-radius
+ * token-scoping trick as .aura-chat above — Medusa surfaces without this class
+ * are untouched. Covers both component-surface (DropdownMenu) and base-surface
+ * (Select) token names so one class themes every menu we migrate. */
+.aura-menu {
+  --bg-component: var(--color-popover-bg);
+  --bg-component-hover: var(--color-popover-row-hover);
+  --bg-component-pressed: var(--color-popover-row-hover);
+  --bg-base: var(--color-popover-bg);
+  --bg-base-hover: var(--color-popover-row-hover);
+  --bg-base-pressed: var(--color-popover-row-hover);
+  --fg-base: var(--color-text-1);
+  --fg-subtle: var(--color-text-3);
+  --fg-muted: var(--color-text-3);
+  --fg-interactive: var(--color-accent);
+  --fg-interactive-hover: var(--color-accent);
+  --border-base: var(--color-popover-border);
+  --border-menu-top: var(--color-popover-border);
+  --border-menu-bot: var(--color-popover-border);
+}
+
+.aura-chat .panel,
+.aura-chat.panel {
+  background: var(--color-bg-0);
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  overflow: hidden;
+}
+
+/* header strip — a clean conversation header, NOT a row of competing chips.
+   The session title reads as a flat heading (status dot + name, no pill fill);
+   the right-side controls are quiet ghost icon-buttons. Left padding matches
+   `.p-scroll` so the title sits directly above the first message. */
+.aura-chat .p-tabs {
+  display: flex;
+  align-items: center;
+  height: 42px;
+  border-bottom: 1px solid var(--color-line-soft);
+  padding: 0 18px 0 30px;
+  gap: 4px;
+  flex: none;
+}
+.aura-chat .p-tab {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding: 0;
+  border-radius: 0;
+  color: var(--color-text-2);
+  font-size: var(--font-size-base);
+  line-height: var(--line-height-base);
+  font-weight: var(--font-weight-strong, 600);
+  cursor: default;
+  max-width: 320px;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+.aura-chat .p-tab.active {
+  background: transparent;
+  color: var(--color-text-1);
+}
+.aura-chat .p-tab .dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--color-accent);
+  flex: none;
+}
+.aura-chat .p-tab .dot.streaming {
+  animation: aura-chat-pulse-dot 1.4s ease-in-out infinite;
+}
+.aura-chat .p-tab .dot.green   { background: var(--color-accent-green); }
+.aura-chat .p-tab .dot.faint   { background: var(--color-text-4); }
+.aura-chat .p-tabs .spacer { flex: 1; }
+.aura-chat .p-tabs .icon-btn {
+  background: transparent;
+  border: 0;
+  width: 26px;
+  height: 26px;
+  border-radius: var(--radius-sm);
+  color: var(--color-text-3);
+  cursor: pointer;
+  display: grid;
+  place-items: center;
+}
+.aura-chat .p-tabs .icon-btn:hover {
+  background: var(--color-bg-2);
+  color: var(--color-text-1);
+}
+@keyframes aura-chat-pulse-dot {
+  0%, 100% { opacity: 0.5; }
+  50%      { opacity: 1; }
+}
+
+/* scroll area — references-grade breathing room. Generous side padding so
+   messages don't hug the chrome, and a column gap that paces user ↔ agent
+   turns the way the reference chat apps do (no cramped thin margins). */
+.aura-chat .p-scroll {
+  flex: 1;
+  overflow-y: auto;
+  padding: 14px 22px 12px;
+  gap: 10px;
+  scrollbar-width: thin;
+  min-height: 0;
+  /* Center the conversation column; the scrollbar stays at the pane's far
+     edge while each turn is capped + centered to --chat-col below. */
+  align-items: center;
+}
+/* Every turn / card / status line is a direct child here — cap each to the
+   reading column and let the flex `align-items: center` centre it. This is
+   what narrows the whole stream without restructuring the JSX or breaking the
+   per-bubble alignment that lives inside each child. */
+.aura-chat .p-scroll > * {
+  width: 100%;
+  max-width: var(--chat-col);
+}
+
+/* dock — holds inline cards + composer. Flush with the main surface: no
+   separate fill, no heavy frame, just a hairline above it. The composer
+   inside reads as part of the conversation surface, not a docked panel.
+   Horizontal padding matches `.p-scroll` so the composer's left edge lines
+   up exactly with the messages above it. */
+.aura-chat .p-dock {
+  flex: none;
+  border-top: 1px solid var(--color-line-soft);
+  background: transparent;
+  padding: 8px 30px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  /* Center the composer column so it lines up with the message column above
+     and never stretches full-bleed (Conductor-style). */
+  align-items: center;
+}
+/* The composer, pending-question card and queue stack all cap to the same
+   reading column as the messages, so the input sits in the same centered band. */
+.aura-chat .p-dock > * {
+  width: 100%;
+  max-width: var(--chat-col);
+}
+
+/* composer */
+/* Composer — a clean rounded CARD that sits directly on the main surface.
+   Background is the MAIN bg, never the darker `--color-composer-bg` fill the
+   user rejected ("the composer card, not in the darker square box") — the
+   card reads through its border + radius, not a darker tint. The dock around
+   it is transparent so there's no boxed container behind the card either. */
+.aura-chat .composer {
+  background: transparent;
+  border: 1px solid var(--color-composer-border);
+  border-radius: var(--radius-xl);
+  padding: 11px 13px 9px;
+  transition: border-color 0.15s ease, box-shadow 0.15s ease;
+}
+/* Fused onto a docked question card directly above: drop the top border and
+   square the top corners so the question (which rounds only its top) and the
+   composer read as a single stacked panel meeting on one hairline. */
+.aura-chat .composer-docked {
+  border-top: none;
+  border-top-left-radius: 0;
+  border-top-right-radius: 0;
+}
+.aura-chat .composer.focus,
+.aura-chat .composer:focus-within {
+  border-color: var(--color-composer-border-focus);
+  box-shadow: 0 0 0 3px
+    color-mix(in srgb, var(--color-accent) 12%, transparent);
+}
+/* When docked + focused, the focus ring would draw a phantom line across the
+   fused seam; keep just the border-colour shift, no boxed ring. */
+.aura-chat .composer-docked.focus,
+.aura-chat .composer-docked:focus-within {
+  box-shadow: none;
+}
+.aura-chat .composer .inputline {
+  width: 100%;
+  background: transparent;
+  border: 0;
+  outline: 0;
+  color: var(--color-text-1);
+  font-family: var(--font-sans);
+  font-size: var(--font-size-base);
+  font-weight: var(--font-weight-body);
+  padding: 4px 0 6px;
+  display: block;
+  line-height: var(--line-height-base);
+  min-height: 22px;
+  resize: none;
+}
+.aura-chat .composer .inputline::placeholder,
+.aura-chat .composer .inputline.empty {
+  color: var(--color-text-4);
+}
+.aura-chat .composer .inputline .caret {
+  display: inline-block;
+  width: 1.5px;
+  height: 14px;
+  background: var(--color-accent);
+  vertical-align: -2px;
+  margin-left: 1px;
+  animation: aura-chat-caret 1s steps(2) infinite;
+}
+@keyframes aura-chat-caret { 50% { opacity: 0; } }
+
+/* Tiptap composer — the ProseMirror surface that replaced the textarea.
+   Inherits the .inputline ink/size; ProseMirror needs an explicit max-height
+   + scroll so a long draft doesn't push the chip row off-screen. The atom
+   chips below render `/command` and `@file` mentions as inline pills. */
+.aura-chat .composer .tiptap-composer-input {
+  width: 100%;
+  background: transparent;
+  border: 0;
+  outline: 0;
+  color: var(--color-text-1);
+  font-family: var(--font-sans);
+  font-size: var(--font-size-base);
+  font-weight: var(--font-weight-body);
+  padding: 4px 0 6px;
+  line-height: var(--line-height-base);
+  min-height: 22px;
+  max-height: 168px;
+  overflow-y: auto;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+  white-space: pre-wrap;
+}
+.aura-chat .composer .tiptap-composer-input p {
+  margin: 0;
+}
+/* Placeholder — tiptap-placeholder sets data-placeholder on the first empty
+   block; render it as muted ghost text matching the old textarea. */
+.aura-chat .composer .tiptap-composer-input p.is-editor-empty:first-child::before {
+  content: attr(data-placeholder);
+  float: left;
+  height: 0;
+  pointer-events: none;
+  color: var(--color-text-4);
+}
+.composer-atom {
+  display: inline-flex;
+  align-items: center;
+  padding: 0 5px;
+  border-radius: var(--radius-sm);
+  font-family: var(--font-mono);
+  font-size: 0.92em;
+  line-height: 1.5;
+  white-space: nowrap;
+  cursor: default;
+  user-select: none;
+}
+.composer-atom-slash {
+  background: color-mix(in srgb, var(--color-accent) 16%, transparent);
+  color: var(--color-accent);
+  border: 1px solid color-mix(in srgb, var(--color-accent) 32%, transparent);
+}
+.composer-atom-mention {
+  background: color-mix(in srgb, var(--color-text-2) 12%, transparent);
+  color: var(--color-text-1);
+  border: 1px solid var(--color-line-soft);
+}
+/* ReasoningBlock — the "whisper line". A single quiet line (green ✦ spark +
+   "Thinking…"/"Thought for Ns") that expands into a left-ruled reasoning
+   aside. Borderless when collapsed so a settled thought is one calm line. */
+.aura-chat .reasoning-whisper {
+  margin: 2px 0;
+}
+.aura-chat .reasoning-whisper-head {
+  display: inline-flex;
+  align-items: center;
+  /* Same leading rhythm as a tool row (zero left pad + 16px glyph column +
+     8px gap) so the thought glyph sits flush-left at the SAME x as the answer
+     prose and every read/run/agent row — the reference's aligned activity
+     list. No left inset: the glyph column is the left margin. */
+  gap: 8px;
+  background: transparent;
+  border: 0;
+  cursor: pointer;
+  padding: 3px 0;
+  font-size: var(--font-size-sm);
+  line-height: var(--line-height-sm);
+  color: var(--color-text-3);
+  transition: color var(--motion-fast);
+}
+.aura-chat .reasoning-whisper-head:hover {
+  color: var(--color-text-2);
+}
+.aura-chat .reasoning-whisper-head .spark {
+  /* Fixed 16px centering column (matches .aura-tool-glyph) so the thought
+     glyph and every tool glyph share one x. Muted ink, not green — a thinking
+     marker is ambient, never a brand accent (the de-green pass). */
+  flex: 0 0 auto;
+  width: 16px;
+  height: 16px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--color-text-3);
+}
+.aura-chat .reasoning-whisper-head .spark.live {
+  animation: aura-chat-spark 1.7s ease-in-out infinite;
+}
+@keyframes aura-chat-spark {
+  0%, 100% { opacity: 0.55; transform: scale(0.9); }
+  50%      { opacity: 1; transform: scale(1.08); }
+}
+.aura-chat .reasoning-whisper-head .chev {
+  display: inline-flex;
+  color: var(--color-text-4);
+}
+.aura-chat .reasoning-whisper-body {
+  margin: 6px 0 2px;
+  padding: 2px 0 2px 13px;
+  border-left: 2px solid var(--color-line);
+  color: var(--color-text-3);
+  font-size: 12px;
+  line-height: 1.55;
+}
+/* tighten block spacing so streamed chain-of-thought reads as a compact aside */
+.reasoning-prose p {
+  margin: 0 0 0.35em;
+}
+.reasoning-prose p:last-child {
+  margin-bottom: 0;
+}
+
+/* Collapsed action tool call — a calm flat log line (NOT a pill). One quiet
+   row by default; clicking expands the full ToolCard. No border, no balloon:
+   just glyph · verb · subject · (diffstat|metric) · status mark, with a faint
+   ink hover. Same rhythm as the read/"thinking" line so the whole activity
+   stream reads as one flat-line family. Accent is chat-scoped green. */
+.aura-chat .aura-tool-chip {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  min-width: 0;
+  text-align: left;
+  /* No left inset — the 16px glyph column IS the left margin, so the verb
+     column lands at the same x as the answer prose above it (flush-left
+     activity stream, matching the reference). */
+  padding: 3px 0;
+  border-radius: var(--radius-sm);
+  color: var(--color-text-2);
+  font-size: 12px;
+  line-height: 1.25;
+  transition: background var(--motion-fast);
+}
+.aura-chat .aura-tool-chip:hover {
+  background: color-mix(in srgb, var(--color-text-3) 7%, transparent);
+}
+.aura-chat .aura-tool-chip-verb {
+  flex-shrink: 0;
+  font-weight: 500;
+  color: var(--color-text-1);
+}
+.aura-chat .aura-tool-chip-subject {
+  min-width: 0;
+  flex: 1 1 auto;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--color-text-2);
+}
+.aura-chat .aura-tool-chip-subject.font-mono {
+  font-family: var(--font-mono);
+  font-size: 11px;
+}
+/* Dim mono secondary preview (the shell command behind a described step).
+   Shares the row with the primary subject; both ellipsize so a long command
+   degrades gracefully rather than shoving the status mark off the row. */
+.aura-chat .aura-tool-chip-aux {
+  min-width: 0;
+  flex: 1 1 auto;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--color-text-3);
+}
+.aura-chat .aura-tool-chip-diffstat {
+  flex-shrink: 0;
+  margin-left: auto;
+  display: inline-flex;
+  gap: 6px;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+.aura-chat .aura-tool-chip-metric {
+  flex-shrink: 0;
+  margin-left: auto;
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  color: var(--color-text-3);
+  font-variant-numeric: tabular-nums;
+}
+/* Exit-status pill for a command run — the at-a-glance "did it work" signal the
+   reference (session transcript) carries on every shell row: a green "exit 0"
+   when it succeeded, a red "failed" when it errored. Green here is status, not a
+   brand accent (allowed), so it survives the de-green pass. Rides the right edge
+   like the metric it replaces for run-glyph rows. */
+.aura-chat .aura-tool-exit {
+  flex-shrink: 0;
+  margin-left: auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  height: 16px;
+  padding: 0 6px;
+  border: 1px solid;
+  border-radius: 999px;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  font-weight: 500;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+/* Shared chrome for every collapsed tool row — the read/"thinking" line, the
+   action chip, and both group headers (Exploring…/Working). Identical
+   padding/gap/height so stacked rows keep one vertical rhythm, and — paired
+   with .aura-tool-glyph below — one leading column so every verb starts at the
+   same x. The chip keeps its own near-identical rule for its sub-parts. */
+.aura-chat .aura-tool-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  min-width: 0;
+  text-align: left;
+  /* Flush-left: no left inset, so the glyph column starts at the prose's left
+     edge and every verb lines up one column in. */
+  padding: 3px 0;
+  border-radius: var(--radius-sm);
+  font-size: 12px;
+  line-height: 1.25;
+  color: var(--color-text-2);
+  transition: background var(--motion-fast);
+}
+.aura-chat .aura-tool-row:hover {
+  background: color-mix(in srgb, var(--color-text-3) 7%, transparent);
+}
+
+/* Expanded action tool — flat row + inline detail, NOT a bordered card and no
+   tint either. The open state reads from the flipped chevron + the detail that
+   hangs directly under it (indented to the verb column, 24px = 16px glyph +
+   8px gap), shrink-wrapping its content so a short command or a small result
+   never stretches edge-to-edge. No persistent wash — a tint strip read as a
+   box; the disclosure is cue enough. Hover matches every other row. */
+.aura-chat .aura-tool-expanded {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+.aura-chat .aura-tool-row-open:hover {
+  background: color-mix(in srgb, var(--color-text-3) 7%, transparent);
+}
+.aura-chat .aura-tool-detail {
+  margin: 2px 0 4px 24px;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 4px;
+  max-width: calc(100% - 24px);
+}
+.aura-chat .aura-tool-detail > * {
+  max-width: 100%;
+  min-width: 0;
+}
+/* Terminal wells break the verb indent — a command's output is full-bleed to
+   the row's left edge, reading as a shell pane, not a card tucked under the
+   icon. (User: "no indentation for the terminal output cards.") */
+.aura-chat .aura-tool-detail-flush {
+  margin-left: 0;
+  max-width: 100%;
+}
+
+/* ── Terminal well ──────────────────────────────────────────────────────
+   A command + its output in one compact console pane. Distinct from the diff
+   and prose blocks: a cooler near-black surface, a denser monospace with a
+   touch of letter-spacing, and tight padding — it should read as a TERMINAL,
+   not a generic card. (User: "compact … different font and style for
+   terminal.") */
+.aura-chat .aura-term-well {
+  overflow: hidden;
+  border: 1px solid color-mix(in srgb, var(--color-line-soft) 70%, transparent);
+  border-radius: var(--radius-sm);
+  background: color-mix(in srgb, var(--color-bg-0) 86%, #000);
+}
+.aura-chat .aura-term-pre {
+  margin: 0;
+  padding: 6px 9px;
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  line-height: 1.5;
+  letter-spacing: 0.01em;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.aura-chat .aura-term-cmd {
+  color: var(--color-text-1);
+  font-weight: 500;
+}
+.aura-chat .aura-term-more {
+  display: block;
+  width: 100%;
+  text-align: left;
+  padding: 3px 9px;
+  font-size: 10.5px;
+  letter-spacing: 0.02em;
+  color: var(--color-text-4);
+  border-top: 1px solid color-mix(in srgb, var(--color-line-soft) 60%, transparent);
+  background: transparent;
+  transition: color var(--motion-fast);
+}
+.aura-chat .aura-term-more:hover {
+  color: var(--color-text-2);
+}
+
+/* Hoisted interactive cards — a question the brain asked you (AskUserQuestion)
+   or a plan it proposed (ExitPlanMode) — surfaced PROMINENTLY in the main turn
+   flow instead of buried under the "Worked through N steps" roll-up. A titled
+   header + the bold question + numbered options, the way Cursor shows its
+   question cards, in Aura's own tokens (no orange — that's agent-brand only).
+   Prominent but never bulky: a thin frame, a compact header, dense option
+   rows. */
+.aura-chat .aura-ask-card,
+.aura-chat .aura-plan-card {
+  width: 100%;
+  border: 1px solid var(--color-line);
+  border-radius: var(--radius-md);
+  background: var(--color-bg-1);
+  overflow: hidden;
+}
+.aura-chat .aura-ask-card-head,
+.aura-chat .aura-plan-card-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 10px;
+  font-size: 10.5px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--color-text-3);
+  border-bottom: 1px solid var(--color-line-soft);
+  background: color-mix(in srgb, var(--color-bg-2) 55%, transparent);
+}
+.aura-chat .aura-ask-card-head svg,
+.aura-chat .aura-plan-card-head svg {
+  color: var(--color-text-2);
+}
+.aura-chat .aura-ask-card-body {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 10px;
+}
+.aura-chat .aura-ask-q {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.aura-chat .aura-ask-q-text {
+  font-size: 13px;
+  line-height: 1.4;
+  font-weight: 600;
+  color: var(--color-text-1);
+}
+.aura-chat .aura-ask-options {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.aura-chat .aura-ask-option {
+  display: flex;
+  align-items: flex-start;
+  gap: 9px;
+  padding: 7px 9px;
+  border: 1px solid var(--color-line-soft);
+  border-radius: var(--radius-sm);
+  background: var(--color-bg-0);
+}
+.aura-chat .aura-ask-num {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  margin-top: 1px;
+  border-radius: 5px;
+  font-size: 10.5px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  color: var(--color-text-2);
+  background: var(--color-bg-2);
+}
+.aura-chat .aura-ask-option-body {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+.aura-chat .aura-ask-option-label {
+  font-size: 12.5px;
+  line-height: 1.35;
+  font-weight: 500;
+  color: var(--color-text-1);
+}
+.aura-chat .aura-ask-option-desc {
+  font-size: 11.5px;
+  line-height: 1.4;
+  color: var(--color-text-3);
+}
+.aura-chat .aura-ask-hint {
+  font-size: 10.5px;
+  color: var(--color-text-4);
+}
+.aura-chat .aura-plan-card-body {
+  padding: 8px 11px;
+  font-size: 12.5px;
+  line-height: 1.5;
+  color: var(--color-text-2);
+}
+
+/* Fixed leading column — a 16px box that CENTERS whatever marks the row: the
+   per-tool glyph (13px SVG), a status dot (6px), a disclosure chevron, or a
+   group pip. Every leading mark thus occupies the same width, so the verb that
+   follows lands at one x down the whole stream — no more glyph/dot jitter. */
+.aura-chat .aura-tool-glyph {
+  flex: 0 0 auto;
+  width: 16px;
+  height: 16px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+/* Expanded group children (LiveToolStatus / ExploringGroup) — an indented
+   list under a single left hairline, replacing the old bordered box so the
+   whole activity stream stays flat lines, not nested cards. The rail is the
+   only "these belong to the group above" cue. */
+.aura-chat .aura-tool-substream {
+  margin-left: 7px;
+  padding-left: 11px;
+  border-left: 1px solid var(--color-line-soft);
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+/* Settled-turn activity roll-up (TurnActivity) — the Conductor treatment for a
+   FINISHED assistant turn's step-run. Collapsed by default to ONE quiet
+   disclosure line; the answer prose renders below it untouched. Quiet, not a
+   loud accent button: muted ink, a faint ink hover, the same flat-row rhythm
+   as a tool line so it reads as a calm summary, not a call to action. */
+.aura-chat .aura-turn-activity {
+  margin: 1px 0 2px;
+}
+.aura-chat .aura-turn-activity-summary {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  width: 100%;
+  min-width: 0;
+  text-align: left;
+  background: transparent;
+  border: 0;
+  cursor: pointer;
+  /* Flush-left like the step rows it expands to — the summary glyph sits at the
+     same x as the answer prose and every step glyph below it. */
+  padding: 3px 0;
+  border-radius: var(--radius-sm);
+  color: var(--color-text-3);
+  font-size: 12px;
+  line-height: 1.25;
+  transition: color var(--motion-fast), background var(--motion-fast);
+}
+.aura-chat .aura-turn-activity-summary:hover {
+  /* Text-only hover — no fill. A full-width rounded background read as an
+     "extra box" wrapping the row; the reference summary is just clickable
+     text that brightens. */
+  color: var(--color-text-2);
+}
+/* Leading glyph — same 16px centering column as a tool row so the counts
+   line up with the verbs in the expanded list below. */
+.aura-chat .aura-turn-activity-glyph {
+  flex: 0 0 auto;
+  width: 16px;
+  height: 16px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--color-text-4);
+}
+.aura-chat .aura-turn-activity-summary:hover .aura-turn-activity-glyph {
+  color: var(--color-text-3);
+}
+.aura-chat .aura-turn-activity-counts {
+  min-width: 0;
+  /* Don't GROW — only shrink (with ellipsis) when space is tight. A growing
+     counts span pushed the chevron to the far right edge; sized to content,
+     the chevron sits immediately after the text where the eye expects it. */
+  flex: 0 1 auto;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-weight: 500;
+}
+.aura-chat .aura-turn-activity-chev {
+  flex: 0 0 auto;
+  /* Right after the counts, not flung to the edge — a 1px optical nudge off
+     the text baseline so the caret reads as part of the same affordance. */
+  margin-left: 1px;
+  display: inline-flex;
+  color: var(--color-text-4);
+}
+/* Expanded flat step list — flush-left, NO rail. The reference renders every
+   step (thinking / read / run / agent) at the SAME left margin as the summary
+   header above it: no indent, no hairline box. The summary line and each step
+   row carry the same internal padding + 16px glyph column, so a zero margin
+   lands every step glyph at one x straight under the summary glyph. A uniform
+   vertical list: each reasoning whisper and each tool card on its own row, NO
+   nested grouping, NO bordered container. */
+.aura-chat .aura-turn-activity-list {
+  margin: 2px 0 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+/* ── Crew telemetry strip (docked above the composer) ──────────────────────
+   The live "N agents working" line for the autonomous work-loop, collapsible
+   into nested per-agent rows. Quiet by default; amber spinner = live, green =
+   landed (status only — never affordances). Lives in the composer dock, so it
+   reads as composer chrome, not a mid-stream card. */
+.aura-chat .aura-crew-block {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 5px 9px;
+  border: 1px solid var(--color-line-soft);
+  border-radius: var(--radius-sm);
+  background: color-mix(in srgb, var(--color-bg-card) 70%, transparent);
+}
+.aura-chat .aura-crew-head {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  width: 100%;
+  min-width: 0;
+  text-align: left;
+  background: transparent;
+  border: 0;
+  cursor: pointer;
+  padding: 0;
+  color: var(--color-text-3);
+  font-size: 12px;
+  line-height: 1.25;
+  transition: color var(--motion-fast);
+}
+.aura-chat .aura-crew-head:hover {
+  color: var(--color-text-2);
+}
+.aura-chat .aura-crew-glyph {
+  flex: 0 0 auto;
+  width: 16px;
+  height: 16px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  /* Amber = an agent is on it (working). Calm muted when only queued. */
+  color: var(--color-accent-amber, rgb(217 154 43));
+}
+.aura-chat .aura-crew-summary {
+  min-width: 0;
+  flex: 1 1 auto;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-weight: 500;
+}
+.aura-chat .aura-crew-lead {
+  color: var(--color-text-4);
+  font-weight: 400;
+}
+.aura-chat .aura-crew-chev {
+  flex: 0 0 auto;
+  display: inline-flex;
+  color: var(--color-text-4);
+}
+.aura-chat .aura-crew-rows {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.aura-chat .aura-crew-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  width: 100%;
+  text-align: left;
+  background: transparent;
+  border: 0;
+  border-radius: var(--radius-xs);
+  padding: 3px 4px;
+  font-size: 12px;
+  color: var(--color-text-2);
+}
+.aura-chat .aura-crew-row-live {
+  cursor: pointer;
+  transition: background var(--motion-fast);
+}
+.aura-chat .aura-crew-row-live:hover {
+  background: color-mix(in srgb, var(--color-text-1) 6%, transparent);
+}
+.aura-chat .aura-crew-row-title {
+  min-width: 0;
+  flex: 0 1 auto;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.aura-chat .aura-crew-row-done {
+  color: var(--color-text-3);
+}
+.aura-chat .aura-crew-fail-dot {
+  flex: 0 0 auto;
+  width: 7px;
+  height: 7px;
+  margin: 0 5px;
+  border-radius: 9999px;
+  background: #d66a6a;
+}
+.aura-chat .aura-crew-fail-msg {
+  min-width: 0;
+  flex: 1 1 auto;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 11px;
+  color: #d08a8a;
+}
+.aura-chat .aura-crew-foot {
+  margin-top: 2px;
+  font-size: 11px;
+  color: var(--color-text-4);
+}
+.aura-chat .aura-crew-foot code {
+  font-size: 10.5px;
+  padding: 0 3px;
+  border-radius: 3px;
+  background: color-mix(in srgb, var(--color-text-1) 8%, transparent);
+}
+
+/* Controls bar — the mockup's signature two-zone composer: a full-bleed
+   hairline divides the input from the model/effort/approvals/send row.
+   Negative side-margins pull the rule edge-to-edge past the composer's
+   own padding; the matching padding restores the inset for the chips. */
+.aura-chat .composer-bottom {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 9px -13px -9px;
+  padding: 8px 13px;
+  border-top: 1px solid var(--color-line-soft);
+}
+.aura-chat .composer-bottom .right {
+  margin-left: auto;
+  display: flex;
+  gap: 4px;
+  align-items: center;
+}
+.aura-chat .chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  background: var(--color-pill-bg);
+  border: 1px solid var(--color-line-soft);
+  color: var(--color-pill-fg);
+  padding: 4px 10px;
+  border-radius: 999px;
+  font-size: var(--font-size-xs);
+  line-height: var(--line-height-xs);
+  font-weight: var(--font-weight-ui);
+  cursor: pointer;
+  transition: background 0.12s ease, color 0.12s ease, border-color 0.12s ease;
+}
+.aura-chat .chip:hover {
+  background: var(--color-pill-bg-hover);
+  color: var(--color-text-1);
+}
+.aura-chat .chip.mode {
+  color: var(--color-accent);
+  border-color: color-mix(in srgb, var(--color-accent) 40%, transparent);
+  background: var(--color-accent-soft);
+}
+.aura-chat .chip.mode-build {
+  color: var(--color-accent-green);
+  border-color: color-mix(in srgb, var(--color-accent-green) 40%, transparent);
+  background: color-mix(in srgb, var(--color-accent-green) 10%, transparent);
+}
+.aura-chat .icon-btn-sm {
+  background: transparent;
+  border: 0;
+  width: 24px;
+  height: 24px;
+  color: var(--color-text-3);
+  border-radius: var(--radius-sm);
+  display: grid;
+  place-items: center;
+  cursor: pointer;
+}
+.aura-chat .icon-btn-sm:hover {
+  background: var(--color-bg-2);
+  color: var(--color-text-1);
+}
+/* The little ⌘↵ / Esc / ⏎ key hint that rides inside the send/stop/queue
+   Button. The buttons themselves are the 3D Button primitive now (btn3d);
+   this is just the inset key cap, tinted off the button's own foreground so
+   it reads on the green primary, the red danger, and the subtle bg-2 alike. */
+.aura-chat .send-kbd {
+  background: color-mix(in srgb, currentColor 18%, transparent);
+  padding: 1px 4px;
+  border-radius: var(--radius-xs);
+  font-size: var(--font-size-2xs);
+  line-height: var(--line-height-2xs);
+  opacity: 0.85;
+  border: 0;
+}
+
+/* empty hero — no aura logo; clean text-only intro so the chat starts
+   with prose, not branding. Tighter padding so the intro doesn't push
+   the composer down past comfortable reading height. */
+.aura-chat .empty-hero {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  text-align: center;
+  padding: 32px 24px 16px;
+  gap: 10px;
+  height: 100%;
+}
+.aura-chat .empty-hero h3 {
+  margin: 0;
+  font-size: var(--font-size-lg);
+  line-height: var(--line-height-lg);
+  font-weight: var(--font-weight-heading);
+  letter-spacing: var(--letter-spacing-tight);
+  color: var(--color-text-1);
+}
+.aura-chat .empty-hero p {
+  margin: 0;
+  color: var(--color-text-2);
+  font-size: var(--font-size-sm);
+  line-height: var(--line-height-sm);
+  font-weight: var(--font-weight-body);
+  max-width: 280px;
+}
+.aura-chat .quick-row {
+  display: grid;
+  gap: 6px;
+  width: 100%;
+  margin-top: 4px;
+}
+.aura-chat .quick {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 12px;
+  border: 1px solid var(--color-line-soft);
+  background: var(--color-bg-2);
+  border-radius: var(--radius-md);
+  text-align: left;
+  cursor: pointer;
+  color: var(--color-text-1);
+  font-size: var(--font-size-sm);
+  line-height: var(--line-height-sm);
+  font-weight: var(--font-weight-ui);
+}
+.aura-chat .quick:hover {
+  border-color: color-mix(in srgb, var(--color-accent) 40%, transparent);
+  background: var(--color-bg-3);
+}
+.aura-chat .quick .qg {
+  width: 24px;
+  height: 24px;
+  border-radius: var(--radius-sm);
+  background: var(--color-bg-3);
+  display: grid;
+  place-items: center;
+  color: var(--color-text-3);
+  flex: none;
+}
+.aura-chat .quick .arrow {
+  margin-left: auto;
+  color: var(--color-text-4);
+}
+
+/* codeword (inline mono callout — used in empty-hero copy + agent text) */
+.aura-chat .codeword {
+  font-family: var(--font-mono);
+  font-size: var(--font-size-xs);
+  background: var(--color-bg-2);
+  border: 1px solid var(--color-line-soft);
+  padding: 1px 5px;
+  border-radius: var(--radius-sm);
+  color: var(--color-text-1);
+}
+
+/* Clickable symbol chip in answer prose — looks like a quiet bordered code
+   chip at rest so the prose stays calm, but lights up arctic-accent on hover
+   to signal "this jumps to a search". (Image #6: highlighted code tokens are
+   clickable.) */
+.aura-chat .aura-md-symbol {
+  transition: background var(--motion-fast), border-color var(--motion-fast);
+}
+.aura-chat .aura-md-symbol:hover {
+  background: color-mix(in srgb, var(--color-accent) 14%, var(--color-bg-2));
+  border-color: color-mix(in srgb, var(--color-accent) 32%, transparent);
+  text-decoration: underline;
+  text-decoration-style: dotted;
+  text-underline-offset: 2px;
+}
+
+/* Clickable file-path chip in answer prose — same calm-at-rest treatment as
+   the symbol chip. The path is muted ink at rest (no green wall of links); the
+   accent (green in chat) + its glyph only light up on hover to signal "this
+   opens the file". `color` cascades to the inline <use> glyph via
+   currentColor, so both flip together. */
+.aura-chat .aura-md-file-chip {
+  transition: color var(--motion-fast), background var(--motion-fast),
+    border-color var(--motion-fast);
+}
+.aura-chat .aura-md-file-chip:hover {
+  color: var(--color-accent);
+  background: color-mix(in srgb, var(--color-accent) 12%, var(--color-bg-2));
+  border-color: color-mix(in srgb, var(--color-accent) 30%, transparent);
+}
+
+/* user message bubble — redesign `.msg-user .body`. Right-aligned and
+   elevated onto the card surface (bg-3) with a hairline `--color-line`
+   border, so the user's turn reads as a calm tinted bubble pushed to the
+   right (iMessage/Claude side), not a flush in-flow quote. `margin-left:
+   auto` does the right-align — the element carries `w-fit max-w-[85%]` in
+   TSX, so it hugs its content and tops out at 85% before the auto margin
+   pushes it to the right edge. */
+.aura-chat .user-bubble {
+  background: var(--color-bg-3);
+  border: 1px solid var(--color-line);
+  padding: 6px 11px;
+  border-radius: var(--radius-lg);
+  color: var(--color-text-1);
+  font-size: var(--font-size-base);
+  line-height: 1.5;
+  font-weight: var(--font-weight-body);
+  margin-left: auto;
+  margin-bottom: 6px;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+/* agent reply — plain prose, no bubble, no avatar (prototype `.agent-text`).
+   Readability tuned for the narrow right-pane: roomier line-height,
+   longer paragraph rhythm, and overflow-wrap so identifier-heavy prose
+   (filenames, fn names, dotted paths) can break cleanly instead of
+   forcing horizontal scroll. */
+.aura-chat .agent-text {
+  color: var(--color-text-1);
+  font-size: var(--font-size-base);
+  font-weight: var(--font-weight-body);
+  margin-bottom: 7px;
+  overflow-wrap: anywhere;
+  word-break: normal;
+}
+.aura-chat .agent-text p { margin: 0 0 12px; }
+.aura-chat .agent-text p:last-child { margin-bottom: 0; }
+.aura-chat .agent-text ul,
+.aura-chat .agent-text ol { margin: 0 0 12px; padding-left: 20px; }
+.aura-chat .agent-text li { margin-bottom: 4px; }
+.aura-chat .agent-text li:last-child { margin-bottom: 0; }
+.aura-chat .agent-text h1,
+.aura-chat .agent-text h2,
+.aura-chat .agent-text h3,
+.aura-chat .agent-text h4 {
+  font-weight: 600;
+  margin: 14px 0 6px;
+  line-height: 1.35;
+}
+.aura-chat .agent-text h1:first-child,
+.aura-chat .agent-text h2:first-child,
+.aura-chat .agent-text h3:first-child,
+.aura-chat .agent-text h4:first-child { margin-top: 0; }
+.aura-chat .agent-text code {
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  background: var(--color-bg-2);
+  border: 1px solid var(--color-line-soft);
+  padding: 1px 5px;
+  border-radius: var(--radius-sm);
+  color: var(--color-text-1);
+  /* Allow long path-like chips (e.g. `src/components/icon-button/icon-button.spec.tsx`)
+     to break inside the chip rather than push the row into horizontal scroll
+     in the narrow right rail. */
+  white-space: normal;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+  max-width: 100%;
+}
+.aura-chat .agent-text pre {
+  background: var(--color-bg-2);
+  border: 1px solid var(--color-line-soft);
+  border-radius: var(--radius-md);
+  padding: 8px 10px;
+  margin: 0 0 12px;
+  overflow-x: auto;
+  white-space: pre;
+}
+.aura-chat .agent-text pre code {
+  border: 0;
+  padding: 0;
+  background: transparent;
+  white-space: pre;
+  font-size: var(--font-size-xs);
+  line-height: 1.55;
+}
+
+/* assistant identity row — redesign `.msg-ai .who`. A small caret-orange
+   monogram (Anthropic brand ink, agent-only per the colour character),
+   the orchestrator name "Aura", and an optional dotted model suffix. Shown
+   once per assistant group (first row only) so a multi-turn answer reads as
+   one speaker, matching Slack/Claude grouping. */
+/* Zero left inset + 16px avatar column below matches the tool/summary rows'
+   `padding:3px 0` + 16px glyph column, so the identity avatar, the
+   "Worked through N steps" counts, every tool verb AND the answer prose all
+   start at one x — the rows read "in line", flush-left, not stair-stepped. */
+.aura-chat .aura-msg-who {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  margin-bottom: 4px;
+  padding: 0;
+  color: var(--color-text-3);
+  font-size: var(--font-size-xs);
+  line-height: 1.2;
+}
+/* Avatar is the real Aura brand mark (AgentIcon agentId="aura-manager"),
+   which paints its own ring+dot SVG on its own tile. The wrapper is a fixed
+   16px box — the same leading column the tool-row/summary glyphs occupy — so
+   the name lands at the same x as the counts and verbs beneath it. */
+.aura-chat .aura-msg-av {
+  flex: 0 0 auto;
+  width: 16px;
+  height: 16px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+.aura-chat .aura-msg-who .name {
+  color: var(--color-text-2);
+  font-weight: 600;
+  font-size: var(--font-size-xs);
+}
+/* Model provenance: the vendor's real mark (AgentIcon) + the model name. */
+.aura-chat .aura-msg-who .model {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  color: var(--color-text-3);
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  letter-spacing: 0.01em;
+}
+.aura-chat .aura-msg-who .model::before {
+  content: "·";
+  margin-right: 1px;
+  color: var(--color-text-3);
+}
+
+/* Per-message action row — Conductor-style: time-taken + copy + more sit
+   quietly under each agent message, always visible (not hover-only), so the
+   affordances are discoverable without hunting. Muted until hovered. */
+.aura-chat .aura-msg-actions {
+  display: flex;
+  align-items: center;
+  gap: 1px;
+  margin-top: 6px;
+  width: fit-content;
+  max-width: 100%;
+  color: var(--color-text-4);
+}
+.aura-chat .aura-msg-actions .dur {
+  font-size: var(--font-size-2xs);
+  line-height: 1;
+  font-variant-numeric: tabular-nums;
+  margin-right: 6px;
+  color: var(--color-text-4);
+}
+/* Estimated tokens saved — an informational credit, not a status. Mirrors the
+   muted .dur/.model chips (small, low-emphasis, tabular numerals) so it sits
+   quietly in the same left cluster. Note: `.aura-chat` remaps --color-accent to
+   green, so we deliberately stay on the quiet ink (--color-text-4) rather than
+   the accent — this chip must NOT read as a green status. */
+.aura-chat .aura-msg-actions .saved {
+  font-size: var(--font-size-2xs);
+  line-height: 1;
+  font-variant-numeric: tabular-nums;
+  margin-right: 6px;
+  white-space: nowrap;
+  color: var(--color-text-4);
+}
+/* Model credit, relocated from the identity line — small, minimal, and kept
+   in the SAME left cluster as the time-taken + copy (not pushed to the far
+   edge), so the whole row reads as one compact group that hugs its content
+   rather than spanning the width. The vendor mark (AgentIcon) + the model
+   name in mono, in the quietest ink so it's a credit, not a control. */
+.aura-chat .aura-msg-actions .model {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  margin-left: 2px;
+  padding: 0 5px;
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  letter-spacing: 0.01em;
+  color: var(--color-text-4);
+  white-space: nowrap;
+}
+.aura-chat .aura-msg-actions button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  border: 0;
+  background: transparent;
+  border-radius: var(--radius-sm);
+  color: var(--color-text-4);
+  cursor: pointer;
+  transition: background 0.12s ease, color 0.12s ease;
+}
+.aura-chat .aura-msg-actions button:hover {
+  background: var(--color-bg-2);
+  color: var(--color-text-1);
+}
+
+/* Per-message "More" menu — a small popover anchored to the ··· button.
+   Opens upward-right of the action row; click-away/Escape close it from
+   the component. The menu items are full-width text rows, so they
+   override the 22px-square sizing the action-row buttons inherit. */
+.aura-chat .aura-more {
+  position: relative;
+  display: inline-flex;
+}
+.aura-chat .aura-more-menu {
+  position: absolute;
+  top: calc(100% + 4px);
+  left: 0;
+  z-index: 30;
+  min-width: 184px;
+  display: flex;
+  flex-direction: column;
+  padding: 4px;
+  background: var(--color-bg-1);
+  border: 1px solid var(--color-line-soft);
+  border-radius: 8px;
+  box-shadow: var(--shadow-flyout, 0 8px 24px rgba(0, 0, 0, 0.28));
+}
+.aura-chat .aura-more-menu button {
+  width: 100%;
+  height: auto;
+  justify-content: flex-start;
+  gap: 10px;
+  padding: 6px 8px;
+  border-radius: 6px;
+  font-size: 13px;
+  line-height: 1.4;
+  color: var(--color-text-2);
+}
+.aura-chat .aura-more-menu button:hover:not(:disabled) {
+  background: var(--color-bg-2);
+  color: var(--color-text-1);
+}
+.aura-chat .aura-more-menu button:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+/* shimmer thinking line — direct port of prototype `.thinking`. Sits
+   in-flow under the latest user-bubble, no avatar. */
+.aura-chat .thinking {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--color-text-3);
+  font-size: var(--font-size-sm);
+  line-height: var(--line-height-sm);
+  margin-bottom: 12px;
+}
+.aura-chat .thinking .spinner {
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  border: 1.5px solid var(--color-line);
+  border-top-color: var(--color-accent);
+  animation: aura-chat-spin 0.9s linear infinite;
+  flex: none;
+}
+.aura-chat .shimmer {
+  color: var(--color-text-3);
+  animation: aura-chat-shimmer 1.6s ease-in-out infinite;
+}
+/* Live elapsed stat trailing the working indicator — quiet, tabular so the
+   digits don't jitter as the seconds tick. */
+.aura-chat .thinking .thinking-elapsed {
+  color: var(--color-text-4);
+  font-size: var(--font-size-2xs);
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 0.01em;
+}
+@keyframes aura-chat-spin { to { transform: rotate(360deg); } }
+@keyframes aura-chat-shimmer {
+  0%, 100% { opacity: 0.55; }
+  50%      { opacity: 1; }
+}
+
+/* system line — quiet italic note in-flow (no avatar gutter). */
+.aura-chat .system-line {
+  color: var(--color-text-3);
+  font-size: var(--font-size-xs);
+  line-height: var(--line-height-xs);
+  font-style: italic;
+  margin: 4px 0 8px;
+}
+.aura-chat .system-line.warn { color: var(--color-accent-amber, rgb(251 191 36)); }
+.aura-chat .system-line.ok   { color: var(--color-accent-green); }
+
+/* Milestone divider — a centered rule with an inset caption marking a
+   major thing finished. Antigravity-style chapter break between phases of
+   work. The check + caption read in the accent-green status colour; the
+   rules fade out from the caption so the line feels anchored, not boxed. */
+.aura-chat .aura-milestone {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin: 14px 2px 16px;
+}
+.aura-chat .aura-milestone-rule {
+  flex: 1;
+  height: 1px;
+  background: var(--color-line-soft);
+}
+.aura-chat .aura-milestone-rule:first-child {
+  background: linear-gradient(to right, transparent, var(--color-line-soft));
+}
+.aura-chat .aura-milestone-rule:last-child {
+  background: linear-gradient(to left, transparent, var(--color-line-soft));
+}
+.aura-chat .aura-milestone-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex: none;
+  font-size: var(--font-size-2xs);
+  line-height: 1;
+  font-weight: 500;
+  letter-spacing: 0.01em;
+  color: var(--color-accent-green);
+  white-space: nowrap;
+}
+
+/* Time-gap divider — a wiggly rule marking elapsed wall-clock time where a
+ * conversation paused and resumed. The wave is a tiling SVG sine used as an
+ * alpha mask, so the line color stays a design token (the mask only carves
+ * the shape); the straight milestone rule means "done", this wave means
+ * "time passed". */
+.aura-chat .aura-timegap {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 16px 2px 18px;
+}
+.aura-chat .aura-timegap-rule {
+  flex: 1;
+  height: 8px;
+  opacity: 0.6;
+  background-color: var(--color-line-soft);
+  -webkit-mask-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='16' height='8' viewBox='0 0 16 8'%3E%3Cpath d='M0 4 Q4 1.4 8 4 T16 4' fill='none' stroke='%23000' stroke-width='1.4'/%3E%3C/svg%3E");
+  mask-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='16' height='8' viewBox='0 0 16 8'%3E%3Cpath d='M0 4 Q4 1.4 8 4 T16 4' fill='none' stroke='%23000' stroke-width='1.4'/%3E%3C/svg%3E");
+  -webkit-mask-repeat: repeat-x;
+  mask-repeat: repeat-x;
+  -webkit-mask-position: center;
+  mask-position: center;
+}
+.aura-chat .aura-timegap-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex: none;
+  font-size: var(--font-size-2xs);
+  line-height: 1;
+  font-weight: 500;
+  letter-spacing: 0.01em;
+  color: var(--color-text-3);
+  white-space: nowrap;
+}
+
+/* shared icon sizes inside the chat shell */
+.aura-chat .ico    { width: 14px; height: 14px; flex: none; }
+.aura-chat .ico-12 { width: 12px; height: 12px; flex: none; }
+.aura-chat .ico-20 { width: 20px; height: 20px; flex: none; }
+
+/* ─────────────────────────────────────────────────────────────────
+ * Pajamas-style card stacks — borders ARE the grid, not orphan
+ * decoration. When two Cards stack vertically inside an
+ * .aura-card-stack[data-direction="vertical"], the second card
+ * loses its top border so the shared edge is a single 1px line
+ * instead of a doubled 2px line. Same for horizontal stacks.
+ *
+ * Cards inside a stack also lose their corner radius on the joining
+ * sides so the run reads as one continuous block. Outer corners of
+ * the stack keep the default radius.
+ * ───────────────────────────────────────────────────────────── */
+.aura-card-stack[data-direction="vertical"] > * + * {
+  border-top: 0;
+  border-top-left-radius: 0;
+  border-top-right-radius: 0;
+}
+.aura-card-stack[data-direction="vertical"] > *:not(:last-child) {
+  border-bottom-left-radius: 0;
+  border-bottom-right-radius: 0;
+}
+.aura-card-stack[data-direction="horizontal"] > * + * {
+  border-left: 0;
+  border-top-left-radius: 0;
+  border-bottom-left-radius: 0;
+}
+.aura-card-stack[data-direction="horizontal"] > *:not(:last-child) {
+  border-top-right-radius: 0;
+  border-bottom-right-radius: 0;
+}
+
+/* ── Medusa-style block design ─────────────────────────────────────────
+ * Sharp 4px-radius outlined blocks, [BRACKETED_MONO] section headers,
+ * [ N ] numbered indices, diagonal-hatch placeholders for empty zones,
+ * blue bracketed-link CTAs. Used by PlanCard, tool/activity cards,
+ * PlanTab, TeamTasksPanel — anywhere we want the docs-grid feel. */
+
+.aura-block {
+  background: var(--color-bg-content);
+  border: 1px solid var(--color-line);
+  border-radius: 4px;
+}
+
+.aura-block-soft {
+  background: var(--color-bg-1);
+  border: 1px solid var(--color-line-soft);
+  border-radius: 4px;
+}
+
+/* Section header tag. Example: `[PLAN]`, `[BASELINE]`, `[FAQ]`. The
+ * brackets are real characters so they survive copy/paste and match
+ * Medusa's exact rendering. */
+.aura-block-label {
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  line-height: 1;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--color-text-3);
+}
+.aura-block-label::before { content: "["; }
+.aura-block-label::after  { content: "]"; }
+
+/* Numbered index for ordered lists — Medusa renders these as `[ 1 ]`,
+ * `[ 2 ]` aligned with mono text. Wider than `[1]` so digits don't
+ * touch the brackets. */
+.aura-block-index {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--color-text-3);
+  letter-spacing: 0.02em;
+}
+.aura-block-index::before { content: "[ "; }
+.aura-block-index::after  { content: " ]"; }
+
+/* Bracketed blue link CTA. Pairs with `.aura-block-label` for header
+ * rows like `[PLAN] · [VIEW PLAN]`. */
+.aura-block-link {
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--color-accent);
+  text-decoration: none;
+  transition: color var(--motion-fast);
+}
+.aura-block-link::before { content: "["; }
+.aura-block-link::after  { content: "]"; }
+.aura-block-link:hover { text-decoration: underline; }
+
+/* ── PlanTab markdown prose ───────────────────────────────────────────
+ * Scoped, calm typography for ReactMarkdown bodies inside the Plan
+ * surface (baseline + phase bodies). Without this the markdown renders
+ * at raw browser defaults — giant h1, oversized code. Cursor-parity:
+ * comfortable 14px base, modest headings, small inline code. Kept under
+ * `.plan-prose` so nothing leaks to the rest of the app. */
+.plan-prose {
+  font-size: 13px;
+  line-height: 1.65;
+  color: var(--color-text-2);
+}
+.plan-prose > :first-child { margin-top: 0; }
+.plan-prose > :last-child { margin-bottom: 0; }
+.plan-prose h1,
+.plan-prose h2,
+.plan-prose h3,
+.plan-prose h4 {
+  font-weight: 600;
+  color: var(--color-text-1);
+  letter-spacing: var(--letter-spacing-tight);
+  line-height: 1.3;
+  margin: 1.1em 0 0.35em;
+}
+.plan-prose h1 { font-size: 15px; }
+.plan-prose h2 { font-size: 14px; }
+.plan-prose h3,
+.plan-prose h4 { font-size: 13px; }
+.plan-prose p { margin: 0.5em 0; }
+.plan-prose ul,
+.plan-prose ol {
+  margin: 0.45em 0;
+  padding-left: 1.35em;
+}
+.plan-prose ul { list-style: disc; }
+.plan-prose ol { list-style: decimal; }
+.plan-prose li { margin: 0.18em 0; }
+.plan-prose a {
+  color: var(--color-accent);
+  text-decoration: none;
+}
+.plan-prose a:hover { text-decoration: underline; }
+.plan-prose strong {
+  font-weight: 600;
+  color: var(--color-text-1);
+}
+.plan-prose code {
+  font-family: var(--font-mono);
+  font-size: 11.75px;
+  background: var(--color-bg-2);
+  padding: 0.1em 0.35em;
+  border-radius: var(--radius-xs);
+}
+.plan-prose pre {
+  font-family: var(--font-mono);
+  font-size: 11.75px;
+  line-height: 1.5;
+  background: var(--color-bg-2);
+  padding: 0.7em 0.85em;
+  border-radius: var(--radius-sm);
+  overflow-x: auto;
+  margin: 0.6em 0;
+}
+.plan-prose pre code {
+  background: transparent;
+  padding: 0;
+  font-size: inherit;
+}
+.plan-prose blockquote {
+  margin: 0.6em 0;
+  padding-left: 0.85em;
+  border-left: 2px solid var(--color-line-soft);
+  color: var(--color-text-3);
+}
+
+/* Fit any rendered mermaid SVG to its content column. Shared across the
+ * Plan architecture diagram and Pages/notes code blocks, so the rule is
+ * deliberately generic. */
+.mermaid-frame svg {
+  max-width: 100%;
+  height: auto;
+}
+
+/* Diagonal-hatch placeholder background — used to fill empty zones in
+ * a block when there is no rich content (no architecture diagram, no
+ * file refs, no description). Mirrors Medusa's empty-state texture. */
+.aura-hatch {
+  background-image: repeating-linear-gradient(
+    135deg,
+    color-mix(in srgb, var(--color-fg-soft) 18%, transparent) 0,
+    color-mix(in srgb, var(--color-fg-soft) 18%, transparent) 1px,
+    transparent 1px,
+    transparent 7px
+  );
+}
+
+/* Smaller hatch swatch for inline use (table cell fill, icon slot). */
+.aura-hatch-sm {
+  background-image: repeating-linear-gradient(
+    135deg,
+    color-mix(in srgb, var(--color-fg-soft) 22%, transparent) 0,
+    color-mix(in srgb, var(--color-fg-soft) 22%, transparent) 1px,
+    transparent 1px,
+    transparent 5px
+  );
+}
+
+@keyframes aura-pulse {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50%      { opacity: 0.45; transform: scale(0.7); }
+}
+
+/* v0.2.7 Phase 6 — GitLens-style inline blame. Rendered as a Monaco
+ * after-line decoration via 'aura-blame-inline'. Muted text, italic,
+ * placed slightly inset from the line content. */
+.aura-blame-inline {
+  color: var(--color-text-4, #8a8a8a);
+  font-style: italic;
+  font-size: 0.85em;
+  opacity: 0.7;
+  pointer-events: none;
+}
+
+/* v0.2.11 — pinned-panel jump highlight. Briefly flash a ring + tint
+ * around the destination message so the user spots it after the
+ * scrollIntoView lands. */
+@keyframes aura-msg-flash {
+  0%   { box-shadow: 0 0 0 2px var(--color-accent-blue, #5b8def); background: rgba(91, 141, 239, 0.10); }
+  100% { box-shadow: 0 0 0 0 transparent; background: transparent; }
+}
+.aura-msg-flash {
+  animation: aura-msg-flash 1.6s ease-out;
+  border-radius: 6px;
+}
+
+/* v0.2.11 — typing indicator pulse for the chat footer slot. */
+@keyframes aura-typing-pulse {
+  0%, 80%, 100% { opacity: 0.25; transform: scale(0.85); }
+  40%           { opacity: 1;    transform: scale(1); }
+}
+.aura-typing-dot {
+  display: inline-block;
+  width: 4px;
+  height: 4px;
+  border-radius: 9999px;
+  background: currentColor;
+  margin-right: 3px;
+  animation: aura-typing-pulse 1.2s infinite ease-in-out;
+}
+.aura-typing-dot:nth-child(2) { animation-delay: 0.15s; }
+.aura-typing-dot:nth-child(3) { animation-delay: 0.3s; }
+
+/* ── Plane shared primitives base layer ────────────────────────────────
+ * Class hooks consumed by `ui/FloatingPill.tsx`, `ui/PageActionBar.tsx`,
+ * `ui/FeedbackFAB.tsx`. Centralising the
+ * sizing/colour rules here means the three Tasks/Pages redesign agents
+ * can compose the same base without re-deriving pixel values per
+ * surface. Token-bound; no hardcoded hex.
+ *
+ * Naming follows the prototype mockup (`docs/plane-app-examples.html`,
+ * lines ~1756–1865) so cross-referencing the visual spec to the JSX
+ * stays a one-to-one mapping.
+ */
+
+/* FloatingPill — the sticky 36px pill (page-doc-toolbar style). */
+.aura-pill-shell {
+  position: sticky;
+  top: 0;
+  z-index: 10;
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  padding: 8px 16px 4px;
+  pointer-events: none;
+}
+.aura-pill {
+  pointer-events: auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  height: var(--pill-h);
+  padding: 0 4px;
+  background: var(--color-bg-1);
+  border: 1px solid var(--color-line-soft);
+  border-radius: var(--pill-radius);
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.18);
+}
+.aura-pill-btn {
+  all: unset;
+  cursor: pointer;
+  width: var(--pill-btn);
+  height: var(--pill-btn);
+  display: grid;
+  place-items: center;
+  border-radius: var(--pill-btn-radius);
+  color: var(--color-text-2);
+  transition: background var(--motion-fast), color var(--motion-fast);
+}
+.aura-pill-btn:hover {
+  background: var(--color-bg-2);
+  color: var(--color-text-1);
+}
+.aura-pill-btn[data-active="true"],
+.aura-pill-btn[aria-pressed="true"] {
+  background: var(--color-bg-2);
+  color: var(--color-accent);
+}
+.aura-pill-btn[disabled] {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+.aura-pill-sep {
+  width: 0.5px;
+  height: 20px;
+  background: var(--color-line);
+  margin: 0 3px;
+  flex: none;
+}
+
+/* PageActionBar base — flex row primitive used by TaskActionBar +
+ * pages/PageActionBar. Consumers compose their own primary + action
+ * sets; this layer just nails the geometry. */
+.aura-actionbar {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+}
+.aura-actionbar-primary {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: var(--action-btn);
+  padding: 0 12px;
+  border-radius: var(--action-btn-radius);
+  background: var(--color-accent);
+  color: var(--color-bg-0);
+  border: 0;
+  cursor: pointer;
+  font-size: var(--font-size-sm);
+  line-height: var(--line-height-sm);
+  font-weight: var(--font-weight-ui);
+  transition: opacity var(--motion-fast);
+}
+.aura-actionbar-primary:hover {
+  opacity: 0.9;
+}
+.aura-actionbar-primary[disabled] {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+.aura-actionbar-iconbtn {
+  all: unset;
+  cursor: pointer;
+  width: var(--action-btn);
+  height: var(--action-btn);
+  display: grid;
+  place-items: center;
+  border-radius: var(--action-btn-radius);
+  color: var(--color-text-2);
+  transition: background var(--motion-fast), color var(--motion-fast);
+}
+.aura-actionbar-iconbtn:hover {
+  background: var(--color-bg-2);
+  color: var(--color-text-1);
+}
+.aura-actionbar-iconbtn[data-active="true"],
+.aura-actionbar-iconbtn[aria-pressed="true"] {
+  background: var(--color-bg-2);
+  color: var(--color-accent);
+}
+.aura-actionbar-sep {
+  width: var(--action-sep-w);
+  height: var(--action-sep-h);
+  background: var(--color-line);
+  margin: 0 4px;
+  flex: none;
+}
+
+/* FeedbackFAB — bottom-right circular floating button primitive. */
+.aura-feedback-fab {
+  position: fixed;
+  bottom: 18px;
+  right: 18px;
+  z-index: 50;
+  width: 38px;
+  height: 38px;
+  border-radius: 50%;
+  background: var(--color-accent);
+  color: #ffffff;
+  border: 0;
+  display: grid;
+  place-items: center;
+  cursor: pointer;
+  box-shadow: 0 6px 16px rgba(0, 0, 0, 0.25);
+  transition: transform var(--motion-fast), box-shadow var(--motion-fast);
+}
+.aura-feedback-fab:hover {
+  transform: scale(1.05);
+  box-shadow: 0 8px 20px rgba(0, 0, 0, 0.32);
+}
+
+/* SectionScrollIndicator — refined dashed rail with hollow dots. */
+.aura-scroll-indicator {
+  position: fixed;
+  top: 50%;
+  right: 18px;
+  transform: translateY(-50%);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  z-index: 8;
+  padding: 12px 4px;
+  pointer-events: auto;
+}
+.aura-scroll-indicator::before {
+  content: "";
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 50%;
+  width: 1px;
+  transform: translateX(-50%);
+  background-image: linear-gradient(
+    to bottom,
+    var(--color-text-3) 50%,
+    transparent 50%
+  );
+  background-size: 1px 6px;
+  background-repeat: repeat-y;
+  pointer-events: none;
+  z-index: 0;
+}
+.aura-scroll-indicator-dot {
+  position: relative;
+  z-index: 1;
+  width: 5px;
+  height: 5px;
+  padding: 0;
+  border: 0;
+  background: var(--color-bg-0);
+  border-radius: 50%;
+  outline: 1px solid var(--color-line);
+  outline-offset: -1px;
+  cursor: pointer;
+  opacity: 0.7;
+  transition: opacity var(--motion-fast), outline-color var(--motion-fast),
+    background var(--motion-fast);
+}
+.aura-scroll-indicator-dot:hover {
+  opacity: 1;
+  outline-color: var(--color-text-3);
+}
+.aura-scroll-indicator-dot.on {
+  opacity: 1;
+  background: var(--color-text-2);
+  outline-color: var(--color-text-2);
+}
+
+/* SS.3.1 — Monaco lineDecoration applied to the row of the active PR
+   thread anchor. Reads as a real "this code is selected" highlight
+   instead of the thin 1px-anchor ring (which was visually invisible). */
+.aura-pr-active-line {
+  background: rgba(56, 189, 248, 0.14);
+  box-shadow: inset 2px 0 0 rgba(56, 189, 248, 0.85);
+}
+.aura-pr-active-line-margin {
+  background: rgba(56, 189, 248, 0.35);
+  width: 3px !important;
+  margin-left: 3px;
+}
+
+/* ── Tiptap Pages canvas typography ──────────────────────────────────
+ * Replaces the Tailwind `prose` plugin (not installed in our v4 setup).
+ * Plane-style: modest headings, tight rhythm, design-token bound.
+ * Scoped to `.tiptap-pane` so we don't bleed into Monaco / chat /
+ * other markdown surfaces. */
+.tiptap-pane h1,
+.tiptap-pane h2,
+.tiptap-pane h3,
+.tiptap-pane h4,
+.tiptap-pane h5,
+.tiptap-pane h6 {
+  color: var(--color-text-1);
+  font-weight: var(--font-weight-heading);
+  line-height: 1.3;
+  margin-top: 1.6em;
+  margin-bottom: 0.25em;
+}
+.tiptap-pane h1:first-child,
+.tiptap-pane h2:first-child,
+.tiptap-pane h3:first-child {
+  margin-top: 0.2em;
+}
+/* Notion-style heading scale on a 16px body. */
+.tiptap-pane h1 { font-size: 1.875em; letter-spacing: -0.02em; font-weight: 700; }
+.tiptap-pane h2 { font-size: 1.5em; letter-spacing: -0.01em; }
+.tiptap-pane h3 { font-size: 1.25em; }
+.tiptap-pane h4 { font-size: 1.05em; color: var(--color-text-2); }
+
+.tiptap-pane p {
+  margin: 0.18em 0;
+  padding: 2px 0;
+  color: var(--color-text-2);
+}
+.tiptap-pane > :first-child { margin-top: 0; }
+.tiptap-pane strong {
+  color: var(--color-text-1);
+  font-weight: var(--font-weight-heading);
+}
+.tiptap-pane em { font-style: italic; }
+
+.tiptap-pane ul,
+.tiptap-pane ol {
+  margin: 0.5em 0;
+  padding-left: 1.4em;
+}
+.tiptap-pane ul { list-style: disc; }
+.tiptap-pane ol { list-style: decimal; }
+.tiptap-pane li { margin: 0.15em 0; }
+.tiptap-pane li > p { margin: 0; }
+
+.tiptap-pane ul[data-type="taskList"] {
+  list-style: none;
+  padding-left: 0.1em;
+}
+.tiptap-pane ul[data-type="taskList"] li {
+  display: flex;
+  gap: 0.5em;
+  align-items: flex-start;
+}
+.tiptap-pane ul[data-type="taskList"] li > label {
+  margin-top: 0.3em;
+}
+
+.tiptap-pane blockquote {
+  border-left: 2px solid var(--color-line);
+  padding: 0.1em 0.9em;
+  margin: 0.7em 0;
+  color: var(--color-text-3);
+  font-style: italic;
+}
+
+.tiptap-pane hr {
+  border: 0;
+  border-top: 1px solid var(--color-line-soft);
+  margin: 1.4em 0;
+}
+
+.tiptap-pane code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.92em;
+  background: var(--color-bg-2);
+  padding: 0.1em 0.4em;
+  border-radius: 4px;
+  color: var(--color-text-1);
+}
+.tiptap-pane pre {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12.5px;
+  line-height: 1.5;
+}
+.tiptap-pane pre code {
+  background: transparent;
+  padding: 0;
+  font-size: inherit;
+  color: inherit;
+}
+
+/* Wikilinks (aura-wiki: scheme) — dotted accent underline so they
+ * read as internal-doc references distinct from external links. */
+.tiptap-pane a[href^="aura-wiki:"] {
+  color: var(--color-accent);
+  text-decoration: underline;
+  text-decoration-style: dotted;
+  text-underline-offset: 2px;
+}
+.tiptap-pane a[href^="aura-wiki:"]:hover {
+  text-decoration-style: solid;
+}
+
+/* ── Pages reading column — generous body type ───────────────────────
+ * Scoped to the Pages canvas (`.pages-canvas`) so we bump only the
+ * Pages document reading size to a calm 15px / 1.7 without touching the
+ * task-description editor or any other `.tiptap-pane` consumer. The
+ * two-class selector outranks the editor's inline `text-[16px]` utility,
+ * and applies to both the live Tiptap surface (`.tiptap-pane`, which is
+ * the ProseMirror root) and the Markdown-preview prose (which we also
+ * tag `.tiptap-pane`). Body copy lifts to text-1 for the premium,
+ * content-first feel; paragraphs keep the same color so prose reads as
+ * one even voice. */
+.pages-canvas .tiptap-pane {
+  font-size: 15px;
+  line-height: 1.7;
+  color: var(--color-text-1);
+}
+.pages-canvas .tiptap-pane p {
+  color: var(--color-text-1);
+}
+
+/* ════════════════════════════════════════════════════════════════════
+ * Pages 2 document surface — `.pages-doc`
+ * ════════════════════════════════════════════════════════════════════
+ * The pages2 editor (PageEditorPane → TiptapEditor documentPadding) mounts
+ * inside a root tagged `.pages-doc`. This is the NEW Pages-document scope —
+ * separate from the legacy `.pages-canvas` NotesWorkpane scope above so the
+ * two surfaces evolve independently. Everything here targets the document
+ * reading experience: no focus box, a calm + smaller type scale, and
+ * Notion-grade blocks (full-bleed tables/code, clean cells, callouts,
+ * toggles, checkboxes, images).
+ *
+ *   --pd-col-pad: the reading column's horizontal padding (matches the
+ *     TiptapEditor documentPadding wrapper: px-6 → 24px, sm:px-12 → 48px).
+ *     Wide blocks pull out by this much to reach the column edge ("full
+ *     bleed"), Notion-style, without escaping the page or scrolling it.
+ */
+.pages-doc {
+  --pd-col-pad: 24px;
+}
+@media (min-width: 640px) {
+  .pages-doc {
+    --pd-col-pad: 48px;
+  }
+}
+
+/* ── 1. Kill the green focus box ─────────────────────────────────────
+ * Documents are content, not form fields — they should never paint a
+ * focus ring/box. Neutralize outline AND box-shadow on the editable
+ * ProseMirror surface for this scope only (leaves every other focus ring
+ * in the app untouched). Covers both :focus and :focus-visible because
+ * the contenteditable surface can match either depending on how focus
+ * was acquired (click vs keyboard). */
+.pages-doc .tiptap-pane,
+.pages-doc .tiptap-pane:focus,
+.pages-doc .tiptap-pane:focus-visible,
+.pages-doc .tiptap-pane:focus-within,
+.pages-doc .ProseMirror,
+.pages-doc .ProseMirror:focus,
+.pages-doc .ProseMirror:focus-visible {
+  outline: none !important;
+  box-shadow: none !important;
+}
+
+/* ── 2. Smaller, calmer document typography ──────────────────────────
+ * The pages2 editor isn't under the `.pages-canvas` size scope, so it
+ * renders at the editor's inline `text-[16px]`. This two-class selector
+ * outranks that utility (specificity 0,2,0 > 0,1,0) and sets a compact,
+ * premium document scale: 13.5px body / 1.65, proportionally smaller
+ * headings, tighter paragraph rhythm. */
+.pages-doc .tiptap-pane {
+  font-size: 13.5px;
+  line-height: 1.65;
+  color: var(--color-text-1);
+  letter-spacing: 0.001em;
+}
+.pages-doc .tiptap-pane p {
+  margin: 0.12em 0;
+  padding: 1px 0;
+  color: var(--color-text-1);
+}
+.pages-doc .tiptap-pane h1 {
+  font-size: 1.6em;
+  line-height: 1.25;
+  margin-top: 1.3em;
+  letter-spacing: -0.018em;
+}
+.pages-doc .tiptap-pane h2 {
+  font-size: 1.3em;
+  line-height: 1.3;
+  margin-top: 1.2em;
+  letter-spacing: -0.012em;
+}
+.pages-doc .tiptap-pane h3 {
+  font-size: 1.12em;
+  line-height: 1.35;
+  margin-top: 1em;
+}
+.pages-doc .tiptap-pane h4 {
+  font-size: 1em;
+  margin-top: 0.9em;
+}
+.pages-doc .tiptap-pane h1:first-child,
+.pages-doc .tiptap-pane h2:first-child,
+.pages-doc .tiptap-pane h3:first-child {
+  margin-top: 0.15em;
+}
+.pages-doc .tiptap-pane ul,
+.pages-doc .tiptap-pane ol {
+  margin: 0.35em 0;
+  padding-left: 1.3em;
+}
+.pages-doc .tiptap-pane li {
+  margin: 0.1em 0;
+}
+.pages-doc .tiptap-pane blockquote {
+  margin: 0.55em 0;
+  padding: 0.05em 0.85em;
+}
+.pages-doc .tiptap-pane hr {
+  margin: 1.1em 0;
+}
+.pages-doc .tiptap-pane pre {
+  font-size: 12px;
+}
+
+/* ── 3 + 4. Notion-grade blocks ──────────────────────────────────────
+ * Checklists (real checkboxes), code blocks, callouts, toggles, dividers,
+ * images, and full-bleed tables. Scoped to `.pages-doc` so the document
+ * surface gets the premium treatment without touching task-card editors.
+ */
+
+/* Task list — real, clickable checkboxes (Notion-style). The TaskItem
+ * NodeView renders `label > input[type=checkbox]`; we restyle the box to
+ * a rounded square that fills with the accent when checked, and strike +
+ * dim the completed line. */
+.pages-doc .tiptap-pane ul[data-type="taskList"] {
+  margin: 0.3em 0;
+}
+.pages-doc .tiptap-pane ul[data-type="taskList"] li {
+  align-items: flex-start;
+  gap: 0.55em;
+}
+.pages-doc .tiptap-pane ul[data-type="taskList"] li > label {
+  margin-top: 0.16em;
+  flex: 0 0 auto;
+  user-select: none;
+}
+.pages-doc .tiptap-pane ul[data-type="taskList"] li > div {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+.pages-doc .tiptap-pane ul[data-type="taskList"] input[type="checkbox"] {
+  appearance: none;
+  -webkit-appearance: none;
+  width: 15px;
+  height: 15px;
+  margin: 0;
+  border: 1.5px solid var(--color-line);
+  border-radius: 4px;
+  background: transparent;
+  cursor: pointer;
+  position: relative;
+  transition: background-color var(--motion-fast), border-color var(--motion-fast);
+}
+.pages-doc .tiptap-pane ul[data-type="taskList"] input[type="checkbox"]:hover {
+  border-color: var(--color-accent);
+}
+.pages-doc .tiptap-pane ul[data-type="taskList"] input[type="checkbox"]:checked {
+  background: var(--color-accent);
+  border-color: var(--color-accent);
+}
+.pages-doc .tiptap-pane ul[data-type="taskList"] input[type="checkbox"]:checked::after {
+  content: "";
+  position: absolute;
+  left: 4px;
+  top: 1px;
+  width: 4px;
+  height: 8px;
+  border: solid var(--color-bg-0, #0b0b0d);
+  border-width: 0 2px 2px 0;
+  transform: rotate(45deg);
+}
+.pages-doc .tiptap-pane ul[data-type="taskList"] li[data-checked="true"] > div {
+  text-decoration: line-through;
+  color: var(--color-text-4);
+}
+
+/* ── Document measure ─────────────────────────────────────────────────
+ * The editor canvas is full-width (no wrapper clamp), so each readable
+ * block self-clamps to a comfortable ~760px line length and centers —
+ * giving the calm reading column — while wide blocks (tables, code,
+ * images) are free to use the full document width below. Direct children
+ * of the ProseMirror root only, so cell/quote contents aren't re-clamped. */
+.pages-doc .tiptap-pane > p,
+.pages-doc .tiptap-pane > h1,
+.pages-doc .tiptap-pane > h2,
+.pages-doc .tiptap-pane > h3,
+.pages-doc .tiptap-pane > h4,
+.pages-doc .tiptap-pane > h5,
+.pages-doc .tiptap-pane > h6,
+.pages-doc .tiptap-pane > ul,
+.pages-doc .tiptap-pane > ol,
+.pages-doc .tiptap-pane > blockquote,
+.pages-doc .tiptap-pane > hr,
+.pages-doc .tiptap-pane > .callout,
+.pages-doc .tiptap-pane > div[data-type="details"] {
+  max-width: 760px;
+  margin-left: auto;
+  margin-right: auto;
+}
+
+/* Code blocks — use the full document width; long lines scroll inside the
+ * block rather than forcing the page to scroll. */
+.pages-doc .tiptap-pane > pre {
+  max-width: 100%;
+  margin-left: auto;
+  margin-right: auto;
+  padding: 0.85em 1em;
+  background: var(--color-bg-2);
+  border-radius: 8px;
+  overflow-x: auto;
+}
+
+/* Callouts — already styled under `.tiptap-pane` (4241+); just tune the
+ * rhythm for the smaller document scale. */
+.pages-doc .tiptap-pane .callout {
+  margin: 0.7em 0;
+  padding: 0.5em 0.8em;
+}
+
+/* Toggle / details — compact summary row for the document scale. */
+.pages-doc .tiptap-pane div[data-type="details"] {
+  margin: 0.45em 0;
+}
+
+/* Images — sit within the column, rounded, never overflow it. */
+.pages-doc .tiptap-pane img,
+.pages-doc .tiptap-pane .tiptap-image {
+  max-width: 100%;
+  height: auto;
+  border-radius: 8px;
+  margin: 0.6em 0;
+  display: block;
+}
+.pages-doc .tiptap-pane img.ProseMirror-selectednode,
+.pages-doc .tiptap-pane .tiptap-image.ProseMirror-selectednode {
+  outline: 2px solid var(--color-accent);
+  outline-offset: 1px;
+}
+
+/* Text alignment (TextAlign extension) — honour per-block alignment. */
+.pages-doc .tiptap-pane [style*="text-align"] {
+  /* inline style wins; this is a no-op anchor for clarity. */
+}
+
+/* Tables — Notion-ish, full document width. The table fills the available
+ * width (using the space beside the text column); if its content genuinely
+ * needs more, the wrapper scrolls horizontally rather than squishing cells
+ * or forcing the PAGE to scroll. Clean hairline cells, tinted header row. */
+.pages-doc .tiptap-pane > .tableWrapper {
+  margin: 0.9em auto;
+  max-width: 100%;
+  overflow-x: auto;
+}
+.pages-doc .tiptap-pane table {
+  table-layout: auto;
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.95em;
+  margin: 0;
+}
+.pages-doc .tiptap-pane th,
+.pages-doc .tiptap-pane td {
+  border: 1px solid var(--color-line-soft);
+  padding: 5px 9px;
+  text-align: left;
+  vertical-align: top;
+  min-width: 90px;
+}
+.pages-doc .tiptap-pane th {
+  background: var(--color-bg-2);
+  font-weight: var(--font-weight-heading);
+  color: var(--color-text-1);
+}
+.pages-doc .tiptap-pane td > p,
+.pages-doc .tiptap-pane th > p {
+  margin: 0;
+  padding: 0;
+}
+
+/* Columns — collapse the side margins so the column layout still aligns
+ * to the reading column, but allow each column to be a real flex track. */
+.pages-doc .tiptap-pane div[data-type="columns"] {
+  margin: 0.7em 0;
+}
+
+/* ════════════════════════════════════════════════════════════════════
+ * ADE surface redesign (W1) — consolidated left sidebar.
+ *
+ * One panel replaces the old workspace-rail + icon-rail + sidebar trio:
+ *   head  — brand (left) + settings/avatar (top-right)
+ *   body  — the active section (Build / Team / Plan / Trace)
+ *   foot  — 4-up segmented section switcher
+ *
+ * Everything is scoped under `.ade-side` so it never touches the legacy
+ * shell. Values are bound to the shared design tokens (not hard-coded
+ * hex) so the panel tracks whatever theme is active — though in
+ * practice it only renders when the ember pack is on (aura.ade.v2).
+ * Mirrors docs/plan/ade-superset-redesign.html structure. */
+
+.ade-side {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 0;
+  background: var(--color-bg-1);
+  font-size: var(--font-size-sm);
+}
+
+/* ── ADE topbar identity ────────────────────────────────────────────── *
+ * Brand + profile avatar live in the macOS-titlebar TopBar now (the old
+ * .ade-side-head was removed in the chrome consolidation). Settings +
+ * profile sit far-right; the brand far-left after the traffic lights. */
+.ade-tb-brand {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  padding-left: 4px;
+  margin-left: 2px;
+  border-left: 1px solid var(--color-line-soft);
+  font-size: var(--font-size-sm);
+  font-weight: var(--font-weight-ui);
+  color: var(--color-text-2);
+  letter-spacing: var(--letter-spacing-tight);
+  white-space: nowrap;
+}
+.ade-tb-brand svg {
+  color: var(--color-accent);
+  flex: none;
+}
+/* "beta" tag sitting right after the Aura wordmark — every current build is
+ * the beta channel, so this is a standing identity, not a transient chip.
+ * Arctic-blue accent (primary brand label); status greens/agent orange stay
+ * reserved for their own meanings. */
+.ade-tb-beta {
+  display: inline-flex;
+  align-items: center;
+  height: 14px;
+  margin-left: 1px;
+  padding: 0 4px;
+  border-radius: var(--radius-sm);
+  border: 1px solid color-mix(in srgb, var(--color-accent) 30%, transparent);
+  background: color-mix(in srgb, var(--color-accent) 12%, transparent);
+  color: var(--color-accent);
+  font-size: 9.5px;
+  font-weight: var(--font-weight-ui);
+  line-height: 1;
+  letter-spacing: 0.03em;
+  text-transform: lowercase;
+}
+.ade-tb-av {
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  display: grid;
+  place-items: center;
+  font-size: var(--font-size-xs);
+  font-weight: var(--font-weight-ui);
+  color: #fff;
+  background: linear-gradient(
+    140deg,
+    var(--color-accent),
+    color-mix(in srgb, var(--color-accent) 60%, #000)
+  );
+  border: none;
+  cursor: pointer;
+  flex: none;
+  transition: filter var(--motion-fast);
+}
+.ade-tb-av:hover {
+  filter: brightness(1.08);
+}
+
+/* ── multi-colour liquid AURA wordmark (WorkSurface empty state) ───────
+   The wordmark is figlet ASCII art (aura-wordmark.txt), rendered in a
+   <pre>. A static multi-hue gradient spreads L→R across the glyphs (a
+   flow of colours, not a sweep) and the #aura-liquid SVG turbulence
+   filter gives the strokes a gentle molten wobble for life. No
+   background-position animation — sliding the gradient under a clipped,
+   no-repeat <pre> drags it off the glyphs and blanks them. */
+.aura-ascii {
+  display: inline-block;
+  margin: 0;
+  font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas,
+    monospace;
+  font-size: 12px;
+  line-height: 1.04;
+  font-weight: 600;
+  white-space: pre;
+  letter-spacing: 0;
+  background-image: linear-gradient(
+    95deg,
+    #5ad1ff 0%,
+    #6aa5ff 20%,
+    #8f7bff 40%,
+    #c678dd 58%,
+    #ff8a5b 78%,
+    #ffd166 100%
+  );
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+  -webkit-text-fill-color: transparent;
+  /* Crisp gradient wordmark. The old `url(#aura-liquid)` displacement map
+     smeared the thin figlet strokes into illegibility (and blanked the
+     glyphs outright if the SVG filter def wasn't mounted), so we keep just
+     a soft glow. No SVG filter dependency → renders the same anywhere. */
+  filter: drop-shadow(0 1px 16px rgba(106, 165, 255, 0.14));
+}
+@media (max-width: 520px) {
+  .aura-ascii {
+    font-size: 9px;
+  }
+}
+
+/* ── body + sections ───────────────────────────────────────────────── */
+.ade-side-body {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
+  /* Compact inset — the body is the first thing under the rounded content
+     corner (no head row above it). Kept tight so density reads Codex/
+     Conductor-like. */
+  padding: 5px 4px 3px;
+  display: flex;
+  flex-direction: column;
+}
+/* sections that host a full existing sidebar fill the body height */
+.ade-sec {
+  display: none;
+  flex-direction: column;
+  min-height: 0;
+}
+.ade-sec.show {
+  display: flex;
+  flex: 1;
+}
+.ade-sec-fill {
+  flex: 1;
+  min-height: 0;
+  margin: -8px -6px 0;   /* cancel .ade-side-body padding so mounted
+                            sidebars span the full width — keep in sync */
+}
+/* Build section — workspace roster only (files/changes live on the
+   right rail). Fills the section body and scrolls on its own. */
+.ade-build {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
+}
+
+/* Build-section nav — Workspaces (resting context) + Automations rows,
+   above the workspace roster. Kept quiet so the roster stays the focus:
+   small text, accent tint only on the current row. Separated from the
+   roster by whitespace, not a divider (cleaner, Conductor-like). */
+.ade-build-nav {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  padding: 4px 0 2px;
+  margin-bottom: 3px;
+}
+/* Row = flex wrapper holding the clickable label (rowmain) + an optional
+   trailing affordance (the +New button on Workspaces). Both rows share the
+   same structure so they read as one set; the active tint sits on the row,
+   the padding/hover on the inner button. */
+.ade-bnav-row {
+  display: flex;
+  align-items: center;
+  width: 100%;
+  border-radius: var(--radius-md);
+  color: var(--color-text-2);
+}
+.ade-bnav-rowmain {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 3px 8px;
+  border: none;
+  background: transparent;
+  border-radius: var(--radius-md);
+  color: inherit;
+  font-size: var(--font-size-xs);
+  font-weight: var(--font-weight-ui);
+  text-align: left;
+  cursor: pointer;
+  transition: var(--motion-fast) background, var(--motion-fast) color;
+}
+.ade-bnav-rowmain:hover {
+  background: var(--color-bg-2);
+  color: var(--color-text-1);
+}
+.ade-bnav-new {
+  flex: none;
+  margin-left: 4px;
+  margin-right: 2px;
+}
+/* Active tint lives on the LABEL button (rowmain), not the whole row, so
+   the trailing +New affordance sits on the neutral panel bg beside the
+   green pill rather than crammed inside it. The row stays the flex track;
+   the glyph still tints accent via the row-level .active selector below. */
+.ade-bnav-row.active .ade-bnav-rowmain {
+  background: color-mix(in srgb, var(--color-accent) 12%, transparent);
+  color: var(--color-accent);
+}
+.ade-bnav-row.active .ade-bnav-rowmain:hover {
+  background: color-mix(in srgb, var(--color-accent) 16%, transparent);
+}
+.ade-bnav-glyph {
+  flex: none;
+  width: 14px;
+  height: 14px;
+  color: var(--color-text-3);
+}
+.ade-bnav-row.active .ade-bnav-glyph {
+  color: var(--color-accent);
+}
+.ade-bnav-row .nm {
+  flex: 1;
+  min-width: 0;
+}
+
+/* Sub-sectioned panel (Plan: Tasks | Pages). A segmented toggle pinned
+   on top, the chosen surface filling the rest. */
+.ade-subsec {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+.ade-subtabs {
+  display: flex;
+  gap: 2px;
+  padding: 2px;
+  margin: 0 0 4px;
+  background: var(--color-bg-2);
+  border: 1px solid var(--color-line);
+  border-radius: var(--radius-md);
+}
+.ade-subtabs button {
+  flex: 1;
+  padding: 3px 8px;
+  font-size: var(--font-size-xs);
+  font-weight: var(--font-weight-ui);
+  color: var(--color-text-3);
+  background: transparent;
+  border: none;
+  border-radius: calc(var(--radius-md) - 2px);
+  cursor: pointer;
+}
+.ade-subtabs button:hover {
+  color: var(--color-text-1);
+}
+.ade-subtabs button.active {
+  color: var(--color-text-1);
+  background: var(--color-bg-0);
+  box-shadow: var(--shadow-xs, 0 1px 2px rgba(0, 0, 0, 0.25));
+}
+/* Secondary launcher inside the Tasks/Pages toggle — it opens the
+   Standup center pane rather than toggling a sidebar surface, so it
+   stays its content width (not flex:1) and is fenced off with a divider
+   so it never reads as a third toggle state. */
+.ade-subtabs .ade-subtab-aux {
+  flex: 0 0 auto;
+  margin-left: 4px;
+  padding-left: 10px;
+  padding-right: 9px;
+  color: var(--color-text-4);
+  border-left: 1px solid var(--color-line);
+  border-radius: 0 calc(var(--radius-md) - 2px) calc(var(--radius-md) - 2px) 0;
+}
+.ade-subtabs .ade-subtab-aux:hover {
+  color: var(--color-text-1);
+  background: var(--color-bg-0);
+}
+/* Rail section title — a glyph + name header for a full-bleed mounted
+   section (Trace). Sits above the rows with a hairline divider, like
+   Build's nav, and supplies the top padding the -8px full-bleed margin
+   strips off. */
+.ade-rail-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 8px 6px;
+  margin-bottom: 3px;
+  border-bottom: 1px solid var(--color-line-soft);
+  color: var(--color-text-1);
+  font-size: var(--font-size-sm);
+  font-weight: var(--font-weight-ui);
+}
+.ade-rail-title svg {
+  width: 14px;
+  height: 14px;
+  color: var(--color-accent);
+}
+
+.ade-sec-h {
+  display: flex;
+  align-items: center;
+  font-size: var(--font-size-2xs);
+  font-weight: var(--font-weight-ui);
+  text-transform: uppercase;
+  letter-spacing: var(--letter-spacing-wide);
+  color: var(--color-text-3);
+  padding: 7px 8px 3px;
+}
+.ade-sec-h .right {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+.ade-sec-h .right.dim {
+  text-transform: none;
+  letter-spacing: 0;
+  color: var(--color-text-4);
+  font-weight: var(--font-weight-body);
+}
+
+/* ── generic section row (Team channels, Plan items, Trace tools) ───── */
+.ade-row {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  width: 100%;
+  padding: 4px 8px;
+  border-radius: var(--radius-md);
+  color: var(--color-text-2);
+  background: transparent;
+  text-align: left;
+  transition: var(--motion-fast) background, var(--motion-fast) color;
+}
+.ade-row:hover {
+  background: var(--color-bg-2);
+  color: var(--color-text-1);
+}
+.ade-row.active {
+  background: color-mix(in srgb, var(--color-accent) 13%, transparent);
+  color: var(--color-accent);
+}
+.ade-row .nm {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.ade-row .unread {
+  flex: none;
+  min-width: 17px;
+  height: 17px;
+  padding: 0 5px;
+  border-radius: 9px;
+  background: var(--color-accent);
+  color: #fff;
+  font-size: var(--font-size-2xs);
+  font-weight: var(--font-weight-accent);
+  display: grid;
+  place-items: center;
+}
+.ade-row .ade-glyph {
+  flex: none;
+  width: 14px;
+  height: 14px;
+  color: var(--color-text-3);
+}
+.ade-row.active .ade-glyph {
+  color: var(--color-accent);
+}
+
+/* ── Automations surface (center pane) ──────────────────────────────
+   Orchestration runs + saved launch presets. Quiet card language —
+   hairline borders, one accent (the "Run" + active dot), everything
+   else on the text ramp so it reads as calm infrastructure. */
+.auto-surface {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  width: 100%;
+  background: var(--color-bg-0);
+  color: var(--color-text-1);
+}
+.auto-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex: none;
+  padding: 12px 16px;
+  border-bottom: 1px solid var(--color-line);
+}
+.auto-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: var(--font-size-md);
+  font-weight: var(--font-weight-accent);
+}
+.auto-title svg {
+  color: var(--color-accent);
+}
+.auto-new {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 11px;
+  font-size: var(--font-size-xs);
+  font-weight: var(--font-weight-ui);
+  color: var(--color-text-1);
+  background: var(--color-bg-2);
+  border: 1px solid var(--color-line);
+  border-radius: var(--radius-md);
+  cursor: pointer;
+  transition: var(--motion-fast) background;
+}
+.auto-new:hover {
+  background: var(--color-bg-card);
+}
+.auto-scroll {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 8px 16px 24px;
+}
+.auto-sec {
+  margin-top: 14px;
+  max-width: 720px;
+}
+.auto-sec-h {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-size: var(--font-size-2xs);
+  font-weight: var(--font-weight-ui);
+  text-transform: uppercase;
+  letter-spacing: var(--letter-spacing-wide);
+  color: var(--color-text-3);
+  padding: 6px 2px;
+}
+.auto-sec-add {
+  font-size: var(--font-size-2xs);
+  color: var(--color-text-3);
+  background: transparent;
+  border: none;
+  cursor: pointer;
+  letter-spacing: 0;
+  text-transform: none;
+}
+.auto-sec-add:hover {
+  color: var(--color-accent);
+}
+.auto-empty {
+  font-size: var(--font-size-xs);
+  color: var(--color-text-3);
+  line-height: 1.5;
+  padding: 4px 2px 8px;
+  max-width: 520px;
+}
+.auto-empty.err {
+  color: var(--color-red);
+}
+
+/* starter templates */
+.auto-tpl-cat {
+  margin-top: 8px;
+}
+.auto-tpl-cat-h {
+  font-size: var(--font-size-2xs);
+  color: var(--color-text-4);
+  letter-spacing: var(--letter-spacing-wide);
+  text-transform: uppercase;
+  padding: 4px 2px;
+}
+.auto-tpl-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+  margin-bottom: 4px;
+}
+.auto-tpl {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  text-align: left;
+  padding: 11px 12px;
+  border: 1px solid var(--color-line);
+  border-radius: var(--radius-md);
+  background: var(--color-bg-1);
+  cursor: pointer;
+  transition:
+    border-color var(--motion-fast),
+    background var(--motion-fast);
+}
+.auto-tpl:hover {
+  border-color: var(--color-accent);
+  background: var(--color-bg-2);
+}
+.auto-tpl-icon {
+  flex: 0 0 auto;
+  display: flex;
+  color: var(--color-text-3);
+  margin-top: 1px;
+}
+.auto-tpl:hover .auto-tpl-icon {
+  color: var(--color-accent);
+}
+.auto-tpl-body {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 0;
+}
+.auto-tpl-title {
+  font-size: var(--font-size-xs);
+  font-weight: var(--font-weight-ui);
+  color: var(--color-text-1);
+}
+.auto-tpl-desc {
+  font-size: var(--font-size-2xs);
+  color: var(--color-text-3);
+  line-height: 1.45;
+}
+
+/* preset row */
+.auto-preset {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 10px;
+  border: 1px solid var(--color-line);
+  border-radius: var(--radius-md);
+  background: var(--color-bg-1);
+  margin-bottom: 6px;
+}
+.auto-preset-body {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+.auto-preset-body .nm {
+  font-size: var(--font-size-sm);
+  color: var(--color-text-1);
+}
+.auto-preset-body .sub {
+  font-size: var(--font-size-xs);
+  color: var(--color-text-3);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.auto-run {
+  flex: none;
+  padding: 4px 12px;
+  font-size: var(--font-size-xs);
+  font-weight: var(--font-weight-ui);
+  color: var(--color-accent);
+  background: color-mix(in srgb, var(--color-accent) 12%, transparent);
+  border: 1px solid color-mix(in srgb, var(--color-accent) 30%, transparent);
+  border-radius: var(--radius-md);
+  cursor: pointer;
+}
+.auto-run:hover {
+  background: color-mix(in srgb, var(--color-accent) 20%, transparent);
+}
+.auto-del {
+  flex: none;
+  width: 24px;
+  height: 24px;
+  display: grid;
+  place-items: center;
+  color: var(--color-text-4);
+  background: transparent;
+  border: none;
+  border-radius: var(--radius-md);
+  cursor: pointer;
+}
+.auto-del:hover {
+  color: var(--color-red);
+  background: var(--color-bg-2);
+}
+
+/* wave + lanes */
+.auto-wave {
+  border: 1px solid var(--color-line);
+  border-radius: var(--radius-md);
+  background: var(--color-bg-1);
+  margin-bottom: 8px;
+  overflow: hidden;
+}
+.auto-wave-h {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 7px 10px;
+  border-bottom: 1px solid var(--color-line-soft);
+  font-size: var(--font-size-2xs);
+  color: var(--color-text-3);
+}
+.auto-wave-h .wid {
+  font-family: var(--font-mono);
+}
+.auto-lane {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding: 8px 10px;
+}
+.auto-lane + .auto-lane {
+  border-top: 1px solid var(--color-line-soft);
+}
+.auto-lane-body {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+.auto-lane-body .nm {
+  font-size: var(--font-size-sm);
+  color: var(--color-text-1);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.auto-lane-body .sub {
+  font-size: var(--font-size-xs);
+  color: var(--color-text-3);
+}
+.auto-lane-body .lane-err {
+  font-size: var(--font-size-xs);
+  color: var(--color-red);
+}
+.auto-dot {
+  flex: none;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--color-text-4);
+}
+.auto-dot.running {
+  background: var(--color-accent-green);
+  animation: auto-pulse 1.4s ease-in-out infinite;
+}
+.auto-dot.queued {
+  background: var(--color-amber);
+}
+.auto-dot.done {
+  background: var(--color-green);
+}
+.auto-dot.failed,
+.auto-dot.conflict {
+  background: var(--color-red);
+}
+.auto-dot.cancelled {
+  background: var(--color-text-4);
+}
+@keyframes auto-pulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.35;
+  }
+}
+.auto-cancel {
+  flex: none;
+  padding: 3px 9px;
+  font-size: var(--font-size-2xs);
+  color: var(--color-text-3);
+  background: transparent;
+  border: 1px solid var(--color-line);
+  border-radius: var(--radius-md);
+  cursor: pointer;
+}
+.auto-cancel:hover {
+  color: var(--color-red);
+  border-color: var(--color-red);
+}
+
+/* add-preset form */
+.auto-form {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 10px;
+  margin-bottom: 8px;
+  border: 1px solid var(--color-line);
+  border-radius: var(--radius-md);
+  background: var(--color-bg-1);
+}
+.auto-in {
+  width: 100%;
+  padding: 6px 9px;
+  font-size: var(--font-size-xs);
+  color: var(--color-text-1);
+  background: var(--color-bg-0);
+  border: 1px solid var(--color-line);
+  border-radius: var(--radius-md);
+  font-family: inherit;
+}
+.auto-in:focus {
+  outline: none;
+  border-color: var(--color-accent);
+}
+.auto-ta {
+  resize: vertical;
+  min-height: 40px;
+}
+.auto-form-row {
+  display: flex;
+  gap: 6px;
+}
+.auto-save {
+  padding: 5px 14px;
+  font-size: var(--font-size-xs);
+  font-weight: var(--font-weight-ui);
+  color: #fff;
+  background: var(--color-accent);
+  border: none;
+  border-radius: var(--radius-md);
+  cursor: pointer;
+}
+.auto-save:hover {
+  filter: brightness(1.07);
+}
+.auto-cancel-btn {
+  padding: 5px 12px;
+  font-size: var(--font-size-xs);
+  color: var(--color-text-3);
+  background: transparent;
+  border: 1px solid var(--color-line);
+  border-radius: var(--radius-md);
+  cursor: pointer;
+}
+.auto-cancel-btn:hover {
+  color: var(--color-text-1);
+}
+
+/* ── Automations: recipe model ─────────────────────────────────────── */
+.auto-note {
+  font-size: var(--font-size-2xs);
+  color: var(--color-text-4);
+  padding: 2px 2px 6px;
+  max-width: 720px;
+}
+
+/* recipe card: WHEN → DO → THEN, compact rows + a side rail */
+.auto-recipe {
+  display: flex;
+  align-items: stretch;
+  gap: 12px;
+  padding: 10px 12px;
+  margin-bottom: 8px;
+  max-width: 720px;
+  border: 1px solid var(--color-line);
+  border-radius: var(--radius-md);
+  background: var(--color-bg-1);
+}
+.auto-recipe.is-paused {
+  opacity: 0.62;
+}
+.auto-recipe-rows {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+.auto-recipe-row {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  min-width: 0;
+}
+.auto-recipe-key {
+  flex: 0 0 36px;
+  font-size: var(--font-size-2xs);
+  font-weight: var(--font-weight-ui);
+  text-transform: uppercase;
+  letter-spacing: var(--letter-spacing-wide);
+  color: var(--color-text-4);
+}
+.auto-recipe-val {
+  flex: 1;
+  min-width: 0;
+  font-size: var(--font-size-xs);
+  color: var(--color-text-1);
+  line-height: 1.45;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.auto-recipe-side {
+  flex: none;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 8px;
+}
+.auto-recipe-state {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.auto-recipe-next {
+  font-size: var(--font-size-2xs);
+  color: var(--color-text-4);
+  white-space: nowrap;
+}
+.auto-recipe-next.on {
+  color: var(--color-green, var(--color-text-3));
+}
+.auto-recipe-actions {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+.auto-icon-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  height: 26px;
+  padding: 0 8px;
+  font-size: var(--font-size-2xs);
+  color: var(--color-text-3);
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: var(--radius-md);
+  cursor: pointer;
+  transition: var(--motion-fast) background;
+}
+.auto-icon-btn:hover {
+  background: var(--color-bg-2);
+  color: var(--color-text-1);
+}
+.auto-icon-btn.run {
+  color: var(--color-accent);
+  border-color: color-mix(in srgb, var(--color-accent) 28%, transparent);
+}
+.auto-icon-btn.run:hover {
+  background: color-mix(in srgb, var(--color-accent) 14%, transparent);
+}
+.auto-icon-btn.run:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+.auto-icon-btn.danger:hover {
+  color: var(--color-red);
+}
+
+/* inline form (new / edit) */
+.auto-formx {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 12px;
+  max-width: 720px;
+  border: 1px solid color-mix(in srgb, var(--color-accent) 35%, var(--color-line));
+  border-radius: var(--radius-md);
+  background: var(--color-bg-1);
+}
+.auto-formx-block {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding-top: 8px;
+  border-top: 1px solid var(--color-line-soft);
+}
+.auto-formx-key {
+  font-size: var(--font-size-2xs);
+  font-weight: var(--font-weight-ui);
+  text-transform: uppercase;
+  letter-spacing: var(--letter-spacing-wide);
+  color: var(--color-text-3);
+}
+.auto-formx-grid {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+.auto-formx-grid > * {
+  flex: 1 1 140px;
+  min-width: 120px;
+}
+.auto-formx-action {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.auto-formx-then-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  font-size: var(--font-size-xs);
+  color: var(--color-text-2);
+  cursor: pointer;
+}
+.auto-formx-foot {
+  display: flex;
+  gap: 8px;
+  padding-top: 2px;
+}
+.auto-time {
+  width: 100%;
+  padding: 6px 9px;
+  font-size: var(--font-size-xs);
+  font-family: inherit;
+  color: var(--color-text-1);
+  background: var(--color-bg-0);
+  border: 1px solid var(--color-line);
+  border-radius: var(--radius-md);
+}
+.auto-time:focus {
+  outline: none;
+  border-color: var(--color-accent);
+}
+
+/* recent runs */
+.auto-runrow {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 4px;
+  max-width: 720px;
+  border-bottom: 1px solid var(--color-line-soft);
+}
+.auto-run-dot {
+  flex: none;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--color-text-4);
+}
+.auto-run-dot.ok {
+  background: var(--color-green, #3fb950);
+}
+.auto-run-dot.proven {
+  background: var(--color-green, #3fb950);
+}
+.auto-run-dot.fail {
+  background: var(--color-red);
+}
+.auto-run-dot.live {
+  background: var(--color-accent);
+  animation: auto-pulse 1.4s ease-in-out infinite;
+}
+@keyframes auto-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.35; }
+}
+.auto-run-title {
+  flex: 0 1 auto;
+  min-width: 0;
+  font-size: var(--font-size-xs);
+  color: var(--color-text-1);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.auto-run-meta {
+  flex: 1;
+  font-size: var(--font-size-2xs);
+  color: var(--color-text-4);
+  white-space: nowrap;
+}
+.auto-run-verdict {
+  flex: none;
+  font-size: var(--font-size-2xs);
+  font-weight: var(--font-weight-ui);
+  color: var(--color-text-3);
+}
+.auto-run-verdict.proven {
+  color: var(--color-green, #3fb950);
+}
+.auto-run-verdict.fail {
+  color: var(--color-red);
+}
+
+/* ── New Workspace button ──────────────────────────────────────────── */
+/* ── Build: project group + worktree rows ──────────────────────────── */
+.ade-proj {
+  margin-bottom: 1px;
+}
+/* Separator between adjacent workspaces — whitespace only, no hairline.
+   Space alone reads each workspace as its own block (Codex/Conductor
+   keep blocks apart with air, not lines) and keeps the roster calm. */
+.ade-proj + .ade-proj {
+  margin-top: 5px;
+}
+.ade-proj-h {
+  display: flex;
+  align-items: center;
+  gap: 1px;
+  width: 100%;
+  /* Symmetric: no vertical padding on the row itself — the .ph-name
+     toggle owns the row's height + even top/bottom padding, so the
+     header can't read bottom-heavy. */
+  padding: 0 2px 0 0;
+  color: var(--color-text-2);
+  font-weight: var(--font-weight-ui);
+}
+/* The project mark doubles as the collapse toggle: it rests as the repo
+   glyph/avatar and cross-fades to a chevron when the header row is hovered
+   (Conductor pattern — no separate persistent chevron). Click folds the
+   parallel copies; the .ph-name button beside it still opens the workspace. */
+.ph-toggle {
+  flex: none;
+  position: relative;
+  width: 22px;
+  height: 22px;
+  display: grid;
+  place-items: center;
+  color: var(--color-text-4);
+  background: transparent;
+  border-radius: var(--radius-sm, 4px);
+}
+.ph-toggle:hover {
+  background: var(--color-bg-2);
+}
+/* Mark + chevron share one grid cell so they overlap; opacity swaps them. */
+.ph-toggle .ph-icon,
+.ph-toggle .ph-toggle-chev {
+  grid-area: 1 / 1;
+  display: grid;
+  place-items: center;
+  transition: opacity var(--motion-fast), transform var(--motion-fast);
+}
+.ph-toggle .ph-icon {
+  opacity: 1;
+}
+.ph-toggle .ph-toggle-chev {
+  opacity: 0;
+  color: var(--color-text-1);
+  transform: rotate(-90deg);
+}
+.ph-toggle .ph-toggle-chev.open {
+  transform: rotate(0deg);
+}
+/* Reveal the chevron (and dissolve the mark) on header hover, or when the
+   toggle takes keyboard focus — the icon literally becomes the chevron. */
+.ade-proj-h:hover .ph-toggle .ph-icon,
+.ph-toggle:focus-visible .ph-icon {
+  opacity: 0;
+}
+.ade-proj-h:hover .ph-toggle .ph-toggle-chev,
+.ph-toggle:focus-visible .ph-toggle-chev {
+  opacity: 1;
+}
+/* "Projects" break header — a real hairline divider separates the roster from
+   the Build nav (Conductor's clear section break), and the label's left edge
+   lines up with the project glyphs below it (glyph sits ~4px in from the row
+   edge inside its 22px toggle, so the uppercase label matches at 4px). The
+   `.ade-sec-h` shorthand set 8px — override just the left here. */
+.ade-proj-sech {
+  margin-top: 8px;
+  padding-top: 9px;
+  padding-left: 4px;
+  border-top: 1px solid var(--color-line);
+}
+.ph-name {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  /* Equal top/bottom padding + a fixed tight height own the row rhythm.
+     line-height:1 strips the text's stray descender space that was
+     pushing the visual weight below centre (the bottom-heavy look). */
+  min-height: 24px;
+  padding: 0 6px;
+  line-height: 1;
+  background: transparent;
+  border-radius: var(--radius-md);
+  text-align: left;
+}
+.ph-name:hover {
+  background: var(--color-bg-2);
+}
+.ade-proj-h .nm {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  /* same muted per-folder tint as the glyph (neutral fallback) */
+  color: var(--folder-tint, var(--color-text-2));
+}
+.ade-proj-h .glyph {
+  flex: none;
+  width: 14px;
+  height: 14px;
+  /* tinted per folder (falls back to neutral when no tint is set) */
+  color: var(--folder-tint, var(--color-text-4));
+}
+/* Hover-only ⋯ — same treatment as the worktree row (.wrow-more): no
+   permanently reserved slot and no invisible click target. Collapses to zero
+   width when idle (the project name reclaims the space) and expands on header
+   hover or keyboard focus; pointer-events off while hidden so a click near the
+   name's right edge never trips the menu. */
+.ph-more {
+  flex: none;
+  width: 0;
+  height: 20px;
+  display: grid;
+  place-items: center;
+  overflow: hidden;
+  color: var(--color-text-4);
+  background: transparent;
+  border-radius: var(--radius-sm, 4px);
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity var(--motion-fast), color var(--motion-fast),
+    background var(--motion-fast);
+}
+.ade-proj-h:hover .ph-more,
+.ade-proj-h:focus-within .ph-more {
+  width: 20px;
+  opacity: 1;
+  pointer-events: auto;
+}
+.ph-more:hover {
+  color: var(--color-text-2);
+  background: color-mix(in srgb, var(--color-text-1) 8%, transparent);
+}
+/* The "+" beside ⋯ — start a new parallel copy (a fresh worktree session)
+   scoped to this project. Persistent (Conductor keeps it on the row, not
+   hover-only) but quiet by default; arctic-blue on hover marks it as the
+   create affordance. */
+.ph-new {
+  flex: none;
+  width: 20px;
+  height: 20px;
+  display: grid;
+  place-items: center;
+  color: var(--color-text-5);
+  background: transparent;
+  border-radius: var(--radius-sm, 4px);
+  opacity: 1;
+  transition: opacity var(--motion-fast), color var(--motion-fast),
+    background var(--motion-fast);
+}
+.ade-proj-h:hover .ph-new {
+  color: var(--color-text-3);
+}
+.ph-new:hover {
+  color: var(--color-accent);
+  background: color-mix(in srgb, var(--color-accent) 14%, transparent);
+}
+
+/* Parallel-copy count chip on the project header — how many copies this
+   project has. Clicking opens the full Workspaces view scoped to it. Quiet
+   pill by default, arctic-blue on hover (it's a link out, not a toggle). */
+.ph-count {
+  flex: none;
+  min-width: 18px;
+  height: 18px;
+  margin-left: 4px;
+  padding: 0 5px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 999px;
+  background: var(--color-bg-2);
+  color: var(--color-text-3);
+  font-size: var(--font-size-2xs);
+  font-weight: var(--font-weight-ui);
+  font-variant-numeric: tabular-nums;
+  transition: color var(--motion-fast), background var(--motion-fast);
+}
+.ph-count:hover {
+  color: var(--color-accent);
+  background: color-mix(in srgb, var(--color-accent) 14%, transparent);
+}
+
+/* "Projects" section header + its right-side controls (sort · new · fold-all).
+   The label is the .ade-sec-h text; the icons ride in the shared .right
+   cluster (margin-left:auto). Quiet glyphs, brighten on hover. */
+.ade-projhead .projhead-btn {
+  flex: none;
+  width: 20px;
+  height: 20px;
+  display: grid;
+  place-items: center;
+  color: var(--color-text-4);
+  background: transparent;
+  border-radius: var(--radius-sm, 4px);
+  transition: color var(--motion-fast), background var(--motion-fast);
+}
+.ade-projhead .projhead-btn:hover {
+  color: var(--color-text-1);
+  background: color-mix(in srgb, var(--color-text-1) 8%, transparent);
+}
+.ade-proj-rows {
+  display: flex;
+  flex-direction: column;
+  /* Breathing space: worktree rows sat flush against the workspace name
+     line and each other — a slight top inset lifts the first row off the
+     name, and a per-row gap gives each copy its own air (calmer, easier to
+     scan than a dense stack). */
+  gap: 3px;
+  padding-top: 3px;
+  padding-left: 0;
+}
+/* disclosure for the collapsed idle agent-scratch worktrees */
+.ade-wmore {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  width: 100%;
+  padding: 4px 8px;
+  margin-top: 1px;
+  border-radius: var(--radius-md);
+  background: transparent;
+  color: var(--color-text-4);
+  font-size: var(--font-size-2xs);
+  font-weight: var(--font-weight-ui);
+  text-align: left;
+  transition: var(--motion-fast) background, var(--motion-fast) color;
+}
+.ade-wmore:hover {
+  background: var(--color-bg-2);
+  color: var(--color-text-2);
+}
+.ade-wmore .chev {
+  color: var(--color-text-4);
+  transform: rotate(-90deg);
+  transition: transform var(--motion-fast);
+}
+.ade-wmore .chev.open {
+  transform: rotate(0deg);
+}
+/* The "…more parallel copies" row that opens the full Workspaces view carries a
+   small grid glyph (a hint at the center view) and a trailing arrow that
+   brightens on hover — reads as "go somewhere", not "expand inline". */
+.ade-wmore .wmore-glyph {
+  color: var(--color-text-4);
+  flex: none;
+}
+.ade-wmore .wmore-arrow {
+  margin-left: auto;
+  color: var(--color-text-5);
+  transition: transform var(--motion-fast), color var(--motion-fast);
+}
+.ade-wmore:hover .wmore-arrow {
+  color: var(--color-accent);
+  transform: translateX(2px);
+}
+.ade-wrow {
+  position: relative; /* anchors the hover-only ⋯ (absolute, no reserved slot) */
+  display: flex;
+  flex-direction: column;
+  width: 100%;
+  /* One clean line per copy (Conductor density) — glyph · name · agents ·
+     diff/PR badges, no subtext row. The ~18px glyph sets the line height, so
+     3px symmetric vertical padding lands the row at ~26px: compact but
+     comfortably clickable. */
+  padding: 3px 8px;
+  border-radius: var(--radius-md);
+  background: transparent;
+  text-align: left;
+  border-left: 2px solid transparent;
+  transition: var(--motion-fast) background;
+}
+.ade-wrow:hover {
+  background: var(--color-bg-2);
+}
+.ade-wrow.active {
+  background: color-mix(in srgb, var(--color-accent) 10%, transparent);
+  /* No left accent lip — the background tint alone marks the active row. */
+}
+/* The row is a focusable role="button"; the global focus ring is an
+   offset outline, but this row lives in an overflow-clipped scroller, so
+   only its right segment escapes — into the panel seam — as a stray
+   bright stub. Draw the ring INSET instead so it stays inside the row and
+   reads symmetrically. Specificity is bumped past the global
+   [tabindex]:not(...):focus-visible rule so this actually wins. */
+.ade-proj-rows .ade-wrow[role="button"]:focus-visible {
+  outline: none;
+  box-shadow: inset 0 0 0 2px var(--focus-ring-color);
+}
+.ade-wrow .l1 {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.ade-wrow .name {
+  /* The session name / branch identity. Fills the row and pushes the
+     hover ⋯ to the end; truncates when long. */
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--color-text-1);
+  font-weight: var(--font-weight-ui);
+}
+.ade-wrow .l2 {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding-left: 30px;   /* clear the status avatar so meta aligns */
+}
+.ade-wrow .branch {
+  font-family: var(--font-mono);
+  font-size: var(--font-size-2xs);
+  color: var(--color-text-3);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.ade-wrow .badges {
+  /* Rides the L1 name line now (single-line rows). The name is flex:1 and
+     eats the slack, so the whole right cluster — agents · badges · ⋯ —
+     packs at the row's right edge; no auto-margin needed. */
+  margin-left: 0;
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  flex: none;
+}
+.ade-wrow .diff-add {
+  font-family: var(--font-mono);
+  font-size: var(--font-size-2xs);
+  color: var(--color-green);
+}
+.ade-wrow .diff-del {
+  font-family: var(--font-mono);
+  font-size: var(--font-size-2xs);
+  color: var(--color-red);
+}
+/* open-PR pill — the mockup's "#816". Tinted by PR state so a merged or
+   closed ref reads differently from an open one. */
+.ade-wrow .pr-pill {
+  font-family: var(--font-mono);
+  font-size: var(--font-size-2xs);
+  line-height: 1;
+  padding: 2px 5px;
+  border-radius: var(--radius-sm);
+  color: var(--color-accent);
+  background: color-mix(in srgb, var(--color-accent) 14%, transparent);
+  border: 1px solid color-mix(in srgb, var(--color-accent) 26%, transparent);
+}
+.ade-wrow .pr-pill.merged {
+  color: var(--color-purple, var(--color-accent));
+  background: color-mix(in srgb, var(--color-purple, var(--color-accent)) 14%, transparent);
+  border-color: color-mix(in srgb, var(--color-purple, var(--color-accent)) 26%, transparent);
+}
+.ade-wrow .pr-pill.closed {
+  color: var(--color-red);
+  background: color-mix(in srgb, var(--color-red) 12%, transparent);
+  border-color: color-mix(in srgb, var(--color-red) 24%, transparent);
+}
+
+/* The agent's live state now reads from the L1 session name + the
+   animated avatar dot, so no separate right-aligned status word is
+   rendered. (.ws-stat retired with the row redesign.) */
+
+/* per-row ⋯ — opens the worktree context menu (open / copy path /
+   remove). Absolutely pinned to the row's right edge so it reserves NO
+   layout slot: the row's full width goes to the name + badges, and the ⋯
+   only materialises on hover/focus, masking the trailing badge beneath it
+   (opaque row-bg pill) so the two never visually clash. Right-click still
+   opens the same menu, so nothing's lost when it's hidden. */
+.ade-wrow .wrow-more {
+  position: absolute;
+  top: 50%;
+  right: 5px;
+  transform: translateY(-50%);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  border-radius: var(--radius-sm);
+  background: var(--color-bg-2);
+  color: var(--color-text-4);
+  opacity: 0;
+  pointer-events: none;
+  transition:
+    var(--motion-fast) opacity,
+    var(--motion-fast) color,
+    var(--motion-fast) background;
+}
+.ade-wrow:hover .wrow-more,
+.ade-wrow:focus-within .wrow-more {
+  opacity: 1;
+  pointer-events: auto;
+}
+.ade-wrow .wrow-more:hover {
+  color: var(--color-text-1);
+  background: var(--color-bg-3);
+}
+
+/* Who's-on-this-copy agent chips — the right-side cluster on a copy row.
+   The copy glyph + name own the row's identity; these ride to the right of
+   the name (0/1/many marks) and never grow it. The inline LiveAgentLane sets
+   its own gap/nowrap; this just holds it flush and keeps it off the ⋯. */
+.ade-wrow .wrow-agents {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  margin-left: 0;
+}
+
+/* ── roster context menu ───────────────────────────────────────────── *
+ * Cursor-anchored floating sheet for right-click / ⋯ on a project header
+ * or worktree row. position:fixed (viewport coords from the click), so it
+ * escapes the sidebar's overflow clip and survives scroll-free dismissal. */
+/* The shared Medusa flyout — byte-for-byte the ui/menuSurface.ts recipe the
+   Radix menus use (MENU_PANEL / MENU_ROW / MENU_LABEL / MENU_SEP), expressed as
+   CSS so this hand-rolled cursor-anchored sheet is indistinguishable from a
+   DropdownMenu: bg-1 surface, hairline line-soft ring, 8px radius, tight 4px
+   padding, flyout shadow; 13px rows that lift text-2 → text-1 over a neutral
+   bg-2 wash, 16px leading glyphs. */
+.ade-roster-menu {
+  position: fixed;
+  z-index: 60;
+  min-width: 208px;
+  padding: 4px;
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+  background: var(--color-bg-1);
+  border: 1px solid var(--color-line-soft);
+  border-radius: 8px;
+  box-shadow: var(--shadow-flyout, 0 8px 24px rgba(0, 0, 0, 0.32));
+}
+.ade-roster-menu .rm-head {
+  padding: 6px 8px;
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: var(--color-text-4);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.ade-roster-menu .rm-sep {
+  height: 1px;
+  margin: 4px -4px;
+  background: var(--color-line-soft, var(--color-line));
+}
+.ade-roster-menu .rm-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  padding: 6px 8px;
+  border-radius: 6px;
+  font-size: 13px;
+  line-height: 1.4;
+  color: var(--color-text-2);
+  background: transparent;
+  text-align: left;
+  transition: var(--motion-fast) background, var(--motion-fast) color;
+}
+/* One icon size for every menu row (overrides the per-icon size props) so the
+   branch / copy / trash glyphs line up at a consistent 16px — the size-4 the
+   Radix rows normalise to. */
+.ade-roster-menu .rm-item svg {
+  flex: none;
+  width: 16px;
+  height: 16px;
+  color: var(--color-text-4);
+}
+.ade-roster-menu .rm-item.active {
+  color: var(--color-accent);
+  font-weight: var(--font-weight-ui);
+}
+/* Right-aligned keyboard-shortcut chip (Linear-style), pushed to the row's far
+   edge. Only shown for genuinely wired shortcuts — never a decorative fake. */
+.ade-roster-menu .rm-item .rm-key {
+  margin-left: auto;
+  padding-left: 12px;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  letter-spacing: 0.02em;
+  color: var(--color-text-5);
+}
+.ade-roster-menu .rm-item:hover .rm-key {
+  color: var(--color-text-3);
+}
+.ade-roster-menu .rm-item:hover {
+  background: var(--color-bg-2);
+  color: var(--color-text-1);
+}
+.ade-roster-menu .rm-item.danger:hover {
+  background: color-mix(in srgb, var(--color-red) 10%, transparent);
+  color: var(--color-red);
+}
+.ade-roster-menu .rm-item.danger:hover svg {
+  color: var(--color-red);
+}
+.ade-roster-menu .rm-item:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+  background: transparent;
+  color: var(--color-text-3);
+}
+
+/* ── worktree hover card ───────────────────────────────────────────── *
+ * Aura's take on Conductor's copy detail: the copy's identity (branch small
+ * on top, humanized title bold) + a status ring, who's driving it + what
+ * they're doing now, then ONE contextual action derived from real git state
+ * (Commit & push / Pull / Create PR / open PR) — never a generic "Open".
+ * This is a hand-rolled portal card (see `WorktreeHover`), not a Medusa
+ * tooltip, so it owns its own surface AND can hold interactive buttons a
+ * tooltip can't. */
+/* The portal wrapper `WorktreeHover` renders — fixed-positioned beside the
+   row. It carries no visuals of its own; `.wt-hovercard` is the card. */
+.wt-hc-pop {
+  /* positioning + z-index set inline by the bridge */
+}
+.wt-hovercard {
+  display: flex;
+  flex-direction: column;
+  gap: 9px;
+  width: 272px;
+  padding: 11px 12px;
+  background: var(--color-bg-1);
+  border: 1px solid var(--color-line);
+  border-radius: 10px;
+  box-shadow:
+    0 1px 2px rgba(0, 0, 0, 0.12),
+    0 12px 28px -8px rgba(0, 0, 0, 0.35);
+}
+/* Header is a button (click anywhere on the identity → open the copy). Reset
+   the native button chrome so it reads as plain card content. */
+.wt-hc-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 10px;
+  width: 100%;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  text-align: left;
+  cursor: pointer;
+  font: inherit;
+  color: inherit;
+}
+.wt-hc-id {
+  flex: 1;
+  min-width: 0;
+}
+.wt-hc-name {
+  font-size: 14px;
+  font-weight: 600;
+  line-height: 1.25;
+  color: var(--color-text-1);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.wt-hc-branch {
+  margin-bottom: 2px;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  line-height: 1.3;
+  color: var(--color-text-4);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+/* Status glyph slot — positions the board's own kanban `StateRing` glyph
+   (dashed / conic-arc / solid-disc, styled in the component). Never animated;
+   the live "working" pulse lives on the agent row. */
+.wt-hc-ring {
+  flex: none;
+  display: grid;
+  place-items: center;
+  width: 12px;
+  height: 12px;
+  margin-top: 2px;
+}
+.wt-hc-agents {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+/* One-line calm status when no agent is attached (e.g. "Unsaved changes"). */
+.wt-hc-status {
+  font-size: 11px;
+  line-height: 1.3;
+  color: var(--color-text-4);
+}
+.wt-hc-agent {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+}
+.wt-hc-agent-icon {
+  flex: none;
+  margin-top: 0.5px;
+}
+.wt-hc-agent-body {
+  flex: 1;
+  min-width: 0;
+}
+.wt-hc-agent-head {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+}
+.wt-hc-agent-name {
+  font-size: 12px;
+  font-weight: 500;
+  line-height: 1.3;
+  color: var(--color-text-1);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.wt-hc-run,
+.wt-hc-idle,
+.wt-hc-attn {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 9px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+.wt-hc-run {
+  color: var(--color-accent-green);
+}
+.wt-hc-attn {
+  color: var(--color-amber);
+}
+.wt-hc-idle {
+  color: var(--color-text-5);
+}
+.wt-hc-dot {
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: var(--color-accent-green);
+  animation: wt-hc-pulse 1.4s ease-in-out infinite;
+}
+@keyframes wt-hc-pulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.35;
+  }
+}
+.wt-hc-activity {
+  margin-top: 1px;
+  font-size: 11px;
+  line-height: 1.3;
+  color: var(--color-text-3);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.wt-hc-foot {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+/* The one contextual action, Conductor-compact + calm. Two quiet skins on one
+   base: `-outline` (Commit & push / Pull / Create PR — a bordered neutral
+   button, never filled, never coloured) and `-ghost` (open an existing PR — a
+   bare link). No solid CTA: the card only ever shows ONE action, so there's
+   no hierarchy to shout for. Colour stays out of it — green is status-only and
+   the theme accent would fill these loudly; a neutral lift on hover is enough. */
+.wt-hc-act {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  height: 26px;
+  padding: 0 10px;
+  border-radius: 7px;
+  border: 1px solid transparent;
+  background: transparent;
+  color: var(--color-text-1);
+  font-family: var(--font-ui, inherit);
+  font-size: 11.5px;
+  font-weight: 500;
+  line-height: 1;
+  white-space: nowrap;
+  cursor: pointer;
+  transition:
+    var(--motion-fast) background,
+    var(--motion-fast) border-color;
+}
+.wt-hc-act svg {
+  flex: none;
+}
+.wt-hc-act-outline {
+  border-color: var(--color-line);
+  color: var(--color-text-1);
+}
+.wt-hc-act-outline svg {
+  color: var(--color-text-3);
+}
+.wt-hc-act-outline:hover {
+  background: var(--color-bg-2);
+  border-color: var(--color-line-strong, var(--color-line));
+}
+.wt-hc-act-ghost {
+  padding: 0 8px;
+  color: var(--color-text-3);
+  font-family: var(--font-mono);
+  font-size: 11px;
+}
+.wt-hc-act-ghost svg {
+  color: var(--color-text-4);
+}
+.wt-hc-act-ghost:hover {
+  background: var(--color-bg-2);
+  color: var(--color-text-1);
+}
+/* Create PR is a split button: face + caret share one bordered pill. */
+.wt-hc-split {
+  position: relative;
+  display: inline-flex;
+  align-items: stretch;
+}
+.wt-hc-split-face {
+  border-top-right-radius: 0;
+  border-bottom-right-radius: 0;
+  border-right-color: transparent;
+}
+.wt-hc-split-caret {
+  width: 24px;
+  padding: 0;
+  justify-content: center;
+  border-top-left-radius: 0;
+  border-bottom-left-radius: 0;
+  margin-left: -1px;
+}
+.wt-hc-split-caret svg {
+  color: var(--color-text-3);
+}
+/* The small overflow menu the caret opens (draft PR / push only). */
+.wt-hc-menu {
+  position: absolute;
+  top: calc(100% + 4px);
+  left: 0;
+  z-index: 2;
+  min-width: 150px;
+  padding: 4px;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  background: var(--color-bg-1);
+  border: 1px solid var(--color-line);
+  border-radius: 8px;
+  box-shadow: 0 8px 22px -6px rgba(0, 0, 0, 0.4);
+}
+.wt-hc-menu-item {
+  padding: 5px 8px;
+  border: 0;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--color-text-2);
+  font-family: var(--font-ui, inherit);
+  font-size: 11.5px;
+  text-align: left;
+  white-space: nowrap;
+  cursor: pointer;
+  transition: var(--motion-fast) background;
+}
+.wt-hc-menu-item:hover {
+  background: var(--color-bg-2);
+  color: var(--color-text-1);
+}
+/* Empty flex spacer so a no-action copy still right-aligns its age. */
+.wt-hc-spacer {
+  flex: 1;
+}
+.wt-hc-age {
+  margin-left: auto;
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  color: var(--color-text-5);
+}
+
+/* ── status-avatar (who + status) ──────────────────────────────────── *
+ * The brand mark (or a git-branch glyph when no agent is attached) sits
+ * bare on the row — no framing box — with a small status dot in the
+ * corner. The old SVG progress ring double-framed the agent logo (the
+ * "box" complaint); the corner dot conveys run/attn without it. */
+.wsa {
+  position: relative;
+  width: 20px;
+  height: 20px;
+  flex: none;
+  display: grid;
+  place-items: center;
+}
+.wsa-glyph {
+  width: 15px;
+  height: 15px;
+  color: var(--color-text-3);
+}
+/* ⌘-hold quick-switch number, shown in the glyph's place while Command is
+   down. Accent-tinted so it reads as an actionable shortcut (⌘+N), not
+   status; tabular so 1–9 sit centred. */
+.wsa-num {
+  display: grid;
+  place-items: center;
+  width: 17px;
+  height: 17px;
+  border-radius: var(--radius-sm);
+  font-size: 10px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  color: var(--color-accent);
+  background: color-mix(in srgb, var(--color-accent) 16%, transparent);
+}
+.wsa-dot {
+  position: absolute;
+  right: -2px;
+  bottom: -2px;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  /* ring it in the panel bg so it reads as a separate dot over the icon */
+  box-shadow: 0 0 0 1.5px var(--color-bg-1);
+}
+/* Active states get a steady solid dot plus an expanding "ping" ring
+   (the ::after) so motion reads as a live heartbeat rather than a
+   flicker. Running pings calmly in green; waiting-on-you pings faster
+   in amber to pull the eye. */
+.wsa.run .wsa-dot {
+  background: var(--color-accent-green);
+}
+.wsa.attn .wsa-dot {
+  background: var(--color-amber);
+}
+.wsa.run .wsa-dot::after,
+.wsa.attn .wsa-dot::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: 50%;
+  background: inherit;
+  animation: wsaping 1.8s ease-out infinite;
+}
+.wsa.attn .wsa-dot::after {
+  animation-duration: 1.1s;
+}
+@keyframes wsaping {
+  0% {
+    transform: scale(1);
+    opacity: 0.55;
+  }
+  80%,
+  100% {
+    transform: scale(2.8);
+    opacity: 0;
+  }
+}
+
+/* ── live-agent lane ───────────────────────────────────────────────────
+   The project's "who's working here right now" face pile: one brand mark
+   per concurrent agent (across the project's worktrees), shown under the
+   header and kept visible while the rows are collapsed. Answers "which
+   logo?" when several agents share a workspace — show them all,
+   attention-first, each with its own live status dot. */
+.ade-live-lane {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px;
+  /* align under the header name, past the chevron + folder glyph */
+  padding: 1px 6px 5px 27px;
+}
+.ala-chip {
+  position: relative;
+  width: 24px;
+  height: 24px;
+  flex: none;
+  display: grid;
+  place-items: center;
+  border-radius: var(--radius-sm, 4px);
+  background: transparent;
+  cursor: pointer;
+  transition: var(--motion-fast) background, var(--motion-fast) transform;
+}
+.ala-chip:hover {
+  background: var(--color-bg-2);
+  transform: translateY(-1px);
+}
+.ala-dot {
+  position: absolute;
+  right: 0;
+  bottom: 0;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  /* ring it in the panel bg so it reads as a separate dot over the icon */
+  box-shadow: 0 0 0 1.5px var(--color-bg-1);
+}
+.ala-chip.run .ala-dot {
+  background: var(--color-accent-green);
+}
+.ala-chip.attn .ala-dot {
+  background: var(--color-amber);
+}
+.ala-chip.run .ala-dot::after,
+.ala-chip.attn .ala-dot::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: 50%;
+  background: inherit;
+  animation: wsaping 1.8s ease-out infinite;
+}
+.ala-chip.attn .ala-dot::after {
+  animation-duration: 1.1s;
+}
+.ala-more {
+  display: inline-flex;
+  align-items: center;
+  height: 20px;
+  padding: 0 6px;
+  border-radius: 999px;
+  background: var(--color-bg-2);
+  color: var(--color-text-3);
+  font-size: var(--font-size-2xs);
+  font-weight: var(--font-weight-ui);
+}
+
+/* Lane-chip hover card — "what is this agent doing?". Fixed-positioned
+   (viewport coords from the chip rect) so it escapes the sidebar's
+   overflow clip, the same way the roster context menu does. */
+.ala-card {
+  position: fixed;
+  z-index: 60;
+  width: 264px;
+  padding: 9px 11px;
+  border-radius: var(--radius-md);
+  background: var(--color-bg-1);
+  border: 1px solid var(--color-line, var(--color-line-soft));
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.4);
+  pointer-events: none;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.ala-card-h {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+}
+.ala-card-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--color-text-1);
+  font-size: var(--font-size-xs);
+  font-weight: var(--font-weight-ui);
+}
+.ala-card-branch {
+  flex: none;
+  font-family: var(--font-mono);
+  font-size: var(--font-size-2xs);
+  color: var(--color-text-4);
+}
+.ala-card-status {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  font-size: var(--font-size-2xs);
+  color: var(--color-text-2);
+}
+.ala-card-dot {
+  flex: none;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--color-text-4);
+}
+.ala-card-status.run .ala-card-dot {
+  background: var(--color-accent-green);
+}
+.ala-card-status.attn .ala-card-dot {
+  background: var(--color-amber);
+}
+.ala-card-status.ok .ala-card-dot {
+  background: var(--color-accent);
+}
+.ala-card-act {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--color-text-3);
+}
+.ala-card-detail {
+  font-size: var(--font-size-2xs);
+  line-height: 1.4;
+  color: var(--color-text-3);
+  /* clamp long prompts/responses to a few lines */
+  display: -webkit-box;
+  -webkit-line-clamp: 3;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+/* ── foot: section switcher ────────────────────────────────────────── */
+.ade-side-foot {
+  flex: none;
+  border-top: 1px solid var(--color-line-soft);
+  padding: 4px 8px;
+}
+.ade-seg {
+  display: flex;
+  gap: 3px;
+}
+.ade-seg button {
+  position: relative; /* anchor the notification badge / avatar cluster */
+  overflow: visible; /* never clip the corner badge that overhangs the glyph */
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
+  height: 33px;
+  justify-content: center;
+  border-radius: var(--radius-md);
+  color: var(--color-text-3);
+  background: transparent;
+  font-size: var(--font-size-2xs);
+  font-weight: var(--font-weight-ui);
+  transition: var(--motion-fast) background, var(--motion-fast) color;
+}
+.ade-seg button:hover {
+  background: var(--color-bg-2);
+  color: var(--color-text-1);
+}
+.ade-seg button.active {
+  background: color-mix(in srgb, var(--color-accent) 13%, transparent);
+  color: var(--color-accent);
+}
+.ade-seg button svg {
+  width: 14px;
+  height: 14px;
+}
+
+/* ── segment notification badges ────────────────────────────────────
+ * A count pill (or bare dot) pinned to the segment's top-right corner.
+ * The 2px bg-1 ring lets the badge sit cleanly over the glyph. */
+.ade-seg-badge {
+  position: absolute;
+  top: 3px;
+  right: 6px;
+  min-width: 15px;
+  height: 15px;
+  padding: 0 4px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 999px;
+  background: var(--color-red);
+  color: #fff;
+  font-size: 9px;
+  font-weight: 600;
+  line-height: 1;
+  font-variant-numeric: tabular-nums;
+  box-shadow: 0 0 0 2px var(--color-bg-1);
+}
+.ade-seg-badge--dot {
+  min-width: 0;
+  width: 7px;
+  height: 7px;
+  padding: 0;
+  top: 5px;
+  right: 9px;
+}
+
+/* ── Notion-style blocks (v0.2.38) ──────────────────────────────────────
+ * Callout, toggle, columns, highlight, table — restyled toward Notionless
+ * while staying bound to Aura's dark design tokens. */
+
+/* Highlight (==text==) */
+.tiptap-pane mark {
+  background: rgba(255, 212, 0, 0.32);
+  color: inherit;
+  border-radius: 3px;
+  padding: 0 2px;
+  box-decoration-break: clone;
+  -webkit-box-decoration-break: clone;
+}
+
+/* Callout — coloured aside with a derived icon glyph. */
+.tiptap-pane .callout {
+  position: relative;
+  margin: 0.6em 0;
+  padding: 12px 14px 12px 44px;
+  border-radius: 6px;
+  border-left: 3px solid var(--callout-accent, #6b7280);
+  background: var(--callout-bg, rgba(107, 114, 128, 0.1));
+  line-height: 1.55;
+}
+.tiptap-pane .callout::before {
+  content: attr(data-icon);
+  position: absolute;
+  left: 14px;
+  top: 11px;
+  font-size: 1.05em;
+  line-height: 1.5;
+}
+.tiptap-pane .callout > :first-child { margin-top: 0; }
+.tiptap-pane .callout > :last-child { margin-bottom: 0; }
+.tiptap-pane .callout p { color: var(--color-text-1); }
+.tiptap-pane .callout[data-callout-type="note"]    { --callout-accent: #6b7280; --callout-bg: rgba(107, 114, 128, 0.12); }
+.tiptap-pane .callout[data-callout-type="info"]    { --callout-accent: #3b82f6; --callout-bg: rgba(59, 130, 246, 0.12); }
+.tiptap-pane .callout[data-callout-type="tip"]     { --callout-accent: #d97706; --callout-bg: rgba(217, 119, 6, 0.12); }
+.tiptap-pane .callout[data-callout-type="warning"] { --callout-accent: #eab308; --callout-bg: rgba(234, 179, 8, 0.14); }
+.tiptap-pane .callout[data-callout-type="danger"]  { --callout-accent: #ef4444; --callout-bg: rgba(239, 68, 68, 0.12); }
+.tiptap-pane .callout[data-callout-type="success"] { --callout-accent: #22c55e; --callout-bg: rgba(34, 197, 94, 0.12); }
+
+/* Toggle / details — NodeView renders a div[data-type=details] wrapper with a
+ * bare <button> (we draw the triangle) + an inner content div holding the
+ * summary and the collapsible body. `.is-open` is toggled on the wrapper. */
+.tiptap-pane div[data-type="details"] {
+  display: flex;
+  align-items: flex-start;
+  gap: 4px;
+  margin: 0.35em 0;
+}
+.tiptap-pane div[data-type="details"] > button {
+  flex: 0 0 auto;
+  width: 20px;
+  height: 26px;
+  margin-top: 1px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--color-text-4);
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.tiptap-pane div[data-type="details"] > button::before {
+  content: "▸";
+  font-size: 0.8em;
+  display: inline-block;
+  transition: transform 0.12s ease;
+}
+.tiptap-pane div[data-type="details"].is-open > button::before {
+  transform: rotate(90deg);
+}
+.tiptap-pane div[data-type="details"] > div { flex: 1 1 auto; min-width: 0; }
+.tiptap-pane div[data-type="details"] summary {
+  list-style: none;
+  font-weight: 500;
+  color: var(--color-text-1);
+  padding: 2px 0;
+}
+.tiptap-pane div[data-type="details"] summary::-webkit-details-marker {
+  display: none;
+}
+.tiptap-pane div[data-type="details"]:not(.is-open) div[data-type="detailsContent"] {
+  display: none;
+}
+.tiptap-pane div[data-type="detailsContent"] > :first-child { margin-top: 0; }
+
+/* Columns */
+.tiptap-pane div[data-type="columns"] {
+  display: flex;
+  gap: 20px;
+  margin: 0.6em 0;
+  align-items: stretch;
+}
+.tiptap-pane div[data-type="column"] {
+  flex: 1 1 0;
+  min-width: 0;
+}
+.tiptap-pane div[data-type="column"] + div[data-type="column"] {
+  border-left: 1px solid var(--color-line-soft);
+  padding-left: 20px;
+}
+@media (max-width: 720px) {
+  .tiptap-pane div[data-type="columns"] { flex-direction: column; gap: 6px; }
+  .tiptap-pane div[data-type="column"] + div[data-type="column"] {
+    border-left: 0;
+    padding-left: 0;
+  }
+}
+
+/* Table */
+.tiptap-pane .tableWrapper { overflow-x: auto; margin: 0.7em 0; }
+.tiptap-pane table {
+  border-collapse: collapse;
+  table-layout: fixed;
+  width: 100%;
+  margin: 0;
+}
+.tiptap-pane th,
+.tiptap-pane td {
+  border: 1px solid var(--color-line);
+  padding: 6px 10px;
+  vertical-align: top;
+  text-align: left;
+  position: relative;
+  min-width: 64px;
+}
+.tiptap-pane th {
+  background: var(--color-bg-2);
+  font-weight: 600;
+  color: var(--color-text-1);
+}
+.tiptap-pane td > :first-child,
+.tiptap-pane th > :first-child { margin-top: 0; }
+.tiptap-pane td > :last-child,
+.tiptap-pane th > :last-child { margin-bottom: 0; }
+.tiptap-pane .column-resize-handle {
+  position: absolute;
+  right: -2px;
+  top: 0;
+  bottom: 0;
+  width: 4px;
+  background: var(--color-accent);
+  opacity: 0;
+  cursor: col-resize;
+}
+.tiptap-pane table:hover .column-resize-handle { opacity: 0.35; }
+.tiptap-pane .selectedCell::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: rgba(59, 130, 246, 0.12);
+  pointer-events: none;
+}
+
+/* ── Drag handle (Notion ⠿) + block-action menu ─────────────────────────── */
+.tiptap-drag-handle-portal { z-index: 20; }
+.tiptap-handle-wrap {
+  display: flex;
+  align-items: center;
+  gap: 1px;
+  transform: translateX(-6px);
+}
+.tiptap-handle-add,
+.tiptap-handle-grip {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 24px;
+  border: 0;
+  background: transparent;
+  color: var(--color-text-5);
+  border-radius: 4px;
+  opacity: 0.75;
+}
+.tiptap-handle-add:hover,
+.tiptap-handle-grip:hover {
+  background: var(--color-bg-2);
+  color: var(--color-text-2);
+  opacity: 1;
+}
+.tiptap-handle-grip { cursor: grab; }
+.tiptap-handle-grip:active { cursor: grabbing; }
+.tiptap-menu-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  text-align: left;
+  padding: 6px 8px;
+  border-radius: 6px;
+  font-size: 13px;
+  color: var(--color-text-2);
+  background: transparent;
+  border: 0;
+  cursor: pointer;
+}
+.tiptap-menu-row:hover {
+  background: var(--color-bg-2);
+  color: var(--color-text-1);
+}
+.tiptap-menu-row-danger:hover {
+  background: color-mix(in srgb, var(--color-red) 10%, transparent);
+  color: var(--color-red);
+}
+
+/* ── Popout windows (lib/popout.ts + PopoutRoot.tsx) ───────────────────────
+ * A spun-off OS window renders one surface full-bleed under a slim drag-bar.
+ * The bar mirrors the main window's overlay chrome: native traffic lights sit
+ * top-left (hence the left inset), the app draws title + window tools. */
+.popout-root {
+  position: fixed;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  background: var(--color-bg-content);
+  color: var(--color-text-1);
+  overflow: hidden;
+}
+.popout-bar {
+  flex-shrink: 0;
+  height: 38px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  /* Clear the macOS traffic lights overlaid at top-left. */
+  padding: 0 8px 0 78px;
+  background: var(--color-bg-1);
+  border-bottom: 0.5px solid var(--color-line-soft);
+  -webkit-user-select: none;
+  user-select: none;
+}
+.popout-bar-title {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  min-width: 0;
+  font-size: var(--font-size-xs);
+  font-weight: var(--font-weight-ui);
+  color: var(--color-text-1);
+}
+.popout-bar-sub {
+  font-size: var(--font-size-2xs);
+  font-weight: 400;
+  color: var(--color-text-3);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.popout-bar-actions {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  flex-shrink: 0;
+}
+.popout-bar-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  border-radius: var(--radius-md);
+  color: var(--color-text-3);
+  background: transparent;
+  transition: var(--motion-fast) background, var(--motion-fast) color;
+}
+.popout-bar-btn:hover {
+  background: var(--color-bg-2);
+  color: var(--color-text-1);
+}
+.popout-bar-btn.active {
+  background: color-mix(in srgb, var(--color-accent) 13%, transparent);
+  color: var(--color-accent);
+}
+.popout-body {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+/* ── Reduced motion ─────────────────────────────────────────────────────────
+   Honor the OS "reduce motion" setting (WCAG 2.2 § 2.3.3). Collapse the motion
+   tokens to instant and neutralize animations/transitions/smooth-scroll so the
+   UI still updates — just without the movement that triggers vestibular issues.
+   Scoped to the media query, so default behavior is untouched for everyone
+   else. */
+@media (prefers-reduced-motion: reduce) {
+  :root {
+    --motion-fast: 0ms;
+    --motion-medium: 0ms;
+  }
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}
+
+
+/* ── Pages compact document redesign ────────────────────────────────────────
+   Fixed Conductor-style document scale: compact, readable, non-user-sized. */
+.pages-doc {
+  --pd-col-pad: 20px;
+  --pages-doc-measure: 640px;
+  background: var(--color-bg-content);
+}
+@media (min-width: 640px) {
+  .pages-doc { --pd-col-pad: 32px; }
+}
+.pages-doc .tiptap-pane,
+.pages-doc .tiptap-pane.ProseMirror,
+.pages-doc .ProseMirror {
+  max-width: var(--pages-doc-measure);
+  margin-inline: auto;
+  font-size: 12.75px !important;
+  line-height: 1.62 !important;
+  letter-spacing: 0;
+  color: var(--color-text-1);
+}
+.pages-doc .tiptap-pane p {
+  margin: 0.08em 0;
+  padding: 0;
+  color: var(--color-text-1);
+}
+.pages-doc .tiptap-pane h1,
+.pages-doc .tiptap-pane h2,
+.pages-doc .tiptap-pane h3,
+.pages-doc .tiptap-pane h4 {
+  color: var(--color-text-1);
+  font-weight: 650;
+  letter-spacing: -0.012em;
+}
+.pages-doc .tiptap-pane h1 {
+  font-size: 1.34em !important;
+  line-height: 1.24;
+  margin: 0.95em 0 0.3em;
+}
+.pages-doc .tiptap-pane h2 {
+  font-size: 1.18em !important;
+  line-height: 1.3;
+  margin: 0.85em 0 0.25em;
+}
+.pages-doc .tiptap-pane h3 {
+  font-size: 1.06em !important;
+  line-height: 1.35;
+  margin: 0.7em 0 0.2em;
+}
+.pages-doc .tiptap-pane h4 {
+  font-size: 1em !important;
+  line-height: 1.4;
+  margin: 0.6em 0 0.15em;
+  color: var(--color-text-2);
+}
+.pages-doc .tiptap-pane h1:first-child,
+.pages-doc .tiptap-pane h2:first-child,
+.pages-doc .tiptap-pane h3:first-child {
+  margin-top: 0;
+}
+.pages-doc .tiptap-pane ul,
+.pages-doc .tiptap-pane ol {
+  margin: 0.22em 0;
+  padding-left: 1.2em;
+}
+.pages-doc .tiptap-pane li { margin: 0.06em 0; }
+.pages-doc .tiptap-pane blockquote {
+  margin: 0.45em 0;
+  padding: 0.05em 0.7em;
+  border-left: 2px solid var(--color-line);
+  color: var(--color-text-2);
+}
+.pages-doc .tiptap-pane code:not(pre code) {
+  border-radius: 5px;
+  padding: 0.05em 0.35em;
+  background: var(--color-bg-2);
+  font-size: 0.92em;
+}
+.pages-doc .tiptap-pane pre {
+  max-width: var(--pages-doc-measure);
+  margin: 0.55em auto;
+  font-size: 11.5px !important;
+  line-height: 1.55;
+  border-radius: 8px;
+}
+.pages-doc .tiptap-pane table,
+.pages-doc .tiptap-pane .tableWrapper,
+.pages-doc .tiptap-pane img,
+.pages-doc .tiptap-pane .tiptap-image {
+  max-width: min(100%, calc(var(--pages-doc-measure) + 96px));
+}
+.pages-doc .tiptap-pane hr { margin: 0.85em 0; }
+.pages-doc .tiptap-pane [style*="font-size"] { font-size: inherit !important; }
+.pages-doc .tiptap-pane [style*="text-align"] { text-align: left !important; }
+.pages-doc [data-radix-popper-content-wrapper] [role="menu"],
+.pages-doc [data-radix-popper-content-wrapper] [role="menu"] * {
+  font-size: 12px;
+}

@@ -1,0 +1,435 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>aura-term · empty-state mock</title>
+<style>
+/* Values pulled 1:1 from aura-term/src/ui/theme.rs. When iced ports this,
+   every number below maps to a constant in that file — no new tokens. */
+
+:root {
+  --bg-0: #07080a;       /* desktop canvas */
+  --bg-1: #0d0f12;       /* topbar / rail */
+  --bg-2: #14171c;       /* elevated card / menu */
+  --bg-3: #1b1f26;       /* hover on elevated */
+  --line: #1f242b;
+  --line-soft: #16191f;
+  --text-1: #e8ebf0;     /* primary */
+  --text-2: #9aa2ae;     /* secondary */
+  --text-3: #5f6773;     /* tertiary / paths */
+  --text-4: #3a4049;     /* disabled / faint */
+  --accent: #5fc9b0;     /* Aura teal */
+  --accent-soft: #1e3a34;
+  --green: #4ade80;
+
+  --sz-display: 22px;
+  --sz-title: 17px;
+  --sz-body: 14px;
+  --sz-meta: 12px;
+  --sz-micro: 11px;
+
+  --p-xs: 4px;
+  --p-sm: 8px;
+  --p-md: 12px;
+  --p-lg: 16px;
+  --p-xl: 24px;
+
+  --rail-w: 52px;
+  --topbar-h: 48px;
+  --ribbon-h: 36px;
+  --mac-traffic-left: 82px;
+
+  --ui: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Inter", sans-serif;
+  --mono: "SF Mono", "JetBrains Mono", Menlo, monospace;
+}
+
+* { box-sizing: border-box; }
+
+html, body {
+  margin: 0;
+  padding: 0;
+  font-family: var(--ui);
+  font-size: var(--sz-body);
+  color: var(--text-1);
+  /* Simulated desktop background so the window chrome reads as a real
+     macOS surface. Gradient mimics typical wallpaper. */
+  background: linear-gradient(135deg, #3a2d5e 0%, #5e3a5a 50%, #c88ea3 100%);
+  min-height: 100vh;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 40px;
+}
+
+.window {
+  width: min(1200px, calc(100vw - 80px));
+  height: min(800px, calc(100vh - 80px));
+  background: var(--bg-0);
+  border-radius: 10px;
+  overflow: hidden;
+  box-shadow:
+    0 0 0 1px rgba(255, 255, 255, 0.06),
+    0 20px 60px -10px rgba(0, 0, 0, 0.6),
+    0 40px 120px rgba(0, 0, 0, 0.4);
+  display: grid;
+  grid-template-columns: var(--rail-w) 1fr;
+  grid-template-rows: var(--topbar-h) 1fr var(--ribbon-h);
+  grid-template-areas:
+    "topbar topbar"
+    "rail   body"
+    "ribbon ribbon";
+}
+
+/* ─── topbar ─────────────────────────────────────────────────────────── */
+
+.topbar {
+  grid-area: topbar;
+  background: var(--bg-1);
+  border-bottom: 1px solid var(--line-soft);
+  display: flex;
+  align-items: center;
+  padding-right: var(--p-md);
+}
+
+.traffic {
+  width: var(--mac-traffic-left);
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding-left: 20px;
+}
+.traffic span {
+  width: 12px; height: 12px; border-radius: 50%;
+  display: inline-block;
+}
+.traffic .r { background: #ff5f57; }
+.traffic .y { background: #febc2e; }
+.traffic .g { background: #28c840; }
+
+.icon-btn {
+  width: 32px; height: 32px;
+  border: 0; background: transparent;
+  color: var(--text-2);
+  display: inline-flex; align-items: center; justify-content: center;
+  border-radius: 6px;
+  cursor: pointer;
+}
+.icon-btn:hover { background: var(--bg-2); color: var(--text-1); }
+.icon-btn svg { width: 16px; height: 16px; }
+
+.spacer { flex: 1; }
+
+.avatar {
+  width: 28px; height: 28px;
+  border-radius: 50%;
+  background: var(--accent);
+  color: var(--bg-0);
+  font-weight: 600;
+  font-size: var(--sz-body);
+  display: flex; align-items: center; justify-content: center;
+  cursor: pointer;
+}
+
+/* ─── rail ───────────────────────────────────────────────────────────── */
+
+.rail {
+  grid-area: rail;
+  background: var(--bg-1);
+  border-right: 1px solid var(--line-soft);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  padding: var(--p-sm) 0;
+  gap: var(--p-xs);
+}
+
+.rail .top, .rail .bottom {
+  display: flex;
+  flex-direction: column;
+  gap: var(--p-xs);
+}
+
+.rail .spacer-y { flex: 1; }
+
+.rail-btn {
+  width: 36px; height: 36px;
+  border: 0; background: transparent;
+  color: var(--text-3);
+  display: inline-flex; align-items: center; justify-content: center;
+  border-radius: 6px;
+  cursor: pointer;
+  position: relative;
+}
+.rail-btn:hover { background: var(--bg-2); color: var(--text-1); }
+.rail-btn svg { width: 18px; height: 18px; }
+
+/* ─── body ───────────────────────────────────────────────────────────── */
+
+.body {
+  grid-area: body;
+  background: var(--bg-0);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  /* breathing room is the point — logo sits at ~35%, recents at ~65% */
+  padding: 0 64px;
+}
+
+.body .top-push { flex: 3; }
+.body .mid-push { flex: 2; }
+.body .bot-push { flex: 3; }
+
+.logo {
+  font-family: var(--mono);
+  font-size: 64px;
+  font-weight: 300;
+  letter-spacing: 0.08em;
+  color: var(--text-4);
+  user-select: none;
+}
+
+.status-dot {
+  display: flex; align-items: center; gap: var(--p-sm);
+  margin-top: var(--p-md);
+  color: var(--text-3);
+  font-size: var(--sz-body);
+}
+.status-dot .dot {
+  width: 8px; height: 8px; border-radius: 50%;
+  background: var(--green);
+  box-shadow: 0 0 8px var(--green);
+}
+
+.recents {
+  width: 100%;
+  max-width: 680px;
+}
+.recents-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: var(--p-md);
+}
+.recents-head h2 {
+  margin: 0;
+  font-size: var(--sz-title);
+  font-weight: 500;
+  color: var(--text-1);
+  letter-spacing: -0.01em;
+}
+
+.open-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--p-sm);
+  background: var(--bg-2);
+  border: 1px solid var(--line);
+  color: var(--text-1);
+  font-family: var(--ui);
+  font-size: var(--sz-body);
+  padding: 6px 12px;
+  border-radius: 6px;
+  cursor: pointer;
+}
+.open-btn:hover { background: var(--bg-3); }
+.open-btn svg { width: 14px; height: 14px; color: var(--text-2); }
+
+.recent-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 10px 8px;
+  border-radius: 6px;
+  cursor: pointer;
+}
+.recent-row:hover { background: var(--bg-2); }
+.recent-row .path {
+  font-family: var(--mono);
+  font-size: var(--sz-body);
+  color: var(--text-2);
+}
+.recent-row:hover .path { color: var(--text-1); }
+.recent-row .ts {
+  font-size: var(--sz-meta);
+  color: var(--text-4);
+}
+
+.hint {
+  margin-top: var(--p-xl);
+  text-align: center;
+  color: var(--text-4);
+  font-size: var(--sz-meta);
+}
+.hint kbd {
+  font-family: var(--mono);
+  font-size: var(--sz-micro);
+  background: var(--bg-2);
+  border: 1px solid var(--line);
+  padding: 1px 6px;
+  border-radius: 4px;
+  color: var(--text-3);
+}
+
+/* ─── ribbon ─────────────────────────────────────────────────────────── */
+
+.ribbon {
+  grid-area: ribbon;
+  background: var(--bg-1);
+  border-top: 1px solid var(--line-soft);
+  display: flex;
+  align-items: center;
+  padding: 0 var(--p-md);
+  gap: var(--p-md);
+  font-size: var(--sz-meta);
+  color: var(--text-3);
+}
+.ribbon .pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 2px 8px;
+  border-radius: 4px;
+  background: var(--bg-2);
+  color: var(--text-2);
+}
+.ribbon .pill .dot {
+  width: 6px; height: 6px; border-radius: 50%;
+  background: var(--accent);
+}
+
+/* ─── annotation overlay (turn off by removing .annotated class) ─────── */
+
+.annotated .callout {
+  position: absolute;
+  font-family: var(--mono);
+  font-size: var(--sz-micro);
+  color: var(--accent);
+  background: rgba(7, 8, 10, 0.9);
+  border: 1px dashed var(--accent);
+  padding: 2px 6px;
+  border-radius: 4px;
+  pointer-events: none;
+  white-space: nowrap;
+}
+
+</style>
+</head>
+<body>
+
+<div class="window">
+
+  <!-- ── topbar ──────────────────────────────────────────────────── -->
+  <div class="topbar">
+    <div class="traffic"><span class="r"></span><span class="y"></span><span class="g"></span></div>
+
+    <!-- sidebar toggle (matches opencode's top-left icon after traffic) -->
+    <button class="icon-btn" title="Toggle sidebar">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75">
+        <rect x="3" y="4" width="18" height="16" rx="2"/>
+        <line x1="9" y1="4" x2="9" y2="20"/>
+      </svg>
+    </button>
+
+    <!-- empty state: NO tabs, NO +, NO diff-pill, NO inbox. Just the avatar at right. -->
+    <div class="spacer"></div>
+
+    <div class="avatar">A</div>
+  </div>
+
+  <!-- ── rail ────────────────────────────────────────────────────── -->
+  <div class="rail">
+    <div class="top">
+      <!-- new tab / new session -->
+      <button class="rail-btn" title="New tab">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75">
+          <line x1="12" y1="5" x2="12" y2="19"/>
+          <line x1="5" y1="12" x2="19" y2="12"/>
+        </svg>
+      </button>
+    </div>
+
+    <div class="spacer-y"></div>
+
+    <div class="bottom">
+      <!-- settings -->
+      <button class="rail-btn" title="Settings">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75">
+          <circle cx="12" cy="12" r="3"/>
+          <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09a1.65 1.65 0 0 0-1-1.51 1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09a1.65 1.65 0 0 0 1.51-1 1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33h0a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51h0a1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82v0a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/>
+        </svg>
+      </button>
+      <!-- help -->
+      <button class="rail-btn" title="Help">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75">
+          <circle cx="12" cy="12" r="10"/>
+          <path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3"/>
+          <line x1="12" y1="17" x2="12.01" y2="17"/>
+        </svg>
+      </button>
+    </div>
+  </div>
+
+  <!-- ── body ────────────────────────────────────────────────────── -->
+  <div class="body">
+
+    <div class="top-push"></div>
+
+    <div class="logo">aura</div>
+
+    <div class="status-dot">
+      <span class="dot"></span>
+      <span>ready · local shell</span>
+    </div>
+
+    <div class="mid-push"></div>
+
+    <div class="recents">
+      <div class="recents-head">
+        <h2>Recent projects</h2>
+        <button class="open-btn">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75">
+            <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/>
+          </svg>
+          Open project
+        </button>
+      </div>
+
+      <div class="recent-row">
+        <span class="path">~/Documents/New Git/aura-sovereign</span>
+        <span class="ts">2 minutes ago</span>
+      </div>
+      <div class="recent-row">
+        <span class="path">~/Documents/New Git/.claude/worktrees/feat+aura-terminal</span>
+        <span class="ts">1 hour ago</span>
+      </div>
+      <div class="recent-row">
+        <span class="path">~/code/aura-test-repo</span>
+        <span class="ts">yesterday</span>
+      </div>
+      <div class="recent-row">
+        <span class="path">~/Desktop/scratch</span>
+        <span class="ts">3 days ago</span>
+      </div>
+    </div>
+
+    <div class="bot-push"></div>
+
+    <div class="hint">
+      <kbd>⌘</kbd> <kbd>O</kbd> open project &nbsp;·&nbsp;
+      <kbd>⌘</kbd> <kbd>T</kbd> new tab &nbsp;·&nbsp;
+      <kbd>⌘</kbd> <kbd>K</kbd> command palette
+    </div>
+
+  </div>
+
+  <!-- ── ribbon ──────────────────────────────────────────────────── -->
+  <div class="ribbon">
+    <div class="pill"><span class="dot"></span>aura v0.12.6</div>
+    <div class="spacer"></div>
+    <div>no active session</div>
+  </div>
+
+</div>
+
+</body>
+</html>

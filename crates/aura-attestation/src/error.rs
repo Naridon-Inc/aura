@@ -13,6 +13,12 @@ pub enum AttestationError {
 
     #[error("base64 decode: {0}")]
     Base64(String),
+
+    #[error("identity: {0}")]
+    Identity(String),
+
+    #[error("keychain: {0}")]
+    Keychain(String),
 }
 
 /// Dedicated enum for verification failures so callers can distinguish a

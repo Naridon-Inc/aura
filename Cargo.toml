@@ -1,12 +1,18 @@
 [package]
 name = "aura"
-version = "0.18.0"
+version = "0.19.21"
 edition = "2024"
 
 # Public release workspace: the aura CLI (root package) + its vendored
 # member crates under crates/. Mirrors the modular sovereign layout.
 [workspace]
-members = ["crates/*"]
+members = ["crates/*", "desktop/src-tauri"]
+# aura-stackgraph is a STANDALONE binary crate: its parser stack pins
+# tree-sitter 0.26 (and tree-sitter-java =0.23.4), which collides with the
+# workspace's tree-sitter 0.23.5 via `links = "tree-sitter"`. It is wired in
+# by shelling out to its binary over stdio, so it must stay out of the
+# workspace resolution graph.
+exclude = ["crates/aura-stackgraph"]
 resolver = "2"
 
 [dependencies]
@@ -53,6 +59,11 @@ age = "0.11.1"
 rusqlite = { version = "0.38.0", features = ["bundled"] }
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.149"
+# Round-trip-preserving TOML for `.aura/settings.toml` reads/writes (per-repo
+# worktree settings: `[worktree]`/`[git] base`/`[copy] files`). toml_edit keeps
+# unrelated tables, keys, comments and formatting intact on save. See
+# `src/repo_settings.rs`.
+toml_edit = "0.22"
 strsim = "0.11.1"
 textwrap = "0.16.2"
 tokio = { version = "1.49.0", features = ["full", "rt-multi-thread"] }

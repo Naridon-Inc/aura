@@ -93,12 +93,66 @@ impl AgentProvider for Codex {
                     stdout_is_stream_json: false,
                 })
             }
-            InvokeMode::PtyRepl => Ok(Invocation {
-                bin: "codex".into(),
-                args: vec![],
-                env: vec![],
-                stdout_is_stream_json: false,
-            }),
+            InvokeMode::PtyRepl => {
+                // `codex resume <SESSION_ID>` re-opens a prior interactive
+                // session by its UUID — codex locates the matching
+                // `~/.codex/sessions/<Y>/<M>/<D>/rollout-*-<uuid>.jsonl`
+                // rollout itself, so we only pass the id, never a path. The
+                // desktop "open this chat in Codex" handoff writes a native
+                // rollout under that id and passes the uuid here. No resume id
+                // → a bare `codex` REPL (byte-identical to the prior build).
+                let args = match req.resume_session_id {
+                    Some(sid) => vec!["resume".into(), sid.into()],
+                    None => vec![],
+                };
+                Ok(Invocation {
+                    bin: "codex".into(),
+                    args,
+                    env: vec![],
+                    stdout_is_stream_json: false,
+                })
+            }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{InvokeMode, InvokeRequest};
+
+    fn req(mode: InvokeMode, resume: Option<&str>) -> InvokeRequest<'_> {
+        InvokeRequest {
+            prompt: "",
+            mode,
+            resume_session_id: resume,
+            attachments_via_stdin: false,
+            effort: None,
+            fast: false,
+            model: None,
+            approval: None,
+        }
+    }
+
+    /// PtyRepl with a session id emits `codex resume <uuid>` — the real
+    /// interactive resume command. The desktop chat-export hands the rollout
+    /// uuid here.
+    #[test]
+    fn pty_resume_emits_resume_subcommand() {
+        let inv = Codex
+            .build_invocation(&req(InvokeMode::PtyRepl, Some("019ec999-aaaa-7bbb")))
+            .unwrap();
+        assert_eq!(inv.bin, "codex");
+        assert_eq!(inv.args, vec!["resume", "019ec999-aaaa-7bbb"]);
+    }
+
+    /// PtyRepl with no resume id stays a bare `codex` REPL — byte-identical to
+    /// the pre-resume build.
+    #[test]
+    fn pty_without_resume_is_bare_repl() {
+        let inv = Codex
+            .build_invocation(&req(InvokeMode::PtyRepl, None))
+            .unwrap();
+        assert!(inv.args.is_empty());
     }
 }

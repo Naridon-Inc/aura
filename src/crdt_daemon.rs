@@ -186,10 +186,19 @@ fn pull_loop(session: Arc<CrdtSession>, stop: Arc<AtomicBool>) {
                     if op.file_path.is_empty() {
                         continue;
                     }
+                    // Contain the peer-supplied path before writing: a malicious
+                    // CRDT op could target `../../.git/hooks/pre-commit` (code
+                    // execution on the victim's next commit) or an absolute path
+                    // outside the repo. Skip anything that does not resolve
+                    // safely inside the working tree.
+                    let Some(safe_path) = crate::live_sync::contain_sync_path(&op.file_path)
+                    else {
+                        continue;
+                    };
                     if let Some(new_text) =
                         session.apply_inbound(&branch, &op.file_path, &op.update_b64)
                     {
-                        atomic_write(Path::new(&op.file_path), new_text.as_bytes());
+                        atomic_write(&safe_path, new_text.as_bytes());
                     }
                 }
                 if cursor > since {

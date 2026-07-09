@@ -1,0 +1,238 @@
+[package]
+name = "aura-shell"
+version = "0.19.21"
+description = "Aura desktop shell — Tauri 2 binary backed by every aura-* Rust crate."
+authors = ["Aura"]
+edition = "2021"
+license = "Apache-2.0 OR MIT"
+# Two bins live in this crate: the main shell and the `aura-shell-mcp`
+# companion claude spawns via `--mcp-config`. tauri-cli + `cargo run`
+# both need a default to disambiguate.
+default-run = "aura-shell"
+
+[lib]
+# The `_lib` suffix may seem redundant but it is necessary
+# to make the lib name unique and wouldn't conflict with the bin name.
+# This seems to be only an issue on Windows, see https://github.com/rust-lang/cargo/issues/8519
+name = "aura_shell_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+# Companion binary claude spawns via `--mcp-config` so the
+# `permission_prompt` MCP tool is hosted in our process group. It speaks
+# JSON-RPC 2.0 on stdio, forwards the prompt to the main aura-shell over
+# a UNIX socket, and blocks until the user picks a decision in the React
+# UI. Lives in `src/bin/aura_shell_mcp.rs` so cargo treats it as a sibling
+# binary that drops next to the main shell binary in `target/*/`.
+[[bin]]
+name = "aura-shell-mcp"
+path = "src/bin/aura_shell_mcp.rs"
+
+# Two-process PTY hosting (T3.1). Long-lived daemon that owns
+# portable-pty children spawned for coding-agent CLIs (claude /
+# gemini / codex / cursor-agent). Opt-in via AURA_USE_PTY_DAEMON=1
+# env on the shell — default path stays in-process. See
+# `pty_daemon` module docs in the lib for the design.
+[[bin]]
+name = "aura-pty-daemon"
+path = "src/bin/aura_pty_daemon.rs"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+# Tauri runtime + IPC scaffolding. `unstable` unlocks the multi-webview API
+# (Window::add_child / Manager::get_window/get_webview) the in-app browser
+# uses to embed a real native WebKit webview as a child of the main window.
+tauri = { version = "2", features = ["devtools", "unstable", "tray-icon", "macos-private-api"] }
+tauri-plugin-opener = "2"
+tauri-plugin-dialog = "2"
+tauri-plugin-notification = "2"
+tauri-plugin-updater = "2"
+tauri-plugin-process = "2"
+# Menu-bar (tray) HUD: ⌘⇧A summons the always-on-top floating bar from
+# anywhere. Registered on the Rust side (lib.rs/hud.rs) so it fires no
+# matter which app is focused and needs no JS-side capability entry.
+tauri-plugin-global-shortcut = "2"
+
+# Aura engine — every Rust crate in the workspace is reachable from the
+# shell via tauri commands. Path deps share Cargo.lock so signing/CRDT/
+# policy code is byte-identical to what aura-term ships.
+aura-agents        = { path = "../../crates/aura-agents" }
+aura-attestation   = { path = "../../crates/aura-attestation" }
+aura-blocks        = { path = "../../crates/aura-blocks" }
+aura-blockstore    = { path = "../../crates/aura-blockstore" }
+aura-daemon        = { path = "../../crates/aura-daemon" }
+aura-daemon-client = { path = "../../crates/aura-daemon-client" }
+# Aura Loop — the shared dependency-graph + ready-set model. The shell's
+# native-brain loop driver (W4) and the unified chat ready_view (W3)
+# consume the same `ready_view`/`LoopGraph` the CLI runner uses.
+aura-loop          = { path = "../../crates/aura-loop" }
+# Plugin-bundle signing — the registry verifies bundle signatures at
+# scan time with the SAME digest the CLI's `aura plugin sign` computes.
+aura-plugin-sign   = { path = "../../crates/aura-plugin-sign" }
+# Native GPU terminal — the wgpu-rendered replacement for xterm.js
+# (cmd_native_term). `aura-term-core` owns the PTY + alacritty grid model,
+# `aura-term-gpu` turns its RenderList into wgpu draw calls. Both are the same
+# crates `aura-term` ships, so the on-screen terminal is byte-identical to the
+# headless engine we unit-test.
+aura-term-core     = { path = "../../crates/aura-term-core" }
+aura-term-gpu      = { path = "../../crates/aura-term-gpu" }
+# wgpu backs the native terminal surface: Metal on macOS, Vulkan on Linux,
+# D3D12 on Windows — one renderer, per-OS surface attach in cmd_native_term.
+# raw-window-handle bridges the native child view to a wgpu::Surface.
+wgpu               = "27"
+raw-window-handle  = "0.6"
+
+# Standard async + serialization stack — pinned to the same major versions
+# the rest of the workspace uses so we don't drag duplicate proc-macro
+# builds across the workspace lock.
+serde      = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio      = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "io-util", "process", "net", "fs"] }
+tracing    = "0.1"
+
+# PTY backend for the W4 terminal pane. portable-pty is the same crate
+# wezterm uses — cross-platform spawn + resize + bidirectional bytes.
+portable-pty = "0.8"
+uuid = { version = "1", features = ["v4"] }
+
+# Bucket L1 — pre-dispatch zone-glob expansion. The Manager spawns
+# `aura snapshot-file` once per matched file before fan-out.
+glob = "0.3"
+
+# vte parses ANSI/CSI/OSC sequences; we only consume OSC 133 prompt
+# markers + printable text from the agent PTY stream so the UI view
+# can render chat-bubble blocks while the Terminal view still gets
+# the unaltered byte stream.
+vte = "0.13"
+
+# notify watches the workspace cwd recursively so we see external
+# editor saves (VS Code, Zed, neovim) and refresh open buffers
+# without the user pressing reload.
+notify = "6"
+
+# AuraWatch — background tap on the Claude stream that nudges (or
+# autonomously logs) when an Edit/Write tool_use lands without a
+# matching intent log entry. Talks to ollama (local) and the same
+# cloud APIs aura-cli already supports — never installs/serves
+# anything itself.
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream", "multipart"] }
+futures-util = "0.3"
+dirs   = "5"
+
+# Brain abstraction (v0.2.30 KK.3) — async-trait powers the `Brain`
+# trait object, thiserror gives the unified `BrainError`, keyring
+# backs the per-provider API-key store (macOS Keychain / Windows
+# Credential Manager / Secret Service on Linux), async-stream lets
+# each Brain yield ChatChunks ergonomically.
+async-trait  = "0.1"
+thiserror    = "1"
+keyring      = { version = "3", features = ["apple-native", "windows-native", "linux-native"] }
+async-stream = "0.3"
+tokio-util   = { version = "0.7", features = ["io"] }
+
+# Manager session persistence — atomic write via tempfile + rename.
+tempfile = "3"
+
+# Settings dialog — read/write `~/.aura/agents.toml` for the Agents tab.
+toml = "0.8"
+# Round-trip-preserving TOML for per-repo `.aura/settings.toml` worktree
+# settings (`cmd_repo_settings.rs`): keeps unrelated tables/keys/comments intact
+# when the UI writes setup/run/archive/base/copyFiles.
+toml_edit = "0.22"
+
+# v0.2.32 MM.1 Modes — YAML for mode files on disk + blake3 for the
+# install-time content pin (detects silent marketplace rewrites).
+serde_yaml = "0.9"
+blake3     = "1"
+
+# Clipboard tray — `cmd_clips.rs` stamps clip filenames with ISO-8601
+# (chrono) and decodes pasted PNG bytes from base64 sent by the
+# renderer. arboard puts image bytes into the OS clipboard so a
+# drag-from-tray onto Claude Code triggers its `[Image #N]`
+# attachment path (drag types raw text otherwise — TUI sees a path
+# string, not an image).
+chrono = { version = "0.4", default-features = false, features = ["clock", "serde"] }
+base64 = "0.22"
+arboard = "3"
+image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
+
+# Mobile remote: axum HTTP+WS server bound to LAN so a phone in the
+# same network can drive the active manager / agent session. Embedded
+# HTML lives in `cmd_remote.rs`; QR code (rendered into a PNG) lets
+# the user point their phone camera and connect without typing the
+# IP. local-ip-address picks the first non-loopback IPv4 the host
+# advertises.
+axum       = { version = "0.7", features = ["ws"] }
+tower-http = { version = "0.6", features = ["cors"] }
+local-ip-address = "0.6"
+# Outbound WebSocket client for the cloud relay (Stage 6: drive aura
+# from a phone over the public internet via auravcs.com).
+tokio-tungstenite = { version = "0.24", features = ["rustls-tls-native-roots"] }
+url        = "2"
+sha2       = "0.10"
+hex        = "0.4"
+# Gzip for terminal scrollback persistence — cold-restore history is
+# written to ~/.aura/terminal-sessions/<repo>/<tab>.scrollback.gz so a
+# relaunched terminal replays its screen as inert text when the live
+# process is gone (daemon off / child exited).
+flate2     = "1"
+# Unpack VS Code extensions: a `.vsix` is an OPC/ZIP archive. We extract
+# (jailed, size-capped) and read its declarative contributes — themes,
+# language-configuration, snippets, grammars. We never run extension code.
+# deflate-only keeps the build lean; .vsix archives use standard deflate.
+zip = { version = "2", default-features = false, features = ["deflate"] }
+# Wave C — random bytes for OAuth PKCE code_verifier + state nonce.
+rand       = "0.8"
+
+# v0.2.28 search: regex engine for fs_replace_in_files. git grep
+# handles content search itself; replace needs an in-process matcher.
+regex      = "1"
+
+# Resource monitor — TopBar memory/CPU pill + popover breakdown. sysinfo is
+# fully cross-platform (macOS/Linux/Windows); disable default features to keep
+# the binary small — we only need process + cpu + memory views.
+sysinfo = { version = "0.32", default-features = false, features = ["system"] }
+
+# Used to send SIGTERM by pid when the user interrupts a running turn.
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+# macOS-native window-button repositioning (cmd_window.rs). Tauri exposes the
+# raw NSWindow; cocoa/objc let us move the standard traffic-light buttons at
+# runtime so a FullscreenOverlay can tuck them below its header.
+[target.'cfg(target_os = "macos")'.dependencies]
+cocoa = "0.26"
+objc = "0.2"
+# Screen-region luminance sampling for the HUD's content-adaptive glass
+# (hud.rs `adapt_to_backdrop`): grab what's behind the bar via
+# CGWindowListCreateImage and read its average brightness to pick a light or
+# dark appearance. Pinned to the version already in the lock.
+core-graphics = "0.25"
+
+# Linux native terminal surface (cmd_native_term::surface). The GPU child view
+# is a GtkDrawingArea realized into an X11 window whose XID we hand to wgpu's
+# Vulkan backend. Pinned to the gtk-rs 0.18 line Tauri 2 already links, so we
+# share its build rather than pulling a second gtk stack.
+[target.'cfg(target_os = "linux")'.dependencies]
+gtk    = "0.18"
+gdk    = "0.18"
+gdkx11 = "0.18"
+glib   = "0.18"
+
+# v0.2.30 KK.3 — Brain abstraction feature flags. Each provider lives
+# behind one so embedded / minimal builds can drop providers they don't
+# ship. Default set is "everything we have today" — Anthropic native +
+# CLI wrapper. v0.2.31 will flip the gemini/openai stubs default-on
+# once their streaming is real.
+[features]
+default = ["brain_anthropic_native", "brain_cli_wrapper", "brain_openai_compat", "brain_aura_pro"]
+brain_anthropic_native = []
+brain_cli_wrapper      = []
+brain_gemini_native    = []
+brain_openai_native    = []
+brain_openai_compat    = []
+# v0.2.31 task #352 — managed/subscription brain that proxies through
+# aura-cloud using the user's existing cloud auth token. Default-on
+# alongside the other production brains.
+brain_aura_pro         = []

@@ -78,10 +78,10 @@ Description:
 {{ issue.description }}
 
 Instructions:
-1. This is an unattended orchestration session. Never ask a human to perform follow-up actions.
-2. Only stop early for a true blocker (missing required auth/permissions/secrets).
-3. Work only in the provided repository copy. Do not touch any other path.
-4. When done, ensure the code compiles and tests pass.
+1. This is an unattended orchestration session. Never ask a human to perform follow-up actions; when a choice arises, pick the most reasonable option and proceed.
+2. Only stop early for a true blocker (missing required auth/permissions/secrets). If you stop, report exactly what blocked you.
+3. Work only in the provided repository copy — touch only what this issue needs and no other path. Make no unrelated or destructive changes.
+4. Before declaring done, verify it: confirm the code compiles and tests pass. Report what you actually ran and its result; never claim a check passed that you didn't run.
 "#.to_string()
 }
 
@@ -1055,6 +1055,7 @@ pub fn decompose_prd(
 
     let system_prompt = format!(
         "You are a senior engineering manager. You decompose PRDs into implementable engineering tasks.\n\
+        Commit to one concrete breakdown — don't hedge or offer alternatives. Make the dependency and sequencing calls yourself.\n\
         Available team members: {}\n\
         Available labels: {}\n\
         Return ONLY valid JSON, no markdown fences.",

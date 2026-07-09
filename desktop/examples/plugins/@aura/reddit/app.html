@@ -1,0 +1,665 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <!--
+      @aura/reddit — full-surface mini-app sandbox.
+
+      Same sandbox model as every Aura mini-app: srcdoc iframe with
+      sandbox="allow-scripts" (NO allow-same-origin, NO allow-popups), opaque
+      "null" origin, postMessage bridge as the ONLY host channel.
+
+      What this app demonstrates: an UNAUTHENTICATED public API. Unlike the
+      Gemini sample (host-side credential injection), Reddit's public listing
+      endpoints need no key — so this app declares NO `secrets` and NO
+      `netAuth`. It just calls `net.fetch` against www.reddit.com, the one host
+      its `net:fetch:` capability grants. Every other URL is denied in the
+      bridge AND re-denied in Rust. The app sets its own descriptive
+      User-Agent header (Reddit asks API clients to identify themselves); the
+      host forwards request headers verbatim.
+
+      Because the sandbox has no allow-popups, posts can't open a browser
+      window — clicking a post expands it inline (selftext / image / a
+      copyable permalink) instead. The last subreddit + favorites persist via
+      storage.kv; that store holds only those, never anything sensitive.
+    -->
+    <style>
+      :root {
+        color-scheme: dark;
+      }
+      * {
+        box-sizing: border-box;
+      }
+      html,
+      body {
+        height: 100%;
+        margin: 0;
+      }
+      body {
+        display: flex;
+        flex-direction: column;
+        background: #0e1013;
+        color: #d7dade;
+        font:
+          13px/1.5 ui-sans-serif,
+          system-ui,
+          -apple-system,
+          sans-serif;
+      }
+      header {
+        flex: 0 0 auto;
+        display: flex;
+        align-items: center;
+        gap: 9px;
+        padding: 10px 16px;
+        border-bottom: 1px solid #1d2127;
+      }
+      .glyph {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        width: 26px;
+        height: 26px;
+        border-radius: 7px;
+        background: linear-gradient(135deg, #ff4500 0%, #ff8717 100%);
+        font-size: 15px;
+      }
+      header h1 {
+        font-size: 13.5px;
+        font-weight: 600;
+        margin: 0;
+      }
+      header .sub {
+        margin: 0;
+        font-size: 11px;
+        color: #7e8590;
+      }
+      header .spacer {
+        flex: 1;
+      }
+      .controls {
+        display: flex;
+        align-items: center;
+        gap: 6px;
+      }
+      .controls form {
+        display: flex;
+        align-items: center;
+        gap: 6px;
+        margin: 0;
+      }
+      .controls .prefix {
+        color: #7e8590;
+        font-size: 12px;
+      }
+      #sub {
+        width: 150px;
+        background: #16181d;
+        border: 1px solid #272c34;
+        color: #e6e9ed;
+        border-radius: 7px;
+        padding: 5px 9px;
+        font: inherit;
+        outline: none;
+      }
+      #sub:focus {
+        border-color: #3a72d4;
+      }
+      #sort {
+        background: #16181d;
+        border: 1px solid #272c34;
+        color: #c3c8d0;
+        border-radius: 7px;
+        padding: 5px 7px;
+        font: inherit;
+        outline: none;
+      }
+      button.go,
+      button.fav {
+        background: #1f2329;
+        border: 1px solid #2a2f37;
+        color: #c3c8d0;
+        border-radius: 7px;
+        padding: 5px 11px;
+        font: inherit;
+        cursor: pointer;
+      }
+      button.go:hover,
+      button.fav:hover {
+        color: #fff;
+        border-color: #3a4049;
+      }
+      .favbar {
+        flex: 0 0 auto;
+        display: flex;
+        align-items: center;
+        gap: 6px;
+        padding: 7px 16px;
+        border-bottom: 1px solid #14171b;
+        overflow-x: auto;
+      }
+      .favbar:empty {
+        display: none;
+      }
+      .chip {
+        flex: 0 0 auto;
+        background: #16181d;
+        border: 1px solid #23272e;
+        color: #9aa1ab;
+        border-radius: 999px;
+        padding: 3px 10px;
+        font-size: 11.5px;
+        cursor: pointer;
+        white-space: nowrap;
+      }
+      .chip:hover {
+        color: #e6e9ed;
+        border-color: #3a4049;
+      }
+      .chip.active {
+        color: #fff;
+        border-color: #ff4500;
+      }
+      #list {
+        flex: 1 1 auto;
+        overflow-y: auto;
+        padding: 8px 0 24px;
+      }
+      .post {
+        max-width: 760px;
+        margin: 0 auto;
+        display: flex;
+        gap: 12px;
+        padding: 11px 16px;
+        border-bottom: 1px solid #16191e;
+      }
+      .post:hover {
+        background: #121418;
+      }
+      .post .score {
+        flex: 0 0 auto;
+        width: 46px;
+        text-align: center;
+        color: #ff7a3d;
+        font-weight: 600;
+        font-size: 12.5px;
+        padding-top: 1px;
+      }
+      .post .score small {
+        display: block;
+        color: #5d646e;
+        font-weight: 400;
+        font-size: 9.5px;
+        margin-top: 1px;
+      }
+      .post .main {
+        flex: 1;
+        min-width: 0;
+      }
+      .post .title {
+        color: #e6e9ed;
+        font-size: 13.5px;
+        line-height: 1.4;
+        cursor: pointer;
+      }
+      .post .title:hover {
+        color: #fff;
+      }
+      .post .meta {
+        margin-top: 4px;
+        font-size: 11px;
+        color: #6b727c;
+        display: flex;
+        flex-wrap: wrap;
+        gap: 4px 10px;
+      }
+      .post .meta b {
+        color: #8b929c;
+        font-weight: 500;
+      }
+      .post .thumb {
+        flex: 0 0 auto;
+        width: 70px;
+        height: 52px;
+        border-radius: 6px;
+        object-fit: cover;
+        background: #16181d;
+        border: 1px solid #20242b;
+      }
+      .detail {
+        margin-top: 9px;
+        padding: 10px 12px;
+        background: #121519;
+        border: 1px solid #20242b;
+        border-radius: 8px;
+        font-size: 12.5px;
+        color: #c3c8d0;
+        white-space: pre-wrap;
+        word-wrap: break-word;
+      }
+      .detail img {
+        max-width: 100%;
+        max-height: 460px;
+        border-radius: 6px;
+        display: block;
+      }
+      .detail .permalink {
+        margin-top: 8px;
+        font-size: 11px;
+        color: #6b727c;
+        user-select: all;
+      }
+      .empty,
+      .error {
+        max-width: 520px;
+        margin: 48px auto;
+        text-align: center;
+        color: #7e8590;
+        padding: 0 20px;
+      }
+      .error {
+        color: #f0b4b9;
+      }
+      .empty .big {
+        font-size: 15px;
+        color: #c3c8d0;
+        margin-bottom: 6px;
+      }
+      .loading {
+        max-width: 520px;
+        margin: 48px auto;
+        text-align: center;
+        color: #7e8590;
+      }
+      footer {
+        flex: 0 0 auto;
+        padding: 8px 16px;
+        border-top: 1px solid #1d2127;
+        font-size: 10.5px;
+        color: #6b727c;
+        text-align: center;
+      }
+    </style>
+  </head>
+  <body>
+    <header>
+      <span class="glyph">👽</span>
+      <div>
+        <h1>Reddit</h1>
+        <p class="sub" id="subtitle">r/popular</p>
+      </div>
+      <span class="spacer"></span>
+      <div class="controls">
+        <form id="goform">
+          <span class="prefix">r/</span>
+          <input
+            id="sub"
+            type="text"
+            placeholder="subreddit"
+            autocomplete="off"
+            spellcheck="false"
+          />
+          <select id="sort">
+            <option value="hot">Hot</option>
+            <option value="new">New</option>
+            <option value="top">Top</option>
+            <option value="rising">Rising</option>
+          </select>
+          <button class="go" type="submit">Go</button>
+        </form>
+        <button class="fav" id="fav" type="button" title="Save this subreddit">
+          ☆
+        </button>
+      </div>
+    </header>
+
+    <div class="favbar" id="favbar"></div>
+    <div id="list"></div>
+
+    <footer>
+      Sandboxed mini-app · reaches only www.reddit.com · no login, no secrets
+    </footer>
+
+    <script>
+      // ── bridge plumbing (raw protocol, same as the other sample apps) ──
+      const V = 1;
+      const KV_KEY = "reddit.state.v1";
+      const UA = "aura-commons-reddit/0.1 (sandboxed mini-app)";
+
+      let nextId = 1;
+      const pending = new Map();
+
+      function call(method, args) {
+        return new Promise((resolve, reject) => {
+          const id = "p" + nextId++;
+          pending.set(id, { resolve, reject });
+          window.parent.postMessage(
+            { v: V, kind: "call", id, method, args },
+            "*",
+          );
+        });
+      }
+
+      // ── state ──────────────────────────────────────────────────────────
+      let sub = "popular";
+      let sort = "hot";
+      let favorites = [];
+      let posts = [];
+      let expanded = null; // permalink of the open post, or null
+
+      const listEl = document.getElementById("list");
+      const subInput = document.getElementById("sub");
+      const sortSel = document.getElementById("sort");
+      const subtitleEl = document.getElementById("subtitle");
+      const favBtn = document.getElementById("fav");
+      const favbarEl = document.getElementById("favbar");
+
+      function esc(s) {
+        return String(s).replace(
+          /[&<>"]/g,
+          (c) =>
+            ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c],
+        );
+      }
+
+      function fmtScore(n) {
+        if (n >= 10000) return (n / 1000).toFixed(1) + "k";
+        if (n >= 1000) return (n / 1000).toFixed(1) + "k";
+        return String(n);
+      }
+
+      function ago(utcSeconds) {
+        const s = Math.max(0, Math.floor(Date.now() / 1000 - utcSeconds));
+        if (s < 60) return s + "s";
+        const m = Math.floor(s / 60);
+        if (m < 60) return m + "m";
+        const h = Math.floor(m / 60);
+        if (h < 24) return h + "h";
+        const d = Math.floor(h / 24);
+        if (d < 30) return d + "d";
+        const mo = Math.floor(d / 30);
+        if (mo < 12) return mo + "mo";
+        return Math.floor(mo / 12) + "y";
+      }
+
+      function isHttp(u) {
+        return typeof u === "string" && /^https?:\/\//.test(u);
+      }
+
+      function isImageUrl(u) {
+        return isHttp(u) && /\.(jpe?g|png|gif|webp)(\?|$)/i.test(u);
+      }
+
+      function thumbFor(p) {
+        if (isHttp(p.thumbnail)) return p.thumbnail;
+        return null;
+      }
+
+      function imageFor(p) {
+        if (p.post_hint === "image" && isHttp(p.url)) return p.url;
+        if (isImageUrl(p.url)) return p.url;
+        try {
+          const src = p.preview.images[0].source.url;
+          if (isHttp(src)) return src;
+        } catch (e) {
+          /* no preview */
+        }
+        return null;
+      }
+
+      // ── rendering ───────────────────────────────────────────────────────
+      function renderFavbar() {
+        if (favorites.length === 0) {
+          favbarEl.innerHTML = "";
+          return;
+        }
+        favbarEl.innerHTML = favorites
+          .map(
+            (f) =>
+              '<span class="chip' +
+              (f === sub ? " active" : "") +
+              '" data-sub="' +
+              esc(f) +
+              '">r/' +
+              esc(f) +
+              "</span>",
+          )
+          .join("");
+      }
+
+      function renderFavBtn() {
+        const saved = favorites.includes(sub);
+        favBtn.textContent = saved ? "★" : "☆";
+        favBtn.title = saved ? "Remove from saved" : "Save this subreddit";
+      }
+
+      function postCard(p) {
+        const thumb = thumbFor(p);
+        const open = expanded === p.permalink;
+        let detail = "";
+        if (open) {
+          const img = imageFor(p);
+          let inner = "";
+          if (img) inner += '<img src="' + esc(img) + '" alt="" />';
+          if (p.selftext && p.selftext.trim()) {
+            inner +=
+              (img ? "<br />" : "") + esc(p.selftext.trim().slice(0, 4000));
+          }
+          if (!inner)
+            inner = '<span style="color:#6b727c">Link post — no inline text.</span>';
+          detail =
+            '<div class="detail">' +
+            inner +
+            '<div class="permalink">reddit.com' +
+            esc(p.permalink || "") +
+            "</div></div>";
+        }
+        return (
+          '<div class="post" data-perma="' +
+          esc(p.permalink) +
+          '">' +
+          '<div class="score">' +
+          fmtScore(p.score || 0) +
+          "<small>votes</small></div>" +
+          (thumb ? '<img class="thumb" src="' + esc(thumb) + '" alt="" />' : "") +
+          '<div class="main"><div class="title">' +
+          esc(p.title || "(untitled)") +
+          "</div>" +
+          '<div class="meta"><b>r/' +
+          esc(p.subreddit || sub) +
+          "</b><span>u/" +
+          esc(p.author || "?") +
+          "</span><span>" +
+          (p.num_comments || 0) +
+          " comments</span><span>" +
+          ago(p.created_utc || 0) +
+          " ago</span></div>" +
+          detail +
+          "</div></div>"
+        );
+      }
+
+      function render() {
+        renderFavbar();
+        renderFavBtn();
+        subtitleEl.textContent = "r/" + sub + " · " + sort;
+        if (posts.length === 0) {
+          listEl.innerHTML =
+            '<div class="empty"><div class="big">Nothing to show</div>' +
+            "Try another subreddit or sort.</div>";
+          return;
+        }
+        listEl.innerHTML = posts.map(postCard).join("");
+      }
+
+      function showLoading() {
+        listEl.innerHTML =
+          '<div class="loading">Loading r/' + esc(sub) + "…</div>";
+      }
+
+      function showError(msg) {
+        listEl.innerHTML = '<div class="error">' + esc(msg) + "</div>";
+      }
+
+      // ── data ─────────────────────────────────────────────────────────────
+      async function load() {
+        const clean = (sub || "popular").replace(/[^a-zA-Z0-9_]/g, "");
+        if (!clean) return;
+        sub = clean;
+        expanded = null;
+        showLoading();
+        const url =
+          "https://www.reddit.com/r/" +
+          encodeURIComponent(clean) +
+          "/" +
+          sort +
+          ".json?limit=25&raw_json=1";
+        try {
+          const res = await call("net.fetch", {
+            url,
+            method: "GET",
+            headers: [
+              ["user-agent", UA],
+              ["accept", "application/json"],
+            ],
+          });
+          if (res.status === 403 || res.status === 429) {
+            showError(
+              "Reddit is rate-limiting anonymous requests (HTTP " +
+                res.status +
+                "). Try again in a moment.",
+            );
+            return;
+          }
+          if (res.status === 404) {
+            showError("No subreddit “r/" + clean + "” (or it's private).");
+            return;
+          }
+          if (res.status < 200 || res.status >= 300) {
+            showError("Reddit error " + res.status + ".");
+            return;
+          }
+          const data = JSON.parse(res.body || "{}");
+          const children = (data.data && data.data.children) || [];
+          posts = children
+            .map((c) => c.data)
+            .filter((p) => p && p.title)
+            .map((p) => ({
+              title: p.title,
+              author: p.author,
+              subreddit: p.subreddit,
+              score: p.score,
+              num_comments: p.num_comments,
+              permalink: p.permalink,
+              created_utc: p.created_utc,
+              selftext: p.selftext,
+              url: p.url,
+              thumbnail: p.thumbnail,
+              post_hint: p.post_hint,
+              preview: p.preview,
+            }));
+          render();
+          void persist();
+        } catch (e) {
+          const m = String(e && e.message ? e.message : e);
+          showError("Couldn't reach Reddit: " + m);
+        }
+      }
+
+      async function persist() {
+        try {
+          await call("storage.kv", {
+            op: "set",
+            key: KV_KEY,
+            value: { sub, sort, favorites },
+          });
+        } catch (e) {
+          /* non-fatal */
+        }
+      }
+
+      async function restore() {
+        try {
+          const r = await call("storage.kv", { op: "get", key: KV_KEY });
+          const v = r && r.value;
+          if (v && typeof v === "object") {
+            if (typeof v.sub === "string") sub = v.sub;
+            if (typeof v.sort === "string") sort = v.sort;
+            if (Array.isArray(v.favorites))
+              favorites = v.favorites.filter((x) => typeof x === "string");
+          }
+        } catch (e) {
+          /* first run */
+        }
+        subInput.value = sub;
+        sortSel.value = sort;
+        void load();
+      }
+
+      // ── events ───────────────────────────────────────────────────────────
+      document.getElementById("goform").addEventListener("submit", (e) => {
+        e.preventDefault();
+        sub = subInput.value.trim() || "popular";
+        sort = sortSel.value;
+        void load();
+      });
+
+      sortSel.addEventListener("change", () => {
+        sort = sortSel.value;
+        void load();
+      });
+
+      favBtn.addEventListener("click", () => {
+        if (favorites.includes(sub)) {
+          favorites = favorites.filter((f) => f !== sub);
+        } else {
+          favorites = [sub, ...favorites].slice(0, 12);
+        }
+        renderFavbar();
+        renderFavBtn();
+        void persist();
+      });
+
+      favbarEl.addEventListener("click", (e) => {
+        const chip = e.target.closest(".chip");
+        if (!chip) return;
+        sub = chip.getAttribute("data-sub");
+        subInput.value = sub;
+        void load();
+      });
+
+      listEl.addEventListener("click", (e) => {
+        const card = e.target.closest(".post");
+        if (!card) return;
+        const perma = card.getAttribute("data-perma");
+        expanded = expanded === perma ? null : perma;
+        render();
+      });
+
+      window.addEventListener("message", (ev) => {
+        const env = ev.data;
+        if (!env || typeof env !== "object") return;
+        if (env.kind === "handshake/hello") {
+          window.parent.postMessage(
+            {
+              v: V,
+              kind: "handshake/ready",
+              pluginId: "@aura/reddit",
+              sdkVersion: "0.1.0-raw",
+            },
+            "*",
+          );
+          void restore();
+          return;
+        }
+        if (env.kind === "result") {
+          const p = pending.get(env.id);
+          if (!p) return;
+          pending.delete(env.id);
+          if (env.ok) p.resolve(env.value);
+          else p.reject(new Error(env.error ? env.error.message : "failed"));
+        }
+      });
+    </script>
+  </body>
+</html>

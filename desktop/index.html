@@ -1,0 +1,48 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <link rel="icon" type="image/svg+xml" href="/vite.svg" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Aura</title>
+    <!--
+      Flash-free theme — read the persisted preference from localStorage
+      before React mounts and stamp .dark/.light + .theme-* on <html>
+      so the very first paint already matches the user's choice. Mirror
+      of themeStore.ts:useApplyThemeClass; keep the two in sync.
+    -->
+    <script>
+      (function () {
+        var root = document.documentElement;
+        try {
+          var variant = localStorage.getItem("aura.theme.variant");
+          /* Explicit pick (modal/ember/conductor) wins; otherwise the ADE v2
+             master flag defaults the surface to ember (ON unless an explicit
+             "0"). Keep in sync with themeStore.ts:readVariant. */
+          if (variant !== "modal" && variant !== "ember" && variant !== "conductor") {
+            variant = localStorage.getItem("aura.ade.v2") !== "0" ? "ember" : "default";
+          }
+          var pref = localStorage.getItem("aura.theme");
+          var isLight = false;
+          if (variant === "modal" || variant === "ember" || variant === "conductor") {
+            isLight = false; /* dark-only variants */
+          } else if (pref === "light") {
+            isLight = true;
+          } else if (pref === "system") {
+            isLight = window.matchMedia("(prefers-color-scheme: light)").matches;
+          }
+          root.classList.add(isLight ? "light" : "dark");
+          root.classList.add("theme-" + variant);
+        } catch (e) {
+          root.classList.add("dark");
+          root.classList.add("theme-default");
+        }
+      })();
+    </script>
+  </head>
+
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>

@@ -219,7 +219,8 @@ fn apply_with_router(repo_root: &Path, base: &str, selected: &[Finding]) -> Resu
         .join("\n");
 
     let prompt = format!(
-        "You are the Aura Arbitrator. Apply the following review findings to the code.\n\
+        "You are the Aura Arbitrator. Resolve ONLY the findings below — make the minimal \
+change that fixes each one, and touch no unrelated code.\n\
 \n<findings>\n{findings_text}\n</findings>\n\
 \n<target_files>\n{files_block}</target_files>\n\
 \nOUTPUT RULES:\n\
@@ -345,10 +346,10 @@ fn build_fix_prompt(selected: &[Finding]) -> String {
         .collect::<Vec<_>>()
         .join("\n");
     format!(
-        "You are the fixer in a code review. Apply minimal, surgical fixes for ONLY the \
-findings below by editing the relevant files in this repository. Do not refactor \
-unrelated code, do not change tests to pass artificially, and do not commit. When done, \
-print a one-line summary of what you changed.\n\n<findings>\n{body}\n</findings>\n"
+        "You are the fixer in a code review. Edit the repository to apply minimal, surgical \
+fixes for ONLY the findings below. Do not refactor unrelated code, do not weaken or game \
+tests to make them pass, and do not commit. When done, print a one-line summary of what you \
+changed.\n\n<findings>\n{body}\n</findings>\n"
     )
 }
 

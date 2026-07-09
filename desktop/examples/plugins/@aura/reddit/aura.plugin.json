@@ -1,0 +1,23 @@
+{
+  "schema": "https://aura.dev/schemas/plugin@1",
+  "id": "@aura/reddit",
+  "name": "Reddit",
+  "version": "0.1.0",
+  "publisher": "aura",
+  "icon": "👽",
+  "engines": { "aura": ">=0.17.0" },
+  "description": "Browse Reddit inside a sandboxed Commons mini-app. The reference app for UNAUTHENTICATED public APIs: it reaches only www.reddit.com through the host net proxy, holds no secrets, and persists its last subreddit + favorites in its own per-plugin store.",
+  "entry": "worker.js",
+  "capabilities": ["net:fetch:www.reddit.com", "storage:kv"],
+  "activationEvents": ["onStartup"],
+  "contributes": {
+    "apps": [
+      {
+        "id": "reader",
+        "title": "Reddit",
+        "entry": "app.html",
+        "icon": "👽"
+      }
+    ]
+  }
+}

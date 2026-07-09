@@ -1,0 +1,1315 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1, viewport-fit=cover"
+    />
+    <meta name="theme-color" content="#0a0a0a" />
+    <title>Aura Remote</title>
+    <style>
+      :root {
+        color-scheme: dark;
+        --bg: #0a0a0a;
+        --panel: #141414;
+        --panel-2: #0f0f0f;
+        --line: #2a2a2a;
+        --line-2: #1f1f1f;
+        --text: #e8e8e8;
+        --text-2: #c0c0c0;
+        --muted: #8b8b8b;
+        --accent: #58a6ff;
+        --accent-2: #1a3a66;
+        --good: #7ee787;
+        --bad: #ff6b6b;
+      }
+      * { box-sizing: border-box; }
+      html, body {
+        margin: 0;
+        padding: 0;
+        background: var(--bg);
+        color: var(--text);
+        font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text",
+          system-ui, sans-serif;
+        font-size: 16px;
+        line-height: 1.5;
+        height: 100%;
+        overscroll-behavior: none;
+        -webkit-overflow-scrolling: touch;
+      }
+      body {
+        position: fixed;
+        inset: 0;
+        display: flex;
+        flex-direction: column;
+        height: 100dvh;
+        overflow: hidden;
+      }
+
+      /* ── Header ── */
+      .header {
+        flex: 0 0 auto;
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        padding: calc(env(safe-area-inset-top, 8px) + 4px) 12px 8px;
+        border-bottom: 1px solid var(--line);
+        background: var(--panel-2);
+      }
+      .icon-btn {
+        background: none;
+        border: none;
+        color: var(--text);
+        padding: 8px;
+        min-width: 44px;
+        min-height: 44px;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        border-radius: 8px;
+        cursor: pointer;
+      }
+      .icon-btn:active { background: var(--line-2); }
+      .icon-btn svg { display: block; }
+      .header-title {
+        flex: 1;
+        text-align: center;
+        font-size: 14px;
+        font-weight: 600;
+        color: var(--text);
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        padding: 0 8px;
+      }
+      .header-title .sub {
+        display: block;
+        font-size: 10px;
+        font-weight: 400;
+        color: var(--muted);
+        margin-top: 2px;
+        text-transform: uppercase;
+        letter-spacing: 0.06em;
+      }
+      .conn-dot {
+        width: 6px;
+        height: 6px;
+        border-radius: 50%;
+        background: #555;
+        display: inline-block;
+        margin-right: 6px;
+        vertical-align: middle;
+      }
+      .conn-dot.connected { background: var(--good); }
+      .conn-dot.error { background: var(--bad); }
+
+      /* ── Main scroll area ── */
+      .scroll {
+        flex: 1 1 auto;
+        overflow-y: auto;
+        overflow-x: hidden;
+        padding: 12px 14px 8px;
+        overscroll-behavior: contain;
+        -webkit-overflow-scrolling: touch;
+      }
+      .scroll.hidden { display: none; }
+      .messages {
+        max-width: 760px;
+        width: 100%;
+        margin: 0 auto;
+      }
+
+      /* ── Terminal pane (PTY agents: Claude Code, Gemini CLI, …) ── */
+      .terminal-pane {
+        flex: 1 1 auto;
+        display: none;
+        overflow: hidden;
+        background: #000;
+        position: relative;
+      }
+      .terminal-pane.active { display: block; }
+      #xterm-host {
+        position: absolute;
+        inset: 0;
+        padding: 6px 4px 4px;
+      }
+      .xterm, .xterm-viewport, .xterm-screen {
+        width: 100% !important;
+        height: 100% !important;
+      }
+      .xterm-viewport {
+        overflow-y: auto !important;
+        -webkit-overflow-scrolling: touch;
+      }
+
+      /* ── Empty state ── */
+      .home {
+        height: 100%;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        text-align: center;
+        padding: 40px 24px;
+        color: var(--muted);
+      }
+      .home h2 {
+        margin: 0 0 8px;
+        font-size: 18px;
+        font-weight: 600;
+        color: var(--text);
+      }
+      .home p {
+        margin: 0 0 4px;
+        font-size: 14px;
+        line-height: 1.55;
+      }
+
+      /* ── Message bubbles ── */
+      .msg {
+        margin-bottom: 14px;
+      }
+      .msg.user {
+        display: flex;
+        justify-content: flex-end;
+      }
+      .msg.user .bubble {
+        background: var(--panel);
+        border: 1px solid var(--line);
+        border-radius: 18px;
+        padding: 10px 14px;
+        max-width: 85%;
+        font-size: 15px;
+        white-space: pre-wrap;
+        word-break: break-word;
+      }
+      .msg.assistant .bubble {
+        font-size: 15px;
+        line-height: 1.65;
+        white-space: pre-wrap;
+        word-break: break-word;
+        color: var(--text);
+      }
+      .msg.assistant.mono .bubble {
+        font-family: ui-monospace, "SF Mono", Menlo, monospace;
+        font-size: 13px;
+        line-height: 1.55;
+      }
+      .msg.system .bubble {
+        font-size: 12px;
+        color: var(--muted);
+        font-style: italic;
+        padding: 4px 0;
+      }
+
+      /* ── Pinned input ── */
+      .composer {
+        flex-shrink: 0;
+        border-top: 1px solid var(--line);
+        padding: 8px 12px calc(env(safe-area-inset-bottom, 8px) + 8px);
+        background: var(--panel-2);
+      }
+      .composer-wrap {
+        max-width: 840px;
+        margin: 0 auto;
+        background: var(--panel);
+        border: 1px solid var(--line);
+        border-radius: 20px;
+        padding: 8px 8px 8px 14px;
+        display: flex;
+        align-items: flex-end;
+        gap: 6px;
+      }
+      .composer textarea {
+        flex: 1 1 auto;
+        background: transparent;
+        color: var(--text);
+        border: none;
+        outline: none;
+        font: inherit;
+        font-size: 16px;
+        line-height: 1.5;
+        resize: none;
+        min-height: 24px;
+        max-height: 160px;
+        padding: 6px 0;
+      }
+      .composer textarea::placeholder { color: var(--muted); }
+      .send-btn {
+        flex: 0 0 auto;
+        background: var(--accent);
+        color: #fff;
+        border: none;
+        border-radius: 50%;
+        width: 36px;
+        height: 36px;
+        font-size: 16px;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        cursor: pointer;
+      }
+      .send-btn:disabled {
+        opacity: 0.35;
+        cursor: not-allowed;
+      }
+
+      /* ── Drawer (left-sliding) ── */
+      .drawer-bg {
+        position: fixed;
+        inset: 0;
+        background: rgba(0, 0, 0, 0.5);
+        opacity: 0;
+        pointer-events: none;
+        transition: opacity 0.22s ease;
+        z-index: 40;
+      }
+      .drawer-bg.open {
+        opacity: 1;
+        pointer-events: auto;
+      }
+      .drawer {
+        position: fixed;
+        top: 0;
+        left: 0;
+        bottom: 0;
+        width: min(85vw, 320px);
+        background: var(--panel-2);
+        border-right: 1px solid var(--line);
+        transform: translateX(-100%);
+        transition: transform 0.22s ease;
+        z-index: 50;
+        display: flex;
+        flex-direction: column;
+        padding-top: env(safe-area-inset-top);
+      }
+      .drawer.open { transform: translateX(0); }
+      .drawer-head {
+        flex: 0 0 auto;
+        padding: 12px 16px 8px;
+        border-bottom: 1px solid var(--line);
+      }
+      .drawer-head h2 {
+        margin: 0 0 2px;
+        font-size: 14px;
+        font-weight: 700;
+      }
+      .drawer-head .meta {
+        font-size: 11px;
+        color: var(--muted);
+      }
+      .projects {
+        flex: 0 0 auto;
+        padding: 10px 12px 4px;
+        display: flex;
+        flex-wrap: wrap;
+        gap: 6px;
+      }
+      .chip {
+        background: transparent;
+        border: 1px solid var(--line);
+        color: var(--text-2);
+        border-radius: 999px;
+        padding: 5px 11px;
+        font-size: 12px;
+        font-weight: 500;
+        cursor: pointer;
+      }
+      .chip.active {
+        background: var(--accent-2);
+        border-color: var(--accent);
+        color: var(--accent);
+      }
+      .sessions {
+        flex: 1 1 auto;
+        overflow-y: auto;
+        padding: 6px 8px calc(env(safe-area-inset-bottom) + 12px);
+      }
+      .sec {
+        font-size: 10px;
+        text-transform: uppercase;
+        letter-spacing: 0.08em;
+        color: var(--muted);
+        padding: 12px 8px 4px;
+      }
+      .item {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        width: 100%;
+        background: transparent;
+        border: none;
+        color: var(--text);
+        text-align: left;
+        padding: 10px;
+        border-radius: 10px;
+        cursor: pointer;
+      }
+      .item.active { background: var(--accent-2); }
+      .item:active { background: var(--line-2); }
+      .badge {
+        flex: 0 0 auto;
+        width: 28px;
+        height: 28px;
+        border-radius: 7px;
+        background: #1f1f1f;
+        color: var(--text);
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        font-weight: 700;
+        font-size: 12px;
+      }
+      .badge.claude { background: #2d1f0f; color: #ffb86b; }
+      .badge.gemini { background: #14242d; color: #6ec5ff; }
+      .badge.codex  { background: #1a1f2e; color: #a4b2ff; }
+      .badge.cursor { background: #221a2d; color: #c79bff; }
+      .badge.aura-manager { background: var(--accent-2); color: var(--accent); }
+      .item-meta {
+        flex: 1 1 auto;
+        min-width: 0;
+      }
+      .item-title {
+        font-size: 13px;
+        font-weight: 500;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+      }
+      .item-sub {
+        font-size: 11px;
+        color: var(--muted);
+        margin-top: 1px;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+      }
+      .empty-list {
+        color: var(--muted);
+        font-size: 12px;
+        padding: 18px 8px;
+        text-align: center;
+      }
+
+      /* ── New-session modal ── */
+      .modal-bg {
+        position: fixed;
+        inset: 0;
+        background: rgba(0, 0, 0, 0.6);
+        display: none;
+        align-items: flex-end;
+        z-index: 70;
+      }
+      .modal-bg.open { display: flex; }
+      .modal {
+        background: var(--panel);
+        width: 100%;
+        border-radius: 16px 16px 0 0;
+        padding: 16px 16px calc(env(safe-area-inset-bottom) + 16px);
+        border-top: 1px solid var(--line);
+      }
+      .modal h2 {
+        margin: 0 0 12px;
+        font-size: 14px;
+        font-weight: 700;
+      }
+      .modal .row {
+        display: flex;
+        flex-direction: column;
+        gap: 4px;
+        margin-bottom: 12px;
+      }
+      .modal label {
+        font-size: 11px;
+        color: var(--muted);
+        text-transform: uppercase;
+        letter-spacing: 0.06em;
+      }
+      .modal select, .modal textarea {
+        background: var(--panel-2);
+        color: var(--text);
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        padding: 10px 12px;
+        font: inherit;
+        font-size: 14px;
+        width: 100%;
+        resize: vertical;
+        min-height: 40px;
+      }
+      .modal textarea { min-height: 80px; }
+      .modal .actions {
+        display: flex;
+        gap: 8px;
+        justify-content: flex-end;
+        margin-top: 8px;
+      }
+      .modal .actions button {
+        background: transparent;
+        border: 1px solid var(--line);
+        color: var(--text);
+        border-radius: 8px;
+        padding: 9px 16px;
+        font-size: 14px;
+        font-weight: 600;
+        cursor: pointer;
+      }
+      .modal .actions .primary {
+        background: var(--accent);
+        color: #fff;
+        border-color: var(--accent);
+      }
+    </style>
+  </head>
+  <body>
+    <header class="header">
+      <button class="icon-btn" id="menu-btn" aria-label="Sessions">
+        <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <line x1="3" y1="6" x2="21" y2="6"/>
+          <line x1="3" y1="12" x2="21" y2="12"/>
+          <line x1="3" y1="18" x2="21" y2="18"/>
+        </svg>
+      </button>
+      <div class="header-title">
+        <span id="title-main">Aura</span>
+        <span class="sub"><span id="conn-dot" class="conn-dot"></span><span id="conn-text">connecting…</span></span>
+      </div>
+      <button class="icon-btn" id="new-btn" aria-label="New session">
+        <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M12 20h9"/>
+          <path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4z"/>
+        </svg>
+      </button>
+    </header>
+
+    <div class="scroll" id="scroll">
+      <div class="messages" id="messages">
+        <div class="home" id="home">
+          <h2>No session selected</h2>
+          <p>Tap the menu icon to pick an active Claude / Gemini / Manager session, or the pen icon to start a new one.</p>
+        </div>
+      </div>
+    </div>
+
+    <!-- Terminal pane for PTY agents (Claude Code, Gemini CLI). Lazy-mounted on first PTY session. -->
+    <div class="terminal-pane" id="terminal-pane">
+      <div id="xterm-host"></div>
+    </div>
+
+    <div class="composer">
+      <div class="composer-wrap">
+        <textarea
+          id="input"
+          placeholder="Pick a session to chat with…"
+          autocapitalize="sentences"
+          autocomplete="off"
+          rows="1"
+        ></textarea>
+        <button id="send" class="send-btn" disabled>↑</button>
+      </div>
+    </div>
+
+    <!-- Drawer -->
+    <div class="drawer-bg" id="drawer-bg"></div>
+    <aside class="drawer" id="drawer">
+      <div class="drawer-head">
+        <h2>Sessions</h2>
+        <div class="meta" id="drawer-meta">desktop snapshot</div>
+      </div>
+      <div class="projects" id="projects"></div>
+      <div class="sessions" id="sessions"></div>
+    </aside>
+
+    <!-- New-session modal -->
+    <div class="modal-bg" id="modal-bg">
+      <div class="modal">
+        <h2>Start a new session</h2>
+        <div class="row">
+          <label for="m-project">Project</label>
+          <select id="m-project"></select>
+        </div>
+        <div class="row">
+          <label for="m-agent">Agent</label>
+          <select id="m-agent">
+            <option value="aura-manager">Aura Manager</option>
+            <option value="claude">Claude Code</option>
+            <option value="gemini">Gemini CLI</option>
+            <option value="codex">Codex</option>
+          </select>
+        </div>
+        <div class="row">
+          <label for="m-prompt">Prompt</label>
+          <textarea
+            id="m-prompt"
+            placeholder="What should the agent do?"
+            autocapitalize="sentences"
+          ></textarea>
+        </div>
+        <div class="actions">
+          <button id="m-cancel">Cancel</button>
+          <button id="m-start" class="primary">Start</button>
+        </div>
+      </div>
+    </div>
+
+    <script>
+      (() => {
+        const PIN = "__PIN__";
+
+        // ── DOM
+        const menuBtn = document.getElementById("menu-btn");
+        const newBtn = document.getElementById("new-btn");
+        const titleMain = document.getElementById("title-main");
+        const connDot = document.getElementById("conn-dot");
+        const connText = document.getElementById("conn-text");
+        const scroll = document.getElementById("scroll");
+        const messages = document.getElementById("messages");
+        const home = document.getElementById("home");
+        const terminalPane = document.getElementById("terminal-pane");
+        const xtermHost = document.getElementById("xterm-host");
+        const input = document.getElementById("input");
+        const send = document.getElementById("send");
+        const drawer = document.getElementById("drawer");
+        const drawerBg = document.getElementById("drawer-bg");
+        const drawerMeta = document.getElementById("drawer-meta");
+        const projectsEl = document.getElementById("projects");
+        const sessionsEl = document.getElementById("sessions");
+        const modalBg = document.getElementById("modal-bg");
+        const mProject = document.getElementById("m-project");
+        const mAgent = document.getElementById("m-agent");
+        const mPrompt = document.getElementById("m-prompt");
+        const mCancel = document.getElementById("m-cancel");
+        const mStart = document.getElementById("m-start");
+
+        // ── State
+        let ws = null;
+        let connected = false;
+        let snapshot = { activeRoot: null, projects: [], sessions: [] };
+        let selectedProject = null;
+        let activeSession = null;
+        let activeChannels = [];
+        let pendingJoin = null;
+        let lastRibbonAt = 0;
+
+        // ── xterm.js (lazy) for PTY agents
+        let term = null;
+        let fitAddon = null;
+        let xtermLoading = null;
+        let pendingPtyBytes = [];
+        function loadScript(src) {
+          return new Promise((res, rej) => {
+            const s = document.createElement("script");
+            s.src = src;
+            s.onload = () => res();
+            s.onerror = () => rej(new Error("load " + src));
+            document.head.appendChild(s);
+          });
+        }
+        function loadCss(href) {
+          return new Promise((res) => {
+            const l = document.createElement("link");
+            l.rel = "stylesheet";
+            l.href = href;
+            l.onload = () => res();
+            l.onerror = () => res();
+            document.head.appendChild(l);
+          });
+        }
+        async function ensureXterm() {
+          if (term) return term;
+          if (xtermLoading) { await xtermLoading; return term; }
+          xtermLoading = (async () => {
+            await loadCss("https://unpkg.com/xterm@5.3.0/css/xterm.css");
+            await loadScript("https://unpkg.com/xterm@5.3.0/lib/xterm.js");
+            await loadScript("https://unpkg.com/xterm-addon-fit@0.8.0/lib/xterm-addon-fit.js");
+            // eslint-disable-next-line no-undef
+            term = new Terminal({
+              fontFamily: 'ui-monospace, "SF Mono", Menlo, monospace',
+              fontSize: 12,
+              lineHeight: 1.15,
+              cursorBlink: true,
+              convertEol: true,
+              scrollback: 5000,
+              theme: {
+                background: "#000000",
+                foreground: "#e8e8e8",
+                cursor: "#58a6ff",
+                selectionBackground: "rgba(88,166,255,0.35)",
+              },
+            });
+            // eslint-disable-next-line no-undef
+            fitAddon = new FitAddon.FitAddon();
+            term.loadAddon(fitAddon);
+            term.open(xtermHost);
+            try { fitAddon.fit(); } catch {}
+            // Phone keyboard input → desktop PTY stdin (only if active session is PTY).
+            term.onData((data) => {
+              if (!activeSession || activeSession.mode !== "pty") return;
+              if (!ws || !connected) return;
+              ws.send(JSON.stringify({
+                type: "pty-write",
+                session_id: activeSession.id,
+                data,
+              }));
+            });
+            // Resize desktop PTY to match phone xterm dimensions whenever
+            // the visible terminal grid changes (rotation, software keyboard
+            // open/close, address-bar collapse). Coalesce bursts.
+            let resizeT = null;
+            const sendResize = () => {
+              if (!activeSession || activeSession.mode !== "pty") return;
+              if (!ws || !connected) return;
+              ws.send(JSON.stringify({
+                type: "pty-resize",
+                session_id: activeSession.id,
+                cols: term.cols,
+                rows: term.rows,
+              }));
+            };
+            term.onResize(() => {
+              clearTimeout(resizeT);
+              resizeT = setTimeout(sendResize, 80);
+            });
+            window.addEventListener("resize", () => {
+              try { fitAddon.fit(); } catch {}
+            });
+            if (window.visualViewport) {
+              window.visualViewport.addEventListener("resize", () => {
+                try { fitAddon.fit(); } catch {}
+              });
+            }
+            // Drain any bytes queued while xterm was loading.
+            if (pendingPtyBytes.length) {
+              for (const buf of pendingPtyBytes) term.write(buf);
+              pendingPtyBytes = [];
+            }
+          })();
+          await xtermLoading;
+          return term;
+        }
+        async function showTerminal() {
+          scroll.classList.add("hidden");
+          terminalPane.classList.add("active");
+          await ensureXterm();
+          try { fitAddon && fitAddon.fit(); } catch {}
+          // Tell the desktop our actual cols/rows so the PTY redraws to fit.
+          // We send explicitly here in case `term.onResize` didn't fire (the
+          // dimensions may be unchanged across sessions of the same size).
+          if (term && activeSession && activeSession.mode === "pty" &&
+              ws && connected) {
+            ws.send(JSON.stringify({
+              type: "pty-resize",
+              session_id: activeSession.id,
+              cols: term.cols,
+              rows: term.rows,
+            }));
+          }
+          if (term) term.focus();
+        }
+        function hideTerminal() {
+          terminalPane.classList.remove("active");
+          scroll.classList.remove("hidden");
+          if (term) term.clear();
+          pendingPtyBytes = [];
+        }
+
+        // ── Connection status
+        function setConn(text, kind) {
+          connText.textContent = text;
+          connDot.classList.remove("connected", "error");
+          if (kind) connDot.classList.add(kind);
+        }
+
+        // ── Drawer
+        function openDrawer() {
+          drawer.classList.add("open");
+          drawerBg.classList.add("open");
+        }
+        function closeDrawer() {
+          drawer.classList.remove("open");
+          drawerBg.classList.remove("open");
+        }
+        menuBtn.onclick = openDrawer;
+        drawerBg.onclick = closeDrawer;
+
+        // ── Project + sessions render
+        function renderProjects() {
+          projectsEl.innerHTML = "";
+          if (!snapshot.projects.length) {
+            const e = document.createElement("div");
+            e.className = "empty-list";
+            e.textContent = "no projects open";
+            e.style.padding = "8px 4px";
+            projectsEl.appendChild(e);
+            return;
+          }
+          const all = document.createElement("button");
+          all.className = "chip" + (selectedProject == null ? " active" : "");
+          all.textContent = "All";
+          all.onclick = () => { selectedProject = null; renderAll(); };
+          projectsEl.appendChild(all);
+          for (const p of snapshot.projects) {
+            const c = document.createElement("button");
+            c.className =
+              "chip" + (selectedProject === p.root ? " active" : "");
+            c.textContent = p.name + (p.active ? " ●" : "");
+            c.onclick = () => { selectedProject = p.root; renderAll(); };
+            projectsEl.appendChild(c);
+          }
+        }
+        function renderSessions() {
+          sessionsEl.innerHTML = "";
+          const filtered = snapshot.sessions.filter(
+            (s) => selectedProject == null || s.repoRoot === selectedProject,
+          );
+          if (!filtered.length) {
+            const e = document.createElement("div");
+            e.className = "empty-list";
+            e.textContent =
+              selectedProject == null
+                ? "no active sessions on the desktop"
+                : "no sessions in this project";
+            sessionsEl.appendChild(e);
+            return;
+          }
+          const groups = { manager: [], agent: [] };
+          for (const s of filtered) (groups[s.kind] || groups.agent).push(s);
+          if (groups.manager.length) {
+            const h = document.createElement("div");
+            h.className = "sec";
+            h.textContent = "Manager";
+            sessionsEl.appendChild(h);
+            for (const s of groups.manager) sessionsEl.appendChild(item(s));
+          }
+          if (groups.agent.length) {
+            const h = document.createElement("div");
+            h.className = "sec";
+            h.textContent = "Agents";
+            sessionsEl.appendChild(h);
+            for (const s of groups.agent) sessionsEl.appendChild(item(s));
+          }
+        }
+        function item(s) {
+          const c = document.createElement("button");
+          c.className =
+            "item" + (activeSession && activeSession.id === s.id ? " active" : "");
+          const b = document.createElement("div");
+          b.className = "badge " + s.agentId;
+          b.textContent = monogram(s);
+          const m = document.createElement("div");
+          m.className = "item-meta";
+          const t = document.createElement("div");
+          t.className = "item-title";
+          t.textContent = s.label || s.agentId;
+          const sub = document.createElement("div");
+          sub.className = "item-sub";
+          const repo =
+            (s.repoRoot || "").split("/").filter(Boolean).pop() || "";
+          sub.textContent =
+            (repo ? repo + " · " : "") +
+            (s.kind === "manager" ? "manager" : s.mode || "stream");
+          m.appendChild(t);
+          m.appendChild(sub);
+          c.appendChild(b);
+          c.appendChild(m);
+          c.onclick = () => { openSession(s); closeDrawer(); };
+          return c;
+        }
+        function monogram(s) {
+          if (s.kind === "manager") return "M";
+          const id = (s.agentId || "?").toLowerCase();
+          if (id.startsWith("claude")) return "C";
+          if (id.startsWith("gemini")) return "G";
+          if (id.startsWith("codex")) return "X";
+          if (id.startsWith("cursor")) return "K";
+          return id[0].toUpperCase();
+        }
+        function renderAll() {
+          renderProjects();
+          renderSessions();
+          drawerMeta.textContent =
+            snapshot.sessions.length +
+            " session" +
+            (snapshot.sessions.length === 1 ? "" : "s") +
+            " · " +
+            snapshot.projects.length +
+            " project" +
+            (snapshot.projects.length === 1 ? "" : "s");
+        }
+
+        // ── Modal (new session)
+        function renderModalProjects() {
+          mProject.innerHTML = "";
+          for (const p of snapshot.projects) {
+            const o = document.createElement("option");
+            o.value = p.root;
+            o.textContent = p.name + (p.active ? " ●" : "");
+            if (p.active || p.root === selectedProject) o.selected = true;
+            mProject.appendChild(o);
+          }
+          if (!snapshot.projects.length) {
+            const o = document.createElement("option");
+            o.value = "";
+            o.textContent = "(active workspace)";
+            mProject.appendChild(o);
+          }
+        }
+        newBtn.onclick = () => {
+          renderModalProjects();
+          mPrompt.value = "";
+          modalBg.classList.add("open");
+          setTimeout(() => mPrompt.focus(), 50);
+        };
+        mCancel.onclick = () => modalBg.classList.remove("open");
+        modalBg.addEventListener("click", (e) => {
+          if (e.target === modalBg) modalBg.classList.remove("open");
+        });
+        mStart.onclick = () => {
+          const text = mPrompt.value.trim();
+          if (!text || !connected) return;
+          const repo = mProject.value || "";
+          const agent = mAgent.value;
+
+          // Auto-join an existing desktop session for the same agent+repo
+          // instead of spawning a duplicate. Spawning a fresh Claude/Gemini
+          // when the desktop already has one running just creates a parallel
+          // disconnected session — phone should feed into the live one.
+          const match = snapshot.sessions.find((s) => {
+            if (repo && s.repoRoot !== repo) return false;
+            if (agent === "aura-manager") return s.kind === "manager";
+            return s.kind === "agent" && s.agentId === agent;
+          });
+          if (match) {
+            modalBg.classList.remove("open");
+            openSession(match);
+            // Queue prompt as the first message into the joined session.
+            // Wait one tick for the subscribe + UI swap to settle.
+            setTimeout(() => {
+              input.value = text;
+              autosize();
+              sendMessage();
+            }, 120);
+            return;
+          }
+
+          // No existing session — actually spawn a new one. Phone-spawned
+          // coding agents default to STREAM mode: the tabId is
+          // `stream:<agent>@<repo>` so future joins from the same phone
+          // (or another) collapse onto the same conversation thread.
+          if (agent === "aura-manager") {
+            ws.send(JSON.stringify({
+              type: "manager-start",
+              repo_root: repo,
+              prompt: text,
+            }));
+          } else {
+            ws.send(JSON.stringify({
+              type: "send-prompt",
+              agent_id: agent,
+              repo_root: repo,
+              prompt: text,
+              mode: "stream",
+            }));
+          }
+          pendingJoin = {
+            agentId: agent,
+            repoRoot: repo,
+            ts: Date.now(),
+            knownIds: new Set(snapshot.sessions.map((s) => s.id)),
+          };
+          modalBg.classList.remove("open");
+        };
+
+        // ── Open / leave session
+        function openSession(s) {
+          activeSession = s;
+          // Subscribe to all channels the desktop tagged this session
+          // with. PTY tabs: agent-pty:<sid>. Stream tabs: sanitized
+          // agent-stream:<...> + agent-stream-done:<...>. Manager tabs:
+          // manager:<sid> for state + manager-stream:<sid> for tokens.
+          const chans =
+            s.channels && s.channels.length ? s.channels.slice() : [];
+          if (!chans.length) {
+            if (s.kind === "manager") {
+              chans.push("manager:" + s.id);
+              chans.push("manager-stream:" + s.id);
+            } else if (s.mode === "pty") chans.push("agent-pty:" + s.id);
+            else chans.push("agent-stream:" + s.id);
+          }
+          unsubscribeAll();
+          for (const c of chans) {
+            ws.send(JSON.stringify({ type: "subscribe", channel: c }));
+          }
+          activeChannels = chans;
+          lastRibbonAt = 0;
+          // Header reflects the active session.
+          titleMain.textContent = s.label || s.agentId;
+          // Reset the message list.
+          messages.innerHTML = "";
+          if (home && home.parentNode) home.remove();
+          // PTY (Claude Code, Gemini CLI) → real terminal pane.
+          // Manager + stream-mode agents → chat bubbles.
+          if (s.mode === "pty") {
+            showTerminal();
+            // Ask the desktop for the existing scrollback so the phone's
+            // xterm renders the same screen the desktop sees, before any
+            // new bytes stream in.
+            ws.send(JSON.stringify({
+              type: "request-history",
+              kind: "pty",
+              session_id: s.id,
+            }));
+          } else {
+            hideTerminal();
+            appendSystem("Joined live session.");
+            flushStream();
+          }
+          input.placeholder =
+            s.kind === "manager"
+              ? "Talk to the Manager…"
+              : "message " + (s.label || s.agentId) + "…";
+          send.disabled = !connected;
+          if (s.mode !== "pty") input.focus();
+          renderSessions();
+        }
+        function leaveSession() {
+          unsubscribeAll();
+          activeSession = null;
+          titleMain.textContent = "Aura";
+          hideTerminal();
+          messages.innerHTML =
+            '<div class="home" id="home"><h2>No session selected</h2><p>Tap the menu icon to pick an active Claude / Gemini / Manager session, or the pen icon to start a new one.</p></div>';
+          input.placeholder = "Pick a session to chat with…";
+          send.disabled = true;
+          renderSessions();
+        }
+        function unsubscribeAll() {
+          if (!ws || !connected) {
+            activeChannels = [];
+            return;
+          }
+          for (const c of activeChannels) {
+            ws.send(JSON.stringify({ type: "unsubscribe", channel: c }));
+          }
+          activeChannels = [];
+        }
+
+        // ── Send composer
+        function sendMessage() {
+          const text = input.value.trim();
+          if (!text || !connected || !activeSession) return;
+          appendUser(text);
+          flushStream();
+          const s = activeSession;
+          if (s.kind === "manager") {
+            ws.send(JSON.stringify({
+              type: "manager-chat",
+              session_id: s.id,
+              message: text,
+            }));
+          } else if (s.mode === "pty") {
+            ws.send(JSON.stringify({
+              type: "pty-write",
+              session_id: s.id,
+              data: text + "\r",
+            }));
+          } else {
+            ws.send(JSON.stringify({
+              type: "send-prompt",
+              agent_id: s.agentId,
+              repo_root: s.repoRoot,
+              prompt: text,
+              mode: "stream",
+              resume_session: s.id,
+            }));
+          }
+          input.value = "";
+          autosize();
+        }
+        send.addEventListener("click", sendMessage);
+        input.addEventListener("input", autosize);
+        input.addEventListener("keydown", (e) => {
+          if (e.key === "Enter" && !e.shiftKey) {
+            e.preventDefault();
+            sendMessage();
+          }
+        });
+        function autosize() {
+          input.style.height = "auto";
+          input.style.height = Math.min(input.scrollHeight, 160) + "px";
+        }
+
+        // ── Append helpers
+        function appendUser(text) {
+          if (home && home.parentNode) home.remove();
+          const div = document.createElement("div");
+          div.className = "msg user";
+          const b = document.createElement("div");
+          b.className = "bubble";
+          b.textContent = text;
+          div.appendChild(b);
+          messages.appendChild(div);
+          scrollBottom();
+        }
+        function appendSystem(text) {
+          if (home && home.parentNode) home.remove();
+          const div = document.createElement("div");
+          div.className = "msg system";
+          const b = document.createElement("div");
+          b.className = "bubble";
+          b.textContent = text;
+          div.appendChild(b);
+          messages.appendChild(div);
+          scrollBottom();
+        }
+        let streamingNode = null;
+        let streamingBubble = null;
+        let streamingMono = false;
+        function appendStream(chunk, opts) {
+          if (home && home.parentNode) home.remove();
+          const wantMono = !!(opts && opts.mono);
+          if (!streamingBubble || streamingMono !== wantMono) {
+            flushStream();
+            const div = document.createElement("div");
+            div.className = "msg assistant" + (wantMono ? " mono" : "");
+            const b = document.createElement("div");
+            b.className = "bubble";
+            div.appendChild(b);
+            messages.appendChild(div);
+            streamingNode = div;
+            streamingBubble = b;
+            streamingMono = wantMono;
+          }
+          streamingBubble.textContent += chunk;
+          scrollBottom();
+        }
+        function flushStream() {
+          streamingNode = null;
+          streamingBubble = null;
+          streamingMono = false;
+        }
+        function scrollBottom() {
+          // requestAnimationFrame so layout settles before we scroll —
+          // otherwise iOS jumps half a row when lines wrap.
+          requestAnimationFrame(() => {
+            scroll.scrollTop = scroll.scrollHeight;
+          });
+        }
+
+        // ── WS
+        function connect() {
+          const proto = location.protocol === "https:" ? "wss:" : "ws:";
+          const url = proto + "//" + location.host + "/ws?pin=" + PIN;
+          ws = new WebSocket(url);
+          ws.onopen = () => {
+            connected = true;
+            setConn("connected", "connected");
+            send.disabled = !activeSession;
+            ws.send(JSON.stringify({ type: "request-snapshot" }));
+            // If we already had an active session before the disconnect,
+            // resubscribe to its channels.
+            if (activeSession) {
+              for (const c of activeChannels) {
+                ws.send(JSON.stringify({ type: "subscribe", channel: c }));
+              }
+            }
+          };
+          ws.onclose = () => {
+            connected = false;
+            setConn("disconnected", "error");
+            send.disabled = true;
+            setTimeout(connect, 1500);
+          };
+          ws.onerror = () => setConn("error", "error");
+          ws.onmessage = (ev) => {
+            let msg;
+            try { msg = JSON.parse(ev.data); } catch (_) { return; }
+            if (msg.type === "hello") {
+              setConn("connected · v" + msg.version, "connected");
+            } else if (msg.type === "snapshot") {
+              snapshot = msg.payload || { projects: [], sessions: [] };
+              if (selectedProject == null && snapshot.activeRoot)
+                selectedProject = snapshot.activeRoot;
+              renderAll();
+              if (pendingJoin) {
+                const fresh = snapshot.sessions.find(
+                  (s) =>
+                    !pendingJoin.knownIds.has(s.id) &&
+                    s.agentId === pendingJoin.agentId &&
+                    (pendingJoin.repoRoot === "" ||
+                      s.repoRoot === pendingJoin.repoRoot),
+                );
+                if (fresh) {
+                  pendingJoin = null;
+                  openSession(fresh);
+                } else if (Date.now() - pendingJoin.ts > 8000) {
+                  pendingJoin = null;
+                }
+              }
+              if (
+                activeSession &&
+                !snapshot.sessions.find((s) => s.id === activeSession.id)
+              ) {
+                appendSystem("Session was closed on the desktop.");
+                setTimeout(() => {
+                  if (
+                    activeSession &&
+                    !snapshot.sessions.find((s) => s.id === activeSession.id)
+                  ) {
+                    leaveSession();
+                  }
+                }, 1500);
+              }
+            } else if (msg.type === "event") {
+              handleStreamEvent(msg.channel, msg.payload);
+            } else if (msg.type === "history") {
+              // Mid-session backlog from the desktop. PTY: payload is a
+              // byte array — write it straight into xterm so the phone
+              // sees the same screen before the live stream catches up.
+              if (msg.kind === "pty" && Array.isArray(msg.payload)) {
+                const buf = new Uint8Array(msg.payload);
+                if (term) {
+                  term.write(buf);
+                } else {
+                  pendingPtyBytes.push(buf);
+                  ensureXterm().catch(() => {});
+                }
+              }
+            } else if (msg.type === "ack") {
+              // No-op: kept open for future "delivered" UI.
+            } else if (msg.type === "error") {
+              appendSystem("error: " + msg.message);
+            }
+          };
+        }
+
+        function handleStreamEvent(channel, payload) {
+          // Only render events from our currently-active session.
+          if (!activeChannels.includes(channel)) return;
+          // Manager-stream — chat reply tokens (StreamDelta).
+          if (channel.startsWith("manager-stream:")) {
+            if (!payload || typeof payload !== "object") return;
+            if (payload.kind === "text_delta") {
+              if (payload.text) appendStream(payload.text);
+            } else if (payload.kind === "tool_use") {
+              flushStream();
+              appendSystem("› " + (payload.name || "tool"));
+            } else if (payload.kind === "done") {
+              flushStream();
+            } else if (payload.kind === "error") {
+              flushStream();
+              appendSystem("error: " + (payload.message || ""));
+            }
+            return;
+          }
+          // Manager session snapshot — pull new ribbon entries.
+          if (channel.startsWith("manager:")) {
+            renderManagerSnapshot(payload);
+            return;
+          }
+          // PTY: raw byte array → write straight into xterm so OSC/CSI/cursor
+          // moves render correctly. Buffer if xterm hasn't finished loading.
+          if (channel.startsWith("agent-pty:")) {
+            if (Array.isArray(payload)) {
+              const buf = new Uint8Array(payload);
+              if (term) {
+                term.write(buf);
+              } else {
+                pendingPtyBytes.push(buf);
+                ensureXterm().catch(() => {});
+              }
+            }
+            return;
+          }
+          if (channel.startsWith("agent-stream-done:")) {
+            flushStream();
+            return;
+          }
+          if (channel.startsWith("agent-stream:")) {
+            handleAgentStreamEvent(payload);
+            return;
+          }
+        }
+        function handleAgentStreamEvent(payload) {
+          if (!payload) return;
+          if (typeof payload === "string") { appendStream(payload); return; }
+          const kind = payload.kind || payload.type;
+          if (kind === "user_prompt") return;
+          if (kind === "system_init") return;
+          if (kind === "image") return;
+          if (kind === "assistant_text") {
+            const t = payload.text || extractText(payload);
+            if (t) appendStream(t);
+            return;
+          }
+          if (kind === "text_delta" || kind === "content_block_delta") {
+            const t =
+              (payload.delta && payload.delta.text) || payload.text || "";
+            if (t) appendStream(t);
+            return;
+          }
+          if (kind === "tool_use") {
+            flushStream();
+            appendSystem("› " + (payload.name || "tool"));
+            return;
+          }
+          if (kind === "tool_result") return;
+          if (kind === "result" || kind === "done" || kind === "message_stop") {
+            flushStream();
+            return;
+          }
+          if (kind === "raw_error") {
+            flushStream();
+            appendSystem("error: " + (payload.message || ""));
+            return;
+          }
+          const fallback = extractText(payload);
+          if (fallback) appendStream(fallback);
+        }
+        function extractText(payload) {
+          if (!payload) return "";
+          if (typeof payload === "string") return payload;
+          if (typeof payload.text === "string") return payload.text;
+          if (Array.isArray(payload.content)) {
+            return payload.content
+              .map((c) => (typeof c === "string" ? c : c.text || ""))
+              .join("");
+          }
+          if (payload.delta && typeof payload.delta.text === "string")
+            return payload.delta.text;
+          return "";
+        }
+        function stripAnsi(s) {
+          return s.replace(/\x1b\[[0-9;?]*[ -/]*[@-~]/g, "");
+        }
+
+        function renderManagerSnapshot(snap) {
+          if (!snap || typeof snap !== "object") return;
+          const ribbon = Array.isArray(snap.ribbon) ? snap.ribbon : [];
+          for (const r of ribbon) {
+            const at = r.at || 0;
+            if (at <= lastRibbonAt) continue;
+            lastRibbonAt = at;
+            const k = r.kind || r.type;
+            if (k === "manager_speech" || k === "ManagerSpeech") {
+              flushStream();
+              appendStream(r.text || "");
+              flushStream();
+            } else if (k === "task_dispatched" || k === "TaskDispatched") {
+              appendSystem(
+                "→ " + (r.title || r.task_id || "task dispatched"),
+              );
+            } else if (k === "task_completed" || k === "TaskCompleted") {
+              appendSystem("✓ " + (r.title || r.task_id || "task done"));
+            } else if (k === "task_failed" || k === "TaskFailed") {
+              appendSystem("✗ " + (r.title || r.task_id || "task failed"));
+            }
+          }
+        }
+
+        connect();
+      })();
+    </script>
+  </body>
+</html>

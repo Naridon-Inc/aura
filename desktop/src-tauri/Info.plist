@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>NSMicrophoneUsageDescription</key>
+    <string>Aura uses your microphone for huddles — voice chat with teammates working in the same repo.</string>
+    <key>NSCameraUsageDescription</key>
+    <string>Aura may use your camera if you choose to share video in a huddle.</string>
+    <key>NSScreenCaptureUsageDescription</key>
+    <string>Aura uses screen recording to share your screen with teammates in a huddle.</string>
+    <key>NSAppleEventsUsageDescription</key>
+    <string>Aura sends Apple Events to control opening files and folders in your other apps.</string>
+</dict>
+</plist>

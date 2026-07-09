@@ -363,6 +363,23 @@ impl AgentDescriptor {
     }
 }
 
+/// Map a user-facing agent alias onto its canonical registry id. Lets short
+/// or friendly names ("cc", "claude_code") resolve to the real provider
+/// ("claude") — e.g. the chat `@cc /resume` mention. Unknown ids pass through
+/// unchanged so `Registry::get` can still fall back to an exact lookup.
+pub fn canonical_agent_id(id: &str) -> &str {
+    match id.trim().to_ascii_lowercase().as_str() {
+        // Claude Code — `cc` is the short handle, `claude_code` the cli_wrapper
+        // suffix; the registry provider id is just `claude`.
+        "cc" | "claude_code" | "claude-code" | "claudecode" => "claude",
+        // Gemini CLI.
+        "gem" => "gemini",
+        // Codex CLI.
+        "cx" => "codex",
+        _ => id,
+    }
+}
+
 /// Registry of providers. Built once at process init from compiled
 /// defaults plus any overrides in `~/.aura/agents.toml`. Lookups are by
 /// stable id — unknown ids round-trip through saved sessions and surface
@@ -393,7 +410,10 @@ impl Registry {
     }
 
     pub fn get(&self, id: &str) -> Option<Arc<dyn AgentProvider>> {
-        self.by_id.get(id).cloned()
+        self.by_id
+            .get(canonical_agent_id(id))
+            .or_else(|| self.by_id.get(id))
+            .cloned()
     }
 
     pub fn iter(&self) -> impl Iterator<Item = &Arc<dyn AgentProvider>> {
@@ -577,6 +597,34 @@ mod tests {
         }));
         let pick = smart_pick(&reg, "refactor it", "beta").unwrap();
         assert_eq!(pick.id(), "beta");
+    }
+
+    #[test]
+    fn canonical_agent_id_maps_aliases() {
+        assert_eq!(canonical_agent_id("cc"), "claude");
+        assert_eq!(canonical_agent_id("CC"), "claude");
+        assert_eq!(canonical_agent_id("claude_code"), "claude");
+        assert_eq!(canonical_agent_id("claude-code"), "claude");
+        assert_eq!(canonical_agent_id("gem"), "gemini");
+        assert_eq!(canonical_agent_id("cx"), "codex");
+        // Unknown / already-canonical ids pass through untouched.
+        assert_eq!(canonical_agent_id("claude"), "claude");
+        assert_eq!(canonical_agent_id("cursor"), "cursor");
+    }
+
+    #[test]
+    fn registry_get_resolves_cc_alias() {
+        let mut reg = Registry::new();
+        reg.push(Arc::new(StubProvider {
+            id: "claude",
+            prefs: &[],
+            available: true,
+        }));
+        // `cc` and `claude_code` both resolve to the `claude` provider.
+        assert_eq!(reg.get("cc").unwrap().id(), "claude");
+        assert_eq!(reg.get("claude_code").unwrap().id(), "claude");
+        assert_eq!(reg.get("claude").unwrap().id(), "claude");
+        assert!(reg.get("nonexistent").is_none());
     }
 
     #[test]

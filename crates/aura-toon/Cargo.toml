@@ -1,6 +1,6 @@
 [package]
 name = "aura-toon"
-version = "0.1.0"
+version = "0.19.21"
 edition = "2021"
 license = "Apache-2.0"
 description = "Token-Oriented Object Notation encoder. 30-60% fewer LLM tokens than JSON for the same data."

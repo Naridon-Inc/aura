@@ -126,6 +126,14 @@ pub struct GoalRecord {
     /// `AURA-<n>` sequence for display without a task fetch.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub task_seq: Option<u64>,
+    /// Plain-language acceptance checks — the "what to test / verify" plan a
+    /// planner (or a human) wrote for this goal. Deliberately distinct from
+    /// `decomposition` (the auto-derived semantic code-node requirements):
+    /// these are steps a non-engineer can read and tick through ("Build
+    /// succeeds", "Sign-in returns a session"), while the decomposition is the
+    /// machine's AST-level proof checklist. Empty when none were provided.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub acceptance: Vec<String>,
     /// The cached one-time decomposition. `None` until first proven.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub decomposition: Option<Decomposition>,

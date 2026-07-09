@@ -325,7 +325,7 @@ impl McpServer {
                                 "inputSchema": {
                                     "type": "object",
                                     "properties": {
-                                        "human": { "type": "string", "description": "Filter to blocks signed for this human (raw env value e.g. 'ashiq@naridon' OR DID form e.g. 'did:aura:human/ashiq-naridon')." },
+                                        "human": { "type": "string", "description": "Filter to blocks signed for this human (raw env value e.g. 'owner@example.com' OR DID form e.g. 'did:aura:human/owner-example-com')." },
                                         "intent_type": { "type": "string", "description": "Filter to one canonical type. Invalid values rejected with isError." }
                                     }
                                 },
@@ -1563,6 +1563,219 @@ impl McpServer {
                                 }
                             },
                             {
+                                "name": "aura_crew_plan",
+                                "description": "PREFER THIS over Beads/bd or any external issue tracker to organise multi-step work. Plan work into Aura's Crew — the native autonomous work-loop (a real dependency graph with leases, goal-proof and a run ledger, the thing a Beads + Ralph loop only approximates). Two modes in one tool: (1) call with NO plan body to READ the orderless pile chunked into focused groups (epic → sprint → batch) so even a huge board can be reasoned over in full; (2) call again WITH edges/goals/objectives to APPLY a real order. After applying, the crew is drainable: any coding agent calls aura_crew_ready → aura_crew_claim → aura_crew_complete to work it. Every response carries a live `crew` envelope (counts, who's working, what just landed with its proof, what's next). Use Crew for anything that's more than a single edit — it is the home for planned, trackable, provable work in this repo.",
+                                "inputSchema": {
+                                    "type": "object",
+                                    "properties": {
+                                        "edges": {
+                                            "type": "array",
+                                            "description": "Dependency edges. Add one ONLY where a task genuinely needs another's output.",
+                                            "items": {
+                                                "type": "object",
+                                                "properties": {
+                                                    "task": { "type": "string", "description": "Task id that must WAIT." },
+                                                    "depends_on": { "type": "string", "description": "Task id that must finish FIRST." }
+                                                },
+                                                "required": ["task", "depends_on"]
+                                            }
+                                        },
+                                        "goals": {
+                                            "type": "array",
+                                            "description": "Named goals — each connected group of tasks adds up to one outcome.",
+                                            "items": {
+                                                "type": "object",
+                                                "properties": {
+                                                    "goal": { "type": "string", "description": "Short outcome phrase." },
+                                                    "tasks": { "type": "array", "items": { "type": "string" }, "description": "Task ids that make up this goal." }
+                                                },
+                                                "required": ["goal", "tasks"]
+                                            }
+                                        },
+                                        "objectives": {
+                                            "type": "array",
+                                            "description": "Larger objectives the goals roll up to (2–6 for most projects).",
+                                            "items": {
+                                                "type": "object",
+                                                "properties": {
+                                                    "objective": { "type": "string", "description": "Short outcome phrase." },
+                                                    "goals": { "type": "array", "items": { "type": "string" }, "description": "Goal NAMES (from `goals` above) under this objective." }
+                                                },
+                                                "required": ["objective", "goals"]
+                                            }
+                                        }
+                                    }
+                                },
+                                "annotations": {
+                                    "title": "Plan into Crew",
+                                    "readOnlyHint": false,
+                                    "destructiveHint": false,
+                                    "idempotentHint": false,
+                                    "openWorldHint": false,
+                                    "auraCapability": "auto"
+                                }
+                            },
+                            {
+                                "name": "aura_crew_status",
+                                "description": "Read the Crew's live state without touching it — counts by lifecycle (ready/working/blocked/paused/done/failed), who is working what (agent + elapsed), what just landed (commit + goal-proof verdict — the proof Beads can't show), what's next, and the goal/crew rollups. Call this to ground yourself before planning or claiming, and any time you want to know where the autonomous work-loop is at. Optional `crew` scopes to one crew.",
+                                "inputSchema": {
+                                    "type": "object",
+                                    "properties": {
+                                        "crew": { "type": "string", "description": "Optional crew id to scope to (default: the whole graph)." }
+                                    }
+                                },
+                                "annotations": {
+                                    "title": "Crew Status",
+                                    "readOnlyHint": true,
+                                    "destructiveHint": false,
+                                    "idempotentHint": true,
+                                    "openWorldHint": false,
+                                    "auraCapability": "auto"
+                                }
+                            },
+                            {
+                                "name": "aura_crew_ready",
+                                "description": "Get the Crew's ready set — the nodes whose dependencies are all met and that nobody is working yet — each with its FULL spec (what to build + acceptance criteria) so you can pick one and execute. This is how a coding agent BECOMES a worker draining the loop: call aura_crew_ready, choose a node, aura_crew_claim it, do the work, aura_crew_complete. Prefer this over inventing your own ad-hoc TODOs or pulling from Beads — the ready set already respects the real dependency order. Optional `crew` scopes to one crew.",
+                                "inputSchema": {
+                                    "type": "object",
+                                    "properties": {
+                                        "crew": { "type": "string", "description": "Optional crew id to scope to." }
+                                    }
+                                },
+                                "annotations": {
+                                    "title": "Crew Ready Set",
+                                    "readOnlyHint": true,
+                                    "destructiveHint": false,
+                                    "idempotentHint": true,
+                                    "openWorldHint": false,
+                                    "auraCapability": "auto"
+                                }
+                            },
+                            {
+                                "name": "aura_crew_claim",
+                                "description": "Lease a ready Crew node so no other agent grabs it, and get back its full spec to execute. Always claim before you start working a node — the lease is what keeps two agents (or two of you) off the same task while many run in parallel. Returns the spec; if someone else already holds it the call is refused (with the live envelope so you can pick another from `crew.next_up`). When done, call aura_crew_complete with the commit sha, or aura_crew_fail with an honest reason.",
+                                "inputSchema": {
+                                    "type": "object",
+                                    "properties": {
+                                        "id": { "type": "string", "description": "Node id from aura_crew_ready." },
+                                        "agent": { "type": "string", "description": "Your agent name (e.g. 'claude') — becomes the lease holder so teammates see who's on it." },
+                                        "lease_secs": { "type": "integer", "description": "How long the lease holds before it can be reclaimed as stale (default 1800)." }
+                                    },
+                                    "required": ["id"]
+                                },
+                                "annotations": {
+                                    "title": "Claim Crew Node",
+                                    "readOnlyHint": false,
+                                    "destructiveHint": false,
+                                    "idempotentHint": false,
+                                    "openWorldHint": false,
+                                    "auraCapability": "auto"
+                                }
+                            },
+                            {
+                                "name": "aura_crew_report",
+                                "description": "Heartbeat on a Crew node you're working: refreshes your lease so a long task isn't reclaimed as stale, and carries an optional progress note. Call this periodically during work that runs longer than the lease window. Real, not a no-op — the lease clock is reset (only the same holder may refresh).",
+                                "inputSchema": {
+                                    "type": "object",
+                                    "properties": {
+                                        "id": { "type": "string", "description": "Node id you're working." },
+                                        "agent": { "type": "string", "description": "Your agent name — must match the holder that claimed it." },
+                                        "note": { "type": "string", "description": "Optional one-line progress note." },
+                                        "lease_secs": { "type": "integer", "description": "New lease window in seconds (default 1800)." }
+                                    },
+                                    "required": ["id"]
+                                },
+                                "annotations": {
+                                    "title": "Crew Heartbeat",
+                                    "readOnlyHint": false,
+                                    "destructiveHint": false,
+                                    "idempotentHint": false,
+                                    "openWorldHint": false,
+                                    "auraCapability": "auto"
+                                }
+                            },
+                            {
+                                "name": "aura_crew_complete",
+                                "description": "Mark a Crew node done with the commit its work landed in. The commit feeds Aura's goal-proof join, so the surface (and teammates) can see this node as PROVEN against the goal it served — not just 'done'. Always pass the real commit sha. After this, dependents that were waiting on this node may become ready; pick the next from `crew.next_up` or call aura_crew_ready.",
+                                "inputSchema": {
+                                    "type": "object",
+                                    "properties": {
+                                        "id": { "type": "string", "description": "Node id to complete." },
+                                        "commit": { "type": "string", "description": "The git commit sha your work landed in (full or short)." }
+                                    },
+                                    "required": ["id"]
+                                },
+                                "annotations": {
+                                    "title": "Complete Crew Node",
+                                    "readOnlyHint": false,
+                                    "destructiveHint": false,
+                                    "idempotentHint": false,
+                                    "openWorldHint": false,
+                                    "auraCapability": "auto"
+                                }
+                            },
+                            {
+                                "name": "aura_crew_fail",
+                                "description": "Mark a Crew node failed with an honest reason for what blocked it. The crew moves on and a human (or you, later) can retry it from the Crew surface. Use this instead of silently abandoning a node — the reason is what makes the loop's track record trustworthy.",
+                                "inputSchema": {
+                                    "type": "object",
+                                    "properties": {
+                                        "id": { "type": "string", "description": "Node id to fail." },
+                                        "reason": { "type": "string", "description": "What blocked it — be specific and honest." }
+                                    },
+                                    "required": ["id", "reason"]
+                                },
+                                "annotations": {
+                                    "title": "Fail Crew Node",
+                                    "readOnlyHint": false,
+                                    "destructiveHint": false,
+                                    "idempotentHint": false,
+                                    "openWorldHint": false,
+                                    "auraCapability": "auto"
+                                }
+                            },
+                            {
+                                "name": "aura_crew_list",
+                                "description": "List the crews in this project — the durable registry (always including the default 'main' crew) joined to each crew's LIVE lifecycle counts (ready/working/blocked/paused/done/failed) and the goals inside it. Call this to see what crews exist and where each is at before spawning another or routing work into one. Many crews can run in parallel, each draining its own slice of the graph.",
+                                "inputSchema": {
+                                    "type": "object",
+                                    "properties": {}
+                                },
+                                "annotations": {
+                                    "title": "List Crews",
+                                    "readOnlyHint": true,
+                                    "destructiveHint": false,
+                                    "idempotentHint": true,
+                                    "openWorldHint": false,
+                                    "auraCapability": "auto"
+                                }
+                            },
+                            {
+                                "name": "aura_crew_spawn",
+                                "description": "Stand up a SECOND crew to run in parallel with the first — this is how you add a new stream of autonomous work without waiting for the current crew to finish. Mints a named crew (idempotent by slug) and, optionally, moves a set of existing nodes into it via `task_ids` so it has work immediately. After spawning, run it independently with `aura loop run --crew <id>`, or drain it over MCP by passing `crew` to aura_crew_ready / aura_crew_status. Use this when the user wants two efforts going at once (e.g. a 'Perf crew' alongside the main build).",
+                                "inputSchema": {
+                                    "type": "object",
+                                    "properties": {
+                                        "title": { "type": "string", "description": "Human name for the crew (e.g. 'Perf crew'). Slugged into a stable crew id." },
+                                        "description": { "type": "string", "description": "Optional one-line purpose." },
+                                        "task_ids": {
+                                            "type": "array",
+                                            "items": { "type": "string" },
+                                            "description": "Optional node ids to move into the new crew so it has work right away."
+                                        }
+                                    },
+                                    "required": ["title"]
+                                },
+                                "annotations": {
+                                    "title": "Spawn Crew",
+                                    "readOnlyHint": false,
+                                    "destructiveHint": false,
+                                    "idempotentHint": false,
+                                    "openWorldHint": false,
+                                    "auraCapability": "auto"
+                                }
+                            },
+                            {
                                 "name": "aura_refs",
                                 "description": "Find every site that references a symbol across an indexed file set, using a real cross-file stack-graph (not regex). Phase A surface for Python + TypeScript — the natural successor to grep/`aura_live_impacts`'s function-name heuristic. Returns sorted, deduplicated (caller_file, definition_file) tuples. Cross-repo resolution is Phase D (deferred).",
                                 "inputSchema": {
@@ -1957,6 +2170,15 @@ impl McpServer {
                     "aura_a2a_task_patch" => Self::tool_a2a_task_patch(args),
                     "aura_loop_plan_context" => Self::tool_loop_plan_context(args),
                     "aura_loop_plan_apply" => Self::tool_loop_plan_apply(args),
+                    "aura_crew_plan" => Self::tool_crew_plan(args),
+                    "aura_crew_status" => Self::tool_crew_status(args),
+                    "aura_crew_ready" => Self::tool_crew_ready(args),
+                    "aura_crew_claim" => Self::tool_crew_claim(args),
+                    "aura_crew_report" => Self::tool_crew_report(args),
+                    "aura_crew_complete" => Self::tool_crew_complete(args),
+                    "aura_crew_fail" => Self::tool_crew_fail(args),
+                    "aura_crew_list" => Self::tool_crew_list(args),
+                    "aura_crew_spawn" => Self::tool_crew_spawn(args),
                     "aura_pr_commit_review_list" => Self::tool_pr_commit_review_list(args),
                     "aura_pr_commit_review_get" => Self::tool_pr_commit_review_get(args),
                     "aura_handover_cloud_list" => Self::tool_handover_cloud_list(args),
@@ -5871,6 +6093,479 @@ impl McpServer {
             report.edges, skipped, report.connected, report.goals, report.objectives
         );
         json!({ "content": [{ "type": "text", "text": text }] })
+    }
+
+    // ── Crew: the agent-facing work-loop surface ────────────────────────────
+    //
+    // These are the verbs a coding agent (Claude Code, etc.) uses to PLAN work
+    // into Aura and to BE a worker draining it — the native answer to Beads +
+    // a Ralph loop, but over a real dependency graph with leases, goal-proof and
+    // a run ledger. Every crew response carries a live `crew` state envelope so
+    // the agent always sees where the whole crew is at, not just the one node it
+    // touched. See `crew_envelope`.
+
+    /// Resolve the repo root for a crew tool, or the MCP "not in a project"
+    /// error payload. Shared by every crew verb.
+    fn crew_repo_root() -> Result<std::path::PathBuf, Value> {
+        crate::goals::discover_repo_root()
+            .or_else(|| std::env::current_dir().ok())
+            .ok_or_else(|| json!({ "isError": true, "content": [{ "type": "text", "text": "Not in a project folder — open or cd into your repo first." }] }))
+    }
+
+    /// One graph node rendered for an agent: the full spec it needs to do the
+    /// work, plus its place in the flow. Absent fields are omitted, never faked.
+    fn crew_node_json(t: &aura_loop::LoopTask) -> Value {
+        json!({
+            "id": t.id,
+            "title": t.title,
+            "spec": t.input,
+            "acceptance": t.acceptance_criteria,
+            "priority": t.priority,
+            "agent": t.agent_kind,
+            "status": t.status,
+            "waiting_on": t.depends_on,
+            "goal": aura_loop::goal_of(t),
+            "crew": aura_loop::crew_of(t),
+        })
+    }
+
+    /// The live crew-state envelope attached to EVERY crew response: counts by
+    /// lifecycle, who's working on what (agent + elapsed), what just landed
+    /// (commit + goal-proof verdict — the thing Beads can't show), and what's
+    /// next in the ready set. Scoped to one crew when `crew_filter` is given.
+    fn crew_envelope(repo_root: &std::path::Path, crew_filter: Option<&str>) -> Value {
+        let graph = aura_loop::LoopGraph::at(repo_root);
+        let all = graph.list();
+        let scope = aura_loop::RunScope { goal: None, crew: crew_filter.map(|s| s.to_string()) };
+        let scoped: Vec<aura_loop::LoopTask> =
+            if scope.is_unscoped() { all.clone() } else { scope.filter(&all) };
+        let view = aura_loop::ready_view(&scoped);
+        let failed = scoped.iter().filter(|t| t.status == aura_loop::STATE_FAILED).count();
+
+        let now = chrono::Utc::now().timestamp();
+        let working: Vec<Value> = view
+            .working
+            .iter()
+            .map(|t| {
+                let elapsed = t.lease.as_ref().map(|l| (now - l.acquired_at).max(0));
+                json!({
+                    "id": t.id,
+                    "title": t.title,
+                    "agent": t.agent_kind,
+                    "holder": t.lease.as_ref().map(|l| l.holder.clone()),
+                    "elapsed_secs": elapsed,
+                })
+            })
+            .collect();
+
+        // Just landed: the most-recently-completed nodes, joined to the goal
+        // ledger by commit so each carries its proof verdict.
+        let mut done_sorted = view.done.clone();
+        done_sorted.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
+        let just_landed: Vec<Value> = done_sorted
+            .iter()
+            .take(5)
+            .map(|t| {
+                let proof = t.commit_sha.as_ref().and_then(|sha| {
+                    let short = &sha[..sha.len().min(12)];
+                    let recs = crate::goals::store::for_commit(repo_root, short);
+                    recs.iter()
+                        .flat_map(|g| g.runs.iter())
+                        .find(|r| {
+                            r.commit
+                                .as_deref()
+                                .map(|c| sha.starts_with(c) || c.starts_with(short))
+                                .unwrap_or(false)
+                        })
+                        .map(|r| {
+                            json!({
+                                "verdict": serde_json::to_value(r.verdict).ok(),
+                                "ok": r.ok,
+                                "total": r.total,
+                            })
+                        })
+                });
+                json!({ "id": t.id, "title": t.title, "commit": t.commit_sha, "proof": proof })
+            })
+            .collect();
+
+        let next_up: Vec<Value> = view
+            .ready
+            .iter()
+            .take(5)
+            .map(|t| json!({ "id": t.id, "title": t.title, "priority": t.priority }))
+            .collect();
+
+        json!({
+            "counts": {
+                "ready": view.ready.len(),
+                "working": view.working.len(),
+                "blocked": view.blocked.len(),
+                "paused": view.paused.len(),
+                "done": view.done.len(),
+                "failed": failed,
+            },
+            "working": working,
+            "just_landed": just_landed,
+            "next_up": next_up,
+            "goals": serde_json::to_value(aura_loop::goals_summary(&scoped)).unwrap_or(Value::Null),
+            "crews": serde_json::to_value(aura_loop::crews_summary(&all)).unwrap_or(Value::Null),
+        })
+    }
+
+    /// Wrap a crew result `body` with the live envelope and render as one MCP
+    /// text payload. `headline` is the human one-liner; `body` is the verb's
+    /// own data. Keeps every crew tool's return shape identical.
+    fn crew_reply(repo_root: &std::path::Path, crew: Option<&str>, headline: &str, body: Value) -> Value {
+        let payload = json!({
+            "ok": true,
+            "headline": headline,
+            "result": body,
+            "crew": Self::crew_envelope(repo_root, crew),
+        });
+        let text = serde_json::to_string_pretty(&payload).unwrap_or_else(|_| payload.to_string());
+        json!({ "content": [{ "type": "text", "text": text }] })
+    }
+
+    /// `aura_crew_status` — read the whole crew's live state without touching it.
+    fn tool_crew_status(args: Value) -> Value {
+        let repo_root = match Self::crew_repo_root() {
+            Ok(p) => p,
+            Err(e) => return e,
+        };
+        let crew = args.get("crew").and_then(|v| v.as_str()).filter(|s| !s.trim().is_empty());
+        Self::crew_reply(&repo_root, crew, "Crew status", json!({}))
+    }
+
+    /// `aura_crew_ready` — the ready set: nodes whose dependencies are all met
+    /// and that nobody is working yet. Full specs so the agent can pick one and
+    /// claim it.
+    fn tool_crew_ready(args: Value) -> Value {
+        let repo_root = match Self::crew_repo_root() {
+            Ok(p) => p,
+            Err(e) => return e,
+        };
+        let crew = args.get("crew").and_then(|v| v.as_str()).filter(|s| !s.trim().is_empty());
+        let graph = aura_loop::LoopGraph::at(&repo_root);
+        let all = graph.list();
+        let ready = aura_loop::ready_set(&all);
+        let scope = aura_loop::RunScope { goal: None, crew: crew.map(|s| s.to_string()) };
+        let ready: Vec<aura_loop::LoopTask> =
+            if scope.is_unscoped() { ready } else { scope.filter(&ready) };
+        let nodes: Vec<Value> = ready.iter().map(Self::crew_node_json).collect();
+        let headline = if nodes.is_empty() {
+            "Nothing ready right now — everything is blocked, in flight, or done."
+        } else {
+            "Ready to claim — pick one, then call aura_crew_claim with its id."
+        };
+        Self::crew_reply(&repo_root, crew, headline, json!({ "ready": nodes }))
+    }
+
+    /// `aura_crew_claim` — lease a ready node so no other agent grabs it. Returns
+    /// the node's full spec to execute. Refused (with the live envelope) if
+    /// someone else already holds it.
+    fn tool_crew_claim(args: Value) -> Value {
+        let repo_root = match Self::crew_repo_root() {
+            Ok(p) => p,
+            Err(e) => return e,
+        };
+        let id = match args.get("id").and_then(|v| v.as_str()).filter(|s| !s.trim().is_empty()) {
+            Some(s) => s.to_string(),
+            None => return json!({ "isError": true, "content": [{ "type": "text", "text": "`id` is required — the node id from aura_crew_ready." }] }),
+        };
+        let holder = Self::crew_holder(&args);
+        let lease_secs = args.get("lease_secs").and_then(|v| v.as_i64()).unwrap_or(1800);
+        let graph = aura_loop::LoopGraph::at(&repo_root);
+        match graph.claim(&id, &holder, lease_secs) {
+            Ok(t) => Self::crew_reply(
+                &repo_root,
+                None,
+                "Claimed — do the work, commit, then call aura_crew_complete with the commit sha (or aura_crew_fail with a reason).",
+                json!({ "claimed": Self::crew_node_json(&t), "holder": holder, "lease_secs": lease_secs }),
+            ),
+            Err(e) => {
+                let env = Self::crew_envelope(&repo_root, None);
+                let payload = json!({
+                    "ok": false,
+                    "headline": format!("Couldn't claim {id}: {e}. Someone else may hold it — pick another from `crew.next_up`."),
+                    "crew": env,
+                });
+                json!({ "isError": true, "content": [{ "type": "text", "text": serde_json::to_string_pretty(&payload).unwrap_or_else(|_| payload.to_string()) }] })
+            }
+        }
+    }
+
+    /// `aura_crew_report` — a worker heartbeat on a node it's working: refreshes
+    /// the lease so a long task isn't reclaimed as stale, and carries an optional
+    /// progress note back in the envelope. Real, not a no-op: the lease clock is
+    /// reset.
+    fn tool_crew_report(args: Value) -> Value {
+        let repo_root = match Self::crew_repo_root() {
+            Ok(p) => p,
+            Err(e) => return e,
+        };
+        let id = match args.get("id").and_then(|v| v.as_str()).filter(|s| !s.trim().is_empty()) {
+            Some(s) => s.to_string(),
+            None => return json!({ "isError": true, "content": [{ "type": "text", "text": "`id` is required — the node you're working." }] }),
+        };
+        let holder = Self::crew_holder(&args);
+        let lease_secs = args.get("lease_secs").and_then(|v| v.as_i64()).unwrap_or(1800);
+        let note = args.get("note").and_then(|v| v.as_str()).unwrap_or("").to_string();
+        let graph = aura_loop::LoopGraph::at(&repo_root);
+        // Re-claim by the SAME holder refreshes the lease (the graph only
+        // refuses a *different* live holder), so this is a true heartbeat.
+        match graph.claim(&id, &holder, lease_secs) {
+            Ok(t) => Self::crew_reply(
+                &repo_root,
+                None,
+                "Heartbeat recorded — lease refreshed, keep going.",
+                json!({ "node": Self::crew_node_json(&t), "note": note, "lease_secs": lease_secs }),
+            ),
+            Err(e) => json!({ "isError": true, "content": [{ "type": "text", "text": format!("Couldn't refresh {id}: {e}. If another agent took it, re-claim a fresh node from aura_crew_ready.") }] }),
+        }
+    }
+
+    /// `aura_crew_complete` — mark a node done with the commit its work landed in.
+    /// The commit feeds the goal-proof join so the surface can show this node as
+    /// proven, not just "done".
+    fn tool_crew_complete(args: Value) -> Value {
+        let repo_root = match Self::crew_repo_root() {
+            Ok(p) => p,
+            Err(e) => return e,
+        };
+        let id = match args.get("id").and_then(|v| v.as_str()).filter(|s| !s.trim().is_empty()) {
+            Some(s) => s.to_string(),
+            None => return json!({ "isError": true, "content": [{ "type": "text", "text": "`id` is required." }] }),
+        };
+        let commit = args.get("commit").and_then(|v| v.as_str()).filter(|s| !s.trim().is_empty()).map(|s| s.to_string());
+        let graph = aura_loop::LoopGraph::at(&repo_root);
+        match graph.complete(&id, commit.clone(), None) {
+            Ok(t) => Self::crew_reply(
+                &repo_root,
+                None,
+                "Marked complete. Pick the next from `crew.next_up`, or aura_crew_ready for the full set.",
+                json!({ "completed": Self::crew_node_json(&t), "commit": commit }),
+            ),
+            Err(e) => json!({ "isError": true, "content": [{ "type": "text", "text": format!("Couldn't complete {id}: {e}") }] }),
+        }
+    }
+
+    /// `aura_crew_fail` — mark a node failed with a reason. Frees it for a retry
+    /// (a human can re-arm it from the surface).
+    fn tool_crew_fail(args: Value) -> Value {
+        let repo_root = match Self::crew_repo_root() {
+            Ok(p) => p,
+            Err(e) => return e,
+        };
+        let id = match args.get("id").and_then(|v| v.as_str()).filter(|s| !s.trim().is_empty()) {
+            Some(s) => s.to_string(),
+            None => return json!({ "isError": true, "content": [{ "type": "text", "text": "`id` is required." }] }),
+        };
+        let reason = match args.get("reason").and_then(|v| v.as_str()).filter(|s| !s.trim().is_empty()) {
+            Some(s) => s.to_string(),
+            None => return json!({ "isError": true, "content": [{ "type": "text", "text": "`reason` is required — say what blocked it, honestly." }] }),
+        };
+        let graph = aura_loop::LoopGraph::at(&repo_root);
+        match graph.fail(&id, reason.clone()) {
+            Ok(t) => Self::crew_reply(
+                &repo_root,
+                None,
+                "Marked failed. The crew moves on; a human can retry it from the Crew surface.",
+                json!({ "failed": Self::crew_node_json(&t), "reason": reason }),
+            ),
+            Err(e) => json!({ "isError": true, "content": [{ "type": "text", "text": format!("Couldn't fail {id}: {e}") }] }),
+        }
+    }
+
+    /// `aura_crew_plan` — the planning front door. With no plan body it RETURNS
+    /// the orderless pile chunked to reason over (same chunking the desktop
+    /// planner uses); with edges/goals/objectives it APPLIES them onto the graph.
+    /// Either way the live envelope rides along.
+    fn tool_crew_plan(args: Value) -> Value {
+        let repo_root = match Self::crew_repo_root() {
+            Ok(p) => p,
+            Err(e) => return e,
+        };
+        let has_plan = ["edges", "goals", "objectives"]
+            .iter()
+            .any(|k| args.get(*k).map(|v| v.is_array() && !v.as_array().map(|a| a.is_empty()).unwrap_or(true)).unwrap_or(false));
+        if has_plan {
+            // Delegate to the existing applier (cycle-checked), then attach the
+            // envelope so the agent sees the new ready set immediately.
+            let applied = Self::tool_loop_plan_apply(args);
+            let report_text = applied
+                .get("content")
+                .and_then(|c| c.get(0))
+                .and_then(|c| c.get("text"))
+                .and_then(|t| t.as_str())
+                .unwrap_or("Plan applied.")
+                .to_string();
+            // If the applier errored, surface that verbatim.
+            if applied.get("isError").and_then(|v| v.as_bool()).unwrap_or(false) {
+                return applied;
+            }
+            return Self::crew_reply(&repo_root, None, "Plan applied to the crew.", json!({ "report": report_text }));
+        }
+        // No plan body → return the pile to plan over.
+        let graph = aura_loop::LoopGraph::at(&repo_root);
+        let all = graph.list();
+        let ctx = aura_loop::planning::plan_context(&all);
+        let chunks: Vec<Value> = ctx
+            .chunks
+            .iter()
+            .map(|c| {
+                let tasks: Vec<Value> = c
+                    .node_ids
+                    .iter()
+                    .map(|id| {
+                        let (title, detail) = graph.get(id).map(|t| (t.title, t.input)).unwrap_or_default();
+                        json!({ "id": id, "title": title, "detail": detail })
+                    })
+                    .collect();
+                json!({ "label": c.label, "seed_goal": c.seed_goal, "tasks": tasks })
+            })
+            .collect();
+        let headline = if chunks.is_empty() {
+            "No loose work to order yet — add tasks (aura_a2a_task_create) or sync the board, then plan."
+        } else {
+            "Reason the real dependencies inside each chunk, name each goal, then call aura_crew_plan again with edges/goals/objectives to apply."
+        };
+        Self::crew_reply(
+            &repo_root,
+            None,
+            headline,
+            json!({
+                "considered": ctx.considered,
+                "deferred": ctx.deferred,
+                "chunks": chunks,
+                "how_to_apply": "Within EACH chunk work out which task must finish before which (only where one genuinely needs another's output). Then call aura_crew_plan with edges:[{task,depends_on}], goals:[{goal,tasks:[ids]}], objectives:[{objective,goals:[names]}]."
+            }),
+        )
+    }
+
+    /// `aura_crew_list` — the crews in this repo: the durable registry (always
+    /// including "main") joined to each crew's LIVE lifecycle counts from the
+    /// graph. This is how an agent or the surface sees "what crews exist and
+    /// where each is at" before spawning another or routing work.
+    fn tool_crew_list(_args: Value) -> Value {
+        let repo_root = match Self::crew_repo_root() {
+            Ok(p) => p,
+            Err(e) => return e,
+        };
+        let registry = aura_loop::crew::CrewRegistry::at(&repo_root);
+        let metas = registry.list();
+        let graph = aura_loop::LoopGraph::at(&repo_root);
+        let all = graph.list();
+        let summaries = aura_loop::crews_summary(&all);
+        // Index live counts by crew id so a registered-but-empty crew still
+        // shows zeros rather than vanishing.
+        let crews: Vec<Value> = metas
+            .iter()
+            .map(|m| {
+                let s = summaries.iter().find(|c| c.crew == m.id);
+                json!({
+                    "id": m.id,
+                    "title": m.title,
+                    "description": m.description,
+                    "created_at": m.created_at,
+                    "counts": {
+                        "total": s.map(|s| s.total).unwrap_or(0),
+                        "ready": s.map(|s| s.ready).unwrap_or(0),
+                        "working": s.map(|s| s.working).unwrap_or(0),
+                        "blocked": s.map(|s| s.blocked).unwrap_or(0),
+                        "paused": s.map(|s| s.paused).unwrap_or(0),
+                        "done": s.map(|s| s.done).unwrap_or(0),
+                        "failed": s.map(|s| s.failed).unwrap_or(0),
+                    },
+                    "goals": s.map(|s| s.goals.clone()).unwrap_or_default(),
+                })
+            })
+            .collect();
+        // Any crew id that appears on nodes but isn't registered (e.g. a raw
+        // crew_id set directly) — surface it too so nothing is hidden.
+        let known: std::collections::HashSet<&str> = metas.iter().map(|m| m.id.as_str()).collect();
+        let unregistered: Vec<Value> = summaries
+            .iter()
+            .filter(|s| !known.contains(s.crew.as_str()))
+            .map(|s| {
+                json!({
+                    "id": s.crew,
+                    "title": s.crew,
+                    "description": Value::Null,
+                    "created_at": 0,
+                    "counts": {
+                        "total": s.total, "ready": s.ready, "working": s.working,
+                        "blocked": s.blocked, "paused": s.paused, "done": s.done, "failed": s.failed,
+                    },
+                    "goals": s.goals,
+                    "unregistered": true,
+                })
+            })
+            .collect();
+        let mut out = crews;
+        out.extend(unregistered);
+        Self::crew_reply(&repo_root, None, "Crews in this project", json!({ "crews": out }))
+    }
+
+    /// `aura_crew_spawn` — stand up a SECOND crew to run in parallel with the
+    /// first. Mints a named crew in the registry (idempotent by slug) and,
+    /// optionally, moves a set of existing nodes into it (`task_ids`) so the new
+    /// crew has work immediately. Returns the new crew + an envelope scoped to
+    /// it, so the agent can `aura_crew_ready` against it right away.
+    fn tool_crew_spawn(args: Value) -> Value {
+        let repo_root = match Self::crew_repo_root() {
+            Ok(p) => p,
+            Err(e) => return e,
+        };
+        let title = match args.get("title").and_then(|v| v.as_str()).filter(|s| !s.trim().is_empty()) {
+            Some(s) => s.to_string(),
+            None => return json!({ "isError": true, "content": [{ "type": "text", "text": "`title` is required — name the crew (e.g. 'Perf crew')." }] }),
+        };
+        let description = args.get("description").and_then(|v| v.as_str()).filter(|s| !s.trim().is_empty()).map(|s| s.to_string());
+        let now = chrono::Utc::now().timestamp();
+        let registry = aura_loop::crew::CrewRegistry::at(&repo_root);
+        let meta = match registry.spawn(title, description, now) {
+            Ok(m) => m,
+            Err(e) => return json!({ "isError": true, "content": [{ "type": "text", "text": format!("Couldn't spawn crew: {e}") }] }),
+        };
+        // Optionally route a set of nodes into the new crew.
+        let mut moved: Vec<String> = Vec::new();
+        let mut move_errors: Vec<String> = Vec::new();
+        if let Some(ids) = args.get("task_ids").and_then(|v| v.as_array()) {
+            let graph = aura_loop::LoopGraph::at(&repo_root);
+            for id in ids.iter().filter_map(|v| v.as_str()) {
+                match graph.set_crew(id, Some(meta.id.clone())) {
+                    Ok(_) => moved.push(id.to_string()),
+                    Err(e) => move_errors.push(format!("{id}: {e}")),
+                }
+            }
+        }
+        let headline = format!(
+            "Crew '{}' ready{}. Run it in parallel with `aura loop run --crew {}`, or drain it over MCP via aura_crew_ready (crew: \"{}\").",
+            meta.title,
+            if moved.is_empty() { String::new() } else { format!(" with {} task(s) moved in", moved.len()) },
+            meta.id, meta.id,
+        );
+        Self::crew_reply(
+            &repo_root,
+            Some(&meta.id),
+            &headline,
+            json!({
+                "crew": { "id": meta.id, "title": meta.title, "description": meta.description, "created_at": meta.created_at },
+                "moved": moved,
+                "move_errors": move_errors,
+            }),
+        )
+    }
+
+    /// Stable lease holder for a crew worker: `crew:<agent>` when the agent
+    /// names itself, else `crew:mcp:<pid>` so concurrent MCP workers stay
+    /// distinct.
+    fn crew_holder(args: &Value) -> String {
+        match args.get("agent").and_then(|v| v.as_str()).filter(|s| !s.trim().is_empty()) {
+            Some(a) => format!("crew:{a}"),
+            None => format!("crew:mcp:{}", std::process::id()),
+        }
     }
 
     /// Bet 4 Phase B — proxies POST /api/v2/pr/commit-review-generate. Same

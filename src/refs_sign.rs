@@ -9,7 +9,7 @@
 // The note is attached to the COMMIT the ref points at. Content is JSON
 // Lines, one object per endorsement, field order fixed by `SigLine`:
 //
-//   {"ref":"refs/heads/main","oid":"<40-hex>","signer":"Ashiq",
+//   {"ref":"refs/heads/main","oid":"<40-hex>","signer":"Owner",
 //    "key_id":"did:aura:key/AbCdEfGhIjk","pubkey":"<b64url-no-pad 32B>",
 //    "sig":"<b64-std-no-pad 64B ed25519>","ts":1765432100}
 //

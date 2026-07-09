@@ -1,56 +1,128 @@
 {
-  "name": "aura-vcs",
-  "displayName": "Aura — AI-Native Version Control",
-  "description": "Semantic version control for AI agents. Tracks AST logic, enforces intent, and provides session lifecycle management.",
-  "version": "0.6.2",
+  "name": "aura-vscode",
+  "displayName": "Aura — Semantic VCS",
+  "description": "Aura semantic version control inside VS Code: AST snapshots, intent log, manager, PR cockpit, live sync.",
+  "version": "0.1.0",
   "publisher": "naridon",
-  "engines": { "vscode": "^1.85.0" },
+  "license": "Apache-2.0",
+  "engines": { "vscode": "^1.92.0" },
   "categories": ["SCM Providers", "Other"],
-  "activationEvents": ["workspaceContains:.aura", "workspaceContains:.git"],
+  "activationEvents": [
+    "onStartupFinished"
+  ],
   "main": "./dist/extension.js",
+  "scripts": {
+    "build": "node esbuild.config.mjs",
+    "watch": "node esbuild.config.mjs --watch",
+    "package": "vsce package --no-dependencies",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
   "contributes": {
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "aura",
+          "title": "Aura",
+          "icon": "media/aura.svg"
+        }
+      ]
+    },
+    "views": {
+      "aura": [
+        { "id": "aura.history",          "name": "History",        "icon": "media/aura.svg" },
+        { "id": "aura.sourceControl",    "name": "Source Control", "icon": "media/aura.svg" },
+        { "id": "aura.prInbox",          "name": "PR Inbox",       "icon": "media/aura.svg" },
+        { "id": "aura.sentinel",         "name": "Sentinel Inbox", "icon": "media/aura.svg" },
+        { "id": "aura.memory",           "name": "Memory",         "icon": "media/aura.svg" },
+        { "id": "aura.knowledge",        "name": "Knowledge",      "icon": "media/aura.svg" },
+        { "id": "aura.doctor",           "name": "Doctor",         "type": "webview" },
+        { "id": "aura.settings",         "name": "Settings",       "type": "webview" }
+      ]
+    },
     "commands": [
-      { "command": "aura.snapshot", "title": "Aura: Take Snapshot" },
-      { "command": "aura.status", "title": "Aura: Show Status" },
-      { "command": "aura.sessions", "title": "Aura: Show Sessions" },
-      { "command": "aura.explain", "title": "Aura: Explain Code Origin" },
-      { "command": "aura.prReview", "title": "Aura: PR Review" },
-      { "command": "aura.init", "title": "Aura: Initialize Repository" }
+      { "command": "aura.enable",        "title": "Aura: Enable Capture (no MCP)" },
+      { "command": "aura.disable",       "title": "Aura: Disable Capture" },
+      { "command": "aura.review",        "title": "Aura: Review PR" },
+      { "command": "aura.openManager",   "title": "Aura: Open Manager" },
+      { "command": "aura.openInbox",     "title": "Aura: Open PR Inbox" },
+      { "command": "aura.snapshot",      "title": "Aura: Snapshot Current File" },
+      { "command": "aura.logIntent",     "title": "Aura: Log Intent" },
+      { "command": "aura.prove",         "title": "Aura: Prove Goal" },
+      { "command": "aura.rewind",        "title": "Aura: Rewind Function" },
+      { "command": "aura.openStory",     "title": "Aura: Open Story" },
+      { "command": "aura.openReplay",    "title": "Aura: Provenance Replay" },
+      { "command": "aura.openSettings",      "title": "Aura: Open Settings" },
+      { "command": "aura.refreshStatus",     "title": "Aura: Refresh Status" },
+      { "command": "aura.history.refresh",   "title": "Aura: Refresh History",     "icon": "$(refresh)" },
+      { "command": "aura.history.loadMore",  "title": "Aura: Load More History" },
+      { "command": "aura.scm.refresh",       "title": "Aura: Refresh Source Control", "icon": "$(refresh)" },
+      { "command": "aura.scm.saveAndSync",   "title": "Aura: Save & Sync",         "icon": "$(cloud-upload)" },
+      { "command": "aura.memory.refresh",    "title": "Aura: Refresh Memory",      "icon": "$(refresh)" },
+      { "command": "aura.memory.openKey",    "title": "Aura: Open Memory Key" },
+      { "command": "aura.memory.write",      "title": "Aura: Write Memory Key" },
+      { "command": "aura.session.open",      "title": "Aura: Open Session" },
+      { "command": "aura.knowledge.refresh", "title": "Aura: Refresh Knowledge",   "icon": "$(refresh)" },
+      { "command": "aura.knowledge.search",  "title": "Aura: Search Knowledge",    "icon": "$(search)" },
+      { "command": "aura.knowledge.openEntry","title": "Aura: Open Knowledge Entry" },
+      { "command": "aura.knowledge.new",     "title": "Aura: New Knowledge Entry", "icon": "$(add)" },
+      { "command": "aura.pr.refresh",        "title": "Aura: Refresh PR Inbox",    "icon": "$(refresh)" },
+      { "command": "aura.pr.openDetail",     "title": "Aura: Open PR Detail" },
+      { "command": "aura.sentinel.refresh",   "title": "Aura: Refresh Sentinel",     "icon": "$(refresh)" },
+      { "command": "aura.sentinel.send",      "title": "Aura: Send Sentinel Message","icon": "$(send)" },
+      { "command": "aura.sentinel.openMessage","title": "Aura: Open Sentinel Message" },
+      { "command": "aura.sentinel.reply",     "title": "Aura: Reply to Sentinel" },
+      { "command": "aura.liveSync.start",     "title": "Aura: Start Live Sync watcher" },
+      { "command": "aura.liveSync.stop",      "title": "Aura: Stop Live Sync watcher" },
+      { "command": "aura.zone.claim",         "title": "Aura: Claim Zone (current file)" },
+      { "command": "aura.zone.release",       "title": "Aura: Release Zone (current file)" },
+      { "command": "aura.prove.symbol",        "title": "Aura: Prove Symbol" },
+      { "command": "aura.openInspector",       "title": "Aura: Intent Inspector" }
     ],
+    "menus": {
+      "view/title": [
+        { "command": "aura.history.refresh",   "when": "view == aura.history",       "group": "navigation" },
+        { "command": "aura.scm.saveAndSync",   "when": "view == aura.sourceControl", "group": "navigation@1" },
+        { "command": "aura.scm.refresh",       "when": "view == aura.sourceControl", "group": "navigation@2" },
+        { "command": "aura.memory.refresh",    "when": "view == aura.memory",        "group": "navigation" },
+        { "command": "aura.knowledge.search",  "when": "view == aura.knowledge",     "group": "navigation@1" },
+        { "command": "aura.knowledge.new",     "when": "view == aura.knowledge",     "group": "navigation@2" },
+        { "command": "aura.knowledge.refresh", "when": "view == aura.knowledge",     "group": "navigation@3" },
+        { "command": "aura.pr.refresh",        "when": "view == aura.prInbox",       "group": "navigation" },
+        { "command": "aura.sentinel.send",      "when": "view == aura.sentinel",      "group": "navigation@1" },
+        { "command": "aura.sentinel.refresh",   "when": "view == aura.sentinel",      "group": "navigation@2" }
+      ]
+    },
     "configuration": {
       "title": "Aura",
       "properties": {
-        "aura.binaryPath": {
+        "aura.binPath": {
           "type": "string",
-          "default": "aura",
-          "description": "Path to the aura binary"
+          "default": "",
+          "description": "Absolute path to the `aura` binary. Empty = auto-detect via PATH."
         },
-        "aura.autoStartDaemon": {
-          "type": "boolean",
-          "default": true,
-          "description": "Automatically start the Aura watcher daemon on workspace open"
+        "aura.mcpBinPath": {
+          "type": "string",
+          "default": "",
+          "description": "Absolute path to the `aura-mcp` binary. Empty = auto-detect."
         },
-        "aura.showStatusBar": {
-          "type": "boolean",
-          "default": true,
-          "description": "Show Aura session status in the status bar"
+        "aura.statusBarPollSeconds": {
+          "type": "number",
+          "default": 30,
+          "description": "Poll cadence for status-bar chips (intents today, audit unacked, live sync, cost, strict mode)."
+        },
+        "aura.cloudBaseUrl": {
+          "type": "string",
+          "default": "https://auravcs.com",
+          "description": "Aura cloud base URL for hosted features (PR inbox, sentinel, live sync)."
         }
       }
     }
   },
-  "scripts": {
-    "build": "esbuild src/extension.ts --bundle --outdir=dist --platform=node --format=cjs --external:vscode",
-    "watch": "esbuild src/extension.ts --bundle --outdir=dist --platform=node --format=cjs --external:vscode --watch",
-    "package": "vsce package"
-  },
   "devDependencies": {
-    "@types/vscode": "^1.85.0",
-    "esbuild": "^0.20.0",
-    "typescript": "^5.3.0"
-  },
-  "repository": {
-    "type": "git",
-    "url": "https://github.com/Naridon-Inc/aura"
-  },
-  "license": "MIT"
+    "@types/node": "^20.11.0",
+    "@types/vscode": "^1.92.0",
+    "esbuild": "^0.24.0",
+    "typescript": "^5.5.4",
+    "@vscode/vsce": "^3.2.0"
+  }
 }

@@ -1,6 +1,6 @@
 [package]
 name = "aura-blocks"
-version = "0.1.0"
+version = "0.19.21"
 edition = "2024"
 license = "Apache-2.0 OR MIT"
 description = "Canonical Block envelope, FSM, and append-only op stream for Aura's work surface."

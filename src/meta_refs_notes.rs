@@ -458,6 +458,11 @@ pub struct LogEntry {
     pub short: String,
     pub summary: String,
     pub rows: Vec<NoteLine>,
+    /// The proof snapshot riding the parallel `refs/notes/aura-proof`
+    /// plane, when this commit carries one. `None` for commits with no
+    /// recorded goal verdict.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub proof: Option<ProofNote>,
 }
 
 /// Walk HEAD newest-first and collect up to `limit` commits that carry
@@ -485,12 +490,418 @@ pub fn collect_log(
         }
         rows.sort_by(|a, b| a.ts.cmp(&b.ts));
         let commit = repo.find_commit(oid)?;
+        let proof = note_body(repo, PROOF_REF, oid).and_then(|b| parse_proof_note(&b));
         entries.push(LogEntry {
             sha: oid.to_string(),
             short: oid.to_string().chars().take(7).collect(),
             summary: commit.summary().unwrap_or("").to_string(),
             rows,
+            proof,
         });
     }
     Ok(entries)
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// The PROOF plane — a second, parallel notes ref `refs/notes/aura-proof`.
+//
+// The intent plane (above) carries WHO/WHY. This one carries WHETHER IT'S
+// PROVEN: per commit, the goal-ledger verdict at the time the commit was
+// built. Together a vanilla GitHub/GitLab/self-hosted clone can show the
+// reason for a change AND whether the code actually delivers it — verified
+// offline, no server. Like the intent ref it is plain git: the only artifact
+// is a standard notes ref any host round-trips.
+//
+// Crucial difference from intent: proof is a SNAPSHOT, newest wins. A commit
+// has one current verdict, not a growing union of rows — so writes
+// force-replace the note and pull resolves divergence by newest `at`, never
+// by union. Binding a note to a commit via the FULL oid lets `aura meta
+// verify` reject a note that's been re-pointed at the wrong commit.
+// ─────────────────────────────────────────────────────────────────────────
+
+use crate::goals::model::Verdict;
+use crate::goals::store as goal_store;
+
+/// The proof plane ref. `git push origin refs/notes/aura-proof` round-trips
+/// it through any host, exactly like the intent ref.
+pub const PROOF_REF: &str = "refs/notes/aura-proof";
+
+/// Staging ref `aura meta pull` fetches proof notes into before resolving
+/// them by newest-wins into PROOF_REF. Deleted after merge.
+pub const INCOMING_PROOF_REF: &str = "refs/notes/aura-proof-incoming";
+
+/// One goal's verdict inside a commit's proof snapshot.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProofGoal {
+    pub id: String,
+    pub text: String,
+    pub verdict: String,
+    pub ok: usize,
+    pub total: usize,
+}
+
+/// A commit's proof snapshot: the rolled-up verdict plus the per-goal
+/// breakdown that produced it. `commit` is the FULL oid so the note binds to
+/// exactly one commit — a re-pointed note is detectable.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProofNote {
+    /// FULL commit oid this snapshot proves. Binds note → commit.
+    pub commit: String,
+    /// Rolled-up verdict: "verified" | "partial" | "not_wired" | "unknown".
+    pub verdict: String,
+    /// Sum of requirements met across the matching goals.
+    pub ok: usize,
+    /// Sum of total requirements across the matching goals.
+    pub total: usize,
+    pub goals: Vec<ProofGoal>,
+    /// Newest matching run's `at` (unix millis), the snapshot's age.
+    pub at: u64,
+}
+
+/// Render the snake_case verdict string the ledger and frontend share.
+fn verdict_str(v: Verdict) -> &'static str {
+    match v {
+        Verdict::Verified => "verified",
+        Verdict::Partial => "partial",
+        Verdict::NotWired => "not_wired",
+        Verdict::Unknown => "unknown",
+    }
+}
+
+/// Roll several goal verdicts into one by precedence: all Verified →
+/// "verified"; else any Verified/Partial → "partial"; else any NotWired →
+/// "not_wired"; else "unknown". Matches the frontend rollup intent.
+fn rollup_verdict(verdicts: &[Verdict]) -> &'static str {
+    if verdicts.is_empty() {
+        return "unknown";
+    }
+    if verdicts.iter().all(|v| *v == Verdict::Verified) {
+        return "verified";
+    }
+    if verdicts
+        .iter()
+        .any(|v| *v == Verdict::Verified || *v == Verdict::Partial)
+    {
+        return "partial";
+    }
+    if verdicts.iter().any(|v| *v == Verdict::NotWired) {
+        return "not_wired";
+    }
+    "unknown"
+}
+
+/// Build the proof snapshot for `full_oid` from the goal ledger at `root`.
+///
+/// A goal counts for this commit when it has ANY run whose non-empty
+/// `commit` (a short sha prefix) is a prefix of the full oid. For each such
+/// goal the NEWEST matching run supplies its verdict/ok/total/at. Returns
+/// `None` when no goal matches, so commits with no recorded proof get no
+/// note (don't manufacture an "unknown" snapshot for every commit).
+pub fn build_proof_note(root: &std::path::Path, full_oid: &str) -> Option<ProofNote> {
+    let goals = goal_store::load(root);
+    let mut proof_goals: Vec<ProofGoal> = Vec::new();
+    let mut verdicts: Vec<Verdict> = Vec::new();
+    let mut ok_sum = 0usize;
+    let mut total_sum = 0usize;
+    let mut newest_at = 0u64;
+
+    for g in &goals {
+        // Newest matching run = the first run (newest-first) whose non-empty
+        // commit prefixes this oid.
+        let matching = g.runs.iter().find(|r| {
+            r.commit
+                .as_deref()
+                .map(|c| !c.is_empty() && full_oid.starts_with(c))
+                .unwrap_or(false)
+        });
+        let Some(run) = matching else {
+            continue;
+        };
+        verdicts.push(run.verdict);
+        ok_sum += run.ok;
+        total_sum += run.total;
+        if run.at > newest_at {
+            newest_at = run.at;
+        }
+        proof_goals.push(ProofGoal {
+            id: g.id.clone(),
+            text: g.text.clone(),
+            verdict: verdict_str(run.verdict).to_string(),
+            ok: run.ok,
+            total: run.total,
+        });
+    }
+
+    if proof_goals.is_empty() {
+        return None;
+    }
+
+    Some(ProofNote {
+        commit: full_oid.to_string(),
+        verdict: rollup_verdict(&verdicts).to_string(),
+        ok: ok_sum,
+        total: total_sum,
+        goals: proof_goals,
+        at: newest_at,
+    })
+}
+
+/// Compact, deterministic single-line JSON rendering of a proof snapshot.
+/// Field order is fixed by the struct so two machines render an identical
+/// body for an identical snapshot (the newest-wins compare needs this).
+pub fn render_proof_note(n: &ProofNote) -> String {
+    serde_json::to_string(n).unwrap_or_else(|_| {
+        format!(
+            "{{\"commit\":\"{}\",\"verdict\":\"unknown\",\"ok\":0,\"total\":0,\"goals\":[],\"at\":{}}}",
+            n.commit, n.at
+        )
+    })
+}
+
+/// Parse a proof-note body back into a snapshot. Tolerant of surrounding
+/// whitespace; `None` for blank / non-JSON / shape-mismatched bodies.
+pub fn parse_proof_note(body: &str) -> Option<ProofNote> {
+    let body = body.trim();
+    if body.is_empty() {
+        return None;
+    }
+    serde_json::from_str::<ProofNote>(body).ok()
+}
+
+/// What `aura meta push` did to the PROOF plane locally.
+#[derive(Debug, Serialize)]
+pub struct ProofPushReport {
+    pub commits_in_range: usize,
+    /// Commits in range that have a proof snapshot at all.
+    pub commits_proven: usize,
+    /// Commits whose proof note was written/replaced (changed vs existing).
+    pub commits_changed: usize,
+}
+
+/// Walk the commits in `range` and write each one's current proof snapshot
+/// as a note under PROOF_REF. Proof is a SNAPSHOT, newest wins: the note is
+/// force-replaced when the freshly-built body differs from the stored one —
+/// NOT union-merged. For the default (`None`) range a commit is included
+/// unless it already carries an UNCHANGED proof note (so a re-prove that
+/// changes the verdict still lands).
+pub fn write_proof_for_range(
+    repo: &Repository,
+    range: Option<&str>,
+) -> Result<ProofPushReport, Box<dyn std::error::Error>> {
+    // Reuse the intent walker for the same topology, but we must NOT skip on
+    // the intent ref — proof has its own ref. For the default range, force an
+    // explicit "HEAD" walk so collect_range_windows doesn't drop commits that
+    // happen to lack an aura-intent note.
+    let windows = match range {
+        Some(_) => collect_range_windows(repo, range)?,
+        None => collect_range_windows(repo, Some("HEAD"))?,
+    };
+
+    let root = repo
+        .workdir()
+        .map(|w| w.to_path_buf())
+        .unwrap_or_else(|| repo.path().to_path_buf());
+
+    let sig = signature(repo);
+    let mut commits_proven = 0usize;
+    let mut commits_changed = 0usize;
+
+    for window in &windows {
+        let full_oid = window.oid.to_string();
+        let Some(note) = build_proof_note(&root, &full_oid) else {
+            continue;
+        };
+        commits_proven += 1;
+        let body = render_proof_note(&note);
+        let current = note_body(repo, PROOF_REF, window.oid);
+        if current.as_deref().map(str::trim) == Some(body.trim()) {
+            continue; // unchanged snapshot — nothing to do
+        }
+        repo.note(&sig, &sig, Some(PROOF_REF), window.oid, &body, true)?;
+        commits_changed += 1;
+    }
+
+    Ok(ProofPushReport {
+        commits_in_range: windows.len(),
+        commits_proven,
+        commits_changed,
+    })
+}
+
+/// What `aura meta pull` resolved on the PROOF plane after the fetch.
+#[derive(Debug, Serialize)]
+pub struct ProofPullReport {
+    /// False when the fetch found no remote proof ref (nothing staged).
+    pub incoming_present: bool,
+    pub commits_seen: usize,
+    pub commits_updated: usize,
+}
+
+/// Resolve `refs/notes/aura-proof-incoming` into the local
+/// `refs/notes/aura-proof` by NEWEST-`at`-WINS per commit (proof is a
+/// snapshot, not a union): parse both sides, keep whichever has the larger
+/// `at`; write the incoming one only when it is strictly newer. Then delete
+/// the staging ref.
+pub fn merge_incoming_proof(
+    repo: &Repository,
+) -> Result<ProofPullReport, Box<dyn std::error::Error>> {
+    let incoming: Vec<Oid> = match repo.notes(Some(INCOMING_PROOF_REF)) {
+        Ok(notes) => notes.flatten().map(|(_, annotated)| annotated).collect(),
+        Err(_) => {
+            return Ok(ProofPullReport {
+                incoming_present: false,
+                commits_seen: 0,
+                commits_updated: 0,
+            });
+        }
+    };
+
+    let sig = signature(repo);
+    let mut commits_updated = 0usize;
+    for annotated in &incoming {
+        let Some(their_body) = note_body(repo, INCOMING_PROOF_REF, *annotated) else {
+            continue;
+        };
+        let Some(theirs) = parse_proof_note(&their_body) else {
+            continue;
+        };
+        let mine = note_body(repo, PROOF_REF, *annotated).and_then(|b| parse_proof_note(&b));
+        let keep_incoming = match &mine {
+            Some(m) => theirs.at > m.at,
+            None => true,
+        };
+        if !keep_incoming {
+            continue;
+        }
+        let body = render_proof_note(&theirs);
+        repo.note(&sig, &sig, Some(PROOF_REF), *annotated, &body, true)?;
+        commits_updated += 1;
+    }
+
+    if let Ok(mut staging) = repo.find_reference(INCOMING_PROOF_REF) {
+        staging.delete()?;
+    }
+
+    Ok(ProofPullReport {
+        incoming_present: true,
+        commits_seen: incoming.len(),
+        commits_updated,
+    })
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// `aura meta verify` — offline, server-free audit of the two planes.
+// ─────────────────────────────────────────────────────────────────────────
+
+/// One commit's verification result.
+#[derive(Debug, Serialize)]
+pub struct VerifyPerCommit {
+    pub sha: String,
+    pub short: String,
+    pub summary: String,
+    /// Does this commit carry an aura-intent note?
+    pub has_intent: bool,
+    /// The parsed proof snapshot, when present.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub proof: Option<ProofNote>,
+    /// Proof present AND its `commit` field equals this commit's full oid.
+    pub binding_ok: bool,
+}
+
+/// The whole-range verdict `aura meta verify` reports.
+#[derive(Debug, Serialize)]
+pub struct VerifyReport {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub range: Option<String>,
+    pub commits: usize,
+    pub intent_covered: usize,
+    pub proven: usize,
+    /// One line per binding problem found.
+    pub issues: Vec<String>,
+    /// True when no commit's proof note is mis-bound to its oid.
+    pub ok: bool,
+    pub per_commit: Vec<VerifyPerCommit>,
+}
+
+/// Max commits a default (HEAD) verify walk inspects, so a huge history
+/// can't run unbounded.
+const VERIFY_CAP: usize = 200;
+
+/// Walk the commits in `range` (default = HEAD, capped at VERIFY_CAP) and
+/// check, per commit: whether it carries intent, whether it carries a proof
+/// snapshot, and whether that snapshot binds back to the right oid. A proof
+/// note whose `commit` field doesn't match the commit it's attached to is an
+/// issue (it's been re-pointed or tampered) and makes the report `ok=false`.
+pub fn verify_range(
+    repo: &Repository,
+    range: Option<&str>,
+) -> Result<VerifyReport, Box<dyn std::error::Error>> {
+    let mut walk = repo.revwalk()?;
+    walk.set_sorting(git2::Sort::TOPOLOGICAL | git2::Sort::TIME)?;
+    match range {
+        Some(r) if r.contains("..") => walk.push_range(r)?,
+        Some(r) => {
+            let commit = repo.revparse_single(r)?.peel_to_commit()?;
+            walk.push(commit.id())?;
+        }
+        None => walk.push_head()?,
+    }
+
+    let mut per_commit: Vec<VerifyPerCommit> = Vec::new();
+    let mut intent_covered = 0usize;
+    let mut proven = 0usize;
+    let mut issues: Vec<String> = Vec::new();
+
+    for oid in walk {
+        if per_commit.len() >= VERIFY_CAP {
+            break;
+        }
+        let oid = oid?;
+        let full = oid.to_string();
+        let short: String = full.chars().take(7).collect();
+        let commit = repo.find_commit(oid)?;
+        let summary = commit.summary().unwrap_or("").to_string();
+
+        let has_intent = note_body(repo, NOTES_REF, oid).is_some();
+        if has_intent {
+            intent_covered += 1;
+        }
+
+        let proof = note_body(repo, PROOF_REF, oid).and_then(|b| parse_proof_note(&b));
+        let binding_ok = match &proof {
+            Some(p) => {
+                proven += 1;
+                if p.commit == full {
+                    true
+                } else {
+                    issues.push(format!(
+                        "{}: proof note binds to {} but is attached to {}",
+                        short, p.commit, full
+                    ));
+                    false
+                }
+            }
+            None => false,
+        };
+
+        per_commit.push(VerifyPerCommit {
+            sha: full,
+            short,
+            summary,
+            has_intent,
+            proof,
+            binding_ok,
+        });
+    }
+
+    let ok = issues.is_empty();
+    Ok(VerifyReport {
+        range: range.map(|s| s.to_string()),
+        commits: per_commit.len(),
+        intent_covered,
+        proven,
+        issues,
+        ok,
+        per_commit,
+    })
 }

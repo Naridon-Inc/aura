@@ -118,6 +118,54 @@ impl SnapshotStore {
         Ok(filename)
     }
 
+    /// Snapshot a file that lives OUTSIDE the current working tree — e.g. inside
+    /// a throwaway loop worktree that's about to be discarded — into a chosen
+    /// repo's `.aura/snapshots/`. Reads `source` (any readable path) and writes
+    /// the durable snapshot under `repo_root/.aura/snapshots/`, keyed by
+    /// `logical_path` (the repo-relative path to recover to). Unlike
+    /// [`Self::snapshot_file`], the read source and the write destination are
+    /// decoupled, so a recovery snapshot survives the source worktree's deletion.
+    /// Local-first: no cloud push (recovery is on this machine).
+    pub fn snapshot_external(
+        repo_root: &Path,
+        source: &Path,
+        logical_path: &str,
+        trigger: &str,
+        agent_id: &str,
+    ) -> Result<String, String> {
+        let dir = repo_root.join(".aura").join("snapshots");
+        fs::create_dir_all(&dir)
+            .map_err(|e| format!("Cannot create snapshot dir: {}", e))?;
+
+        let content = fs::read_to_string(source)
+            .map_err(|e| format!("Cannot snapshot {}: {}", source.display(), e))?;
+
+        let timestamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as u64;
+
+        let snapshot = FileSnapshot {
+            file_path: logical_path.to_string(),
+            content,
+            timestamp,
+            trigger: trigger.to_string(),
+            agent_id: agent_id.to_string(),
+        };
+
+        let safe_name = logical_path.replace('/', "__").replace('\\', "__");
+        let filename = format!("{}__{}.json", safe_name, timestamp);
+        let snap_path = dir.join(&filename);
+
+        let json = serde_json::to_string(&snapshot)
+            .map_err(|e| format!("Serialize error: {}", e))?;
+        let tmp_path = dir.join(format!("{}.tmp", filename));
+        fs::write(&tmp_path, &json).map_err(|e| format!("Write error: {}", e))?;
+        fs::rename(&tmp_path, &snap_path).map_err(|e| format!("Rename error: {}", e))?;
+
+        Ok(filename)
+    }
+
     /// Get all snapshots for a specific file, sorted newest first
     pub fn get_snapshots_for_file(file_path: &str) -> Vec<FileSnapshot> {
         Self::ensure_dir();

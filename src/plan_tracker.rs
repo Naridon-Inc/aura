@@ -115,7 +115,7 @@ fn claude_projects_dir() -> Option<PathBuf> {
 }
 
 fn project_name_from_dir(dirname: &str) -> String {
-    // Convert "-Users-muhammed-Documents-New-Git" → "New Git"
+    // Convert "-Users-you-Documents-New-Git" → "New Git"
     // The dirname uses single dashes for path separators AND within folder names.
     // Strategy: strip the known home prefix, then take the last path component.
 

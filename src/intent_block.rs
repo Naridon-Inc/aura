@@ -1614,8 +1614,8 @@ mod tests {
         let mut block = build_intent_block(
             "Tightened the retry backoff so we stop hammering the rate limiter",
             "MCP Agent",
-            Some("ashiq@naridon"),
-            "ashiq-laptop",
+            Some("owner@example.com"),
+            "owner-laptop",
             fixed_ts(),
             Some("BugFix"),
         );
@@ -1623,10 +1623,10 @@ mod tests {
 
         // A publishes their key into the shared registry.
         let ident = team_keys::SelfIdentity {
-            human_id: Some("did:aura:human/ashiq".into()),
-            display_name: Some("Ashiq".into()),
-            email: Some("mo@auravcs.com".into()),
-            github_login: Some("MHASK".into()),
+            human_id: Some("did:aura:human/owner".into()),
+            display_name: Some("Owner".into()),
+            email: Some("owner@example.com".into()),
+            github_login: Some("OWNER".into()),
             agent_id: Some("MCP Agent".into()),
         };
         team_keys::publish_self(&reg, &teammate, &ident, 1_700_000_000).unwrap();
@@ -1651,8 +1651,8 @@ mod tests {
 
         // The resolved identity is what the surface shows next to the seal.
         let entry = team_keys::entry_for(&reg, &claimed).unwrap();
-        assert_eq!(entry.display_name.as_deref(), Some("Ashiq"));
-        assert_eq!(entry.email.as_deref(), Some("mo@auravcs.com"));
+        assert_eq!(entry.display_name.as_deref(), Some("Owner"));
+        assert_eq!(entry.email.as_deref(), Some("owner@example.com"));
     }
 
     #[test]
@@ -1686,19 +1686,19 @@ mod tests {
         let b = build_intent_block(
             "Sign on behalf of operator",
             "MCP Agent",
-            Some("ashiq@naridon"),
+            Some("owner@example.com"),
             "laptop",
             fixed_ts(),
             None,
         );
         match &b.payload {
             BlockPayload::Sentinel { body, .. } => {
-                assert_eq!(body["human_id"], "ashiq@naridon");
+                assert_eq!(body["human_id"], "owner@example.com");
             }
             _ => panic!("expected Sentinel payload"),
         }
         let on_behalf = b.provenance.on_behalf_of.expect("on_behalf_of must be set");
-        assert_eq!(on_behalf.0, "did:aura:human/ashiq-naridon");
+        assert_eq!(on_behalf.0, "did:aura:human/owner-example-com");
     }
 
     #[test]
@@ -1800,7 +1800,7 @@ mod tests {
         let block = build_intent_block(
             "joint-sign",
             "MCP",
-            Some("ashiq"),
+            Some("owner"),
             "host",
             fixed_ts(),
             None,
@@ -1809,7 +1809,7 @@ mod tests {
         let loaded = load_signed_block(&path).unwrap();
         assert_eq!(
             loaded.provenance.on_behalf_of.as_ref().map(|a| a.0.as_str()),
-            Some("did:aura:human/ashiq")
+            Some("did:aura:human/owner")
         );
         // Joint signature must still verify since canonicalization
         // covers the new field.

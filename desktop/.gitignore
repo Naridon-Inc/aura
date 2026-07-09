@@ -1,0 +1,42 @@
+# Logs
+logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
+
+node_modules
+dist
+dist-ssr
+*.local
+
+# Editor directories and files
+.vscode/*
+!.vscode/extensions.json
+.idea
+.DS_Store
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
+
+# Local Aura state (snapshots/sessions/transcripts/plans live in dev tree)
+.aura/
+
+# Lockfiles from package managers we don't use (bun is canonical)
+package-lock.json
+pnpm-lock.yaml
+
+# TypeScript incremental build outputs
+*.tsbuildinfo
+
+# Vite dev artifacts that shouldn't be committed
+vite.config.d.ts
+vite.config.js
+
+# Linux release build output (AppImage + sig + manifest) — produced by scripts/build-linux.sh
+dist-linux/
+release-linux/

@@ -1,0 +1,20 @@
+[package]
+name        = "aura-term-gpu"
+version     = "0.1.0"
+edition     = "2024"
+license     = "Apache-2.0 OR MIT"
+description = "wgpu renderer for aura-term-core: draws a RenderList (bg quads + glyph atlas + cursor) onto any wgpu target. Windowing-agnostic — the host owns the surface."
+repository  = "https://github.com/Naridon-Inc/aura"
+publish     = false
+
+[dependencies]
+aura-term-core = { path = "../aura-term-core" }
+wgpu           = "27"
+cosmic-text    = "0.15"
+bytemuck       = { version = "1", features = ["derive"] }
+tracing        = "0.1"
+
+[dev-dependencies]
+# Drives wgpu's async adapter/device requests to completion in the offscreen
+# render test (no async runtime otherwise).
+pollster = "0.4"

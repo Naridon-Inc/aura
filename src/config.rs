@@ -43,7 +43,7 @@ pub struct AuraConfig {
     #[serde(default)]
     pub budget: Option<crate::usage::BudgetConfig>, // AI spending caps
     #[serde(default)]
-    pub team_repos: Vec<String>, // Repos managed by the team (e.g., "your-org/your-repo")
+    pub team_repos: Vec<String>, // Repos managed by the team (e.g., "OWNER/aura-sovereign")
     #[serde(default)]
     pub team_repos_cloud: std::collections::HashMap<String, String>, // repo_full_name -> org_slug, for cloud-routed teams
     #[serde(default)]

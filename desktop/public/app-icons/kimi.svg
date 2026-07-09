@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="24" height="24" fill="none">
+  <!-- Kimi-Coder (Moonshot AI) — crescent moon mark. Self-colored so it
+       renders identically on dark and light tiles (AgentIcon drops the halo
+       for brand files and shows this as-is). Moonshot indigo. -->
+  <path d="M20.5 14.2A8.2 8.2 0 0 1 9.8 3.5 8.5 8.5 0 1 0 20.5 14.2Z" fill="#6366F1"/>
+  <circle cx="16.4" cy="6.2" r="1.05" fill="#A5B4FC"/>
+  <circle cx="19.4" cy="9.4" r="0.7" fill="#A5B4FC"/>
+</svg>

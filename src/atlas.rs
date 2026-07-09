@@ -987,9 +987,11 @@ fn ai_polish(atlas: &mut Atlas) -> usize {
         Err(_) => return 0,
     };
 
-    let system_prompt = "You are a senior engineer writing a plain-English code directory for non-experts. \
-For each symbol in the JSON array, write ONE short sentence (max 18 words) describing what it does in human terms — \
-what it is FOR, not how it is built. Avoid jargon. Do not restate the name. \
+    let system_prompt = "You are writing a plain-English code directory for people who don't read code. \
+For each symbol in the JSON array, write ONE short sentence (max 18 words) saying what it does for the user in \
+real-world terms — what it is FOR, not how it works inside. Lead with the meaning. Skip jargon (AST, async, \
+generics, git); if a technical word is unavoidable, gloss it in plain words. Describe only what the data shows — \
+do not guess at intent the code doesn't state. Do not restate the name. \
 Return ONLY a JSON object mapping each symbol's \"key\" to its sentence, with no markdown fences or commentary.";
 
     let raw = match GsdEngine::generate_content(

@@ -1,0 +1,41 @@
+{
+  "schema": "https://aura.dev/schemas/plugin@1",
+  "id": "@aura/gemini",
+  "name": "Gemini",
+  "version": "0.1.0",
+  "publisher": "aura",
+  "icon": "✦",
+  "engines": { "aura": ">=0.17.0" },
+  "description": "Chat with Google Gemini inside a sandboxed Commons mini-app. The reference app for host-side credential injection: the sandbox calls the Gemini API through the host net proxy, and the API key is attached host-side (query param `key`) so the plugin code never sees it.",
+  "entry": "worker.js",
+  "capabilities": [
+    "net:fetch:generativelanguage.googleapis.com",
+    "secrets:gemini_api_key",
+    "storage:kv"
+  ],
+  "activationEvents": ["onStartup"],
+  "secrets": [
+    {
+      "id": "gemini_api_key",
+      "title": "Google AI Studio API key",
+      "url": "https://aistudio.google.com/app/apikey"
+    }
+  ],
+  "netAuth": [
+    {
+      "host": "generativelanguage.googleapis.com",
+      "secret": "gemini_api_key",
+      "inject": { "kind": "query", "name": "key", "template": "${secret}" }
+    }
+  ],
+  "contributes": {
+    "apps": [
+      {
+        "id": "chat",
+        "title": "Gemini",
+        "entry": "app.html",
+        "icon": "✦"
+      }
+    ]
+  }
+}

@@ -1,0 +1,93 @@
+{
+  "repoRoot": "/Users/you/Documents/New Git",
+  "home": "/Users/you",
+  "branch": "feat/commons-platform",
+  "gitStatus": { "aura-shell/src/components/CommandPalette.tsx": "M" },
+
+  "files": [
+    "aura-shell/src/components/agent/AgentIcon.tsx",
+    "aura-shell/src/components/CommandPalette.tsx",
+    "aura-shell/src/components/Composer.tsx",
+    "aura-shell/src/components/EmptyPanePicker.tsx",
+    "aura-shell/src/lib/agents.ts",
+    "aura-shell/src/lib/agentActivity.ts",
+    "aura-shell/src-tauri/src/cmd_search.rs",
+    "aura-shell/src-tauri/src/agent_card.rs",
+    "aura-shell/src-tauri/src/agent_hook.rs",
+    "aura-shell/src-tauri/src/agent_event_listener.rs",
+    "AGENTS.md",
+    "agent-manual.md"
+  ],
+
+  "symbols": [
+    { "name": "AgentPicker", "kind": "function", "path": "aura-shell/src/components/Composer.tsx", "line": 958, "preview": "function AgentPicker({" },
+    { "name": "spawnAgent", "kind": "function", "path": "aura-shell/src/components/EmptyPanePicker.tsx", "line": 136, "preview": "async function spawnAgent(agentId: string, label: string, profileName?: string) {" },
+    { "name": "openLaneAgent", "kind": "function", "path": "aura-shell/src/components/EmptyPanePicker.tsx", "line": 192, "preview": "function openLaneAgent(lane: Lane) {" },
+    { "name": "shortAgent", "kind": "function", "path": "aura-shell/src/components/CommandPalette.tsx", "line": 103, "preview": "function shortAgent(id: string): string {" },
+    { "name": "PaletteAgent", "kind": "type", "path": "aura-shell/src/components/CommandPalette.tsx", "line": 69, "preview": "export type PaletteAgent = {" },
+    { "name": "runAgentPrompt", "kind": "const", "path": "aura-shell/src/App.tsx", "line": 1741, "preview": "const runAgentPrompt = useCallback(" },
+    { "name": "lastAgentRailRef", "kind": "const", "path": "aura-shell/src/App.tsx", "line": 1160, "preview": "const lastAgentRailRef = useRef<string | null>(null);" },
+    { "name": "Agents", "kind": "const", "path": "aura-shell/src/components/Icons.tsx", "line": 136, "preview": "export const Agents = (p: IconProps) => (" },
+    { "name": "AgentIcon", "kind": "function", "path": "aura-shell/src/components/agent/AgentIcon.tsx", "line": 14, "preview": "export function AgentIcon({ agentId, size }: { agentId: string; size?: number }) {" },
+    { "name": "useAgents", "kind": "function", "path": "aura-shell/src/lib/agents.ts", "line": 41, "preview": "export function useAgents(): Agent[] {" },
+    { "name": "findAgent", "kind": "function", "path": "aura-shell/src/lib/agents.ts", "line": 77, "preview": "export function findAgent(id: string, agents: Agent[]): Agent | undefined {" }
+  ],
+
+  "contentHits": [
+    { "path": "aura-shell/src/App.tsx", "line": 2271, "column": 8, "preview": "const agentId = (body.agentId as string) || \"claude\";" },
+    { "path": "aura-shell/src/App.tsx", "line": 3048, "column": 6, "preview": "const targetAgent = cmd.agent ?? \"claude\";" },
+    { "path": "aura-shell/src/components/Composer.tsx", "line": 178, "column": 2, "preview": "const agent = findAgent(agentId, agents);" },
+    { "path": "aura-shell/src/components/Composer.tsx", "line": 97, "column": 2, "preview": "const agentBtnRef = useRef<HTMLButtonElement>(null);" },
+    { "path": "aura-shell/src/lib/agentActivity.ts", "line": 12, "column": 14, "preview": "export type AgentActivity = { agentId: string; lane: string };" }
+  ],
+
+  "intents": [
+    { "timestamp": 1781466097, "agent_id": "claude", "intent_type": "BugFix", "intent": "Fixed ⌘K function/symbol search and added an intent-log search lane. Root cause: fs_grep_symbol's fallback pattern used Perl \\s/\\b which POSIX ERE silently ignores.", "changeset": { "files": ["aura-shell/src-tauri/src/cmd_search.rs"] } },
+    { "timestamp": 1781501331, "agent_id": "claude", "intent_type": "BugFix", "intent": "Added truncate_on_char_boundary() helper and routed fs_grep_content's preview truncation through it, replacing the raw &preview[..PREVIEW_BYTES] byte slice that crashed search on an em-dash.", "changeset": { "files": ["aura-shell/src-tauri/src/cmd_search.rs"] } },
+    { "timestamp": 1781465989, "agent_id": "claude", "intent_type": "Refactor", "intent": "Redesigned the live Search this project surface (SearchWorkpane): plain-language header with live match/file counts, file-grouped results, inline match highlight.", "changeset": { "files": ["aura-shell/src/components/SearchWorkpane.tsx"] } },
+    { "timestamp": 1781464195, "agent_id": "claude", "intent_type": "Refactor", "intent": "Redesigned the file-sidebar SearchSidebar so agent results carry their own IA instead of raw CLI stdout lines: added parseGrep and a typed result model.", "changeset": { "files": ["aura-shell/src/components/SearchSidebar.tsx"] } }
+  ],
+
+  "goals": [
+    {
+      "id": "AURA-55",
+      "text": "Every build stays provably tied to its goal",
+      "runs": [
+        { "commit": "eaa24c26aa00", "verdict": "verified", "ok": 3, "total": 3, "files": ["aura-shell/src/components/commons/crew/CrewSurface.tsx"] }
+      ]
+    },
+    {
+      "id": "CREW-2",
+      "text": "Crew surface lets you hand the loop work and watch it prove each commit",
+      "runs": [
+        { "commit": "16f370f7aabb", "verdict": "verified", "ok": 2, "total": 2, "files": ["aura-shell/src/components/commons/crew/CrewActivityTab.tsx"] },
+        { "commit": "9bc1d4e0a210", "verdict": "partial", "ok": 1, "total": 2, "files": ["aura-shell/src/components/commons/crew/CrewQueueTab.tsx"] }
+      ]
+    }
+  ],
+
+  "loopReview": [],
+
+  "readyView": {
+    "counts": { "ready": 2, "blocked": 1, "working": 1, "done": 2, "other": 1 },
+    "ready": [
+      { "id": "n-101", "title": "Wire proof pills into the Crew detail drawer", "input": "Show the goals.jsonl verdict next to each done task's commit so a non-engineer can see the build was proven.", "acceptance_criteria": "Done task shows Proven N/N checks", "task_kind": "feature", "depends_on": [], "status": "submitted", "priority": "high", "agent_kind": "claude", "tags": ["crew", "proof"], "board_task_id": "AURA-200", "created_at": 1781400000, "updated_at": 1781400000 },
+      { "id": "n-102", "title": "Add + Add-to-queue popover", "input": "Let people hand Crew a new job from inside the surface without leaving for the board.", "task_kind": "feature", "depends_on": [], "status": "submitted", "priority": "medium", "agent_kind": "claude", "tags": ["crew"], "board_task_id": "AURA-201", "created_at": 1781400100, "updated_at": 1781400100 }
+    ],
+    "blocked": [
+      { "task": { "id": "n-103", "title": "Activity feed: newest-first with Retry", "input": "A live feed of what's running now, then done/failed newest-first, with a Retry on failures.", "task_kind": "feature", "depends_on": ["n-101"], "status": "submitted", "priority": "medium", "agent_kind": "claude", "tags": ["crew", "activity"], "board_task_id": "AURA-202", "created_at": 1781400200, "updated_at": 1781400200 }, "unmet": ["n-101"] }
+    ],
+    "working": [
+      { "id": "n-104", "title": "Graph layout: lane reservation for the queue view", "input": "Topology graph default for the queue, dependency edges drawn, every node clickable.", "task_kind": "feature", "depends_on": [], "status": "working", "priority": "high", "agent_kind": "claude", "branch": "crew/graph-layout", "tags": ["crew", "graph"], "assignee": "claude", "board_task_id": "AURA-203", "created_at": 1781400300, "updated_at": 1781503000 }
+    ],
+    "done": [
+      { "id": "n-105", "title": "Crew shell: two tabs + detail drawer", "input": "Restructure Crew into Queue + Activity tabs with a click-to-open detail drawer.", "task_kind": "feature", "depends_on": [], "status": "completed", "priority": "high", "agent_kind": "claude", "tags": ["crew"], "commit_sha": "16f370f7aabbccdd", "board_task_id": "AURA-198", "created_at": 1781399000, "updated_at": 1781399500 },
+      { "id": "n-106", "title": "Goal-alignment spine reads the ledger", "input": "Frontend reads .aura/goals.jsonl so each build shows its proof verdict.", "task_kind": "feature", "depends_on": [], "status": "completed", "priority": "high", "agent_kind": "claude", "tags": ["goals"], "commit_sha": "eaa24c26aa00ffee", "board_task_id": "AURA-55", "created_at": 1781398000, "updated_at": 1781398500 }
+    ],
+    "other": [
+      { "id": "n-107", "title": "Detail drawer: resolve waiting-on ids to real titles", "input": "In the task drawer, render each dependency as its human title, not a raw node id.", "task_kind": "feature", "depends_on": [], "status": "failed", "priority": "medium", "agent_kind": "claude", "tags": ["crew", "detail"], "error_message": "Build failed: id→title map was empty when the node had no board_task_id", "board_task_id": "AURA-204", "created_at": 1781401000, "updated_at": 1781402000 }
+    ]
+  },
+
+  "tasks": []
+}

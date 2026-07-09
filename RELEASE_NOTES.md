@@ -1,3 +1,28 @@
+# v0.19.21 — Semantic CI, work-loop & policy refresh + security groundwork
+
+A maintenance cut on the 0.19 line. It refreshes the CLI and the vendored engine
+crates and lays down security groundwork for the open-source tree. No breaking
+changes to the command surface.
+
+## Changed
+- **Engine crates refreshed.** The vendored `crates/` — toon, merge, agents,
+  attestation, plugin-sign, blocks, blockstore, loop, policy, ci, redact,
+  prdiff — are brought up to the 0.19.21 line, tracking the semantic-CI,
+  work-loop and policy improvements developed upstream.
+- **Round-trip `.aura/settings.toml`.** Per-repo settings reads/writes now
+  preserve comments, key order and unrelated tables on save (`toml_edit`).
+
+## Security
+- **No credentials in the source tree.** Every API / OAuth / telemetry key is
+  read from the environment at runtime (with an empty/`None` fallback); the real
+  values are injected only into the official builds we compile and distribute,
+  never committed here. Public verification material (e.g. update-signing
+  *public* keys) remains public by design.
+
+**Full Changelog**: https://github.com/Naridon-Inc/aura/compare/v0.18.0...v0.19.21
+
+---
+
 # v0.18.0 — Provenance, awareness & the autonomous work loop
 
 The largest `aura` CLI release since v0.15.1. It turns Aura from a semantic VCS

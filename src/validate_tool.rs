@@ -95,13 +95,25 @@ struct Verdict {
 }
 
 impl Verdict {
-    fn to_json(&self) -> Value {
+    /// Serialize to the shape Claude Code's PreToolUse hook protocol accepts.
+    ///
+    /// Claude Code validates hook stdout against a strict schema: a PreToolUse
+    /// hook may print ONLY the modern `hookSpecificOutput` envelope (or nothing
+    /// + exit 0). The legacy top-level `decision` key — and our internal
+    /// gate-card fields (severity/title/details) — fail that validation at the
+    /// root ("(root): Invalid input"), which Claude Code surfaces as a hook
+    /// error on every tool call. We map our verdict 1:1 onto the envelope:
+    /// `decision` ("allow"|"ask"|"deny") is already the exact `permissionDecision`
+    /// enum, and `reason` becomes `permissionDecisionReason`. The richer
+    /// gate-card fields still reach the desktop via the parked-card path, not
+    /// stdout.
+    fn to_hook_stdout(&self) -> Value {
         json!({
-            "decision": self.decision,
-            "severity": self.severity,
-            "title": self.title,
-            "reason": self.reason,
-            "details": self.details,
+            "hookSpecificOutput": {
+                "hookEventName": "PreToolUse",
+                "permissionDecision": self.decision,
+                "permissionDecisionReason": self.reason,
+            },
         })
     }
 }
@@ -129,7 +141,7 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
         },
     };
 
-    println!("{}", verdict.to_json());
+    println!("{}", verdict.to_hook_stdout());
 
     // Awareness auto-emit (M3c): once we've allowed an edit, announce it on the
     // Team Radar so teammates/agents see it BEFORE the commit. Throttled and

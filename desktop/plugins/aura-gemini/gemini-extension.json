@@ -1,0 +1,5 @@
+{
+  "name": "aura-gemini",
+  "description": "Aura Shell integration for Gemini CLI - native notifications and session status",
+  "version": "1.0.0"
+}

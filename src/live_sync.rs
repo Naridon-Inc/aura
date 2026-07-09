@@ -755,6 +755,55 @@ pub fn pulled_body(func: &serde_json::Value) -> Option<String> {
     }
 }
 
+/// Contain a peer-supplied file path before we ever write it to disk.
+///
+/// Sync and CRDT payloads carry a `file_path` chosen by a remote peer. Writing
+/// that path verbatim let a malicious peer target `../../.git/hooks/pre-commit`
+/// (arbitrary code execution on the victim's next commit) or any absolute path
+/// outside the repo. This clamps the path to the repo working tree:
+///   * absolute paths, drive prefixes and UNC roots are refused;
+///   * any `..` component is refused (no traversal — belt-and-suspenders with
+///     the final `starts_with` check below);
+///   * anything under a `.git` directory is refused (hooks/config = RCE);
+///   * the lexically-joined result must still resolve inside the repo root.
+///
+/// Returns the safe absolute path to write, or `None` if the path must be
+/// rejected (the caller counts it as skipped). The path need not exist yet, so
+/// this uses lexical normalisation rather than `canonicalize` on the target.
+pub(crate) fn contain_sync_path(file_path: &str) -> Option<std::path::PathBuf> {
+    use std::path::{Component, Path, PathBuf};
+
+    let raw = Path::new(file_path);
+    if raw.is_absolute() {
+        return None;
+    }
+    // Live sync runs with the repo root as the working directory.
+    let root = std::env::current_dir().ok()?.canonicalize().ok()?;
+
+    let mut normalized = PathBuf::new();
+    for component in raw.components() {
+        match component {
+            Component::Normal(segment) => {
+                if segment.eq_ignore_ascii_case(".git") {
+                    return None;
+                }
+                normalized.push(segment);
+            }
+            Component::CurDir => {}
+            Component::ParentDir | Component::RootDir | Component::Prefix(_) => return None,
+        }
+    }
+    if normalized.as_os_str().is_empty() {
+        return None;
+    }
+
+    let full = root.join(&normalized);
+    if !full.starts_with(&root) {
+        return None;
+    }
+    Some(full)
+}
+
 /// Apply pulled function bodies to local files using AST-level splice.
 /// Returns (applied_count, skipped_count, conflicts).
 ///
@@ -798,8 +847,17 @@ pub fn apply_pulled_functions(
             continue;
         }
 
-        // Check if file exists
-        let path = std::path::Path::new(file_path);
+        // Contain the peer-supplied path before any filesystem write: reject
+        // absolute paths, `..` traversal, and anything under `.git` (writing
+        // `.git/hooks/*` would be code execution on the victim's next commit).
+        let safe_path = match contain_sync_path(file_path) {
+            Some(p) => p,
+            None => {
+                skipped += 1;
+                continue;
+            }
+        };
+        let path = safe_path.as_path();
         if !path.exists() {
             // File doesn't exist locally — create it with just this function
             if let Some(parent) = path.parent() {

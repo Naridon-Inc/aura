@@ -1,6 +1,6 @@
 [package]
 name = "aura-merge"
-version = "0.1.0"
+version = "0.19.21"
 edition = "2021"
 license = "Apache-2.0"
 description = "Structured 3-way merge engine: deep-merge for JSON/YAML/TOML, line-level 3-way for text, scaffold extraction for code."

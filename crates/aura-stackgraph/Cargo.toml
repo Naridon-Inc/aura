@@ -1,0 +1,24 @@
+[package]
+name = "aura-stackgraph"
+version = "0.1.0"
+edition = "2021"
+description = "Stack-graph-backed symbol index for aura — find-refs / find-defs across files"
+license = "AGPL-3.0-only"
+
+[dependencies]
+stack-graphs = { version = "0.14", features = ["storage"] }
+tree-sitter-stack-graphs = "0.10"
+tree-sitter-stack-graphs-python = "0.3"
+tree-sitter-stack-graphs-typescript = "0.4"
+tree-sitter-stack-graphs-javascript = "0.3"
+tree-sitter-stack-graphs-java = "0.5"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "1"
+
+[dev-dependencies]
+tempfile = "3"
+
+[[bin]]
+name = "aura-stackgraph"
+path = "src/bin/aura_stackgraph.rs"

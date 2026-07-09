@@ -38,28 +38,79 @@ pub struct BuildProof {
 /// from the live reasons when needed, recording a run per goal. Returns what it
 /// proved (empty when there's no active task). Never errors — the commit first.
 pub fn prove_active_on_commit(root: &Path, commit_sha: &str) -> Vec<BuildProof> {
-    let mut proofs = Vec::new();
-
     let (task_uuid, _task_seq) = match super::active::resolve(root) {
         Some(t) => t,
-        None => return proofs,
+        None => return Vec::new(),
     };
+    let title = task_title(root, &task_uuid).unwrap_or_default();
+    prove_task_on_commit(root, Some(&task_uuid), &title, commit_sha)
+}
 
-    // 1. Make sure the active task has a goal to prove. If nothing's linked,
-    //    derive the smaller goal from the task title and link it.
-    let mut goals = store::for_task(root, &task_uuid);
+/// Prove a **specific** task's goal(s) against `commit_sha` and record a run
+/// per goal into `ledger_root`'s goal ledger — the durable, app-visible
+/// `.aura/goals.jsonl`. This is the crew's path: the autonomous loop knows
+/// exactly which node it just finished, so it proves *that node's own goal*
+/// rather than whatever `.aura/active_task` happens to point at (which the
+/// loop never pins per node), and it writes the run to the main repo even when
+/// the work was built in a throwaway `--jobs` worktree (whose own ledger is
+/// discarded). Without both, a crew-built commit lands with no proof bound to
+/// it and the Activity surface honestly but uselessly reads "Not checked".
+///
+/// `task_uuid` is the board task id when the node has one (so the goal links to
+/// the board task and survives across runs); pass `None` for a node minted
+/// straight into the graph, and the goal is derived from `task_title` and
+/// proved unlinked. The AST snapshot proved against is the latest checkpoint in
+/// `refs/notes/aura`, which git shares across worktrees — so the freshly
+/// committed code is reachable from the main repo. When there's genuinely no
+/// snapshot to check (verdict `unknown`), no run is recorded: "Not checked"
+/// then means exactly that, not a dropped result.
+pub fn prove_task_on_commit(
+    ledger_root: &Path,
+    task_uuid: Option<&str>,
+    task_title: &str,
+    commit_sha: &str,
+) -> Vec<BuildProof> {
+    // Resolve the goal(s) for THIS task explicitly. Prefer the goals already
+    // linked to the board task; otherwise derive one from the title (and link
+    // it when we have a board id to link to).
+    let task_uuid = task_uuid.filter(|u| !u.trim().is_empty());
+    let mut goals = match task_uuid {
+        Some(u) => store::for_task(ledger_root, u),
+        None => Vec::new(),
+    };
     if goals.is_empty() {
-        if let Some(title) = task_title(root, &task_uuid) {
-            if let Ok(rec) = store::upsert_by_text(root, &title) {
-                let seq = task_seq(root, &task_uuid);
-                let _ = store::link_task(root, &rec.id, &task_uuid, seq);
-                goals = store::for_task(root, &task_uuid);
+        let title = task_title.trim();
+        if !title.is_empty() {
+            if let Ok(rec) = store::upsert_by_text(ledger_root, title) {
+                match task_uuid {
+                    Some(u) => {
+                        let seq = task_seq(ledger_root, u);
+                        let _ = store::link_task(ledger_root, &rec.id, u, seq);
+                        goals = store::for_task(ledger_root, u);
+                    }
+                    // No board id to anchor to — prove the derived goal directly.
+                    None => goals = vec![rec],
+                }
             }
         }
     }
     if goals.is_empty() {
-        return proofs;
+        return Vec::new();
     }
+
+    prove_goals(ledger_root, goals, commit_sha)
+}
+
+/// Decompose-once / prove-on-build for an explicit set of goals against
+/// `commit_sha`, recording a run per goal into `root`'s ledger. Shared by the
+/// active-task ([`prove_active_on_commit`]) and explicit-task
+/// ([`prove_task_on_commit`]) entry points.
+fn prove_goals(
+    root: &Path,
+    goals: Vec<super::model::GoalRecord>,
+    commit_sha: &str,
+) -> Vec<BuildProof> {
+    let mut proofs = Vec::new();
 
     // The live reasons behind this commit — what the agent just logged.
     let reasons = latest_intent(root);

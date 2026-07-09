@@ -11,7 +11,11 @@ mod arbitrator;
 mod task;
 mod aura_loop_run;
 mod loop_accept;
+mod loop_stranded;
 mod loop_worktree;
+mod work;
+mod worktree_scripts;
+mod repo_settings;
 mod board;
 mod goals;
 mod activity;
@@ -78,7 +82,11 @@ mod acp_server;
 mod manifest_sig;
 mod rekor;
 mod intent_block;
-mod team_keys;
+// `team_keys` now lives in the shared `aura-attestation` crate so non-CLI
+// binaries (the desktop shell) can verify registry self-signatures too.
+// Re-exported at the old path so every `crate::team_keys::…` call site here
+// keeps working unchanged.
+pub use aura_attestation::team_keys;
 mod block_adapter;
 mod episodic;
 mod recall_narrate;
@@ -97,8 +105,10 @@ mod skill_rank;
 mod skills;
 mod replay;
 mod review;
+mod doctor;
 mod continuity;
 mod meta_refs;
+mod meta_bundle;
 mod refs_sign;
 mod merge_driver;
 
@@ -191,6 +201,95 @@ fn track_event(event_name: &str, metadata: Option<&str>) {
     });
 }
 
+// PostHog EU crash ingestion — mirrors aura-shell/src-tauri/src/telemetry.rs so
+// the desktop app and its bundled CLI report crashes into the *same* project,
+// under the same anonymous person, instead of the CLI's old homegrown endpoint.
+// The token is a public, write-only capture key: safe to bake into the shipped
+// binary, never committed to source. Runtime env wins (dev), else the value
+// baked at build time via `option_env!` (release builds export it from
+// ~/.aura-posthog.env). Absent → a silent no-op (contributors can still build).
+fn posthog_key() -> Option<String> {
+    if let Ok(k) = std::env::var("AURA_POSTHOG_KEY") {
+        let k = k.trim().to_string();
+        if !k.is_empty() {
+            return Some(k);
+        }
+    }
+    option_env!("AURA_POSTHOG_KEY")
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+}
+
+fn posthog_host() -> String {
+    if let Ok(h) = std::env::var("AURA_POSTHOG_HOST") {
+        let h = h.trim().to_string();
+        if !h.is_empty() {
+            return h;
+        }
+    }
+    option_env!("AURA_POSTHOG_HOST")
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "https://eu.i.posthog.com".to_string())
+}
+
+/// The PostHog `distinct_id` for crash events. Reuses the desktop app's device
+/// id (`~/.aura/device.json`) when present so a user's CLI and app crashes land
+/// on the same PostHog person; falls back to the hashed machine fingerprint.
+/// Fully panic-safe — every fallible step degrades to the fallback.
+fn posthog_distinct_id() -> String {
+    let home = std::env::var("HOME")
+        .or_else(|_| std::env::var("USERPROFILE"))
+        .unwrap_or_default();
+    if !home.is_empty() {
+        let path = std::path::Path::new(&home).join(".aura").join("device.json");
+        if let Ok(raw) = std::fs::read_to_string(&path) {
+            if let Ok(v) = serde_json::from_str::<serde_json::Value>(&raw) {
+                if let Some(id) = v.get("device_id").and_then(|x| x.as_str()) {
+                    let id = id.trim();
+                    if !id.is_empty() {
+                        return id.to_string();
+                    }
+                }
+            }
+        }
+    }
+    anonymous_machine_id()
+}
+
+/// Best-effort crash report to PostHog EU. Called from *inside* the panic hook,
+/// so it must NEVER itself panic: consent-gated, and every fallible step
+/// early-returns rather than unwrapping. A silent no-op without consent or a
+/// baked key.
+fn report_crash_to_posthog(message: &str) {
+    if !is_telemetry_enabled() {
+        return;
+    }
+    let Some(key) = posthog_key() else {
+        return;
+    };
+    let host = posthog_host();
+    let payload = serde_json::json!({
+        "api_key": key,
+        "event": "crash",
+        "distinct_id": posthog_distinct_id(),
+        "properties": {
+            "source": "cli",
+            "os": std::env::consts::OS,
+            "arch": std::env::consts::ARCH,
+            "cli_version": CURRENT_VERSION,
+            "message": message,
+        }
+    });
+    let Ok(client) = reqwest::blocking::Client::builder()
+        .timeout(Duration::from_secs(2))
+        .build()
+    else {
+        return;
+    };
+    let _ = client.post(format!("{host}/capture/")).json(&payload).send();
+}
+
 fn setup_crash_reporter() {
     std::panic::set_hook(Box::new(|info| {
         let msg = match info.payload().downcast_ref::<&'static str>() {
@@ -201,21 +300,25 @@ fn setup_crash_reporter() {
             },
         };
 
-        if is_telemetry_enabled() {
-            // Synchronous block to ensure it sends before the process dies
-            let os = std::env::consts::OS;
-            let payload = serde_json::json!({
-                "event": "crash",
-                "os": os,
-                "version": CURRENT_VERSION,
-                "metadata": msg
-            });
-            let client = reqwest::blocking::Client::builder().timeout(Duration::from_secs(2)).build().unwrap();
-            let _ = client.post("http://api.auravcs.com/telemetry").json(&payload).send();
-        }
+        // Report the crash to PostHog EU (consent-gated, panic-safe). This used
+        // to POST the old `api.auravcs.com/telemetry` endpoint — which now just
+        // 301-redirects HTTP→HTTPS and silently drops the body, so CLI crashes
+        // vanished and never reached our analytics. PostHog is where every other
+        // Aura event already lands, so they're finally visible alongside them.
+        // (The old path also `.unwrap()`ed the client builder — itself a panic
+        // inside the panic hook; `report_crash_to_posthog` early-returns instead.)
+        report_crash_to_posthog(msg);
 
-        println!("\n{} {} {}", "💥".bold(), "Aura encountered a fatal anomaly:".bold().red(), msg);
-        println!("  {} If this persists, please report it at https://github.com/Naridon-Inc/aura/issues", "↳".dimmed());
+        // The panic hook must never itself panic. `println!` writes to stdout and
+        // panics on a broken pipe (EPIPE) — and a parent that captured our stdout
+        // then exited is exactly when we land here. A second panic inside the hook
+        // is fatal: std aborts ("panicked while panicking") → SIGABRT → a macOS
+        // crash report. Write the notice to stderr through a fallible `writeln!`
+        // whose error we deliberately swallow, so a dead pipe can never abort us.
+        use std::io::Write as _;
+        let mut err = std::io::stderr();
+        let _ = writeln!(err, "\n{} {} {}", "💥".bold(), "Aura encountered a fatal anomaly:".bold().red(), msg);
+        let _ = writeln!(err, "  {} If this persists, please report it at https://github.com/Naridon-Inc/aura/issues", "↳".dimmed());
     }));
 }
 
@@ -718,7 +821,13 @@ enum Commands {
         no_redact: bool,
     },
     /// Diagnose and repair stuck sessions, orphaned data, and other issues
-    Doctor,
+    Doctor {
+        /// Emit a read-only structured JSON report instead of the
+        /// interactive text output. JSON mode performs NO repairs
+        /// (no force-end, no prune, no stale cleanup) — it only reports.
+        #[arg(long)]
+        json: bool,
+    },
     /// Launch the Aura desktop shell (aura-shell — Tauri 2 superset of aura-term)
     Ui {
         /// Path to the aura-shell binary. Defaults to discovery via PATH then
@@ -774,13 +883,23 @@ enum Commands {
         #[command(subcommand)]
         sub: TaskSubcommands,
     },
-    /// Dependency graph + ready-set over the A2A task spine. `aura loop
-    /// ready` is the Beads-grade "what can I work on now"; `aura loop
-    /// add/dep` build the DAG. The autonomous runner consumes the ready
-    /// set (see `aura loop run`, added by the harness).
+    /// Crew — hand a stack of work to your agents and they do it on their own,
+    /// in dependency order. `aura crew ready` is the Beads-grade "what can I
+    /// work on now"; `aura crew add/dep` build the DAG; `aura crew run` is the
+    /// autonomous runner. The legacy `aura loop ...` name still works as a
+    /// hidden alias so nothing breaks.
+    #[command(name = "crew", alias = "loop")]
     Loop {
         #[command(subcommand)]
         sub: LoopSubcommands,
+    },
+    /// Open isolated worktrees for parallel coding sessions (a second Claude
+    /// Code, Codex, or your own hands), then merge each back AST-aware and
+    /// recorded in the intent log — no branch-switching, no lost work.
+    #[command(name = "work", alias = "wt")]
+    Work {
+        #[command(subcommand)]
+        sub: work::WorkSubcommands,
     },
     /// Team activity feed — recent events emitted by the engine and tools
     Activity {
@@ -824,6 +943,13 @@ enum Commands {
     Refs {
         #[command(subcommand)]
         sub: refs_sign::RefsSubcommands,
+    },
+    /// Portable signed meaning bundle — pack intent + goals + commit provenance
+    /// into one JSON file that imports into any clone, verifiable offline.
+    /// export / import.
+    Bundle {
+        #[command(subcommand)]
+        sub: meta_bundle::BundleSubcommands,
     },
     /// Change Notes — per-file "what / why / where it affects" for a commit,
     /// derived from the AST diff + reverse call graph. No AI tokens. Powers the
@@ -1187,6 +1313,31 @@ enum Commands {
         /// the git-shared .aura/usage_by_dev.jsonl aggregate)
         #[arg(long)]
         by_dev: bool,
+    },
+    /// Internal: record one completed agent turn's token usage into a
+    /// repo-local session so the team usage surface lights up without a
+    /// cloud account. Driven by the desktop app at end-of-turn — not meant
+    /// for humans. Project-scoped by construction (writes `.aura/sessions`).
+    #[command(hide = true)]
+    UsageRecord {
+        /// Stable id for the chat/agent session (accumulates across turns).
+        #[arg(long)]
+        session: String,
+        /// Which AI drove the turn: "aura", "claude", "gemini", "codex", …
+        #[arg(long)]
+        agent: String,
+        /// Model name (for cost lookup), if known.
+        #[arg(long)]
+        model: Option<String>,
+        /// Input (prompt) tokens this turn.
+        #[arg(long, default_value_t = 0)]
+        input: u64,
+        /// Output (completion) tokens this turn.
+        #[arg(long, default_value_t = 0)]
+        output: u64,
+        /// Cache-read tokens this turn, if the provider reported them.
+        #[arg(long, default_value_t = 0)]
+        cache: u64,
     },
     /// Show the current cloud identity (user + org) for the stored token
     Whoami,
@@ -2321,8 +2472,8 @@ enum AttestAction {
         #[arg(long)]
         json: bool,
         /// Filter to blocks signed for a specific human DID. Accepts
-        /// either the raw env value (e.g. "ashiq@naridon") or the
-        /// canonical DID form (e.g. "did:aura:human/ashiq-naridon") —
+        /// either the raw env value (e.g. "owner@example.com") or the
+        /// canonical DID form (e.g. "did:aura:human/owner-example-com") —
         /// matched case-sensitive against either slot in the block.
         #[arg(long)]
         human: Option<String>,
@@ -2432,6 +2583,20 @@ enum GoalsSubcommands {
         goal: String,
         /// Board task ref (e.g. AURA-42)
         task: String,
+    },
+    /// Attach a goal to a task with a plain-language verify plan (no proving)
+    Add {
+        /// What "done" looks like, in plain words ("users can sign in via Google")
+        text: String,
+        /// Tie this goal to a board task (e.g. AURA-42)
+        #[arg(long)]
+        task: Option<String>,
+        /// A check to verify the goal is met — repeat for each (--check "…" --check "…")
+        #[arg(long = "check")]
+        check: Vec<String>,
+        /// Output raw JSON
+        #[arg(long)]
+        json: bool,
     },
 }
 
@@ -2617,7 +2782,12 @@ enum ZoneSubcommands {
         label: Option<String>,
     },
     /// List all zone claims for this repo
-    List,
+    List {
+        /// Emit JSON (the remote zones array) instead of the human table,
+        /// for shell consumers like the desktop `/zones` card.
+        #[arg(long)]
+        json: bool,
+    },
     /// Release a zone claim
     Release {
         /// Zone ID to release
@@ -2784,10 +2954,71 @@ enum LoopSubcommands {
         json: bool,
     },
     /// Set a node's status directly (submitted | working | completed |
-    /// failed | canceled | rejected | input-required | auth-required).
+    /// failed | canceled | rejected | input-required | auth-required | paused).
     Set {
         id: String,
         status: String,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Pause work: hold nodes back from the ready set without losing them.
+    /// Give a node id, or scope a whole goal (`--goal`) or crew (`--crew`) so
+    /// every submitted/working node under it parks at once. Paused nodes resume
+    /// to `submitted` — nothing is canceled.
+    Pause {
+        /// A single node id to pause (omit when using --goal/--crew).
+        id: Option<String>,
+        /// Pause every node tagged `goal:<this>`.
+        #[arg(long)]
+        goal: Option<String>,
+        /// Pause every node in this crew.
+        #[arg(long)]
+        crew: Option<String>,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Resume paused work back into the ready set. Mirrors `pause`: a node id,
+    /// or a `--goal` / `--crew` scope to un-park a whole slice at once.
+    Resume {
+        /// A single node id to resume (omit when using --goal/--crew).
+        id: Option<String>,
+        /// Resume every paused node tagged `goal:<this>`.
+        #[arg(long)]
+        goal: Option<String>,
+        /// Resume every paused node in this crew.
+        #[arg(long)]
+        crew: Option<String>,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Show the run history — every `aura loop run`, newest first, with its
+    /// scope (whole graph / one goal / one crew), node count, outcome tallies
+    /// and per-node commits. Reads `.aura/crew/runs.jsonl`.
+    Runs {
+        /// Cap how many runs to print (0 = all).
+        #[arg(long, default_value_t = 20)]
+        limit: usize,
+        #[arg(long)]
+        json: bool,
+    },
+    /// List the crews in this project — the default "main" crew plus any
+    /// spawned ones, each with its live lifecycle counts. Many crews can run
+    /// in parallel, each draining its own slice of the graph.
+    Crews {
+        #[arg(long)]
+        json: bool,
+    },
+    /// Stand up a second crew to run in parallel — mint a named crew and,
+    /// optionally, move existing nodes into it so it has work right away.
+    Spawn {
+        /// Human name for the crew (slugged into a stable crew id).
+        title: String,
+        /// Optional one-line purpose.
+        #[arg(long)]
+        description: Option<String>,
+        /// Node ids to move into the new crew (repeatable).
+        #[arg(long = "task")]
+        tasks: Vec<String>,
         #[arg(long)]
         json: bool,
     },
@@ -2828,6 +3059,13 @@ enum LoopSubcommands {
         /// worktree); this flag governs the sequential, commit-in-place path.
         #[arg(long)]
         rollback: bool,
+        /// Drain only the nodes tagged `goal:<this>` — start one goal on its own
+        /// while the rest of the board waits.
+        #[arg(long)]
+        goal: Option<String>,
+        /// Drain only this crew's nodes — run one crew while another is working.
+        #[arg(long)]
+        crew: Option<String>,
         #[arg(long)]
         json: bool,
     },
@@ -2880,6 +3118,52 @@ enum LoopSubcommands {
     /// of starting a disconnected island — each with the tail steps to hang the
     /// new work after. Empty when nothing's grouped under a goal yet.
     AttachTargets {
+        #[arg(long)]
+        json: bool,
+    },
+    /// Sync the task graph over git so tasks flow between machines: commit any
+    /// local `.aura/a2a/` graph changes, pull peers' updates (rebase), then
+    /// push. Run it after `loop add` to send a task to a remote runner, or let
+    /// the runner call it each cycle. Ephemeral leases (`*.lease.json`,
+    /// gitignored) never travel — only the durable graph.
+    Sync {
+        /// Pull only — fetch peers' task-graph updates without committing or
+        /// pushing local changes.
+        #[arg(long)]
+        pull_only: bool,
+        /// Push only — commit and push local graph changes without pulling.
+        #[arg(long)]
+        push_only: bool,
+        /// Remote to sync against.
+        #[arg(long, default_value = "origin")]
+        remote: String,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Bridge the task graph to the cloud A2A board so work initiated from
+    /// anywhere (the mobile app, the web console, another agent) reaches this
+    /// runner without a git client. `--pull` mints ready cloud tasks into the
+    /// local graph (claiming each so no peer double-runs it); `--push` reports
+    /// finished nodes back to the cloud with their commit + result. With
+    /// neither flag it does both. This is the no-git delivery plane that pairs
+    /// with `loop sync` (the git one).
+    CloudSync {
+        /// Pull ready cloud tasks into the local graph (skip the push-back).
+        #[arg(long)]
+        pull: bool,
+        /// Push finished local nodes back to the cloud (skip the pull).
+        #[arg(long)]
+        push: bool,
+        /// Repo to scope cloud tasks to (github `owner/repo`). Defaults to the
+        /// current git remote; pass explicitly when they differ.
+        #[arg(long)]
+        repo: Option<String>,
+        /// Agent to dispatch for pulled tasks that don't name one themselves.
+        #[arg(long, default_value = "claude")]
+        agent: String,
+        /// Max tasks to pull per call.
+        #[arg(long, default_value_t = 50)]
+        limit: i64,
         #[arg(long)]
         json: bool,
     },
@@ -3145,7 +3429,8 @@ enum ReviewSubcommands {
         #[arg(long)]
         json: bool,
     },
-    /// Run role-driven review: Aura engine + reviewer agents over the diff
+    /// Run role-driven review: Aura engine + a multi-agent specialist panel
+    /// over the diff, adversarially verified
     Run {
         /// Override the configured reviewer agents (comma-separated)
         #[arg(long)]
@@ -3156,6 +3441,13 @@ enum ReviewSubcommands {
         /// Override the base branch
         #[arg(long)]
         base: Option<String>,
+        /// How wide the specialist panel runs: low | medium | high | max
+        /// (low = security+correctness; max = every dimension incl. readability)
+        #[arg(long, default_value = "medium")]
+        depth: String,
+        /// Skip the adversarial verify pass (faster, but keeps false positives)
+        #[arg(long)]
+        no_verify: bool,
         /// Per-reviewer timeout in seconds
         #[arg(long, default_value = "900")]
         timeout_secs: u64,
@@ -3321,6 +3613,17 @@ fn a11y_label(emoji: &str, text_label: &str) -> String {
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // Die quietly when our reader goes away. Rust's runtime sets SIGPIPE to
+    // SIG_IGN, so writing to a closed pipe returns EPIPE — which `println!`
+    // turns into a panic. The desktop app spawns us (e.g. `aura ci run`),
+    // captures stdout, then often drops that pipe; our very next print would
+    // panic, the crash hook would print again and panic-while-panicking, and
+    // macOS would file a crash report — on a loop. Restoring the default
+    // disposition makes a broken pipe a clean termination, exactly like any
+    // Unix tool in a `… | head` pipeline.
+    unsafe {
+        libc::signal(libc::SIGPIPE, libc::SIG_DFL);
+    }
     setup_crash_reporter();
     let cli = Cli::parse();
 
@@ -3357,7 +3660,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         Commands::ProposePlan { .. } => "propose-plan",
         Commands::Resume { .. } => "resume",
         Commands::Carryover { .. } => "carryover",
-        Commands::Doctor => "doctor",
+        Commands::Doctor { .. } => "doctor",
         Commands::Ui { .. } => "ui",
         Commands::Completions { .. } => "completions",
         Commands::RequestAccess { .. } => "request-access",
@@ -4641,7 +4944,37 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
             }
 
-            println!("{} Checkpoint logic staged.", "✓".green().bold());
+            // Promote the staged checkpoint into a durable Git Note when we are
+            // the only writer that will. `stage_checkpoint` above only wrote
+            // `.git/AURA_CTX.json`; that file is promoted onto HEAD by the
+            // post-commit hook (`aura persist-checkpoint` → `commit_staged`).
+            // But when `capture-context` is invoked directly from a terminal —
+            // or the commit lands with `git commit --no-verify`, bypassing the
+            // hook — nothing ever promotes it, so `status`, `prove`, and
+            // `goal-trace` (which read committed Notes via `get_all_checkpoints`)
+            // report "no checkpoints" despite the ✓ here. Git exports
+            // `GIT_INDEX_FILE` only while running a hook, so its absence means we
+            // are a direct invocation and must persist the Note ourselves.
+            let in_git_hook = std::env::var_os("GIT_INDEX_FILE").is_some();
+            let head_exists = repo.head().and_then(|r| r.peel_to_commit()).is_ok();
+            let mut promoted = false;
+            if !in_git_hook && head_exists {
+                match CheckpointStore::commit_staged(&repo) {
+                    Ok(()) => promoted = true,
+                    Err(e) => eprintln!(
+                        "  {} staged, but could not persist the checkpoint Git note: {e}",
+                        "⚠".yellow()
+                    ),
+                }
+            }
+
+            if promoted {
+                println!("{} Checkpoint saved.", "✓".green().bold());
+            } else {
+                // Hook context (post-commit will promote) or an empty repo with
+                // no HEAD to attach to — the staged file is the durable record.
+                println!("{} Checkpoint logic staged.", "✓".green().bold());
+            }
             println!("  {} {} semantic nodes tracked", "↳".dimmed(), staged_nodes.len().to_string().cyan());
             println!("  {} Session: {}", "↳".dimmed(), sess.session_id.dimmed());
         }
@@ -5920,7 +6253,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         Commands::Carryover { repo, mode, agent, since_hours, json, inject, no_redact } => {
             continuity::run_carryover(repo, mode, agent.clone(), *since_hours, *json, *inject, *no_redact)?;
         }
-        Commands::Doctor => {
+        Commands::Doctor { json } => {
+            // Read-only structured report path (opt-in). JSON mode is a
+            // pure probe: it computes the same checks the text path does
+            // but performs NONE of the side-effects (no force-end of
+            // stuck sessions, no snapshot prune, no stale cleanup, no
+            // replay-orphan removal). Powers the desktop shell's
+            // `/doctor` slash card via `aura_doctor_json`.
+            if *json {
+                let report = doctor::collect_report()?;
+                println!("{}", serde_json::to_string_pretty(&report)?);
+                return Ok(());
+            }
+
             println!("\n{} {}\n", a11y_label("🩺", "DOCTOR"), "Aura Doctor: Diagnosing repository health...".bold().cyan());
 
             let mut issues_found = 0;
@@ -6823,6 +7168,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         Commands::Loop { sub } => {
             handle_loop_command(sub)?;
         }
+        Commands::Work { sub } => {
+            work::handle(sub)?;
+        }
         Commands::Activity { sub } => {
             handle_activity_command(sub)?;
         }
@@ -6880,6 +7228,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         Commands::Refs { sub } => {
             refs_sign::run(sub)?;
+        }
+        Commands::Bundle { sub } => {
+            meta_bundle::run(sub)?;
         }
         Commands::Taste { sub } => {
             cmd_taste::run(sub)?;
@@ -7065,6 +7416,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 GoalsSubcommands::Show { goal, json } => goals::cli::show(goal, *json),
                 GoalsSubcommands::Why { goal, json } => goals::cli::why(goal, *json),
                 GoalsSubcommands::Link { goal, task } => goals::cli::link(goal, task),
+                GoalsSubcommands::Add { text, task, check, json } => {
+                    goals::cli::add(text, task.as_deref(), check, *json)
+                }
             };
             if let Err(e) = res {
                 println!("{} {}", "✗".red().bold(), e);
@@ -8978,9 +9332,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 }
                             }
                         }
-                        ZoneSubcommands::List => {
+                        ZoneSubcommands::List { json } => {
                             match live_sync::fetch_remote_zones() {
                                 Ok(resp) => {
+                                    if *json {
+                                        // The remote already hands back a JSON
+                                        // object; re-emit it verbatim (pretty) so
+                                        // the shell parses the same shape the
+                                        // mothership produced.
+                                        println!("{}", serde_json::to_string_pretty(&resp)?);
+                                        return Ok(());
+                                    }
                                     let zones = resp["zones"].as_array();
                                     let total = zones.map(|a| a.len()).unwrap_or(0);
                                     println!("\n  {} Sentinel Zones ({} active)", "Zones".bold(), total);
@@ -9745,6 +10107,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 if *json {
                     let mut out = usage::report_to_json(&report);
                     out["by_developer"] = usage_by_dev::rows_to_json(&windowed);
+                    // Mark which row is "you" so the desktop surface can show
+                    // your own project usage as the hero and gate the
+                    // per-person breakdown to admins.
+                    out["self_developer"] =
+                        serde_json::json!(usage_by_dev::dev_identity().email);
                     println!("{}", serde_json::to_string_pretty(&out).unwrap_or_default());
                 } else {
                     usage::print_report(&report);
@@ -9777,6 +10144,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     };
                     export_usage_csv(path, &report);
                 }
+            }
+        }
+        Commands::UsageRecord { session, agent, model, input, output, cache } => {
+            // Cheap, silent, fired per turn by the desktop app. Only write
+            // when there's something to record — `record_turn_usage` upserts a
+            // repo-local session, and the next `aura usage` read rolls it into
+            // the git-shared per-developer aggregate (project-scoped only).
+            if *input > 0 || *output > 0 || *cache > 0 {
+                session::SessionManager::record_turn_usage(
+                    session,
+                    agent,
+                    model.as_deref(),
+                    *input,
+                    *output,
+                    *cache,
+                );
             }
         }
         Commands::AcpServe => {
@@ -12341,6 +12724,7 @@ fn handle_loop_command(sub: &LoopSubcommands) -> Result<(), Box<dyn std::error::
                     aura_loop::STATE_WORKING,
                     aura_loop::STATE_INPUT_REQUIRED,
                     aura_loop::STATE_AUTH_REQUIRED,
+                    aura_loop::STATE_PAUSED,
                 ]
                 .contains(&status.as_str())
             {
@@ -12355,6 +12739,169 @@ fn handle_loop_command(sub: &LoopSubcommands) -> Result<(), Box<dyn std::error::
                 println!("{} → {}", task.short_id().yellow().bold(), loop_status_color(&task.status));
             }
         }
+        LoopSubcommands::Pause { id, goal, crew, json } => {
+            // Single node, or a whole goal/crew scope — never both.
+            if id.is_some() && (goal.is_some() || crew.is_some()) {
+                return Err("give a node id OR a --goal/--crew scope, not both".into());
+            }
+            if let Some(id) = id {
+                let task = graph
+                    .pause(id)
+                    .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
+                if *json {
+                    println!("{}", serde_json::to_string(&task)?);
+                } else {
+                    println!("{} → {}", task.short_id().yellow().bold(), loop_status_color(&task.status));
+                }
+            } else {
+                let scope = aura_loop::RunScope { goal: goal.clone(), crew: crew.clone() };
+                if scope.is_unscoped() {
+                    return Err("nothing to pause — pass a node id, --goal, or --crew".into());
+                }
+                let paused = graph.pause_scope(&scope);
+                if *json {
+                    println!("{}", serde_json::to_string(&paused)?);
+                } else {
+                    println!("{} paused {} task(s)", "⏸".yellow().bold(), paused.len());
+                }
+            }
+        }
+        LoopSubcommands::Resume { id, goal, crew, json } => {
+            if id.is_some() && (goal.is_some() || crew.is_some()) {
+                return Err("give a node id OR a --goal/--crew scope, not both".into());
+            }
+            if let Some(id) = id {
+                let task = graph
+                    .resume(id)
+                    .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
+                if *json {
+                    println!("{}", serde_json::to_string(&task)?);
+                } else {
+                    println!("{} → {}", task.short_id().yellow().bold(), loop_status_color(&task.status));
+                }
+            } else {
+                let scope = aura_loop::RunScope { goal: goal.clone(), crew: crew.clone() };
+                if scope.is_unscoped() {
+                    return Err("nothing to resume — pass a node id, --goal, or --crew".into());
+                }
+                let resumed = graph.resume_scope(&scope);
+                if *json {
+                    println!("{}", serde_json::to_string(&resumed)?);
+                } else {
+                    println!("{} resumed {} task(s)", "▶".green().bold(), resumed.len());
+                }
+            }
+        }
+        LoopSubcommands::Runs { limit, json } => {
+            let mut runs = aura_loop::run_log::RunLedger::at(&repo_root).list();
+            if *limit > 0 && runs.len() > *limit {
+                runs.truncate(*limit);
+            }
+            if *json {
+                println!("{}", serde_json::to_string(&runs)?);
+            } else if runs.is_empty() {
+                println!("{}", "No runs yet — `aura loop run` records each run here.".dimmed());
+            } else {
+                for r in &runs {
+                    let scope = match (&r.goal, &r.crew) {
+                        (Some(g), _) => format!("goal:{g}"),
+                        (None, Some(c)) => format!("crew:{c}"),
+                        (None, None) => "whole graph".to_string(),
+                    };
+                    let dur = r
+                        .duration_secs()
+                        .map(|s| format!("{s}s"))
+                        .unwrap_or_else(|| "—".to_string());
+                    println!(
+                        "{}  {}  {} ✓ {} ✗  ·  {} node(s)  ·  {}  ·  {}",
+                        r.id.cyan().bold(),
+                        scope.dimmed(),
+                        r.completed.to_string().green(),
+                        r.failed.to_string().red(),
+                        r.attempted,
+                        dur.dimmed(),
+                        r.runner.dimmed(),
+                    );
+                }
+            }
+        }
+        LoopSubcommands::Crews { json } => {
+            let registry = aura_loop::crew::CrewRegistry::at(&repo_root);
+            let metas = registry.list();
+            let all = graph.list();
+            let summaries = aura_loop::crews_summary(&all);
+            if *json {
+                // Pair each registered crew with its live summary (or zeros).
+                let rows: Vec<serde_json::Value> = metas
+                    .iter()
+                    .map(|m| {
+                        let s = summaries.iter().find(|c| c.crew == m.id);
+                        serde_json::json!({
+                            "id": m.id,
+                            "title": m.title,
+                            "description": m.description,
+                            "total": s.map(|s| s.total).unwrap_or(0),
+                            "ready": s.map(|s| s.ready).unwrap_or(0),
+                            "working": s.map(|s| s.working).unwrap_or(0),
+                            "done": s.map(|s| s.done).unwrap_or(0),
+                            "failed": s.map(|s| s.failed).unwrap_or(0),
+                        })
+                    })
+                    .collect();
+                println!("{}", serde_json::to_string(&rows)?);
+            } else {
+                for m in &metas {
+                    let s = summaries.iter().find(|c| c.crew == m.id);
+                    let total = s.map(|s| s.total).unwrap_or(0);
+                    let working = s.map(|s| s.working).unwrap_or(0);
+                    let done = s.map(|s| s.done).unwrap_or(0);
+                    println!(
+                        "{}  {}  ·  {} task(s)  ·  {} working  ·  {} done",
+                        m.id.cyan().bold(),
+                        m.title.dimmed(),
+                        total,
+                        working.to_string().yellow(),
+                        done.to_string().green(),
+                    );
+                }
+            }
+        }
+        LoopSubcommands::Spawn {
+            title,
+            description,
+            tasks,
+            json,
+        } => {
+            let registry = aura_loop::crew::CrewRegistry::at(&repo_root);
+            let now = chrono::Utc::now().timestamp();
+            let meta = registry.spawn(title.clone(), description.clone(), now)?;
+            let mut moved: Vec<String> = Vec::new();
+            for id in tasks {
+                if graph.set_crew(id, Some(meta.id.clone())).is_ok() {
+                    moved.push(id.clone());
+                }
+            }
+            if *json {
+                println!(
+                    "{}",
+                    serde_json::json!({ "id": meta.id, "title": meta.title, "moved": moved })
+                );
+            } else {
+                println!(
+                    "{} {} ({})",
+                    "Spawned crew".green().bold(),
+                    meta.title,
+                    meta.id.cyan(),
+                );
+                if !moved.is_empty() {
+                    println!("  moved {} task(s) in", moved.len());
+                }
+                println!(
+                    "  run it with: {}",
+                    format!("aura loop run --crew {}", meta.id).dimmed()
+                );
+            }
+        }
         LoopSubcommands::Run {
             agent,
             lease_secs,
@@ -12364,6 +12911,8 @@ fn handle_loop_command(sub: &LoopSubcommands) -> Result<(), Box<dyn std::error::
             watch,
             jobs,
             rollback,
+            goal,
+            crew,
             json,
         } => {
             let opts = aura_loop_run::RunOpts {
@@ -12375,9 +12924,316 @@ fn handle_loop_command(sub: &LoopSubcommands) -> Result<(), Box<dyn std::error::
                 watch: *watch,
                 jobs: *jobs,
                 rollback: *rollback,
+                goal: goal.clone(),
+                crew: crew.clone(),
                 json: *json,
             };
             aura_loop_run::run(&repo_root, &opts)?;
+        }
+        LoopSubcommands::Sync {
+            pull_only,
+            push_only,
+            remote,
+            json,
+        } => {
+            let git = |args: &[&str]| -> std::io::Result<std::process::Output> {
+                std::process::Command::new("git")
+                    .args(args)
+                    .current_dir(&repo_root)
+                    .output()
+            };
+            let branch = {
+                let out = git(&["rev-parse", "--abbrev-ref", "HEAD"])?;
+                String::from_utf8_lossy(&out.stdout).trim().to_string()
+            };
+            if branch.is_empty() || branch == "HEAD" {
+                return Err("not on a branch — cannot sync the task graph".into());
+            }
+
+            let do_push = !*pull_only;
+            let do_pull = !*push_only;
+            let mut committed = false;
+            let mut pulled = false;
+            let mut pushed = false;
+            let mut notes: Vec<String> = Vec::new();
+
+            // 1. Stage + commit local graph changes. Only the durable graph is
+            //    tracked; lease sidecars are gitignored, so they never travel.
+            //    --no-verify: this is bookkeeping, not semantic code work.
+            if do_push && repo_root.join(".aura").join("a2a").exists() {
+                let _ = git(&["add", ".aura/a2a"])?;
+                // `--quiet` exits non-zero when there IS a staged diff.
+                let staged = git(&["diff", "--cached", "--quiet", "--", ".aura/a2a"])?;
+                if !staged.status.success() {
+                    let out = git(&[
+                        "commit",
+                        "--no-verify",
+                        "-m",
+                        "aura: sync task graph",
+                        "--",
+                        ".aura/a2a",
+                    ])?;
+                    if out.status.success() {
+                        committed = true;
+                    } else {
+                        notes.push(format!("commit: {}", String::from_utf8_lossy(&out.stderr).trim()));
+                    }
+                }
+            }
+
+            // 2. Pull peers' graph updates. --rebase keeps graph history linear;
+            //    --autostash tolerates a dirty tree (e.g. an agent mid-edit).
+            if do_pull {
+                let out = git(&["pull", "--rebase", "--autostash", remote.as_str(), branch.as_str()])?;
+                if out.status.success() {
+                    pulled = true;
+                } else {
+                    notes.push(format!("pull: {}", String::from_utf8_lossy(&out.stderr).trim()));
+                }
+            }
+
+            // 3. Push if we have commits the remote lacks (graph and/or the
+            //    agent's code commits from this cycle).
+            if do_push {
+                let range = format!("{remote}/{branch}..HEAD");
+                let ahead = git(&["rev-list", "--count", range.as_str()])?;
+                let ahead_n: i64 = String::from_utf8_lossy(&ahead.stdout).trim().parse().unwrap_or(-1);
+                if ahead_n != 0 {
+                    let out = git(&["push", remote.as_str(), branch.as_str()])?;
+                    if out.status.success() {
+                        pushed = true;
+                    } else {
+                        notes.push(format!("push: {}", String::from_utf8_lossy(&out.stderr).trim()));
+                    }
+                }
+            }
+
+            if *json {
+                println!(
+                    "{}",
+                    serde_json::json!({
+                        "branch": branch,
+                        "remote": remote,
+                        "committed": committed,
+                        "pulled": pulled,
+                        "pushed": pushed,
+                        "notes": notes,
+                    })
+                );
+            } else {
+                let mut parts: Vec<String> = Vec::new();
+                if committed {
+                    parts.push("committed graph".into());
+                }
+                if pulled {
+                    parts.push("pulled".into());
+                }
+                if pushed {
+                    parts.push("pushed".into());
+                }
+                if parts.is_empty() {
+                    parts.push("nothing to sync".into());
+                }
+                println!("{} {} ({})", "↕".cyan().bold(), parts.join(" · "), branch);
+                for n in &notes {
+                    println!("  {} {}", "!".yellow(), n);
+                }
+            }
+        }
+        LoopSubcommands::CloudSync {
+            pull,
+            push,
+            repo,
+            agent,
+            limit,
+            json,
+        } => {
+            let (cloud_url, token) = recall_cloud_creds()?;
+            let client = cloud_http_client();
+            let base = cloud_url.trim_end_matches('/').to_string();
+
+            // Scope to the current git remote (owner/repo) unless overridden. A
+            // non-github remote means "org-wide" — no repo filter.
+            let repo_slug = repo.clone().or_else(|| {
+                let r = crate::live_events::repo_name();
+                if r.contains('/') {
+                    Some(r)
+                } else {
+                    None
+                }
+            });
+
+            // Neither flag → do both legs (the runner's normal cycle).
+            let do_pull = *pull || !*push;
+            let do_push = *push || !*pull;
+
+            let mut pulled = 0usize;
+            let mut pushed = 0usize;
+            let mut notes: Vec<String> = Vec::new();
+
+            // PULL — ready cloud tasks become local graph nodes. Each is claimed
+            // on the cloud (→ working) so a second runner won't also pull it.
+            if do_pull {
+                let mut url = format!("{}/api/v2/a2a/tasks", base);
+                let mut sep = '?';
+                recall_push_str(&mut url, &mut sep, "status", Some("submitted"));
+                recall_push_str(&mut url, &mut sep, "repo", repo_slug.as_deref());
+                recall_push_i64(&mut url, &mut sep, "limit", Some(*limit));
+                match recall_get(&client, &url, &token) {
+                    Ok(body) => {
+                        let already: std::collections::HashSet<String> =
+                            graph.list().into_iter().filter_map(|t| t.remote_id).collect();
+                        let tasks = body
+                            .get("tasks")
+                            .and_then(|v| v.as_array())
+                            .cloned()
+                            .unwrap_or_default();
+                        for ct in tasks {
+                            let cid = match ct.get("id").and_then(|v| v.as_str()) {
+                                Some(s) => s.to_string(),
+                                None => continue,
+                            };
+                            if already.contains(&cid) {
+                                continue; // already mirrored locally
+                            }
+                            let input = ct
+                                .get("input_text")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("")
+                                .to_string();
+                            let title: String = input
+                                .lines()
+                                .next()
+                                .unwrap_or("(cloud task)")
+                                .chars()
+                                .take(120)
+                                .collect();
+                            let kind = ct
+                                .get("task_kind")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("task")
+                                .to_string();
+                            let ac = ct
+                                .get("acceptance_criteria")
+                                .and_then(|v| v.as_str())
+                                .map(|s| s.to_string());
+                            // Cloud agent_kind is namespaced ("a2a:claude"); the
+                            // runner dispatches the bare provider id.
+                            let task_agent = ct
+                                .get("agent_kind")
+                                .and_then(|v| v.as_str())
+                                .map(|s| s.trim_start_matches("a2a:").to_string())
+                                .filter(|s| !s.is_empty())
+                                .unwrap_or_else(|| agent.clone());
+                            let tags: Vec<String> = ct
+                                .get("tags")
+                                .and_then(|v| v.as_array())
+                                .map(|a| {
+                                    a.iter()
+                                        .filter_map(|t| t.as_str().map(|s| s.to_string()))
+                                        .collect()
+                                })
+                                .unwrap_or_default();
+                            let mut node = match graph.create(
+                                title,
+                                input,
+                                "medium".to_string(),
+                                kind,
+                                vec![],
+                                ac,
+                                Some(task_agent),
+                                tags,
+                            ) {
+                                Ok(n) => n,
+                                Err(e) => {
+                                    notes.push(format!("create {cid}: {e}"));
+                                    continue;
+                                }
+                            };
+                            node.remote_id = Some(cid.clone());
+                            node.branch = ct
+                                .get("branch")
+                                .and_then(|v| v.as_str())
+                                .map(|s| s.to_string());
+                            if let Err(e) = graph.save(&node) {
+                                notes.push(format!("save {cid}: {e}"));
+                                continue;
+                            }
+                            let purl =
+                                format!("{}/api/v2/a2a/tasks/{}", base, a2a_safe_id(&cid));
+                            let pbody = serde_json::json!({ "status": "working" });
+                            if let Err(e) = recall_patch(&client, &purl, &token, &pbody) {
+                                notes.push(format!("claim {cid}: {e}"));
+                            }
+                            pulled += 1;
+                        }
+                    }
+                    Err(e) => notes.push(format!("pull: {e}")),
+                }
+            }
+
+            // PUSH — finished local nodes report back to the cloud once. The
+            // `cloud:pushed` tag keeps later cycles from re-PATCHing.
+            if do_push {
+                const PUSHED_TAG: &str = "cloud:pushed";
+                for mut node in graph.list() {
+                    let rid = match &node.remote_id {
+                        Some(r) => r.clone(),
+                        None => continue,
+                    };
+                    if !node.is_terminal() {
+                        continue;
+                    }
+                    if node.tags.iter().any(|t| t == PUSHED_TAG) {
+                        continue;
+                    }
+                    let purl = format!("{}/api/v2/a2a/tasks/{}", base, a2a_safe_id(&rid));
+                    let mut pb = serde_json::Map::new();
+                    pb.insert("status".into(), serde_json::json!(node.status));
+                    if let Some(sha) = &node.commit_sha {
+                        pb.insert("commit_sha".into(), serde_json::json!(sha));
+                    }
+                    if let Some(res) = &node.result {
+                        pb.insert("result".into(), res.clone());
+                    }
+                    if let Some(err) = &node.error_message {
+                        pb.insert("error_message".into(), serde_json::json!(err));
+                    }
+                    match recall_patch(&client, &purl, &token, &serde_json::Value::Object(pb)) {
+                        Ok(_) => {
+                            node.tags.push(PUSHED_TAG.to_string());
+                            let _ = graph.save(&node);
+                            pushed += 1;
+                        }
+                        Err(e) => notes.push(format!("push {rid}: {e}")),
+                    }
+                }
+            }
+
+            if *json {
+                println!(
+                    "{}",
+                    serde_json::json!({
+                        "repo": repo_slug,
+                        "pulled": pulled,
+                        "pushed": pushed,
+                        "notes": notes,
+                    })
+                );
+            } else {
+                let mut parts: Vec<String> = Vec::new();
+                if do_pull {
+                    parts.push(format!("pulled {pulled}"));
+                }
+                if do_push {
+                    parts.push(format!("pushed {pushed}"));
+                }
+                let scope = repo_slug.as_deref().unwrap_or("org-wide");
+                println!("{} cloud {} ({})", "☁".cyan().bold(), parts.join(" · "), scope);
+                for n in &notes {
+                    println!("  {} {}", "!".yellow(), n);
+                }
+            }
         }
         LoopSubcommands::Seed { from, agent, json } => {
             let plan_path = match from {
@@ -12911,11 +13767,13 @@ fn handle_review_command(sub: &ReviewSubcommands) -> Result<(), Box<dyn std::err
         ReviewSubcommands::Roles { json } => {
             review::show_roles(*json).map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
         }
-        ReviewSubcommands::Run { reviewers, fixer, base, timeout_secs, json } => {
+        ReviewSubcommands::Run { reviewers, fixer, base, depth, no_verify, timeout_secs, json } => {
             review::run_roles_review(
                 reviewers.as_deref(),
                 fixer.as_deref(),
                 base.as_deref(),
+                Some(depth.as_str()),
+                *no_verify,
                 *timeout_secs,
                 *json,
             )

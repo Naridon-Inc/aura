@@ -109,6 +109,17 @@ impl AgentProvider for GeminiCli {
                 // restored-tab respawn passes "latest" so a desktop
                 // restart picks up the user's most recent conversation
                 // for this project without needing the prior session id.
+                //
+                // Two resume carriers share the `resume_session_id` slot:
+                //   - a bare id / index / "latest" → `--resume <id>` (resolved
+                //     against gemini's own per-project session store).
+                //   - an absolute path to a session JSON we authored elsewhere
+                //     → `--session-file <path>` (gemini loads that file's full
+                //     conversation directly, no project-store match needed).
+                // The desktop "open this chat in Gemini" handoff writes a
+                // native session JSON and passes its PATH, so it lands here.
+                // Detecting a path by a leading `/` keeps the bare-id and
+                // "latest" callers byte-identical.
                 let mut args: Vec<String> = vec![];
                 // Pin the REPL to the picked model so the spawned Gemini
                 // tab opens where the composer picker pointed.
@@ -121,8 +132,13 @@ impl AgentProvider for GeminiCli {
                     args.extend(mode_args);
                 }
                 if let Some(sid) = req.resume_session_id {
-                    args.push("--resume".into());
-                    args.push(sid.into());
+                    if sid.starts_with('/') {
+                        args.push("--session-file".into());
+                        args.push(sid.into());
+                    } else {
+                        args.push("--resume".into());
+                        args.push(sid.into());
+                    }
                 }
                 Ok(Invocation {
                     bin: "gemini".into(),
@@ -132,6 +148,51 @@ impl AgentProvider for GeminiCli {
                 })
             },
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{InvokeMode, InvokeRequest};
+
+    fn req(resume: Option<&str>) -> InvokeRequest<'_> {
+        InvokeRequest {
+            prompt: "",
+            mode: InvokeMode::PtyRepl,
+            resume_session_id: resume,
+            attachments_via_stdin: false,
+            effort: None,
+            fast: false,
+            model: None,
+            approval: None,
+        }
+    }
+
+    /// An absolute session-file path routes to `--session-file <path>` — the
+    /// path the desktop chat-export writes a native session JSON to and hands
+    /// here. Gemini loads it directly, no per-project store match.
+    #[test]
+    fn pty_resume_path_uses_session_file() {
+        let inv = GeminiCli
+            .build_invocation(&req(Some("/Users/x/.aura/agent-handoff/gemini/session-abc.json")))
+            .unwrap();
+        let i = inv.args.iter().position(|a| a == "--session-file").unwrap();
+        assert_eq!(
+            inv.args[i + 1],
+            "/Users/x/.aura/agent-handoff/gemini/session-abc.json"
+        );
+        assert!(!inv.args.iter().any(|a| a == "--resume"));
+    }
+
+    /// A bare id / index / "latest" keeps the original `--resume <id>` shape
+    /// (the restored-tab respawn path) — unchanged by the session-file addition.
+    #[test]
+    fn pty_resume_bare_id_uses_resume_flag() {
+        let inv = GeminiCli.build_invocation(&req(Some("latest"))).unwrap();
+        let i = inv.args.iter().position(|a| a == "--resume").unwrap();
+        assert_eq!(inv.args[i + 1], "latest");
+        assert!(!inv.args.iter().any(|a| a == "--session-file"));
     }
 }
 

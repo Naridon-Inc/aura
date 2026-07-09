@@ -8,11 +8,14 @@
 //! pre-existing `aura review list|show` PR-review inbox is untouched — these
 //! are additive subcommands.
 
+pub mod context;
+pub mod dimensions;
 pub mod findings;
 pub mod fix;
 pub mod github;
 pub mod reviewer;
 pub mod roles;
+pub mod verify;
 
 use std::io::{BufRead, IsTerminal, Write};
 use std::path::{Path, PathBuf};
@@ -32,6 +35,19 @@ pub struct RoleReviewReport {
     pub base: String,
     pub risk_label: String,
     pub risk_score: u64,
+    /// Depth the panel ran at ("low".."max") — which specialist dimensions fired.
+    #[serde(default)]
+    pub tier: String,
+    /// The agent that ran the adversarial verify pass, or `None` if it was
+    /// skipped (disabled, or no agent available).
+    #[serde(default)]
+    pub verified_by: Option<String>,
+    /// How many candidate findings the verifier refuted (dropped as false
+    /// positives) and how many it confirmed.
+    #[serde(default)]
+    pub refuted: usize,
+    #[serde(default)]
+    pub confirmed: usize,
     pub reviewers: Vec<ReviewerSummary>,
     pub findings: Vec<Finding>,
 }
@@ -185,11 +201,17 @@ fn print_roles(r: &ReviewRoles) {
 // run
 // ---------------------------------------------------------------------------
 
-/// `aura review run` — dispatch every reviewer over the diff and aggregate.
+/// `aura review run` — dispatch the specialist panel over the diff, aggregate,
+/// adversarially verify, and calibrate.
+///
+/// `depth` selects how wide the panel is (see [`dimensions::Tier`]); `no_verify`
+/// skips the adversarial false-positive cull (faster, noisier).
 pub fn run_roles_review(
     reviewers: Option<&str>,
     fixer: Option<&str>,
     base: Option<&str>,
+    depth: Option<&str>,
+    no_verify: bool,
     timeout_secs: u64,
     json: bool,
 ) -> Result<(), String> {
@@ -206,17 +228,22 @@ pub fn run_roles_review(
     }
     let agent_ids = r.sanitized_reviewers();
     let base = r.base.clone();
+    let tier = depth.map(dimensions::Tier::parse).unwrap_or(dimensions::Tier::Medium);
+    let timeout = Duration::from_secs(timeout_secs);
 
     if !json {
+        let dims = dimensions::for_tier(tier).len();
         println!(
-            "\n{} role review against {} — Aura engine + {} agent reviewer(s)",
+            "\n{} role review against {} — Aura engine + {} agent(s) over {} specialist dimension(s) at depth {}",
             "🔍".bold(),
             base.yellow(),
-            agent_ids.len()
+            agent_ids.len(),
+            dims,
+            tier.label().cyan(),
         );
     }
 
-    let results = reviewer::dispatch(&agent_ids, &base, Duration::from_secs(timeout_secs));
+    let results = reviewer::dispatch(&agent_ids, &base, timeout, tier);
 
     // Aura's engine is always results[0]; use it for the overall risk.
     let (risk_label, risk_score) = results
@@ -226,6 +253,31 @@ pub fn run_roles_review(
 
     let all: Vec<Finding> = results.iter().flat_map(|res| res.findings.clone()).collect();
     let aggregated = findings::aggregate(all);
+
+    // Adversarial verify (best-effort) → context calibration. The verifier is a
+    // fresh skeptic: prefer the configured fixer, else the first reviewer.
+    let verifier_id = r.fixer.clone().or_else(|| agent_ids.first().cloned());
+    let verified = if no_verify {
+        verify::VerifyOutcome {
+            findings: aggregated,
+            refuted: 0,
+            confirmed: 0,
+            verifier: None,
+            note: Some("verification disabled (--no-verify)".to_string()),
+        }
+    } else {
+        if !json {
+            println!("  {} adversarial verify pass…", "↳".dimmed());
+        }
+        let diff = reviewer::capture_diff(&base);
+        verify::verify(verifier_id.as_deref(), aggregated, &diff, timeout)
+    };
+    if !json {
+        if let Some(note) = &verified.note {
+            println!("    {} {}", "·".dimmed(), note.dimmed());
+        }
+    }
+    let calibrated = findings::calibrate(verified.findings);
 
     let summaries: Vec<ReviewerSummary> = results
         .iter()
@@ -245,8 +297,12 @@ pub fn run_roles_review(
         base: base.clone(),
         risk_label,
         risk_score,
+        tier: tier.label().to_string(),
+        verified_by: verified.verifier.clone(),
+        refuted: verified.refuted,
+        confirmed: verified.confirmed,
         reviewers: summaries,
-        findings: aggregated,
+        findings: calibrated,
     };
     persist_report(&repo_root, &report)?;
 
@@ -308,11 +364,38 @@ fn print_report(report: &RoleReviewReport) {
         report.findings.len()
     );
 
+    // Verification line — what the adversarial pass did.
+    match &report.verified_by {
+        Some(v) => println!(
+            "{} verified by {} · {} confirmed · {} refuted (false positives dropped)",
+            "Verify:".bold(),
+            v.cyan(),
+            report.confirmed.to_string().green(),
+            report.refuted.to_string().yellow(),
+        ),
+        None => println!("{} {}", "Verify:".bold(), "skipped".dimmed()),
+    }
+
+    // Blocking vs advisory split — what a human must look at first.
+    let blocking = report
+        .findings
+        .iter()
+        .filter(|f| f.severity >= findings::Severity::High)
+        .count();
+    if blocking > 0 {
+        println!(
+            "{} {} blocking (High/Critical) · {} advisory",
+            "Gate:".bold(),
+            blocking.to_string().red().bold(),
+            (report.findings.len() - blocking).to_string().dimmed(),
+        );
+    }
+
     if report.findings.is_empty() {
         println!("  {}", "no findings — clean".green());
         return;
     }
-    println!("\n{}", "Aggregated findings".bold().cyan());
+    println!("\n{}", "Findings (worst first)".bold().cyan());
     for (i, f) in report.findings.iter().enumerate() {
         let sev = match f.severity {
             findings::Severity::Critical => f.severity.label().red().bold(),
@@ -321,13 +404,46 @@ fn print_report(report: &RoleReviewReport) {
             findings::Severity::Advisory => f.severity.label().blue(),
             findings::Severity::Info => f.severity.label().dimmed(),
         };
+        // Location chip: file:line when anchored, else file, else nothing.
+        let loc = match (&f.file, f.line) {
+            (Some(file), Some(line)) => format!(" {}", format!("{file}:{line}").dimmed()),
+            (Some(file), None) => format!(" {}", file.dimmed()),
+            _ => String::new(),
+        };
+        // Provenance chip: the specialist dimension(s), else the raw source.
+        let dim = f
+            .dimension
+            .clone()
+            .unwrap_or_else(|| f.source.clone());
+        let corro = if f.agreement > 1 {
+            format!(" ×{}", f.agreement).green().to_string()
+        } else {
+            String::new()
+        };
         println!(
-            "  {:>2}. {} {} {}",
+            "  {:>2}. {} {}{}  {}{}",
             i + 1,
             sev,
             f.title.white(),
-            format!("[{}]", f.source).dimmed()
+            loc,
+            format!("[{dim}]").dimmed(),
+            corro,
         );
+        if let Some(r) = &f.rationale {
+            println!("      {}", clip_line(r, 140).dimmed());
+        }
+    }
+}
+
+/// One-line clip for terminal display (rationale preview under a finding).
+fn clip_line(s: &str, n: usize) -> String {
+    let one = s.split_whitespace().collect::<Vec<_>>().join(" ");
+    if one.chars().count() <= n {
+        one
+    } else {
+        let mut out: String = one.chars().take(n.saturating_sub(1)).collect();
+        out.push('…');
+        out
     }
 }
 
@@ -507,6 +623,10 @@ mod tests {
             base: "main".into(),
             risk_label: "LOW".into(),
             risk_score: 5,
+            tier: "medium".into(),
+            verified_by: Some("claude".into()),
+            refuted: 2,
+            confirmed: 3,
             reviewers: vec![ReviewerSummary {
                 source: "aura".into(),
                 available: true,

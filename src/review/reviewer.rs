@@ -12,8 +12,10 @@
 //! read its stdout) so they share the working tree safely.
 
 use std::process::{Command, Stdio};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
+use super::dimensions::{self, Dimension, Tier};
 use super::findings::{self, Finding, Severity};
 
 /// What one reviewer concluded about the diff.
@@ -165,51 +167,64 @@ fn str_array(v: &serde_json::Value, key: &str) -> Vec<String> {
         .unwrap_or_default()
 }
 
-/// Run a single agent reviewer in a worker thread, capturing its findings.
-fn run_agent_reviewer(agent_id: &str, diff: &str, timeout: Duration) -> ReviewerResult {
+/// One agent invocation's raw result.
+#[derive(Debug)]
+pub struct AgentRun {
+    /// Combined stdout+stderr the agent emitted.
+    pub output: String,
+    pub duration_ms: u64,
+    pub timed_out: bool,
+    pub error: Option<String>,
+}
+
+/// Distinguishes concurrent temp logs — the same agent may run several
+/// dimensions (and the verifier) at once, so the pid alone isn't unique.
+static RUN_SEQ: AtomicU64 = AtomicU64::new(0);
+
+/// Run an arbitrary prompt through an agent CLI (one-shot, read-only), teeing
+/// its output to a unique temp file so a chatty brain can't deadlock on a full
+/// pipe while we poll for the timeout.
+///
+/// `Err(reason)` means the agent never produced usable output (unknown agent,
+/// missing binary, spawn/IO failure). Callers turn that into a skipped reviewer
+/// rather than aborting the whole review.
+pub fn run_agent_prompt(
+    agent_id: &str,
+    prompt: &str,
+    timeout: Duration,
+) -> Result<AgentRun, String> {
     let reg = aura_agents::registry();
-    let provider = match reg.get(agent_id) {
-        Some(p) => p,
-        None => {
-            return ReviewerResult::skipped(
-                agent_id,
-                format!("'{agent_id}' is not a known agent"),
-            )
-        }
-    };
+    let provider = reg
+        .get(agent_id)
+        .ok_or_else(|| format!("'{agent_id}' is not a known agent"))?;
     if !provider.is_available() {
-        return ReviewerResult::skipped(
-            agent_id,
-            format!("'{}' binary not found on PATH — skipped", provider.bin_name()),
-        );
+        return Err(format!(
+            "'{}' binary not found on PATH — skipped",
+            provider.bin_name()
+        ));
     }
 
-    let prompt = build_review_prompt(diff);
-    let inv = match provider.build_invocation(&aura_agents::InvokeRequest {
-        prompt: &prompt,
-        mode: aura_agents::InvokeMode::OneShot,
-        resume_session_id: None,
-        attachments_via_stdin: false,
-        effort: None,
-        fast: false,
-        model: None,
-        approval: None,
-    }) {
-        Ok(i) => i,
-        Err(e) => return ReviewerResult::skipped(agent_id, format!("build invocation: {e}")),
-    };
+    let inv = provider
+        .build_invocation(&aura_agents::InvokeRequest {
+            prompt,
+            mode: aura_agents::InvokeMode::OneShot,
+            resume_session_id: None,
+            attachments_via_stdin: false,
+            effort: None,
+            fast: false,
+            model: None,
+            approval: None,
+        })
+        .map_err(|e| format!("build invocation: {e}"))?;
 
-    // Tee output to a per-agent temp file so a chatty reviewer can't
-    // deadlock on a full pipe while we poll for the timeout.
-    let log_path = std::env::temp_dir().join(format!("aura-review-{agent_id}-{}.log", std::process::id()));
-    let log_file = match std::fs::File::create(&log_path) {
-        Ok(f) => f,
-        Err(e) => return ReviewerResult::skipped(agent_id, format!("create log: {e}")),
-    };
-    let log_err = match log_file.try_clone() {
-        Ok(f) => f,
-        Err(e) => return ReviewerResult::skipped(agent_id, format!("dup log: {e}")),
-    };
+    // Unique per call: same agent may run several dimensions concurrently.
+    let seq = RUN_SEQ.fetch_add(1, Ordering::Relaxed);
+    let log_path = std::env::temp_dir().join(format!(
+        "aura-review-{agent_id}-{}-{seq}.log",
+        std::process::id()
+    ));
+    let log_file = std::fs::File::create(&log_path).map_err(|e| format!("create log: {e}"))?;
+    let log_err = log_file.try_clone().map_err(|e| format!("dup log: {e}"))?;
 
     let mut cmd = Command::new(&inv.bin);
     cmd.args(&inv.args)
@@ -225,10 +240,7 @@ fn run_agent_reviewer(agent_id: &str, diff: &str, timeout: Duration) -> Reviewer
     }
 
     let started = Instant::now();
-    let mut child = match cmd.spawn() {
-        Ok(c) => c,
-        Err(e) => return ReviewerResult::skipped(agent_id, format!("spawn {}: {e}", inv.bin)),
-    };
+    let mut child = cmd.spawn().map_err(|e| format!("spawn {}: {e}", inv.bin))?;
 
     let mut timed_out = false;
     let mut error = None;
@@ -255,60 +267,92 @@ fn run_agent_reviewer(agent_id: &str, diff: &str, timeout: Duration) -> Reviewer
     let output = std::fs::read_to_string(&log_path).unwrap_or_default();
     let _ = std::fs::remove_file(&log_path);
 
-    let findings = findings::parse_agent_output(agent_id, &output);
-    ReviewerResult {
-        source: agent_id.to_string(),
-        available: true,
-        risk_label: "n/a".to_string(),
-        risk_score: 0,
-        findings,
+    Ok(AgentRun {
+        output,
         duration_ms,
         timed_out,
         error,
+    })
+}
+
+/// Run one specialist dimension through an agent and parse its JSON findings,
+/// tagged `"<agent>:<dimension>"` so the summary shows who ran which pass.
+fn run_dimension(
+    agent_id: &str,
+    dim: &Dimension,
+    diff: &str,
+    context: &str,
+    timeout: Duration,
+) -> ReviewerResult {
+    let source = format!("{agent_id}:{}", dim.id);
+    let prompt = dimensions::build_prompt(dim, diff, context);
+    match run_agent_prompt(agent_id, &prompt, timeout) {
+        Ok(run) => {
+            let findings = findings::parse_json_findings(&source, dim.id, &run.output);
+            ReviewerResult {
+                source,
+                available: true,
+                risk_label: "n/a".to_string(),
+                risk_score: 0,
+                findings,
+                duration_ms: run.duration_ms,
+                timed_out: run.timed_out,
+                error: run.error,
+            }
+        }
+        Err(reason) => ReviewerResult::skipped(&source, reason),
     }
 }
 
-fn build_review_prompt(diff: &str) -> String {
-    format!(
-        "You are a senior code reviewer. Review the following unified diff and report \
-concrete issues only. Do NOT modify any files.\n\
-\n\
-Output ONE finding per line. Each line MUST be:\n\
-  <SEVERITY>: <path:line> — <explanation>\n\
-where SEVERITY is one of CRITICAL / HIGH / MODERATE / LOW, and <path:line> anchors the \
-finding to the exact NEW-file line it concerns (read the `@@ -a,b +c,d @@` hunk headers: \
-`+c` is the first new-side line of that hunk; count added/context lines down from there). \
-Use a range `path:start-end` only when the issue genuinely spans several lines. Anchor to \
-a line that actually appears (added `+` or context) in the diff below. Example:\n\
-  HIGH: src/auth/login.rs:42 — token compared with == instead of a constant-time check\n\
-  MODERATE: src/net/retry.rs:88-94 — retry loop never backs off between attempts\n\
-If you find nothing material, output a single line: \"LOW: no material issues found\".\n\
-\n\
-=== DIFF ===\n{diff}\n=== END DIFF ===\n"
-    )
-}
-
-/// Dispatch Aura + every agent reviewer over the diff, in parallel.
-/// Returns Aura first, then each agent in the order requested.
-pub fn dispatch(agent_ids: &[String], base: &str, timeout: Duration) -> Vec<ReviewerResult> {
+/// Dispatch the Aura engine plus a multi-agent specialist panel over the diff.
+///
+/// The deterministic engine always runs first (and on this thread — git2
+/// handles aren't `Send`). Then every dimension enabled at `tier` (see
+/// [`dimensions::for_tier`]) is fanned across the configured agents round-robin:
+/// with several agents the panel is genuinely parallel and heterogeneous; with
+/// a single agent that one brain runs the whole specialist sweep. Each
+/// dimension runs in its own thread (all read-only over the shared tree) and is
+/// parsed independently, so one timing-out specialist can't sink the rest.
+pub fn dispatch(
+    agent_ids: &[String],
+    base: &str,
+    timeout: Duration,
+    tier: Tier,
+) -> Vec<ReviewerResult> {
     let diff = capture_diff(base);
 
-    // Fan the agent reviewers out across threads; each is read-only.
+    let mut results = vec![run_aura_reviewer(base)];
+
+    // No agents, or nothing to review → the engine pass stands alone.
+    if agent_ids.is_empty() || diff.trim().is_empty() {
+        return results;
+    }
+
+    // Gather history + project context once, shared across the whole panel:
+    // recent git churn + Aura intent for the touched files + the repo's learned
+    // conventions. Every specialist judges the diff against the same backdrop.
+    let context = super::context::gather(&diff).block;
+
+    let dims = dimensions::for_tier(tier);
     let mut handles = Vec::new();
-    for id in agent_ids {
-        let id = id.clone();
+    for (i, dim) in dims.into_iter().enumerate() {
+        let agent = agent_ids[i % agent_ids.len()].clone();
         let diff = diff.clone();
+        let context = context.clone();
+        // `dim` is `&'static Dimension` (CATALOG is a const), so it moves into
+        // the thread freely.
         handles.push(std::thread::spawn(move || {
-            run_agent_reviewer(&id, &diff, timeout)
+            run_dimension(&agent, dim, &diff, &context, timeout)
         }));
     }
 
-    // Aura's engine runs on this thread (git2 handles aren't Send).
-    let mut results = vec![run_aura_reviewer(base)];
     for h in handles {
         match h.join() {
             Ok(r) => results.push(r),
-            Err(_) => results.push(ReviewerResult::skipped("agent", "reviewer thread panicked".into())),
+            Err(_) => results.push(ReviewerResult::skipped(
+                "agent",
+                "reviewer thread panicked".into(),
+            )),
         }
     }
     results
@@ -319,23 +363,18 @@ mod tests {
     use super::*;
 
     #[test]
-    fn prompt_embeds_diff_and_forbids_edits() {
-        let p = build_review_prompt("diff --git a b");
-        assert!(p.contains("diff --git a b"));
-        assert!(p.contains("Do NOT modify any files"));
-    }
-
-    #[test]
     fn unknown_agent_is_skipped_not_fatal() {
-        let r = run_agent_reviewer("definitely-not-an-agent", "x", Duration::from_secs(1));
-        assert!(!r.available);
-        assert!(r.error.is_some());
-        assert!(r.findings.is_empty());
+        let r = run_agent_prompt("definitely-not-an-agent", "x", Duration::from_secs(1));
+        assert!(r.is_err());
+        assert!(r.unwrap_err().contains("not a known agent"));
     }
 
     #[test]
-    fn prompt_requests_line_anchors() {
-        let p = build_review_prompt("diff --git a b");
-        assert!(p.contains("path:line"));
+    fn empty_diff_runs_engine_only() {
+        // With no agents configured, dispatch returns exactly the Aura pass and
+        // never tries to fan a panel — regardless of tier.
+        let results = dispatch(&[], "HEAD", Duration::from_secs(1), Tier::Max);
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].source, "aura");
     }
 }
