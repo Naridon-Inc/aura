@@ -3,6 +3,7 @@
   <img src="https://img.shields.io/badge/license-Apache%202.0-blue?style=flat-square" />
   <img src="https://img.shields.io/badge/lang-Rust-orange?style=flat-square" />
   <img src="https://img.shields.io/badge/agents-Claude%20%7C%20Gemini%20%7C%20Cursor%20%7C%20Codex%20%7C%20Kimi-green?style=flat-square" />
+  <img src="https://img.shields.io/badge/desktop-macOS%20%7C%20Linux%20%7C%20Windows-white?style=flat-square" />
 </p>
 
 <h1 align="center">Aura</h1>
@@ -39,6 +40,23 @@ change and the *provenance* of who/what/why. Both planes live in your repo — n
 Every commit is parsed into logic nodes, diffed at the AST level, checked against the
 intent you declared, and proved against the goal it claims to serve — automatically.
 
+## One engine, three surfaces
+
+This repository is the whole of Aura — a single Rust engine exposed three ways:
+
+- **`aura` CLI** — the engine as a command-line tool: git hooks, semantic review,
+  function-level rewind, AI-usage tracking, the Crew work-loop, and an MCP server.
+  *(root [`src/`](src) + [`crates/`](crates))*
+- **Aura desktop app** — a native **Agentic Development Environment (ADE)** that turns
+  the engine into a visual workspace: many coding agents in one place, a Crew board,
+  semantic review, rewind, and a project timeline. macOS · Linux · Windows.
+  *([`desktop/`](desktop))*
+- **VS Code extension** — Aura's agent sessions, review, and git surfaces inside VS Code.
+  *([`extensions/vscode`](extensions/vscode))*
+
+All three read and write the same `.aura/` meaning-plane, so a change one agent makes on
+the CLI shows up — with full provenance — in the desktop app, and vice-versa.
+
 ## Install
 
 ```bash
@@ -59,6 +77,44 @@ Then initialize in any git repo:
 cd your-project
 aura init
 ```
+
+---
+
+## The desktop app — Aura's Agentic Development Environment
+
+The desktop app ([`desktop/`](desktop)) turns the engine into a full visual workspace — a
+home for coding agents that keeps the same meaning-plane audit trail the CLI does. Built
+with Tauri 2 + React 19 + Rust; ships for macOS, Linux, and Windows with auto-updates.
+
+**Get a signed build for your platform at [auravcs.com](https://auravcs.com).**
+
+What's inside:
+
+- **Many agents, one place** — Claude Code, Gemini CLI, Codex, Cursor, Kimi, and OpenCode
+  each run as real terminals with session resume, alongside a native Aura brain you chat
+  with in **Plan / Build / Ask** modes.
+- **Crew board** — the autonomous work-loop as a visual dependency graph: hand it a goal,
+  it plans the tasks, works the ready ones in parallel git worktrees, and proves each one
+  against the goal it was meant to deliver.
+- **Semantic review & function-level rewind** — see which logic nodes changed and *why*,
+  and revert a single function without touching the rest of the file.
+- **Project timeline** — intent, sessions, and code evolution over time, in plain language.
+- **Tasks & Pages** — an in-repo board and docs that live in `.aura/` next to your code
+  (the very same files `aura task` reads).
+- **Built in** — a source-control commit graph, an in-app browser, a terminal, and a
+  VS Code extension host.
+
+Build it from source:
+
+```bash
+cd desktop
+bun install
+bun run tauri dev        # run it locally
+bun run tauri build      # or produce a release bundle
+```
+
+The app shells out to the `aura` CLI, so build that first (`cargo build --release` at the
+repo root) or install it with the one-liner above.
 
 ---
 
@@ -430,6 +486,23 @@ Rust, Python, TypeScript, JavaScript, Go, Java, C#, C++, C, Ruby, PHP, Swift, Ko
 - Telemetry opt-out: `AURA_TELEMETRY_OPTOUT=1` or `DO_NOT_TRACK=1`
 - No data leaves your machine unless you configure cloud sync
 - Usage tracking reads local Claude Code transcripts only — no API calls
+
+## Repository layout
+
+```
+aura/
+├─ src/            the `aura` CLI — the semantic engine's entrypoint
+├─ crates/         21 engine crates: AST diff/merge, attestation, plugin signing,
+│                  the Crew work-loop, redaction, CRDT core, terminal engine, daemon, …
+├─ desktop/        the desktop app (Tauri + React) — the ADE
+├─ extensions/
+│  └─ vscode/      the VS Code extension
+├─ integrations/   editor / agent integration recipes
+└─ tests/          end-to-end tests
+```
+
+The CLI and every crate build from the root workspace (`cargo build --release`). The
+desktop app builds from [`desktop/`](desktop); the extension from [`extensions/vscode`](extensions/vscode).
 
 ## License
 

@@ -1,8 +1,18 @@
-# v0.19.21 — Semantic CI, work-loop & policy refresh + security groundwork
+# v0.19.21 — Full monorepo: the desktop app & extension join the CLI
 
-A maintenance cut on the 0.19 line. It refreshes the CLI and the vendored engine
-crates and lays down security groundwork for the open-source tree. No breaking
-changes to the command surface.
+This cut brings the **entire project into one open-source repository**. Alongside the
+`aura` CLI and the vendored engine crates, the tree now includes the **Aura desktop app**
+— the Agentic Development Environment, under `desktop/` — and the **VS Code extension**
+under `extensions/vscode`. Everything builds from one place. No breaking changes to the
+command surface.
+
+## Added
+- **The desktop app is now in-tree.** The native Agentic Development Environment
+  (`desktop/`, Tauri 2 + React 19 + Rust) — a multi-agent workspace with a Crew board,
+  semantic review, function-level rewind, and a project timeline — ships in this
+  repository and builds from source. Signed binaries: [auravcs.com](https://auravcs.com).
+- **VS Code extension** (`extensions/vscode`) joins the tree, and the **full engine crate
+  set** now lives in the same Cargo workspace (`desktop/src-tauri` included).
 
 ## Changed
 - **Engine crates refreshed.** The vendored `crates/` — toon, merge, agents,
