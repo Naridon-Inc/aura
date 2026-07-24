@@ -86,6 +86,37 @@ aura init
 
 ---
 
+## Troubleshooting
+
+**Is `aura` installed and on your PATH?**
+
+```bash
+which aura      # prints the path to the binary, or nothing if not found
+aura --version  # prints the installed version
+```
+
+If `which aura` prints nothing, the install directory isn't on your PATH yet.
+
+**PATH didn't update after install?** The installer prints the install location
+when it finishes — add that directory to your PATH and reload your shell:
+
+```bash
+# zsh (default on macOS): append to ~/.zshrc, then reload
+echo 'export PATH="<install-dir>:$PATH"' >> ~/.zshrc && source ~/.zshrc
+
+# bash: append to ~/.bashrc (or ~/.bash_profile on macOS), then reload
+echo 'export PATH="<install-dir>:$PATH"' >> ~/.bashrc && source ~/.bashrc
+
+# fish: persists automatically, no reload needed
+fish_add_path <install-dir>
+```
+
+Replace `<install-dir>` with the location printed by `install.sh` at the end of
+installation. Opening a new terminal also picks up the change.
+
+**Still stuck?** If `aura --version` works but a repo misbehaves (stuck session,
+missing hooks), run `aura doctor` to diagnose and repair.
+
 ## The desktop app — Aura's Agentic Development Environment
 
 The desktop app ([`desktop/`](desktop)) turns the engine into a full visual workspace — a
@@ -498,6 +529,13 @@ Aura detects and tracks sessions from:
 - **Kimi (Moonshot)** — OpenAI-compatible endpoint
 - **Cursor** — workspace detection
 - **OpenCode** — env vars and config
+
+## Integrations
+
+Guides for wiring Aura into specific agents and editors:
+
+- [OpenCode](integrations/opencode.md) — quickstart via the git-hook capture path
+- [Cursor](integrations/cursor.md) — semantic review + provenance alongside Cursor
 
 ## Supported Languages
 
