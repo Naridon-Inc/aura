@@ -16,7 +16,9 @@ export type ModelFamily =
   | "anthropic"
   | "openai"
   | "gemini"
+  | "xai"
   | "kimi"
+  | "antigravity"
   | "generic"
   | "custom";
 
@@ -62,6 +64,8 @@ export type SelectedModel = {
 };
 
 const ANTHROPIC: CatalogModel[] = [
+  { key: "fable-5", id: "claude-fable-5", label: "Fable 5", isNew: true },
+  { key: "sonnet-5", id: "claude-sonnet-5", label: "Sonnet 5", isNew: true },
   { key: "opus-4-8-1m", id: "claude-opus-4-8", label: "Opus 4.8 1M", longContext: true, isNew: true },
   { key: "opus-4-8", id: "claude-opus-4-8", label: "Opus 4.8", isNew: true },
   { key: "opus-4-7-1m", id: "claude-opus-4-7", label: "Opus 4.7 1M", longContext: true },
@@ -72,8 +76,14 @@ const ANTHROPIC: CatalogModel[] = [
   { key: "haiku-4-5", id: "claude-haiku-4-5-20251001", label: "Haiku 4.5" },
 ];
 
+// GPT-5.6 ships as three named tiers (verified against codex's
+// models_cache.json): Sol = frontier, Terra = balanced, Luna = fast/cheap.
+// codex forwards each via `-c model=<id>`; there is no bare `gpt-5.6`.
 const OPENAI: CatalogModel[] = [
-  { key: "gpt-5-5", id: "gpt-5.5", label: "GPT-5.5", isNew: true },
+  { key: "gpt-5-6-sol", id: "gpt-5.6-sol", label: "GPT-5.6 Sol", isNew: true },
+  { key: "gpt-5-6-terra", id: "gpt-5.6-terra", label: "GPT-5.6 Terra", isNew: true },
+  { key: "gpt-5-6-luna", id: "gpt-5.6-luna", label: "GPT-5.6 Luna", isNew: true },
+  { key: "gpt-5-5", id: "gpt-5.5", label: "GPT-5.5" },
   { key: "gpt-5-4", id: "gpt-5.4", label: "GPT-5.4" },
 ];
 
@@ -85,6 +95,40 @@ const GEMINI: CatalogModel[] = [
   { key: "gemini-3-flash", id: "gemini-3-flash-preview", label: "Gemini 3 Flash", isNew: true },
   { key: "gemini-2-5-pro", id: "gemini-2.5-pro", label: "Gemini 2.5 Pro" },
   { key: "gemini-2-5-flash", id: "gemini-2.5-flash", label: "Gemini 2.5 Flash" },
+];
+
+const XAI: CatalogModel[] = [
+  { key: "grok-4-5", id: "grok-4.5", label: "Grok 4.5", isNew: true },
+];
+
+// The installed `kimi` CLI is the coding product (scope `kimi-code`); its
+// config exposes exactly one selectable model alias, `kimi-code/kimi-for-coding`
+// (display "Kimi-k2.6"), which the managed endpoint routes to the current
+// coding model. No separate `kimi-3`/`k3` id is accepted by this CLI, so we
+// list the one real id rather than invent a menu.
+// Kimi (Moonshot) coding CLI. ids are the model-table keys from the CLI's own
+// `~/.kimi-code/config.toml` and are forwarded verbatim as `kimi -m <id>`.
+// K3 is the current default; the K2.7 pair are the prior line. Newest first.
+const KIMI: CatalogModel[] = [
+  { key: "kimi-k3", id: "kimi-code/k3", label: "K3", isNew: true },
+  { key: "kimi-k2-7-coding", id: "kimi-code/kimi-for-coding", label: "K2.7 Coding" },
+  { key: "kimi-k2-7-coding-highspeed", id: "kimi-code/kimi-for-coding-highspeed", label: "K2.7 Coding Highspeed" },
+];
+
+// Antigravity (`agy`) multiplexes several backends behind one agent. `agy
+// models` bakes the reasoning tier into each id (…-high/-medium/-low), but we
+// show ONE row per base model and let the shared Level chip pick the tier —
+// the backend (`aura-agents/antigravity.rs`) re-attaches it as `<base>-<tier>`,
+// clamped to the tiers that base offers. So ids here are the tier-less bases
+// (`gemini-3.6-flash`); ids with no reasoning tier (`claude-sonnet-4-6`,
+// `claude-opus-4-6-thinking`) stand alone. Newest line (3.6 Flash) first.
+const ANTIGRAVITY: CatalogModel[] = [
+  { key: "agy-gemini-3-6-flash", id: "gemini-3.6-flash", label: "Gemini 3.6 Flash", isNew: true },
+  { key: "agy-gemini-3-5-flash", id: "gemini-3.5-flash", label: "Gemini 3.5 Flash" },
+  { key: "agy-gemini-3-1-pro", id: "gemini-3.1-pro", label: "Gemini 3.1 Pro" },
+  { key: "agy-claude-sonnet-4-6", id: "claude-sonnet-4-6", label: "Claude Sonnet 4.6" },
+  { key: "agy-claude-opus-4-6-thinking", id: "claude-opus-4-6-thinking", label: "Claude Opus 4.6 · Thinking" },
+  { key: "agy-gpt-oss-120b", id: "gpt-oss-120b", label: "GPT-OSS 120B" },
 ];
 
 // Families whose exact model ids we don't enumerate get a single "Default"
@@ -107,6 +151,7 @@ export function familyOf(brain: BrainChoice): ModelFamily {
     case "gemini_native":
       return "gemini";
     case "openai_compat":
+      if (/\b(?:xai|grok)\b/i.test(`${brain.id} ${brain.label}`)) return "xai";
       return "custom";
     case "cli_wrapper": {
       // The Claude Code CLI carries the suffix `claude_code` (its aura-agents
@@ -117,6 +162,9 @@ export function familyOf(brain: BrainChoice): ModelFamily {
       if (suffix === "codex") return "openai";
       if (suffix === "gemini") return "gemini";
       if (suffix === "kimi") return "kimi";
+      // Antigravity's registry id is `antigravity`; `agy` is the bin alias —
+      // match both so its 11-model list shows instead of a bare "Default".
+      if (suffix === "antigravity" || suffix === "agy") return "antigravity";
       return "generic";
     }
     default:
@@ -138,6 +186,12 @@ function staticCatalog(family: ModelFamily): CatalogModel[] {
         return OPENAI;
       case "gemini":
         return GEMINI;
+      case "xai":
+        return XAI;
+      case "kimi":
+        return KIMI;
+      case "antigravity":
+        return ANTIGRAVITY;
       default:
         return DEFAULT_ONLY;
     }
@@ -151,7 +205,9 @@ function staticCatalog(family: ModelFamily): CatalogModel[] {
 function isLongContextCapable(family: ModelFamily, id: string): boolean {
   if (family !== "anthropic") return false;
   const m = id.match(/(?:opus|sonnet)-(\d+)/);
-  return !!m && Number(m[1]) >= 4;
+  // Generation-5 models have a 1M window by default rather than a separate
+  // beta variant, so they should appear once in the picker.
+  return !!m && Number(m[1]) >= 4 && Number(m[1]) < 5;
 }
 
 /** Tidy a provider display name for the compact row/chip ("Claude Opus 4.8"
@@ -216,8 +272,12 @@ function familyBrand(
       return { brand: "codex", brandName: "GPT" };
     case "gemini":
       return { brand: "gemini", brandName: "Gemini" };
+    case "xai":
+      return { brand: "xai", brandName: "Grok" };
     case "kimi":
       return { brand: "kimi", brandName: "Kimi" };
+    case "antigravity":
+      return { brand: "antigravity", brandName: "Antigravity" };
     default:
       return {};
   }
@@ -244,8 +304,12 @@ export function modelBrandId(
       return "codex";
     case "gemini":
       return "gemini";
+    case "xai":
+      return "xai";
     case "kimi":
       return "kimi";
+    case "antigravity":
+      return "antigravity";
     default:
       return brainId;
   }
@@ -264,8 +328,12 @@ export function modelBrandName(family: ModelFamily, model: CatalogModel): string
       return "GPT";
     case "gemini":
       return "Gemini";
+    case "xai":
+      return "Grok";
     case "kimi":
       return "Kimi";
+    case "antigravity":
+      return "Antigravity";
     default:
       return "";
   }

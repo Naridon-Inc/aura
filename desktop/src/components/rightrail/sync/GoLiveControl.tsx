@@ -93,7 +93,7 @@ export function GoLiveControl({
               className="ml-auto flex items-center gap-1.5 text-[10.5px] text-accent-green shrink-0"
               title={`live ${agoShort(startedAt)}`}
             >
-              <span className="h-[7px] w-[7px] rounded-full bg-accent-green shadow-[0_0_0_3px_rgba(77,193,164,0.18)]" />
+              <span className="h-[7px] w-[7px] rounded-full bg-accent-green shadow-[0_0_0_3px_color-mix(in_oklab,var(--color-accent-green)_18%,transparent)]" />
               syncing
             </span>
           </div>

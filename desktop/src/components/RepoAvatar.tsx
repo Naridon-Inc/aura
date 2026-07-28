@@ -87,3 +87,90 @@ export function RepoAvatar({
 
   return <>{fallback}</>;
 }
+
+// A project's own hue, derived from its repo root with FNV-1a.
+//
+// Deliberately the SAME hash and the same `hsl()` formula the Workspaces view
+// carries for its project chips (components/workspaces/WorkspacesBits.tsx →
+// `folderTint`), and seeded from the same value — the owning project root —
+// so a project resolves to one hue rather than two schemes drifting apart.
+//
+// Worth knowing before you trust that: `folderTint` is currently unreachable.
+// `ProjectGlyph` picks `accent || folderTint(root)`, and every call site feeds
+// it `accentForRoot()`, which returns a non-empty neutral for every project —
+// so the accent always wins and those chips are all one colour today. The
+// alignment here is therefore latent, not visible: matching the formula means
+// that the day the neutral override is dropped the two surfaces already agree,
+// instead of someone having to reconcile two hashes after the fact.
+//
+// `accentForRoot` (components/WorkspaceRail.tsx) is not reused for the same
+// reason it can't be trusted above: it was deliberately flattened to one
+// neutral for all roots, so it carries no per-project identity — passing it in
+// would tint every tile identically. Its history is the warning label on this
+// function, though. The rail used to hash roots into eight FULL-strength hues
+// and the list read as a paint chart. Hence 24% saturation here, and hence the
+// letter staying on the text ramp below rather than taking the hue.
+function projectHue(root: string): string {
+  let h = 0x811c9dc5;
+  for (let i = 0; i < root.length; i++) {
+    h ^= root.charCodeAt(i);
+    h = Math.imul(h, 0x01000193);
+  }
+  return `hsl(${(h >>> 0) % 360} 24% 62%)`;
+}
+
+/** The default project mark: a rounded tile carrying the project's initial.
+ *
+ *  This replaces the folder glyph that used to stand in whenever no owner
+ *  avatar resolved. A folder says "a directory on your disk" — which was
+ *  honest when a project might have been any old folder, but every project
+ *  now has a repository behind it, so the mark should say "a project" and
+ *  should differ between projects. One folder icon repeated down a list
+ *  distinguishes nothing; an initial does, and it matches the monogram
+ *  discs people already carry elsewhere in the app.
+ *
+ *  The tile carries a wash of the project's hue so a column of them is
+ *  scannable before you read a single letter. Kept at a 16% mix INTO
+ *  `--color-bg-3` rather than over transparent: mixing against the surface
+ *  token means the tile follows the theme (it lifts off the dark grounds and
+ *  settles into the light one) instead of needing a per-theme value, and 16%
+ *  of a 24%-saturation hue lands about a hue step apart between neighbours —
+ *  enough to tell two tiles apart, nowhere near enough to compete with
+ *  arctic-blue affordances, teal/green status or agent orange, which is the
+ *  reason the saturation is held down rather than the mix alone. */
+export function ProjectMark({
+  name,
+  root,
+  size,
+}: {
+  name: string;
+  /** Repo root — the hue seed. Required rather than defaulted to `name` so a
+   *  tile can never silently disagree with the same project's chip in the
+   *  Workspaces view, which seeds from the root too. */
+  root: string;
+  size: number;
+}) {
+  const letter = (name.trim().charAt(0) || "?").toUpperCase();
+  return (
+    <span
+      aria-hidden
+      className="grid shrink-0 place-items-center font-medium"
+      style={{
+        width: size,
+        height: size,
+        borderRadius: Math.max(3, Math.round(size * 0.22)),
+        background: `color-mix(in srgb, ${projectHue(root)} 16%, var(--color-bg-3))`,
+        // The letter stays on the neutral text ramp. Tinting it too would
+        // double the colour on a 15px tile and take it straight back to the
+        // paint chart the rail was pulled out of.
+        color: "var(--color-text-2)",
+        // Track the tile so the letter stays optically centred at 15px and
+        // at 32px without a second size prop.
+        fontSize: Math.max(8, Math.round(size * 0.58)),
+        lineHeight: 1,
+      }}
+    >
+      {letter}
+    </span>
+  );
+}

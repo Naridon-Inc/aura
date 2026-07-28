@@ -466,7 +466,15 @@ export function MonacoEditor({
   }, [presenceMarkers]);
 
   return (
-    <div className="flex flex-col h-full min-h-0">
+    // w-full + min-w-0 are load-bearing, not cosmetic. This root is often a
+    // flex-ROW child (e.g. WorkSurface's `relative flex-1 min-w-0 flex` wraps
+    // the raw/default file editor with no width box of its own). Without an
+    // explicit width the item is auto-sized and @monaco-editor/react's inner
+    // `width:100%` resolves against a zero-width parent — WebKit fills it on
+    // most setups but collapses it on some, leaving only the gutter sliver and
+    // a blank body (the "file opens but shows nothing" report, all files).
+    // w-full pins the width; min-w-0 lets it still shrink inside flex.
+    <div className="flex flex-col h-full min-h-0 w-full min-w-0">
       <div className="flex-1 min-h-0">
         <Editor
           value={value}

@@ -6,12 +6,15 @@
 // calm, plain-language card: exactly what's about to happen and why,
 // with Allow / Deny. The agent stays blocked until we resolve.
 //
-// This is a legitimate modal: the human MUST decide before the agent
-// proceeds, so it overlays everything on a dim scrim. Visual posture is
-// copied from the shared `Dialog` scaffold (bg-black/55 backdrop-blur
-// scrim + bg-bg-1 / border-line card), but rendered standalone via a
-// portal so we own focus-trapping and the Enter=Allow / Esc=Deny
-// keymap the gate needs.
+// The human must decide before the agent proceeds — but that decision does
+// NOT need to hijack the whole screen. A full-screen dim scrim in the middle
+// of the window read as alarming and got in the way ("why is this popping up,
+// it's annoying"). Instead we dock a compact card just above the composer
+// input — right where the user is working — as a non-blocking overlay: the
+// rest of the app stays live and clickable behind it, and the card floats over
+// the input the parked agent is waiting on. Still rendered via a body portal
+// (so it's global, one host for every pane) with the Enter=Allow / Esc=Deny
+// keymap, just without the scrim and focus-trap of a true modal.
 //
 // Multiple gates can queue (the agent fires one per blocked tool call);
 // we show them oldest-first since the agent is blocked on the oldest,
@@ -197,6 +200,49 @@ function humanizeAge(secs: number): string {
   return `${Math.floor(s / 86400)}d`;
 }
 
+// Where to float the card. We anchor it centered just above the composer
+// (`.composer`) so it hovers over the input the parked agent is waiting on.
+// When no composer is on screen (terminal-only view, detached window) we fall
+// back to bottom-center. Re-measured on a light interval so it tracks the
+// composer as it grows/shrinks with multi-line input or window resizes.
+type AnchorPos = { left: number; bottom: number } | null;
+
+function useComposerAnchor(): AnchorPos {
+  const [pos, setPos] = useState<AnchorPos>(null);
+  useEffect(() => {
+    let raf = 0;
+    const measure = () => {
+      const el = document.querySelector<HTMLElement>(".composer");
+      if (!el) {
+        setPos((p) => (p === null ? p : null));
+        return;
+      }
+      const r = el.getBoundingClientRect();
+      // Off-screen / zero-size (hidden pane) → treat as absent.
+      if (r.width === 0 || r.height === 0) {
+        setPos((p) => (p === null ? p : null));
+        return;
+      }
+      const left = Math.round(r.left + r.width / 2);
+      // Sit 10px above the composer's top edge.
+      const bottom = Math.round(Math.max(12, window.innerHeight - r.top + 10));
+      setPos((p) =>
+        p && p.left === left && p.bottom === bottom ? p : { left, bottom },
+      );
+    };
+    // Measure after layout settles, then keep it fresh cheaply.
+    raf = requestAnimationFrame(() => requestAnimationFrame(measure));
+    const iv = window.setInterval(measure, 300);
+    window.addEventListener("resize", measure);
+    return () => {
+      cancelAnimationFrame(raf);
+      window.clearInterval(iv);
+      window.removeEventListener("resize", measure);
+    };
+  }, []);
+  return pos;
+}
+
 export function AgentGateHost() {
   // Oldest-first queue (FIFO). The agent is blocked on the oldest gate,
   // so that's the one we surface; resolving it pops the front.
@@ -277,6 +323,15 @@ function GateCard({
   const allowRef = useRef<HTMLButtonElement>(null);
   const noteRef = useRef<HTMLInputElement>(null);
 
+  // Dock position (above the composer) + a one-shot mount transition so the
+  // card slides up into place instead of snapping in.
+  const anchor = useComposerAnchor();
+  const [shown, setShown] = useState(false);
+  useEffect(() => {
+    const id = requestAnimationFrame(() => setShown(true));
+    return () => cancelAnimationFrame(id);
+  }, []);
+
   // Resolve the gate. allow=true → agent proceeds; allow=false → denied,
   // with an optional human note. Keep the card up (and re-enable) on
   // failure so a transient IPC error never silently drops a parked agent.
@@ -332,10 +387,11 @@ function GateCard({
     void resolve(false);
   }, [denyMode, resolve]);
 
-  // Focus Allow on mount so Enter is immediately the primary action.
-  useEffect(() => {
-    allowRef.current?.focus();
-  }, []);
+  // Deliberately do NOT steal focus on mount: the card is a non-blocking dock
+  // now, and yanking the caret out of the composer mid-type is exactly the
+  // "annoying" behaviour we're removing. Enter=Allow / Esc=Deny still work once
+  // the card itself has focus (click it, or Tab in). The buttons stay one click
+  // away regardless.
 
   // When deny mode opens, move focus to the note input.
   useEffect(() => {
@@ -364,46 +420,36 @@ function GateCard({
         onDenyClick();
         return;
       }
-      if (e.key === "Tab") {
-        const focusables = cardRef.current?.querySelectorAll<HTMLElement>(
-          'button:not([disabled]), input:not([disabled]), [tabindex]:not([tabindex="-1"])',
-        );
-        if (!focusables || focusables.length === 0) return;
-        const first = focusables[0];
-        const last = focusables[focusables.length - 1];
-        if (e.shiftKey && document.activeElement === first) {
-          e.preventDefault();
-          last.focus();
-        } else if (!e.shiftKey && document.activeElement === last) {
-          e.preventDefault();
-          first.focus();
-        }
-      }
+      // No Tab-trap: this is a docked, non-blocking card, so Tab should be free
+      // to move focus back into the live app behind it.
     },
     [busy, denyMode, resolve, onDenyClick],
   );
 
-  return (
-    <div
-      className="fixed inset-0 z-[200] flex items-start justify-center"
-      role="presentation"
-    >
-      {/* Scrim — mirrors Dialog's `bg-black/55 backdrop-blur-sm`. Clicking
-          it does NOT dismiss: a parked agent must get a real decision. */}
-      <div className="absolute inset-0 bg-black/55 backdrop-blur-sm" />
+  // Anchor above the composer when we found one; otherwise bottom-center.
+  // The slide-in nudge (translateY + opacity) plays once on mount via `shown`.
+  const dockStyle: React.CSSProperties = {
+    left: anchor ? anchor.left : "50%",
+    bottom: anchor ? anchor.bottom : 24,
+    transform: `translateX(-50%) translateY(${shown ? "0px" : "10px"})`,
+    opacity: shown ? 1 : 0,
+  };
 
+  return (
+    // Full-screen layer, but pointer-events-none so the live app behind the
+    // card stays clickable — the gate no longer blocks the whole window.
+    <div className="fixed inset-0 z-[200] pointer-events-none" role="presentation">
       <div
         ref={cardRef}
         role="alertdialog"
-        aria-modal="true"
         aria-label={request.title}
         onKeyDown={onKeyDown}
-        // Flex column with a capped height so the card never outgrows the
-        // viewport: header and footer stay pinned (Allow/Deny always
-        // reachable), only the middle scrolls. Without this a huge `reason`
-        // (e.g. a bulk "remove these 100 symbols" request) pushed the footer
-        // off-screen with no way to scroll — the app looked frozen.
-        className="relative my-[7vh] flex max-h-[86vh] w-full max-w-[460px] mx-4 flex-col rounded-lg bg-bg-1 border border-line shadow-xl overflow-hidden"
+        style={dockStyle}
+        // Docked above the composer. Flex column with a capped height so the
+        // card never outgrows the viewport: header and footer stay pinned
+        // (Allow/Deny always reachable), only the middle scrolls. `pointer-
+        // events-auto` re-enables interaction on the card itself.
+        className="pointer-events-auto absolute flex max-h-[68vh] w-[min(430px,calc(100vw-2rem))] flex-col rounded-xl bg-bg-1 border border-line shadow-2xl overflow-hidden transition-[opacity,transform] duration-200 ease-out"
       >
         {/* Header: severity chip + the "agent is paused" affordance. */}
         <header className="shrink-0 flex items-center gap-2 px-4 py-2.5 border-b border-line-soft">
@@ -519,7 +565,7 @@ function GateCard({
             red-tinted in confirm mode so the two-step reads clearly). */}
         <footer className="shrink-0 flex items-center gap-2 px-4 py-2.5 border-t border-line-soft">
           {pending > 0 && (
-            <span className="text-text-4 text-[10.5px] mr-auto">
+            <span className="text-text-4 text-[10.5px] tabular-nums mr-auto">
               {pending} more waiting
             </span>
           )}

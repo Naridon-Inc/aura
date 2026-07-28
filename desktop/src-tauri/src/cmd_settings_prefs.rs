@@ -178,6 +178,11 @@ pub struct FlagPrefs {
     /// for Aura's code-graph tools instead of reading whole files. Default ON;
     /// toggled in Settings → Experimental.
     pub show_token_savings: bool,
+    /// Show a per-message input/output token readout in chat (the provider's
+    /// real counts for that turn). Default OFF — it's a power-user detail, so
+    /// it stays out of the calm default view until opted in via Settings →
+    /// Experimental.
+    pub show_message_tokens: bool,
 }
 
 impl Default for FlagPrefs {
@@ -187,6 +192,7 @@ impl Default for FlagPrefs {
             provenance_replay: false,
             manager_worktrees: false,
             show_token_savings: true,
+            show_message_tokens: false,
         }
     }
 }
@@ -213,6 +219,10 @@ pub struct HudPrefs {
     pub sidebar_width: f32,
     /// Sidebar panel content height in px. 320–900.
     pub sidebar_height: f32,
+    /// Whether the desk-pet perches on the pill and mirrors the live agent
+    /// status. Frontend-driven (a vendored OpenPets sprite, MIT); this field
+    /// only persists the choice. Default on.
+    pub pet: bool,
 }
 
 impl Default for HudPrefs {
@@ -223,6 +233,7 @@ impl Default for HudPrefs {
             opacity: 1.0,
             sidebar_width: 320.0,
             sidebar_height: 520.0,
+            pet: true,
         }
     }
 }

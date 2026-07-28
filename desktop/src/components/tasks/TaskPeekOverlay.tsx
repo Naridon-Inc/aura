@@ -290,7 +290,7 @@ function PeekIconButton({
       aria-label={label}
       className={`w-7 h-7 rounded-[5px] grid place-items-center transition-colors disabled:opacity-30 disabled:pointer-events-none ${
         danger
-          ? "text-text-4 hover:text-rose-400 hover:bg-rose-500/10"
+          ? "text-text-4 hover:text-red hover:bg-red/10"
           : "text-text-4 hover:text-text-1 hover:bg-bg-2"
       }`}
     >

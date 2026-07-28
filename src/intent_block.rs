@@ -496,6 +496,24 @@ pub fn verify_block_structured(
         }
     };
     out["rekor"] = rekor_section;
+
+    // Scope check: surface what the block DECLARED it would write vs what it
+    // ACTUALLY wrote (stamped at commit-time reconciliation), plus the
+    // set-difference — files the agent touched beyond the scope it stated.
+    // The desktop "Scope check" card renders this so a divergence the agent
+    // never announced becomes visible, not merely recorded. `actual_writes` /
+    // `undeclared_writes` are absent until the block is reconciled.
+    out["declared_writes"] = json!(block.declared_impacts.writes_paths);
+    if let Some(actual) = &block.actual_impacts {
+        let undeclared: Vec<&String> = actual
+            .writes_paths
+            .iter()
+            .filter(|p| !block.declared_impacts.writes_paths.contains(p))
+            .collect();
+        out["actual_writes"] = json!(actual.writes_paths);
+        out["undeclared_writes"] = json!(undeclared);
+    }
+
     Ok(out)
 }
 
@@ -772,6 +790,28 @@ fn recover_via_rotation_chain(
     Ok((chain.recovered_pub, Some(info)))
 }
 
+/// Read a block's `created_at` as an RFC-3339 string.
+///
+/// The field is written by `time::OffsetDateTime`'s own `Serialize`, which
+/// is *positional* — `[year, ordinalDay, hour, minute, second, nanosecond,
+/// offsetHours, offsetMinutes, offsetSeconds]`, not a string. Reading it with
+/// `as_str()` therefore always missed, and every row came back with the
+/// placeholder `"?"`; the desktop attestation panel printed that straight
+/// through as `Sealed: ? ago` on blocks that carry a perfectly good stamp.
+///
+/// Returns `None` when the field is absent or in a shape we can't read, so
+/// callers can omit the row rather than show a placeholder as if it were data.
+fn read_created_at(value: Option<&serde_json::Value>) -> Option<String> {
+    let value = value?;
+    if let Some(s) = value.as_str() {
+        return Some(s.to_string());
+    }
+    let parsed: OffsetDateTime = serde_json::from_value(value.clone()).ok()?;
+    parsed
+        .format(&time::format_description::well_known::Rfc3339)
+        .ok()
+}
+
 /// MCP entry point: same scan as `list_blocks_cli` but returns a JSON
 /// array (one object per block) instead of printing. Lets a downstream
 /// agent enumerate signed intents through MCP and feed each id into
@@ -812,9 +852,7 @@ pub fn list_blocks_structured(
         let kind = v.pointer("/kind/kind")
             .and_then(|x| x.as_str())
             .unwrap_or("?").to_string();
-        let created_at = v.get("created_at")
-            .and_then(|x| x.as_str())
-            .unwrap_or("?").to_string();
+        let created_at = read_created_at(v.get("created_at"));
         let has_sig = v.pointer("/provenance/signature/sig_b64").is_some();
         let has_rekor = v.pointer("/attestations/rekor/uuid").is_some();
         // Same precedence as list_blocks_cli text output: prefer the
@@ -1614,8 +1652,8 @@ mod tests {
         let mut block = build_intent_block(
             "Tightened the retry backoff so we stop hammering the rate limiter",
             "MCP Agent",
-            Some("owner@example.com"),
-            "owner-laptop",
+            Some("ashiq@naridon"),
+            "ashiq-laptop",
             fixed_ts(),
             Some("BugFix"),
         );
@@ -1623,10 +1661,10 @@ mod tests {
 
         // A publishes their key into the shared registry.
         let ident = team_keys::SelfIdentity {
-            human_id: Some("did:aura:human/owner".into()),
-            display_name: Some("Owner".into()),
-            email: Some("owner@example.com".into()),
-            github_login: Some("OWNER".into()),
+            human_id: Some("did:aura:human/ashiq".into()),
+            display_name: Some("Ashiq".into()),
+            email: Some("ashiq@naridon.com".into()),
+            github_login: Some("MHASK".into()),
             agent_id: Some("MCP Agent".into()),
         };
         team_keys::publish_self(&reg, &teammate, &ident, 1_700_000_000).unwrap();
@@ -1651,8 +1689,8 @@ mod tests {
 
         // The resolved identity is what the surface shows next to the seal.
         let entry = team_keys::entry_for(&reg, &claimed).unwrap();
-        assert_eq!(entry.display_name.as_deref(), Some("Owner"));
-        assert_eq!(entry.email.as_deref(), Some("owner@example.com"));
+        assert_eq!(entry.display_name.as_deref(), Some("Ashiq"));
+        assert_eq!(entry.email.as_deref(), Some("ashiq@naridon.com"));
     }
 
     #[test]
@@ -1686,19 +1724,19 @@ mod tests {
         let b = build_intent_block(
             "Sign on behalf of operator",
             "MCP Agent",
-            Some("owner@example.com"),
+            Some("ashiq@naridon"),
             "laptop",
             fixed_ts(),
             None,
         );
         match &b.payload {
             BlockPayload::Sentinel { body, .. } => {
-                assert_eq!(body["human_id"], "owner@example.com");
+                assert_eq!(body["human_id"], "ashiq@naridon");
             }
             _ => panic!("expected Sentinel payload"),
         }
         let on_behalf = b.provenance.on_behalf_of.expect("on_behalf_of must be set");
-        assert_eq!(on_behalf.0, "did:aura:human/owner-example-com");
+        assert_eq!(on_behalf.0, "did:aura:human/ashiq-naridon");
     }
 
     #[test]
@@ -1800,7 +1838,7 @@ mod tests {
         let block = build_intent_block(
             "joint-sign",
             "MCP",
-            Some("owner"),
+            Some("ashiq"),
             "host",
             fixed_ts(),
             None,
@@ -1809,7 +1847,7 @@ mod tests {
         let loaded = load_signed_block(&path).unwrap();
         assert_eq!(
             loaded.provenance.on_behalf_of.as_ref().map(|a| a.0.as_str()),
-            Some("did:aura:human/owner")
+            Some("did:aura:human/ashiq")
         );
         // Joint signature must still verify since canonicalization
         // covers the new field.

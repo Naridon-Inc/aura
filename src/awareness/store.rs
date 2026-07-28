@@ -1,13 +1,21 @@
 //! Append-only on-disk log for awareness events (`.aura/awareness/events.jsonl`).
-//! Mirrors the durable-JSONL pattern used by `live_conflicts.rs`. The store is
-//! cwd-relative (like the conflict store) and bounded to the most recent
-//! [`MAX_EVENTS`] so a long Live session can't grow it without limit.
+//! Mirrors the durable-JSONL pattern used by `live_conflicts.rs`, bounded to the
+//! most recent [`MAX_EVENTS`] so a long Live session can't grow it without
+//! limit.
+//!
+//! The log lives on the **shared** plane — one per repository, at the main
+//! checkout's `.aura/`. It used to be plain cwd-relative, which meant a radar
+//! run inside a worktree read and wrote a private feed nobody else could see
+//! (and a run from a subdirectory started a third one). Anchoring it to the
+//! repository root is what lets `aura radar` in one checkout show you what an
+//! agent in another is doing.
 
 use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::PathBuf;
 
 use super::model::{AwarenessEvent, AwarenessKind};
+use crate::worktree::paths;
 
 /// Keep at most this many events on disk (newest wins). This is the awareness
 /// plane's tombstone/bloat guard — events are ephemeral situational signal, not
@@ -15,7 +23,7 @@ use super::model::{AwarenessEvent, AwarenessKind};
 const MAX_EVENTS: usize = 500;
 
 fn store_path() -> PathBuf {
-    PathBuf::from(".aura").join("awareness").join("events.jsonl")
+    PathBuf::from(paths::shared_aura_path("awareness")).join("events.jsonl")
 }
 
 pub fn read_all() -> Vec<AwarenessEvent> {
@@ -157,6 +165,8 @@ mod tests {
             ts,
             key_id: None,
             sig: None,
+            pubkey: None,
+            worktree: None,
         }
     }
 
@@ -166,7 +176,7 @@ mod tests {
         let (_g, _d) = enter_tmp();
 
         assert!(append(&ev("claude", AwarenessKind::Editing, 1)));
-        assert!(append(&ev("owner", AwarenessKind::Intent, 2)));
+        assert!(append(&ev("ashiq", AwarenessKind::Intent, 2)));
 
         let rows = read_all();
         assert_eq!(rows.len(), 2);
@@ -190,7 +200,7 @@ mod tests {
         // different symbol, kind, or actor are all distinct targets.
         assert!(!has_recent("claude", AwarenessKind::Editing, None, Some("logout"), 5000, 2000));
         assert!(!has_recent("claude", AwarenessKind::Intent, None, Some("login"), 5000, 2000));
-        assert!(!has_recent("owner", AwarenessKind::Editing, None, Some("login"), 5000, 2000));
+        assert!(!has_recent("ashiq", AwarenessKind::Editing, None, Some("login"), 5000, 2000));
     }
 
     #[test]
@@ -206,14 +216,14 @@ mod tests {
         b.symbol = Some("logout".into());
         let mut stale = ev("claude", AwarenessKind::Editing, 10);
         stale.symbol = Some("old".into());
-        let peer = ev("owner", AwarenessKind::Editing, 1600);
+        let peer = ev("ashiq", AwarenessKind::Editing, 1600);
         for e in [&a, &b, &stale, &peer] {
             assert!(append(e));
         }
 
         assert_eq!(count_recent_by_actor("claude", 1000, 2000), 2);
         assert_eq!(count_recent_by_actor("CLAUDE", 1000, 2000), 2, "case-insensitive");
-        assert_eq!(count_recent_by_actor("owner", 1000, 2000), 1);
+        assert_eq!(count_recent_by_actor("ashiq", 1000, 2000), 1);
         assert_eq!(count_recent_by_actor("claude", 10_000, 2000), 3, "wider window sees stale");
     }
 

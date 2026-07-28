@@ -56,7 +56,7 @@ export function ChannelCustomTab({
           {tab.url}
         </span>
         {removeErr && (
-          <span className="text-[10.5px] text-red-400 truncate max-w-[200px]">
+          <span className="text-[10.5px] text-red truncate max-w-[200px]">
             {removeErr}
           </span>
         )}
@@ -88,7 +88,7 @@ export function ChannelCustomTab({
                     }
                   })();
                 }}
-                className="text-[11px] text-red-400"
+                className="text-[11px] text-red"
               >
                 Remove for everyone
               </Button>
@@ -106,7 +106,7 @@ export function ChannelCustomTab({
               variant="ghost"
               size="icon-sm"
               onClick={() => setConfirming(true)}
-              className="text-text-4 hover:text-red-400 flex-shrink-0"
+              className="text-text-4 hover:text-red flex-shrink-0"
               title="Remove this tab for the whole team"
               aria-label="Remove tab"
             >

@@ -49,6 +49,13 @@ type VerifyResult = {
     rekor_url?: string;
     error?: string;
   };
+  /** Scope check — what the block DECLARED it would write vs what it ACTUALLY
+   *  wrote (stamped at commit-time reconciliation), plus the set difference.
+   *  `actual_writes` / `undeclared_writes` are absent until the block is
+   *  reconciled, so all three are optional. */
+  declared_writes?: string[];
+  actual_writes?: string[];
+  undeclared_writes?: string[];
 };
 
 /** One row from `aura attest list --json`. */
@@ -183,6 +190,9 @@ export function SessionAttestation({
   const effectiveKey = result?.key_id ?? keyId ?? null;
   const effectiveType = result?.intent_type ?? meta?.intent_type ?? intentType ?? null;
   const human = result?.human_id ?? meta?.human_id ?? null;
+  // Formatted once here rather than inline, so a stamp we cannot read drops the
+  // whole row instead of rendering a bare " ago" next to nothing.
+  const sealedWhen = formatAttestWhen(meta?.created_at);
   const chain = result?.recovered_via_chain ?? null;
   const hasRekorEntry = meta?.rekor ?? false;
 
@@ -207,8 +217,8 @@ export function SessionAttestation({
                 <span className="text-text-3">What the AI changed in this run</span>
               )}
             </MetaRow>
-            {meta?.created_at != null ? (
-              <MetaRow label="Sealed">{formatAttestWhen(meta.created_at)} ago</MetaRow>
+            {sealedWhen ? (
+              <MetaRow label="Sealed">{sealedWhen} ago</MetaRow>
             ) : null}
             {human ? (
               <MetaRow label="Signed by">
@@ -223,6 +233,20 @@ export function SessionAttestation({
             chain={chain}
           />
         </section>
+
+        {/* Scope check — the visible half of "did the AI do only what it said?".
+            Before it edits, the agent declares which files it will touch; at
+            commit time Aura stamps what it ACTUALLY touched and this reads the
+            difference straight off the block. Only shown once the block is
+            reconciled (actual_writes present) — older / unreconciled blocks
+            carry no scope data, so we omit the card rather than invent one. */}
+        {result?.declared_writes != null && result?.actual_writes != null ? (
+          <ScopeCheck
+            declared={result.declared_writes}
+            actual={result.actual_writes}
+            undeclared={result.undeclared_writes ?? []}
+          />
+        ) : null}
 
         {/* Public witness — the optional, independent copy. Framed as an extra
             witness ("not just Aura's word"), not "Rekor transparency log". */}
@@ -359,6 +383,92 @@ function Caret({ open }: { open: boolean }) {
     >
       <path d="M4 2.5 8 6l-4 3.5" stroke="currentColor" strokeWidth="1.5" />
     </svg>
+  );
+}
+
+// ── Scope check ──────────────────────────────────────────────────────────
+
+// The visible half of "did the AI do only what it said it would?". Before it
+// edits, the agent declares which files it will touch; at commit time Aura
+// stamps what it ACTUALLY touched, and the set difference is the scope catch.
+// Rendered in plain words as an amber note, never an alarm: the change is
+// kept, but nothing the AI didn't mention slips past you unseen. When the two
+// match, a calm confirmation says so — the same promise, kept.
+function ScopeCheck({
+  declared,
+  actual,
+  undeclared,
+}: {
+  declared: string[];
+  actual: string[];
+  undeclared: string[];
+}) {
+  const caught = undeclared.length > 0;
+  return (
+    <section>
+      <div className="mb-2.5">
+        <SectionLabel>Scope check</SectionLabel>
+      </div>
+      <div className="overflow-hidden rounded-lg border border-line-soft bg-bg-1">
+        {caught ? (
+          <div className="flex items-start gap-3 px-3.5 py-3">
+            <span
+              className="mt-px shrink-0 text-[13px] leading-none"
+              style={{ color: "var(--color-amber)" }}
+              aria-hidden
+            >
+              ⚠
+            </span>
+            <div className="min-w-0 flex-1">
+              <div className="text-[13px] font-medium text-text-1">
+                A change reached beyond the plan
+              </div>
+              <div className="mt-1 text-[12.5px] leading-snug text-text-2">
+                Before this change, the AI said it would touch{" "}
+                <FileList files={declared} />. It also changed{" "}
+                <FileList files={undeclared} emphasise /> — {undeclared.length === 1 ? "a file" : "files"} it
+                didn&apos;t mention. Aura caught it. The change was kept; now you know it happened.
+              </div>
+            </div>
+          </div>
+        ) : (
+          <div className="flex items-start gap-3 px-3.5 py-3">
+            <span className="mt-0.5 shrink-0">
+              <Tick />
+            </span>
+            <div className="min-w-0 flex-1">
+              <div className="text-[13px] font-medium text-text-1">Stayed in scope</div>
+              <div className="mt-1 text-[12.5px] leading-snug text-text-2">
+                The AI changed exactly the {actual.length === 1 ? "file" : "files"} it said it
+                would — <FileList files={actual} />. Nothing extra slipped in.
+              </div>
+            </div>
+          </div>
+        )}
+      </div>
+    </section>
+  );
+}
+
+/** A short, plain list of file names, joined with commas and a trailing "and".
+ *  Names stay in a subtle monospace so they read as literal files, not prose;
+ *  `emphasise` tints the out-of-scope ones amber to match the catch. */
+function FileList({ files, emphasise }: { files: string[]; emphasise?: boolean }) {
+  if (files.length === 0) return <span className="text-text-3">nothing</span>;
+  return (
+    <>
+      {files.map((f, i) => (
+        <span key={f}>
+          {i > 0 ? (i === files.length - 1 ? " and " : ", ") : ""}
+          <span
+            className="font-mono text-[11.5px]"
+            style={emphasise ? { color: "var(--color-amber)" } : { color: "var(--color-text-1)" }}
+          >
+            {f}
+          </span>
+        </span>
+      ))}
+    </>
   );
 }
 
@@ -590,12 +700,30 @@ export function shortBlockId(id: string): string {
   return `${id.slice(0, 10)}…${id.slice(-4)}`;
 }
 
-/** Render `created_at` (unix seconds, unix millis, or ISO) as a short
- *  relative stamp, falling back to an absolute date for older entries. */
-export function formatAttestWhen(value?: string | number | null): string {
+/** Render `created_at` (unix seconds, unix millis, ISO, or the positional
+ *  array Rust's `time` crate serialises) as a short relative stamp, falling
+ *  back to an absolute date for older entries. */
+export function formatAttestWhen(
+  value?: string | number | number[] | null,
+): string {
   if (value == null) return "";
   let ms: number;
-  if (typeof value === "number") {
+  if (Array.isArray(value)) {
+    // `time::OffsetDateTime` serialises positionally, not as a string:
+    // [year, ordinalDay, hour, minute, second, nanosecond,
+    //  offsetHours, offsetMinutes, offsetSeconds]. That shape is what sits in
+    // `.aura/attest/*.json`, so the seal stamp arrives here as an array.
+    // Without this branch it fell through to `Date.parse`, which stringifies
+    // the array to "2026,206,12,…" and yields NaN — which is why a block with
+    // a perfectly good timestamp rendered its Sealed row as "? ago".
+    const [year, ordinal, h = 0, min = 0, s = 0, ns = 0, offH = 0, offM = 0, offS = 0] =
+      value;
+    if (typeof year !== "number" || typeof ordinal !== "number") return "";
+    // Day-of-year is 1-based, and Date.UTC rolls day overflow into the correct
+    // month, so ordinal 206 of 2026 resolves to 25 July without a lookup table.
+    const asUtc = Date.UTC(year, 0, ordinal, h, min, s, Math.floor(ns / 1e6));
+    ms = asUtc - ((offH * 60 + offM) * 60 + offS) * 1000;
+  } else if (typeof value === "number") {
     ms = value < 1e12 ? value * 1000 : value;
   } else {
     const asNum = Number(value);

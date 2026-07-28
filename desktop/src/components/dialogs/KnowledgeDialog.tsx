@@ -135,7 +135,7 @@ export function KnowledgeDialog({ open, repoRoot, onClose }: KnowledgeDialogProp
             autoFocus
           />
           {error ? (
-            <div className="text-red text-[11.5px]">{error}</div>
+            <div role="alert" className="text-red text-[11.5px]">{error}</div>
           ) : loading && results.length === 0 ? (
             <div className="text-text-4 text-[11.5px] py-6 text-center">searching…</div>
           ) : results.length === 0 ? (
@@ -246,7 +246,7 @@ function ComposeForm({
   return (
     <div className="flex flex-col gap-2">
       <div className="text-[11.5px] text-text-1">New knowledge entry</div>
-      {err && <div className="text-red text-[11.5px]">{err}</div>}
+      {err && <div role="alert" className="text-red text-[11.5px]">{err}</div>}
       <label className="flex flex-col gap-1">
         <span className="text-[10.5px] text-text-3 uppercase tracking-wide">Question</span>
         <Input

@@ -800,16 +800,43 @@ export function TeamActivityFeed({
     }
   }, [repoRoot, load]);
 
+  // Keyless sessions (a real Claude/Gemini transcript with no Aura signing key)
+  // fall back to the git author *email* for `developer` — so a teammate's own
+  // work reads "mo@company.com" while their signed commits read "Ashiq".
+  // Resolve that email against the roster to the teammate's name so one person
+  // reads as one person. Only an exact roster-email match wins (honest — never
+  // a guess), and keyed rows already carry the signed name, so they pass
+  // through untouched. This is a display convenience, not a verified identity.
+  const emailToName = useMemo(() => {
+    const m = new Map<string, string>();
+    for (const mem of roster) {
+      const e = (mem.email || "").trim().toLowerCase();
+      if (e && mem.name) m.set(e, mem.name);
+    }
+    return m;
+  }, [roster]);
+
+  const resolvedRows = useMemo(() => {
+    if (emailToName.size === 0) return rows;
+    return rows.map((r) => {
+      const dev = (r.developer || "").trim();
+      if (!dev.includes("@")) return r;
+      const name = emailToName.get(dev.toLowerCase());
+      return name && name !== dev ? { ...r, developer: name } : r;
+    });
+  }, [rows, emailToName]);
+
   // How many distinct teammates' activity is actually present — the honest
-  // "is the feed really just me?" signal. Counts resolved developer names only.
+  // "is the feed really just me?" signal. Counts resolved developer names only
+  // (email→name resolved first, so one teammate never double-counts).
   const distinctDevelopers = useMemo(() => {
     const seen = new Set<string>();
-    for (const r of rows) {
+    for (const r of resolvedRows) {
       const d = (r.developer || "").trim();
       if (d) seen.add(d);
     }
     return seen.size;
-  }, [rows]);
+  }, [resolvedRows]);
 
   const syncState = deriveTeamSyncState({
     signedIn,
@@ -819,7 +846,7 @@ export function TeamActivityFeed({
 
   return (
     <TeamActivityFeedView
-      rows={rows}
+      rows={resolvedRows}
       sessions={claudeSessions}
       roster={roster}
       dirty={dirty}

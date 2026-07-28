@@ -1,6 +1,6 @@
 [package]
 name = "aura-redact"
-version = "0.19.21"
+version = "0.2.0"
 edition = "2021"
 license = "Apache-2.0"
 description = "Always-on secret & PII scrubber: 20+ credential shapes (cloud/VCS keys, JWTs, PEM, credentialed URIs) + Shannon-entropy pass with a git-SHA-safe guard, custom rule-packs, and a redaction report. Drop-in for LLM prompts, logs, telemetry."

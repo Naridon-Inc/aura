@@ -10,6 +10,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { Dialog } from "../Dialog";
 import { Button } from "../ui/button";
+import { AsciiSpinner } from "../ui/ascii-spinner";
 import { api, type GitStatusEntry, type IntentChangesetFile } from "../../lib/api";
 
 type LogIntentDialogProps = {
@@ -198,7 +199,10 @@ export function LogIntentDialog({
           </div>
           <div className="border border-line-soft rounded bg-bg-0 max-h-[180px] overflow-y-auto">
             {loadingDirty ? (
-              <div className="px-2 py-3 text-text-4 text-[11px]">scanning…</div>
+              <div className="flex items-center gap-1.5 px-2 py-3 text-text-4 text-[11px]" role="status">
+                <AsciiSpinner className="text-[11px] leading-none" />
+                Looking for changes…
+              </div>
             ) : dirty.length === 0 ? (
               <div className="px-2 py-3 text-text-4 text-[11px]">no changes to cover right now</div>
             ) : (
@@ -240,7 +244,7 @@ export function LogIntentDialog({
         <div className="text-text-5 text-[10.5px]">
           Press ⌘↵ to save this note
         </div>
-        {err && <div className="text-red text-[11px]">{err}</div>}
+        {err && <div role="alert" className="text-red text-[11px]">{err}</div>}
       </div>
     </Dialog>
   );

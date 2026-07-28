@@ -85,7 +85,7 @@ export function SnapshotDialog({ open, repoRoot, onClose }: SnapshotDialogProps)
         <div className="text-text-5 text-[10.5px]">
           A point you can always come back to — your current work is kept safe, exactly as it is now.
         </div>
-        {err && <div className="text-red text-[11px]">{err}</div>}
+        {err && <div role="alert" className="text-red text-[11px]">{err}</div>}
         {output && (
           <pre className="bg-bg-1 border border-line rounded p-2 max-h-40 overflow-auto text-[10.5px] font-mono text-text-3 whitespace-pre-wrap">
             {output}

@@ -28,6 +28,7 @@ import {
   type LaneSpec,
   type LaneStatus,
   type PendingPlan,
+  type TokenLedger,
   type UnifiedChange,
   type WaveOutcome,
   type WavePlan,
@@ -35,13 +36,16 @@ import {
 } from "../../lib/api";
 import { Select } from "../ui/select";
 
+// `conflict` is a warning, not a destination: two lanes claimed the same zone
+// and someone has to look. That is the amber slot. It used to share the accent
+// with `running`, which made a healthy lane and a collided one identical.
 const STATUS_TONE: Record<LaneStatus, string> = {
   queued: "var(--color-text-3)",
   running: "var(--color-accent)",
-  done: "var(--color-success, #16a34a)",
-  conflict: "var(--color-warning, #d97706)",
+  done: "var(--color-accent-green)",
+  conflict: "var(--color-amber)",
   cancelled: "var(--color-text-3)",
-  failed: "var(--color-danger, #dc2626)",
+  failed: "var(--color-red)",
 };
 
 const STATUS_LABEL: Record<LaneStatus, string> = {
@@ -269,8 +273,8 @@ export function WaveDispatchPanel({ plan, repoRoot: _repoRoot, onWaveComplete }:
         <div
           className="px-3 py-2 t-sm"
           style={{
-            background: "color-mix(in srgb, var(--color-danger, #dc2626) 8%, transparent)",
-            color: "var(--color-danger, #dc2626)",
+            background: "color-mix(in srgb, var(--color-red) 8%, transparent)",
+            color: "var(--color-red)",
             borderBottom: "1px solid var(--color-line-soft)",
           }}
         >
@@ -336,6 +340,63 @@ export function WaveDispatchPanel({ plan, repoRoot: _repoRoot, onWaveComplete }:
       {outcome && outcome.unified_changes.length > 0 && (
         <UnifiedChangeset changes={outcome.unified_changes} />
       )}
+
+      {outcome?.tokens && outcome.tokens.done_lanes > 0 && (
+        <WaveTokenMeter ledger={outcome.tokens} />
+      )}
+    </div>
+  );
+}
+
+/** Compact ~N/1000 formatter — "1.5k", "370", "0". Estimates only. */
+function fmtTokens(n: number): string {
+  if (n >= 1000) {
+    const k = n / 1000;
+    return `${k >= 10 ? Math.round(k) : k.toFixed(1)}k`;
+  }
+  return String(Math.round(n));
+}
+
+/** The honest Orchestrator token meter. Shows both sides a user cares
+ *  about after a "is Conductor costing me more?" worry: what fan-out
+ *  compression SAVED the coordinator's context, and the fan-out OVERHEAD
+ *  it added vs. a linear run. Every figure is a heuristic estimate — the
+ *  "~" is load-bearing honesty, not decoration. */
+function WaveTokenMeter({ ledger }: { ledger: TokenLedger }) {
+  const { transcript_tokens, summary_tokens, saved_tokens, overhead_tokens, done_lanes } = ledger;
+  return (
+    <div
+      className="mx-3 mb-3 mt-1 px-3 py-1.5 flex items-center gap-x-3 gap-y-1 flex-wrap"
+      style={{
+        border: "1px solid var(--color-line-soft)",
+        borderRadius: 2,
+        fontFamily: "var(--font-mono)",
+        fontSize: "11px",
+      }}
+      title={
+        "Heuristic ~3.5-chars/token estimates, not provider-billed counts.\n" +
+        `${done_lanes} lane${done_lanes === 1 ? "" : "s"} produced ~${fmtTokens(transcript_tokens)} tokens of transcript; ` +
+        `the coordinator only reads the ~${fmtTokens(summary_tokens)}-token summaries, ` +
+        `so summarisation kept ~${fmtTokens(saved_tokens)} out of its context.\n` +
+        `Fan-out overhead ~${fmtTokens(overhead_tokens)} is the per-lane coordination prompt a single linear run would not pay.`
+      }
+    >
+      <span className="aura-block-label" style={{ color: "var(--color-text-3)" }}>
+        COORDINATOR CONTEXT
+      </span>
+      <span style={{ color: "var(--color-text-3)" }}>
+        lanes produced ~{fmtTokens(transcript_tokens)}
+      </span>
+      <span style={{ color: "var(--color-text-3)" }}>→</span>
+      <span style={{ color: "var(--color-text-2)" }}>
+        you read ~{fmtTokens(summary_tokens)}
+      </span>
+      <span style={{ color: "var(--color-accent)", fontWeight: 600 }}>
+        saved ~{fmtTokens(saved_tokens)}
+      </span>
+      <span style={{ color: "var(--color-text-3)", marginLeft: "auto" }}>
+        fan-out overhead ~{fmtTokens(overhead_tokens)}
+      </span>
     </div>
   );
 }
@@ -462,7 +523,9 @@ function LaneRow({
           {conflict && (
             <div
               className="t-xs mt-1"
-              style={{ color: "var(--color-warning, #d97706)" }}
+              // Same amber as STATUS_TONE.conflict — the line that explains
+              // the collision and the dot that flags it stay in step.
+              style={{ color: "var(--color-amber)" }}
             >
               zone conflict on <code>{conflict.zone}</code> with sibling lane
             </div>
@@ -470,7 +533,7 @@ function LaneRow({
           {lane.error && (
             <div
               className="t-xs mt-1"
-              style={{ color: "var(--color-danger, #dc2626)" }}
+              style={{ color: "var(--color-red)" }}
             >
               {lane.error}
             </div>

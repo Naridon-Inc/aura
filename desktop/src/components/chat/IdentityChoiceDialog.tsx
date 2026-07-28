@@ -135,7 +135,7 @@ export function IdentityChoiceDialog({
         if (e.target === e.currentTarget) onClose();
       }}
     >
-      <div className="w-[460px] max-w-[92vw] rounded-md border border-line-1 bg-bg-1 shadow-xl">
+      <div className="w-[460px] max-w-[92vw] rounded-md border border-line bg-bg-1 shadow-xl">
         <header className="flex items-center justify-between border-b border-line-soft px-4 py-2.5">
           <h2
             id="identity-choice-title"
@@ -168,7 +168,7 @@ export function IdentityChoiceDialog({
                 <label
                   className={`flex items-start gap-2 rounded border px-2.5 py-2 cursor-pointer ${
                     checked
-                      ? "border-amber-500/40 bg-amber-500/10"
+                      ? "border-accent/40 bg-accent/10"
                       : "border-line-soft bg-bg-2 hover:bg-bg-hover"
                   }`}
                 >
@@ -214,7 +214,7 @@ export function IdentityChoiceDialog({
         </label>
 
         {err && (
-          <div className="mx-4 mb-2 rounded border border-red-500/30 bg-red-500/10 px-2 py-1 text-[11px] text-red-300">
+          <div className="mx-4 mb-2 rounded border border-red/30 bg-red/10 px-2 py-1 text-[11px] text-red">
             {err}
           </div>
         )}
@@ -234,7 +234,7 @@ export function IdentityChoiceDialog({
             type="button"
             onClick={apply}
             disabled={busy || !picked}
-            className="rounded border border-amber-500/40 bg-amber-500/20 px-3 py-1 text-[11.5px] text-amber-100 hover:bg-amber-500/30 disabled:opacity-50"
+            className="rounded border border-accent/40 bg-accent/15 px-3 py-1 text-[11.5px] text-accent transition-colors hover:bg-accent/25 disabled:opacity-50"
           >
             {busy ? "Saving…" : "Use this identity"}
           </button>
@@ -263,7 +263,7 @@ function buildChoices(
   };
 
   // 1. Canonical alias-resolved handle first — that's the headline fix
-  //    (teammate@example.com when the user's local git is the hotmail alias).
+  //    (mck@naridon.com when the user's local git is the hotmail alias).
   if (report.canonical_handle && report.canonical_handle !== report.handle) {
     pushOnce({
       id: `canonical:${report.canonical_handle}`,

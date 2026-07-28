@@ -24,6 +24,7 @@ import {
   type TeamMember,
 } from "../../lib/api";
 import { useDocumentVisibility } from "../../lib/useDocumentVisibility";
+import { peekCache, writeCache } from "../../lib/resourceCache";
 import { sessionDisplayTitle } from "../../lib/sessionMeta";
 import { AgentIcon } from "../agent/AgentIcon";
 import { initialsOf, providerLabel, relTimeFromTs } from "./usageProviders";
@@ -33,6 +34,14 @@ const RECENT_WINDOW_S = 60 * 60; // an intent within the last hour still reads "
 const POLL_MS = 6000;
 const MAX_VISIBLE = 6;
 const DESKTOP_SESSION = "desktop";
+
+/** Cache the live sentinel claims per repo so re-opening the Overview paints
+ *  the last-known "Right now" line instantly instead of flashing "All quiet"
+ *  until the first poll lands. Stale heartbeats are still dropped by the memo
+ *  below, so a warm-but-old cache never shows anyone as falsely live. */
+function agentsCacheKey(repoRoot: string): string {
+  return `teamActivity:agents:${repoRoot}`;
+}
 
 /** One live activity line — an agent claim, a human status, or a recent intent. */
 type Line = {
@@ -83,7 +92,9 @@ export function TeamActivityNow({
    *  whether we show a calm "All quiet" line vs render nothing when idle. */
   hasTeam: boolean;
 }) {
-  const [agents, setAgents] = useState<SentinelAgent[]>([]);
+  const [agents, setAgents] = useState<SentinelAgent[]>(
+    () => peekCache<SentinelAgent[]>(agentsCacheKey(repoRoot)) ?? [],
+  );
   const [nowS, setNowS] = useState(() => Math.floor(Date.now() / 1000));
   const visible = useDocumentVisibility();
 
@@ -97,12 +108,23 @@ export function TeamActivityNow({
       return;
     }
     let cancelled = false;
+    // Stale-while-revalidate: seed already painted the cached claims; refresh
+    // and write through, but a failed poll keeps the last-known claims rather
+    // than blanking the line.
+    const key = agentsCacheKey(repoRoot);
+    const cached = peekCache<SentinelAgent[]>(key);
+    if (cached) setAgents(cached);
     async function tick() {
       try {
         const list = await api.sentinelAgents(repoRoot);
-        if (!cancelled) setAgents(list);
+        if (!cancelled) {
+          writeCache(key, list);
+          setAgents(list);
+        }
       } catch {
-        if (!cancelled) setAgents([]);
+        // Keep the last-known claims on a transient poll failure; only blank
+        // when nothing was ever cached (a genuine cold, empty state).
+        if (!cancelled && !peekCache<SentinelAgent[]>(key)) setAgents([]);
       }
       if (!cancelled) setNowS(Math.floor(Date.now() / 1000));
     }

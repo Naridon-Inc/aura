@@ -26,6 +26,7 @@ import {
   type FileChangeNote,
   type IntentChangesetFile,
   type SnapshotEntry,
+  type SymbolImpact,
 } from "../../lib/api";
 import { AgentBadge } from "../agent/AgentBadge";
 import { Button } from "../ui/button";
@@ -508,6 +509,92 @@ function lookupSymbols(map: Map<string, ChangedSymbol[]>, path: string): Changed
   return [];
 }
 
+// ── blast-radius pre-flight for one restorable piece ─────────────────────
+// Before you bring a piece back, show what leans on it. Same reverse call
+// graph the delete-guard uses (`aura impact <symbol> <file>`), framed in plain
+// language: how many things use this, and which user-facing features a person
+// would actually notice. Purely informational — Aura still snapshots first, so
+// a bring-back is always undoable — but you make the call with eyes open. Loads
+// lazily (this only mounts when its file block is expanded).
+function SymbolDependents({
+  repoRoot,
+  symbol,
+  relFile,
+}: {
+  repoRoot: string;
+  symbol: string;
+  relFile: string;
+}) {
+  const [impact, setImpact] = useState<SymbolImpact | null>(null);
+  const [state, setState] = useState<"loading" | "ok" | "unavailable">("loading");
+
+  useEffect(() => {
+    let alive = true;
+    setState("loading");
+    api
+      .auraSymbolImpact(repoRoot, symbol, relFile)
+      .then((r) => {
+        if (!alive) return;
+        setImpact(r);
+        // graphSource "none" means we had no graph to walk — say so plainly
+        // rather than pretending "nothing depends on it".
+        setState(r.graphSource === "none" ? "unavailable" : "ok");
+      })
+      .catch(() => {
+        if (alive) setState("unavailable");
+      });
+    return () => {
+      alive = false;
+    };
+  }, [repoRoot, symbol, relFile]);
+
+  if (state === "loading") {
+    return <div className="mt-1 text-[10px] text-text-4">Checking what depends on this…</div>;
+  }
+  if (state === "unavailable" || !impact) {
+    return (
+      <div className="mt-1 text-[10px] text-text-4">
+        Couldn’t check what depends on this — bring-back is still safe (Aura saves a copy first).
+      </div>
+    );
+  }
+
+  const total = Math.max(impact.directCallers.length, impact.transitiveCallerCount);
+  const hasDeps = impact.directCallers.length > 0 || impact.features.length > 0;
+
+  if (!hasDeps) {
+    return (
+      <div className="mt-1 text-[10px] text-accent-green">
+        Nothing else uses this — safe to bring back.
+      </div>
+    );
+  }
+
+  const callerNames = impact.directCallers.slice(0, 3).map((c) => c.symbol);
+  const moreCallers = total - callerNames.length;
+  const featureNames = impact.features.slice(0, 3).map((f) => f.name);
+
+  return (
+    <div className="mt-1 flex flex-col gap-0.5">
+      <div className="text-[10px] text-amber">
+        {total} {total === 1 ? "thing depends" : "things depend"} on this — bringing it back
+        changes what they see.
+      </div>
+      {callerNames.length > 0 && (
+        <div className="text-[10px] text-text-4">
+          Used by <span className="font-mono text-text-3">{callerNames.join(", ")}</span>
+          {moreCallers > 0 ? ` +${moreCallers} more` : ""}
+        </div>
+      )}
+      {featureNames.length > 0 && (
+        <div className="text-[10px] text-text-4">
+          Affects: <span className="text-text-3">{featureNames.join(", ")}</span>
+        </div>
+      )}
+    </div>
+  );
+}
+
 // ── one changed file ─────────────────────────────────────────────────────
 
 function FileChangeBlock({
@@ -537,9 +624,14 @@ function FileChangeBlock({
   );
   const name = file.path.split("/").pop() || file.path;
   const dir = file.path.slice(0, file.path.length - name.length);
+  // Prefer the symbols resolved from a commit's change-note; when the moment
+  // bound none (no per-change sha — e.g. the squashed bundled sample), fall
+  // back to any symbols the changeset embedded, so the surgical "Bring this
+  // back" button still renders instead of the type-a-name fallback.
+  const effectiveSymbols = symbols.length > 0 ? symbols : file.symbols ?? [];
   // Only "modified" symbols can be brought back to a prior version; added
   // ones have no earlier state, deleted ones aren't in the file to surgery.
-  const restorable = symbols.filter((s) => s.change !== "added");
+  const restorable = effectiveSymbols.filter((s) => s.change !== "added");
 
   return (
     <div className="rounded-lg border border-line-soft bg-bg-1">
@@ -575,15 +667,23 @@ function FileChangeBlock({
               {restorable.map((s) => (
                 <div
                   key={`${s.identifier}-${s.kind}`}
-                  className="flex items-center gap-2 rounded-md border border-line-soft bg-bg-content px-2.5 py-1.5"
+                  className="flex items-start gap-2 rounded-md border border-line-soft bg-bg-content px-2.5 py-1.5"
                 >
-                  <SymbolKindDot change={s.change} />
+                  <span className="pt-0.5">
+                    <SymbolKindDot change={s.change} />
+                  </span>
                   <span className="min-w-0 flex-1">
                     <span className="block truncate font-mono text-[11.5px] text-text-1">{s.identifier}</span>
                     <span className="block text-[10px] text-text-4">
                       {s.kind}
                       {s.change === "deleted" ? " · was deleted here" : " · changed here"}
                     </span>
+                    {/* Blast-radius pre-flight: who leans on this piece, shown
+                        before you bring it back. Deleted pieces aren't in the
+                        graph to trace, so skip them. */}
+                    {s.change !== "deleted" && (
+                      <SymbolDependents repoRoot={repoRoot} symbol={s.identifier} relFile={file.path} />
+                    )}
                   </span>
                   <Tooltip>
                     <TooltipTrigger asChild>
@@ -604,7 +704,7 @@ function FileChangeBlock({
                 </div>
               ))}
             </div>
-          ) : symbols.length > 0 ? (
+          ) : effectiveSymbols.length > 0 ? (
             <div className="text-[11px] leading-relaxed text-text-4">
               The pieces here were newly added, so there's no earlier version to bring back.
             </div>

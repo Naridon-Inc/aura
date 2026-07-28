@@ -71,7 +71,7 @@ export function BlockCard({ block, focused = false, exit = null }: Props) {
     <div
       className="rounded-md p-3 flex flex-col gap-2.5 transition-colors group/block"
       style={{
-        background: failed ? "#2a1818" : "var(--color-bg-3)",
+        background: failed ? "color-mix(in srgb, var(--color-red) 10%, var(--color-bg-3))" : "var(--color-bg-3)",
         border: `1px solid ${focused ? tone : "var(--color-line)"}`,
       }}
     >
@@ -83,7 +83,7 @@ export function BlockCard({ block, focused = false, exit = null }: Props) {
         <span style={{ color: tone }} className="font-medium">{label}</span>
         <span className="text-text-3">{block.kind}</span>
         {block.kind === "exit" && block.exit_code != null && (
-          <span className="text-text-3 font-mono">code {block.exit_code}</span>
+          <span className="text-text-3 tabular-nums">stopped with error {block.exit_code}</span>
         )}
         {shortId && (
           <span
@@ -93,8 +93,8 @@ export function BlockCard({ block, focused = false, exit = null }: Props) {
             #{shortId}
           </span>
         )}
-        <span className="ml-auto text-text-3 font-mono normal-case">{ts}</span>
-        <span className="text-text-3 font-mono normal-case">· {dur}</span>
+        <span className="ml-auto text-text-3 font-mono tabular-nums normal-case">{ts}</span>
+        <span className="text-text-3 font-mono tabular-nums normal-case">· {dur}</span>
         <BlockActions
           canCollapse={block.kind === "output" && !!block.text}
           collapsed={collapsed}
@@ -147,7 +147,7 @@ function BlockActions({
   copied: boolean;
 }) {
   return (
-    <span className="ml-2 flex items-center gap-1 opacity-0 group-hover/block:opacity-100 transition-opacity normal-case tracking-normal">
+    <span className="ml-2 flex items-center gap-1 opacity-0 transition-opacity focus-within:opacity-100 group-hover/block:opacity-100 normal-case tracking-normal">
       {canCollapse && (
         <ActionButton
           title={collapsed ? "Expand output" : "Collapse output"}
@@ -295,7 +295,9 @@ function payloadRow(b: BlockEnvelope): {
     return {
       prefix: ok ? "✓" : "✗",
       prefixColor: ok ? "var(--color-accent-green)" : "var(--color-red)",
-      payload: ok ? "process exited cleanly" : `process exited with code ${b.exit_code ?? 0}`,
+      payload: ok
+      ? "Finished without errors"
+      : `Stopped with error ${b.exit_code ?? 0}`,
     };
   }
   // output — payload row only renders when there's a one-line summary

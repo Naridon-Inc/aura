@@ -9,7 +9,8 @@
 // consistent with any future MCP exposure.
 
 import { useEffect, useMemo, useState } from "react";
-import { Loader2, RefreshCw, Search } from "lucide-react";
+import { RefreshCw, Search } from "lucide-react";
+import { AsciiSpinner } from "../ui/ascii-spinner";
 
 import { Button } from "../ui/button";
 import { Input } from "../ui/input";
@@ -183,7 +184,7 @@ export function MarketplaceDialog({ open, onClose }: Props) {
               title="Refresh"
             >
               {store.marketplaceLoading ? (
-                <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                <AsciiSpinner className="text-[12px] leading-none" />
               ) : (
                 <RefreshCw className="h-3.5 w-3.5" />
               )}
@@ -192,7 +193,7 @@ export function MarketplaceDialog({ open, onClose }: Props) {
 
           <div className="max-h-[60vh] overflow-y-auto space-y-2 pr-1">
             {store.marketplaceError && tab !== "installed" && (
-              <div className="text-[12px] text-red-700 dark:text-red-300 bg-red-100/30 dark:bg-red-900/20 rounded p-2">
+              <div className="text-[12px] text-red bg-red/10 rounded p-2">
                 Marketplace unavailable: {store.marketplaceError}
               </div>
             )}

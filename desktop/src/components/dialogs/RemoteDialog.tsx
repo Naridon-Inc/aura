@@ -232,7 +232,7 @@ export function RemoteDialog({ open, onClose }: RemoteDialogProps) {
         )}
 
         {error && (
-          <div className="text-[11.5px] text-fg-error">
+          <div className="text-[11.5px] text-red">
             {error}
           </div>
         )}
@@ -321,7 +321,7 @@ export function RemoteDialog({ open, onClose }: RemoteDialogProps) {
           )}
 
           {relayError && (
-            <div className="text-[11.5px] text-fg-error">
+            <div className="text-[11.5px] text-red">
               {relayError}
             </div>
           )}

@@ -5,8 +5,9 @@
 // available list — this bar is the one-tap launcher for the four or so
 // CLIs the user actually reaches for.
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo } from "react";
 import { useAgents, type Agent, MANAGER_AGENT } from "../lib/agents";
+import { usePinned, seedPinsIfUnset, type PinMap } from "../lib/agentPrefs";
 import { AgentIcon } from "./agent/AgentIcon";
 import {
   DropdownMenu,
@@ -18,85 +19,30 @@ import {
 } from "./ui/dropdown-menu";
 import { Tooltip, TooltipTrigger, TooltipContent } from "./ui/tooltip";
 
-const SHOW_KEY = "aura.presetsBar.show";
-const PINNED_KEY = "aura.presetsBar.pinned";
-
-// Default pin state: every available CLI agent is pinned on first run. Aura
-// Manager — the native in-app agent — rides this bar too, pinned by default
-// (it shows unless the user explicitly turns it off via the ⚙ menu), so the
-// native agent is always one tap away alongside the CLIs.
-function loadPinned(): Record<string, boolean> | null {
-  try {
-    const raw = localStorage.getItem(PINNED_KEY);
-    if (!raw) return null;
-    return JSON.parse(raw);
-  } catch {
-    return null;
-  }
-}
-
-function savePinned(map: Record<string, boolean>) {
-  try {
-    localStorage.setItem(PINNED_KEY, JSON.stringify(map));
-  } catch {
-    /* quota — ignore, in-memory state still works */
-  }
-}
-
-function loadShow(): boolean {
-  return localStorage.getItem(SHOW_KEY) !== "0";
-}
-
 type PresetsBarProps = {
   onLaunchAgent: (agentId: string, label: string) => void;
 };
 
 export function PresetsBar({ onLaunchAgent }: PresetsBarProps) {
   const { agents } = useAgents();
-  const [show, setShow] = useState(loadShow);
-  const [pinned, setPinned] = useState<Record<string, boolean>>(
-    () => loadPinned() ?? {},
-  );
+  // Pin state lives in the shared store so the Settings → Agents roster and
+  // any popout window stay in lockstep with this bar.
+  const { pinned, show, isPinned, toggle: togglePin, setShow: toggleShow } =
+    usePinned();
 
-  // First-run: when discovery returns and the user has no saved pin
-  // state, pin every available CLI agent. Manager is skipped here — it has
-  // no stored flag, and isPinnedOf treats "no flag" as pinned, so it shows
-  // by default without an explicit seed.
+  // First-run: once discovery returns, seed pins for every installed CLI so
+  // they show by default. Idempotent — a no-op once any pin state exists.
   useEffect(() => {
-    if (loadPinned() !== null) return;
-    if (agents.length === 0) return;
-    const seed: Record<string, boolean> = {};
-    for (const a of agents) {
-      if (a.id === MANAGER_AGENT.id) continue;
-      if (a.available) seed[a.id] = true;
-    }
-    setPinned(seed);
-    savePinned(seed);
+    seedPinsIfUnset(
+      agents.filter((a) => a.available && a.id !== MANAGER_AGENT.id).map((a) => a.id),
+    );
   }, [agents]);
 
-  function togglePin(agentId: string) {
-    setPinned((prev) => {
-      const next = { ...prev, [agentId]: !prev[agentId] };
-      savePinned(next);
-      return next;
-    });
-  }
-
-  function toggleShow(next: boolean) {
-    setShow(next);
-    localStorage.setItem(SHOW_KEY, next ? "1" : "0");
-  }
-
-  // Aura Manager is the native agent — it rides this bar as a peer of the CLI
-  // agents, pinned by default (shown unless the user explicitly turns it off),
-  // so the in-app agent is always one tap away on the surface. CLI agents stay
-  // off-by-default until the first-run seed pins the installed ones.
-  const isPinnedOf = (a: Agent) =>
-    a.id === MANAGER_AGENT.id ? pinned[a.id] !== false : !!pinned[a.id];
+  const pinnedMap: PinMap = pinned ?? {};
 
   const pinnedAgents = useMemo(
-    () => agents.filter((a) => a.available && isPinnedOf(a)),
-    [agents, pinned],
+    () => agents.filter((a) => a.available && isPinned(a.id)),
+    [agents, pinned, isPinned],
   );
 
   // Hidden mode: render a thin sliver with just the gear, so the user
@@ -106,7 +52,7 @@ export function PresetsBar({ onLaunchAgent }: PresetsBarProps) {
       <div className="flex items-center h-6 px-2 border-b border-line-soft bg-bg-chrome">
         <PresetsManageMenu
           agents={agents}
-          pinned={pinned}
+          pinned={pinnedMap}
           show={show}
           onTogglePin={togglePin}
           onToggleShow={toggleShow}
@@ -119,7 +65,7 @@ export function PresetsBar({ onLaunchAgent }: PresetsBarProps) {
     <div className="flex items-center h-8 px-2 gap-0.5 border-b border-line-soft bg-bg-chrome shrink-0 overflow-x-auto">
       <PresetsManageMenu
         agents={agents}
-        pinned={pinned}
+        pinned={pinnedMap}
         show={show}
         onTogglePin={togglePin}
         onToggleShow={toggleShow}

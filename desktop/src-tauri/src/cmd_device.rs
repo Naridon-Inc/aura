@@ -173,22 +173,36 @@ pub(crate) fn normalise_origin_url(raw: &str) -> String {
     url.to_lowercase()
 }
 
-/// Read an optional per-repo override at `.aura/repo.json`. When present
-/// and containing a non-empty `room_id`, every clone that has this file
-/// committed converges on the same cloud room regardless of how each
-/// developer cloned (SSH alias, https, gitlab mirror, fork, etc). Commit
-/// this file to your repo and your whole team derives the same room.
-#[derive(Serialize, Deserialize, Debug, Default)]
-struct RepoOverride {
-    #[serde(default)]
-    room_id: String,
-}
-
+/// Read the per-repo identity override at `.aura/repo.json` and return the
+/// `room_id` it resolves to. Two shapes are honored:
+///
+///  * **Signed Aura-native identity** (`aura repo-id init`) — a UUID + derived
+///    `room_id`, signed by the repo's Ed25519 key. The signature is verified
+///    here; a tampered manifest (e.g. one that repoints the repo at someone
+///    else's room without re-signing) is ignored, falling back to the
+///    URL-derived id instead of silently trusting it.
+///  * **Legacy `{"room_id": "..."}` override** — honored as-is (unsigned), so
+///    a pre-UUID committed file keeps a whole team converging on one room.
+///
+/// Either way, committing `.aura/repo.json` makes every clone derive the same
+/// room regardless of how each developer cloned (SSH alias, https, GitLab
+/// mirror, fork). Shared type + verification live in
+/// `aura_attestation::repo_identity`.
 pub(crate) fn read_repo_override(repo_root: &Path) -> Option<String> {
-    let path = repo_root.join(".aura").join("repo.json");
-    let raw = fs::read_to_string(&path).ok()?;
-    let parsed: RepoOverride = serde_json::from_str(&raw).ok()?;
-    let trimmed = parsed.room_id.trim();
+    let manifest = aura_attestation::RepoIdentityManifest::read(repo_root).ok()??;
+
+    // A signed manifest is only trusted if its signature verifies. An invalid
+    // signature is a red flag, not a soft fallback to its claimed room_id.
+    if manifest.is_signed() {
+        if let Err(e) = manifest.verify() {
+            eprintln!(
+                "aura: ignoring .aura/repo.json — repo identity signature invalid: {e}"
+            );
+            return None;
+        }
+    }
+
+    let trimmed = manifest.room_id.trim();
     if trimmed.is_empty() {
         return None;
     }

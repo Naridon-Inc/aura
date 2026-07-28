@@ -359,6 +359,96 @@ impl CheckpointStore {
         Ok(checkpoints)
     }
 
+    /// Retrieve the checkpoint that best represents the code **at a given commit** —
+    /// so a goal can be proven against the snapshot that session actually produced,
+    /// not whatever branch happens to be checked out. Resolution order:
+    ///   1. a checkpoint note attached directly to `commit_ish`,
+    ///   2. else the nearest **descendant** commit that carries a note (the first
+    ///      checkpoint taken *after* this commit — its tree is the closest superset
+    ///      of this commit's code, so functions present here are present there),
+    ///   3. else the nearest **ancestor** commit that carries a note (best-effort
+    ///      fallback when nothing downstream was ever checkpointed).
+    /// Returns `None` when the commit can't be resolved or no note exists anywhere
+    /// reachable — the caller treats that as "can't tell", never "not reached".
+    ///
+    /// Why the descendant-first fallback matters: intent rows point at the commit a
+    /// file was written on (e.g. the notes-store commit), but a checkpoint is only
+    /// taken later, at a session-log commit downstream. That descendant checkpoint's
+    /// full-tree AST still contains everything this commit introduced, so proving
+    /// against it yields the honest verdict for the session's own code.
+    pub fn get_checkpoint_for_commit(repo: &Repository, commit_ish: &str) -> Option<CheckpointData> {
+        let target = repo
+            .revparse_single(commit_ish)
+            .ok()?
+            .peel_to_commit()
+            .ok()?
+            .id();
+
+        // 1. Direct hit — a note on this exact commit.
+        if let Some(cp) = Self::note_checkpoint(repo, target) {
+            return Some(cp);
+        }
+
+        let bearing = Self::checkpoint_bearing_commits(repo);
+
+        // 2. Nearest DESCENDANT with a note (fewest commits ahead of target).
+        let mut best_desc: Option<(usize, CheckpointData)> = None;
+        for (oid, cp) in &bearing {
+            if *oid == target {
+                return Some(cp.clone());
+            }
+            if repo.graph_descendant_of(*oid, target).unwrap_or(false) {
+                let ahead = repo
+                    .graph_ahead_behind(*oid, target)
+                    .map(|(a, _)| a)
+                    .unwrap_or(usize::MAX);
+                if best_desc.as_ref().map_or(true, |(b, _)| ahead < *b) {
+                    best_desc = Some((ahead, cp.clone()));
+                }
+            }
+        }
+        if let Some((_, cp)) = best_desc {
+            return Some(cp);
+        }
+
+        // 3. Nearest ANCESTOR with a note (fewest commits behind target).
+        let mut best_anc: Option<(usize, CheckpointData)> = None;
+        for (oid, cp) in &bearing {
+            if repo.graph_descendant_of(target, *oid).unwrap_or(false) {
+                let behind = repo
+                    .graph_ahead_behind(target, *oid)
+                    .map(|(a, _)| a)
+                    .unwrap_or(usize::MAX);
+                if best_anc.as_ref().map_or(true, |(b, _)| behind < *b) {
+                    best_anc = Some((behind, cp.clone()));
+                }
+            }
+        }
+        best_anc.map(|(_, cp)| cp)
+    }
+
+    /// Decode the checkpoint note attached to a single commit, if any.
+    fn note_checkpoint(repo: &Repository, commit: git2::Oid) -> Option<CheckpointData> {
+        let note = repo.find_note(Some(Self::NOTES_REF), commit).ok()?;
+        let msg = note.message()?;
+        serde_json::from_str::<CheckpointData>(msg).ok()
+    }
+
+    /// Every commit that carries an Aura checkpoint note, paired with its decoded
+    /// checkpoint. Walks `refs/notes/aura`; each entry is (annotated_commit, data).
+    fn checkpoint_bearing_commits(repo: &Repository) -> Vec<(git2::Oid, CheckpointData)> {
+        let mut out = Vec::new();
+        if let Ok(notes) = repo.notes(Some(Self::NOTES_REF)) {
+            for entry in notes.flatten() {
+                // entry = (note_blob_oid, annotated_commit_oid)
+                if let Some(cp) = Self::note_checkpoint(repo, entry.1) {
+                    out.push((entry.1, cp));
+                }
+            }
+        }
+        out
+    }
+
     /// Semantic Compaction: prune old git notes, keeping the last N checkpoints.
     /// Shadow branch is unaffected (it's the permanent archive).
     pub fn compact_history(repo: &Repository, keep: usize) -> Result<usize, Box<dyn std::error::Error>> {

@@ -26,7 +26,7 @@
 //!   `(key_id, pubkey, identity)` binding. `verify_self_sig` confirms the
 //!   pubkey in the row actually verifies its own attestation, so a row
 //!   whose pubkey was swapped or whose identity was edited fails closed.
-//! - The remaining trust ("this key really is Owner's, not an impostor's")
+//! - The remaining trust ("this key really is Ashiq's, not an impostor's")
 //!   is **trust-on-first-use anchored to git push access** — the same trust
 //!   you already extend to every commit on the branch. The first time a
 //!   member's key appears it is recorded; a later impersonation attempt
@@ -61,7 +61,7 @@ pub struct TeamKeyEntry {
     /// the block (dual-identity). None for agent-only signing identities.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub human_id: Option<String>,
-    /// Friendly name for surfaces ("Owner"). Informational.
+    /// Friendly name for surfaces ("Ashiq"). Informational.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub display_name: Option<String>,
     /// Git/commit email this identity maps to, when known. Lets the Trace
@@ -295,10 +295,10 @@ mod tests {
 
     fn ident() -> SelfIdentity {
         SelfIdentity {
-            human_id: Some("did:aura:human/owner".into()),
-            display_name: Some("Owner".into()),
-            email: Some("owner@example.com".into()),
-            github_login: Some("OWNER".into()),
+            human_id: Some("did:aura:human/ashiq".into()),
+            display_name: Some("Ashiq".into()),
+            email: Some("ashiq@naridon.com".into()),
+            github_login: Some("MHASK".into()),
             agent_id: Some("MCP Agent".into()),
         }
     }

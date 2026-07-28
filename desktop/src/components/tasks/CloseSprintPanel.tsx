@@ -120,19 +120,19 @@ export function CloseSprintPanel({
               sub={
                 usePoints ? `${donePoints}/${totalPoints} pts` : "items done"
               }
-              tone="emerald"
+              tone="muted"
             />
             <StatTile
               label="Carried over"
               value={String(carriedCount)}
               sub={carriedCount === 1 ? "unfinished" : "unfinished"}
-              tone={carriedCount > 0 ? "amber" : "muted"}
+              tone={carriedCount > 0 ? "alert" : "muted"}
             />
             <StatTile
               label="Velocity"
               value={String(velocity)}
               sub={`${unit} shipped`}
-              tone="accent"
+              tone="muted"
             />
           </div>
 
@@ -174,16 +174,12 @@ function StatTile({
   label: string;
   value: string;
   sub: string;
-  tone: "emerald" | "amber" | "accent" | "muted";
+  /** Semantic, not chromatic. Three tiles in a row that each owned a different
+   *  hue read as decoration; now the numbers sit on the neutral ramp and only
+   *  "alert" — work that did NOT get finished — carries a colour. */
+  tone: "alert" | "muted";
 }) {
-  const valueTone =
-    tone === "emerald"
-      ? "text-emerald-400"
-      : tone === "amber"
-        ? "text-amber-400"
-        : tone === "accent"
-          ? "text-accent"
-          : "text-text-3";
+  const valueTone = tone === "alert" ? "text-amber" : "text-text-1";
   return (
     <div className="rounded-lg bg-bg-content p-3 border border-line-soft">
       <div className="text-[10.5px] uppercase tracking-wider text-text-5">

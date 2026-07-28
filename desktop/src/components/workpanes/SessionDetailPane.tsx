@@ -17,7 +17,7 @@
 // reconstructed from a commit). Changes carries the live file count. Real data
 // only: no mock tabs, no fabricated verdicts.
 
-import { useEffect, useMemo, useState } from "react";
+import { Fragment, useEffect, useMemo, useState } from "react";
 import {
   api,
   type ClaudeSession,
@@ -42,6 +42,7 @@ import { FullscreenOverlay } from "../FullscreenOverlay";
 import { useSessionIntentReport } from "./IntentStory";
 import { SessionAlignment } from "./SessionAlignment";
 import { TRACE_IA_V3 } from "../../lib/featureFlags";
+import { peekCache, writeCache } from "../../lib/resourceCache";
 import {
   correlateClaudeSession,
   isAutoStub,
@@ -212,13 +213,23 @@ export function SessionDetailPane({
   const [pendingFile, setPendingFile] = useState<string | null>(null);
   // Best-effort Claude sessions — used to relabel a guard `[auto]` row with
   // the agent's real prompt + turn count. Absence never breaks the view.
-  const [sessions, setSessions] = useState<ClaudeSession[]>([]);
+  // Seeded from the process-lifetime cache so re-opening a session (or opening
+  // several in a row) paints the correlated title/turns immediately instead of
+  // re-shelling `claude list-sessions` on every mount; the effect revalidates.
+  const [sessions, setSessions] = useState<ClaudeSession[]>(
+    () => peekCache<ClaudeSession[]>(`sessions:claude:${repoRoot}`) ?? [],
+  );
   // A native Aura chat row carries no intent-log changeset (the session edits
   // the working tree and never commits), so the Changes tab would otherwise be
   // empty. This holds its computed changeset — the files it edited + each
   // file's diff vs the session's start baseline — fetched below. null for a
   // non-chat row or an orchestrator-only session (which edited nothing here).
-  const [mgrChangeset, setMgrChangeset] = useState<IntentChangeset | null>(null);
+  const [mgrChangeset, setMgrChangeset] = useState<IntentChangeset | null>(() => {
+    const sid = (row.manager_session_id ?? "").trim();
+    return sid
+      ? peekCache<IntentChangeset>(`mgrChangeset:${repoRoot}:${sid}`) ?? null
+      : null;
+  });
 
   const openFile = (path?: string) => {
     setPendingFile(path ?? null);
@@ -228,13 +239,22 @@ export function SessionDetailPane({
   useEffect(() => {
     if (!repoRoot) return;
     let alive = true;
+    // Stale-while-revalidate: paint the cached session list first (already
+    // seeded into state), refresh underneath, and never let a failed refresh
+    // blank a list we already have.
+    const key = `sessions:claude:${repoRoot}`;
+    const cached = peekCache<ClaudeSession[]>(key);
+    if (cached) setSessions(cached);
     api
       .claudeListSessions(repoRoot)
       .then((s) => {
-        if (alive) setSessions(Array.isArray(s) ? s : []);
+        const list = Array.isArray(s) ? s : [];
+        writeCache(key, list);
+        if (alive) setSessions(list);
       })
       .catch(() => {
-        if (alive) setSessions([]);
+        // A failed revalidation must not wipe a cached roster.
+        if (alive && !cached) setSessions([]);
       });
     return () => {
       alive = false;
@@ -253,13 +273,21 @@ export function SessionDetailPane({
       return;
     }
     let alive = true;
+    // Stale-while-revalidate per manager session: paint the last-known
+    // changeset instantly, refresh underneath, and keep the cached one if the
+    // refresh fails.
+    const key = `mgrChangeset:${repoRoot}:${sid}`;
+    const cached = peekCache<IntentChangeset>(key);
+    if (cached) setMgrChangeset(cached);
     api
       .managerSessionChangeset(repoRoot, sid)
       .then((cs) => {
-        if (alive) setMgrChangeset(cs ?? null);
+        const val = cs ?? null;
+        if (val) writeCache(key, val);
+        if (alive) setMgrChangeset(val);
       })
       .catch(() => {
-        if (alive) setMgrChangeset(null);
+        if (alive && !cached) setMgrChangeset(null);
       });
     return () => {
       alive = false;
@@ -301,14 +329,26 @@ export function SessionDetailPane({
   // `managerLoadTranscript` rather than a Claude JSONL file read.
   const managerSessionId = (row.manager_session_id ?? "").trim() || null;
 
+  // A blocked/halted guard record (see the Sessions feed's block convention):
+  // an attempt Aura refused to let land. It has no transcript, no changeset, and
+  // nothing to resume or prove — it renders as its own short "here's what was
+  // stopped" report, not the normal asked→built→prove session.
+  const isBlocked = row.intent_type === "blocked";
+
   // Correlated real session (when this row is an agent run we can match to a
   // Claude Code session by time). Drives the real title, "Asked", and turns.
   // A native Aura chat row has its OWN transcript (replayed by id), so it must
   // never borrow a time-nearby Claude session — that would paint a wrong turn
-  // count and a wrong Resume target. Skip correlation entirely for those.
+  // count and a wrong Resume target. A blocked record has no session at all, so
+  // it must NOT borrow the nearest transcript by time either (that false match
+  // is what made a block read a bogus "21 steps · Resume"). Skip correlation
+  // entirely for both.
   const sess = useMemo(
-    () => (managerSessionId ? null : correlateClaudeSession(row, sessions)),
-    [managerSessionId, row, sessions],
+    () =>
+      managerSessionId || isBlocked
+        ? null
+        : correlateClaudeSession(row, sessions),
+    [managerSessionId, isBlocked, row, sessions],
   );
   const title = sessionDisplayTitle(row, sessions);
   // Identity (headline + summary body) is the row's OWN logged intent for a
@@ -360,13 +400,16 @@ export function SessionDetailPane({
   // itself. Both are additive — a plain unsigned, uncommitted run still reads
   // Summary · Changes · Transcript.
   const tabs = useMemo<WizardStepMeta[]>(() => {
+    // A blocked record is a single short report — no transcript, no changeset,
+    // no alignment/attestation. Only the Summary applies.
+    if (isBlocked) return [SUMMARY_TAB];
     const t: WizardStepMeta[] = [SUMMARY_TAB];
     if (showAlignment) t.push(ALIGNMENT_TAB);
     if (signed) t.push(ATTESTATION_TAB);
     t.push({ ...CHANGES_TAB, label: `Changes · ${fileCount}` });
     t.push(TRANSCRIPT_TAB);
     return t;
-  }, [fileCount, showAlignment, signed]);
+  }, [isBlocked, fileCount, showAlignment, signed]);
   const tabIds = useMemo(() => tabs.map((t) => t.id) as Tab[], [tabs]);
 
   // Defensive: if the active tab ever leaves the set, fall back to Summary so
@@ -381,6 +424,25 @@ export function SessionDetailPane({
     const s = d.toLocaleString();
     return s === "Invalid Date" ? "—" : s;
   }, [row.timestamp]);
+
+  // Depth chips — the honest measure of a run. A person sends a few
+  // *messages*; the agent then takes many *steps* (reading, editing, running
+  // commands) to answer each. Counting only the typed prompts made a deep
+  // one-prompt session read a misleading "1 turn", so we lead with the agent's
+  // step count and only add the message count when the human steered more than
+  // once. Falls back to the old turn label for sessions scanned before steps
+  // were tracked (step_count === 0 but a prompt exists).
+  const depthChips = useMemo(() => {
+    if (!sess) return [] as string[];
+    const chips: string[] = [];
+    if (sess.turn_count > 1) chips.push(`${sess.turn_count} messages`);
+    if (sess.step_count > 0) {
+      chips.push(`${sess.step_count} step${sess.step_count === 1 ? "" : "s"}`);
+    } else if (sess.turn_count === 1) {
+      chips.push("1 turn");
+    }
+    return chips;
+  }, [sess]);
 
   return (
     <FullscreenOverlay
@@ -440,14 +502,12 @@ export function SessionDetailPane({
           <AgentBadge agentId={row.agent_id} />
           <span className="text-text-4">·</span>
           <span className="text-text-4">{rel}</span>
-          {sess && sess.turn_count > 0 ? (
-            <>
+          {depthChips.map((c) => (
+            <Fragment key={c}>
               <span className="text-text-4">·</span>
-              <span>
-                {sess.turn_count} turn{sess.turn_count === 1 ? "" : "s"}
-              </span>
-            </>
-          ) : null}
+              <span>{c}</span>
+            </Fragment>
+          ))}
           {hasChangeset ? (
             <>
               <span className="text-text-4">·</span>
@@ -463,7 +523,14 @@ export function SessionDetailPane({
               ) : null}
             </>
           ) : null}
-          {row.intent_type ? (
+          {row.intent_type === "blocked" ? (
+            <>
+              <span className="text-text-4">·</span>
+              <span className="rounded border border-red px-1.5 py-px text-[10px] font-medium text-red">
+                Blocked
+              </span>
+            </>
+          ) : row.intent_type ? (
             <>
               <span className="text-text-4">·</span>
               <span className="rounded border border-line-soft px-1.5 py-px text-[10px] text-text-4">

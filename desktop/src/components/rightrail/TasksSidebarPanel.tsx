@@ -18,6 +18,7 @@
 
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { api, type Task, type TaskPriority, type TaskStatus } from "../../lib/api";
+import { AsciiSpinner } from "../ui/ascii-spinner";
 
 type Props = {
   repoRoot: string;
@@ -126,7 +127,7 @@ export function TasksSidebarPanel({ repoRoot }: Props) {
           <span className="w-px h-3 bg-line-soft mx-1" aria-hidden />
           <button
             type="button"
-            className="t-xs t-ui text-fg-muted hover:text-fg-strong px-1"
+            className="t-xs t-ui text-text-4 hover:text-text-1 px-1"
             onClick={() => void fetch()}
             title="Refresh now"
           >
@@ -134,7 +135,7 @@ export function TasksSidebarPanel({ repoRoot }: Props) {
           </button>
           <button
             type="button"
-            className="t-xs t-ui text-fg-muted hover:text-accent px-1.5 py-0.5 rounded hover:bg-accent-soft"
+            className="t-xs t-ui text-text-4 hover:text-accent px-1.5 py-0.5 rounded hover:bg-accent-soft"
             onClick={openFullBoard}
             title="Open full Tasks board (⌘T)"
           >
@@ -146,10 +147,10 @@ export function TasksSidebarPanel({ repoRoot }: Props) {
       <div className="grid grid-cols-4 gap-px bg-line-soft border-b border-line-soft">
         {STATUS_ORDER.map((s) => (
           <div key={s} className="bg-bg-0 px-2 py-1.5 flex flex-col items-center">
-            <span className="t-2xs text-fg-muted uppercase tracking-wide">
+            <span className="t-2xs text-text-4 uppercase tracking-wide">
               {STATUS_LABEL[s].split(" ")[0]}
             </span>
-            <span className="text-fg-strong t-sm font-medium tabular-nums">
+            <span className="text-text-1 t-sm font-medium tabular-nums">
               {counts[s]}
             </span>
           </div>
@@ -158,7 +159,10 @@ export function TasksSidebarPanel({ repoRoot }: Props) {
 
       <div className="relative flex-1 overflow-y-auto px-2 py-2 flex flex-col gap-1.5">
         {loading && rows.length === 0 ? (
-          <div className="t-xs t-ui text-fg-muted px-2 py-1">Loading…</div>
+          <div className="t-xs t-ui text-text-4 px-2 py-1 flex items-center gap-1.5">
+            <AsciiSpinner className="text-[10px]" />
+            <span>Loading tasks…</span>
+          </div>
         ) : peek.length === 0 ? (
           <EmptyState filter={filter} error={error} onOpenBoard={openFullBoard} />
         ) : (
@@ -170,7 +174,7 @@ export function TasksSidebarPanel({ repoRoot }: Props) {
               <button
                 type="button"
                 onClick={openFullBoard}
-                className="t-xs t-ui text-fg-muted hover:text-accent px-2 py-1 text-left"
+                className="t-xs t-ui text-text-4 hover:text-accent px-2 py-1 text-left"
               >
                 + {overflow} more — open full board
               </button>
@@ -178,7 +182,7 @@ export function TasksSidebarPanel({ repoRoot }: Props) {
           </>
         )}
         {error && peek.length > 0 && (
-          <div className="t-2xs text-fg-muted px-2 py-1 opacity-70" title={error}>
+          <div className="t-2xs text-text-4 px-2 py-1 opacity-70" title={error}>
             Sync issue — showing last known state.
           </div>
         )}
@@ -197,7 +201,7 @@ function EmptyState({
   onOpenBoard: () => void;
 }) {
   return (
-    <div className="t-xs t-ui text-fg-muted px-2 py-3 flex flex-col gap-2 items-start">
+    <div className="t-xs t-ui text-text-4 px-2 py-3 flex flex-col gap-2 items-start">
       <span>
         {filter === "active"
           ? "No in-flight tasks. Switch to All for backlog + done."
@@ -241,8 +245,8 @@ function TaskRow({
         aria-label={`${task.priority} priority`}
       />
       <div className="min-w-0 flex-1 flex flex-col">
-        <span className="t-sm text-fg-strong truncate">{task.title}</span>
-        <div className="flex items-center gap-1.5 t-2xs text-fg-muted">
+        <span className="t-sm text-text-1 truncate">{task.title}</span>
+        <div className="flex items-center gap-1.5 t-2xs text-text-4">
           <StatusPill status={task.status} />
           {task.assignee && <span className="truncate">@{task.assignee}</span>}
           {task.agent_assignee && (
@@ -268,8 +272,8 @@ function StatusPill({ status }: { status: TaskStatus }) {
       : status === "in_review"
         ? "bg-pill-bg text-pill-fg"
         : status === "done"
-          ? "bg-bg-2 text-fg-muted"
-          : "bg-bg-2 text-fg-muted";
+          ? "bg-bg-2 text-text-4"
+          : "bg-bg-2 text-text-4";
   return (
     <span className={`px-1.5 py-0.5 rounded t-2xs ${tone}`}>
       {STATUS_LABEL[status]}
@@ -293,7 +297,7 @@ function FilterChip({
       className={`t-xs t-ui px-1.5 py-0.5 rounded transition-colors ${
         active
           ? "bg-accent-soft text-accent"
-          : "text-fg-muted hover:text-fg-strong hover:bg-bg-2"
+          : "text-text-4 hover:text-text-1 hover:bg-bg-2"
       }`}
     >
       {children}

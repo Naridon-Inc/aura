@@ -172,7 +172,7 @@ export function PageComments(props: PageCommentsProps) {
       </header>
 
       {error && (
-        <div className="mb-3 text-xs text-[color:var(--color-accent-red,#e5534b)]">
+        <div className="mb-3 text-xs text-red">
           {error}
         </div>
       )}

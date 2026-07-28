@@ -471,3 +471,109 @@ impl SemanticParser {
         None
     }
 }
+
+/// The byte offset of the start of the line `offset` sits on.
+///
+/// Insertions anchor to a line boundary rather than to a node's own range,
+/// because a node's range is not always a whole statement: tree-sitter reports
+/// `let FAVORITES = []` as the *declarator* `FAVORITES = []`, so inserting at
+/// its start would land between `let` and the name and produce
+/// `let function loadFavorites() {…} FAVORITES = []`. A line boundary can never
+/// split a token. Scanning for `\n` bytes is UTF-8 safe — a newline byte cannot
+/// occur inside a multi-byte sequence.
+fn line_start(source: &str, offset: usize) -> usize {
+    source[..offset].rfind('\n').map_or(0, |i| i + 1)
+}
+
+/// The byte offset of the end of the line `offset` sits on (before its newline).
+/// The companion to [`line_start`]; see it for why insertions snap to lines.
+fn line_end(source: &str, offset: usize) -> usize {
+    source[offset..].find('\n').map_or(source.len(), |i| offset + i)
+}
+
+impl SemanticParser {
+    /// Put a top-level node that no longer exists back into a file, and return
+    /// the whole new file.
+    ///
+    /// `retrieve_node_source` can only locate a node that is still present, so
+    /// on its own it can *replace* a rewritten node but never recover a deleted
+    /// one — which is the exact case a pre-edit snapshot is taken for. Deletion
+    /// is also the damage the deletion guard blocks a commit over, so "bring it
+    /// back" has to work for it.
+    ///
+    /// The node is placed by its **nearest surviving neighbour** in `past_source`:
+    /// the top-level node directly above it, then the one above that, and so on;
+    /// then the same walk downward. Anchoring to a neighbour rather than a byte
+    /// offset means the node lands where a reader expects even though every line
+    /// around it has moved. When an agent deleted the whole neighbourhood, the
+    /// node goes to the end of the file — placed, never dropped.
+    ///
+    /// Returns `Ok(None)` when `identifier` isn't in `past_source` either, so the
+    /// caller can report honestly instead of writing the file unchanged.
+    pub fn splice_node_back(
+        &mut self,
+        current_source: &str,
+        past_source: &str,
+        ext: &str,
+        identifier: &str,
+    ) -> Result<Option<String>, Box<dyn std::error::Error>> {
+        let (node_src, past_range) =
+            match self.retrieve_node_source(past_source, ext, identifier)? {
+                Some(found) => found,
+                None => return Ok(None),
+            };
+        let node_src = node_src.trim_end().to_string();
+
+        // Every other top-level symbol in the file it came from, in source
+        // order, so "directly above" means what a reader would mean by it.
+        let mut siblings: Vec<(String, std::ops::Range<usize>)> = Vec::new();
+        for name in self
+            .parse_file(past_source, ext)?
+            .into_iter()
+            .filter(|n| n.top_level)
+            .filter_map(|n| n.identifier)
+            .filter(|n| n != identifier)
+        {
+            if let Some((_, range)) = self.retrieve_node_source(past_source, ext, &name)? {
+                siblings.push((name, range));
+            }
+        }
+        siblings.sort_by_key(|(_, r)| r.start);
+
+        let above = siblings
+            .iter()
+            .filter(|(_, r)| r.end <= past_range.start)
+            .map(|(name, _)| name.clone())
+            .rev()
+            .collect::<Vec<_>>();
+        let below = siblings
+            .iter()
+            .filter(|(_, r)| r.start >= past_range.end)
+            .map(|(name, _)| name.clone())
+            .collect::<Vec<_>>();
+
+        for name in above {
+            if let Some((_, r)) = self.retrieve_node_source(current_source, ext, &name)? {
+                let mut out = current_source.to_string();
+                out.insert_str(line_end(current_source, r.end), &format!("\n\n{}", node_src));
+                return Ok(Some(out));
+            }
+        }
+        for name in below {
+            if let Some((_, r)) = self.retrieve_node_source(current_source, ext, &name)? {
+                let mut out = current_source.to_string();
+                out.insert_str(line_start(current_source, r.start), &format!("{}\n\n", node_src));
+                return Ok(Some(out));
+            }
+        }
+
+        let mut out = current_source.to_string();
+        if !out.ends_with('\n') {
+            out.push('\n');
+        }
+        out.push('\n');
+        out.push_str(&node_src);
+        out.push('\n');
+        Ok(Some(out))
+    }
+}

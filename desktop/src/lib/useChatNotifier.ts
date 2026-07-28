@@ -18,7 +18,14 @@
 
 import { useEffect, useRef } from "react";
 import { api } from "./api";
-import { notify } from "./notifications";
+import {
+  notify,
+  isWindowFocused,
+  CHAT_REPLY_ACTION_TYPE,
+  ensureChatReplyActionType,
+  onChatReply,
+} from "./notifications";
+import { playChime, isChimeMuted } from "./chime";
 import { roomTokenParam } from "./roomAuth";
 import {
   AURA_GLOBAL_ROOM_ID,
@@ -71,6 +78,23 @@ export function useChatNotifier(repoRoot: string | null): void {
     };
   }, [repoRoot]);
 
+  // Register the notification "Reply" action once and route any inline reply
+  // back into the right room. The reply's own `extra` carries the repo/channel,
+  // so a single listener handles every room regardless of which repo is focused.
+  useEffect(() => {
+    void ensureChatReplyActionType();
+    void onChatReply((r) => {
+      const root =
+        typeof r.extra.repoRoot === "string" ? r.extra.repoRoot : repoRoot;
+      const channel =
+        typeof r.extra.channel === "string" ? r.extra.channel : "general";
+      if (!root) return;
+      void api.chatSend({ repoRoot: root, channel, body: r.text }).catch(() => {
+        /* reply send failed — best-effort; user can retry in-app */
+      });
+    });
+  }, [repoRoot]);
+
   useEffect(() => {
     if (!repoRoot) return;
     let cancelled = false;
@@ -117,12 +141,31 @@ export function useChatNotifier(repoRoot: string | null): void {
       const who = m.sender_display || "Someone";
       const preview = (m.body ?? "").replace(/\s+/g, " ").trim();
       const body = preview.length > 120 ? `${preview.slice(0, 120)}…` : preview;
-      const title = mentionsMe(m)
+      const mention = mentionsMe(m);
+      const title = mention
         ? `${who} mentioned you in #${channel}`
         : channel === AURA_GLOBAL_CHANNEL
           ? `${who} in #aura`
           : `${who} · #${channel}`;
-      void notify({ title, body: body || undefined, dedupeKey: `chat:${m.id}` });
+      // A message is audible either way: a soft in-app chime when the window is
+      // focused, or the OS notification's own system sound when it isn't — never
+      // both, so one message never double-pings.
+      void (async () => {
+        if (await isWindowFocused()) {
+          playChime(mention ? "mention" : "message");
+          return;
+        }
+        void notify({
+          title,
+          body: body || undefined,
+          dedupeKey: `chat:${m.id}`,
+          // Same mute preference as the in-app chime — silence means silence
+          // on both paths.
+          sound: isChimeMuted() ? undefined : mention ? "Glass" : "Ping",
+          actionTypeId: CHAT_REPLY_ACTION_TYPE,
+          extra: { kind: "chat", repoRoot, channel },
+        });
+      })();
     };
 
     const openRoom = (roomId: string, fallbackChannel?: string) => {

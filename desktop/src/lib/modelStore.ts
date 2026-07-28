@@ -9,8 +9,11 @@ export type ModelId =
   | "auto"
   | "claude-haiku-4-5"
   | "claude-sonnet-4-6"
+  | "claude-sonnet-5"
   | "claude-opus-4-6"
-  | "claude-opus-4-7";
+  | "claude-opus-4-7"
+  | "claude-opus-4-8"
+  | "claude-fable-5";
 
 export type TaskClass = "simple_edit" | "chat" | "plan";
 
@@ -36,8 +39,11 @@ export const MODEL_OPTIONS: { id: ModelId; label: string; hint: string }[] = [
   { id: "auto", label: "Auto", hint: "System picks per task class" },
   { id: "claude-haiku-4-5", label: "Claude Haiku 4.5", hint: "Fast + cheap — simple edits" },
   { id: "claude-sonnet-4-6", label: "Claude Sonnet 4.6", hint: "Balanced — daily chat + refactors" },
+  { id: "claude-sonnet-5", label: "Claude Sonnet 5", hint: "Latest balanced model — coding + agents" },
   { id: "claude-opus-4-6", label: "Claude Opus 4.6", hint: "Strong — bigger plans" },
   { id: "claude-opus-4-7", label: "Claude Opus 4.7", hint: "Strongest — planning + long context" },
+  { id: "claude-opus-4-8", label: "Claude Opus 4.8", hint: "Frontier coding — complex plans" },
+  { id: "claude-fable-5", label: "Claude Fable 5", hint: "Long-horizon work — hardest projects" },
 ];
 
 export const TASK_CLASSES: { id: TaskClass; label: string; hint: string }[] = [

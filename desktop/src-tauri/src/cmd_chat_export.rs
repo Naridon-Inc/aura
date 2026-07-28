@@ -854,6 +854,8 @@ mod tests {
             tool_calls: Vec::new(),
             thinking: None,
             saved_tokens: None,
+            input_tokens: None,
+            output_tokens: None,
         }
     }
 
@@ -877,6 +879,8 @@ mod tests {
                 .collect(),
             thinking: None,
             saved_tokens: None,
+            input_tokens: None,
+            output_tokens: None,
         }
     }
 

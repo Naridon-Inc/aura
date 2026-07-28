@@ -105,13 +105,16 @@ export const Folder = (p: IconProps) => (
   </I>
 );
 
+// Branch — a trunk with two nodes on the spine and a third node forking off a
+// gentle curve. The product's canonical "this is a branch" mark (matches the
+// roster's MainBranchGlyph so branch reads the same everywhere).
 export const GitBranch = (p: IconProps) => (
   <I {...p}>
-    <circle cx="4" cy="4" r="1.5" stroke="currentColor" strokeWidth="1.2" />
-    <circle cx="12" cy="12" r="1.5" stroke="currentColor" strokeWidth="1.2" />
-    <circle cx="12" cy="4" r="1.5" stroke="currentColor" strokeWidth="1.2" />
-    <path d="M4 5.5v3a3 3 0 003 3h3.5" stroke="currentColor" strokeWidth="1.2" fill="none" />
-    <line x1="12" y1="5.5" x2="12" y2="10.5" stroke="currentColor" strokeWidth="1.2" />
+    <circle cx="5" cy="4" r="1.6" stroke="currentColor" strokeWidth="1.3" />
+    <circle cx="5" cy="12" r="1.6" stroke="currentColor" strokeWidth="1.3" />
+    <circle cx="11.5" cy="8.5" r="1.6" stroke="currentColor" strokeWidth="1.3" />
+    <path d="M5 5.6v4.8" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" />
+    <path d="M5 8C6.4 8 7.4 8.5 9.9 8.5" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" fill="none" />
   </I>
 );
 

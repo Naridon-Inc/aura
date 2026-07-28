@@ -51,7 +51,7 @@ export function ModePermissionsBadge({ toolAcl, showSafe = false }: Props) {
 
   return (
     <span
-      className="inline-flex items-center gap-1 rounded-full bg-amber-100/40 px-2 py-0.5 text-[10px] text-amber-900 dark:bg-amber-900/30 dark:text-amber-200"
+      className="inline-flex items-center gap-1 rounded-full bg-amber/10 px-2 py-0.5 text-[10px] text-amber"
       title={`Advanced tools requested: ${wanted.join(", ")}`}
     >
       <ShieldAlert className="h-3 w-3" />

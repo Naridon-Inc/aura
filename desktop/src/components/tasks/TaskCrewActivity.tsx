@@ -267,7 +267,7 @@ export function TaskCrewActivity({
         {life === "failed" ? (
           <div className="mt-2">
             {(node.error_message ?? "").trim() ? (
-              <p className="text-[11.5px] text-rose-300/90 leading-snug whitespace-pre-wrap">
+              <p className="text-[11.5px] text-red leading-snug whitespace-pre-wrap">
                 {node.error_message?.trim()}
               </p>
             ) : null}
@@ -305,9 +305,9 @@ export function TaskCrewActivity({
 // status-only, never affordances.
 const ACCENT: Record<Lifecycle, string> = {
   ready: "var(--color-accent)",
-  working: "#d99a2b",
-  done: "#3fa66a",
-  failed: "#d66a6a",
+  working: "var(--color-amber)",
+  done: "var(--color-accent-green)",
+  failed: "var(--color-red)",
   blocked: "var(--color-text-5)",
   paused: "var(--color-text-5)",
 };
@@ -343,7 +343,7 @@ function DepRow({
             >
               <span
                 className="w-1.5 h-1.5 rounded-full shrink-0"
-                style={{ background: done ? "#3fa66a" : "var(--color-text-5)" }}
+                style={{ background: done ? "var(--color-accent-green)" : "var(--color-text-5)" }}
                 aria-hidden
               />
               <span className="truncate">{t.title || "(untitled)"}</span>

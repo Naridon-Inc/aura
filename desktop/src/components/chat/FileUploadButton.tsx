@@ -23,29 +23,15 @@ import {
   useState,
 } from "react";
 import type { RefObject } from "react";
-import { Paperclip, Loader2, X } from "lucide-react";
-import { invoke } from "@tauri-apps/api/core";
+import { Paperclip, X } from "lucide-react";
+import { AsciiSpinner } from "../ui/ascii-spinner";
 
 import type { ChatAttachment } from "./FileAttachment";
-
-// Local wrapper around the Rust `chat_upload_attachment` command. The
-// idiomatic Aura pattern is to add this to `lib/api.ts` as
-// `api.chatUploadAttachment(repoRoot, filePath)` — see INTEGRATION.md
-// for the one-liner. We invoke directly here so this component
-// compiles standalone before that wiring lands.
-type UploadResp = {
-  url: string;
-  sha256: string;
-  size: number;
-  mime: string;
-  filename: string;
-};
-async function chatUploadAttachment(
-  repoRoot: string,
-  filePath: string,
-): Promise<UploadResp> {
-  return invoke<UploadResp>("chat_upload_attachment", { repoRoot, filePath });
-}
+import { api } from "../../lib/api";
+import {
+  OS_FILE_DRAG,
+  OS_FILE_DROP_COMPOSER,
+} from "../../lib/osFileDrop";
 
 // ───────────────────────────────────────────────────────────────────────
 // Types
@@ -63,6 +49,13 @@ export type FileUploadButtonProps = {
   title?: string;
   /** Optional callback when an upload errors. Use to surface a toast. */
   onError?: (msg: string) => void;
+  /** Increment to open the native picker from an external menu trigger. */
+  openRequest?: number;
+  /** Keep upload/drop behavior mounted without rendering the paperclip. */
+  hideTrigger?: boolean;
+  /** Unique id stamped on the owning composer drop zone. It keeps native
+   *  drops scoped correctly when Team is open in more than one split. */
+  dropZoneId: string;
 };
 
 type PendingUpload = {
@@ -84,6 +77,28 @@ function newId(): string {
   return `up-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 }
 
+const MAX_UPLOAD_BYTES = 25 * 1024 * 1024;
+
+function fileToBase64(file: File): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onerror = () => reject(reader.error ?? new Error(`Could not read ${file.name || "file"}`));
+    reader.onload = () => {
+      const result = typeof reader.result === "string" ? reader.result : "";
+      const separator = result.indexOf(",");
+      if (separator < 0) reject(new Error(`Could not encode ${file.name || "file"}`));
+      else resolve(result.slice(separator + 1));
+    };
+    reader.readAsDataURL(file);
+  });
+}
+
+function displayNameForFile(file: File, index = 0): string {
+  if (file.name.trim()) return file.name;
+  const ext = file.type.split("/")[1]?.split(/[;+]/)[0] || "bin";
+  return `pasted-file-${Date.now()}-${index + 1}.${ext}`;
+}
+
 // ───────────────────────────────────────────────────────────────────────
 // Component
 // ───────────────────────────────────────────────────────────────────────
@@ -94,34 +109,31 @@ export function FileUploadButton({
   dropTargetRef,
   title = "Attach files",
   onError,
+  openRequest,
+  hideTrigger = false,
+  dropZoneId,
 }: FileUploadButtonProps) {
   const [pending, setPending] = useState<PendingUpload[]>([]);
   const [dragging, setDragging] = useState(false);
   const buttonRef = useRef<HTMLButtonElement>(null);
   const overlayId = useId();
+  const lastOpenRequest = useRef(openRequest);
 
   // ── upload pipeline ──────────────────────────────────────────────────
 
-  const uploadOne = useCallback(
-    async (filePath: string, displayName: string) => {
+  const trackUpload = useCallback(
+    async (
+      displayName: string,
+      upload: () => Promise<Omit<ChatAttachment, "filename"> & { filename?: string }>,
+    ) => {
       const id = newId();
       setPending((xs) => [
         ...xs,
         { id, filename: displayName, progress: undefined },
       ]);
       try {
-        // `chatUploadAttachment` is a single Tauri invoke; without a
-        // streaming hook from the backend we can only show a spinner.
-        // (Future: tauri-emit a `chat-upload-progress:<id>` event from
-        // the Rust side and listen here.)
-        const res = await chatUploadAttachment(repoRoot, filePath);
-        onUploaded({
-          url: res.url,
-          sha256: res.sha256,
-          size: res.size,
-          mime: res.mime,
-          filename: res.filename,
-        });
+        const uploaded = await upload();
+        onUploaded({ ...uploaded, filename: uploaded.filename || displayName });
         // Mark complete then drop after a short fade so the user sees
         // the final tick before the chip vanishes.
         setPending((xs) => xs.map((p) => (p.id === id ? { ...p, progress: 1 } : p)));
@@ -138,7 +150,39 @@ export function FileUploadButton({
         // Keep failed chips around — user dismisses with the X.
       }
     },
-    [repoRoot, onUploaded, onError],
+    [onUploaded, onError],
+  );
+
+  const uploadPath = useCallback(
+    (filePath: string, displayName: string) =>
+      trackUpload(displayName, () => api.chatUploadAttachment(repoRoot, filePath)),
+    [repoRoot, trackUpload],
+  );
+
+  const uploadFile = useCallback(
+    (file: File, index = 0) => {
+      const displayName = displayNameForFile(file, index);
+      return trackUpload(displayName, async () => {
+        if (file.size === 0) throw new Error(`${displayName} is empty`);
+        if (file.size > MAX_UPLOAD_BYTES) {
+          throw new Error(`${displayName} is larger than the 25 MB upload limit`);
+        }
+        return api.chatUploadAttachmentBytes(
+          repoRoot,
+          await fileToBase64(file),
+          displayName,
+          file.type || "application/octet-stream",
+        );
+      });
+    },
+    [repoRoot, trackUpload],
+  );
+
+  const uploadFiles = useCallback(
+    (files: File[]) => {
+      files.forEach((file, index) => void uploadFile(file, index));
+    },
+    [uploadFile],
   );
 
   // ── click → native dialog ────────────────────────────────────────────
@@ -153,30 +197,41 @@ export function FileUploadButton({
         if (typeof p !== "string" || !p) continue;
         const name = p.split(/[\\/]/).pop() || "file";
         // Fire-and-forget — uploads run in parallel.
-        void uploadOne(p, name);
+        void uploadPath(p, name);
       }
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
       console.error("file picker failed:", msg);
       onError?.(msg);
     }
-  }, [uploadOne, onError]);
+  }, [uploadPath, onError]);
 
-  // ── drag-and-drop on the button + (optional) composer surface ───────
+  useEffect(() => {
+    if (openRequest === undefined || openRequest === lastOpenRequest.current) return;
+    lastOpenRequest.current = openRequest;
+    void openPicker();
+  }, [openPicker, openRequest]);
+
+  // ── drag, drop, and paste on the owning composer surface ───────
   //
-  // In the Tauri webview, dropped files don't carry an OS path (the
-  // browser DataTransfer API only exposes File objects). For our case
-  // we need the *path* to feed the Rust upload command, so we listen
-  // on Tauri's `tauri://drag-drop` window event instead — it gives us
-  // an absolute path list. Pure HTML5 dnd is wired up for the overlay
-  // affordance only.
+  // Browser File objects (clipboard screenshots and browser-mode drops) are
+  // uploaded by value. Finder and Aura FileTree drops are routed by the
+  // app-level native/in-app path router and arrive through the scoped custom
+  // events below. Every source shares the same progress and error handling.
 
   useEffect(() => {
     const targets: HTMLElement[] = [];
     if (buttonRef.current) targets.push(buttonRef.current);
     if (dropTargetRef?.current) targets.push(dropTargetRef.current);
 
+    const hasFilePayload = (dataTransfer: DataTransfer | null) =>
+      !!dataTransfer &&
+      (dataTransfer.files.length > 0 ||
+        dataTransfer.types.includes("Files") ||
+        dataTransfer.types.includes("text/uri-list"));
+
     const onOver = (e: DragEvent) => {
+      if (!hasFilePayload(e.dataTransfer)) return;
       e.preventDefault();
       if (e.dataTransfer) e.dataTransfer.dropEffect = "copy";
       setDragging(true);
@@ -189,91 +244,80 @@ export function FileUploadButton({
       }
     };
     const onDrop = (e: DragEvent) => {
+      if (!e.dataTransfer?.files.length) return;
       e.preventDefault();
+      e.stopPropagation();
       setDragging(false);
-      // HTML5 dnd path — in browsers we'd read the File objects.
-      // In Tauri we rely on the global tauri://drag-drop listener
-      // below, which gives us real OS paths.
+      uploadFiles(Array.from(e.dataTransfer.files));
+    };
+    const onPaste = (e: ClipboardEvent) => {
+      const clipboard = e.clipboardData;
+      const itemFiles = Array.from(clipboard?.items ?? [])
+        .filter((item) => item.kind === "file")
+        .map((item) => item.getAsFile())
+        .filter((file): file is File => file !== null);
+      // Finder-copy paste is inconsistent across WKWebView versions: some
+      // expose file items, while others populate only clipboardData.files.
+      const files = itemFiles.length > 0
+        ? itemFiles
+        : Array.from(clipboard?.files ?? []);
+      if (files.length === 0) return;
+      e.preventDefault();
+      e.stopPropagation();
+      uploadFiles(files);
     };
     for (const t of targets) {
       t.addEventListener("dragover", onOver);
       t.addEventListener("dragleave", onLeave);
       t.addEventListener("drop", onDrop);
+      t.addEventListener("paste", onPaste);
     }
     return () => {
       for (const t of targets) {
         t.removeEventListener("dragover", onOver);
         t.removeEventListener("dragleave", onLeave);
         t.removeEventListener("drop", onDrop);
+        t.removeEventListener("paste", onPaste);
       }
     };
-  }, [dropTargetRef]);
+  }, [dropTargetRef, uploadFiles]);
 
-  // Tauri-native drag-drop listener: gives us absolute paths.
+  // Finder/Desktop and Aura FileTree drops are hit-tested once by the global
+  // router. `dropZoneId` ensures only the composer under the pointer reacts,
+  // including when multiple Team splits are open simultaneously.
   useEffect(() => {
-    let unlisten: (() => void) | undefined;
-    let cancelled = false;
-    (async () => {
-      try {
-        const { getCurrentWebview } = await import(
-          "@tauri-apps/api/webview"
-        );
-        const webview = getCurrentWebview();
-        // Is a drop position (physical px) over THIS button's own drop
-        // surface? Since `dragDropEnabled` is on, every OS drop in the
-        // window fires this listener AND the global router — without this
-        // guard a drop on the chat composer or terminal would also upload
-        // here. We only act when the cursor is over our button / dropTarget.
-        const overOwnTarget = (pos?: { x: number; y: number }): boolean => {
-          if (!pos) return false;
-          const dpr = window.devicePixelRatio || 1;
-          const x = pos.x / dpr;
-          const y = pos.y / dpr;
-          const rects: HTMLElement[] = [];
-          if (buttonRef.current) rects.push(buttonRef.current);
-          if (dropTargetRef?.current) rects.push(dropTargetRef.current);
-          return rects.some((el) => {
-            const r = el.getBoundingClientRect();
-            return x >= r.left && x <= r.right && y >= r.top && y <= r.bottom;
-          });
-        };
-        const off = await webview.onDragDropEvent((evt) => {
-          if (cancelled) return;
-          const payload = evt.payload as unknown as {
-            type?: string;
-            paths?: string[];
-            position?: { x: number; y: number };
-          };
-          if (payload?.type === "over") {
-            setDragging(overOwnTarget(payload.position));
-            return;
-          }
-          if (payload?.type === "leave" || payload?.type === "cancel") {
-            setDragging(false);
-            return;
-          }
-          if (payload?.type === "drop" && Array.isArray(payload.paths)) {
-            setDragging(false);
-            if (!overOwnTarget(payload.position)) return;
-            for (const p of payload.paths) {
-              if (!p) continue;
-              const name = p.split(/[\\/]/).pop() || "file";
-              void uploadOne(p, name);
-            }
-          }
-        });
-        unlisten = off;
-      } catch (e) {
-        // Webview API not available (e.g. running in pure browser
-        // dev mode). The HTML5 overlay still works for the affordance.
-        console.debug("tauri drag-drop unavailable:", e);
+    const onPathDrop = (event: Event) => {
+      const detail = (event as CustomEvent<{
+        paths?: string[];
+        targetId?: string | null;
+      }>).detail;
+      if (detail?.targetId !== dropZoneId) return;
+      setDragging(false);
+      for (const path of detail.paths ?? []) {
+        if (!path) continue;
+        void uploadPath(path, path.split(/[\\/]/).pop() || "file");
       }
-    })();
-    return () => {
-      cancelled = true;
-      if (unlisten) unlisten();
     };
-  }, [uploadOne]);
+    const onNativeDrag = (event: Event) => {
+      const detail = (event as CustomEvent<{
+        kind?: string | null;
+        targetId?: string | null;
+      }>).detail;
+      if (!detail?.kind) {
+        setDragging(false);
+        return;
+      }
+      setDragging(
+        detail.kind === "composer" && detail.targetId === dropZoneId,
+      );
+    };
+    window.addEventListener(OS_FILE_DROP_COMPOSER, onPathDrop);
+    window.addEventListener(OS_FILE_DRAG, onNativeDrag);
+    return () => {
+      window.removeEventListener(OS_FILE_DROP_COMPOSER, onPathDrop);
+      window.removeEventListener(OS_FILE_DRAG, onNativeDrag);
+    };
+  }, [dropZoneId, uploadPath]);
 
   // ── render ──────────────────────────────────────────────────────────
 
@@ -283,7 +327,7 @@ export function FileUploadButton({
         ref={buttonRef}
         type="button"
         onClick={openPicker}
-        className="text-text-3 hover:text-text-1 p-1 rounded hover:bg-bg-2 transition-colors"
+        className={hideTrigger ? "hidden" : "text-text-3 hover:text-text-1 p-1 rounded hover:bg-bg-2 transition-colors"}
         title={title}
         aria-label={title}
         aria-describedby={dragging ? overlayId : undefined}
@@ -303,10 +347,10 @@ export function FileUploadButton({
       {dragging && (
         <div
           id={overlayId}
-          className="fixed inset-0 z-50 pointer-events-none flex items-center justify-center bg-bg-1/70 backdrop-blur-sm"
+          className="absolute inset-0 z-40 pointer-events-none flex items-center justify-center rounded-[10px] border border-dashed border-accent/40 bg-bg-1/90 backdrop-blur-sm"
         >
-          <div className="bg-bg-2 border-2 border-dashed border-line-soft rounded-lg px-6 py-4 text-text-1 text-[12px] font-medium">
-            Drop to upload
+          <div className="rounded-md bg-bg-2 px-4 py-2 text-text-1 text-[12px] font-medium shadow-lg">
+            Drop files to attach
           </div>
         </div>
       )}
@@ -352,14 +396,14 @@ function UploadChip({
     <div
       className={`h-7 px-2 rounded-md flex items-center gap-1.5 border text-[11.5px] ${
         pending.failed
-          ? "bg-bg-2 border-rose-500/40 text-rose-300"
+          ? "bg-bg-2 border-red/40 text-red"
           : "bg-bg-2 border-line-soft text-text-2"
       }`}
     >
       {pending.failed ? (
-        <span className="text-rose-400">!</span>
+        <span className="text-red">!</span>
       ) : (
-        <Loader2 size={12} className="animate-spin text-text-3" />
+        <AsciiSpinner />
       )}
       <span className="max-w-[140px] truncate" title={pending.filename}>
         {pending.filename}

@@ -56,17 +56,17 @@ type Props = {
   editorRef?: RefObject<Editor | null>;
 };
 
-const COLUMN = "mx-auto w-full max-w-[640px] px-5 sm:px-8 py-5";
-const COMMENT_COLUMN = "mx-auto w-full max-w-[640px] px-5 sm:px-8 pb-8";
+const COLUMN = "pages-doc-column mx-auto w-full max-w-[812px] px-8 py-6";
+const COMMENT_COLUMN = "pages-doc-column mx-auto w-full max-w-[812px] px-8 pb-8";
 
 const VIEW_OPTIONS: {
   value: PageView;
   label: string;
   icon: ReactNode;
 }[] = [
-  { value: "blocks", label: "Blocks", icon: <Blocks className="size-3.5" strokeWidth={1.6} /> },
-  { value: "source", label: "Source", icon: <Code2 className="size-3.5" strokeWidth={1.6} /> },
-  { value: "preview", label: "Preview", icon: <Eye className="size-3.5" strokeWidth={1.6} /> },
+  { value: "blocks", label: "Blocks", icon: <Blocks className="size-4" strokeWidth={1.6} /> },
+  { value: "source", label: "Source", icon: <Code2 className="size-4" strokeWidth={1.6} /> },
+  { value: "preview", label: "Preview", icon: <Eye className="size-4" strokeWidth={1.6} /> },
 ];
 
 const VISIBILITY_OPTIONS: {
@@ -154,23 +154,22 @@ export function PageEditorPane({
   };
 
   return (
-    <div className="pages-doc flex min-w-0 flex-1 flex-col bg-bg-content">
-      <div className="flex min-h-10 items-center justify-between gap-3 border-b border-line-soft px-3.5 py-1.5">
-        <textarea
-          ref={titleRef}
-          value={title}
-          onChange={(e) => onTitleChange(e.target.value.replace(/\n/g, ""))}
-          placeholder="Untitled"
-          rows={1}
-          readOnly={locked}
-          spellCheck={false}
-          className={cn(
-            "min-w-0 flex-1 resize-none truncate border-0 bg-transparent p-0 outline-none",
-            "text-[13px] font-medium leading-[18px] tracking-[-0.005em] text-text-1",
-            "placeholder:text-text-5",
-          )}
-        />
-        <div className="flex shrink-0 items-center gap-1">
+    <div className="pages-doc flex min-w-0 flex-1 flex-col">
+      <div className="pages-doc-topbar">
+        <div className="flex min-w-0 flex-1 items-center gap-3">
+          <span className="pages-doc-badge">Page</span>
+          <textarea
+            ref={titleRef}
+            value={title}
+            onChange={(e) => onTitleChange(e.target.value.replace(/\n/g, ""))}
+            placeholder="Untitled"
+            rows={1}
+            readOnly={locked}
+            spellCheck={false}
+            className="pages-doc-title-input"
+          />
+        </div>
+        <div className="flex shrink-0 items-center gap-2">
           <SaveDot state={saveState} />
           <PageKebab
             view={view}
@@ -186,9 +185,11 @@ export function PageEditorPane({
         </div>
       </div>
 
-      <div className="min-h-0 flex-1 overflow-hidden">
+      <PageViewTabs view={view} onViewChange={onViewChange} />
+
+      <div className="pages-doc-body min-h-0 flex-1 overflow-hidden">
         {view === "blocks" && (
-          <div className="h-full overflow-auto">
+          <div className="pages-doc-scroll h-full overflow-auto">
             <TiptapEditor
               key={note.id}
               value={body}
@@ -214,22 +215,19 @@ export function PageEditorPane({
           </div>
         )}
         {view === "source" && (
-          <div className="h-full overflow-auto">
+          <div className="pages-doc-scroll h-full overflow-auto">
             <textarea
               value={body}
               onChange={(e) => onBodyChange(e.target.value)}
               readOnly={locked}
               spellCheck={false}
-              className={cn(
-                COLUMN,
-                "block min-h-full resize-none border-0 bg-bg-content font-mono text-[12px] leading-[1.65] text-text-1 outline-none",
-              )}
+              className={cn(COLUMN, "pages-doc-source block min-h-full resize-none border-0 outline-none")}
             />
           </div>
         )}
         {view === "preview" && (
-          <div className="h-full overflow-auto">
-            <div className={COLUMN}>
+          <div className="pages-doc-scroll h-full overflow-auto">
+            <div className={cn(COLUMN, "pages-doc-preview")}>
               <MarkdownView source={body} />
             </div>
             <div className={COMMENT_COLUMN}>
@@ -244,6 +242,31 @@ export function PageEditorPane({
           </div>
         )}
       </div>
+    </div>
+  );
+}
+
+function PageViewTabs({
+  view,
+  onViewChange,
+}: {
+  view: PageView;
+  onViewChange: (view: PageView) => void;
+}) {
+  return (
+    <div className="pages-doc-tabs" role="tablist" aria-label="Page view">
+      {VIEW_OPTIONS.map((opt) => (
+        <button
+          key={opt.value}
+          type="button"
+          role="tab"
+          aria-selected={view === opt.value}
+          className={cn("pages-doc-tab", view === opt.value && "is-active")}
+          onClick={() => onViewChange(opt.value)}
+        >
+          {opt.label}
+        </button>
+      ))}
     </div>
   );
 }
@@ -272,17 +295,8 @@ function PageKebab({
   return (
     <DropdownMenu>
       <DropdownMenuTrigger asChild>
-        <button
-          type="button"
-          aria-label="Page menu"
-          title="Page menu"
-          className={cn(
-            "grid size-7 place-items-center rounded-md outline-none transition-colors",
-            "text-text-3 hover:bg-bg-2 hover:text-text-1",
-            "data-[state=open]:bg-bg-2 data-[state=open]:text-text-1",
-          )}
-        >
-          <MoreVertical className="size-4" strokeWidth={1.6} />
+        <button type="button" aria-label="Page menu" title="Page menu" className="pages-doc-menu-button">
+          <MoreVertical className="size-4" strokeWidth={1.7} />
         </button>
       </DropdownMenuTrigger>
       <DropdownMenuContent align="end" className="w-[238px] p-1.5">
@@ -351,10 +365,7 @@ function CompactMenuItem({
   return (
     <DropdownMenuItem
       onSelect={onSelect}
-      className={cn(
-        "gap-2 rounded-md px-2 py-1.5 text-[12px]",
-        active && "bg-bg-2 text-text-1",
-      )}
+      className={cn("gap-2 rounded-md px-2 py-1.5 text-[12px]", active && "bg-bg-2 text-text-1")}
     >
       <span className="grid size-4 place-items-center text-text-4">{icon}</span>
       <span className="min-w-0 flex-1">
@@ -368,16 +379,8 @@ function CompactMenuItem({
 
 function SaveDot({ state }: { state: SaveState }) {
   const text = state === "saving" ? "Saving" : state === "dirty" ? "Unsaved" : "Saved";
-  const color = state === "saving" ? "text-text-4" : state === "dirty" ? "text-amber" : "text-accent-green";
   return (
-    <span className={cn("flex items-center gap-1 text-[11px]", color)} aria-live="polite">
-      <span
-        className={cn(
-          "size-1.5 rounded-full",
-          state === "saving" ? "bg-text-4" : state === "dirty" ? "bg-amber" : "bg-accent-green",
-        )}
-        aria-hidden
-      />
+    <span className={cn("pages-doc-save", state !== "saved" && "is-dirty")} aria-live="polite">
       {text}
     </span>
   );

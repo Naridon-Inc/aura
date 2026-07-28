@@ -4,16 +4,27 @@
 // rendered by the parent — this component only fires when at least one
 // file is open.
 
-import { Fragment, useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type PointerEvent as ReactPointerEvent,
+  type ReactNode,
+} from "react";
+import { convertFileSrc } from "@tauri-apps/api/core";
 import { Tabs } from "./Tabs";
 import { MonacoEditor as Editor } from "./MonacoEditor";
 import { DiffView } from "./DiffView";
 import { EditorBreadcrumbs } from "./EditorBreadcrumbs";
+import { EditorInlineComposer } from "./editor/EditorInlineComposer";
 import { MarkdownView } from "./MarkdownView";
 import { SegmentedControl } from "./ui/segmented";
+import { AsciiSpinner } from "./ui/ascii-spinner";
 import { Input } from "./ui/input";
 import { FileInsightStrip } from "./FileInsightStrip";
-import { AgentSurface, buildAgentTabMenuItems } from "./agent/AgentSurface";
+import { AgentSurface, buildAgentTabMenuItems, type AgentTabMenuItem } from "./agent/AgentSurface";
 import {
   ContextMenu,
   ContextMenuTrigger,
@@ -24,6 +35,8 @@ import {
 import { ManagerSurface, buildManagerTabMenuItems } from "./manager/ManagerSurface";
 import { ManagerDashboardSurface } from "./manager/ManagerDashboardSurface";
 import { WorkSurfaceEmpty } from "./workpanes/WorkSurfaceEmpty";
+import { WorkspaceSetupFeed } from "./workpanes/WorkspaceSetupFeed";
+import { useInFlight, dismissInFlight } from "../lib/workspaceInFlightStore";
 import { Terminal } from "./Terminal";
 import { IntentInspector } from "./workpanes/IntentInspector";
 import { ProvenanceReplay } from "./workpanes/ProvenanceReplay";
@@ -63,8 +76,12 @@ import {
   samePaneRef,
   treeContains,
   treeLeaves,
+  treeLeafNodes,
+  treeAllRefs,
   treePaneCount,
   sessionsViewFromId,
+  openBrowserTab,
+  newBrowserTabId,
   type AgentTab,
   type OpenFile,
   type PlanTabData,
@@ -82,6 +99,23 @@ import { api, type OutlineNode, type StrictModeInfo, type ZoneRule } from "../li
 import { forgetAgentSession } from "../lib/agentSessionStore";
 import { useTeammatePresence } from "../lib/usePresence";
 import { usePagesActiveTitle } from "../lib/pagesActiveTitle";
+import {
+  useBrowserTabTitles,
+  type BrowserTabMeta,
+} from "../lib/browserTabTitles";
+import { hostOf } from "../lib/browserEngine";
+import { BrowserTab, reapBrowserTabs } from "./workpanes/BrowserTab";
+
+/** Background for a terminal that lives inside a split. A hair cooler +
+ *  darker than the editor panes (bg-content ≈ #161618) and the default xterm
+ *  (#1e1e1e), so a split terminal reads as its own surface. Only the split
+ *  path passes this; single-pane + bottom-panel terminals keep exact VSCode
+ *  parity (#1e1e1e). */
+const SPLIT_TERMINAL_BG = "#1a1a1f";
+
+/** Smallest fraction of a split axis a single pane may shrink to while the
+ *  user drags a divider — keeps a pane from collapsing to nothing. */
+const MIN_PANE_FRACTION = 0.1;
 
 type WorkSurfaceProps = {
   repoRoot: string;
@@ -118,6 +152,7 @@ export function WorkSurface({
   onSnapshot,
 }: WorkSurfaceProps) {
   const store = useEditorStore();
+  const inFlight = useInFlight();
   const [showDiff, setShowDiff] = useState(false);
   const [showOutline, setShowOutline] = useState<boolean>(() => {
     return localStorage.getItem("aura.outline.open") !== "0";
@@ -199,6 +234,23 @@ export function WorkSurface({
   // plan/manager/agent tab in the layout invisible just because focus
   // moved. activeSplitRef is a focus hint, not a visibility gate.
   const splitLayout = store.splitLayout ?? null;
+
+  // Reap browser webviews whose tab left the layout. Only the active tab in a
+  // leaf is mounted, so a BrowserTab body unmounting can't tell "switched away"
+  // from "closed" — it always just hides. This central pass, keyed on the set
+  // of browser ids STILL present (every tab, not just active), is the one place
+  // a browser webview is actually destroyed.
+  const browserIdsKey = useMemo(() => {
+    if (!splitLayout) return "";
+    const ids = treeAllRefs(splitLayout)
+      .filter((r) => r.kind === "browser")
+      .map((r) => (r as { id: string }).id);
+    return ids.sort().join("|");
+  }, [splitLayout]);
+  useEffect(() => {
+    const active = new Set(browserIdsKey ? browserIdsKey.split("|") : []);
+    reapBrowserTabs(active);
+  }, [browserIdsKey]);
   // DFS leaf order — resolves every leaf in the tree to its concrete
   // surface (or null if the underlying tab/file vanished). The render
   // path walks the tree and looks up each leaf in this list by index;
@@ -471,7 +523,7 @@ export function WorkSurface({
     // so the existing `resolvedPanes` + index-based store mutators
     // keep working with no further changes.
     let leafCursor = 0;
-    const renderTree = (node: WorkSplitTree): ReactNode => {
+    const renderTree = (node: WorkSplitTree, path: number[] = []): ReactNode => {
       if (node.kind === "leaf") {
         const idx = leafCursor++;
         const activeRef = node.tabs[node.activeIndex];
@@ -506,29 +558,20 @@ export function WorkSurface({
           </SplitPaneShell>
         );
       }
-      // Split node — flex container, recursive children with dividers.
+      // Split node — a resizable flex container. Each child is wrapped in a
+      // flex-grow cell (weights from `node.sizes`, equal when absent) with a
+      // draggable divider between siblings. The divider commits new weights
+      // to the store on drop (persisted via SPLIT_LAYOUT_VERSION v3). `path`
+      // addresses this node so the commit targets the right split.
       return (
-        <div
-          key={`split-${leafCursor}-${node.direction}-${node.children.length}`}
-          className={`flex-1 min-h-0 min-w-0 flex ${
-            node.direction === "row" ? "flex-row" : "flex-col"
-          }`}
+        <SplitContainer
+          key={`split-${path.join(".")}-${node.direction}-${node.children.length}`}
+          direction={node.direction}
+          sizes={node.sizes}
+          onCommitSizes={(w) => store.setSplitSizes(path, w)}
         >
-          {node.children.map((child, i) => (
-            <Fragment key={`c-${i}`}>
-              {i > 0 && (
-                <div
-                  className={
-                    node.direction === "row"
-                      ? "w-px bg-line-soft flex-shrink-0"
-                      : "h-px bg-line-soft flex-shrink-0"
-                  }
-                />
-              )}
-              {renderTree(child)}
-            </Fragment>
-          ))}
-        </div>
+          {node.children.map((child, i) => renderTree(child, [...path, i]))}
+        </SplitContainer>
       );
     };
     return (
@@ -538,6 +581,34 @@ export function WorkSurface({
             so users don't see two parallel rows of the same tabs. */}
         {renderTree(splitLayout)}
       </div>
+    );
+  }
+
+  // Setup-feed gate: the moment you're switched INTO a freshly created copy,
+  // show the Conductor-style provisioning feed full-pane (in place of the
+  // empty chat / booting agent) until the launch resolves, then hand off to
+  // the live workspace. Matched by the new worktree's own path so it only
+  // ever fires in the new copy — never nags the workspace you launched from.
+  // `worktreePath` is set at "spawning", i.e. the instant the switch happens.
+  // Guard `worktreePath !== repoRoot(source)`: a non-git folder launch runs
+  // the agent in the folder itself (path === source), where nothing was
+  // branched or copied — showing the "new copy" feed there would be a lie and
+  // would cover the workspace you're standing in. Only a real managed copy
+  // (a distinct path) gets the feed.
+  const provisioning = inFlight.find(
+    (e) =>
+      !!e.worktreePath &&
+      e.worktreePath.replace(/\/+$/, "") !== e.repoRoot.replace(/\/+$/, "") &&
+      e.worktreePath.replace(/\/+$/, "") === repoRoot.replace(/\/+$/, ""),
+  );
+  if (provisioning) {
+    const fallbackName = projectName ?? repoRoot.split("/").pop() ?? repoRoot;
+    return (
+      <WorkspaceSetupFeed
+        entry={provisioning}
+        projectName={fallbackName}
+        onEnter={() => dismissInFlight(provisioning.key)}
+      />
     );
   }
 
@@ -795,7 +866,7 @@ export function WorkSurface({
               three views without hunting the chrome. Hidden in diff mode
               (the diff toggle owns the toolbar then). */}
           {isMd && !showDiff && active.status === "ok" && (
-            <div className="absolute bottom-4 left-1/2 -translate-x-1/2 z-10 rounded-md shadow-lg shadow-black/30">
+            <div className="absolute bottom-20 left-1/2 -translate-x-1/2 z-10 rounded-md shadow-lg shadow-black/30">
               <SegmentedControl
                 ariaLabel="Markdown view"
                 value={mdView}
@@ -809,8 +880,19 @@ export function WorkSurface({
               />
             </div>
           )}
+          {active.status === "ok" && !showDiff && (
+            <EditorInlineComposer
+              repoRoot={repoRoot}
+              filePath={active.path}
+              fileLabel={
+                active.path.startsWith(repoRoot + "/")
+                  ? active.path.slice(repoRoot.length + 1)
+                  : active.name
+              }
+            />
+          )}
           {active.status !== "ok" ? (
-            <UnreadablePlaceholder file={active} />
+            <FilePreviewOrPlaceholder file={active} />
           ) : showDiff ? (
             <DiffView
               key={active.path}
@@ -888,6 +970,11 @@ export function WorkSurface({
         <TerminalPaneSurface
           tab={pane.tab}
           repoRoot={repoRoot}
+          // Split-only: a hair cooler/darker than the editor panes (bg-content
+          // #161618) and the default xterm (#1e1e1e), so a terminal reads as a
+          // distinct surface once the work area is split. Single-pane + panel
+          // terminals never get this and keep exact VSCode parity.
+          bgTint={SPLIT_TERMINAL_BG}
           onSplit={(direction) => splitTerminal(pane.tab, direction)}
           onAddPane={() => addSplitTerminal(pane.tab.cwd)}
           onClosePane={closePane}
@@ -916,6 +1003,16 @@ export function WorkSurface({
           paneIndex={index}
           currentRepoRoot={repoRoot}
           onClosePane={closePane}
+        />
+      );
+    }
+    if (pane.kind === "browser") {
+      return (
+        <BrowserTab
+          tabId={pane.id}
+          initialUrl={pane.url}
+          onNewTab={() => openBrowserTab()}
+          onClose={closePane}
         />
       );
     }
@@ -950,10 +1047,15 @@ export function WorkSurface({
     if (pane.kind === "channels") {
       const channelsName =
         projectName ?? pane.repoRoot.split("/").pop() ?? pane.repoRoot;
-      // The references-grade 3-pane TeamSurface is the center channels
-      // render. Gating it at the render (not just the opener) keeps a stale
-      // persisted layout snapshot from re-mounting any superseded surface.
-      return <TeamSurface repoRoot={pane.repoRoot} projectName={channelsName} />;
+      // The Team navigator remains in the sidebar. This workpane owns only
+      // the selected conversation and its synchronized detail/canvas panes.
+      return (
+        <TeamSurface
+          repoRoot={pane.repoRoot}
+          projectName={channelsName}
+          mode="detail"
+        />
+      );
     }
     if (pane.kind === "commons") {
       // Full-width Commons (Lounge + Plugin Exchange). Gated behind
@@ -1092,7 +1194,8 @@ type ResolvedSplitPane =
   | { kind: "replay"; ref: WorkPaneRef }
   | { kind: "prove"; ref: WorkPaneRef }
   | { kind: "graph"; ref: WorkPaneRef }
-  | { kind: "pages"; ref: WorkPaneRef; repoRoot: string };
+  | { kind: "pages"; ref: WorkPaneRef; repoRoot: string }
+  | { kind: "browser"; ref: WorkPaneRef; id: string; url?: string };
 
 function resolveSplitPane(
   ref: WorkPaneRef,
@@ -1122,6 +1225,9 @@ function resolveSplitPane(
   }
   if (ref.kind === "empty") {
     return { kind: "empty", ref, id: ref.id };
+  }
+  if (ref.kind === "browser") {
+    return { kind: "browser", ref, id: ref.id, url: ref.url };
   }
   if (ref.kind === "tasks") {
     return { kind: "tasks", ref, repoRoot: ref.id };
@@ -1178,6 +1284,183 @@ function paneIsActive(ref: WorkPaneRef, active: WorkPaneRef | null): boolean {
   // agent / terminal / manager all share the { id } shape
   if (ref.kind !== "file" && active.kind !== "file") return ref.id === active.id;
   return false;
+}
+
+/** Coerce a persisted `sizes` array into a valid weight list of length `n`.
+ *  Falls back to equal weights when absent, wrong-length, or non-finite. */
+function normalizeWeights(sizes: number[] | undefined, n: number): number[] {
+  if (
+    sizes &&
+    sizes.length === n &&
+    sizes.every((x) => typeof x === "number" && isFinite(x) && x > 0)
+  ) {
+    return sizes.slice();
+  }
+  return Array(n).fill(1);
+}
+
+/** The 1px divider between two split cells, widened into a grabbable gutter.
+ *  Shows the accent while hovered or dragging. Pointer capture (set by the
+ *  parent's onDown) keeps the drag alive when the cursor leaves the line. */
+function ResizeHandle({
+  isRow,
+  dragging,
+  onDown,
+  onMove,
+  onUp,
+}: {
+  isRow: boolean;
+  dragging: boolean;
+  onDown: (e: ReactPointerEvent<HTMLDivElement>) => void;
+  onMove: (e: ReactPointerEvent<HTMLDivElement>) => void;
+  onUp: (e: ReactPointerEvent<HTMLDivElement>) => void;
+}) {
+  return (
+    <div
+      role="separator"
+      aria-orientation={isRow ? "vertical" : "horizontal"}
+      onPointerDown={onDown}
+      onPointerMove={onMove}
+      onPointerUp={onUp}
+      onPointerCancel={onUp}
+      className={`relative flex-shrink-0 z-10 group/resize ${
+        isRow ? "w-px cursor-col-resize" : "h-px cursor-row-resize"
+      }`}
+    >
+      {/* Invisible hit zone, ~13px wide, centered on the 1px line. */}
+      <div
+        className={`absolute ${
+          isRow ? "inset-y-0 -left-1.5 -right-1.5" : "inset-x-0 -top-1.5 -bottom-1.5"
+        }`}
+      />
+      {/* The visible divider line. */}
+      <div
+        className={`absolute ${isRow ? "inset-y-0 left-0 w-px" : "inset-x-0 top-0 h-px"} ${
+          dragging
+            ? "bg-[var(--accent-blue,#3b82f6)]"
+            : "bg-line-soft group-hover/resize:bg-[var(--accent-blue,#3b82f6)]"
+        }`}
+      />
+    </div>
+  );
+}
+
+/** A resizable N-way split. Each child sits in a flex-grow cell (weights from
+ *  `sizes`, equal when absent) with a draggable divider between siblings. A
+ *  drag adjusts only the two panes it sits between (their combined weight is
+ *  held constant, so the rest don't move), updates local weights live, and
+ *  commits the final proportions via `onCommitSizes` on release — which the
+ *  store persists. Children are stable elements, so live weight changes
+ *  re-render only this container, not the panes inside it. */
+function SplitContainer({
+  direction,
+  sizes,
+  onCommitSizes,
+  children,
+}: {
+  direction: WorkSplitDirection;
+  sizes?: number[];
+  onCommitSizes: (weights: number[]) => void;
+  children: ReactNode;
+}) {
+  const kids = Array.isArray(children) ? (children as ReactNode[]) : [children];
+  const n = kids.length;
+  const isRow = direction === "row";
+  const containerRef = useRef<HTMLDivElement | null>(null);
+  const [weights, setWeights] = useState<number[]>(() => normalizeWeights(sizes, n));
+  const [activeBoundary, setActiveBoundary] = useState<number | null>(null);
+  // Re-seed on a persisted-sizes change or a child-count change: a structural
+  // mutation (split / close / reorder) arrives as a new count and resets to
+  // equal; a restore or a just-committed drag arrives as new `sizes`.
+  const sizesKey = sizes ? sizes.join(",") : "";
+  useEffect(() => {
+    setWeights(normalizeWeights(sizes, n));
+  }, [sizesKey, n]);
+
+  const drag = useRef<
+    | null
+    | { boundary: number; startPos: number; axisPx: number; base: number[] }
+  >(null);
+
+  const onDown = (boundary: number) => (e: ReactPointerEvent<HTMLDivElement>) => {
+    const el = containerRef.current;
+    if (!el) return;
+    const rect = el.getBoundingClientRect();
+    const axisPx = isRow ? rect.width : rect.height;
+    if (axisPx <= 0) return;
+    e.currentTarget.setPointerCapture?.(e.pointerId);
+    drag.current = {
+      boundary,
+      startPos: isRow ? e.clientX : e.clientY,
+      axisPx,
+      base: weights.slice(),
+    };
+    setActiveBoundary(boundary);
+    e.preventDefault();
+  };
+
+  const onMove = (e: ReactPointerEvent<HTMLDivElement>) => {
+    const d = drag.current;
+    if (!d) return;
+    const total = d.base.reduce((a, b) => a + b, 0);
+    const deltaPx = (isRow ? e.clientX : e.clientY) - d.startPos;
+    const deltaW = (deltaPx / d.axisPx) * total;
+    const a = d.boundary - 1;
+    const b = d.boundary;
+    const pairSum = d.base[a] + d.base[b];
+    // Floor each pane in the pair. Cap the floor at 40% of the pair so an
+    // already-small pair can't invert the clamp bounds into a negative weight.
+    const minW = Math.min(total * MIN_PANE_FRACTION, pairSum * 0.4);
+    let wa = d.base[a] + deltaW;
+    wa = Math.max(minW, Math.min(pairSum - minW, wa));
+    const next = d.base.slice();
+    next[a] = wa;
+    next[b] = pairSum - wa;
+    setWeights(next);
+  };
+
+  const onUp = (e: ReactPointerEvent<HTMLDivElement>) => {
+    const d = drag.current;
+    if (!d) return;
+    drag.current = null;
+    setActiveBoundary(null);
+    e.currentTarget.releasePointerCapture?.(e.pointerId);
+    setWeights((w) => {
+      onCommitSizes(w);
+      return w;
+    });
+  };
+
+  return (
+    <div
+      ref={containerRef}
+      className={`flex-1 min-h-0 min-w-0 flex ${isRow ? "flex-row" : "flex-col"}`}
+    >
+      {kids.map((child, i) => {
+        const cell = (
+          <div
+            key={`cell-${i}`}
+            className="flex min-h-0 min-w-0 overflow-hidden"
+            style={{ flexGrow: weights[i] ?? 1, flexBasis: 0 }}
+          >
+            {child}
+          </div>
+        );
+        if (i === 0) return cell;
+        return [
+          <ResizeHandle
+            key={`rh-${i}`}
+            isRow={isRow}
+            dragging={activeBoundary === i}
+            onDown={onDown(i)}
+            onMove={onMove}
+            onUp={onUp}
+          />,
+          cell,
+        ];
+      })}
+    </div>
+  );
 }
 
 function SplitPaneShell({
@@ -1238,53 +1521,18 @@ function SplitPaneShell({
           : ""
       }`}
     >
-      {canDrag && (
-        <div
-          className="absolute right-1 top-1 z-20 opacity-0 group-hover/pane:opacity-100 transition-opacity"
-          // The grip itself is the draggable element; SplitPaneShell stays
-          // a normal container so terminal text-selection inside it isn't
-          // hijacked by a parent draggable.
-        >
-          <PaneDragHandle index={index!} />
-        </div>
-      )}
+      {/* No corner grip. The pane's tab strip is itself the drag handle
+          (PerPaneTabStrip makes its empty area draggable and emits this same
+          `application/x-aura-split-pane` mime), which keeps the strip's
+          top-right corner clear for the "+" button — a grip pinned there sat
+          on top of "+" and swallowed its clicks. SplitPaneShell stays the
+          drop target via the onDragOver/onDrop above; `canDrag` still gates
+          that. */}
       {children}
     </div>
   );
 }
 
-/** Drag handle for a split pane — placed in pane headers (Agent, Terminal,
- *  File overflow row). Initiates the drag with the source index encoded in
- *  dataTransfer; the target SplitPaneShell handles drop. */
-function PaneDragHandle({
-  index,
-  title = "Drag to reorder pane",
-}: {
-  index: number;
-  title?: string;
-}) {
-  const mime = "application/x-aura-split-pane";
-  return (
-    <span
-      draggable
-      onDragStart={(e) => {
-        e.dataTransfer.setData(mime, String(index));
-        e.dataTransfer.effectAllowed = "move";
-      }}
-      title={title}
-      className="cursor-grab active:cursor-grabbing inline-flex items-center justify-center w-5 h-5 text-text-4 hover:text-text-2 select-none"
-    >
-      <svg width="10" height="10" viewBox="0 0 8 8" fill="currentColor">
-        <circle cx="2" cy="2" r="1" />
-        <circle cx="6" cy="2" r="1" />
-        <circle cx="2" cy="4" r="1" />
-        <circle cx="6" cy="4" r="1" />
-        <circle cx="2" cy="6" r="1" />
-        <circle cx="6" cy="6" r="1" />
-      </svg>
-    </span>
-  );
-}
 
 function TerminalPaneSurface({
   tab,
@@ -1294,11 +1542,16 @@ function TerminalPaneSurface({
   onClosePane,
   onMoveToPanel,
   onSessionOpened,
+  bgTint,
 }: {
   tab: TerminalTab;
   /** Workspace root — keys scrollback save/prune and resolves the launch
    *  profile, so an editor-area terminal restores exactly like a panel one. */
   repoRoot: string;
+  /** Split-only background override (see Terminal's `bgTint`) — makes a
+   *  terminal pane read as a distinct surface from the editor panes beside
+   *  it. Absent for single-pane / panel terminals. */
+  bgTint?: string;
   onSplit: (direction: WorkSplitDirection) => void;
   /** Append another terminal pane to the existing split. Only fires
    *  when the parent already has an active layout — falsy otherwise. */
@@ -1326,7 +1579,10 @@ function TerminalPaneSurface({
   if (onAddPane) items.push({ kind: "item", label: "Add empty pane", onSelect: onAddPane });
   if (onClosePane) items.push({ kind: "item", label: "Close this pane", onSelect: onClosePane });
   return (
-    <div className="h-full w-full flex flex-col bg-bg-content">
+    <div
+      className="h-full w-full flex flex-col bg-bg-content"
+      style={bgTint ? { backgroundColor: bgTint } : undefined}
+    >
       <div className="h-9 px-3 border-b border-line-soft bg-bg-chrome flex items-center gap-2 flex-shrink-0">
         <span className="text-text-4 font-mono text-[11px]">{">_"}</span>
         <div className="min-w-0 flex-1">
@@ -1365,6 +1621,7 @@ function TerminalPaneSurface({
           profile={tab.profileId}
           repoRoot={repoRoot}
           reconnectId={tab.daemonSessionId ?? null}
+          bgTint={bgTint}
           onOpened={(ptyId) => onSessionOpened(tab.termId, ptyId)}
         />
       </div>
@@ -1487,14 +1744,10 @@ function FilePaneSurface({
               repoRoot={repoRoot}
             />
           )
+        ) : file.status === "binary" && isImagePath(file.path) ? (
+          <ImagePreview path={file.path} name={fileBasename(file.path)} />
         ) : (
-          <div className="h-full w-full flex items-center justify-center text-text-4 text-[12px]">
-            {file.status === "binary"
-              ? "Binary file"
-              : file.status === "too_large"
-                ? "File too large"
-                : "Unavailable"}
-          </div>
+          <FilePreviewOrPlaceholder file={file} />
         )}
       </div>
     </div>
@@ -1600,7 +1853,139 @@ function KindBadge({ kind }: { kind: string }) {
   );
 }
 
-function UnreadablePlaceholder({ file }: { file: { status: string; size: number; name: string } }) {
+/** Basename of a path — the file's own name, no directory. */
+function fileBasename(path: string): string {
+  return path.split("/").pop() || path;
+}
+
+// Image extensions we can preview inline. The editor loads these as `binary`
+// (they aren't text), so without this they'd dead-end on "Binary file".
+const IMAGE_EXTS = new Set([
+  "png",
+  "jpg",
+  "jpeg",
+  "gif",
+  "webp",
+  "bmp",
+  "ico",
+  "avif",
+  "svg",
+]);
+
+/** Does this path point at an image we can render inline? Extension-based —
+ *  matches how a file browser decides, and cheap (no byte read). */
+function isImagePath(path: string): boolean {
+  const ext = path.split(".").pop()?.toLowerCase() ?? "";
+  return IMAGE_EXTS.has(ext);
+}
+
+/** Inline image preview for a binary image file. Reads the bytes as base64
+ *  (`read_file_base64`) and renders the real picture, contained to the pane —
+ *  so screenshots, logos and design assets show like they do in any file
+ *  browser instead of a "Binary file" dead end. A non-image or unreadable
+ *  file falls back to the plain "Binary file" line. */
+function ImagePreview({ path, name }: { path: string; name: string }) {
+  const [src, setSrc] = useState<string | null>(null);
+  const [failed, setFailed] = useState(false);
+
+  useEffect(() => {
+    let alive = true;
+    setSrc(null);
+    setFailed(false);
+    api
+      .readFileBase64(path)
+      .then((f) => {
+        if (!alive) return;
+        if (f.is_image && f.data_base64) {
+          setSrc(`data:${f.media_type};base64,${f.data_base64}`);
+        } else {
+          setFailed(true);
+        }
+      })
+      .catch(() => {
+        if (alive) setFailed(true);
+      });
+    return () => {
+      alive = false;
+    };
+  }, [path]);
+
+  if (failed) {
+    return (
+      <div className="h-full w-full flex items-center justify-center bg-bg-content text-text-4 text-[12px]">
+        Binary file
+      </div>
+    );
+  }
+  if (!src) {
+    return (
+      <div className="h-full w-full flex items-center justify-center bg-bg-content">
+        <AsciiSpinner />
+      </div>
+    );
+  }
+  return (
+    <div className="h-full w-full overflow-auto bg-bg-content p-4 flex items-center justify-center">
+      <img
+        src={src}
+        alt={name}
+        className="max-w-full max-h-full object-contain rounded"
+      />
+    </div>
+  );
+}
+
+type PreviewFile = { status: string; size: number; name: string; path: string };
+
+function previewKind(path: string): "image" | "pdf" | "audio" | "video" | null {
+  const ext = path.split(".").pop()?.toLowerCase() ?? "";
+  if (["png", "jpg", "jpeg", "gif", "webp", "svg", "bmp", "ico", "avif"].includes(ext)) {
+    return "image";
+  }
+  if (ext === "pdf") return "pdf";
+  if (["mp3", "wav", "m4a", "aac", "ogg", "flac"].includes(ext)) return "audio";
+  if (["mp4", "mov", "webm", "m4v"].includes(ext)) return "video";
+  return null;
+}
+
+/** Preview common design/reference assets directly from disk through Tauri's
+ *  scoped asset protocol. Unknown binary formats retain the honest fallback. */
+function FilePreviewOrPlaceholder({ file }: { file: PreviewFile }) {
+  const kind = previewKind(file.path);
+  if (!kind) return <UnreadablePlaceholder file={file} />;
+  const src = convertFileSrc(file.path);
+  if (kind === "image") {
+    return (
+      <div className="h-full w-full overflow-auto flex items-center justify-center bg-bg-content p-6">
+        <img
+          src={src}
+          alt={file.name}
+          className="max-w-full max-h-full object-contain rounded-md shadow-lg"
+        />
+      </div>
+    );
+  }
+  if (kind === "pdf") {
+    return (
+      <iframe
+        src={src}
+        title={file.name}
+        className="h-full w-full border-0 bg-white"
+      />
+    );
+  }
+  return (
+    <div className="h-full w-full flex items-center justify-center bg-bg-content p-8">
+      {kind === "audio" ? (
+        <audio src={src} controls className="w-full max-w-xl" />
+      ) : (
+        <video src={src} controls className="max-h-full max-w-full rounded-md shadow-lg" />
+      )}
+    </div>
+  );
+}
+
+function UnreadablePlaceholder({ file }: { file: PreviewFile }) {
   const reason =
     file.status === "too_large"
       ? `file is too large (${(file.size / 1024 / 1024).toFixed(2)} MB cap is 2 MB)`
@@ -1785,6 +2170,8 @@ function fallbackLabelForKind(kind: WorkPaneRef["kind"]): string {
       return "File";
     case "plan":
       return "Plan";
+    case "browser":
+      return "Browser";
     default:
       return "Untitled";
   }
@@ -1805,8 +2192,15 @@ function describeRef(
   store: ReturnType<typeof useEditorStore>,
   currentRepoRoot: string,
   pagesActiveTitle?: string | null,
+  browserTitles?: Record<string, BrowserTabMeta>,
 ): PaneTabPillData | null {
-  const data = describeRefRaw(ref, store, currentRepoRoot, pagesActiveTitle);
+  const data = describeRefRaw(
+    ref,
+    store,
+    currentRepoRoot,
+    pagesActiveTitle,
+    browserTitles,
+  );
   if (!data) return null;
   // One chokepoint so no pane kind — present or future — can leak a raw
   // id onto a tab pill.
@@ -1818,7 +2212,22 @@ function describeRefRaw(
   store: ReturnType<typeof useEditorStore>,
   currentRepoRoot: string,
   pagesActiveTitle?: string | null,
+  browserTitles?: Record<string, BrowserTabMeta>,
 ): PaneTabPillData | null {
+  if (ref.kind === "browser") {
+    // Label tracks the live page: title first, then host, then a plain
+    // "New tab" for a blank start page. `sub` shows the host so the pill
+    // reads e.g. "Aura docs · auravcs.com".
+    const meta = browserTitles?.[ref.id];
+    const host = meta?.url ? hostOf(meta.url) : ref.url ? hostOf(ref.url) : "";
+    const title = meta?.title?.trim();
+    return {
+      ref,
+      label: title && title.length > 0 ? title : host || "New tab",
+      sub: host || "Browser",
+      foreign: false,
+    };
+  }
   if (ref.kind === "agent") {
     const t = store.agentTabs.find((x) => x.sessionId === ref.id);
     if (!t) return null;
@@ -2030,6 +2439,7 @@ function PerPaneTabStrip({
   // Live title of the currently-open page — the pages tab pill reads this
   // instead of the static word "Pages". Null until a page is open.
   const pagesActiveTitle = usePagesActiveTitle();
+  const browserTitles = useBrowserTabTitles();
 
   // Cross-pane drag mime — encodes `{srcPaneId, srcIndex}` as
   // `<paneId>:<index>` so a drop on a different pane's strip can call
@@ -2058,16 +2468,104 @@ function PerPaneTabStrip({
     store.moveTabBetweenPanes(srcPaneId, srcIndex, leaf.paneId);
   }
 
+  // Sibling panes (targets for "Move to pane …") and the total pane count
+  // (gates "Close this pane"). Numbered 1-based by their order in the tree.
+  const allLeaves = store.splitLayout ? treeLeafNodes(store.splitLayout) : [];
+  const paneCount = allLeaves.length;
+  const otherPanes = allLeaves
+    .map((l, i) => ({ paneId: l.paneId, ordinal: i + 1 }))
+    .filter((p) => p.paneId !== leaf.paneId)
+    .map((p) => ({ paneId: p.paneId, label: `pane ${p.ordinal}` }));
+
+  // Right-click menu for ANY tab kind. Agent/manager tabs keep their rich
+  // surface-specific controls; every kind additionally gets the universal
+  // tab ops (close / close others / move between panes). Only non-specialized
+  // menus append "Close this pane" — the agent/manager builders already have
+  // their own pane-close item, so we don't double it up.
+  const buildTabMenu = (ref: WorkPaneRef, idx: number): AgentTabMenuItem[] => {
+    const specialized: AgentTabMenuItem[] =
+      ref.kind === "agent"
+        ? buildAgentTabMenuItems({
+            sessionId: ref.id,
+            inSplit: true,
+            canClosePane: paneCount > 2,
+          })
+        : ref.kind === "manager"
+          ? buildManagerTabMenuItems({ sessionId: ref.id })
+          : [];
+    const single = leaf.tabs.length <= 1;
+    const generic: AgentTabMenuItem[] = [];
+    // Split on any side. Only offered for non-specialized kinds (file,
+    // browser, terminal, views) — agent/manager tabs carry their own split
+    // controls in the specialized block above. Splitting extracts THIS tab
+    // into its own pane and drops an empty picker pane on the chosen side.
+    if (specialized.length === 0) {
+      generic.push(
+        { kind: "item", label: "Split left", onSelect: () => store.splitWithEmpty(ref, "row", "before") },
+        { kind: "item", label: "Split right", onSelect: () => store.splitWithEmpty(ref, "row", "after") },
+        { kind: "item", label: "Split up", onSelect: () => store.splitWithEmpty(ref, "column", "before") },
+        { kind: "item", label: "Split down", onSelect: () => store.splitWithEmpty(ref, "column", "after") },
+        { kind: "separator" },
+      );
+    }
+    generic.push(
+      {
+        kind: "item",
+        label: "Close tab",
+        tone: "danger",
+        onSelect: () => store.closeTabInPane(leaf.paneId, idx),
+      },
+      {
+        kind: "item",
+        label: "Close other tabs",
+        disabled: single,
+        onSelect: () => store.closeOtherTabsInPane(leaf.paneId, idx),
+      },
+    );
+    if (otherPanes.length > 0) {
+      generic.push({ kind: "separator" });
+      for (const op of otherPanes) {
+        generic.push({
+          kind: "item",
+          label: `Move to ${op.label}`,
+          // A lone tab CAN move now — moveTabBetweenPanes collapses the
+          // emptied source pane rather than refusing.
+          onSelect: () => store.moveTabBetweenPanes(leaf.paneId, idx, op.paneId),
+        });
+      }
+    }
+    if (specialized.length === 0 && paneCount > 2) {
+      generic.push({ kind: "separator" });
+      generic.push({
+        kind: "item",
+        label: "Close this pane",
+        tone: "danger",
+        onSelect: () => store.removeSplitPane(paneIndex),
+      });
+    }
+    return specialized.length
+      ? [...specialized, { kind: "separator" }, ...generic]
+      : generic;
+  };
+
   return (
     <div
       className={`flex items-stretch h-8 flex-shrink-0 bg-bg-chrome border-b border-line-soft ${
         overTab ? "outline outline-1 outline-accent-blue -outline-offset-1" : ""
       }`}
+      // This strip is the cross-pane tab DROP target: a tab dragged from
+      // another pane lands anywhere on it → moveTabBetweenPanes. The pane-
+      // REORDER drag SOURCE is the empty spacer after the tabs (below), NOT
+      // this container. A `draggable` container is an ANCESTOR of the tab
+      // buttons, so a tab's `dragstart` bubbles into its handler and corrupts
+      // the drag with the split-pane mime — which silently broke tab moves.
+      // Keeping the reorder source a SIBLING of the tabs keeps the two drags
+      // cleanly separate.
       onDragOver={onStripDragOver}
       onDragLeave={() => setOverTab(false)}
       onDrop={onStripDrop}
     >
-      <div className="flex items-stretch flex-1 min-w-0 overflow-x-auto no-scrollbar">
+      <div className="flex items-stretch min-w-0 overflow-x-auto no-scrollbar">
         {leaf.tabs
           // Unified tab bar: every opened page is a visible tab and nothing is
           // ever hidden. Agent/manager tabs (the Claude session) pin leftmost so
@@ -2076,7 +2574,13 @@ function PerPaneTabStrip({
           .map((ref, idx) => ({ ref, idx }))
           .sort((a, b) => pinRank(a.ref) - pinRank(b.ref))
           .map(({ ref, idx }) => {
-          const data = describeRef(ref, store, currentRepoRoot, pagesActiveTitle);
+          const data = describeRef(
+            ref,
+            store,
+            currentRepoRoot,
+            pagesActiveTitle,
+            browserTitles,
+          );
           if (!data) return null;
           const isActive = idx === leaf.activeIndex;
           const tabButton = (
@@ -2152,67 +2656,50 @@ function PerPaneTabStrip({
           );
           // Agent tabs in a split pane get the same right-click menu as the
           // global strip's agent tabs — the actions fire at the live
-          // AgentSurface for this session via the pane-action bridge. A
-          // pane here is by definition in the split, and "Close this pane"
-          // is offered once the split has more than two panes.
-          if (ref.kind === "agent") {
-            const items = buildAgentTabMenuItems({
-              sessionId: ref.id,
-              inSplit: true,
-              canClosePane: treePaneCount(store.splitLayout) > 2,
-            });
-            return (
-              <ContextMenu key={`${leaf.paneId}-${idx}-${data.label}`}>
-                <ContextMenuTrigger asChild>{tabButton}</ContextMenuTrigger>
-                <ContextMenuContent className="min-w-[12rem]">
-                  {items.map((item, i) =>
-                    item.kind === "separator" ? (
-                      <ContextMenuSeparator key={`sep-${i}`} />
-                    ) : (
-                      <ContextMenuItem
-                        key={item.label}
-                        disabled={item.disabled}
-                        variant={item.tone === "danger" ? "destructive" : "default"}
-                        onSelect={item.onSelect}
-                      >
-                        {item.label}
-                      </ContextMenuItem>
-                    ),
-                  )}
-                </ContextMenuContent>
-              </ContextMenu>
-            );
-          }
-          // Chat tabs in a split pane carry the same right-click controls the
-          // old `.p-tabs` header bar held — split/details/loop/compare/cancel
-          // fire at the live ManagerSurface via the pane-action bridge.
-          if (ref.kind === "manager") {
-            const items = buildManagerTabMenuItems({ sessionId: ref.id });
-            return (
-              <ContextMenu key={`${leaf.paneId}-${idx}-${data.label}`}>
-                <ContextMenuTrigger asChild>{tabButton}</ContextMenuTrigger>
-                <ContextMenuContent className="min-w-[12rem]">
-                  {items.map((item, i) =>
-                    item.kind === "separator" ? (
-                      <ContextMenuSeparator key={`sep-${i}`} />
-                    ) : (
-                      <ContextMenuItem
-                        key={item.label}
-                        disabled={item.disabled}
-                        variant={item.tone === "danger" ? "destructive" : "default"}
-                        onSelect={item.onSelect}
-                      >
-                        {item.label}
-                      </ContextMenuItem>
-                    ),
-                  )}
-                </ContextMenuContent>
-              </ContextMenu>
-            );
-          }
-          return tabButton;
+          // Every tab kind gets a right-click menu now (agents/managers keep
+          // their surface-specific controls via the pane-action bridge; all
+          // kinds get the universal close / close-others / move-to-pane ops).
+          const menuItems = buildTabMenu(ref, idx);
+          return (
+            <ContextMenu key={`${leaf.paneId}-${idx}-${data.label}`}>
+              <ContextMenuTrigger asChild>{tabButton}</ContextMenuTrigger>
+              <ContextMenuContent className="min-w-[12rem]">
+                {menuItems.map((item, i) =>
+                  item.kind === "separator" ? (
+                    <ContextMenuSeparator key={`sep-${i}`} />
+                  ) : (
+                    <ContextMenuItem
+                      key={`${item.label}-${i}`}
+                      disabled={item.disabled}
+                      variant={item.tone === "danger" ? "destructive" : "default"}
+                      onSelect={item.onSelect}
+                    >
+                      {item.label}
+                    </ContextMenuItem>
+                  ),
+                )}
+              </ContextMenuContent>
+            </ContextMenu>
+          );
         })}
       </div>
+      {/* Empty strip background = the pane-REORDER drag handle. It's a SIBLING
+          of the tab buttons (not their ancestor), so dragging a tab never
+          triggers a pane reorder and dragging here never sets the tab mime —
+          the two drags stay cleanly separate. `flex-1` fills the leftover strip
+          width; the tabs row scrolls first when tabs overflow. */}
+      <div
+        className="flex-1 min-w-[16px] self-stretch cursor-grab active:cursor-grabbing"
+        draggable
+        onDragStart={(e) => {
+          e.dataTransfer.setData(
+            "application/x-aura-split-pane",
+            String(paneIndex),
+          );
+          e.dataTransfer.effectAllowed = "move";
+        }}
+        title="Drag to reorder pane"
+      />
       <div className="relative flex items-stretch flex-shrink-0">
         <button
           type="button"
@@ -2353,6 +2840,33 @@ function PaneAddPopover({
           placeholder="Add tab from any workspace…"
           className="h-7 text-[12px]"
         />
+      </div>
+      {/* Spawn a brand-new surface into THIS pane. The existing-tabs list
+          below only re-homes things already open, so without this the in-app
+          browser was unreachable while split (the global "+" menu that hosts
+          it isn't drawn in split mode). Lands + focuses via addTabToPane. */}
+      <div className="px-2 py-1.5 border-b border-line-soft">
+        <button
+          type="button"
+          onClick={() => {
+            store.addTabToPane(leaf.paneId, {
+              kind: "browser",
+              id: newBrowserTabId(),
+            });
+            onClose();
+          }}
+          className="w-full flex items-center gap-2 px-2 h-8 rounded text-left hover:bg-bg-2 transition-colors"
+        >
+          <span className="w-4 h-4 flex items-center justify-center flex-shrink-0 text-text-3">
+            <svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.2">
+              <circle cx="8" cy="8" r="6.2" />
+              <ellipse cx="8" cy="8" rx="2.6" ry="6.2" />
+              <path d="M2 6.2h12M2 9.8h12" strokeLinecap="round" />
+            </svg>
+          </span>
+          <span className="text-[12px] text-text-1">New browser</span>
+          <span className="ml-auto text-[10px] text-text-5 font-mono">⌘⇧B</span>
+        </button>
       </div>
       <div className="flex-1 overflow-y-auto">
         {candidates.length === 0 ? (

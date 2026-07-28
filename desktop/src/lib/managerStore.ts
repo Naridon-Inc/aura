@@ -233,13 +233,64 @@ const inFlightTurns = new Set<string>();
 // start here lets the remounted view resume the real elapsed time.
 const turnStartedAt = new Map<string, number>();
 
+// Observers of the in-flight set. A plain Set isn't observable, so a chat view
+// that DIDN'T start a turn has no way to learn one just went in-flight for the
+// session it's showing — the working indicator would stay dark while the turn
+// streams. That's exactly the "a message injected from the HUD / sidebar shows
+// no working state" bug: `sendAmbientManagerTurn` marks the registry but never
+// touches the mounted view's component-local `busy`, and since the session id
+// doesn't change nothing re-seeds it. These listeners let a mounted view adopt
+// an externally-started turn: every mark/clear notifies, the view re-reads
+// `isManagerTurnInFlight(sid)` and lights (or the terminal chunk clears) its
+// indicator. Notification is fire-and-forget and swallows listener throws so
+// one bad subscriber can't wedge the rest.
+const inFlightListeners = new Set<() => void>();
+
+function notifyInFlight(): void {
+  for (const fn of inFlightListeners) {
+    try {
+      fn();
+    } catch (e) {
+      console.warn("[manager] in-flight listener threw", e);
+    }
+  }
+}
+
+/** Subscribe to in-flight-turn changes across ALL sessions. The listener fires
+ *  after every mark/clear; read `isManagerTurnInFlight(sid)` inside for the
+ *  session you care about. Returns an unsubscribe fn. */
+export function subscribeManagerTurns(fn: () => void): () => void {
+  inFlightListeners.add(fn);
+  return () => {
+    inFlightListeners.delete(fn);
+  };
+}
+
+/** Re-render on every in-flight-turn change. `useWorkingRoots` /
+ *  `useFleetActivity` read `isManagerTurnInFlight` inside a memo whose only
+ *  reactive input was the 5s summary poll — so a turn that armed BETWEEN polls
+ *  (a message injected from the floating HUD or a sidebar composer) didn't light
+ *  the sidebar's working state for up to five seconds. That's the "aura chat is
+ *  running but the sidebar isn't showing it" report. Subscribing here makes any
+ *  hook that folds this tick into its deps recompute the instant a turn marks or
+ *  clears. Returns a monotonically-bumping counter to use as a memo dependency. */
+export function useManagerTurnsTick(): number {
+  const [tick, setTick] = useState(0);
+  useEffect(() => subscribeManagerTurns(() => setTick((t) => t + 1)), []);
+  return tick;
+}
+
 export function markManagerTurnInFlight(sid: string): void {
+  const had = inFlightTurns.has(sid);
   inFlightTurns.add(sid);
+  if (!had) notifyInFlight();
 }
 
 export function clearManagerTurnInFlight(sid: string): void {
+  const had = inFlightTurns.has(sid);
   inFlightTurns.delete(sid);
   turnStartedAt.delete(sid);
+  if (had) notifyInFlight();
 }
 
 export function isManagerTurnInFlight(sid: string): boolean {

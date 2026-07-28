@@ -146,17 +146,15 @@ function Sep() {
   return <span className="text-text-5">›</span>;
 }
 
+// The kind label is a caption, not a state — a function isn't "good" and a
+// type isn't "warning". It used to be inked green/violet/amber per kind,
+// which put three decorative colours in the breadcrumb of every open file.
+// One neutral caption; the word already says which kind it is.
 function KindBadge({ kind }: { kind: string }) {
-  const tone =
-    kind === "fn"
-      ? "text-accent-green"
-      : kind === "class"
-        ? "text-violet"
-        : kind === "type"
-          ? "text-amber"
-          : "text-text-3";
   return (
-    <span className={`text-[9px] uppercase tracking-wider ${tone}`}>{kind}</span>
+    <span className="text-[10px] uppercase tracking-wider text-text-4">
+      {kind}
+    </span>
   );
 }
 

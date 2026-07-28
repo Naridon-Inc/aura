@@ -122,7 +122,7 @@ function SignatureMark({ row }: { row: PluginRow }) {
   if (row.signature === "unknown_key") {
     return (
       <span
-        className="inline-flex items-center gap-0.5 text-[10px] text-amber-400/90"
+        className="inline-flex items-center gap-0.5 text-[10px] text-amber"
         title="Signed by a publisher you haven't trusted yet"
       >
         <ShieldAlert size={12} />

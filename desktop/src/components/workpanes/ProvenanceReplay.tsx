@@ -461,21 +461,29 @@ function KV({
   );
 }
 
+// Verified / in-flight / broken, in the pack's own slots. `--color-accent-blue`
+// was defined by no theme, so "verifying" drew an invisible foreground on a
+// hard-coded blue chip; it is the in-flight state, which is the amber slot. The
+// backgrounds were literal rgba() of hues the palette does not contain — mixed
+// off their own foreground instead so a chip can never drift from its ink.
 function pinTone(status: ManifestStatus): { fg: string; bg: string } {
   switch (status) {
     case "ok":
     case "signed":
       return {
         fg: "var(--color-accent-green)",
-        bg: "rgba(60, 160, 90, 0.20)",
+        bg: "color-mix(in srgb, var(--color-accent-green) 20%, transparent)",
       };
     case "verifying":
       return {
-        fg: "var(--color-accent-blue)",
-        bg: "rgba(80, 130, 220, 0.20)",
+        fg: "var(--color-amber)",
+        bg: "color-mix(in srgb, var(--color-amber) 20%, transparent)",
       };
     case "fail":
-      return { fg: "var(--color-red)", bg: "rgba(220, 50, 50, 0.20)" };
+      return {
+        fg: "var(--color-red)",
+        bg: "color-mix(in srgb, var(--color-red) 20%, transparent)",
+      };
     case "unsigned":
     default:
       return { fg: "var(--color-text-4)", bg: "var(--color-bg-1)" };

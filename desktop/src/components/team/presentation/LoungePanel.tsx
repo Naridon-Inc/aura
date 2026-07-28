@@ -100,7 +100,7 @@ function statusLine(e: RadarEvent): string | null {
 }
 
 /** Case-insensitive identity keys a roster member answers to, so radar
- *  actors ("owner", "claude@cursor") find their roster row. */
+ *  actors ("ashiq", "claude@cursor") find their roster row. */
 function memberKeys(m: TeamMember): string[] {
   const keys = [m.handle, m.name, m.email, m.email.split("@")[0]];
   return keys.filter(Boolean).map((k) => k.toLowerCase());
@@ -406,7 +406,7 @@ export function LoungePanel({
           </div>
         )}
         {reactError && (
-          <div className="mt-2 text-[11px] text-[#e5484d] leading-snug">
+          <div className="mt-2 text-[11px] text-red leading-snug">
             {reactError}
           </div>
         )}

@@ -290,6 +290,9 @@ export type HudSettingsPayload = {
   /** Sidebar panel content size in px — the HUD turns these into CSS vars. */
   sidebarWidth: number;
   sidebarHeight: number;
+  /** Whether the desk-pet perches on the pill. Optional so older emitters
+   *  (pre-pet) still typecheck; the HUD only reacts when it's a boolean. */
+  pet?: boolean;
 };
 
 export function emitHudSettings(payload: HudSettingsPayload): Promise<void> {

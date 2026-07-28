@@ -213,8 +213,8 @@ export function RepoFileChip({
           className="ml-1 px-1.5 py-0.5 rounded text-[10px] font-semibold tracking-wider"
           style={{
             background:
-              "color-mix(in oklab, var(--color-blue, #4a8cff) 18%, transparent)",
-            color: "var(--color-blue, #4a8cff)",
+              "color-mix(in oklab, var(--color-blue) 18%, transparent)",
+            color: "var(--color-blue)",
           }}
         >
           {lineLabel}
@@ -308,7 +308,7 @@ function MenuItem({
         }`}
         style={
           danger
-            ? { color: "var(--color-red, #f87171)" }
+            ? { color: "var(--color-red)" }
             : undefined
         }
       >

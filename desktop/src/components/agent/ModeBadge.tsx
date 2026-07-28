@@ -8,7 +8,7 @@
 import { type CSSProperties } from "react";
 import { cn } from "../../lib/utils";
 
-const ACCENT = "var(--color-accent, #a78bfa)";
+const ACCENT = "var(--color-accent)";
 
 function AutoSparkle({ size = 11 }: { size?: number }) {
   // A compact "auto" sparkle — deliberately unlike any agent brand mark.

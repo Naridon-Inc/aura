@@ -13,6 +13,8 @@
 
 import {
   isPermissionGranted,
+  onAction,
+  registerActionTypes,
   requestPermission,
   sendNotification,
 } from "@tauri-apps/plugin-notification";
@@ -59,14 +61,30 @@ async function isFocused(): Promise<boolean> {
   }
 }
 
+/** Public focus check — lets callers pick the focused path (an in-app chime)
+ *  vs the unfocused path (an OS notification with its own sound) so a single
+ *  event never plays two sounds. */
+export function isWindowFocused(): Promise<boolean> {
+  return isFocused();
+}
+
 /** Fire an OS notification when the window isn't focused. `dedupeKey`
  *  squelches duplicate fires within 4 seconds — the permission flow
  *  fans the same prompt through several listeners and we don't want
- *  three pings for one event. */
+ *  three pings for one event.
+ *
+ *  `sound` names an OS system sound (macOS: "Ping", "Glass", …). `actionTypeId`
+ *  attaches a registered action set (see {@link ensureChatReplyActionType}) so
+ *  the notification can carry an inline Reply field; `extra` is an opaque
+ *  payload round-tripped back to the {@link onChatReply} handler so it knows
+ *  which repo/channel to post the reply into. */
 export async function notify(opts: {
   title: string;
   body?: string;
   dedupeKey?: string;
+  sound?: string;
+  actionTypeId?: string;
+  extra?: Record<string, unknown>;
 }): Promise<void> {
   if (await isFocused()) return;
   if (opts.dedupeKey) {
@@ -90,9 +108,98 @@ export async function notify(opts: {
     sendNotification({
       title: opts.title,
       body: opts.body,
+      sound: opts.sound,
+      actionTypeId: opts.actionTypeId,
+      extra: opts.extra,
     });
   } catch (err) {
     console.warn("notify failed:", err);
+  }
+}
+
+// ── Inline reply from the OS notification ──────────────────────────────────
+//
+// macOS/Linux notifications can carry a text-input action ("Reply"). We
+// register one action type up front, then a single global listener routes any
+// reply back to the app via the caller-supplied sender. The notifier tags each
+// chat notification with `extra.kind === "chat"` plus the repo/channel so the
+// listener knows where to post.
+
+/** actionTypeId to pass to {@link notify} for a chat message that should offer
+ *  an inline reply. */
+export const CHAT_REPLY_ACTION_TYPE = "aura.chat.reply";
+const CHAT_REPLY_ACTION_ID = "REPLY";
+
+let replyActionsReady: Promise<void> | null = null;
+
+/** Register the "Reply" action type once. Safe to call repeatedly and in a
+ *  non-Tauri context (it just no-ops on failure). */
+export function ensureChatReplyActionType(): Promise<void> {
+  if (replyActionsReady) return replyActionsReady;
+  replyActionsReady = (async () => {
+    try {
+      await registerActionTypes([
+        {
+          id: CHAT_REPLY_ACTION_TYPE,
+          actions: [
+            {
+              id: CHAT_REPLY_ACTION_ID,
+              title: "Reply",
+              input: true,
+              inputButtonTitle: "Send",
+              inputPlaceholder: "Reply…",
+            },
+          ],
+        },
+      ]);
+    } catch (err) {
+      console.warn("registerActionTypes failed:", err);
+    }
+  })();
+  return replyActionsReady;
+}
+
+/** The typed reply text isn't delivered under a stable field name across
+ *  platforms, so probe the known candidates on the action payload. */
+function replyTextFrom(payload: Record<string, unknown>): string {
+  for (const k of ["userText", "inputValue", "input", "value", "text"]) {
+    const v = payload[k];
+    if (typeof v === "string" && v.trim()) return v.trim();
+  }
+  return "";
+}
+
+export type ChatReply = { text: string; extra: Record<string, unknown> };
+
+let replyListenerReady = false;
+
+/** Install the single global notification-action listener. `cb` fires only for
+ *  chat notifications (tagged `extra.kind === "chat"`) that carry reply text;
+ *  when the user taps the notification without typing, the window is focused
+ *  instead so they can reply in-app. Idempotent. */
+export async function onChatReply(cb: (r: ChatReply) => void): Promise<void> {
+  if (replyListenerReady) return;
+  replyListenerReady = true;
+  try {
+    await onAction((n) => {
+      const payload = n as unknown as Record<string, unknown>;
+      const actionId = (payload["actionId"] ?? payload["action"]) as
+        | string
+        | undefined;
+      // Only handle our reply action (or an untyped tap on a chat notif).
+      if (actionId && actionId !== CHAT_REPLY_ACTION_ID) return;
+      const extra = ((n as { extra?: Record<string, unknown> }).extra ??
+        {}) as Record<string, unknown>;
+      if (extra["kind"] !== "chat") return;
+      const text = replyTextFrom(payload);
+      if (!text) {
+        void focusWindow();
+        return;
+      }
+      cb({ text, extra });
+    });
+  } catch (err) {
+    console.warn("onAction listen failed:", err);
   }
 }
 

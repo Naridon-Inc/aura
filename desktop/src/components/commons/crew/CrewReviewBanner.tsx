@@ -31,9 +31,9 @@ const KIND_META: Record<
   LoopTaskFlagKind,
   { label: string; icon: typeof Check; tone: string }
 > = {
-  already_done: { label: "Already done", icon: Check, tone: "#3fa66a" },
-  duplicate: { label: "Duplicate", icon: Copy, tone: "#d99a2b" },
-  thin: { label: "Empty stub", icon: CircleSlash, tone: "#717c8a" },
+  already_done: { label: "Already done", icon: Check, tone: "var(--color-accent-green)" },
+  duplicate: { label: "Duplicate", icon: Copy, tone: "var(--color-amber)" },
+  thin: { label: "Empty stub", icon: CircleSlash, tone: "var(--color-text-4)" },
 };
 
 export function CrewReviewBanner({
@@ -56,13 +56,13 @@ export function CrewReviewBanner({
   const n = flags.length;
 
   return (
-    <div className="shrink-0 border-b border-line-soft bg-[color-mix(in_srgb,#d99a2b_7%,transparent)]">
+    <div className="shrink-0 border-b border-line-soft bg-amber/[0.07]">
       <button
         type="button"
         onClick={() => setOpen((v) => !v)}
         className="flex w-full items-center gap-2 px-6 py-2.5 text-left"
       >
-        <AlertTriangle size={14} style={{ color: "#d99a2b" }} className="shrink-0" />
+        <AlertTriangle size={14} style={{ color: "var(--color-amber)" }} className="shrink-0" />
         <span className="text-[12px] font-medium text-text-2">
           {n} task{n === 1 ? "" : "s"} worth a second look before you run
         </span>

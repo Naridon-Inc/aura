@@ -8,10 +8,11 @@
 // command answered.
 
 import { useState } from "react";
-import { ArrowUpRight, Bot, Download, Plus, RefreshCw } from "lucide-react";
+import { ArrowUpRight, Bot, Download, Pin, Plus, RefreshCw } from "lucide-react";
 
 import { api } from "../../../lib/api";
 import type { Agent } from "../../../lib/agents";
+import { usePinned } from "../../../lib/agentPrefs";
 import { AgentIcon } from "../../agent/AgentIcon";
 import { agentDisplayLabel, canonicalAgentId } from "../../../lib/agentIdentity";
 import { Button } from "../../ui/button";
@@ -36,6 +37,9 @@ export function AgentsPane({
   onClose: () => void;
 }) {
   const [scanning, setScanning] = useState(false);
+  // Pin state is shared with the quick-launch PresetsBar — pinning here puts
+  // the agent one tap away on the work surface.
+  const { isPinned, toggle: togglePin } = usePinned();
 
   // Launch an agent through the exact same path as the + button: dispatch the
   // preset event the launcher already listens to, then close so the user lands
@@ -126,6 +130,27 @@ export function AgentsPane({
                           {agent.description}
                         </div>
                       </div>
+                      <button
+                        type="button"
+                        onClick={() => togglePin(agent.id)}
+                        aria-pressed={isPinned(agent.id)}
+                        title={
+                          isPinned(agent.id)
+                            ? "Pinned to the quick-launch bar — click to unpin"
+                            : "Pin to the quick-launch bar"
+                        }
+                        className="shrink-0 rounded-md p-1.5 transition-colors hover:bg-bg-2"
+                        style={{
+                          color: isPinned(agent.id)
+                            ? "var(--color-blue)"
+                            : "var(--color-text-4)",
+                        }}
+                      >
+                        <Pin
+                          size={14}
+                          className={isPinned(agent.id) ? "fill-current" : undefined}
+                        />
+                      </button>
                       <Button
                         size="sm"
                         variant="subtle"

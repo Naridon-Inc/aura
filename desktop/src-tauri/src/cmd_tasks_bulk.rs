@@ -401,7 +401,7 @@ mod tests {
             .block_on(tasks_bulk_assign(
                 repo.to_string_lossy().into_owned(),
                 ids.clone(),
-                vec!["owner".into(), "teammate".into()],
+                vec!["ashiq".into(), "mck".into()],
             ))
             .unwrap();
         let listed = rt()
@@ -411,7 +411,7 @@ mod tests {
             .unwrap();
         for t in listed {
             if ids.contains(&t.id) {
-                assert_eq!(t.assignee_ids, vec!["owner".to_string(), "teammate".to_string()]);
+                assert_eq!(t.assignee_ids, vec!["ashiq".to_string(), "mck".to_string()]);
             }
         }
     }
@@ -428,7 +428,7 @@ mod tests {
             &repo,
             &ids[0],
             "created",
-            "owner",
+            "ashiq",
             serde_json::json!({}),
         );
         let result = rt()

@@ -6,7 +6,7 @@
 // arctic-blue for the one primary action, no jargon walls.
 
 import { useCallback, useEffect, useState, type ReactNode } from "react";
-import { Loader2 } from "lucide-react";
+import { AsciiSpinner } from "../../ui/ascii-spinner";
 
 import {
   api,
@@ -197,7 +197,7 @@ export function EmptyHint({
 export function PaneSpinner({ label = "Loading…" }: { label?: string }) {
   return (
     <div className="flex items-center gap-2 px-1 py-6 text-[12px] text-text-4">
-      <Loader2 size={14} className="animate-spin" />
+      <AsciiSpinner />
       {label}
     </div>
   );

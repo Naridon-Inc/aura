@@ -8,13 +8,13 @@ import {
   GitHubMark,
   GitLabMark,
   GoogleMark,
-  Spinner,
   CheckIcon,
 } from "./icons";
 import {
   useDeviceSignIn,
   type SignInProvider,
 } from "./useDeviceSignIn";
+import { AsciiSpinner } from "../ui/ascii-spinner";
 import { Button } from "../ui/button";
 import type { ReactNode } from "react";
 
@@ -61,7 +61,7 @@ export function SignInScreen({
               className="group relative h-11 w-full inline-flex items-center justify-center gap-2.5 rounded-md border border-line-soft bg-bg-2 text-[13px] font-medium text-text-1 hover:bg-bg-3 hover:border-line-strong disabled:opacity-40 disabled:pointer-events-none transition-colors"
             >
               <span className="absolute left-3.5 inline-flex items-center">
-                {active ? <Spinner /> : p.icon}
+                {active ? <AsciiSpinner className="text-[13px] leading-none" /> : p.icon}
               </span>
               {active ? "Waiting for browser…" : p.label}
             </button>

@@ -29,6 +29,7 @@ import { getCurrentWindow } from "@tauri-apps/api/window";
 
 import { AgentIcon } from "../agent/AgentIcon";
 import { MarkdownInline } from "../MarkdownView";
+import { Pet } from "./Pet";
 import { api } from "../../lib/api";
 import {
   emitHudRequestFull,
@@ -118,6 +119,16 @@ function readHudOpacityLS(): number {
     return Number.isFinite(n) ? Math.min(1, Math.max(0.2, n)) : 1;
   } catch {
     return 1;
+  }
+}
+
+// The desk-pet toggle (settingsStore's `LS.hudPet`). Read synchronously at mount
+// so the pet paints with the first frame; kept live via `hud:settings`.
+function readHudPetLS(): boolean {
+  try {
+    return localStorage.getItem("aura.hud.pet") !== "false";
+  } catch {
+    return true;
   }
 }
 
@@ -223,6 +234,7 @@ export function HudApp() {
   // the very first paint is already in the right shape; kept live by the mount
   // effect + the `hud:settings` subscription below.
   const [mode, setMode] = useState<HudPresentationMode>(readHudModeLS);
+  const [petOn, setPetOn] = useState(readHudPetLS);
   // The sidebar panel has a light + a dark skin; follow the app's resolved
   // theme so it matches the rest of the desktop instead of always glaring
   // white. Reads the shared `aura.theme` (same origin) and updates live when
@@ -402,6 +414,7 @@ export function HudApp() {
       setSidebarW(Math.min(480, Math.max(240, p.sidebarWidth)));
       setSidebarH(Math.min(900, Math.max(320, p.sidebarHeight)));
       void api.hudSetOpacity(p.opacity).catch(() => {});
+      if (typeof p.pet === "boolean") setPetOn(p.pet);
     }).then((f) => {
       un = f;
     });
@@ -761,6 +774,7 @@ export function HudApp() {
 
   return (
     <div className={`hud-root hud-status-${state.status}`}>
+      {petOn && !sidebarCollapsed ? <Pet status={state.status} /> : null}
       <div
         ref={pillRef}
         className={`hud-pill${expanded ? " is-expanded" : ""}`}

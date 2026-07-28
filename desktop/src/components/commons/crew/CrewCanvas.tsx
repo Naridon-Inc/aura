@@ -22,7 +22,6 @@ import {
   ChevronRight,
   Flag,
   Layers,
-  Loader2,
   Maximize2,
   Minus,
   Plus,
@@ -32,6 +31,7 @@ import {
 } from "lucide-react";
 
 import type { ReadyViewDto } from "../../../lib/api";
+import { AsciiSpinner } from "../../ui/ascii-spinner";
 import { AgentIcon } from "../../agent/AgentIcon";
 import { agentDisplayLabel, canonicalAgentId } from "../../../lib/agentIdentity";
 import {
@@ -61,8 +61,8 @@ const EMPTY_PROOF: Map<string, CrewProof[]> = new Map();
 // waiting/queued. Green stays status-only.
 const STATUS_DOT: Record<CrewNodeStatus, string> = {
   ready: "var(--color-accent)",
-  working: "#d99a2b",
-  done: "#3fa66a",
+  working: "var(--color-amber)",
+  done: "var(--color-accent-green)",
   blocked: "var(--color-text-5)",
   paused: "var(--color-text-5)",
   other: "var(--color-text-5)",
@@ -85,7 +85,7 @@ const PARALLEL_HUES = [
   "#6aa5ff", // blue
   "#a78bfa", // violet
   "#4dc1a4", // teal
-  "#d99a2b", // amber
+  "#d9a441", // amber
   "#d07aa0", // rose
   "#7bb86a", // moss
   "#5fb0d9", // cyan
@@ -96,7 +96,7 @@ const hueFor = (id: string) => {
   for (let i = 0; i < id.length; i++) h = (h * 31 + id.charCodeAt(i)) >>> 0;
   return PARALLEL_HUES[h % PARALLEL_HUES.length];
 };
-const CREW_DONE_GREEN = "#3fa66a";
+const CREW_DONE_GREEN = "var(--color-accent-green)";
 
 // A big synced board (900+ tasks) is a tall sheet; allow zooming further out so
 // "fit to view" can actually frame the whole thing before you pan in.
@@ -518,7 +518,7 @@ export function CrewCanvas({
                         key={`sr-${n.id}`}
                         d={`M ${x1} ${y1} C ${x1 + dx} ${y1}, ${rx - dx} ${ry}, ${rx} ${ry}`}
                         fill="none"
-                        stroke="#3fa66a"
+                        stroke="var(--color-accent-green)"
                         strokeWidth={1.4}
                         strokeOpacity={op}
                       />
@@ -610,7 +610,7 @@ export function CrewCanvas({
                   title="Let the brain work out which of these must finish before which, and connect them"
                 >
                   {ordering ? (
-                    <Loader2 size={11} className="animate-spin" />
+                    <AsciiSpinner className="text-[11px]" />
                   ) : (
                     <Sparkles size={11} />
                   )}
@@ -802,20 +802,14 @@ function CanvasNode({
               title="Watch this agent work — open its live output"
               className="shrink-0 cursor-pointer rounded-full p-0.5 text-text-4 hover:bg-accent/12 hover:text-accent"
             >
-              {/* Spinner at rest, the watch glyph on card hover. */}
-              <Loader2
-                size={11}
-                className="animate-spin group-hover:hidden"
-                style={{ color: dot }}
-              />
+              {/* Spinner at rest, the watch glyph on card hover. Amber already
+                  IS the "an agent is on it" colour, so the shared spinner needs
+                  no per-node tint here. */}
+              <AsciiSpinner className="text-[11px] group-hover:hidden" />
               <RadioTower size={12} className="hidden group-hover:block" />
             </span>
           ) : (
-            <Loader2
-              size={11}
-              className="shrink-0 animate-spin"
-              style={{ color: dot }}
-            />
+            <AsciiSpinner className="shrink-0 text-[11px]" />
           )
         ) : done ? (
           // A finished step reads as DONE at a glance — a solid green check, not
@@ -918,7 +912,7 @@ function RollupChips({ stat }: { stat: CrewClusterStat }) {
       >
         <div
           className="h-full rounded-full"
-          style={{ width: `${pct}%`, background: "#3fa66a" }}
+          style={{ width: `${pct}%`, background: "var(--color-accent-green)" }}
         />
       </div>
     </div>
@@ -1046,14 +1040,14 @@ function ResultBlock({
       data-node
       className={`absolute flex flex-col rounded-[10px] border px-3 py-2.5 ${
         allProven
-          ? "border-[#3fa66a]/45 bg-[#3fa66a]/[0.08]"
+          ? "border-accent-green/45 bg-accent-green/[0.08]"
           : "border-line bg-bg-1"
       }`}
       style={{ left: r.x, top: r.y, width: r.w, height: r.h }}
     >
       <div
         className={`flex items-center gap-1.5 ${
-          allProven ? "text-[#3fa66a]" : "text-text-4"
+          allProven ? "text-accent-green" : "text-text-4"
         }`}
       >
         <CheckCircle2 size={12} />
@@ -1069,13 +1063,13 @@ function ResultBlock({
           className="h-full rounded-full"
           style={{
             width: `${pct}%`,
-            background: allProven ? "#3fa66a" : "var(--color-accent)",
+            background: allProven ? "var(--color-accent-green)" : "var(--color-accent)",
           }}
         />
       </div>
       <div className="mt-auto pt-1.5 text-[10px] leading-snug">
         {allProven ? (
-          <span className="font-medium text-[#3fa66a]">
+          <span className="font-medium text-accent-green">
             Delivered &amp; proven · {proven}/{stat.total} checks
           </span>
         ) : (
@@ -1176,7 +1170,7 @@ function ClusterBox({
           >
             <div
               className="h-full rounded-full"
-              style={{ width: `${pct}%`, background: "#3fa66a" }}
+              style={{ width: `${pct}%`, background: "var(--color-accent-green)" }}
             />
           </div>
         </div>

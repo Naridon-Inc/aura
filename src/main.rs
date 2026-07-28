@@ -13,6 +13,7 @@ mod aura_loop_run;
 mod loop_accept;
 mod loop_stranded;
 mod loop_worktree;
+mod runner;
 mod work;
 mod worktree_scripts;
 mod repo_settings;
@@ -41,6 +42,7 @@ mod live_sync;
 mod live_conflicts;
 mod agents;
 mod awareness;
+mod worktree;
 
 /// Shared serial lock for tests that mutate the process-global current
 /// directory (the CRDT and conflict stores are cwd-relative). Tests in
@@ -82,6 +84,8 @@ mod acp_server;
 mod manifest_sig;
 mod rekor;
 mod intent_block;
+mod intent_reconcile;
+mod deletion_guard;
 // `team_keys` now lives in the shared `aura-attestation` crate so non-CLI
 // binaries (the desktop shell) can verify registry self-signatures too.
 // Re-exported at the old path so every `crate::team_keys::…` call site here
@@ -92,6 +96,11 @@ mod episodic;
 mod recall_narrate;
 mod intent_query;
 mod intent_vs_actual;
+// Staged intent verification — the approved contract recorded BEFORE the agent
+// runs, compared against the git index while the work is still staged. This is
+// the gate `ci.rs` cannot be: its intent fact needs a commit that does not
+// exist yet at pre-commit time.
+mod verify_intent;
 mod subagent;
 mod ask_user;
 mod propose_plan;
@@ -108,6 +117,9 @@ mod review;
 mod doctor;
 mod continuity;
 mod meta_refs;
+mod node;
+mod git_remote_aura_helper;
+mod repo_identity;
 mod meta_bundle;
 mod refs_sign;
 mod merge_driver;
@@ -893,6 +905,14 @@ enum Commands {
         #[command(subcommand)]
         sub: LoopSubcommands,
     },
+    /// Runner — turn an always-on box (a VPS, a home server) into a
+    /// cloud-visible worker that keeps draining your crew backlog after you
+    /// close the laptop. `aura runner register` mints its token; `aura runner
+    /// serve` runs the supervise loop and heartbeats to the app.
+    Runner {
+        #[command(subcommand)]
+        sub: RunnerSubcommands,
+    },
     /// Open isolated worktrees for parallel coding sessions (a second Claude
     /// Code, Codex, or your own hands), then merge each back AST-aware and
     /// recorded in the intent log — no branch-switching, no lost work.
@@ -913,6 +933,13 @@ enum Commands {
         #[command(subcommand)]
         sub: Option<RadarSubcommands>,
     },
+    /// Cross-worktree control plane — every checkout of this repo, which agent
+    /// is in it, what each is holding, and where two of them are converging on
+    /// the same symbol. Bare `aura worktrees` shows the board.
+    Worktrees {
+        #[command(subcommand)]
+        sub: Option<WorktreeSubcommands>,
+    },
     /// Show the repo-local Ed25519 identity (`did:aura:key/...`) that signs your
     /// awareness events so they can't be spoofed by another actor.
     Identity {
@@ -930,6 +957,31 @@ enum Commands {
         #[command(subcommand)]
         sub: IntentVsActualSubcommands,
     },
+    /// The approved intent contract — what an agent is authorised to change,
+    /// recorded before it starts. approve / show / amend.
+    IntentContract {
+        #[command(subcommand)]
+        sub: IntentContractSubcommands,
+    },
+    /// Verify the STAGED change against the approved intent contract. Exits
+    /// non-zero when a protected or exported symbol was removed without
+    /// approval — this is what blocks the commit.
+    VerifyIntent {
+        /// Compare against the git index (the default, and the only mode that
+        /// can gate a commit that does not exist yet).
+        #[arg(long, default_value_t = true)]
+        staged: bool,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Put one deleted symbol back from the approved baseline, stage it, and
+    /// re-run verification. Leaves every other change the agent made intact.
+    RestoreSymbol {
+        /// The function/class name to restore.
+        symbol: String,
+        #[arg(long)]
+        json: bool,
+    },
     /// Meaning plane over the wire — mirror the intent log onto standard
     /// git notes (refs/notes/aura-intent) so WHO/WHY round-trips through
     /// any git host alongside the code. push / pull / log.
@@ -943,6 +995,22 @@ enum Commands {
     Refs {
         #[command(subcommand)]
         sub: refs_sign::RefsSubcommands,
+    },
+    /// Aura-native repo identity — mint a stable, self-signed UUID for this
+    /// repo (written to `.aura/repo.json`) so its cloud identity is anchored
+    /// to Aura, not the GitHub name. Survives renames, org moves, mirrors, and
+    /// forge-less self-hosting. init / show.
+    #[command(name = "repo-id")]
+    RepoId {
+        #[command(subcommand)]
+        sub: repo_identity::RepoIdSubcommands,
+    },
+    /// Self-hostable Aura git node — host repos over git smart-HTTP keyed by
+    /// Aura repo id, so `git clone` / `git push` work with no GitHub. The
+    /// substrate half of the sovereign-git track. serve / list.
+    Node {
+        #[command(subcommand)]
+        sub: node::NodeSubcommands,
     },
     /// Portable signed meaning bundle — pack intent + goals + commit provenance
     /// into one JSON file that imports into any clone, verifiable offline.
@@ -959,6 +1027,18 @@ enum Commands {
         /// HEAD~1, branch name. Defaults to HEAD.
         #[arg(default_value = "HEAD")]
         sha: String,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Blast radius for one symbol — who depends on it and which user-facing
+    /// features ride on it, from the reverse call graph. No AI tokens. Powers
+    /// the "N things depend on this" pre-flight before a surgical Rewind, so
+    /// you see the fallout *before* you restore.
+    Impact {
+        /// The symbol (function / class name) you're about to change or revert.
+        symbol: String,
+        /// The file that declares it. Repo-relative or absolute.
+        file: String,
         #[arg(long)]
         json: bool,
     },
@@ -1056,6 +1136,12 @@ enum Commands {
         /// surface and any script that wants the verdict without regex.
         #[arg(long)]
         json: bool,
+        /// Anchor the proof to a specific commit — read the code as it was at
+        /// that commit (or the nearest checkpoint around it), not the checked-out
+        /// branch. Lets a session's goals prove against the code that session
+        /// produced even when it lives on a branch that isn't checked out.
+        #[arg(long)]
+        at: Option<String>,
     },
     /// (Internal) Verify semantic safety
     #[command(hide = true)]
@@ -1120,6 +1206,33 @@ enum Commands {
         #[arg(long)]
         source: Option<String>,
         /// Canonical intent type, e.g. "BugFix" (optional)
+        #[arg(long = "type")]
+        intent_type: Option<String>,
+    },
+    /// Seal an intent into a signed block WITHOUT writing a JSONL row.
+    ///
+    /// The shared signing primitive behind every capture surface: the MCP
+    /// `aura_log_intent` tool signs inline, and the desktop app (native
+    /// Aura-chat brain) shells out to this so both produce byte-identical
+    /// signed attestations — same block shape, same `.aura/attest/` mirror,
+    /// same key registry. Prints `{"signed_block_id":..,"key_id":..}` on
+    /// success (or `{}` when no signing key is available). The caller owns
+    /// the JSONL row and stamps these ids into it, so there is exactly one
+    /// intent row per capture no matter which surface sealed it.
+    #[command(name = "sign-intent")]
+    SignIntent {
+        /// The intent text to seal (what changed and why).
+        text: String,
+        /// Repo-relative paths this change declares it will touch. Repeat the
+        /// flag or pass a comma-separated list. Persisted into the block's
+        /// declared_impacts so the commit-time reconciler can flag any file
+        /// touched beyond them. Empty ⇒ no scope claim (divergence stays dormant).
+        #[arg(long)]
+        writes: Vec<String>,
+        /// Coding agent to attribute the sealed block to (default "aura-shell").
+        #[arg(long)]
+        agent: Option<String>,
+        /// Canonical intent type, e.g. "BugFix" (optional).
         #[arg(long = "type")]
         intent_type: Option<String>,
     },
@@ -2472,8 +2585,8 @@ enum AttestAction {
         #[arg(long)]
         json: bool,
         /// Filter to blocks signed for a specific human DID. Accepts
-        /// either the raw env value (e.g. "owner@example.com") or the
-        /// canonical DID form (e.g. "did:aura:human/owner-example-com") —
+        /// either the raw env value (e.g. "ashiq@naridon") or the
+        /// canonical DID form (e.g. "did:aura:human/ashiq-naridon") —
         /// matched case-sensitive against either slot in the block.
         #[arg(long)]
         human: Option<String>,
@@ -3170,6 +3283,65 @@ enum LoopSubcommands {
 }
 
 #[derive(Subcommand)]
+enum RunnerSubcommands {
+    /// Register this account as a cloud runner and mint its token (shown
+    /// once). Uses your cloud login; the printed token is what the runner
+    /// box exports as AURA_RUNNER_TOKEN.
+    Register {
+        /// Display name for the runner (e.g. "home-server", "ci-box").
+        #[arg(long)]
+        name: String,
+        /// Scope the runner to one repo (owner/name). Omit for org-wide.
+        #[arg(long)]
+        repo: Option<String>,
+        /// Agent CLIs this box can run, comma-separated (e.g. "claude").
+        #[arg(long, default_value = "claude")]
+        agents: String,
+    },
+    /// Run the supervise loop: pull cloud crew tasks, drain the ready set,
+    /// push status + commits, heartbeat, repeat. This is what you leave
+    /// running on the always-on box.
+    Serve {
+        /// Display name used in logs (defaults to the registry name / host).
+        #[arg(long)]
+        name: Option<String>,
+        /// Default agent for tasks that don't name their own kind.
+        #[arg(long, default_value = "claude")]
+        agent: String,
+        /// Restrict the cloud task pull to one repo (owner/name).
+        #[arg(long)]
+        repo: Option<String>,
+        /// Lease window (seconds) handed to each claimed task.
+        #[arg(long, default_value_t = 1800)]
+        lease_secs: i64,
+        /// Seconds to sleep between cycles when the backlog is empty.
+        #[arg(long, default_value_t = 20)]
+        poll_secs: u64,
+        /// Run one cycle and exit (for testing or cron-driven runners).
+        #[arg(long)]
+        once: bool,
+        /// Also sync the task graph over git each cycle (pull peers' graph
+        /// before draining, push it after). Use on a clean containerized
+        /// runner; leave off for a manual run to avoid rebasing underfoot.
+        #[arg(long)]
+        git_sync: bool,
+        /// Drain EVERY project in your org that has pending cloud work, each in
+        /// its own auto-cloned workspace — so one always-on box runs all of your
+        /// projects, not just one. Ignored if `--repo` is set (which pins the
+        /// box to a single project).
+        #[arg(long)]
+        all_projects: bool,
+        /// Where per-project workspaces are cloned in `--all-projects` mode.
+        /// Defaults to a `workspaces/` dir beside this box's checkout (or set
+        /// AURA_RUNNER_WORKSPACES).
+        #[arg(long)]
+        workspaces_root: Option<String>,
+    },
+    /// Print this box's runner record from the cloud (needs AURA_RUNNER_TOKEN).
+    Status,
+}
+
+#[derive(Subcommand)]
 enum TaskSubcommands {
     /// Create a new task
     New {
@@ -3300,6 +3472,49 @@ enum ActivitySubcommands {
         /// Override actor
         #[arg(long)]
         actor: Option<String>,
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+#[derive(Subcommand)]
+enum WorktreeSubcommands {
+    /// The board: every checkout, who is working in it, and what is contended.
+    /// Same as bare `aura worktrees`.
+    List {
+        #[arg(long)]
+        json: bool,
+        /// Skip the per-checkout working-tree read (dirty count, drift from
+        /// trunk). Two git invocations per checkout, so worth dropping on a
+        /// repo with many trees when you only want the roster.
+        #[arg(long)]
+        no_git_status: bool,
+        /// Include checkouts that are clean and have nobody working in them.
+        /// They're summarised as a count by default so the busy ones lead.
+        #[arg(long)]
+        all: bool,
+    },
+    /// Which checkout am I in, and where does my state land? Prints the shared
+    /// plane and the private one, which is the whole design in two lines.
+    Whoami {
+        #[arg(long)]
+        json: bool,
+    },
+    /// Say something to another checkout. `--to <name>` addresses one (use
+    /// `main` for the main checkout); omitted, it reaches every agent.
+    Say {
+        /// The message.
+        message: String,
+        /// Checkout to address, e.g. `barcelona` or `main`.
+        #[arg(long)]
+        to: Option<String>,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Read what other checkouts have said to this one.
+    Inbox {
+        #[arg(short, long, default_value = "20")]
+        limit: usize,
         #[arg(long)]
         json: bool,
     },
@@ -3487,6 +3702,52 @@ enum ReviewSubcommands {
 }
 
 #[derive(Subcommand)]
+enum IntentContractSubcommands {
+    /// Record what the agent is authorised to change, before it runs.
+    Approve {
+        /// The goal in one line, in the requester's own words.
+        #[arg(long)]
+        goal: String,
+        /// A symbol the agent may change. Repeatable.
+        #[arg(long = "allow")]
+        allow: Vec<String>,
+        /// A symbol that must survive intact. Repeatable.
+        #[arg(long = "protect")]
+        protect: Vec<String>,
+        /// A path prefix the work is scoped to. Repeatable.
+        #[arg(long = "path")]
+        path: Vec<String>,
+        #[arg(long, default_value = "")]
+        agent: String,
+        #[arg(long, default_value = "")]
+        session: String,
+        #[arg(long, default_value = "")]
+        worktree: String,
+        /// Baseline tree to approve against (defaults to HEAD).
+        #[arg(long)]
+        baseline: Option<String>,
+        /// Record the contract but leave the pre-commit gate uninstalled.
+        #[arg(long)]
+        no_hook: bool,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Print the approved contract.
+    Show {
+        #[arg(long)]
+        json: bool,
+    },
+    /// Widen the contract deliberately — the honest alternative to a bypass.
+    Amend {
+        /// Approve removing this symbol after all. Repeatable.
+        #[arg(long = "approve-removal")]
+        approve_removal: Vec<String>,
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+#[derive(Subcommand)]
 enum IntentVsActualSubcommands {
     /// List recent commits with their commit-time intent counts (cheap)
     List {
@@ -3612,6 +3873,21 @@ fn a11y_label(emoji: &str, text_label: &str) -> String {
     }
 }
 
+/// True when argv[0]'s basename is `git-remote-aura` (with or without a
+/// platform executable suffix), i.e. git invoked us as its remote helper via a
+/// multi-call symlink rather than as the `aura` CLI.
+fn invoked_as_git_remote_aura() -> bool {
+    std::env::args_os()
+        .next()
+        .map(std::path::PathBuf::from)
+        .and_then(|p| {
+            p.file_name()
+                .and_then(|s| s.to_str())
+                .map(|s| s.trim_end_matches(".exe") == "git-remote-aura")
+        })
+        .unwrap_or(false)
+}
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Die quietly when our reader goes away. Rust's runtime sets SIGPIPE to
     // SIG_IGN, so writing to a closed pipe returns EPIPE — which `println!`
@@ -3624,6 +3900,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     unsafe {
         libc::signal(libc::SIGPIPE, libc::SIG_DFL);
     }
+
+    // Multi-call dispatch: when this binary is invoked under the name
+    // `git-remote-aura` (a symlink installed by `aura node install-helper`),
+    // act as the git remote helper instead of the `aura` CLI. Git calls the
+    // helper as `git-remote-aura <remote> <url>`, which clap would reject — so
+    // we branch here, before `Cli::parse`, and hand off to the shared helper.
+    // `cargo install` also ships a real standalone `git-remote-aura` binary; the
+    // symlink path exists for installs that ship only `aura` (e.g. the app
+    // bundle). Both routes run the exact same code (git_remote_aura_helper).
+    if invoked_as_git_remote_aura() {
+        git_remote_aura_helper::run(); // never returns
+    }
+
     setup_crash_reporter();
     let cli = Cli::parse();
 
@@ -3670,6 +3959,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         Commands::Server { .. } => "server",
         Commands::Save { .. } => "save",
         Commands::LogIntent { .. } => "log-intent",
+        Commands::SignIntent { .. } => "sign-intent",
         Commands::ValidateTool => "validate-tool",
         Commands::Blocks { .. } => "blocks",
         Commands::Share => "share",
@@ -3692,6 +3982,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         Commands::Atlas { .. } => "atlas",
         Commands::Goals { .. } => "goals",
         Commands::ChangeNote { .. } => "change-note",
+        Commands::Impact { .. } => "impact",
         Commands::Whoami => "whoami",
         Commands::Disconnect => "disconnect",
         Commands::Usage { .. } => "usage",
@@ -3710,6 +4001,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         Commands::Webhooks { .. } => "webhooks",
         Commands::AgentCard { .. } => "agent-card",
         Commands::MergeDriver { .. } => "merge-driver",
+        Commands::RepoId { .. } => "repo-id",
+        Commands::Node { .. } => "node",
         _ => "internal_command"
     };
     track_event("cli_execution", Some(cmd_name));
@@ -4353,42 +4646,29 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         .filter_map(|n| n.identifier.clone())
                         .collect();
 
-                    let mut deleted_nodes: Vec<String> = Vec::new();
-                    for prev_node in &latest_checkpoint.ast_nodes {
-                        if let Some(ref ident) = prev_node.identifier {
-                            // Skip anonymous/generated identifiers
-                            if ident.is_empty() || ident == "anonymous" || ident.starts_with("__") {
-                                continue;
-                            }
-                            // If a named node existed in the last checkpoint but is missing now, it was deleted
-                            if !staged_identifiers.contains(ident) {
-                                deleted_nodes.push(ident.clone());
-                            }
-                        }
-                    }
+                    // Which named nodes existed in the last checkpoint but are
+                    // gone from the staged tree? The pure decision logic lives in
+                    // `deletion_guard` so it is unit-tested and shared, not buried
+                    // inline in this 7k-line command arm.
+                    let deleted_nodes: Vec<String> = deletion_guard::detect_deleted_nodes(
+                        latest_checkpoint.ast_nodes.iter().map(|n| n.identifier.as_deref()),
+                        &staged_identifiers,
+                    );
 
                     if !deleted_nodes.is_empty() {
                         spinner.finish_and_clear();
 
-                        // Check if intent mentions the deletion
+                        // Union of the stated intent (MCP handshake file) + the
+                        // logged-intent JSONL — the same haystack the alignment
+                        // matcher uses. `is_deletion_accounted` lowercases it, so
+                        // pass it through as-is.
                         let intent_text = fs::read_to_string(".gemini.intent").unwrap_or_default();
                         let intent_log = fs::read_to_string(".aura/intent_log.jsonl").unwrap_or_default();
-                        let combined_intent = format!("{} {}", intent_text, intent_log).to_lowercase();
+                        let combined_intent = format!("{} {}", intent_text, intent_log);
 
-                        let intent_mentions_deletion = combined_intent.contains("remov")
-                            || combined_intent.contains("delet")
-                            || combined_intent.contains("deprecat")
-                            || combined_intent.contains("drop")
-                            || combined_intent.contains("strip")
-                            || combined_intent.contains("clean")
-                            || combined_intent.contains("refactor");
-
-                        // Check if any deleted node names are mentioned in the intent
-                        let intent_mentions_specific = deleted_nodes.iter()
-                            .any(|name| combined_intent.contains(&name.to_lowercase()));
-
-                        // Also check if intent mentions the deleted file/directory paths
-                        // (for bulk directory deletions, listing every node name is unreasonable)
+                        // Deleted file/directory paths — for bulk directory
+                        // removals, naming a path is accountable enough without
+                        // enumerating every symbol inside it.
                         let deleted_file_paths: Vec<String> = {
                             let mut paths = Vec::new();
                             let head = repo.head().ok().and_then(|h| h.peel_to_tree().ok());
@@ -4406,15 +4686,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             }
                             paths
                         };
-                        let intent_mentions_deleted_paths = deleted_file_paths.iter()
-                            .any(|path| {
-                                // Check if intent mentions the file path or its parent directory
-                                let parts: Vec<&str> = path.split('/').collect();
-                                parts.iter().any(|part| !part.is_empty() && part.len() > 2 && combined_intent.contains(*part))
-                            });
 
-                        let is_likely_intentional = intent_mentions_deletion
-                            && (intent_mentions_specific || intent_mentions_deleted_paths);
+                        // Did the agent account for these removals — a removal
+                        // keyword AND a specific node or path? Pure, tested logic.
+                        let is_likely_intentional = deletion_guard::is_deletion_accounted(
+                            &deleted_nodes,
+                            &deleted_file_paths,
+                            &combined_intent,
+                        );
 
                         if !deleted_nodes.is_empty() && !is_likely_intentional && !*force {
                             // Any deletion without intent is suspicious in strict mode
@@ -4437,27 +4716,116 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 }
                             }
 
+                            // The exact, ready-to-run command that makes THESE
+                            // specific removals accountable. It already names the
+                            // removed nodes and opens with a removal keyword, so an
+                            // agent that fills in the reason and runs it verbatim
+                            // clears this gate on the next commit — a fix, not a wall.
+                            let fix_cmd = deletion_guard::rejection_instruction(&deleted_nodes);
+
                             if config.strict_gatekeeper_mode {
-                                println!("\n  {} {}", "How to Fix:".bold().green(), "If this deletion is intentional, log your intent:");
-                                println!("    {} aura log-intent \"Removed <directory/file> because <reason>\"", "$".dimmed());
-                                println!("  {} Mention the deleted file/directory names and a deletion keyword (removed, deleted, cleaned, etc.)", "↳".dimmed());
-                                println!("\n{} Commit halted. {} logic nodes would be lost.", "✗".red().bold(), deleted_nodes.len());
-                                println!("  {} Safety snapshots saved to .aura/snapshots/", "✓".green());
+                                println!("\n  {} {}", "How to Fix:".bold().green(), "This removal is not accounted for. To proceed, log an intent that owns it — run:");
+                                println!("    {} {}", "$".dimmed(), fix_cmd.cyan());
+                                println!("  {} Fill in the real reason, then commit again. Aura clears the gate once the intent names what was removed and why.", "↳".dimmed());
+                                println!("\n{} Commit halted. {} logic node(s) would be lost with no reason on record.", "✗".red().bold(), deleted_nodes.len());
+                                println!("  {} Safety snapshots saved to .aura/snapshots/ — recover a file with {}.", "✓".green(), "aura rewind".italic());
                                 std::process::exit(1);
                             } else {
-                                println!("\n  {} Strict mode is OFF. Proceeding with warning.", "⚠️".yellow());
-                                println!("  {} To block mass deletions, run: {}", "💡".blue(), "aura config set strict-mode true".italic());
+                                println!("\n  {} {}", "How to Fix:".bold().green(), "This removal is not accounted for. Log an intent that owns it — run:");
+                                println!("    {} {}", "$".dimmed(), fix_cmd.cyan());
+                                println!("  {} Strict mode is OFF, so this is not enforced. Make it a hard gate with: {}", "💡".blue(), "aura config set strict-mode true".italic());
                                 let should_continue = dialoguer::Confirm::with_theme(&ColorfulTheme::default())
-                                    .with_prompt(format!("Continue? {} logic nodes will be removed", deleted_nodes.len()))
+                                    .with_prompt(format!("Continue? {} logic node(s) will be removed", deleted_nodes.len()))
                                     .default(false)
                                     .interact()
                                     .unwrap_or(false);
                                 if !should_continue {
-                                    println!("{} Commit cancelled. Review the deletions above.", "✗".red().bold());
+                                    println!("{} Commit cancelled — the removal was left unaccounted.", "✗".red().bold());
+                                    println!("  {} Run the command above to log intent for the removal, then commit again.", "↳".dimmed());
                                     std::process::exit(1);
                                 }
                             }
                         }
+                    }
+                }
+            }
+
+            // ── INTENT-SCOPE RECONCILIATION: did the agent stay inside what it declared? ──
+            // The newest signed intent block may carry a declared write scope —
+            // the files the agent said (via aura_log_intent's `writes`) it would
+            // touch. Stamp the real staged writes into that block's actual_impacts
+            // (the half that was never computed, which is exactly why the
+            // intent-divergence gate never fired) and flag anything touched beyond
+            // the declared scope. Skipped entirely when --force.
+            if !*force {
+                // Real staged writes = added/modified/renamed/typechanged paths in
+                // the tree→index diff. Deletions are the deletion guard's job above.
+                let actual_writes: Vec<String> = {
+                    let mut paths = Vec::new();
+                    let head_tree = repo.head().ok().and_then(|h| h.peel_to_tree().ok());
+                    let mut diff_opts = git2::DiffOptions::new();
+                    if let Ok(diff) = repo.diff_tree_to_index(head_tree.as_ref(), Some(&index), Some(&mut diff_opts)) {
+                        for delta in diff.deltas() {
+                            use git2::Delta::{Added, Copied, Modified, Renamed, Typechange};
+                            if matches!(delta.status(), Added | Modified | Renamed | Copied | Typechange) {
+                                if let Some(p) = delta.new_file().path() {
+                                    let s = p.to_string_lossy().to_string();
+                                    // Aura's own bookkeeping is never a "write" the agent must
+                                    // declare. Besides the `.aura/` and `.git/` trees, the
+                                    // per-agent intent handshake files live at the repo root
+                                    // (`.gemini.intent`, `.claude.intent`) — the pre-commit hook
+                                    // writes them, so counting them would flag Aura's own control
+                                    // file as an undeclared write on every commit.
+                                    let name = p
+                                        .file_name()
+                                        .map(|n| n.to_string_lossy().to_string())
+                                        .unwrap_or_default();
+                                    let is_aura_control = s.contains(".aura/")
+                                        || s.contains(".git/")
+                                        || name == ".gemini.intent"
+                                        || name == ".claude.intent"
+                                        || name == ".aura.intent";
+                                    if !is_aura_control {
+                                        paths.push(s);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    paths
+                };
+
+                if let Some(recon) = intent_reconcile::reconcile_commit(Path::new(".aura/blocks"), &actual_writes) {
+                    if recon.diverged() {
+                        spinner.finish_and_clear();
+                        println!("\n{} Intent Scope Divergence: the change went beyond what was declared.", "🛡️".red().bold());
+                        println!("  {} You said (intent): {}", "↳".dimmed(), recon.intent_summary.yellow());
+                        println!("  {} Declared {} file(s); commit also touched {} undeclared file(s):",
+                            "↳".dimmed(), recon.declared.len(), recon.undeclared.len().to_string().red().bold());
+                        for (i, f) in recon.undeclared.iter().take(15).enumerate() {
+                            println!("    {} {}. {}", "✗".red(), i + 1, f.yellow());
+                        }
+                        if recon.undeclared.len() > 15 {
+                            println!("    {} ... and {} more", "↳".dimmed(), recon.undeclared.len() - 15);
+                        }
+                        if config.strict_gatekeeper_mode {
+                            println!("\n  {} {}", "How to Fix:".bold().green(), "Either narrow the change to the files you declared, or re-log intent listing the fuller scope.");
+                            println!("    {} aura log-intent \"…\"  (or split the commit)", "$".dimmed());
+                            println!("\n{} Commit halted — undeclared writes in strict mode.", "✗".red().bold());
+                            std::process::exit(1);
+                        } else {
+                            println!("\n  {} Strict mode is OFF — recording the divergence and proceeding.", "⚠️".yellow());
+                            println!("  {} To block undeclared writes, run: {}", "💡".blue(), "aura config set strict-mode true".italic());
+                            // Re-arm the spinner so downstream steps still render.
+                            spinner.set_message(format!("{}", "Continuing…".bold()));
+                            spinner.enable_steady_tick(Duration::from_millis(80));
+                        }
+                    } else {
+                        spinner.println(format!(
+                            "{} Intent scope honored — all {} changed file(s) were declared.",
+                            "🛡️ ".green(),
+                            recon.actual.len()
+                        ));
                     }
                 }
             }
@@ -5349,8 +5717,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             // Determine file extension
             let ext = detect_lang_ext(&file_path);
             if ext.is_empty() {
-                println!("Unsupported file extension.");
-                return Ok(());
+                // Honest failure: nothing was brought back, so exit non-zero.
+                // A caller that reports "success" on exit 0 (the desktop
+                // "Bring this back" button) must not paint a false green here.
+                eprintln!("Aura can't bring back this kind of file yet ({}).", file_path);
+                std::process::exit(1);
             }
             let ext = ext.as_str();
 
@@ -5358,17 +5729,24 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let current_source = match fs::read_to_string(file_path) {
                 Ok(s) => s,
                 Err(e) => {
-                    println!("Failed to read target file: {}", e);
-                    return Ok(());
+                    eprintln!("Couldn't open {} to bring it back: {}", file_path, e);
+                    std::process::exit(1);
                 }
             };
 
+            // A deleted piece has no current range. That used to end the command
+            // right here — backwards, because deletion is the case a pre-edit
+            // snapshot is taken for, and the one the deletion guard halts a
+            // commit over. Carry the absence through instead: the searches below
+            // are what find the old version, and it gets spliced back in rather
+            // than replaced.
             let current_node_info = parser.retrieve_node_source(&current_source, ext, identifier)?;
-            let current_range = match current_node_info {
-                Some((_, range)) => range,
+            let was_deleted = current_node_info.is_none();
+            let (current_node_source, current_range) = match current_node_info {
+                Some((src, range)) => (Some(src), Some(range)),
                 None => {
-                    println!("{} Could not find '{}' in the current file.", "✗".red(), identifier);
-                    return Ok(());
+                    println!("  {} '{}' isn't in {} any more — looking for the version that was saved before it went.", "↳".dimmed(), identifier, file_path);
+                    (None, None)
                 }
             };
 
@@ -5378,20 +5756,23 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             //    c) Fall back to HEAD~1 as last resort
 
             let mut past_node_source: Option<String> = None;
+            // The whole file the old version came from, kept so a deleted piece
+            // can be placed by its neighbours instead of a stale byte offset.
+            let mut past_file_source: Option<String> = None;
 
             // Strategy A: Check durable snapshots first
             println!("  {} Searching durable snapshots...", "↳".dimmed());
             let snapshots = checkpoint::SnapshotStore::get_snapshots_for_file(file_path);
             for snap in &snapshots {
                 if let Ok(Some((src, _))) = parser.retrieve_node_source(&snap.content, ext, identifier) {
-                    // Make sure it's actually different from current
-                    if let Some((current_src, _)) = parser.retrieve_node_source(&current_source, ext, identifier)? {
-                        if src != current_src {
-                            println!("  {} Found in snapshot from {} (trigger: {})",
-                                "✓".green(), snap.timestamp, snap.trigger);
-                            past_node_source = Some(src);
-                            break;
-                        }
+                    // Anything found is a real recovery when the piece is gone;
+                    // otherwise it has to actually differ from what's on disk.
+                    if current_node_source.as_deref() != Some(src.as_str()) {
+                        println!("  {} Found in snapshot from {} (trigger: {})",
+                            "✓".green(), snap.timestamp, snap.trigger);
+                        past_node_source = Some(src);
+                        past_file_source = Some(snap.content.clone());
+                        break;
                     }
                 }
             }
@@ -5408,8 +5789,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let mut commit = match repo.head().and_then(|r| r.peel_to_commit()) {
                     Ok(c) => c,
                     Err(_) => {
-                        println!("{} No git history available.", "✗".red());
-                        return Ok(());
+                        // Nothing was brought back, so this cannot exit 0 — the
+                        // desktop "Bring this back" button reads the status and
+                        // would otherwise report a recovery that never happened.
+                        eprintln!("There are no commits yet to look through for an earlier version of '{}'.", identifier);
+                        std::process::exit(1);
                     }
                 };
 
@@ -5420,19 +5804,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         if let Some(blob) = obj.as_blob() {
                             if let Ok(past_source) = std::str::from_utf8(blob.content()) {
                                 if let Ok(Some((src, _))) = parser.retrieve_node_source(past_source, ext, identifier) {
-                                    // Make sure it's different from current
-                                    if let Some((current_src, _)) = parser.retrieve_node_source(&current_source, ext, identifier)? {
-                                        if src != current_src {
-                                            let label = if depth == 0 {
-                                                "HEAD".to_string()
-                                            } else {
-                                                format!("HEAD~{}", depth)
-                                            };
-                                            println!("  {} Found in commit {} ({})",
-                                                "✓".green(), label, &commit.id().to_string()[..8]);
-                                            past_node_source = Some(src);
-                                            break;
-                                        }
+                                    // Same rule as the snapshot pass: a missing
+                                    // piece makes any hit a recovery.
+                                    if current_node_source.as_deref() != Some(src.as_str()) {
+                                        let label = if depth == 0 {
+                                            "HEAD".to_string()
+                                        } else {
+                                            format!("HEAD~{}", depth)
+                                        };
+                                        println!("  {} Found in commit {} ({})",
+                                            "✓".green(), label, &commit.id().to_string()[..8]);
+                                        past_node_source = Some(src);
+                                        past_file_source = Some(past_source.to_string());
+                                        break;
                                     }
                                 }
                             }
@@ -5448,10 +5832,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let past_node_source = match past_node_source {
                 Some(s) => s,
                 None => {
-                    println!("{} No previous version of '{}' found in snapshots or git history.", "✗".red(), identifier);
-                    println!("  {} Tip: Aura auto-snapshots files before AI edits. If no snapshot exists,", "↳".dimmed());
-                    println!("  {} the function may have been created in this session without a prior state.", "↳".dimmed());
-                    return Ok(());
+                    // No snapshot and no differing version in git history: there
+                    // is genuinely nothing to restore. Exit non-zero so the
+                    // desktop button reports an honest "couldn't bring it back"
+                    // instead of a fabricated success.
+                    if was_deleted {
+                        eprintln!(
+                            "'{}' is gone from {}, and Aura has no saved copy of it — no snapshot, and it isn't in the last 50 commits either.",
+                            identifier, file_path
+                        );
+                    } else {
+                        eprintln!(
+                            "There's no earlier saved version of '{}' to bring back — it may have been created here, with no prior version to return to.",
+                            identifier
+                        );
+                    }
+                    std::process::exit(1);
                 }
             };
 
@@ -5460,15 +5856,35 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 eprintln!("  {} Warning: Could not snapshot current state: {}", "⚠️".yellow(), e);
             }
 
-            // 4. Perform the Semantic Surgery
-            let mut new_source = current_source.clone();
-            new_source.replace_range(current_range, &past_node_source);
+            // 4. Perform the Semantic Surgery — replace the piece if it is still
+            //    there, splice it back beside its old neighbours if it isn't.
+            let new_source = match current_range {
+                Some(range) => {
+                    let mut s = current_source.clone();
+                    s.replace_range(range, &past_node_source);
+                    s
+                }
+                None => {
+                    let past_file = past_file_source.unwrap_or_default();
+                    match parser.splice_node_back(&current_source, &past_file, ext, identifier)? {
+                        Some(s) => s,
+                        None => {
+                            eprintln!("Couldn't work out where '{}' belongs in {}.", identifier, file_path);
+                            std::process::exit(1);
+                        }
+                    }
+                }
+            };
 
             // 5. Save the file
             let mut file = OpenOptions::new().write(true).truncate(true).open(file_path)?;
             file.write_all(new_source.as_bytes())?;
 
-            println!("{} Surgically reverted '{}' to its previous logic state.", "✓".green().bold(), identifier);
+            if was_deleted {
+                println!("{} Put '{}' back where it was, from its last saved version.", "✓".green().bold(), identifier);
+            } else {
+                println!("{} Surgically reverted '{}' to its previous logic state.", "✓".green().bold(), identifier);
+            }
             println!("  {} The rest of {} remains untouched.", "↳".dimmed(), file_path);
 
             // Taste Engine — rewind is the strongest negative signal
@@ -5617,11 +6033,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 std::process::exit(2);
             }
         }
-        Commands::GoalTrace { goal, json } => {
-            if *json {
-                crate::gsd::GsdEngine::prove_goal_json(goal);
-            } else {
-                crate::gsd::GsdEngine::prove_goal(goal);
+        Commands::GoalTrace { goal, json, at } => {
+            match (at.as_deref(), *json) {
+                (Some(sha), true) => crate::gsd::GsdEngine::prove_goal_json_at(goal, sha),
+                (Some(sha), false) => crate::gsd::GsdEngine::prove_goal_at(goal, sha),
+                (None, true) => crate::gsd::GsdEngine::prove_goal_json(goal),
+                (None, false) => crate::gsd::GsdEngine::prove_goal(goal),
             }
         }
         Commands::VerifyEnv { target, pos_target } => {            let env_target = target.clone().unwrap_or_else(|| {
@@ -7168,6 +7585,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         Commands::Loop { sub } => {
             handle_loop_command(sub)?;
         }
+        Commands::Runner { sub } => {
+            handle_runner_command(sub)?;
+        }
         Commands::Work { sub } => {
             work::handle(sub)?;
         }
@@ -7214,11 +7634,72 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 awareness::cmd::run_sync(*json, *quiet);
             }
         },
+        Commands::Worktrees { sub } => match sub {
+            None => worktree::cmd::run_list(false, false, false),
+            Some(WorktreeSubcommands::List {
+                json,
+                no_git_status,
+                all,
+            }) => {
+                worktree::cmd::run_list(*json, *no_git_status, *all);
+            }
+            Some(WorktreeSubcommands::Whoami { json }) => {
+                worktree::cmd::run_whoami(*json);
+            }
+            Some(WorktreeSubcommands::Say { message, to, json }) => {
+                worktree::cmd::run_say(message, to.as_deref(), *json);
+            }
+            Some(WorktreeSubcommands::Inbox { limit, json }) => {
+                worktree::cmd::run_inbox(*limit, *json);
+            }
+        },
         Commands::Identity { json } => {
             awareness::identity::run_show(*json);
         }
         Commands::Review { sub } => {
             handle_review_command(sub)?;
+        }
+        Commands::IntentContract { sub } => match sub {
+            IntentContractSubcommands::Approve {
+                goal,
+                allow,
+                protect,
+                path,
+                agent,
+                session,
+                worktree,
+                baseline,
+                no_hook,
+                json,
+            } => {
+                let code = verify_intent::run_approve(
+                    goal,
+                    allow,
+                    protect,
+                    path,
+                    agent,
+                    session,
+                    worktree,
+                    baseline.as_deref(),
+                    *no_hook,
+                    *json,
+                );
+                std::process::exit(code);
+            }
+            IntentContractSubcommands::Show { json } => {
+                std::process::exit(verify_intent::run_show(*json));
+            }
+            IntentContractSubcommands::Amend { approve_removal, json } => {
+                std::process::exit(verify_intent::run_amend(approve_removal, *json));
+            }
+        },
+        Commands::VerifyIntent { staged: _, json } => {
+            // `--staged` is the only mode: a gate that runs after the commit
+            // exists is a report, not a gate.
+            std::process::exit(verify_intent::run_verify(*json));
+        }
+        Commands::RestoreSymbol { symbol, json } => {
+            std::process::exit(verify_intent::run_restore(symbol, *json));
         }
         Commands::IntentVsActual { sub } => {
             handle_intent_vs_actual_command(sub)?;
@@ -7228,6 +7709,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         Commands::Refs { sub } => {
             refs_sign::run(sub)?;
+        }
+        Commands::RepoId { sub } => {
+            repo_identity::run(sub)?;
+        }
+        Commands::Node { sub } => {
+            node::run(sub)?;
         }
         Commands::Bundle { sub } => {
             meta_bundle::run(sub)?;
@@ -7772,7 +8259,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     }
 
                     // 4. Sentinel collisions
-                    let collision_marker_path = crate::session::worktree_aura_path("sentinel/collisions_pending");
+                    let collision_marker_path = crate::worktree::paths::shared_aura_path("sentinel/collisions_pending");
                     let collision_marker = std::path::Path::new(&collision_marker_path);
                     if collision_marker.exists() {
                         if let Ok(c) = std::fs::read_to_string(collision_marker) {
@@ -8577,6 +9064,44 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             // does. Best-effort — a marker write failure is non-fatal.
             let _ = fs::write(aura_dir.join(".intent_logged"), "1");
             // Exit 0, silent on success.
+        }
+        Commands::SignIntent { text, writes, agent, intent_type } => {
+            // Signing-only sibling of `log-intent`: seals the intent into a
+            // signed block (+ `.aura/attest/` mirror + key registry) and prints
+            // the ids, but writes NO JSONL row. The desktop app shells out here
+            // so a native Aura-chat turn seals its intent through the exact same
+            // path the MCP `aura_log_intent` tool uses — one signing surface,
+            // every capture. Prints `{}` (never errors) when no key is present,
+            // so the caller falls back to its unsigned row without breaking.
+            let trimmed = text.trim();
+            if trimmed.is_empty() {
+                println!("{{}}");
+                return Ok(());
+            }
+            // Flatten `--writes a,b --writes c` into one declared-scope list.
+            let declared: Vec<String> = writes
+                .iter()
+                .flat_map(|w| w.split(','))
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect();
+            let agent_label = agent
+                .as_deref()
+                .filter(|s| !s.trim().is_empty())
+                .unwrap_or("aura-shell");
+            let out = match mcp::sign_intent_best_effort(
+                trimmed,
+                intent_type.as_deref(),
+                &declared,
+                agent_label,
+            ) {
+                Some((block_id, key_id)) => serde_json::json!({
+                    "signed_block_id": block_id,
+                    "key_id": key_id,
+                }),
+                None => serde_json::json!({}),
+            };
+            println!("{}", out);
         }
         Commands::ValidateTool => {
             // Reads a tool-call JSON object from STDIN and prints a single-line
@@ -9907,6 +10432,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         Commands::ChangeNote { sha, json } => {
             handle_change_note_command(sha, *json)?;
         }
+        Commands::Impact { symbol, file, json } => {
+            handle_impact_command(symbol, file, *json)?;
+        }
         Commands::Pr { action } => {
             let res = match action {
                 PrAction::Connect { platform } => pr_cmd::connect(platform),
@@ -10919,8 +11447,24 @@ fn run_a2a_task(action: &A2aTaskAction) -> Result<(), String> {
             if let Some(v) = parent {
                 body_obj.insert("parent_task_id".into(), serde_json::json!(v));
             }
-            if let Some(v) = kind {
-                body_obj.insert("task_kind".into(), serde_json::json!(v));
+            match kind {
+                Some(v) => {
+                    body_obj.insert("task_kind".into(), serde_json::json!(v));
+                }
+                None => {
+                    // No explicit --kind. If the caller also gave no acceptance
+                    // criteria, default to `subtask` — a leaf that needs no AC —
+                    // so a bare `aura a2a-task create` succeeds instead of the
+                    // server defaulting to `task` and rejecting it for a missing
+                    // acceptance_criteria (400).
+                    let has_ac = acceptance_criteria
+                        .as_deref()
+                        .map(|s| !s.trim().is_empty())
+                        .unwrap_or(false);
+                    if !has_ac {
+                        body_obj.insert("task_kind".into(), serde_json::json!("subtask"));
+                    }
+                }
             }
             if let Some(v) = acceptance_criteria {
                 body_obj.insert("acceptance_criteria".into(), serde_json::json!(v));
@@ -12562,6 +13106,51 @@ fn print_loop_task(t: &aura_loop::LoopTask) {
     }
 }
 
+fn handle_runner_command(sub: &RunnerSubcommands) -> Result<(), Box<dyn std::error::Error>> {
+    match sub {
+        RunnerSubcommands::Register { name, repo, agents } => {
+            let agent_kinds = agents
+                .split(',')
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect::<Vec<_>>();
+            runner::register(&runner::RegisterOpts {
+                name: name.clone(),
+                repo: repo.clone(),
+                agent_kinds,
+            })
+        }
+        RunnerSubcommands::Serve {
+            name,
+            agent,
+            repo,
+            lease_secs,
+            poll_secs,
+            once,
+            git_sync,
+            all_projects,
+            workspaces_root,
+        } => {
+            let repo_root = std::env::current_dir()?;
+            runner::serve(
+                &repo_root,
+                &runner::ServeOpts {
+                    name: name.clone(),
+                    agent: agent.clone(),
+                    repo: repo.clone(),
+                    lease_secs: *lease_secs,
+                    poll_secs: *poll_secs,
+                    once: *once,
+                    git_sync: *git_sync,
+                    all_projects: *all_projects,
+                    workspaces_root: workspaces_root.clone(),
+                },
+            )
+        }
+        RunnerSubcommands::Status => runner::status(),
+    }
+}
+
 fn handle_loop_command(sub: &LoopSubcommands) -> Result<(), Box<dyn std::error::Error>> {
     let repo_root = std::env::current_dir()?;
     let graph = aura_loop::LoopGraph::at(&repo_root);
@@ -13923,6 +14512,86 @@ fn handle_change_note_command(
             report.other_files.join(", ").dimmed()
         );
     }
+    Ok(())
+}
+
+fn handle_impact_command(
+    symbol: &str,
+    file: &str,
+    json: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    use colored::Colorize;
+
+    let repo_root = validate_tool::resolve_repo_root(None);
+    // `analyze_deletion` keys the graph on repo-relative paths (same as the
+    // delete-guard feeds it). Accept an absolute path from callers (e.g. the
+    // desktop app) and fold it back to repo-relative.
+    let rel_file = {
+        let p = std::path::Path::new(file);
+        if p.is_absolute() {
+            p.strip_prefix(&repo_root)
+                .map(|r| r.to_string_lossy().to_string())
+                .unwrap_or_else(|_| file.to_string())
+        } else {
+            file.to_string()
+        }
+    };
+
+    let impact = impact::analyze_deletion(&repo_root, &rel_file, &[symbol.to_string()]);
+
+    if json {
+        println!("{}", serde_json::to_string_pretty(&impact::to_json(&impact))?);
+        return Ok(());
+    }
+
+    println!(
+        "\n{}  {} {}",
+        "Blast radius".bold().cyan(),
+        symbol.cyan(),
+        format!("in {rel_file}").dimmed()
+    );
+    println!("  {}", impact.summary.white().bold());
+
+    if impact.direct_callers.is_empty() {
+        println!("  {}", "Nothing calls it directly.".dimmed());
+    } else {
+        println!(
+            "\n  {} ({})",
+            "Depends on this — re-check before you touch it:".dimmed(),
+            impact.direct_callers.len()
+        );
+        for c in &impact.direct_callers {
+            let loc = c.file.as_deref().unwrap_or("?");
+            println!(
+                "    {} {}",
+                c.symbol.cyan(),
+                format!("{loc} · {}", c.kind).dimmed()
+            );
+        }
+        if impact.transitive_caller_count > impact.direct_callers.len() {
+            println!(
+                "    {}",
+                format!(
+                    "… and {} more further out",
+                    impact.transitive_caller_count - impact.direct_callers.len()
+                )
+                .dimmed()
+            );
+        }
+    }
+
+    if !impact.features.is_empty() {
+        println!("\n  {}", "User-facing features that ride on it:".dimmed());
+        for f in &impact.features {
+            println!(
+                "    {} {}",
+                f.name.white(),
+                format!("({} hop{})", f.hops, if f.hops == 1 { "" } else { "s" }).dimmed()
+            );
+        }
+    }
+
+    println!("\n  {}", impact.hedge.dimmed());
     Ok(())
 }
 

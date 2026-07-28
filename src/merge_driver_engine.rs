@@ -394,7 +394,13 @@ fn merge_file_strings(
     let base_p = write("base", base)?;
     let theirs_p = write("theirs", theirs)?;
 
+    // Run it from the directory we just made. All three inputs are absolute
+    // and `-p` writes to stdout, so the child never needs the caller's cwd —
+    // and inheriting it is a real hazard: git exits 128 before doing any work
+    // if the directory it starts in has been removed, which is exactly what
+    // happens when another thread's scratch directory is reaped mid-merge.
     let out = Command::new("git")
+        .current_dir(dir.path())
         .arg("merge-file")
         .arg("-p")
         .arg(format!("--marker-size={}", marker_size))

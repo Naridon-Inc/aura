@@ -14,11 +14,11 @@
 
 use std::collections::{HashMap, VecDeque};
 use std::fs;
-use std::io::{BufRead, BufReader, Write};
+use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::{Arc, Mutex, OnceLock};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use aura_blockstore::{BlockFilter, BlockStore};
 use serde::{Deserialize, Serialize};
@@ -179,17 +179,37 @@ pub async fn aura_recent_blocks(limit: usize) -> Result<Vec<AuraBlock>, String> 
     Ok(out)
 }
 
+/// How long a passthrough CLI call may run before we stop waiting for
+/// it. Long enough for a real scan on a big repo, short enough that a
+/// wedged helper doesn't leave the surface that called it spinning.
+const AURA_CLI_TIMEOUT: Duration = Duration::from_secs(30);
+
 /// Generic CLI passthrough. The frontend invokes Aura subcommands by
 /// name; we run them in the project root and ferry stdout/stderr back.
 /// Times out after 30s so a hung process can't block the IPC channel.
 #[tauri::command]
 pub async fn aura_cli(repo_root: String, args: Vec<String>) -> Result<CliResult, String> {
     let cwd = PathBuf::from(&repo_root);
-    let out = Command::new("aura")
+    // tokio's Command rather than std's: waiting on the child parks this
+    // task instead of holding one of the runtime's worker threads. The
+    // whole app shares that pool, so a helper that never returns used to
+    // take a worker with it — enough of those and every other command in
+    // the app stops being served too. `kill_on_drop` is what makes the
+    // timeout below real: on expiry the child is reaped, not orphaned.
+    let run = tokio::process::Command::new("aura")
         .args(&args)
         .current_dir(&cwd)
-        .output()
-        .map_err(|e| format!("failed to spawn aura: {}", e))?;
+        .kill_on_drop(true)
+        .output();
+    let out = match tokio::time::timeout(AURA_CLI_TIMEOUT, run).await {
+        Ok(res) => res.map_err(|e| format!("failed to spawn aura: {}", e))?,
+        Err(_) => {
+            return Err(
+                "That took longer than 30 seconds, so Aura stopped waiting. Try again in a moment."
+                    .to_string(),
+            )
+        }
+    };
     Ok(CliResult {
         stdout: String::from_utf8_lossy(&out.stdout).into_owned(),
         stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
@@ -360,6 +380,58 @@ pub async fn aura_live_status(
     })
 }
 
+/// Hard wall-clock bound for a single radar shell-out. Must stay BELOW the
+/// panel's poll interval (`POLL_MS = 6000` in `useTeamRadar.ts`) so a slow run
+/// is abandoned before the next tick starts and polls can never overlap.
+const RADAR_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// Run a short-lived query with a hard timeout, killing the child if it
+/// overruns, and return its stdout only on a clean exit.
+///
+/// `Command::output()` waits forever. The Team Radar polls every 6 seconds, so
+/// when `aura radar` got slow, every tick left another process behind: 13 live
+/// `aura radar show --json` processes holding ~20 GB resident were observed on a
+/// developer machine, none of them ever returning an answer. Bounding the wait
+/// makes a bad run cost one timeout instead of an unbounded pile of processes.
+///
+/// stdout is drained on a side thread so a child that outgrows the pipe buffer
+/// can never deadlock against our exit polling.
+fn run_bounded(cmd: &mut Command, timeout: std::time::Duration) -> Option<Vec<u8>> {
+    let mut child = cmd.stdout(Stdio::piped()).stderr(Stdio::null()).spawn().ok()?;
+    let mut stdout = child.stdout.take()?;
+    let reader = std::thread::spawn(move || {
+        let mut buf = Vec::new();
+        let _ = stdout.read_to_end(&mut buf);
+        buf
+    });
+
+    let start = std::time::Instant::now();
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(s)) => break Some(s),
+            Ok(None) => {
+                if start.elapsed() >= timeout {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    break None;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+            Err(_) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                break None;
+            }
+        }
+    };
+
+    let buf = reader.join().unwrap_or_default();
+    match status {
+        Some(s) if s.success() => Some(buf),
+        _ => None,
+    }
+}
+
 /// Read the Team Radar (awareness plane) for a repo by shelling the `aura`
 /// CLI's JSON surface. Returns the ambient feed plus reasoned collisions scored
 /// against the caller's own in-flight work — the CLI does all the scoring and
@@ -392,15 +464,12 @@ pub async fn aura_radar(
     };
 
     // The feed + default (quiet) conflicts come from one call.
-    let show = Command::new("aura")
-        .args(["radar", "show", "--json"])
-        .current_dir(&cwd)
-        .output()
-        .map_err(|e| format!("failed to spawn aura radar: {}", e))?;
-    if !show.status.success() {
+    let mut show_cmd = Command::new("aura");
+    show_cmd.args(["radar", "show", "--json"]).current_dir(&cwd);
+    let Some(stdout) = run_bounded(&mut show_cmd, RADAR_TIMEOUT) else {
         return Ok(empty());
-    }
-    let mut view: serde_json::Value = match serde_json::from_slice(&show.stdout) {
+    };
+    let mut view: serde_json::Value = match serde_json::from_slice(&stdout) {
         Ok(v) => v,
         Err(_) => return Ok(empty()),
     };
@@ -423,16 +492,14 @@ pub async fn aura_radar(
     // When the panel asks for ripples, swap in the fuller conflict list (the
     // ambient feed deliberately hides the Possible tier).
     if include_possible {
-        if let Ok(conf) = Command::new("aura")
+        let mut conf_cmd = Command::new("aura");
+        conf_cmd
             .args(["radar", "conflicts", "--all", "--json"])
-            .current_dir(&cwd)
-            .output()
-        {
-            if conf.status.success() {
-                if let Ok(parsed) = serde_json::from_slice::<serde_json::Value>(&conf.stdout) {
-                    if let Some(list) = parsed.get("conflicts").cloned() {
-                        view["conflicts"] = list;
-                    }
+            .current_dir(&cwd);
+        if let Some(out) = run_bounded(&mut conf_cmd, RADAR_TIMEOUT) {
+            if let Ok(parsed) = serde_json::from_slice::<serde_json::Value>(&out) {
+                if let Some(list) = parsed.get("conflicts").cloned() {
+                    view["conflicts"] = list;
                 }
             }
         }
@@ -542,6 +609,23 @@ fn now_unix_secs() -> u64 {
         .unwrap_or(0)
 }
 
+/// A symbol that changed within a file, carried directly on a bound
+/// changeset. The Time machine normally resolves changed symbols from a
+/// commit's change-note (`aura change-note <sha>`); a changeset that embeds
+/// its own symbols lets the surgical "Bring this back" affordance render
+/// without a per-change sha — the case for the bundled sample, whose history
+/// is squashed to a single commit. Minimal by design: identifier/kind/change
+/// are everything the recovery UI reads.
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct ChangesetSymbol {
+    pub identifier: String,
+    #[serde(default)]
+    pub kind: String,
+    /// "added" | "modified" | "deleted".
+    #[serde(default)]
+    pub change: String,
+}
+
 /// One file claimed by an intent. `status` mirrors git porcelain
 /// (`M`, `A`, `D`, `R`, `?`). `additions`/`deletions` are optional —
 /// callers that don't run numstat just leave them None.
@@ -554,6 +638,12 @@ pub struct IntentChangesetFile {
     pub additions: Option<u64>,
     #[serde(default)]
     pub deletions: Option<u64>,
+    /// Changed symbols carried directly on this file, for surfaces with no
+    /// per-change commit sha to resolve them from (see `ChangesetSymbol`).
+    /// Empty for the normal git-backed path, so it never appears on the wire
+    /// unless a changeset deliberately seeds it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub symbols: Vec<ChangesetSymbol>,
     /// Commit sha that contributed this file, when the changeset was
     /// back-filled from git history. Lets the diff view show the real
     /// committed change (`git show <commit> -- <path>`) instead of an empty
@@ -587,6 +677,49 @@ pub struct IntentChangeset {
     pub source: Option<String>, // "manual" | "agent_prompt" | "save_sync_gate"
     #[serde(default)]
     pub captured_at: Option<u64>,
+}
+
+/// Seal an intent into a signed block by shelling out to `aura sign-intent`
+/// in the repo root, returning `(signed_block_id, key_id)` on success.
+///
+/// This is how a native Aura-chat turn gets the SAME signed attestation the
+/// MCP / Claude-Code capture path produces: one shared signing surface (the
+/// `aura` CLI), identical block shape + `.aura/attest/` mirror + key registry.
+/// Every failure mode — binary absent, non-zero exit, unparseable stdout, or
+/// `{}` (no signing key) — collapses to `None`, so the caller's unsigned JSONL
+/// path is never broken. The JSONL row itself is still written by the caller,
+/// so there is exactly one intent row per capture regardless of the seal.
+fn sign_intent_via_cli(
+    repo_root: &str,
+    intent: &str,
+    writes: &[String],
+) -> Option<(String, String)> {
+    let mut args: Vec<String> = vec![
+        "sign-intent".into(),
+        intent.into(),
+        "--agent".into(),
+        "aura-shell".into(),
+    ];
+    for w in writes {
+        args.push("--writes".into());
+        args.push(w.clone());
+    }
+    let out = Command::new("aura")
+        .args(&args)
+        .current_dir(repo_root)
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let parsed: serde_json::Value = serde_json::from_slice(&out.stdout).ok()?;
+    let block_id = parsed.get("signed_block_id")?.as_str()?.to_string();
+    let key_id = parsed
+        .get("key_id")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default()
+        .to_string();
+    Some((block_id, key_id))
 }
 
 /// Append an intent entry to `<repo>/.aura/intent_log.jsonl` and drop the
@@ -629,12 +762,37 @@ pub async fn aura_log_intent(
     if let Some(sid) = claude_session_id.as_deref().filter(|s| !s.is_empty()) {
         entry["claude_session_id"] = serde_json::json!(sid);
     }
+    let mut declared_writes: Vec<String> = Vec::new();
     if let Some(mut cs) = changeset {
         if cs.captured_at.is_none() {
             cs.captured_at = Some(ts);
         }
+        // Files the agent claims it touched become the declared write-scope for
+        // the signed block. Skip deletes (status "D") — the commit-time
+        // reconciler measures actual writes as added/modified/renamed paths, so
+        // a declared delete would never be "fulfilled" and only adds noise.
+        declared_writes = cs
+            .files
+            .iter()
+            .filter(|f| f.status != "D")
+            .map(|f| f.path.clone())
+            .filter(|p| !p.is_empty())
+            .collect();
         entry["changeset"] =
             serde_json::to_value(&cs).map_err(|e| format!("serialize changeset: {}", e))?;
+    }
+
+    // Seal the intent into a signed block via the shared `aura sign-intent`
+    // primitive so a native Aura-chat turn produces the SAME signed attestation
+    // the MCP / Claude-Code capture path does. Stamp the returned ids into this
+    // row so the Trace/Team surfaces show the seal and the commit-time
+    // reconciler has a declared scope to check against. Best-effort — an
+    // unsigned row (no key / no binary) is exactly the pre-existing behaviour.
+    if let Some((block_id, key_id)) = sign_intent_via_cli(&repo_root, trimmed, &declared_writes) {
+        entry["signed_block_id"] = serde_json::json!(block_id);
+        if !key_id.is_empty() {
+            entry["key_id"] = serde_json::json!(key_id);
+        }
     }
 
     let log_path = aura_dir.join("intent_log.jsonl");
@@ -1033,6 +1191,7 @@ fn build_commit_index(repo_root: &str) -> Vec<CommitDiff> {
                     status,
                     additions: None,
                     deletions: None,
+                    symbols: Vec::new(),
                     commit: None,
                     base: None,
                 });
@@ -1202,6 +1361,7 @@ fn backfill_changesets_from_git(repo_root: &str, rows: &mut [IntentRow]) {
                     status: f.status.clone(),
                     additions: None,
                     deletions: None,
+                    symbols: Vec::new(),
                     // First commit in the window that touched this path — the
                     // diff view shows exactly this commit's change for the file.
                     commit: Some(c.sha.clone()),
@@ -1542,6 +1702,7 @@ pub async fn aura_intent_attribute(
                 status: "M".to_string(),
                 additions: None,
                 deletions: None,
+                symbols: Vec::new(),
                 commit: None,
                 base: None,
             });

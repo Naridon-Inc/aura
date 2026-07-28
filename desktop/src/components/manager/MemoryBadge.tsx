@@ -139,7 +139,7 @@ export function MemoryBadge({ repoRoot, headless = false }: Props) {
           </span>
           <span>Memory</span>
           <span className="text-text-3">·</span>
-          <span>{total}</span>
+          <span className="tabular-nums">{total}</span>
         </button>
       )}
       {open && (

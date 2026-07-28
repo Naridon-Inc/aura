@@ -182,14 +182,18 @@ function PlanWizardDecisionBar({
   planId: string;
   initialParallelism: PlanParallelism;
 }) {
-  const [submitting, setSubmitting] = useState<"build" | "cancel" | null>(null);
+  const [submitting, setSubmitting] = useState<"build" | "revise" | "cancel" | null>(null);
   const [notifyTeam, setNotifyTeam] = useState(false);
   const [parallelism, setParallelism] = useState<PlanParallelism>(initialParallelism);
+  const [revisionOpen, setRevisionOpen] = useState(false);
+  const [revisionFeedback, setRevisionFeedback] = useState("");
   const [err, setErr] = useState<string | null>(null);
 
   const decide = useCallback(
-    async (decision: "build" | "cancel") => {
+    async (decision: "build" | "revise" | "cancel") => {
       if (submitting) return;
+      const feedback = revisionFeedback.trim();
+      if (decision === "revise" && !feedback) return;
       setSubmitting(decision);
       setErr(null);
       try {
@@ -199,6 +203,7 @@ function PlanWizardDecisionBar({
           decision,
           decision === "build" ? notifyTeam : false,
           decision === "build" ? parallelism : undefined,
+          decision === "revise" ? feedback : undefined,
         );
         // Success: close the wizard so the user lands back to watch the
         // build (or returns to chat on cancel). The live session's
@@ -209,11 +214,39 @@ function PlanWizardDecisionBar({
         setSubmitting(null);
       }
     },
-    [submitting, sessionId, planId, notifyTeam, parallelism],
+    [submitting, sessionId, planId, notifyTeam, parallelism, revisionFeedback],
   );
 
   return (
-    <div className="flex w-full items-center justify-between gap-4">
+    <div className="flex w-full flex-col gap-2">
+      {revisionOpen && (
+        <div className="flex items-end gap-2">
+          <textarea
+            autoFocus
+            value={revisionFeedback}
+            onChange={(event) => setRevisionFeedback(event.target.value)}
+            rows={2}
+            maxLength={8000}
+            placeholder="Tell the planning agent what to change…"
+            className="min-w-0 flex-1 resize-y t-xs px-2.5 py-2 outline-none"
+            style={{
+              color: "var(--color-text-1)",
+              background: "var(--color-bg-2)",
+              border: "1px solid var(--color-line)",
+              borderRadius: "var(--radius-sm)",
+            }}
+          />
+          <Button
+            variant="accentSoft"
+            size="sm"
+            disabled={submitting !== null || !revisionFeedback.trim()}
+            onClick={() => void decide("revise")}
+          >
+            {submitting === "revise" ? "Sending…" : "Send feedback"}
+          </Button>
+        </div>
+      )}
+      <div className="flex w-full items-center justify-between gap-4">
       {/* Build options, low-emphasis, on the left. */}
       <div className="flex items-center gap-3 min-w-0">
         <div className="flex items-center gap-2">
@@ -256,6 +289,14 @@ function PlanWizardDecisionBar({
           variant="secondary"
           size="sm"
           disabled={submitting !== null}
+          onClick={() => setRevisionOpen((value) => !value)}
+        >
+          Request changes
+        </Button>
+        <Button
+          variant="secondary"
+          size="sm"
+          disabled={submitting !== null}
           onClick={() => void decide("cancel")}
         >
           {submitting === "cancel" ? "Cancelling…" : "Cancel plan"}
@@ -269,6 +310,7 @@ function PlanWizardDecisionBar({
         >
           {submitting === "build" ? "Building…" : "Build"}
         </Button>
+      </div>
       </div>
     </div>
   );

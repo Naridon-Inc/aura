@@ -1,3 +1,4 @@
+use directories::UserDirs;
 use iced::widget::{column, container, row, text, Space};
 use iced::{Border, Color, Element, Font, Length};
 
@@ -123,10 +124,17 @@ trait WorkspacePath {
 
 impl WorkspacePath for Workspace {
     fn path_abs(&self) -> String {
-        if let Some(rest) = self.path.strip_prefix("~/") {
-            format!("/Users/you/{}", rest)
-        } else {
-            self.path.clone()
+        // `~` means the home of whoever is looking at this screen. It used to be
+        // expanded against a hard-coded path, so every machine except the one it
+        // was written on rendered a home directory that does not exist there.
+        let Some(rest) = self.path.strip_prefix("~/") else {
+            return self.path.clone();
+        };
+        match UserDirs::new() {
+            Some(dirs) => dirs.home_dir().join(rest).to_string_lossy().into_owned(),
+            // No home directory to resolve against. Showing the `~/…` form is
+            // honest; inventing a prefix would not be.
+            None => self.path.clone(),
         }
     }
 }

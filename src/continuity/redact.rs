@@ -226,11 +226,11 @@ mod tests {
 
     #[test]
     fn redacts_public_ip_keeps_private() {
-        let r = redact_text("prod is 8.8.8.8 but local is 192.168.1.10 and 127.0.0.1");
+        let r = redact_text("prod is 51.102.104.41 but local is 192.168.1.10 and 127.0.0.1");
         assert!(r.contains("[REDACTED:ip]"));
         assert!(r.contains("192.168.1.10"), "private IP must survive");
         assert!(r.contains("127.0.0.1"), "loopback must survive");
-        assert!(!r.contains("8.8.8.8"));
+        assert!(!r.contains("51.102.104.41"));
     }
 
     #[test]

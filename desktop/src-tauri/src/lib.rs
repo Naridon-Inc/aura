@@ -10,11 +10,13 @@
 
 mod agent_event_listener;
 mod agent_mutation_guard;
+mod agent_policy;
 mod aurawatch_agentcli;
 mod aurawatch_inference;
 mod cli_bridge;
 mod fs_atomic;
 mod cmd_agent_auth;
+mod cmd_agent_config_sync;
 mod cmd_agent_history;
 mod cmd_agent_skills;
 mod cmd_brain;
@@ -25,12 +27,15 @@ mod cmd_agent_versions;
 mod cmd_agents;
 mod cmd_atlas;
 mod cmd_aura;
+mod cmd_aura_track;
 mod cmd_aura_fs;
 mod cmd_aurawatch;
 mod cmd_browser;
 mod cmd_capture;
 mod cmd_carryover;
 mod cmd_change_note;
+mod cmd_change_summary;
+mod cmd_symbol_impact;
 mod cmd_commons_app;
 mod cmd_changes;
 mod cmd_cloud_auth;
@@ -43,18 +48,24 @@ mod cmd_conflicts;
 mod cmd_daemon;
 mod cmd_device;
 mod cmd_doctor_cli;
+mod cmd_verify_intent;
+mod cmd_editors;
 mod cmd_ext_host;
 mod cmd_files;
 mod cmd_integrations;
+mod cmd_sample;
 mod cmd_lane;
 mod cmd_loop;
 mod cmd_manager;
 mod cmd_mcp_servers;
 mod cmd_meta_plane;
+mod cmd_repo_publish;
+mod cmd_worktree_plane;
 mod integrations;
 mod mcp_http_transport;
 mod mcp_oauth;
 mod cmd_memory;
+mod cmd_mobile_waitlist;
 mod cmd_models;
 mod cmd_modes;
 mod cmd_op;
@@ -100,29 +111,36 @@ mod cmd_tasks_relations;
 mod cmd_team;
 mod cmd_team_notes;
 mod cmd_identity;
+mod cmd_identity_avatar;
 mod notify;
 mod cmd_dialog;
 mod cmd_team_upload;
 mod cmd_vsix;
 mod cmd_watcher;
 mod cmd_window;
+mod cmd_emoji;
 mod cmd_workspace_launch;
 mod cmd_automations;
 mod cmd_mission;
 mod cmd_remote;
+mod cmd_remote_connect;
+mod cmd_remote_devices;
 mod cmd_remote_relay;
+pub mod provisioner;
 mod cmd_resources;
 mod cmd_zones;
 mod crash;
 mod hud;
 mod manager;
 mod menu;
+mod model_discovery;
 mod tray;
 mod op_log;
 mod plugin_exchange;
 mod plugin_host;
 mod telemetry;
 pub mod pty_daemon;
+mod pty_io;
 mod secret_store;
 pub mod spawn_dir;
 mod worktree;
@@ -289,6 +307,14 @@ pub fn run() {
             let m = menu::build(app)?;
             app.set_menu(m)?;
             menu::install_handler(app.handle());
+            // Refresh the fleet agent-CLI config policy in the background so the
+            // NEXT agent spawn sees the latest remote rules (this run uses the
+            // last cache or the built-in floor). Best-effort: offline / non-200
+            // is a no-op. See `agent_policy` for the repair this enforces (e.g.
+            // codex `service_tier = "priority"` → `flex`).
+            tauri::async_runtime::spawn(async {
+                agent_policy::refresh_remote().await;
+            });
             // Menu-bar (tray) presence + the ⌘⇧A floating HUD. The tray
             // keeps Aura resident in the menu bar so the always-on-top HUD
             // can be summoned even when the main window is hidden; the
@@ -401,6 +427,37 @@ pub fn run() {
             // projects while Aura is on. Runs through the same real Crew / notes
             // / tasks / reviewer paths the rest of the app uses.
             cmd_automations::spawn_scheduler(app.handle().clone());
+
+            // Laptop presence: a single always-on beacon so this desktop
+            // shows up in the phone's "Your laptops" list (online/offline +
+            // one-tap connect / wake). Independent of the relay — it runs
+            // whenever the app is open. No-op until the user signs in to
+            // cloud, and self-heals if the cloud predates the feature.
+            cmd_remote_devices::spawn_presence_heartbeat(app.handle().clone());
+
+            // Session sync: continuously publish live interactive agent
+            // sessions (Claude Code, Gemini, Codex, Cursor) to the cloud so the
+            // paired phone's Workspaces feed shows them. The Manager path only
+            // registered its own sessions; agent-PTY tabs had no cloud
+            // registration, so a Claude session on the desktop never surfaced
+            // on mobile. No-op until signed in; drops closed sessions via the
+            // cloud's own staleness filter.
+            cloud_session_sync::spawn_session_heartbeat(app.handle().clone());
+
+            // Roster sync: push every registered project as a bare repo row so
+            // the phone's repo switcher is populated from all workspaces the
+            // user has opened — not just ones with a live session this run.
+            // Replaces the hand-run backfill; idempotent + unmetered + a no-op
+            // when signed out. `projects_register` keeps it fresh per open.
+            cloud_session_sync::spawn_roster_sync();
+
+            // Transcript backfill: seed recently-active Manager sessions' earlier
+            // turns to the cloud once, so a paired phone opening a session shows
+            // its history instead of "No transcript synced yet". Runs after the
+            // heartbeat/roster ticks so the cloud rows exist; each session passes
+            // a cloud-empty guard, so it's a no-op for anything already synced and
+            // signed-out end to end.
+            cmd_manager::spawn_startup_transcript_backfill(app.handle().clone());
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -422,6 +479,8 @@ pub fn run() {
             cmd_files::fs_rename,
             cmd_files::fs_delete,
             cmd_files::fs_reveal_in_finder,
+            cmd_editors::editors_list,
+            cmd_editors::editor_open,
             cmd_files::fs_find_files,
             cmd_search::fs_grep_content,
             cmd_search::fs_replace_in_files,
@@ -463,9 +522,11 @@ pub fn run() {
             cmd_files::git_clone,
             cmd_files::git_init,
             cmd_files::scaffold_template,
+            cmd_sample::seed_sample_project,
             cmd_files::git_ahead_behind,
             cmd_window::window_set_traffic_light_position,
             cmd_window::window_set_traffic_lights_hidden,
+            cmd_emoji::open_system_emoji_picker,
             cmd_dialog::dialog_pick,
             cmd_commons_app::commons_app_fetch,
             worktree::worktree_resolve_ref,
@@ -563,6 +624,7 @@ pub fn run() {
             cmd_changes::aura_changes_resolve,
             cmd_changes::aura_changes_list,
             cmd_change_note::aura_change_note,
+            cmd_symbol_impact::aura_symbol_impact,
             cmd_kg::aura_kg_build,
             cmd_kg::aura_kg_load,
             cmd_aura_fs::git_diff_stats,
@@ -571,6 +633,11 @@ pub fn run() {
             cmd_doctor_cli::aura_cli_version_check,
             cmd_doctor_cli::aura_cli_install_bundled,
             cmd_doctor_cli::aura_doctor_json,
+            cmd_verify_intent::verify_intent_staged,
+            cmd_verify_intent::intent_contract_show,
+            cmd_verify_intent::restore_deleted_symbol,
+            cmd_verify_intent::approve_symbol_removal,
+            cmd_verify_intent::recorded_test_summary,
             cmd_agent_auth::claude_auth_status,
             cmd_agent_auth::claude_auth_login,
             cmd_agent_auth::claude_auth_logout,
@@ -678,6 +745,8 @@ pub fn run() {
             cmd_brain::brain_keychain_has,
             cmd_brain::brain_upsert_provider,
             cmd_brain::brain_remove_provider,
+            cmd_brain::brain_configure_cloud,
+            cmd_brain::brain_cloud_config_get,
             cmd_brain::manager_list_brains,
             cmd_brain::aura_pro_is_signed_in,
             cmd_brain::aura_pro_quota,
@@ -706,6 +775,7 @@ pub fn run() {
             cmd_native_term::native_term_focus,
             cmd_native_term::native_term_select,
             cmd_native_term::native_term_copy,
+            cmd_native_term::native_term_context,
             cmd_native_term::native_term_close,
             cmd_orchestrator::orchestrator_dispatch_wave,
             cmd_orchestrator::orchestrator_lane_status,
@@ -721,18 +791,24 @@ pub fn run() {
             cmd_team::team_claim,
             cmd_identity::identity_status,
             cmd_identity::identity_status_all,
+            // Self-picked profile photos (email-keyed, local; falls back to the
+            // GitHub avatar then the animal monogram when a person has none).
+            cmd_identity_avatar::identity_avatars_get,
+            cmd_identity_avatar::identity_avatar_set_from_path,
+            cmd_identity_avatar::identity_avatar_clear,
             cmd_team::team_set_admin,
             cmd_team::team_transfer_admin,
             cmd_team::identity_override_get,
             cmd_team::identity_override_set,
             cmd_team::identity_override_clear,
             cmd_team::team_alias_add,
-            // NOTE(oo5-prep): `team_alias_remove` and
-            // `canonical_handle_for_email` are referenced here but the
-            // function bodies live on the in-flight `feat/ii9-identity-
-            // aliases` branch — registering them in the OO.4 commit
-            // before they exist broke `cargo build`. Re-add them when
-            // II.9 lands the implementations.
+            cmd_team::team_alias_remove,
+            cmd_team::canonical_handle_for_email,
+            // Duplicate-member suggest + confirm/reject (weak-signal identity
+            // reconciliation the auto-merge is too conservative to do alone).
+            cmd_team::team_identity_suggest_duplicates,
+            cmd_team::team_identity_confirm_duplicate,
+            cmd_team::team_identity_reject_duplicate,
             cmd_team::team_status_get,
             cmd_team::team_status_set,
             cmd_team::team_voice_set,
@@ -761,6 +837,8 @@ pub fn run() {
             cmd_team_notes::notes_feed_add,
             cmd_team_notes::notes_feed_delete,
             cmd_team_upload::chat_upload_attachment,
+            cmd_team_upload::chat_upload_attachment_bytes,
+            cmd_team_upload::chat_upload_voice_note,
             cmd_soundboard::soundboard_list,
             cmd_soundboard::soundboard_upload,
             cmd_soundboard::soundboard_read,
@@ -771,6 +849,8 @@ pub fn run() {
             cmd_cloud_auth::cloud_auth_logout,
             cmd_cloud_auth::cloud_pair_create,
             cmd_cloud_billing::cloud_billing_usage_by_member,
+            cmd_mobile_waitlist::mobile_waitlist_status,
+            cmd_mobile_waitlist::mobile_waitlist_join,
             cmd_device::device_identity,
             cmd_device::device_identity_for_repo,
             cmd_device::device_update,
@@ -803,12 +883,18 @@ pub fn run() {
             agent_mutation_guard::agent_guard_accept_with_intent,
             agent_mutation_guard::agent_guard_self_heal_nudge,
             agent_mutation_guard::agent_guard_intent_covers,
+            cmd_aura_track::aura_ensure_tracked,
+            cmd_aura_track::aura_git_init_and_track,
             cmd_aurawatch::aurawatch_start,
             cmd_aurawatch::aurawatch_stop,
             cmd_aurawatch::aurawatch_set_mode,
             cmd_aurawatch::aurawatch_set_backend,
             cmd_aurawatch::aurawatch_status,
             cmd_aurawatch::aurawatch_detect,
+            cmd_change_summary::summarize_file_change,
+            cmd_change_summary::explain_change,
+            cmd_change_summary::explain_change_diff,
+            cmd_change_summary::explain_symbols,
             cmd_aurawatch::aurawatch_nudge_accept,
             cmd_aurawatch::aurawatch_nudge_dismiss,
             cmd_manager::manager_start,
@@ -821,6 +907,12 @@ pub fn run() {
             cmd_loop::loop_set_status,
             cmd_meta_plane::meta_plane_log,
             cmd_meta_plane::meta_plane_verify,
+            cmd_worktree_plane::worktree_plane,
+            cmd_worktree_plane::worktree_say,
+            cmd_repo_publish::repo_state,
+            cmd_repo_publish::repo_hosts,
+            cmd_repo_publish::repo_name_free,
+            cmd_repo_publish::repo_publish,
             cmd_loop::loop_pause,
             cmd_loop::loop_resume,
             cmd_loop::loop_runs,
@@ -830,10 +922,14 @@ pub fn run() {
             cmd_loop::loop_plan_order,
             cmd_loop::loop_review,
             cmd_loop::loop_attach_targets,
+            cmd_loop::loop_cloud_sync,
+            cmd_loop::loop_cloud_send,
+            cmd_remote_connect::runner_provision,
             cmd_manager::manager_status,
             cmd_manager::manager_memory_health,
             cmd_manager::manager_subagent_monitor,
             cmd_manager::manager_list,
+            cmd_manager::manager_search,
             cmd_manager::manager_load_transcript,
             cmd_manager::manager_session_changeset,
             cmd_manager::manager_resume,
@@ -862,11 +958,17 @@ pub fn run() {
             cmd_prompts::prompts_delete,
             cmd_prompts::prompts_record_use,
             cmd_prs::pr_list,
+            cmd_prs::github_issue_list,
+            cmd_prs::pr_create,
+            cmd_prs::pr_edit,
             cmd_prs::aura_review_json,
             cmd_prs::pr_whoami,
             cmd_prs::pr_labels_list,
             cmd_prs::pr_labels_set,
+            cmd_prs::pr_update,
             cmd_prs::pr_detail,
+            cmd_prs::pr_checks,
+            cmd_prs::pr_vercel_status,
             cmd_prs::pr_comments_list,
             cmd_prs::pr_comment_post,
             cmd_prs::pr_comment_post_issue,
@@ -890,6 +992,9 @@ pub fn run() {
             cmd_settings::settings_agents_toml_list,
             cmd_settings::settings_agents_toml_upsert,
             cmd_settings::settings_agents_toml_remove,
+            cmd_agent_config_sync::settings_agent_configs_status,
+            cmd_agent_config_sync::settings_agent_configs_push,
+            cmd_agent_config_sync::settings_agent_configs_pull,
             cmd_settings::settings_telemetry_show,
             cmd_settings::settings_telemetry_clear,
             cmd_settings_prefs::settings_prefs_load,
@@ -984,6 +1089,10 @@ pub fn run() {
             cmd_integrations::integrations_jira_backfill,
             cmd_integrations::integrations_jira_auto_mirror_enable,
             cmd_integrations::integrations_jira_auto_mirror_disable,
+            cmd_integrations::integrations_linear_connect,
+            cmd_integrations::integrations_linear_cancel,
+            cmd_integrations::integrations_linear_status,
+            cmd_integrations::integrations_linear_disconnect,
             cmd_integrations::integrations_list,
             cmd_integrations::integrations_beads_preview,
             cmd_integrations::integrations_beads_import,

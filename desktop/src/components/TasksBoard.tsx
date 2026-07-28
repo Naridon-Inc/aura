@@ -25,8 +25,6 @@ import {
   Target,
   Check,
   Plus,
-  Keyboard,
-  PictureInPicture2,
   List as ListIcon,
   KanbanSquare,
   GitBranch,
@@ -58,6 +56,7 @@ import { Button } from "./ui/button";
 import { Input } from "./ui/input";
 import { Select } from "./ui/select";
 import { StatusChip } from "./ui/statusChip";
+import { AsciiSpinner } from "./ui/ascii-spinner";
 import { BoardColumnSkeleton } from "./ui/skeleton";
 import { MentionedText } from "./Mentions";
 import { AssigneeStack } from "./AssigneePicker";
@@ -74,7 +73,6 @@ import {
 import {
   TasksToolbarPill,
   TasksToolbarButton,
-  TasksToolbarSep,
 } from "./tasks/TasksToolbarPill";
 import {
   TasksViewsBar,
@@ -235,7 +233,6 @@ export function TasksBoard({
   onClose,
   currentHandle,
   embedded = false,
-  onPopOut,
 }: Props) {
   // Embedded mode is always "open" — the workpane chrome controls visibility.
   const open = embedded ? true : openProp ?? false;
@@ -972,6 +969,9 @@ export function TasksBoard({
           </div>
         </div>
         <div className="flex items-center gap-1.5 flex-shrink-0">
+          {/* View switcher stays (List / Board / Sprint); the pop-out and
+              keyboard-shortcut icons were removed to keep this header simple —
+              shortcuts are still on "?". */}
           <TasksToolbarPill>
             {VIEW_MODES.map((m) => (
               <TasksToolbarButton
@@ -985,23 +985,6 @@ export function TasksBoard({
               </TasksToolbarButton>
             ))}
           </TasksToolbarPill>
-          <TasksToolbarSep />
-          {onPopOut && (
-            <TasksToolbarButton
-              onClick={onPopOut}
-              title="Pop out into a floating window"
-              ariaLabel="Pop out tasks into a floating window"
-            >
-              <PictureInPicture2 strokeWidth={1.5} aria-hidden />
-            </TasksToolbarButton>
-          )}
-          <TasksToolbarButton
-            onClick={() => setShortcutsOpen(true)}
-            title="Keyboard shortcuts (?)"
-            ariaLabel="Keyboard shortcuts"
-          >
-            <Keyboard strokeWidth={1.5} aria-hidden />
-          </TasksToolbarButton>
           <Button
             variant="accentSoft"
             size="sm"
@@ -1016,7 +999,7 @@ export function TasksBoard({
 
       {/* Error / loading */}
       {error && (
-        <div className="px-4 py-2 text-[11.5px] text-red-400 bg-red-500/10 border-b border-line-soft">
+        <div className="px-4 py-2 text-[11.5px] text-red bg-red/10 border-b border-line-soft">
           {error}
         </div>
       )}
@@ -1626,7 +1609,7 @@ function TaskCard({
       <CardMeta
         key="due"
         icon={Clock}
-        muted={overdue ? "rose" : undefined}
+        muted={overdue ? "alert" : undefined}
         title={`Due ${task.due_date}`}
       >
         {formatDueDate(task.due_date)}
@@ -1819,12 +1802,14 @@ function CardMeta({
   children: ReactNode;
   title?: string;
   mono?: boolean;
-  muted?: "rose";
+  /** Semantic, not chromatic: "alert" is the one meta that is asking for the
+   *  reader (an overdue date). Everything else stays on the neutral ramp. */
+  muted?: "alert";
 }) {
   return (
     <span
       className={`inline-flex items-center gap-1 text-[10.5px] tabular-nums whitespace-nowrap ${
-        muted === "rose" ? "text-rose-400" : "text-text-3"
+        muted === "alert" ? "text-red" : "text-text-3"
       } ${mono ? "font-mono" : ""}`}
       title={title}
     >
@@ -1932,7 +1917,10 @@ function ListView({
   return (
     <div className="h-full w-full overflow-y-auto bg-bg-content px-4 sm:px-6">
       {loading && tasks.length === 0 && (
-        <div className="py-6 text-[12px] text-text-5">Loading…</div>
+        <div className="flex items-center gap-2 py-6 text-[12px] text-text-4">
+          <AsciiSpinner />
+          Loading…
+        </div>
       )}
       {!loading && tasks.length === 0 && (
         <div className="py-6 text-[12px] text-text-5 italic">
@@ -2066,19 +2054,13 @@ function ListSection({
   );
 }
 
-// Plane `.signal` — 3-bar priority icon. 1:1 with the mockup spec:
-// bars are 2.5px wide, heights 4/8/12px, gap 1.5px, aligned flex-end in a
-// 14px box. Every bar is `currentColor` (the priority token); lit bars are
-// full-opacity, unlit fade to 0.25. Urgent is a filled red chip with all
-// three bars white. See docs/plane-app-examples.html `.signal`.
-const PRIORITY_TOKEN: Record<TaskPriority, string> = {
-  urgent: "var(--color-pri-urgent)",
-  high: "var(--color-pri-high)",
-  medium: "var(--color-pri-medium)",
-  low: "var(--color-pri-low)",
-  none: "var(--color-pri-none)",
-};
-
+// Plane `.signal` — 3-bar priority icon. Bars are 2.5px wide, heights
+// 4/8/12px, gap 1.5px, aligned flex-end in a 14px box.
+//
+// The number of LIT bars already spells out the level, so the old five-colour
+// ladder (red/orange/yellow/blue/grey) was saying the same thing twice in
+// paint. Bars now read on the neutral ramp and only Urgent — the one priority
+// that is asking for the reader right now — keeps a filled red chip.
 function PrioritySignal({ priority }: { priority: TaskPriority }) {
   const bars = (color: string, urgent = false) => (
     <>
@@ -2104,41 +2086,44 @@ function PrioritySignal({ priority }: { priority: TaskPriority }) {
   if (priority === "urgent") {
     return (
       <span
-        className="inline-flex items-end gap-[1.5px] h-4 px-1 py-px rounded-[4px] flex-shrink-0"
-        style={{ background: PRIORITY_TOKEN.urgent }}
+        className="inline-flex items-end gap-[1.5px] h-4 px-1 py-px rounded-[4px] flex-shrink-0 bg-red"
         title="Priority: Urgent"
         aria-label="Urgent priority"
       >
-        {bars("#fff", true)}
+        {bars("var(--color-bg-0)", true)}
       </span>
     );
   }
   return (
     <span
       className="inline-flex items-end gap-[1.5px] h-[14px] flex-shrink-0"
-      style={{ color: PRIORITY_TOKEN[priority] }}
       title={`Priority: ${priority}`}
       aria-label={`${priority} priority`}
     >
-      {bars(PRIORITY_TOKEN[priority])}
+      {bars("var(--color-text-3)")}
     </span>
   );
 }
 
-// Plane `.state-pill .ring-i` — 11px circle with stroke style keyed to
-// status. Dashed for backlog/cancelled, conic for in_progress/in_review,
-// solid disc for done.
+// Plane `.state-pill .ring-i` — 12px circle whose STROKE STYLE is keyed to
+// status: dashed for backlog/cancelled, part-filled conic for in progress and
+// in review, solid disc for done. The shape is the signal, so only the one
+// genuinely live state ("in progress") carries colour; the rest sit on the
+// neutral ramp instead of each owning a hue. That colour is amber — work in
+// flight — matching CrewCanvas's STATUS_DOT.working and the Automations run
+// dot. Not the accent: on a board, the accent belongs to the card you have
+// selected, and a ring that borrowed it made every running task look picked.
 function StateRing({ statusId }: { statusId: TaskStatus }) {
   const cls = (() => {
     switch (statusId) {
       case "backlog":
         return "border-dashed border-[1.5px] border-text-4";
       case "in_progress":
-        return "border-[1.5px] border-amber-400 bg-[conic-gradient(theme(colors.amber.400)_50%,transparent_50%)]";
+        return "border-[1.5px] border-amber bg-[conic-gradient(var(--color-amber)_50%,transparent_50%)]";
       case "in_review":
-        return "border-[1.5px] border-sky-400 bg-[conic-gradient(theme(colors.sky.400)_75%,transparent_75%)]";
+        return "border-[1.5px] border-text-3 bg-[conic-gradient(var(--color-text-3)_75%,transparent_75%)]";
       case "done":
-        return "border-[1.5px] border-emerald-500 bg-emerald-500";
+        return "border-[1.5px] border-text-3 bg-text-3";
       default:
         return "border-[1.5px] border-text-4";
     }
@@ -2222,7 +2207,7 @@ function ListRow({
         {task.due_date && (
           <span
             className={`flex-shrink-0 text-[11px] tabular-nums px-1 ${
-              isOverdue(task.due_date) ? "text-rose-400" : "text-text-3"
+              isOverdue(task.due_date) ? "text-red" : "text-text-3"
             }`}
             title={`Due ${task.due_date}`}
           >
@@ -2538,7 +2523,12 @@ function SprintView({
   }
 
   if (loading && sprints.length === 0) {
-    return <div className="p-6 text-[12px] text-text-5">Loading sprints…</div>;
+    return (
+      <div className="flex items-center gap-2 p-6 text-[12px] text-text-4">
+        <AsciiSpinner />
+        Loading sprints…
+      </div>
+    );
   }
 
   if (sprints.length === 0) {
@@ -2565,7 +2555,7 @@ function SprintView({
           >
             Start a 2-week sprint
           </Button>
-          {err && <div className="mt-3 text-[11.5px] text-rose-400">{err}</div>}
+          {err && <div className="mt-3 text-[11.5px] text-red">{err}</div>}
         </div>
         {creatingSprint && (
           <CreateSprintWizard
@@ -2665,7 +2655,7 @@ function SprintView({
       )}
 
       {err && (
-        <div className="px-4 py-2 text-[11.5px] text-rose-400 bg-rose-500/10 border-b border-line-soft">
+        <div className="px-4 py-2 text-[11.5px] text-red bg-red/10 border-b border-line-soft">
           {err}
         </div>
       )}
@@ -2863,8 +2853,10 @@ function CapacityBars({
                 className="h-2 bg-accent/40"
                 style={{ width: `${widthPct}%` }}
               />
+              {/* Scope vs delivered reads as two intensities of ONE hue —
+                  a second colour here only made the bar harder to parse. */}
               <div
-                className="absolute inset-y-0 left-0 h-2 bg-emerald-400/60"
+                className="absolute inset-y-0 left-0 h-2 bg-accent"
                 style={{ width: `${(widthPct * donePct) / 100}%` }}
               />
             </div>
@@ -2931,23 +2923,25 @@ function SprintColumn({
         <span className="text-[10.5px] text-text-5 font-mono">{tasks.length}</span>
         {riskCount > 0 && (
           <span
-            className="ml-auto flex items-center gap-1 text-[10px] text-amber-400/80"
+            className="ml-auto flex items-center gap-1 text-[10px] text-amber"
             title={`${riskCount} task${riskCount === 1 ? "" : "s"} with no movement in ${STALE_TASK_MS / 86_400_000} days`}
           >
-            <span className="w-1.5 h-1.5 rounded-full bg-amber-400/80" aria-hidden />
+            <span className="w-1.5 h-1.5 rounded-full bg-amber" aria-hidden />
             {riskCount} stalled
           </span>
         )}
       </div>
       <div className="flex-1 p-2 space-y-2">
         {tasks.length === 0 && (
-          <div className="text-[11px] text-text-5 px-1 italic">Empty</div>
+          <div className="text-[11px] text-text-5 px-1 italic">
+            Nothing here yet
+          </div>
         )}
         {tasks.map((t) => (
           <div key={t.id} className="relative group">
             {atRisk.has(t.id) && (
               <span
-                className="absolute -top-1 -left-1 z-10 w-2 h-2 rounded-full bg-amber-400/80 ring-2 ring-bg-2"
+                className="absolute -top-1 -left-1 z-10 w-2 h-2 rounded-full bg-amber ring-2 ring-bg-2"
                 title="No movement in a while — at risk of slipping the sprint"
                 aria-label="At risk"
               />
@@ -2997,7 +2991,8 @@ function Burndown({
   if (n < 2 || total === 0) {
     return (
       <div className="text-[11px] text-text-5 italic">
-        Series needs ≥2 days and a non-zero total.
+        Not enough history yet — this chart needs at least two days of work on
+        the sprint.
       </div>
     );
   }

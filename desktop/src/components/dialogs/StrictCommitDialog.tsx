@@ -48,11 +48,7 @@ export function StrictCommitDialog({
           >
             Continue anyway
           </Button>
-          <Button
-            variant="accentSoft"
-            size="xs"
-            onClick={onOpenLogIntent}
-          >
+          <Button variant="default" size="xs" onClick={onOpenLogIntent}>
             Add a note
           </Button>
         </>

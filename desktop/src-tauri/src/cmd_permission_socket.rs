@@ -440,7 +440,8 @@ pub async fn propose_plan_blocking(app: &AppHandle, payload: ProposePlanPayload)
 
 /// Socket response shape for a resolved plan decision — `action: build`
 /// threads the minted a2a ids back to the CLI brain so it can spawn
-/// subagents tagged with the cloud task id; `action: cancel` is bare.
+/// subagents tagged with the cloud task id; `action: revise` carries the
+/// user's feedback; `action: cancel` is bare.
 fn plan_decision_response(decision: &PlanDecision) -> Value {
     match decision {
         PlanDecision::Build {
@@ -450,6 +451,10 @@ fn plan_decision_response(decision: &PlanDecision) -> Value {
             "action": "build",
             "a2a_task_ids": a2a_task_ids,
             "plan_task_id": plan_task_id,
+        }),
+        PlanDecision::Revise { feedback } => json!({
+            "action": "revise",
+            "feedback": feedback,
         }),
         PlanDecision::Cancel => json!({ "action": "cancel" }),
     }
@@ -571,5 +576,14 @@ mod tests {
             subtasks: vec![],
         }];
         assert!(scout_eligible(&p));
+    }
+
+    #[test]
+    fn revision_response_returns_user_feedback() {
+        let response = plan_decision_response(&PlanDecision::Revise {
+            feedback: "Keep the public API stable".into(),
+        });
+        assert_eq!(response["action"], "revise");
+        assert_eq!(response["feedback"], "Keep the public API stable");
     }
 }

@@ -85,7 +85,7 @@ fn sig_line_render_parse_roundtrips_and_field_order_is_fixed() {
     let line = SigLine {
         ref_name: "refs/heads/main".into(),
         oid: "deadbeef".into(),
-        signer: "Owner".into(),
+        signer: "Ashiq".into(),
         key_id: "did:aura:key/AAAAAAAAAAA".into(),
         pubkey: Some("cGs".into()),
         sig: "c2ln".into(),
@@ -94,7 +94,7 @@ fn sig_line_render_parse_roundtrips_and_field_order_is_fixed() {
     let rendered = render_sig_line(&line);
     assert_eq!(
         rendered,
-        r#"{"ref":"refs/heads/main","oid":"deadbeef","signer":"Owner","key_id":"did:aura:key/AAAAAAAAAAA","pubkey":"cGs","sig":"c2ln","ts":7}"#
+        r#"{"ref":"refs/heads/main","oid":"deadbeef","signer":"Ashiq","key_id":"did:aura:key/AAAAAAAAAAA","pubkey":"cGs","sig":"c2ln","ts":7}"#
     );
     assert_eq!(parse_sig_line(&rendered).unwrap(), line);
 }
@@ -186,7 +186,7 @@ fn sign_then_verify_valid_on_current_branch_default_ref() {
     let repo = repo_with_commit(tmp.path());
     let sk = fixture_identity(&repo);
 
-    let report = sign_ref(&repo, None, &sk, "Owner", 1_000).unwrap();
+    let report = sign_ref(&repo, None, &sk, "Ashiq", 1_000).unwrap();
     assert_eq!(report.ref_name, "refs/heads/canon");
     assert_eq!(report.key_id, sk.key_id());
     assert!(report.updated);
@@ -196,7 +196,7 @@ fn sign_then_verify_valid_on_current_branch_default_ref() {
     assert_eq!(v.status, RefStatus::Valid);
     assert_eq!(v.signatures.len(), 1);
     assert_eq!(v.signatures[0].status, LineStatus::Valid);
-    assert_eq!(v.signatures[0].signer, "Owner");
+    assert_eq!(v.signatures[0].signer, "Ashiq");
     assert_eq!(v.signatures[0].key_id, sk.key_id());
     assert_eq!(v.signatures[0].age_secs, 60);
 }
@@ -207,13 +207,13 @@ fn resign_same_tip_is_idempotent_and_newest_ts_wins() {
     let repo = repo_with_commit(tmp.path());
     let sk = fixture_identity(&repo);
 
-    let first = sign_ref(&repo, Some("canon"), &sk, "Owner", 100).unwrap();
+    let first = sign_ref(&repo, Some("canon"), &sk, "Ashiq", 100).unwrap();
     assert!(first.updated);
     // Same second: identical line (ed25519 is deterministic) → no-op.
-    let same = sign_ref(&repo, Some("canon"), &sk, "Owner", 100).unwrap();
+    let same = sign_ref(&repo, Some("canon"), &sk, "Ashiq", 100).unwrap();
     assert!(!same.updated);
     // Later second: replaced in place, still exactly one line.
-    let later = sign_ref(&repo, Some("canon"), &sk, "Owner", 200).unwrap();
+    let later = sign_ref(&repo, Some("canon"), &sk, "Ashiq", 200).unwrap();
     assert!(later.updated);
 
     let tip = repo.head().unwrap().peel_to_commit().unwrap().id();
@@ -232,7 +232,7 @@ fn branch_moved_since_signing_reads_unsigned() {
     let repo = repo_with_commit(tmp.path());
     let sk = fixture_identity(&repo);
 
-    sign_ref(&repo, None, &sk, "Owner", 100).unwrap();
+    sign_ref(&repo, None, &sk, "Ashiq", 100).unwrap();
     // The branch moves: the endorsement stays on the OLD tip.
     commit_file(&repo, "b.txt", "b", "feat: second");
 
@@ -251,7 +251,7 @@ fn tampered_oid_reads_invalid() {
     let sk = fixture_identity(&repo);
 
     let c1 = repo.head().unwrap().peel_to_commit().unwrap().id();
-    sign_ref(&repo, None, &sk, "Owner", 100).unwrap();
+    sign_ref(&repo, None, &sk, "Ashiq", 100).unwrap();
     let c2 = commit_file(&repo, "b.txt", "b", "feat: second");
 
     let signed_body = crate::meta_refs::notes::note_body(&repo, SIGS_REF, c1).unwrap();
@@ -349,7 +349,7 @@ fn local_identity_resolves_lines_without_embedded_pubkey() {
     let line = SigLine {
         ref_name: "refs/heads/canon".into(),
         oid: tip.to_string(),
-        signer: "Owner".into(),
+        signer: "Ashiq".into(),
         key_id: sk.key_id(),
         pubkey: None,
         sig: sk.sign(payload.as_bytes()).to_b64(),
@@ -373,7 +373,7 @@ fn one_valid_line_outranks_a_bad_neighbour() {
     let repo = repo_with_commit(tmp.path());
     let sk = fixture_identity(&repo);
 
-    sign_ref(&repo, None, &sk, "Owner", 100).unwrap();
+    sign_ref(&repo, None, &sk, "Ashiq", 100).unwrap();
     let tip = repo.head().unwrap().peel_to_commit().unwrap().id();
     let junk = SigLine {
         ref_name: "refs/heads/canon".into(),

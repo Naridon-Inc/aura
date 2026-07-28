@@ -285,8 +285,15 @@ function ImageReadCard({
 
 /** Render one `tool_use`/`tool_result` pair. Status is derived purely from
  *  the result: absent → running, error flag → error, else ok. The registry
- *  owns naming/normalization; this component owns the pixels. */
-export function ToolCard({
+ *  owns naming/normalization; this component owns the pixels.
+ *
+ *  Memoized (shallow name/input/result): a transcript holds many settled tool
+ *  cards, and each render otherwise re-runs `describeTool` and rebuilds the
+ *  card for every one of them on any stream update. A settled block's
+ *  name/input/result refs are stable, so its card renders once and then skips;
+ *  a still-running card's `result` flips from undefined to an object, which the
+ *  shallow compare catches and re-renders as expected. */
+export const ToolCard = React.memo(function ToolCard({
   name,
   input,
   result,
@@ -458,7 +465,7 @@ export function ToolCard({
       )}
     </div>
   );
-}
+});
 
 // ── Ask-the-user block ──────────────────────────────────────────────────
 

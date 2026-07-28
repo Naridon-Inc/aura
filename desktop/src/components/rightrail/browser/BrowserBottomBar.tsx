@@ -105,7 +105,7 @@ export function BrowserBottomBar({
               title="Attach the marked elements to the chat"
               aria-label="Attach annotations to chat"
               onClick={onAttachAnnotations}
-              className="flex items-center gap-1.5 h-9 px-3 rounded-full bg-accent text-white text-[12px] font-medium hover:bg-accent/90 transition-colors"
+              className="flex items-center gap-1.5 h-9 px-3 rounded-full bg-accent text-[color:var(--color-accent-foreground)] text-[12px] font-medium hover:bg-accent/90 transition-colors"
             >
               <MessageSquarePlus className="h-4 w-4" />
               Attach {annotationCount}
@@ -125,7 +125,7 @@ export function BrowserBottomBar({
         >
           <SquareStack className="h-[18px] w-[18px]" />
           {tabCount > 1 && (
-            <span className="absolute -top-0.5 -right-0.5 min-w-[15px] h-[15px] px-1 flex items-center justify-center rounded-full bg-accent text-white text-[9px] font-semibold leading-none">
+            <span className="absolute -top-0.5 -right-0.5 min-w-[15px] h-[15px] px-1 flex items-center justify-center rounded-full bg-accent text-[color:var(--color-accent-foreground)] text-[9px] font-semibold leading-none">
               {tabCount}
             </span>
           )}
@@ -179,7 +179,7 @@ function EngineSlot({
       className={`flex items-center justify-center w-6 h-6 rounded-full text-[11px] font-bold transition-colors ${
         active
           ? kind === "aura"
-            ? "bg-accent text-white"
+            ? "bg-accent text-[color:var(--color-accent-foreground)]"
             : "bg-bg-1 text-text-1 ring-1 ring-line-strong"
           : "text-text-4 hover:text-text-2"
       }`}
@@ -214,7 +214,7 @@ function RoundBtn({
       disabled={disabled}
       className={`flex items-center justify-center w-9 h-9 rounded-full transition-colors disabled:opacity-40 disabled:pointer-events-none ${
         active
-          ? "bg-accent text-white"
+          ? "bg-accent text-[color:var(--color-accent-foreground)]"
           : accent
             ? "text-accent hover:bg-bg-3"
             : "text-text-2 hover:text-text-1 hover:bg-bg-3"

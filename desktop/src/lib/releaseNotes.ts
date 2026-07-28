@@ -26,11 +26,140 @@ export type ReleaseNote = {
   /** 2–5 short "you can now…" lines. The card shows the title; the modal
    *  shows the full list. */
   highlights: string[];
+  /** An optional one-tap action offered next to "Got it" — for the rare
+   *  release where the note isn't the whole story and there's something the
+   *  user can actually do about it. `kind` is the thing to open; App owns
+   *  what that means. */
+  cta?: { label: string; kind: ReleaseCta };
 };
+
+/** Things a release note is allowed to offer. Keep this list short. */
+export type ReleaseCta = "mobile-waitlist";
 
 // Newest first. The entry whose `version` equals the running app version is the
 // one shown after an update.
 export const RELEASE_NOTES: ReleaseNote[] = [
+  {
+    version: "0.19.33",
+    date: "July 2026",
+    major: true,
+    title: "Every copy of your project in one place — and a commit that has to match what you asked for",
+    highlights: [
+      "See every copy of your project at once. When several things are being worked on in parallel, each gets its own copy of your project — and until now they were easy to lose track of. Workspaces lists them all in one place: what's unfinished in each, how far each has moved from your main line, and who or what is working in it.",
+      "Agents in different copies stop colliding. Aura now watches every copy of a project together, so when two agents are about to change the same thing in different copies, they find out before it happens instead of after. What's inside each copy still stays private to that copy.",
+      "A commit now has to match what you said you'd do. Before work is committed, Aura compares it against the intent behind it — and if the two disagree, it stops and shows you the disagreement rather than letting it through quietly.",
+      "If something you asked to keep was rewritten anyway, Aura names it. It won't block the commit — the piece is still there — but nobody gets to rewrite something you'd protected without you hearing about it.",
+      "Undo now reaches things that were deleted, not just changed. Rewind could already put back a piece that had been rewritten; it can now bring back one that was removed outright.",
+      "Smaller things: strict mode reads as a setting rather than an alarm when it's simply on, a sealed stamp shows its real date instead of a question mark, a change whose description couldn't be written says so instead of showing you the refusal, colour means something again across the app, and the Team surface stops redrawing itself on checks that found nothing new.",
+    ],
+  },
+  {
+    // Carries two releases' worth: 0.19.31 was built but never published, so
+    // everyone updating from 0.19.30 lands here and this note is the only one
+    // they'll see. Its best lines are folded in below.
+    version: "0.19.32",
+    date: "July 2026",
+    major: true,
+    title: "Changes in plain English, a shared place to write, and Aura on your phone",
+    highlights: [
+      "Changes now tells you what actually happened, in plain English. Every change says what that piece of your project used to do, what it does now, and why — written out for you, instead of leaving you to read the code and guess.",
+      "See how a feature is really going. Open one and you get an honest read at a glance — how sure Aura is it works, where the risk is, and whether it drifted from what you asked for — with the whole thread of work behind it, across every session and commit.",
+      "Ask Aura anything about your project and get the answer first. Press ⌘K, ask in your own words, and it answers from what has actually happened in this project — not a guess.",
+      "Nothing disappears quietly. If work would delete part of your project, Aura stops and names exactly what would go, so a deletion is always something you agreed to.",
+      "Scribble — a shared place to write. It's the first thing on the right-hand rail now: jot anything, tick things off, pin what matters, and drop in a picture. Anything you didn't finish yesterday carries over to today, and mentioning a teammate puts it in front of them.",
+      "Your tasks now sit beside the conversation about them. One Chats / Tasks switch under the project name, instead of the board living off in its own corner.",
+      "Your old messages are back. If you or a teammate changed the name you go by, conversations from before could look empty — every one of them now finds its history again, whatever you were called at the time.",
+      "No more freezing after you step away. If one program in a terminal stopped reading, it used to take every other terminal down with it and eventually the whole window — quitting Aura was the only way out. Now a busy terminal only affects itself, says so, and starts taking your typing again on its own.",
+      "See who's working where, live. A team panel at the bottom of Changes shows what your teammates and their agents are touching right now, with their real photos and a verified tick — so two people don't quietly edit the same thing.",
+      "See the actual change without leaving the rail. Open a file under Changes and the before-and-after lines expand right there, in plain colour.",
+      "Steer an agent while it's working. Tap Steer (or press ⌘↵) to change course mid-task instead of waiting for it to finish — and 'Take {name} out' pulls a single agent out of an Aura chat into its own session.",
+      "Let Aura open your pull request. When there's no PR yet, one tap has Aura commit, push, and write a clear title and description from what actually changed. Your Team list also tidies itself, quietly offering 'Same person' when someone shows up twice.",
+      "Smoother in the small places: Pages and past sessions open instantly instead of loading from scratch, typing in the terminal keeps up on Intel Macs, messages no longer appear twice, ⌘K jumps between projects, the Mac installer is back to drag-onto-Applications, and Aura wears its new mark.",
+      "Aura is coming to iPhone and Android — check on your agents, steer them, and approve work from anywhere. Join the waitlist and we'll email you an invite when it's ready.",
+    ],
+    cta: { label: "Join the phone waitlist", kind: "mobile-waitlist" },
+  },
+  {
+    version: "0.19.31",
+    date: "July 2026",
+    major: true,
+    title: "Steer with a tap, pull one agent out, and a self-tidying Team",
+    highlights: [
+      "Steer an agent with one button. While it's working, tap Steer (or press ⌘↵) to change course — your new direction lands right away instead of waiting for it to finish.",
+      "Pull a single agent out of an Aura chat in one tap. 'Take {name} out' hands you its own session — and that same session shows up in your terminal, so you can keep going there too.",
+      "Your Team list tidies itself. When one person shows up twice — a work email next to a personal one, a name that matches their GitHub handle — Aura quietly offers 'Same person' to fold them into one. Nothing merges without your say-so, and 'Different people' makes the hint stop.",
+      "Let Aura open your pull request. When there's no PR yet, one tap has Aura commit, push, and write a clear title and description from what actually changed.",
+      "New here? A ready-made sample project is waiting on first launch, and the Get-started tour now speaks to people who already build with agents — less 'what is an AI coder', more what makes Aura different.",
+    ],
+  },
+  {
+    version: "0.19.30",
+    date: "July 2026",
+    major: true,
+    title: "Steer a working agent, browse your Pages, and a cleaner Team view",
+    highlights: [
+      "Change course mid-task: while an agent is working, send a follow-up and it redirects right away instead of waiting for it to finish. Press ⌘↵ to steer, or set Queue vs Steer as your default in Settings → Behavior → Chat.",
+      "Pages now work like a browser — back and forward arrows to retrace your steps, and every page opens instantly instead of reloading from scratch. Switch projects and you stay on Pages or Tasks instead of being bounced back to Build.",
+      "The Team view reads like a real conversation now: activity grouped into plain-language threads, a tidier member list, and cleaner headers.",
+      "Nicer editing: code blocks are clean and colour-coded with a language picker, and Undo (⌘Z) works again in the file editor.",
+      "Images you send in chat show as a neat little card under your message instead of stretching the bubble.",
+    ],
+  },
+  {
+    version: "0.19.29",
+    date: "July 2026",
+    major: false,
+    title: "Start new work on your always-on cloud machine",
+    highlights: [
+      "When you start new work, pick where it runs: Local keeps it on this computer, Cloud hands it to your always-on machine so it keeps going after you close your laptop.",
+      "Not set up for cloud yet? A one-tap 'Set up cloud' signs you in — then the same button sends your work to the cloud.",
+      "Cloud shows a quick status: green means a machine is ready and your work starts right away, amber means it waits in line until one comes online.",
+    ],
+  },
+  {
+    version: "0.19.28",
+    date: "July 2026",
+    major: false,
+    title: "Files open properly, and dropped screenshots land",
+    highlights: [
+      "Open a file and you'll actually see it. On some setups a file could open to a blank page — now the text shows every time, whatever the file.",
+      "Drag a screenshot into the terminal or a chat and it lands where you drop it, instead of quietly going nowhere.",
+    ],
+  },
+  {
+    version: "0.19.27",
+    date: "July 2026",
+    major: false,
+    title: "Folders you open now stay put",
+    highlights: [
+      "Open a folder and it stays in your sidebar — even when your recent list is already full — so a project you just opened never quietly disappears on you.",
+    ],
+  },
+  {
+    version: "0.19.23",
+    date: "July 2026",
+    major: true,
+    title: "Connect Linear, bring your own AI cloud, and watch your deploys",
+    highlights: [
+      "Plan in Linear? Connect it the same way you connect Jira. Your Linear issues flow straight onto Aura’s task board, so the work in front of you lines up with the tickets that describe it.",
+      "Use the AI account your company already pays for. Aura now works with Claude through Amazon Bedrock and Google Vertex, and with Azure OpenAI — point Aura at your cloud and it just works, no extra key to buy.",
+      "Stacked pull requests finally read as a stack. If you use Graphite, Aura shows your PRs in the order they build on each other — marked as a Graphite stack — instead of a flat, out-of-order list.",
+      "See your deploy right on the pull request. When a change is building or live on Vercel, Aura shows the status and a one-click link to open the preview — no switching tabs to find out whether it shipped.",
+      "Open your project anywhere. A new “Open in…” jumps a repo or file straight into VS Code, Cursor, or whichever editor you prefer. And Settings got a cleaner, more compact makeover that’s quicker to move around.",
+    ],
+  },
+  {
+    version: "0.19.22",
+    date: "July 2026",
+    major: false,
+    title: "More coding agents, and connecting Codex just got clearer",
+    highlights: [
+      "Aura now knows more coding agents out of the box — Google’s Antigravity (agy), Aider and Amp join Claude, Gemini, Codex, Cursor and the rest. Any of them shows up ready to launch the moment it’s installed, and you can still point Aura at any other command-line agent yourself.",
+      "Pin the agents you actually use. A new pin sits next to each agent in Settings → Agents (and the quick-launch bar) — pin the two or three you reach for so they’re one tap away, and unpin the rest. Your installed agents come pinned to start with.",
+      "Connecting Codex now tells you what’s actually going on. If Codex isn’t installed — or is installed but won’t run — Aura says so and hands you the exact command to fix it, instead of a Connect button that quietly does nothing. Already signed in to Codex through the ChatGPT app? Aura now sees that too.",
+      "The #aura channel used to count only you — its header said “· 1” and its member list showed just your own machine. Now it reflects everyone who has posted there, so the count, the members rail, and @-mentions all show the real community around you.",
+    ],
+  },
   {
     version: "0.19.19",
     date: "July 2026",

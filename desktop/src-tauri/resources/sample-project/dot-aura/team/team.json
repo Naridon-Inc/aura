@@ -1,0 +1,30 @@
+{
+  "team_id": "recipe-box",
+  "repo_root": "{{PROJECT_ROOT}}",
+  "created_at": {{T_MINUS_2D}},
+  "members": [
+    {
+      "email": "maya@example.com",
+      "name": "Maya Chen",
+      "handle": "maya",
+      "commits": 12,
+      "first_seen": {{T_MINUS_2D}},
+      "last_seen": {{T_MINUS_1D}},
+      "claimed": true,
+      "admin": true,
+      "source": "direct"
+    },
+    {
+      "email": "sam@example.com",
+      "name": "Sam Rivera",
+      "handle": "sam",
+      "commits": 4,
+      "first_seen": {{T_MINUS_2D}},
+      "last_seen": {{T_MINUS_3H}},
+      "claimed": true,
+      "admin": false,
+      "source": "direct"
+    }
+  ],
+  "channels": ["general", "agents", "pull-requests"]
+}

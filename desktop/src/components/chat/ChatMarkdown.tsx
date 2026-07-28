@@ -16,8 +16,12 @@
 
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
+import remarkMath from "remark-math";
+import { remarkCallouts } from "../markdown/remarkCallouts";
+import { calloutFromBlockquote } from "../markdown/Callout";
+import rehypeKatex from "rehype-katex";
 import type { ReactNode } from "react";
-import { Fragment } from "react";
+import { Fragment, memo } from "react";
 import { onExternalAnchorClick } from "../../lib/openExternal";
 
 export type ChatMarkdownProps = {
@@ -51,8 +55,8 @@ function transformMentions(
             className="px-1 rounded font-medium"
             style={
               self
-                ? { background: "rgba(244, 63, 94, 0.18)", color: "rgb(244, 63, 94)" }
-                : { background: "rgba(91, 141, 239, 0.15)", color: "rgb(120, 162, 247)" }
+                ? { background: "color-mix(in srgb, var(--color-red) 18%, transparent)", color: "var(--color-red)" }
+                : { background: "color-mix(in srgb, var(--color-accent) 15%, transparent)", color: "var(--color-accent)" }
             }
           >
             {match[0]}
@@ -74,14 +78,19 @@ function transformMentions(
   return node;
 }
 
-export function ChatMarkdown({ body, members, selfHandle }: ChatMarkdownProps) {
+// Memoized: react-markdown re-parses the whole body on every render, which is
+// the single heaviest cost in a chat row. A bubble's body/members/selfHandle
+// almost never change once landed, so a shallow-prop memo skips re-parsing for
+// every unrelated stream update (new message, someone typing, a reaction).
+export const ChatMarkdown = memo(function ChatMarkdown({ body, members, selfHandle }: ChatMarkdownProps) {
   const handleSet = new Set(members.map((m) => m.handle));
   const walk = (children: ReactNode) => transformMentions(children, handleSet, selfHandle);
 
   return (
     <div className="aura-chat-md text-[12.5px] min-w-0 max-w-full" style={{ lineHeight: 1.5, overflowWrap: "anywhere" }}>
       <ReactMarkdown
-        remarkPlugins={[remarkGfm]}
+        remarkPlugins={[remarkGfm, remarkMath, remarkCallouts]}
+        rehypePlugins={[rehypeKatex]}
         components={{
           p: ({ children }) => (
             <p className="m-0 my-1 first:mt-0 last:mb-0">{walk(children)}</p>
@@ -93,7 +102,7 @@ export function ChatMarkdown({ body, members, selfHandle }: ChatMarkdownProps) {
               rel="noreferrer"
               onClick={onExternalAnchorClick}
               className="underline decoration-dotted underline-offset-2"
-              style={{ color: "var(--color-accent-blue)" }}
+              style={{ color: "var(--color-accent)" }}
             >
               {children}
             </a>
@@ -105,14 +114,15 @@ export function ChatMarkdown({ body, members, selfHandle }: ChatMarkdownProps) {
           h2: ({ children }) => <h3 className="text-[13px] font-semibold my-1">{children}</h3>,
           h3: ({ children }) => <h3 className="text-[12.5px] font-semibold my-1">{children}</h3>,
           h4: ({ children }) => <h4 className="text-[12.5px] font-semibold my-0.5">{children}</h4>,
-          blockquote: ({ children }) => (
-            <blockquote
-              className="my-1 pl-2 italic"
-              style={{ borderLeft: "2px solid var(--color-line-soft)", color: "var(--color-fg-muted)" }}
-            >
-              {children}
-            </blockquote>
-          ),
+          blockquote: ({ children, className }) =>
+            calloutFromBlockquote(className, children) ?? (
+              <blockquote
+                className="my-1 pl-2 italic"
+                style={{ borderLeft: "2px solid var(--color-line-soft)", color: "var(--color-text-3)" }}
+              >
+                {children}
+              </blockquote>
+            ),
           hr: () => (
             <hr className="my-1.5 border-0" style={{ borderTop: "1px solid var(--color-line-soft)" }} />
           ),
@@ -178,4 +188,4 @@ export function ChatMarkdown({ body, members, selfHandle }: ChatMarkdownProps) {
       </ReactMarkdown>
     </div>
   );
-}
+});

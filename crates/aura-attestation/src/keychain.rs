@@ -10,7 +10,7 @@
 //!     it works on headless servers and in CI)
 //!
 //! Identities are stored under the service name `aura-identity` with the
-//! account `"<kind>:<label>"` (e.g. `human:you`, `agent:claude-code`),
+//! account `"<kind>:<label>"` (e.g. `human:muhammed`, `agent:claude-code`),
 //! so `keyring show aura-identity` lists everything Aura has minted and the
 //! user can inspect or revoke independently of the app. The stored blob is
 //! the JSON [`StoredIdentity`] — the 32-byte seed plus enough metadata that
@@ -179,7 +179,7 @@ mod tests {
 
     #[test]
     fn account_naming_is_kind_qualified() {
-        assert_eq!(account(ActorKind::Human, "you"), "human:you");
+        assert_eq!(account(ActorKind::Human, "muhammed"), "human:muhammed");
         assert_eq!(account(ActorKind::Agent, "claude-code"), "agent:claude-code");
     }
 
@@ -195,7 +195,7 @@ mod tests {
 
     #[test]
     fn tampered_seed_fails_nid_integrity_check() {
-        let id = LocalIdentity::from_seed(ActorKind::Human, "you", [1u8; 32]);
+        let id = LocalIdentity::from_seed(ActorKind::Human, "muhammed", [1u8; 32]);
         let blob = blob_for(&id);
         let mut stored: StoredIdentity = serde_json::from_str(&blob).unwrap();
         // Swap the seed for a different one but keep the original NID —

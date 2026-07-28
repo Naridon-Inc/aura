@@ -422,12 +422,14 @@ mod tests {
 
     #[test]
     fn scaffold_manifest_parses_and_signs() {
+        // The cwd is process-global; every test that moves it must hold the
+        // one shared lock, or it yanks the ground out from under a test in
+        // another module (and `CwdGuard` puts it back even on panic).
+        let _lk = crate::TEST_CWD_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let tmp = tempfile::tempdir().unwrap();
-        let cwd = std::env::current_dir().unwrap();
+        let _cwd = crate::worktree::testing::CwdGuard::enter();
         std::env::set_current_dir(tmp.path()).unwrap();
-        let result = scaffold("@test/scaffolded");
-        std::env::set_current_dir(cwd).unwrap();
-        result.unwrap();
+        scaffold("@test/scaffolded").unwrap();
 
         let dir = tmp.path().join("scaffolded");
         let raw = std::fs::read_to_string(dir.join("aura.plugin.json")).unwrap();

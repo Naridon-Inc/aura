@@ -18,6 +18,7 @@ import {
 } from "../../lib/goalStore";
 import { GoalProbe } from "./GoalProbe";
 import { GoalComposer } from "./GoalComposer";
+import { FeatureRollup } from "./FeatureRollup";
 
 export function TaskGoals({ repoRoot, task }: { repoRoot: string; task: Task }) {
   const goals = useGoalsForTask(repoRoot, task.id);
@@ -37,6 +38,10 @@ export function TaskGoals({ repoRoot, task }: { repoRoot: string; task: Task }) 
           </span>
         ) : null}
       </div>
+
+      {/* When a task holds several goals, they're one feature — roll them into a
+          single "is it finished across all its sessions" read above the cards. */}
+      <FeatureRollup repoRoot={repoRoot} goals={goals} />
 
       {goals.length > 0 ? (
         <div className="mb-2.5 flex flex-col gap-2">

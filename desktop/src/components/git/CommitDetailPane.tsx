@@ -74,7 +74,7 @@ export function CommitDetailPane({
   }
   if (error) {
     return (
-      <div className="px-6 py-8 font-mono text-[11px] text-red-400">{error}</div>
+      <div className="px-6 py-8 font-mono text-[11px] text-red">{error}</div>
     );
   }
   if (!report) {

@@ -30,6 +30,7 @@ import {
 } from "../../lib/laneStore";
 import { AgentIcon } from "./AgentIcon";
 import { Input } from "../ui/input";
+import { AsciiSpinner } from "../ui/ascii-spinner";
 
 type Props = {
   /** Active workspace root. Lanes are scoped to it. */
@@ -74,7 +75,7 @@ export function LaneSwitcher({ repoRoot, onFocusLane }: Props) {
     <div className="flex flex-col gap-2 p-2 w-[300px] bg-bg-2 border border-line rounded-lg">
       <div className="flex items-center justify-between px-1">
         <span className="text-text-1 text-[12.5px] font-medium">Lanes</span>
-        <span className="text-text-5 text-[10.5px]">
+        <span className="text-text-5 text-[10.5px] tabular-nums">
           {lanes.length === 0
             ? "no lanes yet"
             : `${lanes.length} running`}
@@ -103,7 +104,7 @@ export function LaneSwitcher({ repoRoot, onFocusLane }: Props) {
                 <div className="flex-1 min-w-0">
                   <div
                     className="text-[12px] truncate"
-                    style={{ color: isActive ? "#fff" : "var(--color-text-1)" }}
+                    style={{ color: isActive ? "var(--color-bg-0)" : "var(--color-text-1)" }}
                   >
                     {lane.label || laneTitle(lane)}
                   </div>
@@ -111,7 +112,7 @@ export function LaneSwitcher({ repoRoot, onFocusLane }: Props) {
                     className="text-[10px] font-mono truncate"
                     style={{
                       color: isActive
-                        ? "rgba(255,255,255,0.7)"
+                        ? "color-mix(in srgb, var(--color-bg-0) 70%, transparent)"
                         : "var(--color-text-5)",
                     }}
                     title={`branch ${lane.branch}`}
@@ -126,10 +127,10 @@ export function LaneSwitcher({ repoRoot, onFocusLane }: Props) {
                     onDiscard(lane, false);
                   }}
                   title="Close this lane"
-                  className="opacity-0 group-hover:opacity-100 transition-opacity text-[10.5px] px-1.5 py-0.5 rounded flex-shrink-0"
+                  className="opacity-0 group-hover:opacity-100 focus-visible:opacity-100 transition-opacity text-[10.5px] px-1.5 py-0.5 rounded flex-shrink-0 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-accent/50"
                   style={{
                     color: isActive
-                      ? "rgba(255,255,255,0.85)"
+                      ? "color-mix(in srgb, var(--color-bg-0) 85%, transparent)"
                       : "var(--color-text-4)",
                   }}
                 >
@@ -160,7 +161,7 @@ export function LaneSwitcher({ repoRoot, onFocusLane }: Props) {
               type="button"
               onClick={() => onDiscard(dirtyConfirm.lane, true)}
               className="text-[11px] px-2 h-6 rounded text-white"
-              style={{ background: "var(--color-red, #d9534f)" }}
+              style={{ background: "var(--color-red)" }}
             >
               Discard anyway
             </button>
@@ -258,7 +259,10 @@ function NewLanePicker({
 
       <div className="flex flex-col gap-1">
         {agents === null && (
-          <span className="text-text-4 text-[10.5px]">finding agents…</span>
+          <span className="flex items-center gap-1.5 text-text-4 text-[10.5px]">
+            <AsciiSpinner />
+            Finding agents…
+          </span>
         )}
         {agents && agents.length === 0 && (
           <span className="text-text-4 text-[10.5px]">
@@ -280,7 +284,7 @@ function NewLanePicker({
               <AgentIcon agentId={a.id} label={a.label} size={16} active={active} />
               <span
                 className="text-[12px] flex-1"
-                style={{ color: active ? "#fff" : "var(--color-text-1)" }}
+                style={{ color: active ? "var(--color-bg-0)" : "var(--color-text-1)" }}
               >
                 {a.label}
               </span>

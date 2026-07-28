@@ -152,17 +152,20 @@ function severityTone(s: string): {
   }
   if (s === "medium") {
     return {
-      bg: "color-mix(in oklab, var(--color-amber, #d4a017) 12%, transparent)",
-      border: "color-mix(in oklab, var(--color-amber, #d4a017) 35%, transparent)",
-      text: "var(--color-amber, #d4a017)",
-      dot: "var(--color-amber, #d4a017)",
+      bg: "color-mix(in oklab, var(--color-amber) 12%, transparent)",
+      border: "color-mix(in oklab, var(--color-amber) 35%, transparent)",
+      text: "var(--color-amber)",
+      dot: "var(--color-amber)",
     };
   }
+  // Low severity is the "worth knowing, nothing to do" case, so it stays on
+  // the neutral ramp — colour is reserved for the two tiers that actually
+  // want the user to stop and look.
   return {
-    bg: "color-mix(in oklab, var(--color-blue, #4a8cff) 10%, transparent)",
-    border: "color-mix(in oklab, var(--color-blue, #4a8cff) 30%, transparent)",
+    bg: "var(--color-bg-1)",
+    border: "var(--color-line-soft)",
     text: "var(--color-text-2)",
-    dot: "var(--color-blue, #4a8cff)",
+    dot: "var(--color-text-4)",
   };
 }
 

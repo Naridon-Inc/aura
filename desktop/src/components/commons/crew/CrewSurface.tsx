@@ -3,39 +3,36 @@
 // starts until what it needs is done, and each finished piece is tied to the
 // commit — and the proof — that delivered it.
 //
-// This file is the SHELL only: it owns the cross-tab state (which tab, which
-// sub-view, the selected task), loads the one unified `ready_view` + the proof
-// ledger, and exposes the three real verbs in the header (Sync from board, Add
-// to queue, Run crew). You only ever hand the crew WORK — there is no "add an
-// agent" step: Run crew puts an agent on each ready task on its own. The two
-// tabs and the detail drawer are their own modules so
-// none of them grows into a mammoth file:
-//   • Queue tab    → the plan, as a dependency graph (default) or four lanes.
-//   • Activity tab → a live feed: working now on top, then done/failed with
-//                    proof + Retry.
-//   • Detail drawer→ click any task to see its spec, what it's waiting on, its
-//                    agent, commit, and proof.
+// This file is the SHELL only: it owns the surface state (which main view, the
+// selected task, the focused project), loads the one unified `ready_view` + the
+// proof ledger, and exposes the real verbs in the footer (Add to queue, Run
+// crew, and a one-click hand-off to your cloud machine). You only ever hand the
+// crew WORK — there is no "add an agent" step: Run crew puts an agent on each
+// ready task on its own. The body is `CrewWorkspace`: ONE persistent sidebar
+// (a `Tasks | Goals` segment — goals carry the Start/Pause/Resume controls that
+// used to be a separate "Runs" tab) beside a main area that swaps between the
+// dependency **Graph** and the Kanban **Board** via a floating capsule. Each
+// piece is its own module so none grows into a mammoth file.
+// The project switcher lives in the footer; cloud + automations moved to
+// Settings. Mission Control always shows exactly the one project you opened it
+// from — no all-projects aggregate.
 //
 // It reads the SAME `ready_view` the CLI's `aura loop run` and the chat's
 // `/loop` read, so what you see here, what the runner dispatches, and what chat
 // reports can never drift. No mock state anywhere — every number is the engine.
 
 import { useCallback, useEffect, useMemo, useState } from "react";
-import type { ReactNode } from "react";
 import {
-  FolderGit2,
-  Layers,
-  LayoutGrid,
+  Cloud,
+  GitBranch,
   ListTree,
-  Loader2,
   Play,
   Plus,
   RefreshCw,
-  SlidersHorizontal,
   Users,
   X,
-  Zap,
 } from "lucide-react";
+import { AsciiSpinner } from "../../ui/ascii-spinner";
 
 import { api } from "../../../lib/api";
 import { trackFeature } from "../../../lib/track";
@@ -52,82 +49,21 @@ import { CREW_CROSS_PROJECT } from "../../../lib/featureFlags";
 import { FullscreenOverlay } from "../../FullscreenOverlay";
 import { Button } from "../../ui/button";
 import { Input } from "../../ui/input";
-import { WizardStepTabs } from "../../ui/wizard";
-import { SegmentedControl } from "../../ui/segmented";
 import { loadCrewProof, type CrewProof } from "./crewProof";
-import { CrewQueueTab } from "./CrewQueueTab";
-import { CrewControlTab } from "./CrewControlTab";
+import { CrewWorkspace, type CrewMainView } from "./CrewWorkspace";
 import { CrewComposeWizard } from "./CrewComposeWizard";
 import { CrewReviewBanner } from "./CrewReviewBanner";
+import { CloudRunnerPanel } from "./CloudRunnerPanel";
 import {
   knownCrewProjectRoots,
   loadCrewProjects,
-  rollupProgress,
   type CrewProjectSummary,
 } from "./crewProjects";
-// The unified surface draws the crew's one engine four ways: the Queue graph
-// and Control panel (crew-native), plus the status-grouped Activity overview
-// and the Kanban Board (the Mission kit), fed by the same ready_view via the
-// adapter. Automations folds in as its own tab so triggers live here too.
-import { MissionActivity } from "../mission/MissionActivity";
-import { MissionBoard } from "../mission/MissionBoard";
-import { readyViewToMission, mergeMissions } from "../mission/missionFromCrew";
-import { allRuns, type MissionStageId } from "../mission/missionData";
-import { AutomationsSurface } from "../../automations/AutomationsSurface";
-
-// Primary navigation = top tabs (the FullscreenOverlay's tab strip). Four
-// single-purpose sections, no overlap: Work (the live pipeline, shown as a
-// Board or a List), Plan (the dependency graph + the rich per-task detail you
-// drill into), Automations (the triggers that feed the loop), and Runner (the
-// run controls + ledger). Secondary choices live INSIDE a tab (Work's
-// Board/List segmented), never as more top-level tabs.
-type CrewTab = "work" | "plan" | "automations" | "control";
-
-/** The two ways to look at the same live work inside the Work tab — a Trello-
- *  style Board (default) or a status-grouped List. A secondary segmented, not a
- *  top tab. */
-type WorkView = "board" | "list";
-
-// The cross-project strip's overview tab id — a sentinel that can't collide
-// with any real repo root (roots are absolute paths). Only meaningful when
-// CREW_CROSS_PROJECT is on.
-const ALL_PROJECTS = "__all_projects__";
-
-const TAB_ORDER: CrewTab[] = ["work", "plan", "automations", "control"];
-
-// The top tab strip, in order. Plain labels; `hint` is the one-line tooltip a
-// non-engineer reads before clicking.
-const TAB_META: Array<{
-  id: CrewTab;
-  label: string;
-  icon: ReactNode;
-  hint: string;
-}> = [
-  {
-    id: "work",
-    label: "Work",
-    icon: <LayoutGrid size={15} />,
-    hint: "Everything in flight — what's queued, being worked, and just landed",
-  },
-  {
-    id: "plan",
-    label: "Plan",
-    icon: <ListTree size={15} />,
-    hint: "The dependency map — open any task to see what it's waiting on, who's on it, and its proof",
-  },
-  {
-    id: "automations",
-    label: "Automations",
-    icon: <Zap size={15} />,
-    hint: "Schedules and triggers that hand the crew work on their own",
-  },
-  {
-    id: "control",
-    label: "Runner",
-    icon: <SlidersHorizontal size={15} />,
-    hint: "Set the crew going, pause it, and review past runs",
-  },
-];
+// The body is `CrewWorkspace` — one persistent sidebar (Tasks | Goals) beside a
+// main area that swaps between the dependency Graph and the Kanban Board, all
+// fed by the same `ready_view` via the adapter, so every view is only ever a
+// different drawing of one live truth.
+import { readyViewToMission } from "../mission/missionFromCrew";
 
 export function CrewSurface({
   repoRoot,
@@ -141,15 +77,17 @@ export function CrewSurface({
   const [loading, setLoading] = useState(false);
   const [busy, setBusy] = useState<null | "sync" | "run" | "order">(null);
   const [note, setNote] = useState<string | null>(null);
-  const [tab, setTab] = useState<CrewTab>("work");
-  const [workView, setWorkView] = useState<WorkView>("board");
+  const [lens, setLens] = useState<CrewMainView>("graph");
   const [selectedId, setSelectedId] = useState<string | null>(null);
-  // `now` drives the Mission Activity/Board elapsed labels; refreshed on every
-  // poll (no separate ticker — the queue re-reads often enough). `collapsed`
-  // owns which Activity stage groups are folded, surviving a re-poll.
+  // `now` drives the Board's elapsed labels; refreshed on every poll (no
+  // separate ticker — the queue re-reads often enough).
   const [now, setNow] = useState(() => Date.now());
-  const [collapsed, setCollapsed] = useState<Set<MissionStageId>>(new Set());
   const [composeOpen, setComposeOpen] = useState(false);
+  // Cloud machine — docked as a right-side board sheet, NOT the global Settings
+  // dialog. Mission Control is a fullscreen overlay (z-50); Settings opens at
+  // z-40, so routing there would bury it behind the wizard. Keeping the panel
+  // in-surface means one click actually shows it.
+  const [cloudOpen, setCloudOpen] = useState(false);
   // W-C: the crews on this board + which one the surface is scoped to. `null`
   // = all crews (whole graph) — the everyday case where there's only "main".
   const [crews, setCrews] = useState<CrewRow[]>([]);
@@ -167,29 +105,24 @@ export function CrewSurface({
   const [reviewDismissed, setReviewDismissed] = useState(false);
 
   // ─── Cross-project (CREW_CROSS_PROJECT) ────────────────────────────────
-  // When the flag is OFF, `projectTab` stays "" forever and `boardRoot` is
-  // always the open `repoRoot` — every board verb below operates on exactly the
-  // project it does today. When ON, the project strip can point the board at
-  // any known project (its root becomes `boardRoot`) or show the all-projects
-  // overview (`projectTab === ALL_PROJECTS`).
+  // The footer's project switcher points the whole surface at any known
+  // project. `projectTab` is "" (the open `repoRoot`, the default) or another
+  // project's root. There is no "all projects" aggregate any more — Mission
+  // Control always shows exactly one project, the one you opened it from.
   const [projects, setProjects] = useState<CrewProjectSummary[]>([]);
   const [projectsLoading, setProjectsLoading] = useState(false);
-  // "" = the open project (single-project behavior); ALL_PROJECTS = overview;
-  // any other value = that project's root.
+  // "" = the open project (the default); any other value = that project's root.
   const [projectTab, setProjectTab] = useState<string>("");
 
-  // The project the board (queue/activity/control + every verb) is scoped to.
-  // With the flag off this is always the open repo.
+  // The project the board (board/graph/runs + every verb) is scoped to. With
+  // the flag off — or on the default "" — this is always the open repo.
   const boardRoot =
-    CREW_CROSS_PROJECT && projectTab && projectTab !== ALL_PROJECTS
-      ? projectTab
-      : repoRoot;
-  const showOverview = CREW_CROSS_PROJECT && projectTab === ALL_PROJECTS;
+    CREW_CROSS_PROJECT && projectTab ? projectTab : repoRoot;
 
-  // Load the cross-project picture: enumerate known roots, then read each
+  // Load the switcher's project list: enumerate known roots, then read each
   // one's ready-view in parallel (resilient — a project with no crew shows
-  // zeros, never an error). Only runs when the flag is on. Default the strip
-  // to the all-projects overview the first time it lands.
+  // zeros, never an error). Only runs when the flag is on. The board itself
+  // stays on the open project until you pick another from the footer.
   const refreshProjects = useCallback(async () => {
     if (!CREW_CROSS_PROJECT) return;
     setProjectsLoading(true);
@@ -207,9 +140,8 @@ export function CrewSurface({
 
   useEffect(() => {
     if (!CREW_CROSS_PROJECT) return;
-    // Land on the all-projects overview so the first thing a cross-project
-    // user sees is every crew at once.
-    setProjectTab(ALL_PROJECTS);
+    // Populate the footer switcher, but DON'T move the board — it stays on the
+    // project you opened Mission Control from (`projectTab` "" = the open repo).
     void refreshProjects();
   }, [refreshProjects]);
 
@@ -218,7 +150,7 @@ export function CrewSurface({
     try {
       // Queue + proof + reality-check + crews + run ledger load together so a
       // done node's pill is never a frame behind its card, the guard is current
-      // before Run, and the Control tab's crews/goals/runs match the board.
+      // before Run, and the Runs lens's crews/goals/runs match the board.
       const [v, p, flags, c, r] = await Promise.all([
         api.loopReadyView(boardRoot),
         loadCrewProof(boardRoot),
@@ -372,12 +304,11 @@ export function CrewSurface({
       setNote(
         r.dispatched.length === 0
           ? "Nothing ready to start — add some work, or Sync from your board first to fill the queue."
-          : `Your crew is on ${r.dispatched.length} task${r.dispatched.length === 1 ? "" : "s"} — an agent on each${r.ready_remaining > 0 ? ` · ${r.ready_remaining} more ready and waiting` : ""}. Watch the list.`,
+          : `Your crew is on ${r.dispatched.length} task${r.dispatched.length === 1 ? "" : "s"} — an agent on each${r.ready_remaining > 0 ? ` · ${r.ready_remaining} more ready and waiting` : ""}. Watch the board.`,
       );
-      // The crew just put an agent on each — the live List is where you watch it
-      // land, so land on Work → List.
-      setTab("work");
-      setWorkView("list");
+      // The crew just put an agent on each — the Board is where you watch the
+      // cards move as they land, so snap to it.
+      setLens("board");
       await refresh();
     } catch (e) {
       setNote(`Couldn't start the crew: ${String(e)}`);
@@ -406,11 +337,10 @@ export function CrewSurface({
         setNote(
           r.dispatched.length === 0
             ? `Nothing ready in “${goal.goal}” right now.`
-            : `Started ${r.dispatched.length} task${r.dispatched.length === 1 ? "" : "s"} in “${goal.goal}”. Watch the list.`,
+            : `Started ${r.dispatched.length} task${r.dispatched.length === 1 ? "" : "s"} in “${goal.goal}”. Watch the board.`,
         );
         if (r.dispatched.length > 0) {
-          setTab("work");
-          setWorkView("list");
+          setLens("board");
         }
         await refresh();
       } catch (e) {
@@ -595,8 +525,7 @@ export function CrewSurface({
               : `Re-queued ${ids.length} tasks.`,
         );
         if (dispatched > 0) {
-          setTab("work");
-          setWorkView("list");
+          setLens("board");
         }
       } catch (e) {
         setNote(`Couldn't retry: ${String(e)}`);
@@ -670,79 +599,39 @@ export function CrewSurface({
     [view, proof, boardRoot, projectName],
   );
 
-  // The all-projects board (CREW_CROSS_PROJECT overview): every project's own
-  // ready-view — already loaded on the cross-project strip — folded into one
-  // Conductor-style Kanban of every workspace across every project. Each run
-  // carries its project, so a card can say where it lives. Proof pills are
-  // absent here (the overview loads counts, not per-project ledgers) — the
-  // aggregate is a glance; drill into a project for proof. Only built when the
-  // overview is showing, so quiet projects cost nothing the rest of the time.
-  const overviewMission = useMemo(() => {
-    if (!showOverview) return null;
-    const empty = new Map<string, CrewProof[]>();
-    const states = projects
-      .filter((p) => p.view)
-      .map((p) => readyViewToMission(p.view!, empty, p.root, p.name));
-    return mergeMissions(states);
-  }, [showOverview, projects]);
-  const overviewHasRuns =
-    !!overviewMission && allRuns(overviewMission).length > 0;
-  const overviewRoll = useMemo(
-    () => (showOverview ? rollupProgress(projects) : null),
-    [showOverview, projects],
-  );
-  const overviewActive = projects.filter((p) => p.progress.total > 0).length;
-
-  // Open a run from the all-projects board: jump into ITS project (switching the
-  // strip + board root), select it, and land on Plan where its full detail is.
-  const openAcrossProjects = useCallback((run: MissionRun) => {
-    setProjectTab(run.project);
-    setActiveCrew(null);
-    setSelectedId(run.id);
-    setTab("plan");
-  }, []);
-
-  // Selecting a run from the Board/List opens its full detail in the Plan tab's
-  // master→detail column (the one place a task's spec, deps, agent, commit and
-  // proof already live) — no competing drawer.
-  const openDetail = useCallback((id: string) => {
-    setSelectedId(id);
-    setTab("plan");
-  }, []);
-
-  const toggleStage = useCallback((stage: MissionStageId) => {
-    setCollapsed((prev) => {
-      const next = new Set(prev);
-      if (next.has(stage)) next.delete(stage);
-      else next.add(stage);
-      return next;
-    });
-  }, []);
+  // Selecting a task (a canvas node, a worklist row, a board card) opens its
+  // full detail in the persistent sidebar — reachable from both the Graph and
+  // the Board without a competing drawer.
+  const openDetail = useCallback((id: string) => setSelectedId(id), []);
 
   return (
     <FullscreenOverlay
       onClose={onClose}
-      tabs={
-        CREW_CROSS_PROJECT ? (
-          <CrewProjectStrip
-            inline
-            projects={projects}
-            loading={projectsLoading}
-            active={projectTab}
-            openRoot={repoRoot}
-            onSelect={(id) => {
-              setProjectTab(id);
-              setSelectedId(null);
-              setActiveCrew(null);
-            }}
-            onRefresh={() => void refreshProjects()}
-          />
-        ) : undefined
-      }
       footer={
         <div className="flex w-full items-center gap-2">
+          {/* Project switcher — the bottom control that scopes the WHOLE
+              surface. Default is the project you opened Mission Control from;
+              pick another to point every lens + verb at it. Lives here, at the
+              bottom-left, so the lenses get the top of the pane. */}
+          {CREW_CROSS_PROJECT ? (
+            <div className="flex min-w-0 max-w-[42%] items-center border-r border-line-soft pr-2">
+              <CrewProjectStrip
+                inline
+                projects={projects}
+                loading={projectsLoading}
+                active={projectTab || repoRoot}
+                openRoot={repoRoot}
+                onSelect={(id) => {
+                  setProjectTab(id === repoRoot ? "" : id);
+                  setSelectedId(null);
+                  setActiveCrew(null);
+                }}
+                onRefresh={() => void refreshProjects()}
+              />
+            </div>
+          ) : null}
           {/* When the surface is scoped to one crew, show which — so Run's
-              scope is visible from every tab, with a one-click way back to all. */}
+              scope is always visible, with a one-click way back to all. */}
           {activeCrewRow ? (
             <button
               type="button"
@@ -764,9 +653,21 @@ export function CrewSurface({
           {/* Status/focus stay left; controls + actions push to the right edge
               of the bottom bar. */}
           <div className="flex-1" />
+          {/* Cloud is linked to THIS view — one click hands the current work to
+              your always-on machine. Connecting/managing the machine lives in
+              Settings → Cloud machine, which this opens. */}
           <Button
-            variant="ghost"
-            size="xs"
+            variant="subtle"
+            size="icon-sm"
+            onClick={() => setCloudOpen(true)}
+            title="Run on your always-on cloud machine — send work off and bring results back."
+            aria-label="Cloud machine"
+          >
+            <Cloud size={13} />
+          </Button>
+          <Button
+            variant="subtle"
+            size="icon-sm"
             onClick={() => void refresh()}
             disabled={busy !== null}
             title="Re-read the queue"
@@ -778,7 +679,7 @@ export function CrewSurface({
             />
           </Button>
           <Button
-            variant="subtle"
+            variant="secondary"
             size="sm"
             onClick={() => setComposeOpen(true)}
             disabled={busy !== null}
@@ -803,15 +704,15 @@ export function CrewSurface({
             />
           </label>
           <Button
-            variant="default"
+            variant="accentSoft"
             size="sm"
             onClick={onRun}
             disabled={busy !== null || readyCount === 0}
             className="gap-1.5"
-            title="Set the crew going — it runs an agent on each ready task on its own, in order. Watch them land in Work."
+            title="Set the crew going — it runs an agent on each ready task on its own, in order. Watch them land on the Board."
           >
             {busy === "run" ? (
-              <Loader2 size={13} className="animate-spin" />
+              <AsciiSpinner className="text-[12px]" />
             ) : (
               <Play size={13} />
             )}
@@ -820,48 +721,22 @@ export function CrewSurface({
         </div>
       }
     >
-      {/* Primary navigation is the top tab strip (Work · Plan · Automations ·
-          Runner) in the overlay header; this column is just the active tab's
-          body. */}
+      {/* The body is CrewWorkspace — the persistent sidebar + the Graph/Board
+          main area. The project switcher + run controls live in the footer. */}
       <div className="relative flex h-full min-h-0 flex-col">
-        {/* The cross-project picker (All projects + per-project tabs) now lives
-            in the overlay's TOP bar (see `tabs` above) so it sits on the very
-            top row; this body starts straight at the section tabs. */}
-
-        {/* Section tabs (Work · Plan · Automations · Runner) sit BELOW the
-            project selection — you pick the project first, then the lens onto
-            it. Hidden on the All-projects overview, which has no per-tab body. */}
-        {!showOverview ? (
-          <div className="flex-shrink-0 border-b border-line bg-bg-content">
-            <WizardStepTabs
-              variant="tabs"
-              steps={TAB_META.map((t) => ({
-                id: t.id,
-                label: t.label,
-                icon: t.icon,
-              }))}
-              index={TAB_ORDER.indexOf(tab)}
-              onJump={(i) => setTab(TAB_ORDER[i])}
-            />
-          </div>
-        ) : null}
-
         {/* Reality check sits at the very top, above any action note — the one
             thing to glance at before you Run. Auto-loaded; quiet when clean. */}
-        {!showOverview && !reviewDismissed ? (
+        {!reviewDismissed ? (
           <CrewReviewBanner
             flags={reviewFlags}
             onMarkDone={(id) => void onSetStatus(id, "completed")}
-            onOpen={(id) => {
-              setSelectedId(id);
-              setTab("plan");
-            }}
+            onOpen={(id) => setSelectedId(id)}
             onDismiss={() => setReviewDismissed(true)}
           />
         ) : null}
 
-        {/* Action results ride as a slim banner across the top so the Queue's
-            full-bleed board keeps every pixel below it. */}
+        {/* Action results ride as a slim banner across the top so the
+            workspace keeps every pixel below it. */}
         {note ? (
           <div className="shrink-0 border-b border-line-soft bg-bg-1/60 px-6 py-2.5 text-[12px] leading-relaxed text-text-2">
             {note}
@@ -869,67 +744,10 @@ export function CrewSurface({
         ) : null}
 
         <div className="relative min-h-0 flex-1">
-          {showOverview ? (
-            // All-projects dashboard — the Conductor shape: one Kanban of every
-            // workspace across every project, per-project tabs up top. When
-            // nothing's queued anywhere yet we fall back to the project-card grid
-            // (its empty/discovery state), so a fresh install still reads clean.
-            overviewHasRuns && overviewMission ? (
-              <div className="flex h-full min-h-0 flex-col">
-                <div className="flex shrink-0 items-center gap-3 border-b border-line-soft px-6 py-2.5">
-                  <span className="text-[13px] font-medium text-text-1">
-                    All projects
-                  </span>
-                  {overviewRoll ? (
-                    <span className="text-[11.5px] text-text-4">
-                      {overviewRoll.done}/{overviewRoll.total} done across{" "}
-                      {overviewActive} active
-                      {overviewActive === 1 ? " project" : " projects"}
-                      {overviewRoll.working > 0
-                        ? ` · ${overviewRoll.working} in progress`
-                        : ""}
-                    </span>
-                  ) : null}
-                  <span className="ml-auto text-[11.5px] text-text-5">
-                    Every workspace, by stage — click one to open its project
-                  </span>
-                </div>
-                <div className="min-h-0 flex-1">
-                  {/* No cross-project Retry here: re-arming a run must target its
-                      own project's engine, and this board spans many. Opening a
-                      failed card drops you into its project, where Retry is live. */}
-                  <MissionBoard
-                    state={overviewMission}
-                    now={now}
-                    selectedId={selectedId}
-                    showProject
-                    onSelect={openAcrossProjects}
-                  />
-                </div>
-              </div>
-            ) : (
-              <CrewProjectsOverview
-                projects={projects}
-                loading={projectsLoading}
-                onOpen={(root) => {
-                  setProjectTab(root);
-                  setSelectedId(null);
-                  setActiveCrew(null);
-                }}
-              />
-            )
-          ) : loading && !view ? (
+          {loading && !view ? (
             <div className="flex h-full items-center justify-center gap-2 text-[12.5px] text-text-4">
-              <Loader2 size={14} className="animate-spin" />
+              <AsciiSpinner />
               Reading the work queue…
-            </div>
-          ) : tab === "automations" ? (
-            // Triggers live in the unified surface too — the schedules (and
-            // soon on-commit / on-PR / @mention launches) that put work on the
-            // crew. Independent of the queue, so it shows even with nothing
-            // queued yet.
-            <div className="h-full overflow-y-auto">
-              <AutomationsSurface repoRoot={boardRoot} />
             </div>
           ) : empty ? (
             <div className="h-full overflow-y-auto">
@@ -937,94 +755,36 @@ export function CrewSurface({
                 <EmptyState busy={busy} onSync={onSync} />
               </div>
             </div>
-          ) : view && tab === "plan" ? (
-            // Plan — the dependency map + the rich per-task detail. Full-bleed:
-            // the worklist/detail column + dotted canvas fill the whole body.
-            // Clicking a task swaps the left column to its detail — master→detail
-            // in place, no side-popover. This is where a Board/List card opens.
-            <CrewQueueTab
+          ) : view ? (
+            <CrewWorkspace
               view={view}
+              mission={mission}
+              now={now}
+              lens={lens}
+              onLens={setLens}
               selectedId={selectedId}
               selectedTask={selectedTask}
               allTasks={allTasks}
               proof={proof}
-              onSelect={setSelectedId}
+              onSelect={openDetail}
               onDeselect={() => setSelectedId(null)}
               onSetStatus={onSetStatus}
-              onRetry={(id) => void retryNodes([id])}
+              onRetryNode={(id) => void retryNodes([id])}
               onPlanOrder={onPlanOrder}
               ordering={busy === "order"}
               onSync={onSync}
               syncing={busy === "sync"}
+              onRetryRuns={onRetryRuns}
+              crews={crews}
+              activeCrew={activeCrew}
+              onSelectCrew={setActiveCrew}
+              runs={runs}
+              acting={acting}
+              onSpawnCrew={onSpawnCrew}
+              onRunGoal={onRunGoal}
+              onPauseGoal={onPauseGoal}
+              onResumeGoal={onResumeGoal}
             />
-          ) : view && tab === "control" ? (
-            <div className="h-full min-h-0">
-              <CrewControlTab
-                crews={crews}
-                activeCrew={activeCrew}
-                onSelectCrew={setActiveCrew}
-                goals={view.goals}
-                runs={runs}
-                working={view.working}
-                now={now}
-                acting={acting}
-                onSpawnCrew={onSpawnCrew}
-                onRunGoal={onRunGoal}
-                onPauseGoal={onPauseGoal}
-                onResumeGoal={onResumeGoal}
-                onOpenTask={(id) => {
-                  setSelectedId(id);
-                  setTab("plan");
-                }}
-              />
-            </div>
-          ) : view && tab === "work" && mission ? (
-            // Work — everything in flight, looked at two ways: a Board (kanban,
-            // default) or a List (the status-grouped feed). A secondary
-            // segmented chooses between them; clicking any card/row opens that
-            // run's full detail in the Plan tab. One job, two lenses.
-            <div className="flex h-full min-h-0 flex-col">
-              <div className="flex shrink-0 items-center gap-3 border-b border-line-soft px-6 py-2.5">
-                <SegmentedControl
-                  value={workView}
-                  onChange={setWorkView}
-                  options={[
-                    { value: "board", label: "Board" },
-                    { value: "list", label: "List" },
-                  ]}
-                />
-                <span className="text-[11.5px] text-text-4">
-                  {workView === "board"
-                    ? "Every job as a card, by stage"
-                    : "Every job in one feed, newest first"}
-                </span>
-              </div>
-              <div className="min-h-0 flex-1">
-                {workView === "board" ? (
-                  <MissionBoard
-                    state={mission}
-                    now={now}
-                    selectedId={selectedId}
-                    onSelect={(run) => openDetail(run.id)}
-                    onRetry={onRetryRuns}
-                  />
-                ) : (
-                  <div className="h-full overflow-y-auto">
-                    <div className="mx-auto max-w-5xl px-8 py-6">
-                      <MissionActivity
-                        state={mission}
-                        now={now}
-                        selectedId={selectedId}
-                        collapsed={collapsed}
-                        onToggle={toggleStage}
-                        onSelect={(run) => openDetail(run.id)}
-                        onRetry={onRetryRuns}
-                      />
-                    </div>
-                  </div>
-                )}
-              </div>
-            </div>
           ) : null}
 
           {/* Add to queue — the single door onto the queue: plan a goal into a
@@ -1066,6 +826,43 @@ export function CrewSurface({
               </div>
             </div>
           ) : null}
+
+          {/* Cloud machine — same right-side board sheet, in-surface so it never
+              opens behind the wizard. No unsaved input here, so the scrim closes
+              it; Esc too (stopped from also closing Mission Control). */}
+          {cloudOpen ? (
+            <div
+              className="absolute inset-0 z-20"
+              onKeyDown={(e) => {
+                if (e.key === "Escape") {
+                  e.stopPropagation();
+                  setCloudOpen(false);
+                }
+              }}
+            >
+              <div
+                className="absolute inset-0 bg-black/25"
+                aria-hidden
+                onClick={() => setCloudOpen(false)}
+              />
+              <div className="absolute inset-y-0 right-0 flex w-full max-w-[480px] flex-col overflow-hidden border-l border-line bg-bg-content shadow-[var(--shadow-modal)]">
+                <div className="flex shrink-0 items-center justify-end border-b border-line px-2 py-1.5">
+                  <button
+                    type="button"
+                    onClick={() => setCloudOpen(false)}
+                    className="grid h-6 w-6 place-items-center rounded text-text-4 transition-colors hover:bg-bg-2 hover:text-text-1"
+                    title="Close (Esc)"
+                    aria-label="Close"
+                  >
+                    <X size={13} />
+                  </button>
+                </div>
+                <div className="min-h-0 flex-1 overflow-hidden">
+                  <CloudRunnerPanel repoRoot={boardRoot} />
+                </div>
+              </div>
+            </div>
+          ) : null}
         </div>
       </div>
     </FullscreenOverlay>
@@ -1088,11 +885,11 @@ function StatusPill({
       <span
         className="inline-flex items-center gap-1.5 rounded-full px-2.5 py-1 text-[11.5px] font-medium"
         style={{
-          background: "color-mix(in srgb, #d99a2b 16%, transparent)",
-          color: "#d99a2b",
+          background: "color-mix(in srgb, var(--color-amber) 16%, transparent)",
+          color: "var(--color-amber)",
         }}
       >
-        <Loader2 size={11} className="animate-spin" />
+        <AsciiSpinner className="text-[11px]" />
         {working} working
         <span className="opacity-70">· live</span>
       </span>
@@ -1150,7 +947,7 @@ function EmptyState({
         className="mt-1 gap-1.5"
       >
         {busy === "sync" ? (
-          <Loader2 size={13} className="animate-spin" />
+          <AsciiSpinner className="text-[12px]" />
         ) : (
           <RefreshCw size={13} />
         )}
@@ -1161,9 +958,9 @@ function EmptyState({
 }
 
 // ─── Cross-project (CREW_CROSS_PROJECT) ──────────────────────────────────────
-// These render only when the flag is on. The strip is the top-level project
-// switcher (All projects + one tab per project that has crew work); the
-// overview is the "All projects" body — every project as a progress card.
+// Renders only when the flag is on: the footer's project switcher strip (one
+// chip per project that has crew work, plus the open project). Picking one
+// points the whole surface at it. No all-projects aggregate any more.
 
 /** A short "{done}/{total} done" + live/ready line for a project, in plain
  *  language. Amber dot when an agent is working, green when everything's done,
@@ -1189,32 +986,16 @@ function projectStatusLine(p: CrewProjectSummary): {
 }
 
 const TONE_COLOR: Record<string, string> = {
-  working: "#d99a2b", // amber — agent on something
-  done: "var(--color-positive, #34b27b)", // green — finished, status only
+  working: "var(--color-amber)", // amber — agent on something
+  done: "var(--color-accent-green)", // green — finished, status only
   ready: "var(--color-accent)", // arctic-blue — work waiting
   idle: "var(--color-text-4)",
 };
 
-/** The slim progress bar under a project card — done (green) over the rest. */
-function ProjectProgressBar({ done, total }: { done: number; total: number }) {
-  const pct = total > 0 ? Math.round((done / total) * 100) : 0;
-  return (
-    <div className="h-1 w-full overflow-hidden rounded-full bg-bg-3">
-      <div
-        className="h-full rounded-full transition-all"
-        style={{
-          width: `${pct}%`,
-          background: "var(--color-positive, #34b27b)",
-        }}
-      />
-    </div>
-  );
-}
-
-/** The top-of-surface project switcher. "All projects" first, then one tab per
- *  project that actually has crew work — quiet projects don't clutter the
- *  strip, but the overview still lists them. Reuses the same chip shape as the
- *  header's crew chip so the surface reads consistently. */
+/** The footer project switcher — one chip per project that actually has crew
+ *  work (plus the open project, always), so quiet projects don't clutter the
+ *  strip. Reuses the same chip shape as the focused-crew chip so the surface
+ *  reads consistently. */
 function CrewProjectStrip({
   projects,
   loading,
@@ -1230,12 +1011,12 @@ function CrewProjectStrip({
   openRoot: string;
   onSelect: (id: string) => void;
   onRefresh: () => void;
-  /** Render bare (no row chrome) for hosting in the overlay's top bar, so the
-   *  project picker sits on the very top row beside the close chip + actions. */
+  /** Render bare (no row chrome) for hosting inline in the footer's left
+   *  cluster, so the switcher sits on one row with the run controls. */
   inline?: boolean;
 }) {
-  // Only projects with crew work get their own tab; the rest stay in the
-  // overview. The open project always gets a tab so you can always get back to
+  // Only projects with crew work get their own chip; quiet ones stay off the
+  // strip. The open project always gets a chip so you can always get back to
   // the board you came from.
   const tabbed = projects.filter(
     (p) => p.progress.total > 0 || p.root === openRoot,
@@ -1245,14 +1026,14 @@ function CrewProjectStrip({
     selected: boolean,
     onClick: () => void,
     key: string,
-    icon: React.ReactNode,
     label: string,
-    tone?: string,
+    status: { text: string; tone: "working" | "done" | "ready" | "idle" },
   ) => (
     <button
       key={key}
       type="button"
       onClick={onClick}
+      title={`${label} — ${status.text}`}
       className={[
         "inline-flex shrink-0 items-center gap-1.5 rounded-full border px-3 py-1 text-[11.5px] font-medium transition-colors",
         selected
@@ -1265,36 +1046,33 @@ function CrewProjectStrip({
           : undefined
       }
     >
-      <span style={tone ? { color: tone } : undefined}>{icon}</span>
-      {label}
+      {/* Always a plain git icon — a project is a git repo, so the icon names
+          the kind of thing, never its status. Status rides a quiet trailing dot
+          instead, so the icon stays legible and consistent. */}
+      <GitBranch size={12} className="shrink-0 opacity-70" />
+      <span className="truncate">{label}</span>
+      {status.tone !== "idle" ? (
+        <span
+          className="h-1.5 w-1.5 shrink-0 rounded-full"
+          style={{ background: TONE_COLOR[status.tone] }}
+          aria-hidden
+        />
+      ) : null}
     </button>
   );
 
   const inner = (
     <>
       <div className="flex min-w-0 flex-1 items-center gap-1.5 overflow-x-auto">
-        {chip(
-          active === ALL_PROJECTS,
-          () => onSelect(ALL_PROJECTS),
-          ALL_PROJECTS,
-          <Layers size={12} />,
-          "All projects",
-        )}
-        {tabbed.map((p) => {
-          const line = projectStatusLine(p);
-          return chip(
+        {tabbed.map((p) =>
+          chip(
             active === p.root,
             () => onSelect(p.root),
             p.root,
-            <FolderGit2 size={12} />,
             p.name,
-            line.tone === "working"
-              ? TONE_COLOR.working
-              : line.tone === "ready"
-                ? TONE_COLOR.ready
-                : undefined,
-          );
-        })}
+            projectStatusLine(p),
+          ),
+        )}
       </div>
       <button
         type="button"
@@ -1322,126 +1100,6 @@ function CrewProjectStrip({
   return (
     <div className="flex shrink-0 items-center gap-2 border-b border-line-soft bg-bg-1/40 px-6 py-2">
       {inner}
-    </div>
-  );
-}
-
-/** The "All projects" body — every known project as a card with its crew
- *  progress. Click a card to open that project's board. Resilient: a project
- *  with no crew (or one that couldn't be read) shows as a calm zero card, never
- *  an error. */
-function CrewProjectsOverview({
-  projects,
-  loading,
-  onOpen,
-}: {
-  projects: CrewProjectSummary[];
-  loading: boolean;
-  onOpen: (root: string) => void;
-}) {
-  const roll = useMemo(() => rollupProgress(projects), [projects]);
-  const active = projects.filter((p) => p.progress.total > 0);
-
-  if (loading && projects.length === 0) {
-    return (
-      <div className="flex h-full items-center justify-center gap-2 text-[12.5px] text-text-4">
-        <Loader2 size={14} className="animate-spin" />
-        Reading every project's crew…
-      </div>
-    );
-  }
-
-  if (projects.length === 0) {
-    return (
-      <div className="h-full overflow-y-auto">
-        <div className="mx-auto max-w-5xl px-8 py-10">
-          <div className="flex flex-col items-center justify-center gap-3 rounded-xl border border-dashed border-line-soft px-6 py-16 text-center">
-            <div className="text-text-4">
-              <Layers size={26} />
-            </div>
-            <div className="text-[13.5px] font-medium text-text-2">
-              No projects yet
-            </div>
-            <p className="max-w-md text-[12px] leading-relaxed text-text-4">
-              Open a project to give your crew somewhere to work. Once you've
-              opened a few, every one shows up here with its own progress.
-            </p>
-          </div>
-        </div>
-      </div>
-    );
-  }
-
-  return (
-    <div className="h-full overflow-y-auto">
-      <div className="mx-auto max-w-5xl px-8 py-6">
-        <div className="mb-4 flex items-baseline justify-between">
-          <div className="text-[13.5px] font-medium text-text-1">
-            All projects
-          </div>
-          <div className="text-[12px] text-text-4">
-            {roll.done}/{roll.total} done across {active.length} active
-            {active.length === 1 ? " project" : " projects"}
-            {roll.working > 0 ? ` · ${roll.working} in progress` : ""}
-          </div>
-        </div>
-
-        <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
-          {projects.map((p) => {
-            const line = projectStatusLine(p);
-            const g = p.progress;
-            return (
-              <button
-                key={p.root}
-                type="button"
-                onClick={() => onOpen(p.root)}
-                className="group flex flex-col gap-2 rounded-lg border border-line-soft bg-bg-0 shadow-[var(--shadow-card)] px-3 py-2.5 text-left transition-colors hover:border-line-strong hover:bg-bg-2"
-              >
-                <div className="flex items-center gap-2">
-                  <span className="text-text-4 group-hover:text-text-3">
-                    <FolderGit2 size={14} />
-                  </span>
-                  <span className="truncate text-[13px] font-medium text-text-1">
-                    {p.name}
-                  </span>
-                  <span
-                    className="ml-auto inline-flex items-center gap-1 text-[11px] font-medium"
-                    style={{ color: TONE_COLOR[line.tone] }}
-                  >
-                    {line.tone === "working" ? (
-                      <Loader2 size={10} className="animate-spin" />
-                    ) : null}
-                    {line.text}
-                  </span>
-                </div>
-
-                <ProjectProgressBar done={g.done} total={g.total} />
-
-                <div className="flex items-center gap-3 text-[11px] text-text-4">
-                  {g.working > 0 ? (
-                    <span style={{ color: TONE_COLOR.working }}>
-                      {g.working} working
-                    </span>
-                  ) : null}
-                  {g.ready > 0 ? (
-                    <span style={{ color: TONE_COLOR.ready }}>
-                      {g.ready} ready
-                    </span>
-                  ) : null}
-                  {g.blocked > 0 ? <span>{g.blocked} waiting</span> : null}
-                  {g.paused > 0 ? <span>{g.paused} paused</span> : null}
-                  {g.total === 0 ? (
-                    <span className="italic">
-                      {p.errored ? "Couldn't read" : "No crew work yet"}
-                    </span>
-                  ) : null}
-                  <span className="ml-auto truncate text-text-5">{p.root}</span>
-                </div>
-              </button>
-            );
-          })}
-        </div>
-      </div>
     </div>
   );
 }

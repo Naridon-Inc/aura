@@ -63,7 +63,7 @@ export const SLASH_COMMANDS: SlashCommand[] = [
   // ─── Aura CLI (shell-out) ─────────────────────────────────────────
   // Verbs that don't have first-class MCP coverage in the desktop UI yet
   // — surface them by calling the CLI and rendering output in the dialog.
-  { name: "/ask", description: "Ask Aura about the codebase", kind: "aura-cli", target: "ask" },
+  { name: "/ask", description: "Ask Aura about your project", kind: "ui", target: "ask" },
   { name: "/audit", description: "Show the working tree audit trail", kind: "aura-cli", target: "audit" },
   { name: "/explain", description: "Explain a recent semantic change", kind: "aura-cli", target: "explain" },
   { name: "/usage", description: "Token + cost usage summary", kind: "aura-cli", target: "usage" },
@@ -71,7 +71,7 @@ export const SLASH_COMMANDS: SlashCommand[] = [
   { name: "/intents", description: "Recent logged intents", kind: "aura-cli", target: "intents" },
   { name: "/recall", description: "Recall an earlier session by query", kind: "aura-cli", target: "recall" },
   { name: "/history", description: "Show file history", kind: "aura-cli", target: "history" },
-  { name: "/trace", description: "Trace a goal across branches", kind: "aura-cli", target: "goal-trace" },
+  { name: "/trace", description: "See if what you asked for is actually built", kind: "ui", target: "prove" },
   { name: "/whoami", description: "Show signed-in identity", kind: "aura-cli", target: "whoami" },
   { name: "/team", description: "List team members + status", kind: "aura-cli", target: "team" },
   { name: "/know", description: "Search team knowledge base", kind: "ui", target: "knowledge" },

@@ -679,6 +679,13 @@ fn dispatch(work_dir: &Path, task: &LoopTask, opts: &RunOpts) -> Outcome {
     // the whole tagged line is written in ONE `write_all` (the process-global
     // stderr lock makes that atomic), so concurrent workers never interleave
     // mid-line and the desktop can demux each agent's output back to its lane.
+    // Keep a bounded tail of the agent's stdout. Many CLIs (Claude included)
+    // print their real failure to stdout, not stderr; in --json mode we don't
+    // echo stdout at all, so without this a non-zero exit is reported as a bare
+    // "exited 1" with no cause. The ring is capped so a chatty agent can't grow
+    // it without bound.
+    let mut stdout_tail: Vec<String> = Vec::new();
+    const STDOUT_TAIL_MAX: usize = 8;
     if let Some(out) = child.stdout.take() {
         let mut reader = BufReader::new(out);
         let mut line = String::new();
@@ -692,6 +699,14 @@ fn dispatch(work_dir: &Path, task: &LoopTask, opts: &RunOpts) -> Outcome {
             match reader.read_line(&mut line) {
                 Ok(0) => break,
                 Ok(_) => {
+                    let trimmed = line.trim_end();
+                    if !trimmed.is_empty() {
+                        stdout_tail.push(trimmed.to_string());
+                        if stdout_tail.len() > STDOUT_TAIL_MAX {
+                            let overflow = stdout_tail.len() - STDOUT_TAIL_MAX;
+                            stdout_tail.drain(0..overflow);
+                        }
+                    }
                     if !opts.json {
                         let buf = match &prefix {
                             Some(p) => format!("{p}{line}"),
@@ -712,13 +727,18 @@ fn dispatch(work_dir: &Path, task: &LoopTask, opts: &RunOpts) -> Outcome {
 
     let exit = child.wait().ok().and_then(|s| s.code()).unwrap_or(1);
     if exit != 0 {
-        let tail = stderr_buf.lines().rev().take(3).collect::<Vec<_>>();
-        let mut tail = tail;
+        let mut tail = stderr_buf.lines().rev().take(3).collect::<Vec<_>>();
         tail.reverse();
-        let detail = if tail.is_empty() {
-            String::new()
-        } else {
+        // Prefer stderr; fall back to the stdout tail when stderr is silent so
+        // the failure carries the real cause (e.g. an auth/login error the
+        // agent printed to stdout) instead of a bare "exited N".
+        let detail = if !tail.is_empty() {
             format!(": {}", tail.join(" | "))
+        } else if !stdout_tail.is_empty() {
+            let start = stdout_tail.len().saturating_sub(3);
+            format!(": {}", stdout_tail[start..].join(" | "))
+        } else {
+            String::new()
         };
         // If the agent committed something before it died, --rollback undoes it
         // so a half-finished change never lingers on the branch.

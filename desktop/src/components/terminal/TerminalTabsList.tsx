@@ -96,7 +96,7 @@ export function TerminalTabsList({
             <button
               type="button"
               title="New Terminal"
-              className="h-4 w-4 grid place-items-center rounded text-text-4 hover:text-text-2 hover:bg-bg-hover"
+              className="h-4 w-4 grid place-items-center rounded text-text-4 transition-colors hover:text-text-2 hover:bg-bg-hover"
             >
               <Plus className="h-3 w-3" />
             </button>
@@ -116,7 +116,7 @@ export function TerminalTabsList({
       <div
         className={[
           "flex-1 min-h-0 overflow-y-auto py-0.5",
-          dropToNew ? "ring-1 ring-inset ring-[var(--color-accent)]/60 bg-[var(--color-accent)]/5" : "",
+          dropToNew ? "ring-1 ring-inset ring-accent/50 bg-accent/10" : "",
         ].join(" ")}
         // Empty-space drop target: a terminal dropped here (not on a group
         // row — those stopPropagation) becomes its own new group. This is
@@ -148,7 +148,7 @@ export function TerminalTabsList({
             className={[
               "mb-px rounded-sm transition-colors",
               dropGroupId === view.groupId
-                ? "ring-1 ring-inset ring-[var(--color-accent)] bg-[var(--color-accent)]/8"
+                ? "ring-1 ring-inset ring-accent/50 bg-accent/10"
                 : "",
             ].join(" ")}
             onDragOver={(e) => {
@@ -258,21 +258,21 @@ function TermRow({
         }
       }}
       className={[
-        "group relative flex items-center gap-1.5 h-[22px] pl-2 pr-1 cursor-pointer select-none",
+        "group relative flex items-center gap-1.5 h-[22px] min-w-0 pl-2 pr-1 cursor-pointer select-none transition-colors",
         active
-          ? "bg-[var(--color-accent)]/12 text-text-1"
+          ? "bg-accent/10 text-text-1 hover:bg-accent/15"
           : "text-text-3 hover:bg-bg-hover hover:text-text-2",
       ].join(" ")}
     >
       {active && (
-        <span className="absolute left-0 top-0 bottom-0 w-0.5 bg-[var(--color-accent)]" />
+        <span className="absolute left-0 top-0 bottom-0 w-0.5 bg-accent" />
       )}
       {connector && (
         <span className="font-mono text-[11px] leading-none text-text-5 flex-shrink-0 select-none">
           {connector}
         </span>
       )}
-      <TerminalGlyph className="h-3 w-3 flex-shrink-0 opacity-70" />
+      <TerminalGlyph className="h-3 w-3 flex-shrink-0" />
       {editing ? (
         <input
           autoFocus
@@ -285,31 +285,31 @@ function TermRow({
             if (e.key === "Enter") commit();
             if (e.key === "Escape") setEditing(false);
           }}
-          className="min-w-0 flex-1 bg-bg-content border border-[var(--color-accent)] rounded px-1 text-[11px] text-text-1 outline-none"
+          className="min-w-0 flex-1 bg-bg-content border border-accent rounded px-1 text-[11px] text-text-1 outline-none"
         />
       ) : (
         <span className="min-w-0 flex-1 truncate text-[11px]">{name}</span>
       )}
-      <div className="flex items-center gap-0.5 opacity-0 group-hover:opacity-100">
+      <div className="flex items-center gap-0.5 flex-shrink-0 opacity-0 transition-opacity group-hover:opacity-100">
         <button
           type="button"
-          title="Split terminal"
+          title="Split Terminal"
           onClick={(e) => {
             e.stopPropagation();
             onSplit();
           }}
-          className="h-4 w-4 grid place-items-center rounded text-text-4 hover:text-text-2 hover:bg-bg-hover"
+          className="h-4 w-4 grid place-items-center rounded text-text-4 transition-colors hover:text-text-2 hover:bg-bg-hover"
         >
           <SplitIcon className="h-3 w-3" />
         </button>
         <button
           type="button"
-          title="Kill terminal"
+          title="Close Terminal"
           onClick={(e) => {
             e.stopPropagation();
             onKill();
           }}
-          className="h-4 w-4 grid place-items-center rounded text-text-4 hover:text-red-400 hover:bg-bg-hover"
+          className="h-4 w-4 grid place-items-center rounded text-text-4 transition-colors hover:text-red hover:bg-bg-hover"
         >
           <Trash2 className="h-3 w-3" />
         </button>

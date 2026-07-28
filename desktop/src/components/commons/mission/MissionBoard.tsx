@@ -111,11 +111,11 @@ function StatusLine({
     return (
       <span
         className="inline-flex items-center gap-1.5 text-[11px] font-medium"
-        style={{ color: "#d99a2b" }}
+        style={{ color: "var(--color-amber)" }}
       >
         <span
           className="h-1.5 w-1.5 flex-shrink-0 rounded-full"
-          style={{ background: "#d99a2b" }}
+          style={{ background: "var(--color-amber)" }}
           aria-hidden
         />
         An agent is on it{e ? ` · ${e}` : ""}
@@ -124,7 +124,7 @@ function StatusLine({
   }
   if (stage === "reviewing") {
     return (
-      <span className="text-[11px] font-medium" style={{ color: "#d98a4f" }}>
+      <span className="text-[11px] font-medium" style={{ color: "var(--color-amber)" }}>
         {run.prNumber != null
           ? `Ready to review · PR #${run.prNumber}`
           : "Ready to review"}
@@ -136,7 +136,7 @@ function StatusLine({
     // card now, so the old "— open to retry" tail (which pointed you at the
     // detail) is redundant.
     return (
-      <span className="text-[11px] font-medium" style={{ color: "#d66a6a" }}>
+      <span className="text-[11px] font-medium" style={{ color: "var(--color-red)" }}>
         Couldn't finish
       </span>
     );
@@ -151,7 +151,7 @@ function StatusLine({
       return (
         <span
           className="text-[11px] font-medium"
-          style={{ color: p.tone === "green" ? "#3fa66a" : "#d99a2b" }}
+          style={{ color: p.tone === "green" ? "var(--color-accent-green)" : "var(--color-amber)" }}
         >
           {p.label}
         </span>

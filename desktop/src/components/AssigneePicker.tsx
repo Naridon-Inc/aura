@@ -66,26 +66,13 @@ type CommonProps = {
 
 type Props = (SingleProps | MultiProps) & CommonProps;
 
-const PALETTE = [
-  "rgb(220,120,120)",
-  "rgb(200,150,90)",
-  "rgb(180,170,90)",
-  "rgb(130,180,110)",
-  "rgb(110,170,160)",
-  "rgb(120,150,200)",
-  "rgb(160,130,200)",
-  "rgb(200,130,170)",
-];
-
-function hashHandle(s: string): number {
-  let h = 0;
-  for (let i = 0; i < s.length; i++) h = (h * 31 + s.charCodeAt(i)) | 0;
-  return Math.abs(h);
-}
-
-function colorFor(handle: string): string {
-  return PALETTE[hashHandle(handle) % PALETTE.length];
-}
+// Every avatar reads the same. A teammate's initial is an identity label, not
+// a status, so it stays on the neutral ramp — colour in this app is reserved
+// for work that is in flight, finished, or broken.
+const AVATAR_TINT = {
+  background: "var(--color-bg-2)",
+  color: "var(--color-text-2)",
+} as const;
 
 function initialOf(m: TeamMember): string {
   const src = (m.name || m.handle || "?").trim();
@@ -344,8 +331,8 @@ export function AssigneePicker(props: Props) {
                   <span
                     className="w-5 h-5 rounded-full flex items-center justify-center font-semibold text-[10px] flex-shrink-0"
                     style={{
-                      background: `${colorFor(m.handle)}33`,
-                      color: colorFor(m.handle),
+                      background: AVATAR_TINT.background,
+                      color: AVATAR_TINT.color,
                     }}
                   >
                     {initialOf(m)}
@@ -385,8 +372,8 @@ function renderSingleTrigger(
         <span
           className={`${avatarSize} rounded-full flex items-center justify-center font-semibold flex-shrink-0`}
           style={{
-            background: `${colorFor(selected.handle)}33`,
-            color: colorFor(selected.handle),
+            background: AVATAR_TINT.background,
+            color: AVATAR_TINT.color,
           }}
         >
           {initialOf(selected)}
@@ -437,8 +424,8 @@ function renderMultiTrigger(
             key={m.handle}
             className={`${avatarSize} rounded-full flex items-center justify-center font-semibold flex-shrink-0 ring-1 ring-bg-content`}
             style={{
-              background: `${colorFor(m.handle)}33`,
-              color: colorFor(m.handle),
+              background: AVATAR_TINT.background,
+              color: AVATAR_TINT.color,
             }}
             title={m.handle}
           >
@@ -492,8 +479,8 @@ export function AssigneeStack({
           key={m.handle}
           className={`${avatarSize} rounded-full flex items-center justify-center font-semibold flex-shrink-0 ring-1 ring-bg-content`}
           style={{
-            background: `${colorFor(m.handle)}33`,
-            color: colorFor(m.handle),
+            background: AVATAR_TINT.background,
+            color: AVATAR_TINT.color,
           }}
           title={m.handle}
         >

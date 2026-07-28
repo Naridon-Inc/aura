@@ -53,8 +53,12 @@ export function TokenMeterHeader({
       title={`Context: ${total.toLocaleString()} / ${contextWindow.toLocaleString()} tokens (${pct}%)\nLast turn — in ${usage.inputTokens.toLocaleString()}, out ${usage.outputTokens.toLocaleString()}`}
     >
       <span
-        className="tabular-nums t-2xs"
-        style={{ fontFamily: "var(--font-mono)", color: "var(--color-text-3)" }}
+        className="shrink-0 text-right tabular-nums t-2xs"
+        style={{
+          fontFamily: "var(--font-mono)",
+          color: "var(--color-text-3)",
+          minWidth: "4ch",
+        }}
       >
         {formatTokens(total)}
       </span>

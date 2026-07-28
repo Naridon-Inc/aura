@@ -38,8 +38,10 @@ import {
   type FilePresence,
 } from "../lib/radarPresenceStore";
 import { agoFromTs, kindLabel } from "./rightrail/radar/radarFormat";
-import { useManagerSession } from "../lib/managerStore";
+import { isManagerTurnInFlight, useManagerSession } from "../lib/managerStore";
 import { useAgentEvent } from "../lib/agentEventStore";
+import { streamChannel, useAllStreamStates } from "../lib/agentStreamStore";
+import { AsciiSpinner } from "./ui/ascii-spinner";
 import { AgentIcon } from "./agent/AgentIcon";
 import { buildAgentTabMenuItems } from "./agent/AgentSurface";
 import { buildManagerTabMenuItems } from "./manager/ManagerSurface";
@@ -48,10 +50,14 @@ import {
   DropdownMenuTrigger,
   DropdownMenuContent,
   DropdownMenuItem,
-  DropdownMenuLabel,
   DropdownMenuSeparator,
-  DropdownMenuShortcut,
 } from "./ui/dropdown-menu";
+// The "+" quick-launch menu is built with Medusa UI (aliased so it doesn't
+// clash with the local DropdownMenu the tab context-menu still uses).
+import { DropdownMenu as MenuKit } from "@medusajs/ui";
+import { CommandLine, ChatBubble, Globe } from "@medusajs/icons";
+import { openBrowserTab } from "../lib/editorStore";
+import { usePinned } from "../lib/agentPrefs";
 import {
   ContextMenu,
   ContextMenuTrigger,
@@ -642,64 +648,65 @@ function NewTabButton({
   onNewTerminal?: () => void;
   onLaunchAgent?: (id: string, label: string) => void;
 }) {
-  // Radix DropdownMenu portals to document.body, so overflow:auto on
-  // the tab strip can no longer clip the menu — the previous fixed-
-  // position workaround (resize + scroll listeners + manual rect math)
-  // is gone. @floating-ui handles flip + collision detection too.
-  const launch = (a: Agent) => {
-    if (!a.available || !onLaunchAgent) return;
-    onLaunchAgent(a.id, a.label);
-  };
+  // Three fixed quick actions — Terminal, Chat, Browser — plus a toggle for
+  // the agent preset bar. Per-CLI launching lives in that preset bar (the row
+  // of agent pills), so this menu stays terse instead of enumerating agents.
+  const { show, setShow } = usePinned();
+  // "Chat" spawns the first available agent; the preset bar is where you pick a
+  // specific CLI. Disabled until discovery surfaces something runnable.
+  const chatAgent = agents.find((a) => a.available);
 
   return (
-    <DropdownMenu>
-      <DropdownMenuTrigger asChild>
+    <MenuKit>
+      <MenuKit.Trigger asChild>
         <button
           type="button"
           title="New tab"
-          className="px-2 text-text-4 hover:text-text-1 hover:bg-bg-1 text-[14px] flex items-center flex-shrink-0 outline-none"
+          // `data-tauri-drag-region={false}` + a raised stacking context keep
+          // the "+" clickable: the window-drag chrome that brackets the tab
+          // strip was swallowing mousedown here (the OS started a window-move
+          // instead of opening the menu). This opts the button out of drag and
+          // lifts it above that overlay so the click lands.
+          data-tauri-drag-region={false}
+          className="relative z-10 px-2 text-text-4 hover:text-text-1 hover:bg-bg-1 text-[14px] flex items-center flex-shrink-0 outline-none"
         >
           +
         </button>
-      </DropdownMenuTrigger>
-      <DropdownMenuContent align="end" className="min-w-[220px] text-[12px]">
+      </MenuKit.Trigger>
+      <MenuKit.Content align="end" className="min-w-[220px]">
         {onNewTerminal && (
-          <DropdownMenuItem onSelect={onNewTerminal} className="gap-2.5">
-            <span className="text-text-3 font-mono text-[11px] w-4 text-center">{">_"}</span>
+          <MenuKit.Item className="gap-x-2" onSelect={onNewTerminal}>
+            <CommandLine className="text-text-3" />
             <span className="flex-1">Terminal</span>
-            <DropdownMenuShortcut>⌘T</DropdownMenuShortcut>
-          </DropdownMenuItem>
+            <MenuKit.Shortcut>⌘T</MenuKit.Shortcut>
+          </MenuKit.Item>
         )}
-        {onLaunchAgent && (
-          <>
-            <DropdownMenuSeparator />
-            <DropdownMenuLabel>Chat</DropdownMenuLabel>
-            {agents.length === 0 ? (
-              <div className="px-2 py-1.5 text-text-4 text-[11px]">
-                no agents discovered
-              </div>
-            ) : (
-              agents.map((a) => (
-                <DropdownMenuItem
-                  key={a.id}
-                  disabled={!a.available}
-                  onSelect={() => launch(a)}
-                  className="gap-2.5"
-                >
-                  <span className="w-4 flex items-center justify-center">
-                    <AgentIcon agentId={a.id} label={a.label} size={14} />
-                  </span>
-                  <span className="flex-1 truncate">{a.label}</span>
-                  {!a.available && (
-                    <DropdownMenuShortcut>missing</DropdownMenuShortcut>
-                  )}
-                </DropdownMenuItem>
-              ))
-            )}
-          </>
-        )}
-      </DropdownMenuContent>
-    </DropdownMenu>
+        <MenuKit.Item
+          className="gap-x-2"
+          disabled={!chatAgent || !onLaunchAgent}
+          onSelect={() => {
+            if (chatAgent && onLaunchAgent) onLaunchAgent(chatAgent.id, chatAgent.label);
+          }}
+        >
+          <ChatBubble className="text-text-3" />
+          <span className="flex-1">Chat</span>
+          <MenuKit.Shortcut>⌘⇧T</MenuKit.Shortcut>
+        </MenuKit.Item>
+        <MenuKit.Item className="gap-x-2" onSelect={() => openBrowserTab()}>
+          <Globe className="text-text-3" />
+          <span className="flex-1">Browser</span>
+          <MenuKit.Shortcut>⌘⇧B</MenuKit.Shortcut>
+        </MenuKit.Item>
+        <MenuKit.Separator />
+        <MenuKit.CheckboxItem
+          checked={show}
+          onCheckedChange={(c) => setShow(!!c)}
+          onSelect={(e) => e.preventDefault()}
+        >
+          Show Preset Bar
+        </MenuKit.CheckboxItem>
+      </MenuKit.Content>
+    </MenuKit>
   );
 }
 
@@ -1250,11 +1257,7 @@ function FileTab({
           )}
           {owner && (
             <span
-              className="text-[9.5px] font-mono px-1 rounded uppercase tracking-wider flex-shrink-0"
-              style={{
-                background: "color-mix(in oklab, var(--color-amber, #d4a017) 18%, transparent)",
-                color: "var(--color-amber, #d4a017)",
-              }}
+              className="text-[10px] font-mono px-1 rounded uppercase tracking-wider flex-shrink-0 bg-bg-2 text-text-3"
             >
               {owner}
             </span>
@@ -1361,6 +1364,15 @@ function AgentTabRow({
   // arctic-blue primary accent.
   const { status } = useAgentEvent(tab.sessionId);
   const statusDot = agentStatusDot(status.kind);
+  // "Is this agent working right now?" — covers BOTH tab modes: stream tabs
+  // carry it on the channel's `running` flag, pty/chat tabs on the OSC status.
+  // When working, the tab shows a quiet GREYSCALE loader (not the sky dot), so
+  // the animation reads as ambient activity rather than a coloured alert.
+  const streamStates = useAllStreamStates();
+  const working =
+    tab.mode === "stream"
+      ? !!streamStates.get(streamChannel(tab.agentId, tab.repoRoot))?.running
+      : status.kind === "in_progress";
 
   // The right-click menu carries every control the old header bar held:
   // the pane actions (splits / detach / close pane / leave split / story /
@@ -1422,18 +1434,26 @@ function AgentTabRow({
           {tab.attention ? (
             <span
               title="Agent is waiting for your input"
-              className="w-1.5 h-1.5 rounded-full bg-rose-400 flex-shrink-0"
-              style={{ boxShadow: "0 0 6px rgba(244, 63, 94, 0.7)" }}
+              className="w-1.5 h-1.5 rounded-full flex-shrink-0"
+              // Amber — the attention slot. The accent already paints the
+              // active tab's underline a few pixels below this dot, so a
+              // waiting tab in the accent would be indistinguishable from
+              // the tab you are currently on.
+              style={{ background: "var(--color-amber)" }}
             />
+          ) : working ? (
+            <span
+              title="Working"
+              className="flex-shrink-0"
+            >
+              <AsciiSpinner className="text-[10px]" />
+            </span>
           ) : (
             statusDot && (
               <span
                 title={statusDot.title}
                 className="w-1.5 h-1.5 rounded-full flex-shrink-0"
-                style={{
-                  background: statusDot.color,
-                  boxShadow: `0 0 5px ${statusDot.glow}`,
-                }}
+                style={{ background: statusDot.color }}
               />
             )
           )}
@@ -1473,19 +1493,23 @@ function AgentTabRow({
   );
 }
 
-/** Map the live agent status to a tiny tab dot. Status palette only
- *  (sky / amber / emerald) — never the arctic-blue primary accent.
- *  Returns null for idle so a fresh tab carries no noise. */
+/** Map the live agent status to a tiny tab dot. Only "waiting" — the one
+ *  status that is asking something of you — keeps colour, and it takes the
+ *  attention amber rather than the accent, which this strip already spends
+ *  on the active tab's underline. Working and done ride the neutral ramp,
+ *  because a strip of ten tabs blinking sky/emerald was a light show, not
+ *  information. Returns null for idle so a fresh tab carries no noise.
+ *  Tokens, never hex: the palette moves, literals don't. */
 function agentStatusDot(
   kind: "idle" | "in_progress" | "blocked" | "success",
-): { color: string; glow: string; title: string } | null {
+): { color: string; title: string } | null {
   switch (kind) {
     case "in_progress":
-      return { color: "#38bdf8", glow: "rgba(56,189,248,0.6)", title: "Working" };
+      return { color: "var(--color-text-2)", title: "Working" };
     case "blocked":
-      return { color: "#fbbf24", glow: "rgba(251,191,36,0.6)", title: "Waiting" };
+      return { color: "var(--color-amber)", title: "Waiting" };
     case "success":
-      return { color: "#34d399", glow: "rgba(52,211,153,0.55)", title: "Done" };
+      return { color: "var(--color-text-3)", title: "Done" };
     default:
       return null;
   }
@@ -1527,6 +1551,12 @@ function ManagerTabRow({
   // needs you, even with no terminal BEL to ride on.
   const session = useManagerSession(tab.sessionId);
   const awaiting = !!(session?.pending_question || session?.pending_plan);
+  // A native-brain turn in flight is the Manager's equivalent of a CLI agent's
+  // `in_progress` — show the same greyscale loader the top tabs use, so a
+  // backgrounded chat that's still thinking reads as working (not idle).
+  const working =
+    !awaiting &&
+    (isManagerTurnInFlight(tab.sessionId) || session?.status === "running");
   // Suppress "Cancel session" once the chat has finished or been cancelled.
   const isTerminal =
     session?.status === "completed" || session?.status === "cancelled";
@@ -1576,9 +1606,19 @@ function ManagerTabRow({
           {awaiting && (
             <span
               title="Aura is waiting for your input"
-              className="w-1.5 h-1.5 rounded-full bg-rose-400 flex-shrink-0"
-              style={{ boxShadow: "0 0 6px rgba(244, 63, 94, 0.7)" }}
+              className="w-1.5 h-1.5 rounded-full flex-shrink-0"
+              // Same attention amber as the agent tabs above — the manager
+              // row must not read differently from the rows beside it.
+              style={{ background: "var(--color-amber)" }}
             />
+          )}
+          {working && (
+            <span
+              title="Working"
+              className="flex-shrink-0"
+            >
+              <AsciiSpinner className="text-[10px]" />
+            </span>
           )}
           <TabMoreButton items={moreItems} />
           <button
@@ -1657,11 +1697,7 @@ function TabMoreButton({ items }: { items: TabMenuItem[] }) {
               key={item.label}
               disabled={item.disabled}
               onSelect={item.onSelect}
-              className={
-                item.tone === "danger"
-                  ? "text-rose-400 focus:text-rose-300"
-                  : undefined
-              }
+              variant={item.tone === "danger" ? "destructive" : "default"}
             >
               {item.label}
             </DropdownMenuItem>
@@ -1765,7 +1801,7 @@ function SplitGlyph() {
 function SplitMemberPip() {
   return (
     <span
-      className="inline-block w-1.5 h-1.5 rounded-full bg-accent-blue flex-shrink-0"
+      className="inline-block w-1.5 h-1.5 rounded-full bg-text-4 flex-shrink-0"
       title="In split layout"
     />
   );
@@ -1807,13 +1843,41 @@ function DragSlot({
 }) {
   const [dragging, setDragging] = useState(false);
   const [over, setOver] = useState(false);
+  const ref = useRef<HTMLDivElement>(null);
   if (!onReorder) {
     return <>{children}</>;
   }
   const mime = dragMime(stripKey);
+  // WKWebView swallows the right-click `contextmenu` event (and can eat clicks)
+  // on any element that is `draggable` OR carries `-webkit-user-drag: element`
+  // — that's what made the tab's context menu "invisible AND unreliable". So
+  // the wrapper stays inert at rest and we arm BOTH the `draggable` attribute
+  // and the `-webkit-user-drag` style only for the span of a left-button press,
+  // set straight on the node so the very next drag gesture sees them. Right- and
+  // middle-click never arm anything, so the context menu reaches the DOM.
+  //
+  // The `-webkit-user-drag: element` style is what makes WKWebView actually
+  // initiate the native drag; without it the HTML5 drag never starts. But it
+  // must NOT be present at rest — statically applying it re-breaks the context
+  // menu exactly like `draggable` does. So it lives in armDrag, not the style
+  // prop.
+  const armDrag = () => {
+    if (!ref.current) return;
+    ref.current.draggable = true;
+    ref.current.style.setProperty("-webkit-user-drag", "element");
+  };
+  const disarmDrag = () => {
+    if (!ref.current) return;
+    ref.current.draggable = false;
+    ref.current.style.removeProperty("-webkit-user-drag");
+  };
   return (
     <div
-      draggable
+      ref={ref}
+      onMouseDown={(e) => {
+        if (e.button === 0) armDrag();
+      }}
+      onMouseUp={disarmDrag}
       onDragStart={(e) => {
         // dataTransfer.setData fires synchronously; we encode src index
         // as a string and the strip key in the MIME type itself.
@@ -1827,7 +1891,10 @@ function DragSlot({
         e.dataTransfer.effectAllowed = "move";
         setDragging(true);
       }}
-      onDragEnd={() => setDragging(false)}
+      onDragEnd={() => {
+        setDragging(false);
+        disarmDrag();
+      }}
       onDragOver={(e) => {
         if (!Array.from(e.dataTransfer.types).includes(mime)) return;
         e.preventDefault();
@@ -1846,7 +1913,7 @@ function DragSlot({
         onReorder(src, index);
       }}
       className={`flex items-stretch ${dragging ? "opacity-50" : ""} ${
-        over ? "border-l-2 border-accent-blue" : "border-l-2 border-transparent"
+        over ? "border-l-2 border-accent" : "border-l-2 border-transparent"
       }`}
     >
       {children}
@@ -1861,7 +1928,7 @@ function ProjectChip({ repoRoot }: { repoRoot: string }) {
   const name = repoRoot.split("/").filter(Boolean).pop() ?? repoRoot;
   return (
     <span
-      className="ml-1 px-1.5 h-4 flex items-center rounded text-[9.5px] uppercase tracking-wider bg-bg-2 text-text-4 border border-line-soft flex-shrink-0"
+      className="ml-1 px-1.5 h-4 flex items-center rounded text-[10px] uppercase tracking-wider bg-bg-2 text-text-4 border border-line-soft flex-shrink-0"
       title={`In project ${repoRoot}`}
     >
       {name}

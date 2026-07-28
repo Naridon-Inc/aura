@@ -7,11 +7,12 @@
 //! shell-integration marks.
 
 use std::collections::{HashMap, VecDeque};
-use std::io::Write;
 use std::sync::{Arc, Mutex};
 
 use portable_pty::MasterPty;
 use serde::Serialize;
+
+use crate::pty_io::SharedPtyWriter;
 
 /// Same 4 MiB cap the agent ring uses — enough to bridge the
 /// spawn→listen race and give a remounting xterm a screenful of
@@ -27,7 +28,11 @@ pub const RECENT_COMMANDS_CAP: usize = 50;
 /// dance is identical; `last_byte_ms` backs idle reporting and the
 /// daemon-vs-inprocess listings.
 pub struct PtySession {
-    pub writer: Mutex<Box<dyn Write + Send>>,
+    /// Shared so `pty_write` can clone it and release the registry lock
+    /// before the (blocking) write — see `crate::pty_io`. Holding the
+    /// map lock across that write let one wedged shell freeze every
+    /// other terminal in the app.
+    pub writer: SharedPtyWriter,
     pub master: Mutex<Box<dyn MasterPty + Send>>,
     pub child: Mutex<Box<dyn portable_pty::Child + Send + Sync>>,
     pub cwd: Option<String>,

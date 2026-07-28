@@ -81,7 +81,7 @@ export function DoctorDialog({ open, repoRoot, onClose, inline }: DoctorDialogPr
       }
     >
       {error ? (
-        <div className="text-red text-[11.5px] py-2">{error}</div>
+        <div role="alert" className="text-red text-[11.5px] py-2">{error}</div>
       ) : !items && loading ? (
         <div className="text-text-4 text-[11.5px] py-8 text-center">
           Checking your project…

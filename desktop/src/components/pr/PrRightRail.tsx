@@ -25,6 +25,7 @@ import {
 } from "../../lib/api";
 import { PrLabelsCard } from "./PrLabelsCard";
 import { usePrThreadActive } from "./PrThreadColumn";
+import { AsciiSpinner } from "../ui/ascii-spinner";
 import { Button } from "../ui/button";
 import {
   StatusChip,
@@ -233,9 +234,10 @@ function UnresolvedCommentsCard({
   );
 }
 
-// Warm amber literal — the arctic theme repurposes the amber *token* as
-// slate-cyan, so warning/amber UI uses this literal exactly like StatusChip.
-const AMBER = "#d59f4f";
+// The "in progress / needs a look" hue. Goes through the token so the tokens
+// layer stays the single source of truth — the same one PrChecksTab paints
+// pending checks with, so a check reads identically in the rail and the tab.
+const AMBER = "var(--color-amber)";
 
 function MergedCeremonyCard({
   mergedBy,
@@ -790,14 +792,8 @@ function AuraReviewCard({
             >
               {running ? (
                 <>
-                  <span
-                    className="inline-block w-3 h-3 rounded-full border-2 animate-spin"
-                    style={{
-                      borderColor: `color-mix(in srgb, ${AMBER} 40%, transparent)`,
-                      borderTopColor: AMBER,
-                    }}
-                  />
-                  <span>Running… {runElapsed}s</span>
+                  <AsciiSpinner className="text-[11px]" />
+                  <span className="tabular-nums">Running… {runElapsed}s</span>
                 </>
               ) : (
                 "Run safety check"
@@ -854,7 +850,7 @@ function AuraReviewCard({
         >
           {running ? (
             <>
-              <span className="inline-block w-2.5 h-2.5 rounded-full border-2 border-text-3/40 border-t-text-1 animate-spin" />
+              <AsciiSpinner className="text-[10px]" />
               <span className="tabular-nums">{runElapsed}s</span>
             </>
           ) : (

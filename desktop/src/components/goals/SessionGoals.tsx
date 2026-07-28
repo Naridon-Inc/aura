@@ -31,10 +31,21 @@ export function runKeyForIntent(row: IntentRow): string {
   return row.signed_block_id || row.claude_session_id || `${row.agent_id}:${row.timestamp}`;
 }
 
+/** The commit this session's code lives on — the first file in its changeset
+ *  that carries a commit sha (back-filled from git history at load). Proving is
+ *  anchored here so a session's goals check against the code THAT session
+ *  produced, even when it's on a branch that isn't checked out. `undefined` when
+ *  the row has no bound changeset (nothing committed to anchor to) → the prove
+ *  falls back to the working tree, its previous behaviour. */
+export function sessionCommit(row: IntentRow): string | undefined {
+  return row.changeset?.files.find((f) => f.commit)?.commit ?? undefined;
+}
+
 export function SessionGoals({
   repoRoot,
   row,
   hasChanges = false,
+  atCommit: atCommitProp,
 }: {
   repoRoot: string;
   row: IntentRow;
@@ -43,11 +54,19 @@ export function SessionGoals({
    *  open — no manual "check" click. A run that changed nothing (a question, a
    *  read-only session) is never auto-proved; it keeps the manual affordance. */
   hasChanges?: boolean;
+  /** The session's own commit to anchor proofs to (the caller derives it from
+   *  the merged changeset, which also covers native-chat rows that borrow a
+   *  fetched changeset). Falls back to this row's own changeset when omitted. */
+  atCommit?: string;
 }) {
   const runKey = runKeyForIntent(row);
   const runLabel = splitIntent(row.intent).headline || row.intent;
   const goals = useGoalsForRun(repoRoot, runKey);
   const [busy, setBusy] = useState(false);
+  // Anchor every prove on this surface to the session's own commit, so a session
+  // whose code is on another branch reads its true verdict instead of a false 0%
+  // measured against the checked-out tree.
+  const atCommit = atCommitProp ?? sessionCommit(row);
 
   // Adding a goal to a run *is* proving it against the run: create-or-find the
   // record, run the check, and stamp the verdict under this run's key. The
@@ -60,13 +79,13 @@ export function SessionGoals({
       const goal = upsertGoalByText(repoRoot, text);
       let run: GoalRun;
       try {
-        const result = await runProve(repoRoot, text);
+        const result = await runProve(repoRoot, text, atCommit);
         const { verdict, ok, total } = verdictFromProve(result);
-        run = { runKey, label: runLabel, agentId: row.agent_id, verdict, ok, total, at: Date.now() };
+        run = { runKey, label: runLabel, agentId: row.agent_id, verdict, ok, total, at: Date.now(), commit: atCommit ?? null };
       } catch {
         // Keep the association even if proving errored; an "unknown" run keeps
         // the goal visible on this run and re-verifiable.
-        run = { runKey, label: runLabel, agentId: row.agent_id, verdict: "unknown", ok: 0, total: 0, at: Date.now() };
+        run = { runKey, label: runLabel, agentId: row.agent_id, verdict: "unknown", ok: 0, total: 0, at: Date.now(), commit: atCommit ?? null };
       }
       recordRun(repoRoot, goal.id, run);
     } finally {
@@ -112,6 +131,8 @@ export function SessionGoals({
             runLabel={runLabel}
             agentId={row.agent_id}
             currentRunKey={runKey}
+            atCommit={atCommit}
+            autoExplain
           />
         ))}
       </div>

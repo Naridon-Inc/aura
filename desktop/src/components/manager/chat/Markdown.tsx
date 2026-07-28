@@ -21,6 +21,10 @@
 import * as React from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
+import remarkMath from "remark-math";
+import { remarkCallouts } from "../../markdown/remarkCallouts";
+import { calloutFromBlockquote } from "../../markdown/Callout";
+import rehypeKatex from "rehype-katex";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { openFileImperative } from "../../../lib/editorStore";
 import { resolveAgainstRepo, useChatRepoRoot } from "./context";
@@ -548,7 +552,12 @@ function CodeBlock({ children }: { children: React.ReactNode }) {
   );
 }
 
-export function MarkdownBody({
+// Memoized: react-markdown re-parses the whole document on every render, so a
+// parent that re-renders for unrelated reasons (a busy timer tick, a sibling
+// turn streaming) would otherwise re-parse settled prose needlessly. Shallow
+// prop compare (source string + trailingCursor bool) keeps a settled bubble's
+// DOM stable — which is also what keeps a text selection inside it alive.
+export const MarkdownBody = React.memo(function MarkdownBody({
   source,
   trailingCursor,
 }: {
@@ -576,7 +585,8 @@ export function MarkdownBody({
       }}
     >
       <ReactMarkdown
-        remarkPlugins={[remarkGfm]}
+        remarkPlugins={[remarkGfm, remarkMath, remarkCallouts]}
+        rehypePlugins={[rehypeKatex]}
         components={{
           p: ({ children }) => (
             <p className="m-0 mb-[9px] first:mt-0 last:mb-0">
@@ -646,17 +656,18 @@ export function MarkdownBody({
               {children}
             </h4>
           ),
-          blockquote: ({ children }) => (
-            <blockquote
-              className="my-3 pl-3.5 italic"
-              style={{
-                borderLeft: "2px solid var(--color-accent)",
-                color: "var(--color-text-2)",
-              }}
-            >
-              {children}
-            </blockquote>
-          ),
+          blockquote: ({ children, className }) =>
+            calloutFromBlockquote(className, children) ?? (
+              <blockquote
+                className="my-3 pl-3.5 italic"
+                style={{
+                  borderLeft: "2px solid var(--color-accent)",
+                  color: "var(--color-text-2)",
+                }}
+              >
+                {children}
+              </blockquote>
+            ),
           hr: () => (
             <hr
               className="my-4 border-0"
@@ -765,4 +776,4 @@ export function MarkdownBody({
       )}
     </div>
   );
-}
+});

@@ -157,7 +157,7 @@ pub struct PlanSubtask {
 pub struct BridgeRegistry {
     /// `aura ask-user` — answer string flows back as the response.
     pending_questions: Mutex<HashMap<String, oneshot::Sender<String>>>,
-    /// `aura propose-plan` — `"build"` or `"cancel"` flows back.
+    /// `aura propose-plan` — build, revise, or cancel flows back.
     pending_plans: Mutex<HashMap<String, oneshot::Sender<PlanDecision>>>,
 }
 
@@ -182,6 +182,10 @@ pub enum PlanDecision {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         plan_task_id: Option<String>,
     },
+    /// The user wants another planning pass before approving execution.
+    /// Feedback is returned to the proposing brain as a tool result so it
+    /// can amend the plan and call `propose_plan` again.
+    Revise { feedback: String },
     Cancel,
 }
 

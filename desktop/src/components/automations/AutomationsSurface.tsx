@@ -218,20 +218,19 @@ function SectionHead({
   );
 }
 
-/** Tone → the warm/cool dot color for a Recent-runs row. Amber is reserved
- *  for in-flight, green for a clean finish/proof, red for a failure — never
- *  green-for-chrome. */
+/** Tone → the dot colour for a Recent-runs row. Only two states earn a hue:
+ *  a run happening right now (amber) and a run that failed (red). A finished
+ *  run is settled history, so it reads on the neutral ramp like the rest. */
 function runDotColor(row: RecentRow): string {
-  if (row.live) return "#d99a2b"; // amber — an agent is on it
+  if (row.live) return "var(--color-amber)";
   if (!row.verdict) return "var(--color-text-4)";
-  if (row.verdict.tone === "fail") return "#d66a6a";
-  if (row.verdict.tone === "proven") return "var(--color-accent-green, #4dc1a4)";
-  return "var(--color-accent-green, #4dc1a4)";
+  if (row.verdict.tone === "fail") return "var(--color-red)";
+  return "var(--color-text-3)";
 }
 
 function runVerdictColor(tone: "ok" | "fail" | "proven"): string {
-  if (tone === "fail") return "#d66a6a";
-  return "var(--color-accent-green, #4dc1a4)";
+  if (tone === "fail") return "var(--color-red)";
+  return "var(--color-accent-green)";
 }
 
 // ── Left rail: glance + recipe library (the same cockpit shape as the Runner) ──
@@ -265,7 +264,7 @@ function AutoGlance({
       </div>
       <div className="mt-3 flex flex-col gap-1.5">
         <AutoStatRow
-          dot="var(--color-accent-green, #4dc1a4)"
+          dot="var(--color-accent-green)"
           value={active}
           label="active"
         />
@@ -273,7 +272,7 @@ function AutoGlance({
           <AutoStatRow dot="var(--color-text-5)" value={paused} label="paused" />
         ) : null}
         {live > 0 ? (
-          <AutoStatRow dot="#d99a2b" value={live} label="running now" />
+          <AutoStatRow dot="var(--color-amber)" value={live} label="running now" />
         ) : null}
       </div>
     </div>
@@ -556,7 +555,7 @@ export function AutomationsSurface({ repoRoot }: { repoRoot: string }) {
         {/* Your automations */}
         <section className="mb-7">
           {loadErr && (
-            <p className="mb-2 rounded-[6px] border border-line-soft bg-bg-2 px-3 py-2 text-[11.5px] leading-snug text-red-400">
+            <p className="mb-2 rounded-[6px] border border-line-soft bg-bg-2 px-3 py-2 text-[11.5px] leading-snug text-red">
               Couldn't load automations: {loadErr}
             </p>
           )}

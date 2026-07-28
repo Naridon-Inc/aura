@@ -2,13 +2,17 @@
 // diff text (the output of `git diff HEAD -- <file>`). Unlike PrDiffBody it
 // mounts no Monaco editor and carries no PR/comment coupling, so it's cheap to
 // render many of them stacked in a session's Changes tab. It parses the diff
-// into hunks, tracks old/new line numbers for the gutter, and tints adds/dels
-// with the same green/red palette the PR file cards use. Real data only: it
+// into hunks and tracks old/new line numbers for the gutter. Real data only: it
 // renders exactly what git produced and nothing else.
+//
+// Reading treatment (shared by every non-Monaco diff body in the app): a
+// restrained tinted row + a coloured +/− marker in the gutter, with the code
+// itself on the neutral ramp. Saturated line backgrounds and coloured code read
+// like a highlighter and make a long diff exhausting; the marker alone is
+// enough to tell added from removed at a glance.
 
 import { useMemo, type CSSProperties } from "react";
-import { useResolvedTheme } from "../../lib/themeStore";
-import { AURA_DIFF_CSS } from "../../lib/monacoTheme";
+import { useDiffWash } from "./Churn";
 
 type Kind = "add" | "del" | "ctx" | "hunk" | "meta";
 
@@ -77,8 +81,8 @@ function parseUnifiedDiff(diff: string): DiffLine[] {
   return out;
 }
 
-// Exact GitHub diff washes (shared with the Monaco theme) so this fallback
-// renderer matches the side-by-side editor pixel-for-pixel.
+// Row tint — the same washes the side-by-side editor paints, so the two views
+// of one file match pixel-for-pixel.
 function rowStyle(
   kind: Kind,
   wash: { addLine: string; delLine: string },
@@ -88,16 +92,26 @@ function rowStyle(
   return undefined;
 }
 
+/** The +/− marker, pulled off full saturation toward the neutral ramp. It still
+ *  reads instantly as add vs remove, but a screenful of them no longer shouts.
+ *  Shared with every other unified-diff body so the marker matches everywhere. */
+export function diffMarkerColor(fg: string): string {
+  return `color-mix(in oklab, ${fg} 58%, var(--color-text-4))`;
+}
+
 /** Soft cap so a single huge file can't blow up the DOM; the remainder is
  *  summarised rather than silently dropped. */
 const MAX_LINES = 600;
 
 export function UnifiedDiff({ diff }: { diff: string }) {
   const lines = useMemo(() => parseUnifiedDiff(diff), [diff]);
-  const isDark = useResolvedTheme() !== "light";
-  const wash = isDark ? AURA_DIFF_CSS.dark : AURA_DIFF_CSS.light;
-  const markFg = (kind: Kind): string | undefined =>
-    kind === "add" ? wash.addFg : kind === "del" ? wash.delFg : undefined;
+  const wash = useDiffWash();
+  const markFg = (kind: Kind): string =>
+    kind === "add"
+      ? diffMarkerColor(wash.addFg)
+      : kind === "del"
+        ? diffMarkerColor(wash.delFg)
+        : "var(--color-text-5)";
 
   if (lines.length === 0) {
     return null;
@@ -132,19 +146,19 @@ export function UnifiedDiff({ diff }: { diff: string }) {
                 </tr>
               );
             }
-            const glyph = ln.kind === "add" ? "+" : ln.kind === "del" ? "-" : " ";
+            const glyph = ln.kind === "add" ? "+" : ln.kind === "del" ? "−" : " ";
             return (
               <tr key={i} style={rowStyle(ln.kind, wash)}>
-                <td className="w-10 select-none border-r border-line-soft/40 px-1.5 text-right align-top text-[10px] text-text-5">
+                <td className="w-10 select-none border-r border-line-soft/40 px-1.5 text-right align-top text-[10px] tabular-nums text-text-5">
                   {ln.oldNo ?? ""}
                 </td>
-                <td className="w-10 select-none border-r border-line-soft/40 px-1.5 text-right align-top text-[10px] text-text-5">
+                <td className="w-10 select-none border-r border-line-soft/40 px-1.5 text-right align-top text-[10px] tabular-nums text-text-5">
                   {ln.newNo ?? ""}
                 </td>
                 <td className="whitespace-pre-wrap break-words px-2 align-top text-text-2">
                   <span
                     className="mr-1 select-none"
-                    style={{ color: markFg(ln.kind) ?? "var(--color-text-5)" }}
+                    style={{ color: markFg(ln.kind) }}
                   >
                     {glyph}
                   </span>

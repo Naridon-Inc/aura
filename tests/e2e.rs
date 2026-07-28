@@ -595,6 +595,114 @@ fn test_deletion_guard_detects_removed_functions() {
     }
 }
 
+/// The OTHER half of the guard's promise: the fix it hands back actually WORKS.
+///
+/// The rejection tells the agent to run `aura log-intent "Removed <node> …"`.
+/// That is only a real path forward if the command lands a row in the very
+/// `.aura/intent_log.jsonl` the guard reads on the next run. This exercises the
+/// full loop against the real binary — block → run the exact fix → gate clears —
+/// so if `aura log-intent` ever regresses to a no-op (exit 0 but writes
+/// nothing), STEP 3 fails and this test catches it. The pure logic is covered by
+/// deletion_guard's unit round-trip; this is the binary-integration proof.
+#[test]
+fn test_deletion_guard_fix_command_clears_the_gate() {
+    let repo = TestRepo::new();
+
+    // Baseline: two functions COMMITTED first, then init the baseline from HEAD
+    // so the checkpoint the guard diffs against actually contains them.
+    repo.write_file("api.rs", "pub fn handle() -> String { \"ok\".to_string() }\npub fn validate() -> bool { true }\n");
+    repo.commit("Add API functions");
+    repo.aura(&["init", "--force-baseline"]);
+    repo.aura(&["config", "set", "strict-mode", "true"]);
+    repo.aura(&["capture-context"]);
+
+    // Delete validate(), stage it, and record an intent that does NOT account
+    // for the removal. We drop the `.intent_logged` marker + a generic intent so
+    // the SEPARATE "intent not logged" gate is satisfied — that isolates the
+    // deletion guard as the only thing that can block here, which is what this
+    // test is about.
+    repo.write_file("api.rs", "pub fn handle() -> String { \"ok\".to_string() }\n");
+    Command::new("git").args(["add", "."]).current_dir(repo.path()).output().unwrap();
+    std::fs::create_dir_all(repo.path().join(".aura/snapshots")).ok();
+    std::fs::write(repo.path().join(".aura/.intent_logged"), "").unwrap();
+    std::fs::write(repo.path().join(".gemini.intent"), "Updated handle to return JSON").unwrap();
+
+    // STEP 1 — capture-context must block the unaccounted deletion.
+    let blocked = repo.aura(&["capture-context"]);
+    if blocked.status.success() {
+        // The checkpoint AST comparison couldn't run in this environment (e.g.
+        // git notes not propagated) so the guard never fired — we can't exercise
+        // the fix loop. Skip rather than fail; the fire path is covered by
+        // `test_deletion_guard_detects_removed_functions`.
+        eprintln!("  [SKIP] guard did not fire in this env — cannot exercise the fix loop");
+        return;
+    }
+    let out1 = format!(
+        "{}{}",
+        String::from_utf8_lossy(&blocked.stdout),
+        String::from_utf8_lossy(&blocked.stderr),
+    );
+    assert!(out1.contains("validate"), "rejection must name the removed node: {out1}");
+    assert!(out1.contains("aura log-intent"), "rejection must hand back the fix command: {out1}");
+
+    // STEP 2 — run the exact kind of fix the guard described: an intent that
+    // signals a removal AND names the removed node.
+    let logged = repo.aura(&["log-intent", "Removed validate because the endpoint was retired"]);
+    assert!(logged.status.success(), "log-intent should exit 0");
+    let log = std::fs::read_to_string(repo.path().join(".aura/intent_log.jsonl"))
+        .expect("log-intent must create .aura/intent_log.jsonl — a no-op here means the guard is theatre");
+    assert!(
+        log.contains("Removed validate because the endpoint was retired"),
+        "log-intent must append the intent row the guard reads, got: {log}"
+    );
+
+    // STEP 3 — the deletion is now accounted for, so the gate must clear.
+    let cleared = repo.aura(&["capture-context"]);
+    assert!(
+        cleared.status.success(),
+        "the fix the guard handed back must clear the gate on retry; instead exit={:?} out={}{}",
+        cleared.status.code(),
+        String::from_utf8_lossy(&cleared.stdout),
+        String::from_utf8_lossy(&cleared.stderr),
+    );
+}
+
+/// The load-bearing fact behind the whole accountability loop, tested with NO
+/// dependence on the (env-sensitive) checkpoint machinery: `aura log-intent`
+/// must actually PERSIST a readable row to the `.aura/intent_log.jsonl` the
+/// guard reads, and drop the `.intent_logged` marker. If it ever regresses to a
+/// silent no-op (the failure mode where the guard's fix instruction becomes
+/// theatre — reject an agent, hand it a command that changes nothing, loop
+/// forever), this deterministic test fails.
+#[test]
+fn test_log_intent_persists_a_readable_row() {
+    let repo = TestRepo::new();
+
+    let out = repo.aura(&["log-intent", "Removed validate because the endpoint was retired"]);
+    assert!(
+        out.status.success(),
+        "log-intent must exit 0; stderr={}",
+        String::from_utf8_lossy(&out.stderr),
+    );
+
+    let log_path = repo.path().join(".aura/intent_log.jsonl");
+    let log = std::fs::read_to_string(&log_path).unwrap_or_else(|_| {
+        panic!(
+            "log-intent must create {} — a silent no-op means the guard's fix instruction is theatre",
+            log_path.display()
+        )
+    });
+    assert!(
+        log.contains("Removed validate because the endpoint was retired"),
+        "the row the guard reads must contain the logged intent verbatim, got: {log}"
+    );
+
+    assert!(
+        repo.path().join(".aura/.intent_logged").exists(),
+        "log-intent must drop the .intent_logged marker the pre-commit gate checks"
+    );
+}
+
 // ══════════════════════════════════════════════════
 // Snapshot & Rewind Roundtrip Tests
 // ══════════════════════════════════════════════════

@@ -155,7 +155,7 @@ mod tests {
             state: BlockState::Proposed,
             policy: None,
             provenance: Provenance {
-                actor: AgentRef("did:aura:user/you".into()),
+                actor: AgentRef("did:aura:user/muhammed".into()),
                 on_behalf_of: None,
                 origin_host: "laptop".into(),
                 signature: None,

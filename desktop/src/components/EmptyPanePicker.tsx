@@ -5,11 +5,17 @@
 // workspace tabs (a Claude from project A next to a Gemini from
 // project B). Also offers a "spawn new" shortcut for the common case.
 
-import { useEffect, useMemo, useRef, useState } from "react";
-import { treeLeaves, useEditorStore } from "../lib/editorStore";
+import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { newBrowserTabId, treeLeaves, useEditorStore } from "../lib/editorStore";
 import type { WorkPaneRef } from "../lib/editorStore";
 import { AgentIcon } from "./agent/AgentIcon";
-import { api, type AgentProfile, type Lane, type OpenAiCompatProfile } from "../lib/api";
+import {
+  api,
+  type AgentProfile,
+  type Lane,
+  type OpenAiCompatProfile,
+  type ProjectEntry,
+} from "../lib/api";
 import { LaneSwitcher } from "./agent/LaneSwitcher";
 import { Input } from "./ui/input";
 
@@ -26,6 +32,18 @@ export function EmptyPanePicker({ paneIndex, currentRepoRoot, onClosePane }: Pro
   const store = useEditorStore();
   const [section, setSection] = useState<Section>("all");
   const [filter, setFilter] = useState("");
+  // Which project new spawns (terminal / agent / lane) open in. Defaults to
+  // this pane's own workspace; a picker lets the user retarget any other known
+  // project so a split can hold, say, a Claude from project B next to project
+  // A. Interactive surfaces carry their own repoRoot on the tab, so a foreign
+  // spawn stays correctly scoped (unlike opening a foreign *file*, whose git
+  // context would resolve against this workspace — that's not offered here).
+  const [projects, setProjects] = useState<ProjectEntry[]>([]);
+  const [spawnRoot, setSpawnRoot] = useState(currentRepoRoot);
+  useEffect(() => {
+    void api.projectsList().then(setProjects).catch(() => setProjects([]));
+  }, []);
+  const hasOtherProjects = projects.some((p) => p.root !== currentRepoRoot);
 
   const candidates = useMemo(() => {
     const layoutRefs = store.splitLayout ? treeLeaves(store.splitLayout) : [];
@@ -130,15 +148,22 @@ export function EmptyPanePicker({ paneIndex, currentRepoRoot, onClosePane }: Pro
   }
 
   function spawnTerminal() {
-    const id = store.openTerminal(currentRepoRoot, { label: "Terminal" });
+    const id = store.openTerminal(spawnRoot, { label: "Terminal" });
     store.replaceSplitPaneAt(paneIndex, { kind: "terminal", id });
+  }
+
+  function spawnBrowser() {
+    store.replaceSplitPaneAt(paneIndex, {
+      kind: "browser",
+      id: newBrowserTabId(),
+    });
   }
 
   async function spawnAgent(agentId: string, label: string, profileName?: string) {
     try {
       const handle = await api.agentPtyOpen(
         agentId,
-        currentRepoRoot,
+        spawnRoot,
         80,
         24,
         undefined,
@@ -151,7 +176,7 @@ export function EmptyPanePicker({ paneIndex, currentRepoRoot, onClosePane }: Pro
         agentId,
         agentLabel: decoratedLabel,
         agentMonogram: label.charAt(0).toUpperCase(),
-        repoRoot: currentRepoRoot,
+        repoRoot: spawnRoot,
         mode: "pty",
       });
       store.replaceSplitPaneAt(paneIndex, { kind: "agent", id: handle.id });
@@ -169,7 +194,7 @@ export function EmptyPanePicker({ paneIndex, currentRepoRoot, onClosePane }: Pro
     // an existing tab focuses instead of opening a duplicate. Includes
     // a short random suffix on first open so two splits can hold the
     // same profile side-by-side if the user genuinely wants that.
-    const sessionId = `oai-compat:${profile.name}:${currentRepoRoot}:${Math.random()
+    const sessionId = `oai-compat:${profile.name}:${spawnRoot}:${Math.random()
       .toString(36)
       .slice(2, 8)}`;
     store.openAgent({
@@ -177,7 +202,7 @@ export function EmptyPanePicker({ paneIndex, currentRepoRoot, onClosePane }: Pro
       agentId: "openai-compat",
       agentLabel: profile.name,
       agentMonogram: profile.name.charAt(0).toUpperCase(),
-      repoRoot: currentRepoRoot,
+      repoRoot: spawnRoot,
       mode: "chat",
       openaiCompatProfile: profile.name,
     });
@@ -204,108 +229,168 @@ export function EmptyPanePicker({ paneIndex, currentRepoRoot, onClosePane }: Pro
     store.replaceSplitPaneAt(paneIndex, { kind: "agent", id: lane.termId });
   }
 
+  const spawnTiles: {
+    id: string;
+    label: string;
+    icon: ReactNode;
+    onClick: () => void;
+  }[] = [
+    { id: "claude", label: "Claude", icon: <AgentIcon agentId="claude" size={15} />, onClick: () => spawnAgent("claude", "Claude") },
+    { id: "gemini", label: "Gemini", icon: <AgentIcon agentId="gemini" size={15} />, onClick: () => spawnAgent("gemini", "Gemini") },
+    { id: "codex", label: "Codex", icon: <AgentIcon agentId="codex" size={15} />, onClick: () => spawnAgent("codex", "Codex") },
+    { id: "cursor", label: "Cursor", icon: <AgentIcon agentId="cursor" size={15} />, onClick: () => spawnAgent("cursor", "Cursor") },
+    { id: "terminal", label: "Terminal", icon: <TerminalGlyph />, onClick: spawnTerminal },
+    { id: "browser", label: "Browser", icon: <GlobeGlyph />, onClick: spawnBrowser },
+  ];
+
   return (
     <div className="h-full w-full flex flex-col bg-bg-content text-text-1">
-      <div className="flex items-center gap-2 h-10 px-3 border-b border-line-soft bg-bg-chrome">
-        <span className="text-text-3 text-[11px] uppercase tracking-wider">
-          Empty Pane
-        </span>
-        <span className="text-text-5 text-[10.5px] font-mono">
-          pick something to put here
+      {/* Slim header — no bulky title; the pane's tab already says "New tab". */}
+      <div className="flex items-center h-8 px-2 flex-shrink-0">
+        <span className="text-[10px] uppercase tracking-wider text-text-5 px-1">
+          New tab
         </span>
         <button
           type="button"
           onClick={onClosePane}
-          className="ml-auto px-2 h-6 rounded text-[11px] text-text-3 hover:text-text-1 hover:bg-bg-2 transition-colors"
+          className="ml-auto w-6 h-6 rounded flex items-center justify-center text-text-4 hover:text-text-1 hover:bg-bg-2 transition-colors"
           title="Close this pane"
+          aria-label="Close this pane"
         >
-          Close
+          <XGlyph />
         </button>
       </div>
 
-      <div className="px-4 pt-4 pb-2 flex flex-col gap-3">
-        <Input
-          autoFocus
-          value={filter}
-          onChange={(e) => setFilter(e.target.value)}
-          placeholder="Filter open tabs across all workspaces…"
-          className="h-9"
-        />
-        <div className="flex items-center gap-1.5 text-[11px]">
-          {(["all", "agents", "terminals", "managers", "files"] as Section[]).map(
-            (s) => (
-              <button
-                key={s}
-                type="button"
-                onClick={() => setSection(s)}
-                className={`px-2 h-6 rounded transition-colors capitalize ${
-                  section === s
-                    ? "bg-bg-3 text-text-1"
-                    : "text-text-3 hover:text-text-1 hover:bg-bg-2"
-                }`}
-              >
-                {s}
-              </button>
-            ),
-          )}
+      <div className="flex-1 min-h-0 overflow-y-auto">
+        <div className="mx-auto w-full max-w-[540px] px-5 py-3 flex flex-col gap-5">
+          {/* PRIMARY — start something new. The common case for an empty pane. */}
+          <section className="flex flex-col gap-2">
+            <div className="flex items-center justify-between gap-2">
+              <SectionLabel>Start something new</SectionLabel>
+              {hasOtherProjects && (
+                <ProjectSpawnTarget
+                  projects={projects}
+                  value={spawnRoot}
+                  currentRepoRoot={currentRepoRoot}
+                  onChange={setSpawnRoot}
+                />
+              )}
+            </div>
+            <div className="grid grid-cols-3 gap-1.5">
+              {spawnTiles.map((t) => (
+                <SpawnTile key={t.id} label={t.label} icon={t.icon} onClick={t.onClick} />
+              ))}
+            </div>
+            <div className="flex items-center gap-1.5 flex-wrap pt-0.5">
+              <LocalModelsSpawnMenu onSpawn={spawnOpenAiCompat} />
+              <IsolatedSpawnMenu onSpawn={spawnAgent} />
+              <LaneSpawnMenu repoRoot={spawnRoot} onFocusLane={openLaneAgent} />
+            </div>
+          </section>
+
+          {/* SECONDARY — jump to something already running, any workspace. */}
+          <section className="flex flex-col gap-2">
+            <SectionLabel>Or jump to something already open</SectionLabel>
+            <Input
+              value={filter}
+              onChange={(e) => setFilter(e.target.value)}
+              placeholder="Filter open tabs across all workspaces…"
+              className="h-8 text-[12px]"
+            />
+            <div className="flex items-center gap-1 text-[11px]">
+              {(["all", "agents", "terminals", "managers", "files"] as Section[]).map(
+                (s) => (
+                  <button
+                    key={s}
+                    type="button"
+                    onClick={() => setSection(s)}
+                    className={`px-2 h-6 rounded transition-colors capitalize ${
+                      section === s
+                        ? "bg-bg-3 text-text-1"
+                        : "text-text-4 hover:text-text-1 hover:bg-bg-2"
+                    }`}
+                  >
+                    {s}
+                  </button>
+                ),
+              )}
+            </div>
+            {candidates.length === 0 ? (
+              <div className="px-2 py-5 text-center text-text-5 text-[11.5px]">
+                Nothing open matches — start one above.
+              </div>
+            ) : (
+              <ul className="flex flex-col gap-0.5">
+                {candidates.map((row) => (
+                  <li key={row.key}>
+                    <button
+                      type="button"
+                      onClick={() => pick(row.ref)}
+                      className="group w-full flex items-center gap-2.5 px-2 h-8 rounded hover:bg-bg-2 text-left transition-colors"
+                    >
+                      <span className="w-4 h-4 flex items-center justify-center flex-shrink-0 text-text-3">
+                        {row.iconAgent ? (
+                          <AgentIcon agentId={row.iconAgent} size={13} />
+                        ) : row.kind === "terminal" ? (
+                          <TerminalGlyph />
+                        ) : (
+                          <FileGlyph />
+                        )}
+                      </span>
+                      <span className="text-[12px] text-text-1 truncate">
+                        {row.label}
+                      </span>
+                      <span className="text-[10px] text-text-5 font-mono truncate">
+                        {row.sub}
+                      </span>
+                      {row.foreign && (
+                        <span className="ml-auto text-[9.5px] uppercase tracking-wider text-text-4 px-1.5 py-0.5 rounded bg-bg-2 border border-line-soft">
+                          foreign
+                        </span>
+                      )}
+                    </button>
+                  </li>
+                ))}
+              </ul>
+            )}
+          </section>
         </div>
       </div>
-
-      <div className="flex-1 min-h-0 overflow-y-auto px-3 pb-3">
-        {candidates.length === 0 ? (
-          <div className="px-2 py-6 text-center text-text-4 text-[12px]">
-            Nothing matches. Spawn a new agent or terminal below.
-          </div>
-        ) : (
-          <ul className="flex flex-col gap-1">
-            {candidates.map((row) => (
-              <li key={row.key}>
-                <button
-                  type="button"
-                  onClick={() => pick(row.ref)}
-                  className="group w-full flex items-center gap-2.5 px-2 h-9 rounded hover:bg-bg-2 text-left transition-colors"
-                >
-                  <span className="w-5 h-5 flex items-center justify-center flex-shrink-0">
-                    {row.iconAgent ? (
-                      <AgentIcon agentId={row.iconAgent} size={14} />
-                    ) : row.kind === "terminal" ? (
-                      <TerminalGlyph />
-                    ) : (
-                      <FileGlyph />
-                    )}
-                  </span>
-                  <span className="text-[12.5px] text-text-1 truncate">
-                    {row.label}
-                  </span>
-                  <span className="text-[10.5px] text-text-5 font-mono truncate">
-                    {row.sub}
-                  </span>
-                  {row.foreign && (
-                    <span className="ml-auto text-[10px] uppercase tracking-wider text-text-4 px-1.5 py-0.5 rounded bg-bg-2 border border-line-soft">
-                      foreign
-                    </span>
-                  )}
-                </button>
-              </li>
-            ))}
-          </ul>
-        )}
-      </div>
-
-      <div className="border-t border-line-soft px-4 py-3 flex items-center gap-2 flex-wrap">
-        <span className="text-[11px] uppercase tracking-wider text-text-4 mr-1">
-          Spawn new
-        </span>
-        <SpawnPill label="Claude" onClick={() => spawnAgent("claude", "Claude")} />
-        <SpawnPill label="Gemini" onClick={() => spawnAgent("gemini", "Gemini")} />
-        <SpawnPill label="Codex" onClick={() => spawnAgent("codex", "Codex")} />
-        <SpawnPill label="Cursor" onClick={() => spawnAgent("cursor", "Cursor")} />
-        <SpawnPill label="Terminal" onClick={spawnTerminal} />
-        <LocalModelsSpawnMenu onSpawn={spawnOpenAiCompat} />
-        <IsolatedSpawnMenu onSpawn={spawnAgent} />
-        <LaneSpawnMenu repoRoot={currentRepoRoot} onFocusLane={openLaneAgent} />
-      </div>
     </div>
+  );
+}
+
+// Compact section label — small caps header, no card chrome.
+function SectionLabel({ children }: { children: ReactNode }) {
+  return (
+    <div className="text-[10px] uppercase tracking-wider text-text-4">
+      {children}
+    </div>
+  );
+}
+
+// Compact launcher tile — icon + label, arctic-blue accent on hover. Kept
+// deliberately small (h-9, one line) so the grid never reads as bulky cards.
+function SpawnTile({
+  label,
+  icon,
+  onClick,
+}: {
+  label: string;
+  icon: ReactNode;
+  onClick: () => void;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      className="flex items-center gap-2 px-2.5 h-9 rounded-md bg-bg-1 border border-line-soft text-text-2 hover:text-text-1 hover:border-line hover:bg-bg-2 transition-colors"
+    >
+      <span className="w-4 h-4 flex items-center justify-center flex-shrink-0 text-text-3">
+        {icon}
+      </span>
+      <span className="text-[12px] font-medium truncate">{label}</span>
+    </button>
   );
 }
 
@@ -360,7 +445,7 @@ function LocalModelsSpawnMenu({
       </button>
       {open && (
         <div
-          className="absolute bottom-9 right-0 z-30 w-[280px] rounded-md py-2 shadow-lg"
+          className="absolute top-9 left-0 z-30 w-[280px] rounded-md py-2 shadow-lg"
           style={{
             background: "var(--color-bg-3)",
             border: "1px solid var(--color-line-soft)",
@@ -486,7 +571,7 @@ function IsolatedSpawnMenu({
       </button>
       {open && (
         <div
-          className="absolute bottom-9 right-0 z-30 w-[280px] rounded-md py-2 shadow-lg"
+          className="absolute top-9 left-0 z-30 w-[280px] rounded-md py-2 shadow-lg"
           style={{
             background: "var(--color-bg-3)",
             border: "1px solid var(--color-line-soft)",
@@ -611,7 +696,7 @@ function LaneSpawnMenu({
         <span>New lane…</span>
       </button>
       {open && (
-        <div className="absolute bottom-9 right-0 z-30">
+        <div className="absolute top-9 left-0 z-30">
           <LaneSwitcher
             repoRoot={repoRoot}
             onFocusLane={(lane) => {
@@ -625,19 +710,161 @@ function LaneSpawnMenu({
   );
 }
 
+// Compact project chooser shown beside "Start something new". Retargets which
+// project the spawn tiles (terminal / agent / lane) open in — the current
+// workspace by default, any other known project on demand. Only interactive
+// surfaces are retargeted; files aren't (their git context would resolve
+// against this workspace). Hidden entirely when there's only one project.
+function ProjectSpawnTarget({
+  projects,
+  value,
+  currentRepoRoot,
+  onChange,
+}: {
+  projects: ProjectEntry[];
+  value: string;
+  currentRepoRoot: string;
+  onChange: (root: string) => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const ref = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (!open) return;
+    function onDoc(e: MouseEvent) {
+      const t = e.target as Node | null;
+      if (ref.current && t && !ref.current.contains(t)) setOpen(false);
+    }
+    function onKey(e: KeyboardEvent) {
+      if (e.key === "Escape") setOpen(false);
+    }
+    document.addEventListener("mousedown", onDoc);
+    document.addEventListener("keydown", onKey);
+    return () => {
+      document.removeEventListener("mousedown", onDoc);
+      document.removeEventListener("keydown", onKey);
+    };
+  }, [open]);
+
+  // Current workspace first, then the rest most-recently-opened first. De-dup
+  // by root so a project that's also the current one isn't listed twice.
+  const ordered = useMemo(() => {
+    const seen = new Set<string>();
+    const out: { root: string; label: string }[] = [];
+    const push = (root: string, label: string) => {
+      if (root && !seen.has(root)) {
+        seen.add(root);
+        out.push({ root, label });
+      }
+    };
+    push(currentRepoRoot, projectLabelFor(projects, currentRepoRoot));
+    [...projects]
+      .sort((a, b) => b.last_opened_at - a.last_opened_at)
+      .forEach((p) => push(p.root, p.label || baseName(p.root)));
+    return out;
+  }, [projects, currentRepoRoot]);
+
+  const isForeign = value !== currentRepoRoot;
+  return (
+    <div className="relative" ref={ref}>
+      <button
+        type="button"
+        onClick={() => setOpen((v) => !v)}
+        className={`flex items-center gap-1 h-6 px-1.5 rounded text-[11px] border transition-colors ${
+          isForeign
+            ? "text-accent border-accent bg-bg-2"
+            : "text-text-3 border-transparent hover:text-text-1 hover:bg-bg-2 hover:border-line-soft"
+        }`}
+        title="Choose which project new tabs open in"
+      >
+        <FolderGlyph />
+        <span className="truncate max-w-[150px]">{projectLabelFor(projects, value)}</span>
+        <span aria-hidden className="text-text-5">▾</span>
+      </button>
+      {open && (
+        <div
+          className="absolute top-8 right-0 z-30 w-[240px] rounded-md py-1.5 shadow-lg"
+          style={{
+            background: "var(--color-bg-3)",
+            border: "1px solid var(--color-line-soft)",
+          }}
+        >
+          <div className="px-3 pb-1 text-[10px] text-text-4 uppercase tracking-wider">
+            Open new tabs in
+          </div>
+          <div className="px-1.5 flex flex-col gap-0.5 max-h-[240px] overflow-auto">
+            {ordered.map((p) => (
+              <button
+                key={p.root}
+                type="button"
+                onClick={() => {
+                  onChange(p.root);
+                  setOpen(false);
+                }}
+                className={`w-full text-left px-2 py-1.5 rounded text-[12px] flex items-center gap-2 ${
+                  p.root === value
+                    ? "bg-bg-2 text-text-1"
+                    : "text-text-2 hover:bg-bg-2 hover:text-text-1"
+                }`}
+              >
+                <span className="truncate flex-1">{p.label}</span>
+                {p.root === currentRepoRoot && (
+                  <span className="text-[9px] uppercase tracking-wider text-text-5">
+                    current
+                  </span>
+                )}
+                {p.root === value && <span className="text-accent text-[12px]">✓</span>}
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function projectLabelFor(projects: ProjectEntry[], root: string): string {
+  const p = projects.find((x) => x.root === root);
+  return p?.label || baseName(root) || root;
+}
+
+function FolderGlyph() {
+  return (
+    <svg width="12" height="12" viewBox="0 0 16 16" fill="none">
+      <path
+        d="M1.75 4.25c0-.55.45-1 1-1h3.1c.3 0 .58.13.77.36l.76.9c.19.23.47.36.77.36h5.33c.55 0 1 .45 1 1v6.02c0 .55-.45 1-1 1H2.75c-.55 0-1-.45-1-1V4.25z"
+        stroke="currentColor"
+        strokeWidth="1.2"
+        strokeLinejoin="round"
+      />
+    </svg>
+  );
+}
+
 function capitalize(s: string): string {
   return s.charAt(0).toUpperCase() + s.slice(1);
 }
 
-function SpawnPill({ label, onClick }: { label: string; onClick: () => void }) {
+function GlobeGlyph() {
   return (
-    <button
-      type="button"
-      onClick={onClick}
-      className="px-2.5 h-7 rounded text-[11.5px] font-medium text-text-2 bg-bg-2 hover:bg-bg-3 hover:text-text-1 border border-line-soft transition-colors"
-    >
-      {label}
-    </button>
+    <svg width="13" height="13" viewBox="0 0 16 16" fill="none">
+      <circle cx="8" cy="8" r="6" stroke="currentColor" strokeWidth="1.2" />
+      <path
+        d="M2 8h12M8 2c1.8 1.6 2.8 3.8 2.8 6S9.8 12.4 8 14M8 2C6.2 3.6 5.2 5.8 5.2 8S6.2 12.4 8 14"
+        stroke="currentColor"
+        strokeWidth="1.2"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+    </svg>
+  );
+}
+
+function XGlyph() {
+  return (
+    <svg width="12" height="12" viewBox="0 0 16 16" fill="none">
+      <path d="M4 4l8 8M12 4l-8 8" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" />
+    </svg>
   );
 }
 

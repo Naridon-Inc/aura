@@ -64,17 +64,21 @@ export function ProjectGlyph({
 }
 
 // "+207 −1" — green adds, red dels. Nothing when the copy is clean.
+// `--color-green` and `--color-red` are the pack's own diff pair; the old
+// `--color-success` / `--color-danger` names are defined by no theme here, so
+// these only ever rendered their hard-coded fallbacks — two hues the palette
+// does not contain, frozen against every retune.
 export function DiffPill({ added, removed }: { added: number; removed: number }) {
   if (added <= 0 && removed <= 0) return null;
   return (
     <span className="inline-flex items-center gap-1.5 text-[11px] tabular-nums flex-none">
       {added > 0 && (
-        <span style={{ color: "var(--color-success, #22c55e)" }}>
+        <span style={{ color: "var(--color-green)" }}>
           +{compactCount(added)}
         </span>
       )}
       {removed > 0 && (
-        <span style={{ color: "var(--color-danger, #ef4444)" }}>
+        <span style={{ color: "var(--color-red)" }}>
           −{compactCount(removed)}
         </span>
       )}
@@ -86,12 +90,15 @@ export function DiffPill({ added, removed }: { added: number; removed: number })
 export function PrPill({ pr }: { pr?: { number: number; state: string } }) {
   if (!pr) return null;
   const state = pr.state.toLowerCase();
+  // merged = landed (the accent, the one PR state you can still navigate to),
+  // closed = went nowhere (red), open = live (mint). Was three undefined token
+  // names falling through to a violet/red/green trio the palette never had.
   const tint =
     state === "merged"
-      ? "var(--color-accent, #8b5cf6)"
+      ? "var(--color-accent)"
       : state === "closed"
-        ? "var(--color-danger, #ef4444)"
-        : "var(--color-success, #22c55e)";
+        ? "var(--color-red)"
+        : "var(--color-accent-green)";
   return (
     <span
       className="inline-flex items-center h-[17px] px-1.5 rounded text-[10px] font-medium tabular-nums flex-none border"
@@ -122,7 +129,9 @@ export function AgentChips({ agents }: { agents: CopyAgent[] }) {
           title={`${a.label}${a.attention ? " · waiting on you" : ""}`}
           style={
             a.attention
-              ? { boxShadow: "0 0 0 1.5px var(--color-warning, #f59e0b)" }
+              // The comment above already calls this an amber ring — it just
+              // named a token no theme defines, so it was drawing a literal.
+              ? { boxShadow: "0 0 0 1.5px var(--color-amber)" }
               : undefined
           }
         >

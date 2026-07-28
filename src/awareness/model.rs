@@ -102,6 +102,19 @@ pub struct AwarenessEvent {
     /// Base64 Ed25519 signature over [`AwarenessEvent::signing_bytes`] (M3a).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sig: Option<String>,
+    /// Self-certifying public key (b64url of the 32-byte Ed25519 key) that
+    /// signed this event. It travels WITH the event so any teammate can verify
+    /// it without a key registry — the pubkey must re-derive the claimed
+    /// `key_id` (an 8-byte fingerprint) or the binding is rejected. Excluded
+    /// from [`AwarenessEvent::signing_bytes`], exactly like `key_id`/`sig`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pubkey: Option<String>,
+    /// Checkout the actor was standing in. `None` = the main checkout, which is
+    /// also what events written before worktrees were tracked deserialize to.
+    /// Branch alone can't answer "where" — several checkouts can sit on
+    /// detached HEADs, and the name is what a human actually says out loud.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub worktree: Option<String>,
 }
 
 impl AwarenessEvent {
@@ -109,7 +122,7 @@ impl AwarenessEvent {
     /// a fixed order, EXCLUDING `key_id`/`sig` themselves. `serde_json` orders
     /// object keys deterministically, so sign and verify agree.
     pub fn signing_bytes(&self) -> Vec<u8> {
-        let canon = serde_json::json!({
+        let mut canon = serde_json::json!({
             "id": self.id,
             "actor": self.actor,
             "is_agent": self.is_agent,
@@ -122,6 +135,15 @@ impl AwarenessEvent {
             "impact": self.impact,
             "ts": self.ts,
         });
+        // `worktree` joins the canon only when it is actually set. Adding the
+        // key unconditionally (even as `null`) would change the bytes for every
+        // event signed before worktrees were tracked, and each one already on
+        // disk would start failing verification.
+        if let Some(wt) = &self.worktree {
+            if let Some(obj) = canon.as_object_mut() {
+                obj.insert("worktree".into(), serde_json::Value::String(wt.clone()));
+            }
+        }
         serde_json::to_vec(&canon).unwrap_or_default()
     }
 }
@@ -163,11 +185,57 @@ mod tests {
             ts: 7,
             key_id: None,
             sig: None,
+            pubkey: None,
+            worktree: None,
         };
         let before = e.signing_bytes();
-        // Attaching a signature/key id must NOT change what gets signed.
+        // Attaching a signature/key id/pubkey must NOT change what gets signed.
         e.sig = Some("deadbeef".into());
         e.key_id = Some("did:aura:key/zz".into());
+        e.pubkey = Some("Zm9vYmFy".into());
         assert_eq!(before, e.signing_bytes());
+    }
+
+    /// Every event already on disk was signed without a `worktree` key. If
+    /// adding the field changed the canon for those events, each one would
+    /// start failing verification the moment this ships.
+    #[test]
+    fn an_unstamped_event_signs_exactly_as_it_did_before_worktrees() {
+        let mut e = AwarenessEvent {
+            id: "x".into(),
+            actor: "a".into(),
+            is_agent: false,
+            kind: AwarenessKind::Editing,
+            repo: "r".into(),
+            branch: "b".into(),
+            file: None,
+            symbol: None,
+            intent: None,
+            impact: None,
+            ts: 7,
+            key_id: None,
+            sig: None,
+            pubkey: None,
+            worktree: None,
+        };
+        let legacy = serde_json::to_vec(&serde_json::json!({
+            "id": "x",
+            "actor": "a",
+            "is_agent": false,
+            "kind": "editing",
+            "repo": "r",
+            "branch": "b",
+            "file": serde_json::Value::Null,
+            "symbol": serde_json::Value::Null,
+            "intent": serde_json::Value::Null,
+            "impact": serde_json::Value::Null,
+            "ts": 7,
+        }))
+        .expect("canon");
+        assert_eq!(e.signing_bytes(), legacy);
+
+        // Stamped events sign over the checkout too, so it can't be forged.
+        e.worktree = Some("barcelona".into());
+        assert_ne!(e.signing_bytes(), legacy);
     }
 }

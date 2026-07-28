@@ -14,7 +14,12 @@ import { useEffect, useState } from "react";
 
 export type ThemePreference = "dark" | "light" | "system";
 export type ResolvedTheme = "dark" | "light";
-export type ThemeVariant = "default" | "modal" | "ember" | "conductor";
+export type ThemeVariant =
+  | "default"
+  | "modal"
+  | "ember"
+  | "amber"
+  | "emerald";
 
 const KEY = "aura.theme";
 const VARIANT_KEY = "aura.theme.variant";
@@ -42,10 +47,16 @@ function adeV2On(): boolean {
 
 // Variants that ship dark-only — selecting one forces the resolved
 // scheme back to dark so light/system don't fight the variant palette.
+//
+// `amber` is deliberately NOT in this set. It is the default variant, so
+// listing it here would pin every fresh install to dark and leave light
+// mode reachable only by first switching to another style pack — a
+// setting the user never asked to lose. It ships a real `.light.theme-amber`
+// palette (accent #9a6100, 5.14:1 on white), so light is a supported ground.
 const DARK_ONLY_VARIANTS: ReadonlySet<ThemeVariant> = new Set<ThemeVariant>([
   "modal",
   "ember",
-  "conductor",
+  "emerald",
 ]);
 
 const subs = new Set<() => void>();
@@ -87,15 +98,25 @@ function readPref(): ThemePreference {
 function readVariant(): ThemeVariant {
   try {
     // An explicit variant pick (from the theme picker) always wins — that's
-    // how a user opts into modal/conductor over the redesign default.
+    // how a user opts into modal/emerald over the amber default.
     const raw = localStorage.getItem(VARIANT_KEY);
-    if (raw === "modal" || raw === "ember" || raw === "conductor") return raw;
+    // `conductor` was this pack's name before it became `amber`. Anyone who
+    // picked it back then still has that string on disk, so read it forward
+    // rather than silently dropping them onto the default.
+    if (raw === "conductor") return "amber";
+    if (
+      raw === "modal" ||
+      raw === "ember" ||
+      raw === "amber" ||
+      raw === "emerald"
+    )
+      return raw;
     // No explicit choice: the ADE v2 master flag defaults the surface to the
     // ember pack, so flipping that one key swaps the whole redesign on/off.
-    if (adeV2On()) return "ember";
+    if (adeV2On()) return "amber";
     return "default";
   } catch {
-    return adeV2On() ? "ember" : "default";
+    return adeV2On() ? "amber" : "default";
   }
 }
 
@@ -236,7 +257,8 @@ export function useApplyThemeClass(): void {
       "theme-default",
       "theme-modal",
       "theme-ember",
-      "theme-conductor",
+      "theme-amber",
+      "theme-emerald",
     );
     root.classList.add(`theme-${variant}`);
   }, [resolved, variant]);

@@ -7,6 +7,7 @@
 
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { Dialog } from "../Dialog";
+import { AsciiSpinner } from "../ui/ascii-spinner";
 import { Button } from "../ui/button";
 import { api, type OpEntry } from "../../lib/api";
 
@@ -93,14 +94,16 @@ export function OpLogDialog({ open, repoRoot, onClose }: OpLogDialogProps) {
       }
     >
       <div className="space-y-2 text-[11.5px]">
-        {err && <div className="text-red text-[11px]">{err}</div>}
+        {err && <div role="alert" className="text-red text-[11px]">{err}</div>}
         {result && (
-          <div className="text-emerald-400 text-[11px] bg-bg-2 border border-line-soft rounded px-2 py-1.5">
+          <div className="text-text-2 text-[11px] bg-bg-2 border border-line-soft rounded px-2 py-1.5">
             {result}
           </div>
         )}
         {loading && ops.length === 0 && (
-          <div className="text-text-4 text-[11px]">Loading…</div>
+          <div className="flex items-center gap-1.5 text-text-4 text-[11px]">
+            <AsciiSpinner className="text-[11px] leading-none" /> Loading recent actions…
+          </div>
         )}
         {!loading && ops.length === 0 && (
           <div className="text-text-4 text-[11px]">No operations recorded yet.</div>
@@ -134,7 +137,7 @@ export function OpLogDialog({ open, repoRoot, onClose }: OpLogDialogProps) {
                   <span
                     className={[
                       "text-[10px] uppercase tracking-wider px-1.5 py-0.5 rounded shrink-0",
-                      kindColor(op.kind),
+                      "bg-bg-3 text-text-3",
                     ].join(" ")}
                   >
                     {op.kind}
@@ -168,25 +171,6 @@ export function OpLogDialog({ open, repoRoot, onClose }: OpLogDialogProps) {
       </div>
     </Dialog>
   );
-}
-
-function kindColor(kind: string): string {
-  switch (kind) {
-    case "log_intent":
-      return "bg-sky-900/40 text-sky-300";
-    case "snapshot":
-      return "bg-emerald-900/40 text-emerald-300";
-    case "intent_attribute":
-      return "bg-amber-900/40 text-amber-300";
-    case "intent_split":
-      return "bg-violet-900/40 text-violet-300";
-    case "intent_merge":
-      return "bg-fuchsia-900/40 text-fuchsia-300";
-    case "zone_claim":
-      return "bg-rose-900/40 text-rose-300";
-    default:
-      return "bg-bg-3 text-text-3";
-  }
 }
 
 function formatAge(ts: number): string {

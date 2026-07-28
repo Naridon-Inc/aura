@@ -153,7 +153,7 @@ export function RailBrowserAgent({
           disabled={!tabId || (!running && !goal.trim())}
           title={running ? "Stop" : "Run"}
           aria-label={running ? "Stop" : "Run"}
-          className="flex items-center justify-center w-7 h-7 flex-shrink-0 rounded-full bg-accent text-white disabled:opacity-40 disabled:pointer-events-none transition-opacity"
+          className="flex items-center justify-center w-7 h-7 flex-shrink-0 rounded-full bg-accent text-[color:var(--color-accent-foreground)] disabled:opacity-40 disabled:pointer-events-none transition-opacity"
         >
           {running ? <Square className="h-3 w-3" /> : <ArrowRight className="h-3.5 w-3.5" />}
         </button>

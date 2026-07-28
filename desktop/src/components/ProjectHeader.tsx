@@ -3,6 +3,8 @@
 // to host a duplicate that was visually loud in the welcome state and
 // no longer wired to anything.
 
+import { RunScriptButton } from "./RunScriptButton";
+
 type ProjectHeaderProps = {
   name: string;
   path: string;
@@ -22,6 +24,9 @@ export function ProjectHeader({ name, path, branch }: ProjectHeaderProps) {
           </div>
         </div>
         <BranchChip branch={branch} />
+      </div>
+      <div className="flex items-center">
+        <RunScriptButton repoRoot={path} />
       </div>
     </div>
   );

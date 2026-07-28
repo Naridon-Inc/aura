@@ -7,6 +7,7 @@
 
 import { type GraphCommit, type GraphRef } from "../../lib/api";
 import { Avatar } from "../team/presentation/Avatar";
+import { AsciiSpinner } from "../ui/ascii-spinner";
 
 export function CommitList({
   commits,
@@ -20,7 +21,12 @@ export function CommitList({
   onSelect: (sha: string) => void;
 }) {
   if (loading && commits.length === 0) {
-    return <div className="px-3.5 py-3 text-[11.5px] text-text-4">Loading history…</div>;
+    return (
+      <div className="flex items-center gap-1.5 px-3.5 py-3 text-[11.5px] text-text-4">
+        <AsciiSpinner className="text-[10px]" />
+        <span>Reading the project’s story…</span>
+      </div>
+    );
   }
   if (commits.length === 0) {
     return (
@@ -90,18 +96,25 @@ function CommitRow({
   );
 }
 
-/** Branch tip / tag / HEAD pill — HEAD ("You are here") leads in arctic-blue,
- *  tags amber, remote dim, local outlined. Mirrors the graph's badge language
- *  so the two history views read identically. */
+/** Branch tip / tag / HEAD pill — HEAD ("You are here") is the one orientation
+ *  cue that earns the accent; tags and branches are categories, so they stay on
+ *  the neutral ramp. Mirrors the graph's badge language (CommitGraph) so the two
+ *  history views read identically. */
 function RefBadge({ name, kind }: { name: string; kind: GraphRef["kind"] }) {
   if (kind === "head") {
     return (
       <span
-        className="inline-flex shrink-0 items-center gap-1 rounded-full px-1.5 text-[9.5px] font-medium leading-[15px] text-white"
-        style={{ background: "var(--color-accent)" }}
+        className="inline-flex shrink-0 items-center gap-1 rounded-full px-1.5 text-[9.5px] font-medium leading-[15px]"
+        style={{
+          background: "var(--color-accent)",
+          color: "var(--color-accent-foreground)",
+        }}
         title="You are here — the version you’re working from"
       >
-        <span className="inline-block h-1 w-1 rounded-full bg-white" />
+        <span
+          className="inline-block h-1 w-1 rounded-full"
+          style={{ background: "currentColor" }}
+        />
         {name}
       </span>
     );
@@ -109,8 +122,7 @@ function RefBadge({ name, kind }: { name: string; kind: GraphRef["kind"] }) {
   if (kind === "tag") {
     return (
       <span
-        className="inline-flex shrink-0 items-center rounded px-1.5 text-[9.5px] leading-[15px]"
-        style={{ background: "rgba(245,158,11,0.14)", color: "#f59e0b" }}
+        className="inline-flex shrink-0 items-center rounded-full border border-line-soft px-1.5 text-[9.5px] leading-[15px] text-text-3"
         title="A named release point"
       >
         ⌖ {name}

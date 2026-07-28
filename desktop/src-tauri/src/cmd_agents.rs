@@ -177,7 +177,7 @@ fn build_one_shot_invocation(
     let provider = reg
         .get(agent_id)
         .ok_or_else(|| format!("unknown agent: {agent_id}"))?;
-    provider
+    let mut inv = provider
         .build_invocation(&InvokeRequest {
             prompt,
             mode: InvokeMode::OneShot,
@@ -188,7 +188,10 @@ fn build_one_shot_invocation(
             model: None,
             approval: None,
         })
-        .map_err(|e| format!("build invocation for {agent_id}: {e}"))
+        .map_err(|e| format!("build invocation for {agent_id}: {e}"))?;
+    // Enforce the fleet agent-CLI config policy (e.g. codex service_tier repair).
+    crate::agent_policy::apply_to_invocation(agent_id, &mut inv);
+    Ok(inv)
 }
 
 fn which(bin: &str) -> Option<String> {
@@ -219,6 +222,12 @@ fn monogram_for(id: &str) -> String {
         "cursor" => "U".into(),
         "kimi" => "K".into(),
         "pi" => "π".into(),
+        // Extra catalog CLIs. Antigravity ships a brand mark, so its
+        // monogram is a rare fallback; Aider/Amp have none yet, so these
+        // two-letter marks are what their chips actually render.
+        "antigravity" => "A".into(),
+        "aider" => "Ai".into(),
+        "amp" => "Am".into(),
         other => other
             .chars()
             .next()

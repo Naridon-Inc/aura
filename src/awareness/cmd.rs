@@ -30,12 +30,23 @@ pub fn run_emit(
         return;
     };
 
+    // Auto-fill the blast-radius when the caller didn't state one: an agent
+    // announcing "editing removeNote" gets a real, checkpoint-derived ripple
+    // ("affects listNotes, getNote") instead of a blank field — computed from
+    // the reverse callgraph with zero AI tokens. Only when we have both a file
+    // and a symbol to seed the walk; the explicit `--impact` always wins.
+    let impact_owned: Option<String> = match (impact, file, symbol) {
+        (Some(i), _, _) => Some(i.to_string()),
+        (None, Some(f), Some(s)) => auto_impact(f, s),
+        _ => None,
+    };
+
     let ev = emit::emit(emit::EmitInput {
         kind: k,
         file: file.map(String::from),
         symbol: symbol.map(String::from),
         intent: intent.map(String::from),
-        impact: impact.map(String::from),
+        impact: impact_owned,
         agent: agent.map(String::from),
     });
 
@@ -61,6 +72,63 @@ pub fn run_emit(
         who,
         signed
     );
+}
+
+/// Compute a blast-radius one-liner for an emit that carried a `--symbol` but no
+/// `--impact`. Reuses the checkpoint-backed reverse-callgraph engine that powers
+/// `aura change-note` and the delete-guard — token-free, time-bounded, never
+/// panics. Returns `None` when there's nothing worth saying so the field stays
+/// empty rather than noisy.
+fn auto_impact(file: &str, symbol: &str) -> Option<String> {
+    let repo_root = crate::validate_tool::resolve_repo_root(None);
+    // The graph keys on repo-relative paths; fold an absolute one back down.
+    let rel = {
+        let p = Path::new(file);
+        if p.is_absolute() {
+            p.strip_prefix(&repo_root)
+                .map(|r| r.to_string_lossy().to_string())
+                .unwrap_or_else(|_| file.to_string())
+        } else {
+            file.to_string()
+        }
+    };
+    let (impacts, _src) =
+        crate::impact::analyze_changes(&repo_root, &[(rel, vec![symbol.to_string()])]);
+    summarize_impact(&impacts.into_iter().next()?)
+}
+
+/// Turn a [`crate::impact::FileImpact`] into the same "where it affects" phrasing
+/// `change-note` uses: user-facing features first, else a dependent count, else
+/// an honest "nothing else calls it".
+fn summarize_impact(fi: &crate::impact::FileImpact) -> Option<String> {
+    if !fi.features.is_empty() {
+        let names: Vec<String> = fi.features.iter().take(2).map(|f| f.name.clone()).collect();
+        let more = fi.features.len().saturating_sub(names.len());
+        let tail = if more > 0 {
+            format!(", +{more} more")
+        } else {
+            String::new()
+        };
+        let joined = match names.as_slice() {
+            [a] => a.clone(),
+            [a, b] => format!("{a} and {b}"),
+            _ => names.join(", "),
+        };
+        return Some(format!("affects {joined}{tail}"));
+    }
+    if fi.transitive_caller_count > 0 {
+        let n = fi.transitive_caller_count;
+        // A tripped graph-walk budget makes the count a floor, not an exact.
+        let floor = if fi.truncated { "+" } else { "" };
+        return Some(format!(
+            "{n}{floor} dependent{} to re-check",
+            if n == 1 { "" } else { "s" }
+        ));
+    }
+    if fi.leaf {
+        return Some("nothing else calls it".to_string());
+    }
+    None
 }
 
 /// `aura radar` / `aura radar show` — print the team awareness feed.
@@ -96,7 +164,9 @@ pub fn run_conflicts(as_actor: Option<&str>, all_severities: bool, json: bool) {
 
     let _ = broadcast::pull_remote(false);
     let events = broadcast::merged_events();
-    let my_focus = conflict::focus_from_repo(as_actor);
+    // Ripple edges cost a full checkpoint-store read — only build them when the
+    // Possible tier is actually going to be shown.
+    let my_focus = conflict::focus_from_repo_opts(as_actor, all_severities);
     let mut collisions =
         conflict::detect(&my_focus, &events, live_events::now_ms(), api::CONFLICT_WINDOW_MS);
     if !all_severities {

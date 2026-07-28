@@ -133,6 +133,31 @@ pub struct PrRelatedIssue {
     pub state: String,
 }
 
+/// Result of a native PR creation. The frontend uses the number to open the
+/// freshly-created PR in Aura immediately, without scraping `gh` output.
+#[derive(Serialize, Clone)]
+pub struct PrCreated {
+    pub number: u64,
+    pub title: String,
+    pub url: String,
+}
+
+/// One GitHub issue offered by the workspace composer. This deliberately
+/// keeps the issue body: selecting it seeds the agent with the real problem,
+/// not only a lossy title.
+#[derive(Serialize, Clone)]
+pub struct GithubIssue {
+    pub number: u64,
+    pub title: String,
+    pub body: String,
+    pub state: String,
+    pub author: String,
+    pub labels: Vec<String>,
+    pub url: String,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
 #[derive(Serialize, Clone)]
 pub struct PrReviewer {
     pub login: String,
@@ -200,6 +225,113 @@ fn run_gh(repo_root: &str, args: &[&str]) -> Result<String, String> {
         return Err(trimmed.to_string());
     }
     Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+}
+
+fn run_git(repo_root: &str, args: &[&str]) -> Result<String, String> {
+    let cwd = PathBuf::from(repo_root);
+    if !cwd.is_dir() {
+        return Err(format!("repo root does not exist: {}", repo_root));
+    }
+    let out = Command::new("git")
+        .args(args)
+        .current_dir(&cwd)
+        .output()
+        .map_err(|e| format!("failed to spawn git: {}", e))?;
+    if !out.status.success() {
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        let message = stderr.trim();
+        return Err(if message.is_empty() {
+            format!("git exited with status {}", out.status.code().unwrap_or(-1))
+        } else {
+            message.to_string()
+        });
+    }
+    Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+}
+
+fn current_branch(repo_root: &str, requested: Option<&str>) -> Result<String, String> {
+    let branch = requested
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(|| {
+            run_git(repo_root, &["branch", "--show-current"])
+                .unwrap_or_default()
+                .trim()
+                .to_string()
+        });
+    if branch.is_empty() {
+        return Err("can't create a PR from a detached HEAD".to_string());
+    }
+    run_git(repo_root, &["check-ref-format", "--branch", &branch])?;
+    Ok(branch)
+}
+
+/// A PR must point at the commits the author just reviewed in the dialog.
+/// Push the selected branch before `gh pr create`; set its upstream on the
+/// first push so subsequent worktree actions have real ahead/behind state.
+fn push_branch(repo_root: &str, branch: &str) -> Result<(), String> {
+    let has_upstream = Command::new("git")
+        .args(["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{upstream}"])
+        .current_dir(repo_root)
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false);
+    if has_upstream {
+        run_git(repo_root, &["push"])?;
+    } else {
+        run_git(repo_root, &["push", "--set-upstream", "origin", branch])?;
+    }
+    Ok(())
+}
+
+fn create_args(
+    head_branch: &str,
+    title: &str,
+    body: &str,
+    base_branch: Option<&str>,
+    draft: bool,
+) -> Vec<String> {
+    let mut args = vec![
+        "pr".to_string(),
+        "create".to_string(),
+        "--head".to_string(),
+        head_branch.to_string(),
+        "--title".to_string(),
+        title.to_string(),
+        "--body".to_string(),
+        body.to_string(),
+    ];
+    if let Some(base) = base_branch.map(str::trim).filter(|s| !s.is_empty()) {
+        args.push("--base".to_string());
+        args.push(base.to_string());
+    }
+    if draft {
+        args.push("--draft".to_string());
+    }
+    args
+}
+
+fn edit_args(
+    pr_number: u64,
+    title: &str,
+    body: &str,
+    base_branch: Option<&str>,
+) -> Vec<String> {
+    let mut args = vec![
+        "pr".to_string(),
+        "edit".to_string(),
+        pr_number.to_string(),
+        "--title".to_string(),
+        title.to_string(),
+        "--body".to_string(),
+        body.to_string(),
+    ];
+    if let Some(base) = base_branch.map(str::trim).filter(|s| !s.is_empty()) {
+        args.push("--base".to_string());
+        args.push(base.to_string());
+    }
+    args
 }
 
 // ── Aura review enrichment ────────────────────────────────────────────
@@ -343,7 +475,9 @@ struct GhUser {
 /// One node of GitHub's `statusCheckRollup`. The array mixes CheckRun
 /// (Actions: `status` lifecycle + `conclusion` result) and StatusContext
 /// (classic commit statuses: `state`) nodes, so every field is optional
-/// and we bucket from whichever is present.
+/// and we bucket from whichever is present. The name/url fields are only
+/// read by `pr_checks` (the per-check detail view); `pr_list` summarizes
+/// counts and ignores them.
 #[derive(Deserialize, Default)]
 struct GhRollupEntry {
     #[serde(default, deserialize_with = "null_to_default")]
@@ -352,6 +486,126 @@ struct GhRollupEntry {
     conclusion: String,
     #[serde(default, deserialize_with = "null_to_default")]
     state: String,
+    // CheckRun.name / StatusContext.context — the human label of the check.
+    #[serde(default, deserialize_with = "null_to_default")]
+    name: String,
+    #[serde(default, deserialize_with = "null_to_default")]
+    context: String,
+    // CheckRun.detailsUrl / StatusContext.targetUrl — the logs deep-link.
+    #[serde(default, rename = "detailsUrl", deserialize_with = "null_to_default")]
+    details_url: String,
+    #[serde(default, rename = "targetUrl", deserialize_with = "null_to_default")]
+    target_url: String,
+    // CheckRun.workflowName — the Actions workflow this run belongs to.
+    #[serde(default, rename = "workflowName", deserialize_with = "null_to_default")]
+    workflow_name: String,
+    // StatusContext.description — a short "why" line on classic statuses.
+    #[serde(default, deserialize_with = "null_to_default")]
+    description: String,
+}
+
+/// Bucket one rollup entry's winning signal into "success" | "failure" |
+/// "pending". Shared by `summarize_rollup` (counts) and `pr_checks`
+/// (per-check state) so the two can never disagree on what "failing" means.
+fn signal_for(r: &GhRollupEntry) -> &'static str {
+    let signal = if !r.conclusion.is_empty() {
+        r.conclusion.as_str()
+    } else if !r.status.is_empty() && r.status.to_uppercase() != "COMPLETED" {
+        r.status.as_str()
+    } else if !r.state.is_empty() {
+        r.state.as_str()
+    } else {
+        r.status.as_str()
+    };
+    match signal.to_uppercase().as_str() {
+        "SUCCESS" | "PASS" | "NEUTRAL" | "SKIPPED" | "SKIPPING" => "success",
+        "FAILURE" | "FAIL" | "ERROR" | "CANCELLED" | "TIMED_OUT" | "ACTION_REQUIRED"
+        | "STARTUP_FAILURE" | "STALE" => "failure",
+        // QUEUED / IN_PROGRESS / PENDING / WAITING / REQUESTED / EXPECTED / ""
+        _ => "pending",
+    }
+}
+
+/// The raw GitHub signal string (conclusion → status → state) for a
+/// rollup entry, surfaced verbatim so the UI can show "timed_out" vs a
+/// generic "failing" on hover.
+fn raw_signal(r: &GhRollupEntry) -> String {
+    if !r.conclusion.is_empty() {
+        r.conclusion.clone()
+    } else if !r.status.is_empty() {
+        r.status.clone()
+    } else {
+        r.state.clone()
+    }
+}
+
+/// One CI check on a PR, flattened for the desktop Checks tab. `bucket` is
+/// the normalized state the UI colours from; `raw` is the underlying
+/// GitHub signal for the tooltip; `url` opens the run's logs.
+#[derive(Serialize)]
+pub struct PrCheck {
+    pub name: String,
+    pub bucket: String,
+    pub raw: String,
+    pub url: String,
+    pub workflow: String,
+    pub description: String,
+}
+
+/// The individual CI checks on one PR (name + state + logs link), for the
+/// desktop Checks tab. `pr_list` only carries rolled-up counts; this pulls
+/// the per-check detail from the SAME `statusCheckRollup` GitHub already
+/// exposes, so it's one cached `gh pr view` call and no new integration.
+#[tauri::command]
+pub async fn pr_checks(repo_root: String, number: u64) -> Result<Vec<PrCheck>, String> {
+    let stdout = run_gh(
+        &repo_root,
+        &[
+            "pr",
+            "view",
+            &number.to_string(),
+            "--json",
+            "statusCheckRollup",
+        ],
+    )?;
+    #[derive(Deserialize, Default)]
+    struct Wrap {
+        #[serde(
+            default,
+            rename = "statusCheckRollup",
+            deserialize_with = "null_to_default"
+        )]
+        status_check_rollup: Vec<GhRollupEntry>,
+    }
+    let wrap: Wrap =
+        serde_json::from_str(&stdout).map_err(|e| format!("gh json parse: {}", e))?;
+    let out = wrap
+        .status_check_rollup
+        .iter()
+        .map(|r| {
+            let name = if !r.name.is_empty() {
+                r.name.clone()
+            } else if !r.context.is_empty() {
+                r.context.clone()
+            } else {
+                "check".to_string()
+            };
+            let url = if !r.details_url.is_empty() {
+                r.details_url.clone()
+            } else {
+                r.target_url.clone()
+            };
+            PrCheck {
+                name,
+                bucket: signal_for(r).to_string(),
+                raw: raw_signal(r),
+                url,
+                workflow: r.workflow_name.clone(),
+                description: r.description.clone(),
+            }
+        })
+        .collect();
+    Ok(out)
 }
 
 #[derive(Deserialize, Default)]
@@ -437,6 +691,162 @@ pub async fn pr_list(repo_root: String) -> Result<Vec<PrSummary>, String> {
     Ok(out)
 }
 
+/// List repository issues through the same authenticated `gh` session as PRs.
+/// `gh issue list` excludes pull requests and returns only real issues.
+#[tauri::command]
+pub async fn github_issue_list(repo_root: String) -> Result<Vec<GithubIssue>, String> {
+    const FIELDS: &str =
+        "number,title,body,state,author,labels,url,createdAt,updatedAt";
+    let stdout = run_gh(
+        &repo_root,
+        &["issue", "list", "--state", "open", "--limit", "200", "--json", FIELDS],
+    )?;
+    #[derive(Deserialize, Default)]
+    struct IssueAuthor {
+        #[serde(default)]
+        login: String,
+    }
+    #[derive(Deserialize, Default)]
+    struct IssueLabel {
+        #[serde(default)]
+        name: String,
+    }
+    #[derive(Deserialize)]
+    struct RawIssue {
+        number: u64,
+        title: String,
+        #[serde(default)]
+        body: Option<String>,
+        #[serde(default)]
+        state: String,
+        #[serde(default)]
+        author: Option<IssueAuthor>,
+        #[serde(default)]
+        labels: Vec<IssueLabel>,
+        #[serde(default)]
+        url: String,
+        #[serde(default, rename = "createdAt")]
+        created_at: String,
+        #[serde(default, rename = "updatedAt")]
+        updated_at: String,
+    }
+    let raw: Vec<RawIssue> = serde_json::from_str(&stdout)
+        .map_err(|e| format!("gh issue list parse: {}", e))?;
+    Ok(raw
+        .into_iter()
+        .map(|issue| GithubIssue {
+            number: issue.number,
+            title: issue.title,
+            body: issue.body.unwrap_or_default(),
+            state: issue.state,
+            author: issue.author.unwrap_or_default().login,
+            labels: issue
+                .labels
+                .into_iter()
+                .map(|label| label.name)
+                .filter(|name| !name.is_empty())
+                .collect(),
+            url: issue.url,
+            created_at: issue.created_at,
+            updated_at: issue.updated_at,
+        })
+        .collect())
+}
+
+/// Create a GitHub pull request directly from the desktop authoring dialog.
+/// This intentionally owns the push as part of the same user action: the PR
+/// always represents the local branch state the dialog was opened from.
+#[tauri::command]
+pub async fn pr_create(
+    repo_root: String,
+    head_branch: Option<String>,
+    title: String,
+    body: String,
+    base_branch: Option<String>,
+    draft: bool,
+) -> Result<PrCreated, String> {
+    let title = title.trim();
+    if title.is_empty() {
+        return Err("pull request title can't be empty".to_string());
+    }
+    let branch = current_branch(&repo_root, head_branch.as_deref())?;
+    push_branch(&repo_root, &branch)?;
+
+    let args = create_args(
+        &branch,
+        title,
+        body.trim(),
+        base_branch.as_deref(),
+        draft,
+    );
+    let argrefs: Vec<&str> = args.iter().map(String::as_str).collect();
+    let created_stdout = run_gh(&repo_root, &argrefs)?;
+    let created_url = created_stdout
+        .lines()
+        .rev()
+        .map(str::trim)
+        .find(|line| line.starts_with("https://") || line.starts_with("http://"));
+    let target = created_url.unwrap_or(&branch);
+    let view = run_gh(
+        &repo_root,
+        &["pr", "view", target, "--json", "number,title,url"],
+    )?;
+    #[derive(Deserialize)]
+    struct CreatedView {
+        number: u64,
+        title: String,
+        url: String,
+    }
+    let parsed: CreatedView = serde_json::from_str(&view)
+        .map_err(|e| format!("gh pr view created PR parse: {}", e))?;
+    Ok(PrCreated {
+        number: parsed.number,
+        title: parsed.title,
+        url: parsed.url,
+    })
+}
+
+/// Edit the author-controlled PR metadata. Draft/ready is a separate gh
+/// operation, so first read its current state and only toggle when needed.
+#[tauri::command]
+pub async fn pr_edit(
+    repo_root: String,
+    pr_number: u64,
+    title: String,
+    body: String,
+    base_branch: Option<String>,
+    draft: bool,
+) -> Result<(), String> {
+    let title = title.trim();
+    if title.is_empty() {
+        return Err("pull request title can't be empty".to_string());
+    }
+    let args = edit_args(pr_number, title, body.trim(), base_branch.as_deref());
+    let argrefs: Vec<&str> = args.iter().map(String::as_str).collect();
+    run_gh(&repo_root, &argrefs)?;
+
+    let current = run_gh(
+        &repo_root,
+        &["pr", "view", &pr_number.to_string(), "--json", "isDraft"],
+    )?;
+    #[derive(Deserialize)]
+    struct DraftView {
+        #[serde(rename = "isDraft")]
+        is_draft: bool,
+    }
+    let current: DraftView = serde_json::from_str(&current)
+        .map_err(|e| format!("gh pr view draft state parse: {}", e))?;
+    if draft != current.is_draft {
+        let number = pr_number.to_string();
+        if draft {
+            run_gh(&repo_root, &["pr", "ready", &number, "--undo"])?;
+        } else {
+            run_gh(&repo_root, &["pr", "ready", &number])?;
+        }
+    }
+    Ok(())
+}
+
 /// List all labels defined in the repo (not just PR-attached) so the
 /// label picker can show the universe of choices. Backed by
 /// `gh label list --json name,color,description --limit 200`.
@@ -516,6 +926,34 @@ pub async fn pr_labels_set(
     for name in &to_remove {
         args.push("--remove-label".into());
         args.push((*name).clone());
+    }
+    let argrefs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
+    run_gh(&repo_root, &argrefs)?;
+    Ok(())
+}
+
+/// Edit a PR's title and/or body via `gh pr edit`. Either field may be
+/// `None` to leave it unchanged (so the UI can save the title alone, the
+/// body alone, or both). Passing neither is a no-op rather than an error.
+#[tauri::command]
+pub async fn pr_update(
+    repo_root: String,
+    pr_number: u64,
+    title: Option<String>,
+    body: Option<String>,
+) -> Result<(), String> {
+    let mut args: Vec<String> = vec!["pr".into(), "edit".into(), pr_number.to_string()];
+    if let Some(t) = &title {
+        args.push("--title".into());
+        args.push(t.clone());
+    }
+    if let Some(b) = &body {
+        args.push("--body".into());
+        args.push(b.clone());
+    }
+    // No fields supplied — nothing to edit.
+    if args.len() == 3 {
+        return Ok(());
     }
     let argrefs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
     run_gh(&repo_root, &argrefs)?;
@@ -1838,16 +2276,30 @@ pub struct PrStackNode {
     pub is_draft: bool,
     pub aura_risk_score: Option<i64>,
     pub url: String,
-    /// PR numbers whose `base_ref == this.head_ref` — children stacked
-    /// on top of this PR.
+    /// PR numbers whose effective parent branch == this.head_ref —
+    /// children stacked on top of this PR.
     pub children: Vec<u64>,
-    /// PR number whose `head_ref == this.base_ref` — parent. None when
-    /// the parent is a non-PR branch like main.
+    /// PR number whose `head_ref` == this PR's effective parent branch.
+    /// None when the parent is a non-PR branch like main.
     pub parent: Option<u64>,
+    /// True when this branch's parent came from Graphite's local stack
+    /// metadata (`refs/branch-metadata/`) rather than the GitHub base ref.
+    /// Lets the UI flag that the ordering is `gt`-authoritative — which
+    /// surfaces stacks the head/base graph alone can't see (e.g. every PR
+    /// opened against main while stacked locally).
+    pub gt_managed: bool,
 }
 
-/// Compute the stack rooted at `pr_number`. We fetch all open PRs once
-/// and walk the head/base graph in both directions.
+/// Compute the stack rooted at `pr_number`. We fetch all open PRs once and
+/// walk the parent/child graph in both directions.
+///
+/// The parent of a PR is its **effective parent branch** — Graphite's local
+/// stack metadata (`refs/branch-metadata/`) when the branch is `gt`-managed,
+/// otherwise the GitHub base ref. Graphite is the authoritative source here:
+/// it captures stacks the head/base graph can't (a common workflow opens
+/// every PR against `main` while the branches are stacked locally). When the
+/// repo isn't Graphite-managed the map is empty and this is exactly the old
+/// base-ref walk.
 #[tauri::command]
 pub async fn pr_stack(
     repo_root: String,
@@ -1857,12 +2309,25 @@ pub async fn pr_stack(
     // so there's no per-PR fan-out to avoid here; the warm-cached list also
     // serves this without a second network hit.
     let all = pr_list(repo_root.clone()).await?;
+
+    // Local, token-free: branch -> authoritative parent branch (empty for a
+    // non-Graphite repo). Read once and reused for every effective-parent
+    // lookup below.
+    let gt_parents = crate::integrations::graphite::stack_parents(&repo_root);
+    let eff_parent = |p: &PrSummary| -> String {
+        gt_parents
+            .get(&p.head_ref)
+            .cloned()
+            .unwrap_or_else(|| p.base_ref.clone())
+    };
+
     let by_head: std::collections::HashMap<&str, &PrSummary> =
         all.iter().map(|p| (p.head_ref.as_str(), p)).collect();
-    let mut by_base: std::collections::HashMap<&str, Vec<&PrSummary>> =
+    // Children keyed by their effective parent branch.
+    let mut by_parent: std::collections::HashMap<String, Vec<&PrSummary>> =
         std::collections::HashMap::new();
     for p in &all {
-        by_base.entry(p.base_ref.as_str()).or_default().push(p);
+        by_parent.entry(eff_parent(p)).or_default().push(p);
     }
     let root = all
         .iter()
@@ -1873,24 +2338,24 @@ pub async fn pr_stack(
     let mut included: std::collections::BTreeMap<u64, &PrSummary> =
         std::collections::BTreeMap::new();
     included.insert(root.number, root);
-    let mut frontier = vec![root.head_ref.as_str()];
+    let mut frontier = vec![root.head_ref.clone()];
     while let Some(head) = frontier.pop() {
-        if let Some(children) = by_base.get(head) {
+        if let Some(children) = by_parent.get(&head) {
             for c in children {
                 if included.insert(c.number, c).is_none() {
-                    frontier.push(c.head_ref.as_str());
+                    frontier.push(c.head_ref.clone());
                 }
             }
         }
     }
-    // Walk up (parent chain)
-    let mut cur_base = root.base_ref.as_str();
-    while let Some(parent) = by_head.get(cur_base).copied() {
+    // Walk up (parent chain) following the effective parent branch.
+    let mut cur_parent = eff_parent(root);
+    while let Some(parent) = by_head.get(cur_parent.as_str()).copied() {
         if included.contains_key(&parent.number) {
             break;
         }
         included.insert(parent.number, parent);
-        cur_base = parent.base_ref.as_str();
+        cur_parent = eff_parent(parent);
     }
 
     let mut nodes: Vec<PrStackNode> = included
@@ -1907,18 +2372,22 @@ pub async fn pr_stack(
             url: p.url.clone(),
             children: Vec::new(),
             parent: None,
+            gt_managed: gt_parents.contains_key(&p.head_ref),
         })
         .collect();
 
-    // Cross-link parent/children using the ref map within `nodes`.
+    // Cross-link parent/children using each node's effective parent branch.
     let head_to_idx: std::collections::HashMap<String, usize> = nodes
         .iter()
         .enumerate()
         .map(|(i, n)| (n.head_ref.clone(), i))
         .collect();
     for i in 0..nodes.len() {
-        let base = nodes[i].base_ref.clone();
-        if let Some(&p_idx) = head_to_idx.get(&base) {
+        let parent_branch = gt_parents
+            .get(&nodes[i].head_ref)
+            .cloned()
+            .unwrap_or_else(|| nodes[i].base_ref.clone());
+        if let Some(&p_idx) = head_to_idx.get(&parent_branch) {
             nodes[i].parent = Some(nodes[p_idx].number);
             let child_num = nodes[i].number;
             nodes[p_idx].children.push(child_num);
@@ -1962,6 +2431,32 @@ fn pr_head_sha(repo_root: &str, pr_number: u64) -> Result<String, String> {
         return Err("gh returned empty headRefOid".to_string());
     }
     Ok(trimmed.to_string())
+}
+
+/// Vercel deploy status for a PR's head commit, or `Ok(None)` when Vercel
+/// isn't configured (no `[vercel]` block) or knows of no deployment for the
+/// commit yet. Drives the deploy chip on the PR checks view — deliberately
+/// soft: an unconfigured or slow Vercel never breaks the checks list.
+///
+/// Resolves the PR's head commit via `gh` (the same sha the checks ride on),
+/// reads the token-only Vercel config, and asks Vercel for the newest
+/// deployment of that commit. Returns the flattened `VercelDeployment` the
+/// frontend maps to plain language ("Deployed", "Building", "Deploy failed").
+#[tauri::command]
+pub async fn pr_vercel_status(
+    repo_root: String,
+    pr_number: u64,
+) -> Result<Option<crate::integrations::vercel::VercelDeployment>, String> {
+    // Config first — the common case (nobody configured Vercel) short-circuits
+    // before we spend a `gh` round-trip resolving the sha.
+    let cfg = match crate::integrations::config::vercel().map_err(|e| e.to_string())? {
+        Some(cfg) => cfg,
+        None => return Ok(None),
+    };
+    let sha = pr_head_sha(&repo_root, pr_number)?;
+    crate::integrations::vercel::latest_for(&cfg, &sha, None)
+        .await
+        .map_err(|e| e.to_string())
 }
 
 /// Semantic PR review as structured JSON for the `/review` slash card.
@@ -2020,6 +2515,24 @@ pub async fn aura_review_json(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn native_pr_args_preserve_metadata_without_shell_interpolation() {
+        let create = create_args(
+            "feat/native-pr",
+            "feat: native PR authoring",
+            "Body with `code`, quotes, and $variables",
+            Some("develop"),
+            true,
+        );
+        assert_eq!(create[0..4], ["pr", "create", "--head", "feat/native-pr"]);
+        assert!(create.windows(2).any(|w| w == ["--base", "develop"]));
+        assert_eq!(create.last().map(String::as_str), Some("--draft"));
+
+        let edit = edit_args(42, "new title", "new body", Some("main"));
+        assert_eq!(edit[0..3], ["pr", "edit", "42"]);
+        assert!(edit.windows(2).any(|w| w == ["--base", "main"]));
+    }
 
     // Regression: gh emits `"statusCheckRollup": null` (present key, null
     // value) for a branch-promotion PR — e.g. a `main → staging` chore PR

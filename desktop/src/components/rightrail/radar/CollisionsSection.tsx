@@ -10,6 +10,7 @@ import { Tooltip, TooltipContent, TooltipTrigger } from "../../ui/tooltip";
 import type { RadarCollision } from "../../../lib/api";
 import { agoFromMs, actorShort, severityMeta } from "./radarFormat";
 import { baseName } from "../sync/syncFormat";
+import { ActorMark } from "./ActorMark";
 
 type Props = {
   conflicts: RadarCollision[];
@@ -47,6 +48,7 @@ export function CollisionsSection({
                   style={{ background: sev.color }}
                   aria-hidden
                 />
+                <ActorMark actor={c.peer} isAgent={c.peer_is_agent} size={18} />
                 <span className="flex-1 min-w-0">
                   <span className="flex items-center gap-1.5 min-w-0">
                     <span className="text-[12px] text-text-1 truncate">

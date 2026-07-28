@@ -149,7 +149,7 @@ impl std::fmt::Display for Nid {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ActorRef {
     pub kind: ActorKind,
-    /// Human-readable handle, e.g. `"you"` or `"claude-code"`.
+    /// Human-readable handle, e.g. `"muhammed"` or `"claude-code"`.
     pub label: String,
     pub nid: Nid,
 }
@@ -170,7 +170,7 @@ impl ActorRef {
 
     /// The legacy `did:aura:<method>/<label>` form used by
     /// `aura_blocks::AgentRef` in existing provenance fields
-    /// (`did:aura:user/you`, `did:aura:agent/claude-code`). Lets new
+    /// (`did:aura:user/muhammed`, `did:aura:agent/claude-code`). Lets new
     /// crypto identities bridge into the logical-actor strings already
     /// threaded through the block store.
     pub fn did_aura(&self) -> String {
@@ -303,7 +303,7 @@ mod tests {
 
     #[test]
     fn malformed_nid_rejected() {
-        assert!(Nid("did:aura:user/you".into()).to_verifying_key().is_err());
+        assert!(Nid("did:aura:user/muhammed".into()).to_verifying_key().is_err());
         assert!(Nid("did:key:zNotBase58!!".into()).to_verifying_key().is_err());
         // Valid base58 but wrong length / marker.
         let short = format!("{}{}", Nid::PREFIX, bs58::encode([0xed, 0x01, 0x00]).into_string());
@@ -339,7 +339,7 @@ mod tests {
 
     #[test]
     fn actor_ref_serde_round_trip() {
-        let id = LocalIdentity::from_seed(ActorKind::Human, "you", [5u8; 32]);
+        let id = LocalIdentity::from_seed(ActorKind::Human, "muhammed", [5u8; 32]);
         let actor = id.actor_ref();
         let json = serde_json::to_string(&actor).unwrap();
         let back: ActorRef = serde_json::from_str(&json).unwrap();
@@ -348,8 +348,8 @@ mod tests {
 
     #[test]
     fn did_aura_bridges_to_legacy_form() {
-        let human = LocalIdentity::from_seed(ActorKind::Human, "you", [1u8; 32]);
-        assert_eq!(human.actor_ref().did_aura(), "did:aura:user/you");
+        let human = LocalIdentity::from_seed(ActorKind::Human, "muhammed", [1u8; 32]);
+        assert_eq!(human.actor_ref().did_aura(), "did:aura:user/muhammed");
         let agent = LocalIdentity::from_seed(ActorKind::Agent, "claude-code", [2u8; 32]);
         assert_eq!(agent.actor_ref().did_aura(), "did:aura:agent/claude-code");
     }

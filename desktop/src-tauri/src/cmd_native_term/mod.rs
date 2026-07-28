@@ -60,6 +60,11 @@ enum Ctrl {
     SelectClear,
     /// Copy the selected text back over the oneshot channel (empty if none).
     Copy(Sender<String>),
+    /// Return recent visible grid text for an `@terminal` chat mention.
+    Context {
+        max_lines: usize,
+        reply: Sender<String>,
+    },
     /// Tear the render thread down.
     Close,
 }
@@ -421,6 +426,12 @@ fn render_loop(
                 Ctrl::Copy(reply) => {
                     let _ = reply.send(grid.selected_text().unwrap_or_default());
                 }
+                Ctrl::Context { max_lines, reply } => {
+                    let text = grid.visible_text();
+                    let lines: Vec<&str> = text.lines().collect();
+                    let start = lines.len().saturating_sub(max_lines);
+                    let _ = reply.send(lines[start..].join("\n"));
+                }
                 Ctrl::Close => return,
             }
         }
@@ -587,6 +598,29 @@ pub fn native_term_copy(
     // keeps a dead thread from hanging the command.
     rx.recv_timeout(Duration::from_millis(500))
         .map_err(|_| "copy timed out".to_string())
+}
+
+/// Return recent visible terminal text for the Manager's `@terminal` context
+/// mention. Like copy, this round-trips through the render thread so the text
+/// is read from the exact grid the user sees.
+#[tauri::command]
+pub fn native_term_context(
+    manager: State<'_, NativeTermManager>,
+    term_id: String,
+    max_lines: Option<usize>,
+) -> Result<String, String> {
+    let ctrl = match manager.terms.lock().unwrap().get(&term_id) {
+        Some(t) => t.ctrl.clone(),
+        None => return Ok(String::new()),
+    };
+    let (tx, rx) = std::sync::mpsc::channel::<String>();
+    ctrl.send(Ctrl::Context {
+        max_lines: max_lines.unwrap_or(200).clamp(1, 1000),
+        reply: tx,
+    })
+    .map_err(|e| e.to_string())?;
+    rx.recv_timeout(Duration::from_millis(500))
+        .map_err(|_| "terminal context read timed out".to_string())
 }
 
 /// Close the terminal: stop the render thread and remove the native view on the

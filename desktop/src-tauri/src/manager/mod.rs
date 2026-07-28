@@ -311,6 +311,18 @@ pub struct ChatTurn {
     /// before this field deserialize with `saved_tokens=None`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub saved_tokens: Option<u32>,
+    /// Per-turn token usage as reported by the brain: `input_tokens` = the
+    /// prompt/context the turn processed, `output_tokens` = what the brain
+    /// generated (the FINAL round's figures, matching the live header meter).
+    /// Populated on native-brain turns — Anthropic/OpenAI/Gemini/aura_pro emit
+    /// a `Usage` chunk before End; `None` on CLI-wrapper turns (their CLI
+    /// doesn't report counts) and on sessions that predate these fields. Drives
+    /// the optional per-message token readout (Settings → "Show token usage per
+    /// message"). Additive: older turns deserialize with `None`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input_tokens: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_tokens: Option<u32>,
 }
 
 /// One persisted `tool_use`/`tool_result` pair on a `ChatTurn`. Mirrors
@@ -851,6 +863,8 @@ impl ManagerSession {
             tool_calls: Vec::new(),
             thinking: None,
             saved_tokens: None,
+            input_tokens: None,
+            output_tokens: None,
         });
         self.touch();
     }
@@ -872,6 +886,8 @@ impl ManagerSession {
             tool_calls: Vec::new(),
             thinking: None,
             saved_tokens: None,
+            input_tokens: None,
+            output_tokens: None,
         });
         self.touch();
     }
@@ -898,6 +914,8 @@ impl ManagerSession {
             tool_calls: Vec::new(),
             thinking: None,
             saved_tokens: None,
+            input_tokens: None,
+            output_tokens: None,
         });
         self.touch();
     }
@@ -923,6 +941,8 @@ impl ManagerSession {
             tool_calls: Vec::new(),
             thinking: None,
             saved_tokens: None,
+            input_tokens: None,
+            output_tokens: None,
         });
         self.touch();
     }
@@ -945,6 +965,8 @@ impl ManagerSession {
             tool_calls: Vec::new(),
             thinking: None,
             saved_tokens: None,
+            input_tokens: None,
+            output_tokens: None,
         });
         self.touch();
     }

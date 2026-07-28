@@ -33,8 +33,8 @@
      chip, so it stays "fully glass". */
   --chip-bg: rgba(255, 255, 255, 0.1);
   --chip-border: rgba(255, 255, 255, 0.14);
-  --accent: #4dc1a4;
-  --accent-ink: #07130f;
+  --accent: #10b981; /* Aura emerald — matches the app's highlight */
+  --accent-ink: #06180d;
   --st-idle: #9a9a9f;
   --st-work: #d59f4f;
   /* "Needs you" — a warm yellow-orange call for attention (not the calm work
@@ -61,7 +61,10 @@
     --placeholder: rgba(0, 0, 0, 0.42);
     --chip-bg: rgba(0, 0, 0, 0.05);
     --chip-border: rgba(0, 0, 0, 0.1);
-    --accent-ink: #06251c;
+    /* Bright backdrop: pull the emerald deeper (emerald-600) so it holds on a
+       light ground, with white ink on top. */
+    --accent: #059669;
+    --accent-ink: #ffffff;
     --st-idle: #7a7a82;
     --st-work: #b07414;
     --st-needs: #d07e12;
@@ -115,6 +118,39 @@ body,
     var(--glass-shadow);
   overflow: hidden; /* clip rows to the rounded pill (the dropdown portals out) */
 }
+
+/* ── The desk-pet ── */
+/* An in-flow companion that stacks ABOVE the pill (hud-root is a bottom-aligned
+   flex column, so an earlier sibling sits on top of the pill). It lives in the
+   48px top GUTTER — the transparent shadow room — so it never clips at the
+   window edge, and a small negative margin drops its feet onto the pill's rim so
+   it looks like it's standing on the HUD. pointer-events:none so it never steals
+   the pill's drag region or button clicks. */
+.hud-pet {
+  display: flex;
+  justify-content: flex-start;
+  padding-left: 18px; /* sit above the pill's leading edge (the avatar side) */
+  margin-bottom: -10px; /* feet dip onto the pill rim */
+  position: relative;
+  z-index: 3; /* stand on top of the pill, not behind it */
+  pointer-events: none;
+}
+
+.hud-pet-sprite {
+  background-repeat: no-repeat;
+  image-rendering: auto;
+  /* width / height / background image + size are set inline (they derive from
+     the sheet geometry in Pet.tsx). */
+  filter: drop-shadow(0 3px 3px rgba(0, 0, 0, 0.28));
+  transform: translateZ(0); /* own layer — keep the stepped repaint cheap */
+  /* Only the pet's own box is interactive (the container strip stays
+     click-through) — hover greets, click celebrates. */
+  pointer-events: auto;
+  cursor: pointer;
+}
+
+/* The FAB nub (collapsed sidebar) shrinks the window to the icon; a perched pet
+   would overflow that tiny window, so the React side hides it there. */
 
 /* ── Top row (always present): status · [glance when collapsed] · workspace ──
    Collapsed it's the WHOLE pill — one tall glance row. Expanded it shrinks to a

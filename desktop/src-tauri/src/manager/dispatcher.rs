@@ -193,6 +193,51 @@ pub struct LaneOutcome {
     pub started_at: u64,
     #[serde(default)]
     pub completed_at: Option<u64>,
+    /// Token accounting, populated on `Done`. `transcript_tokens` is the
+    /// raw stream the lane produced; `summary_tokens` is the compressed
+    /// form the parent manager actually ingests; `saved_tokens` is what
+    /// summarisation kept out of the coordinator's context
+    /// (transcript − summary, floored at 0). Honest ~3.5-chars/token
+    /// estimates, never provider-billed counts. Zero on non-Done lanes.
+    /// Additive: outcomes persisted before this deserialize them as 0.
+    #[serde(default)]
+    pub transcript_tokens: u32,
+    #[serde(default)]
+    pub summary_tokens: u32,
+    #[serde(default)]
+    pub saved_tokens: u32,
+}
+
+/// Wave-level token ledger — the honest "what did running this in the
+/// Orchestrator cost vs. save" meter. Recomputed from the lanes on every
+/// state change. Every figure is a heuristic ~3.5-chars/token estimate,
+/// never a provider-billed count, so the UI renders them all with a "~".
+///
+/// The two sides a user actually cares about:
+///   * **Saved** — `transcript_tokens − summary_tokens`: context the
+///     per-lane summarisation kept out of the coordinator's window. This
+///     is why fan-out doesn't drown the parent manager.
+///   * **Overhead** — one specialist preamble per lane that a single
+///     linear thread would never pay. This is the honest "tax" for
+///     parallelism; surfacing it means we never tell a user their higher
+///     usage is "in their head".
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct TokenLedger {
+    /// Lanes dispatched in this wave (every lane pays the preamble).
+    pub lane_count: u32,
+    /// Done lanes that contributed transcript/summary figures.
+    pub done_lanes: u32,
+    /// Raw transcript tokens the Done lanes produced in aggregate — the
+    /// work itself, roughly what a linear run would read inline.
+    pub transcript_tokens: u32,
+    /// Tokens of lane summaries the parent manager actually ingests.
+    pub summary_tokens: u32,
+    /// Context summarisation kept out of the coordinator (Σ per-lane
+    /// `saved_tokens`, each floored at 0).
+    pub saved_tokens: u32,
+    /// Estimated coordination overhead the fan-out adds vs. linear: one
+    /// specialist preamble per dispatched lane.
+    pub overhead_tokens: u32,
 }
 
 /// Composed result of a fan-out. Mirrored back to the frontend on the
@@ -204,9 +249,47 @@ pub struct WaveOutcome {
     pub conflicts: Vec<ZoneConflict>,
     /// Best-effort unified change-set. Populated as lanes complete.
     pub unified_changes: Vec<UnifiedChange>,
+    /// Token ledger for the wave. Recomputed on every lane state change.
+    /// Additive: outcomes persisted before this deserialize it as
+    /// all-zero (`TokenLedger::default`).
+    #[serde(default)]
+    pub tokens: TokenLedger,
 }
 
 const TRANSCRIPT_MAX_BYTES: usize = 64 * 1024;
+
+/// Estimated tokens of the fixed specialist-lane preamble
+/// (`default_orchestrator_preamble`) that every dispatched lane is
+/// prefixed with — the coordination overhead a linear run never pays.
+/// The objective + zones the lane also receives vary per-lane and aren't
+/// counted here; this is the fixed skeleton only. ~430 chars / 3.5 ≈ 123.
+/// Update if that preamble changes materially; it feeds the wave token
+/// ledger's honest "overhead" figure, so exactness isn't load-bearing
+/// (the UI always renders it with a "~").
+const LANE_PREAMBLE_TOKENS_EST: u32 = 123;
+
+/// Recompute the wave's [`TokenLedger`] from its current lane snapshots.
+/// Pure — no locks, no I/O — so it's unit-testable in isolation. Called
+/// from `sync_wave_from_lanes` under the wave lock on every state change.
+///
+/// `transcript`/`summary`/`saved` sum only the `Done` lanes (a Running or
+/// Failed lane has no settled figures yet); `overhead` prices every
+/// dispatched lane, since each pays the preamble the moment it spawns.
+fn compute_wave_ledger(lanes: &[LaneOutcome]) -> TokenLedger {
+    let lane_count = lanes.len() as u32;
+    let done: Vec<&LaneOutcome> = lanes
+        .iter()
+        .filter(|l| matches!(l.status, LaneStatus::Done))
+        .collect();
+    TokenLedger {
+        lane_count,
+        done_lanes: done.len() as u32,
+        transcript_tokens: done.iter().map(|l| l.transcript_tokens).sum(),
+        summary_tokens: done.iter().map(|l| l.summary_tokens).sum(),
+        saved_tokens: done.iter().map(|l| l.saved_tokens).sum(),
+        overhead_tokens: lane_count.saturating_mul(LANE_PREAMBLE_TOKENS_EST),
+    }
+}
 
 /// Per-lane stall guard. A lane streams from a brain; if the stream opens but
 /// then produces nothing for this long — a wedged cloud turn, a dropped SSE, a
@@ -360,6 +443,9 @@ impl DispatcherState {
                     error: None,
                     started_at: now_secs(),
                     completed_at: None,
+                    transcript_tokens: 0,
+                    summary_tokens: 0,
+                    saved_tokens: 0,
                 };
                 g.insert(
                     lane_id.clone(),
@@ -379,6 +465,7 @@ impl DispatcherState {
                 lanes: outcomes,
                 conflicts: vec![],
                 unified_changes: vec![],
+                tokens: TokenLedger::default(),
             },
         );
         let notify = Arc::new(tokio::sync::Notify::new());
@@ -675,6 +762,16 @@ fn mark_lane_done(state: &DispatcherState, lane_id: &str, summary: String) {
         if matches!(entry.outcome.status, LaneStatus::Cancelled) {
             return;
         }
+        // Token accounting: the raw transcript is what this lane produced;
+        // the summary is all the parent manager actually reads. The gap is
+        // context the summarisation kept out of the coordinator's window.
+        // Estimated off the bounded stored transcript so brain lanes and
+        // external CLI lanes are measured the same way.
+        let transcript_tokens = super::tokens::estimate_str_tokens(&entry.outcome.transcript);
+        let summary_tokens = super::tokens::estimate_str_tokens(&summary);
+        entry.outcome.transcript_tokens = transcript_tokens;
+        entry.outcome.summary_tokens = summary_tokens;
+        entry.outcome.saved_tokens = transcript_tokens.saturating_sub(summary_tokens);
         entry.outcome.status = LaneStatus::Done;
         entry.outcome.summary = Some(summary);
         entry.outcome.completed_at = Some(now_secs());
@@ -715,6 +812,9 @@ fn sync_wave_from_lanes(state: &DispatcherState, lane_id: &str) {
     if let Some(slot) = wave.lanes.iter_mut().find(|l| l.lane_id == lane_id) {
         *slot = lane_outcome.clone();
     }
+    // Refresh the token ledger from the updated lane set so the frontend
+    // meter tracks live as lanes settle.
+    wave.tokens = compute_wave_ledger(&wave.lanes);
     // Append unified change extracted from the summary. The lane brain
     // is expected to emit a `### CHANGE path/to/file` fenced block when
     // it touches a file; the dispatcher harvests those at compose-time.
@@ -904,6 +1004,9 @@ pub fn dispatch_wave(
             error: None,
             started_at: now_secs(),
             completed_at: None,
+            transcript_tokens: 0,
+            summary_tokens: 0,
+            saved_tokens: 0,
         };
         outcomes.push(outcome);
         lane_zones.push((lane_id, spec.zones.clone()));
@@ -918,6 +1021,7 @@ pub fn dispatch_wave(
             lanes: outcomes.clone(),
             conflicts: conflicts.clone(),
             unified_changes: vec![],
+            tokens: TokenLedger::default(),
         },
     );
 
@@ -987,6 +1091,7 @@ pub fn dispatch_wave(
         lanes: final_lanes.clone(),
         conflicts: conflicts.clone(),
         unified_changes: vec![],
+        tokens: TokenLedger::default(),
     };
     state
         .waves
@@ -1090,6 +1195,9 @@ mod tests {
                 error: None,
                 started_at: 0,
                 completed_at: None,
+                transcript_tokens: 0,
+                summary_tokens: 0,
+                saved_tokens: 0,
             });
             lane_zones.push((lane_id, spec.zones.clone()));
         }
@@ -1148,6 +1256,9 @@ trailing
             error: None,
             started_at: 0,
             completed_at: None,
+            transcript_tokens: 0,
+            summary_tokens: 0,
+            saved_tokens: 0,
         };
         state.inner.lock().unwrap().insert(
             "l1".into(),
@@ -1176,5 +1287,56 @@ trailing
         let p = default_orchestrator_preamble(&spec);
         assert!(p.contains("src/a.ts"));
         assert!(p.contains("src/b.ts"));
+    }
+
+    fn lane_with_tokens(status: LaneStatus, transcript: u32, summary: u32) -> LaneOutcome {
+        LaneOutcome {
+            lane_id: Uuid::new_v4().to_string(),
+            wave_id: "w".into(),
+            spec: LaneSpec {
+                objective: "x".into(),
+                zones: vec![],
+                mode: None,
+                brain_override: None,
+                taxonomy: None,
+                label: None,
+            },
+            status,
+            provider_id: None,
+            transcript: String::new(),
+            summary: None,
+            error: None,
+            started_at: 0,
+            completed_at: None,
+            transcript_tokens: transcript,
+            summary_tokens: summary,
+            saved_tokens: transcript.saturating_sub(summary),
+        }
+    }
+
+    #[test]
+    fn wave_ledger_sums_done_lanes_and_prices_overhead() {
+        let lanes = vec![
+            lane_with_tokens(LaneStatus::Done, 1000, 120),
+            lane_with_tokens(LaneStatus::Done, 500, 80),
+            // A still-running lane contributes overhead but no settled
+            // transcript/summary figures yet.
+            lane_with_tokens(LaneStatus::Running, 0, 0),
+        ];
+        let led = compute_wave_ledger(&lanes);
+        assert_eq!(led.lane_count, 3, "every dispatched lane counts");
+        assert_eq!(led.done_lanes, 2);
+        assert_eq!(led.transcript_tokens, 1500);
+        assert_eq!(led.summary_tokens, 200);
+        assert_eq!(led.saved_tokens, 1300, "Σ(transcript − summary) over Done lanes");
+        assert_eq!(led.overhead_tokens, 3 * LANE_PREAMBLE_TOKENS_EST);
+    }
+
+    #[test]
+    fn wave_ledger_empty_is_zero() {
+        let led = compute_wave_ledger(&[]);
+        assert_eq!(led.lane_count, 0);
+        assert_eq!(led.saved_tokens, 0);
+        assert_eq!(led.overhead_tokens, 0);
     }
 }

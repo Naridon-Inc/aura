@@ -15,7 +15,9 @@
 // the load/save error lines surface that honestly rather than swallowing it.
 
 import { useCallback, useEffect, useState } from "react";
-import { Check, Loader2, Plus, X } from "lucide-react";
+import { Check, Plus, X } from "lucide-react";
+import { AsciiSpinner } from "../ui/ascii-spinner";
+import { LoadingState } from "../ui/state";
 
 import {
   api,
@@ -35,6 +37,7 @@ const EMPTY: RepoWorktreeSettings = {
   archive: null,
   base: null,
   copyFiles: [],
+  namedScripts: [],
 };
 
 // Trim a textarea draft down to a stored value: blank → null, so an empty
@@ -69,6 +72,7 @@ export function RepoWorktreeSettingsPane({ repoRoot }: { repoRoot: string }) {
         archive: s.archive ?? null,
         base: s.base ?? null,
         copyFiles: Array.isArray(s.copyFiles) ? s.copyFiles : [],
+        namedScripts: Array.isArray(s.namedScripts) ? s.namedScripts : [],
       });
     } catch (e) {
       setLoadError(String(e));
@@ -122,6 +126,35 @@ export function RepoWorktreeSettingsPane({ repoRoot }: { repoRoot: string }) {
     setSaved(false);
   }
 
+  function addNamedScript() {
+    setForm((current) => ({
+      ...current,
+      namedScripts: [
+        ...current.namedScripts,
+        { name: `Script ${current.namedScripts.length + 1}`, command: "" },
+      ],
+    }));
+    setSaved(false);
+  }
+
+  function updateNamedScript(index: number, field: "name" | "command", value: string) {
+    setForm((current) => ({
+      ...current,
+      namedScripts: current.namedScripts.map((script, row) =>
+        row === index ? { ...script, [field]: value } : script,
+      ),
+    }));
+    setSaved(false);
+  }
+
+  function removeNamedScript(index: number) {
+    setForm((current) => ({
+      ...current,
+      namedScripts: current.namedScripts.filter((_, row) => row !== index),
+    }));
+    setSaved(false);
+  }
+
   async function save() {
     setSaving(true);
     setSaveError(null);
@@ -133,10 +166,19 @@ export function RepoWorktreeSettingsPane({ repoRoot }: { repoRoot: string }) {
         archive: nullable(form.archive ?? ""),
         base: nullable(form.base ?? ""),
         copyFiles: form.copyFiles,
+        namedScripts: form.namedScripts
+          .map((script) => ({
+            name: script.name.trim(),
+            command: script.command.trim(),
+          }))
+          .filter((script) => script.name && script.command),
       };
       await repoWorktreeSettingsSet(repoRoot, payload);
       setForm(payload);
       setSaved(true);
+      // Let live consumers (the header Run/Setup button) re-read without a
+      // project reswitch.
+      window.dispatchEvent(new CustomEvent("aura:worktree-settings-saved"));
     } catch (e) {
       setSaveError(String(e));
     } finally {
@@ -147,7 +189,7 @@ export function RepoWorktreeSettingsPane({ repoRoot }: { repoRoot: string }) {
   // Branch options: a blank "current branch" default plus every branch the
   // repo reports. Remotes are labelled so picking `origin/main` reads clearly.
   const branchOptions = [
-    { value: "", label: "Current branch" },
+    { value: "__current__", label: "Current branch" },
     ...branches.map((b) => ({
       value: b.name,
       label: b.isRemote ? `${b.name} (remote)` : b.name,
@@ -162,10 +204,7 @@ export function RepoWorktreeSettingsPane({ repoRoot }: { repoRoot: string }) {
       />
 
       {loading ? (
-        <div className="flex items-center gap-2 py-3 text-[12px] text-text-3">
-          <Loader2 className="h-3.5 w-3.5 animate-spin" />
-          Loading this project's settings…
-        </div>
+        <LoadingState label="Loading this project's settings…" className="px-0 py-3" />
       ) : (
         <>
           {loadError && (
@@ -214,6 +253,42 @@ export function RepoWorktreeSettingsPane({ repoRoot }: { repoRoot: string }) {
                 className="font-mono text-[11.5px]"
               />
             </Field>
+            <Field
+              label="Named scripts"
+              hint="Extra commands you can launch by name from the project header."
+            >
+              <div className="flex flex-col gap-2">
+                {form.namedScripts.map((script, index) => (
+                  <div key={index} className="flex items-center gap-2">
+                    <Input
+                      value={script.name}
+                      onChange={(event) => updateNamedScript(index, "name", event.target.value)}
+                      placeholder="Dev"
+                      className="w-32"
+                    />
+                    <Input
+                      value={script.command}
+                      onChange={(event) => updateNamedScript(index, "command", event.target.value)}
+                      placeholder="npm run dev"
+                      className="flex-1 font-mono text-[11.5px]"
+                    />
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      size="icon-sm"
+                      aria-label={`Remove ${script.name || "script"}`}
+                      onClick={() => removeNamedScript(index)}
+                    >
+                      <X className="h-3.5 w-3.5" />
+                    </Button>
+                  </div>
+                ))}
+                <Button type="button" variant="secondary" size="sm" onClick={addNamedScript}>
+                  <Plus className="h-3.5 w-3.5" />
+                  Add script
+                </Button>
+              </div>
+            </Field>
           </Section>
 
           <Section title="New copies">
@@ -222,8 +297,8 @@ export function RepoWorktreeSettingsPane({ repoRoot }: { repoRoot: string }) {
               hint="Which branch new agent copies branch off. Blank = current branch."
             >
               <SelectField
-                value={form.base ?? ""}
-                onChange={(v) => patch({ base: v || null })}
+                value={form.base || "__current__"}
+                onChange={(v) => patch({ base: v === "__current__" ? null : v })}
                 options={branchOptions}
                 widthClass="w-full"
                 placeholder="Current branch"
@@ -241,7 +316,7 @@ export function RepoWorktreeSettingsPane({ repoRoot }: { repoRoot: string }) {
             <Button onClick={() => void save()} disabled={saving}>
               {saving ? (
                 <>
-                  <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                  <AsciiSpinner className="text-[12px] leading-none" />
                   Saving…
                 </>
               ) : (

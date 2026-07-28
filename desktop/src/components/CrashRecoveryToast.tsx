@@ -1,7 +1,7 @@
 // Mounts once at app start. Reads ~/.aura/aura-shell-crashes/ via the
 // crashlytics Tauri commands; if any reports are newer than the
 // last-acknowledged ts in localStorage, surfaces a fixed-bottom toast
-// with the most recent panic message + a "View" button that opens the
+// with the most recent panic message + a "View report" button that opens the
 // raw JSON in a small inline drawer. Dismiss persists ack so the same
 // crash doesn't pop again on the next launch.
 //
@@ -9,6 +9,7 @@
 
 import { useEffect, useState } from "react";
 import { api, type CrashSummary } from "../lib/api";
+import { ToastActionButton, ToastCard, ToastStack } from "./ui/toast";
 
 const ACK_KEY = "aura.crashes.last_acked_ts_ms";
 
@@ -75,167 +76,56 @@ export function CrashRecoveryToast() {
       setReportPath(path);
       setReportText(text);
     } catch (e) {
-      setReportText(`Failed to read crash report: ${String(e)}`);
       setReportPath(path);
+      setReportText(
+        `Aura couldn't open this report. The file is at ${path} — you can open it in any text editor.\n\n${String(e)}`,
+      );
     }
   };
 
   return (
-    <div
-      style={{
-        position: "fixed",
-        bottom: 16,
-        right: 16,
-        zIndex: 9999,
-        maxWidth: 480,
-        background: "#1a1a1a",
-        border: "1px solid #d97706",
-        borderRadius: 8,
-        boxShadow: "0 8px 24px rgba(0,0,0,0.4)",
-        color: "#e5e7eb",
-        fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace",
-        fontSize: 12,
-      }}
-    >
-      {top && !reportText && (
-        <div style={{ padding: "12px 14px" }}>
-          <div
-            style={{
-              display: "flex",
-              alignItems: "center",
-              gap: 8,
-              marginBottom: 8,
-            }}
-          >
-            <span style={{ color: "#fbbf24", fontWeight: 600 }}>
-              ⚠ Aura crashed
-            </span>
-            <span style={{ color: "#9ca3af" }}>
-              {formatAge(top.timestamp_ms)}
-            </span>
-            {unacked.length > 1 && (
-              <span style={{ color: "#9ca3af" }}>
-                (+{unacked.length - 1} more)
-              </span>
-            )}
-          </div>
-          <div
-            style={{
-              color: "#f3f4f6",
-              marginBottom: 6,
-              wordBreak: "break-word",
-            }}
-          >
-            {top.panic_message}
-          </div>
-          {top.location && (
-            <div style={{ color: "#9ca3af", marginBottom: 10 }}>
-              at {top.location}
-            </div>
-          )}
-          <div style={{ display: "flex", gap: 8, justifyContent: "flex-end" }}>
-            <button
-              type="button"
-              onClick={() => void view(top.path)}
-              style={{
-                background: "#374151",
-                color: "#e5e7eb",
-                border: "1px solid #4b5563",
-                borderRadius: 4,
-                padding: "4px 10px",
-                cursor: "pointer",
-                fontFamily: "inherit",
-                fontSize: 12,
-              }}
-            >
-              View report
-            </button>
-            <button
-              type="button"
-              onClick={dismissAll}
-              style={{
-                background: "transparent",
-                color: "#9ca3af",
-                border: "1px solid #4b5563",
-                borderRadius: 4,
-                padding: "4px 10px",
-                cursor: "pointer",
-                fontFamily: "inherit",
-                fontSize: 12,
-              }}
-            >
-              Dismiss
-            </button>
-          </div>
-        </div>
-      )}
-      {reportText && (
-        <div style={{ padding: "12px 14px", maxWidth: 480 }}>
-          <div
-            style={{
-              display: "flex",
-              alignItems: "center",
-              gap: 8,
-              marginBottom: 8,
-            }}
-          >
-            <span style={{ color: "#fbbf24", fontWeight: 600 }}>
-              Crash report
-            </span>
-            <span
-              style={{
-                color: "#6b7280",
-                fontSize: 10,
-                wordBreak: "break-all",
-              }}
-            >
-              {reportPath}
-            </span>
-          </div>
-          <pre
-            style={{
-              background: "#0f0f0f",
-              color: "#d1d5db",
-              border: "1px solid #2a2a2a",
-              borderRadius: 4,
-              padding: 8,
-              maxHeight: 320,
-              overflow: "auto",
-              fontSize: 11,
-              margin: 0,
-              whiteSpace: "pre-wrap",
-              wordBreak: "break-word",
-            }}
-          >
+    <ToastStack>
+      {reportText ? (
+        <ToastCard
+          tone="warning"
+          title="Crash report"
+          message={<span className="break-all font-mono text-[11px]">{reportPath}</span>}
+          onDismiss={dismissAll}
+          dismissTitle="Dismiss"
+        >
+          <pre className="mt-2 max-h-80 overflow-auto whitespace-pre-wrap break-words rounded-[var(--radius-sm)] border border-line bg-bg-0 p-2 font-mono text-[11px] leading-[1.5] text-text-2">
             {reportText}
           </pre>
-          <div
-            style={{
-              display: "flex",
-              gap: 8,
-              justifyContent: "flex-end",
-              marginTop: 10,
-            }}
-          >
-            <button
-              type="button"
-              onClick={dismissAll}
-              style={{
-                background: "#374151",
-                color: "#e5e7eb",
-                border: "1px solid #4b5563",
-                borderRadius: 4,
-                padding: "4px 10px",
-                cursor: "pointer",
-                fontFamily: "inherit",
-                fontSize: 12,
-              }}
-            >
-              Dismiss all
-            </button>
-          </div>
-        </div>
+        </ToastCard>
+      ) : (
+        top && (
+          <ToastCard
+            tone="warning"
+            title="Aura closed unexpectedly"
+            message={
+              <>
+                <span className="text-text-2">{top.panic_message}</span>
+                {top.location && (
+                  <span className="mt-1 block font-mono text-[11px] text-text-4">
+                    at {top.location}
+                  </span>
+                )}
+                <span className="mt-1 block text-text-4">
+                  {formatAge(top.timestamp_ms)}
+                  {unacked.length > 1 && ` · ${unacked.length - 1} more`}
+                </span>
+              </>
+            }
+            onDismiss={dismissAll}
+            dismissTitle="Dismiss"
+            actions={
+              <ToastActionButton variant="primary" onClick={() => void view(top.path)}>
+                View report
+              </ToastActionButton>
+            }
+          />
+        )
       )}
-    </div>
+    </ToastStack>
   );
 }

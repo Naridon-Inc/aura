@@ -25,7 +25,7 @@ use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
 
 use super::model::AwarenessEvent;
-use super::{policy, store};
+use super::{policy, store, verify};
 use crate::live_events;
 
 /// Cap on the remote cache — same ephemeral-signal bound as the local store.
@@ -204,6 +204,14 @@ pub fn pull_remote(force: bool) -> Result<usize, String> {
         let mut seen: HashSet<String> = cache.iter().map(|e| e.id.clone()).collect();
         seen.extend(store::read_all().into_iter().map(|e| e.id));
         for ev in events {
+            // Verify at the trust boundary: an event that CLAIMS a signature
+            // must validate against its own embedded self-certifying pubkey, or
+            // it's tampered (or a borrowed identity) and never enters the cache.
+            // Unsigned events (older CLIs) still pass — verification is
+            // surfaced to the reader, not required for ingest.
+            if ev.sig.is_some() && !verify::verify_event(&ev) {
+                continue;
+            }
             if seen.insert(ev.id.clone()) {
                 cache.push(ev);
                 fresh += 1;
@@ -294,6 +302,8 @@ mod tests {
             ts,
             key_id: None,
             sig: None,
+            pubkey: None,
+            worktree: None,
         }
     }
 
@@ -304,7 +314,7 @@ mod tests {
 
         // Local store: my event. Remote cache: a peer's event + an echo of mine.
         assert!(store::append(&ev("mine", "claude@here", 10)));
-        write_remote(&[ev("mine", "claude@here", 10), ev("peer", "owner", 20)]);
+        write_remote(&[ev("mine", "claude@here", 10), ev("peer", "ashiq", 20)]);
 
         let merged = merged_events();
         assert_eq!(merged.len(), 2, "echo of my own event must dedup away");
@@ -347,7 +357,7 @@ mod tests {
         let (_g, _d) = enter_tmp();
 
         let many: Vec<AwarenessEvent> = (0..REMOTE_MAX + 50)
-            .map(|i| ev(&format!("e{i}"), "owner", i as u64))
+            .map(|i| ev(&format!("e{i}"), "ashiq", i as u64))
             .collect();
         write_remote(&many);
         // write_remote itself doesn't cap (pull_remote does), but reading back

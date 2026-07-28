@@ -19,6 +19,8 @@ import { onExternalAnchorClick } from "../../lib/openExternal";
 import { listen } from "@tauri-apps/api/event";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
+import { remarkCallouts } from "../markdown/remarkCallouts";
+import { calloutFromBlockquote } from "../markdown/Callout";
 import { api, type OpenAiCompatProfile } from "../../lib/api";
 import type { AgentTab } from "../../lib/editorStore";
 import { AgentIcon, brandFor } from "./AgentIcon";
@@ -357,9 +359,11 @@ export function OpenAiCompatChatView({ tab }: Props) {
             <span
               className="text-[10px] uppercase tracking-wide font-mono px-1.5 py-0.5 rounded"
               style={{
-                color: "#fcd34d",
-                background: "rgba(251,191,36,0.10)",
-                border: "1px solid rgba(251,191,36,0.40)",
+                // "No key set" is a caveat you may need to act on, not a
+                // feature — the amber slot, same as every other warning chip.
+                color: "var(--color-amber)",
+                background: "color-mix(in srgb, var(--color-amber) 10%, transparent)",
+                border: "1px solid color-mix(in srgb, var(--color-amber) 40%, transparent)",
               }}
               title="No API key set — fine for Ollama, required for hosted endpoints."
             >
@@ -388,9 +392,9 @@ export function OpenAiCompatChatView({ tab }: Props) {
           role="alert"
           className="px-4 py-2 text-[11.5px] border-b"
           style={{
-            color: "#fca5a5",
-            background: "rgba(239,68,68,0.08)",
-            borderBottomColor: "rgba(239,68,68,0.35)",
+            color: "var(--color-red)",
+            background: "color-mix(in srgb, var(--color-red) 10%, transparent)",
+            borderBottomColor: "color-mix(in srgb, var(--color-red) 40%, transparent)",
           }}
         >
           {profileError}
@@ -443,9 +447,9 @@ export function OpenAiCompatChatView({ tab }: Props) {
             onClick={stop}
             className="px-3 h-9 rounded text-[12px] font-medium border transition-colors"
             style={{
-              background: "rgba(239,68,68,0.12)",
-              color: "#fca5a5",
-              borderColor: "rgba(239,68,68,0.45)",
+              background: "color-mix(in srgb, var(--color-red) 10%, transparent)",
+              color: "var(--color-red)",
+              borderColor: "color-mix(in srgb, var(--color-red) 40%, transparent)",
             }}
             title="Stop the in-flight turn"
           >
@@ -499,7 +503,7 @@ function Bubble({ message }: { message: Message }) {
           // back is enough).
           <span>{message.content}</span>
         ) : message.content ? (
-          <ReactMarkdown remarkPlugins={[remarkGfm]} components={mdComponents()}>
+          <ReactMarkdown remarkPlugins={[remarkGfm, remarkCallouts]} components={mdComponents()}>
             {message.content}
           </ReactMarkdown>
         ) : (
@@ -519,7 +523,7 @@ function Bubble({ message }: { message: Message }) {
         {message.error && (
           <div
             className="mt-2 text-[11.5px]"
-            style={{ color: "#fca5a5" }}
+            style={{ color: "var(--color-red)" }}
             role="alert"
           >
             {message.error}
@@ -551,7 +555,7 @@ function mdComponents() {
         target="_blank"
         rel="noreferrer"
         onClick={onExternalAnchorClick}
-        className="text-sky-300 hover:underline"
+        className="text-accent hover:underline"
       />
     ),
     ul: (p: any) => <ul {...p} className="list-disc pl-5 my-2 space-y-1" />,
@@ -585,11 +589,12 @@ function mdComponents() {
     h1: (p: any) => <h1 {...p} className="text-[17px] font-semibold mt-3 mb-2" />,
     h2: (p: any) => <h2 {...p} className="text-[15px] font-semibold mt-3 mb-2" />,
     h3: (p: any) => <h3 {...p} className="text-[14px] font-semibold mt-3 mb-1" />,
-    blockquote: (p: any) => (
-      <blockquote
-        {...p}
-        className="border-l-2 border-line pl-3 text-text-3 my-2"
-      />
-    ),
+    blockquote: (p: any) =>
+      calloutFromBlockquote(p.className, p.children) ?? (
+        <blockquote
+          {...p}
+          className="border-l-2 border-line pl-3 text-text-3 my-2"
+        />
+      ),
   };
 }

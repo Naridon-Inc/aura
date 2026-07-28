@@ -1,0 +1,15 @@
+:root { --bg:#f4f1ea; --card:#fffdf7; --ink:#2b2622; --accent:#c96a3f; }
+* { box-sizing: border-box; }
+body { margin:0; font-family: system-ui, sans-serif; background:var(--bg); color:var(--ink); }
+header { padding:1.5rem 2rem; }
+h1 { margin:0; font-size:1.6rem; }
+.grid { display:grid; gap:1rem; grid-template-columns:repeat(auto-fill,minmax(220px,1fr)); padding:0 2rem 2rem; }
+.recipe { background:var(--card); border-radius:12px; padding:1rem; box-shadow:0 1px 3px rgba(0,0,0,.08); }
+.recipe h3 { margin:.2rem 0; }
+.meta { color:#8a7f75; font-size:.85rem; }
+.tag { display:inline-block; margin-top:.4rem; padding:.1rem .5rem; border-radius:999px; background:var(--accent); color:#fff; font-size:.75rem; }
+
+/* Dark theme keeps the warm kitchen feel instead of a flat invert. */
+body.dark { --bg:#211d1a; --card:#2c2723; --ink:#efe7dc; --accent:#e0895c; }
+header { display:flex; align-items:center; justify-content:space-between; }
+#theme-toggle { border:0; background:transparent; font-size:1.2rem; cursor:pointer; }

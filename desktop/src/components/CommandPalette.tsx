@@ -18,6 +18,7 @@ import { useDebouncedValue } from "../lib/useDebouncedValue";
 import { useExtCommands } from "../lib/vscodeExt/extCommandStore";
 import { groupHits } from "./palette/paletteGroups";
 import { PaletteResultRow } from "./palette/PaletteRows";
+import { AsciiSpinner } from "./ui/ascii-spinner";
 
 export type PaletteEntry =
   | { kind: "action"; id: AppActionId; label: string; hint?: string }
@@ -64,6 +65,25 @@ export type PaletteEntry =
        *  Absent when the changeset is empty (open the reason editor instead). */
       path?: string;
       line?: number;
+    }
+  | {
+      kind: "chat";
+      id: string;
+      label: string;
+      hint?: string;
+      sessionId: string;
+      repoRoot: string | null;
+      turnIndex: number | null;
+    }
+  | {
+      kind: "workspace";
+      id: string;
+      label: string;
+      hint?: string;
+      /** Absolute workspace root the app switches to via loadProjectAt. */
+      root: string;
+      /** Epoch-ms this project was last opened — drives recency ordering. */
+      lastOpened: number;
     };
 
 export type PaletteAgent = {
@@ -113,13 +133,17 @@ const APP_ACTIONS: PaletteEntry[] = [
   { kind: "action", id: "save", label: "Save File", hint: "⌘S" },
   { kind: "action", id: "close_tab", label: "Close Tab", hint: "⌘W" },
   { kind: "action", id: "settings", label: "Open Settings", hint: "⌘," },
+  { kind: "action", id: "shortcuts", label: "Keyboard Shortcuts", hint: "⌘/" },
   { kind: "action", id: "extensions", label: "Extensions: Add Themes & Languages…" },
+  { kind: "action", id: "mobile_waitlist", label: "Aura on your phone: Join the waitlist…" },
   { kind: "action", id: "time_machine", label: "Time machine: Travel back & recover…", hint: "⌘⌥T" },
   { kind: "action", id: "project_timeline", label: "Project timeline: Relive how it was built…" },
+  { kind: "action", id: "workspaces", label: "Workspaces: See every parallel copy…", hint: "⌘⇧W" },
   { kind: "action", id: "tasks_board", label: "Open Tasks Board", hint: "⌘T" },
   { kind: "action", id: "orchestrate", label: "Orchestrate Multi-Step Session…" },
   { kind: "action", id: "notes", label: "Open Team Notes", hint: "⌘⇧N" },
   { kind: "action", id: "open_prs", label: "Open Pull Requests" },
+  { kind: "action", id: "aura_ask", label: "Ask Aura about your project…" },
   { kind: "action", id: "aura_status", label: "Aura: Project Status" },
   { kind: "action", id: "aura_doctor", label: "Aura: Project Health Check" },
   { kind: "action", id: "aura_impacts", label: "Aura: Changes That Touch Your Work" },
@@ -167,6 +191,28 @@ function scopeForQuery(q: string): { scope: Scope; rest: string } {
 
 const FILE_RESULT_LIMIT = 40;
 
+// Chat search matches raw message bodies, so a snippet can arrive carrying
+// markdown (`**bold**`, `- ` bullets, `# ` headings, ``code``), pasted URLs,
+// and hard line breaks. Rendered verbatim in a one-line palette row that reads
+// as broken formatting — so flatten it to clean prose before display. Keeps
+// alphanumerics intact so the query highlight still lands on the match.
+function cleanChatText(
+  raw: string | null | undefined,
+  opts: { stripUrls?: boolean } = {},
+): string {
+  let s = raw ?? "";
+  if (opts.stripUrls) s = s.replace(/https?:\/\/\S+/g, " ");
+  return s
+    .replace(/```[\s\S]*?```/g, " ") // fenced code blocks
+    .replace(/`([^`]*)`/g, "$1") // inline code
+    .replace(/\*\*([^*]+)\*\*/g, "$1") // bold
+    .replace(/(^|\s)[*_]([^*_]+)[*_]/g, "$1$2") // italic
+    .replace(/^\s*#{1,6}\s+/gm, "") // headings
+    .replace(/^\s*[-*•>]\s+/gm, "") // bullets / blockquotes
+    .replace(/\s+/g, " ") // collapse newlines + runs of space
+    .trim();
+}
+
 export function CommandPalette({
   open,
   recentFiles = [],
@@ -185,8 +231,46 @@ export function CommandPalette({
   const [grepTruncated, setGrepTruncated] = useState(false);
   const [symbolHits, setSymbolHits] = useState<PaletteEntry[]>([]);
   const [intentRows, setIntentRows] = useState<PaletteIntentRow[]>([]);
+  const [chatHits, setChatHits] = useState<PaletteEntry[]>([]);
+  const [chatSearching, setChatSearching] = useState(false);
   const [searching, setSearching] = useState(false);
+  const [workspaceEntries, setWorkspaceEntries] = useState<PaletteEntry[]>([]);
   const inputRef = useRef<HTMLInputElement>(null);
+
+  // Pull the project registry once per open so ⌘K doubles as a workspace
+  // switcher — jump to any other project by name, most-recently-opened first.
+  // The list is small (the machine's registered roots) and the current
+  // workspace drops out, so this only ever offers a real switch.
+  useEffect(() => {
+    if (!open) return;
+    let cancelled = false;
+    api
+      .projectsList()
+      .then((rows) => {
+        if (cancelled) return;
+        const entries = [...rows]
+          .sort((a, b) => (b.last_opened_at ?? 0) - (a.last_opened_at ?? 0))
+          .filter((r) => r.root && r.root !== repoRoot)
+          .map<PaletteEntry>((r) => {
+            const base = r.root.split("/").filter(Boolean).pop() ?? r.root;
+            return {
+              kind: "workspace",
+              id: `ws:${r.root}`,
+              label: r.label?.trim() || base,
+              hint: r.last_opened_at ? relativeTime(r.last_opened_at) : undefined,
+              root: r.root,
+              lastOpened: r.last_opened_at ?? 0,
+            };
+          });
+        setWorkspaceEntries(entries);
+      })
+      .catch(() => {
+        if (!cancelled) setWorkspaceEntries([]);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [open, repoRoot]);
 
   // Index the workspace once per open. `git ls-files` is fast (sub-100ms
   // even on large repos) and respects .gitignore for free.
@@ -249,6 +333,48 @@ export function CommandPalette({
     [query],
   );
   const debouncedQuery = useDebouncedValue(liveRest, 140);
+  useEffect(() => {
+    const q = debouncedQuery.trim();
+    if (!open || liveScope !== "all" || q.length < 2) {
+      setChatHits([]);
+      setChatSearching(false);
+      return;
+    }
+    let cancelled = false;
+    setChatSearching(true);
+    api
+      .managerSearch(q, 40)
+      .then((rows) => {
+        if (cancelled) return;
+        setChatHits(
+          rows.map((row) => ({
+            kind: "chat" as const,
+            id: `chat:${row.session_id}:${row.turn_index ?? "title"}`,
+            label: cleanChatText(row.snippet) || "(empty message)",
+            hint: [
+              cleanChatText(row.objective, { stripUrls: true }),
+              row.role === "title" ? null : row.role,
+              row.repo_root?.split("/").filter(Boolean).pop(),
+            ]
+              .filter(Boolean)
+              .join(" · "),
+            sessionId: row.session_id,
+            repoRoot: row.repo_root,
+            turnIndex: row.turn_index,
+          })),
+        );
+      })
+      .catch(() => {
+        if (!cancelled) setChatHits([]);
+      })
+      .finally(() => {
+        if (!cancelled) setChatSearching(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [open, debouncedQuery, liveScope]);
+
   useEffect(() => {
     if (!open || !repoRoot) {
       setGrepHits([]);
@@ -429,6 +555,20 @@ export function CommandPalette({
             }))
         : [];
 
+    // Workspace lane: other registered projects, most-recent first. With a
+    // query, filter by name; with none, show a few recent so ⌘K opens as a
+    // fast project switcher.
+    const wsLane: PaletteEntry[] =
+      scope === "all"
+        ? q
+          ? workspaceEntries.filter(
+              (e) =>
+                e.label.toLowerCase().includes(q) ||
+                e.hint?.toLowerCase().includes(q),
+            )
+          : workspaceEntries.slice(0, 5)
+        : [];
+
     if (scope === "code") {
       // Pure content view — filter by query against the preview text
       // for relevance ordering; backend already did the heavy lift.
@@ -458,7 +598,7 @@ export function CommandPalette({
       if (scope === "all") {
         const nonFile = pool.filter((e) => e.kind !== "file");
         const file = pool.filter((e) => e.kind === "file").slice(0, 6);
-        return [...nonFile, ...file];
+        return [...nonFile, ...wsLane, ...file];
       }
       if (scope === "file") return pool.slice(0, FILE_RESULT_LIMIT);
       return pool;
@@ -492,10 +632,10 @@ export function CommandPalette({
       // existing palette users.
       const symLane = symbolHits.slice(0, 8);
       const grepLane = grepHits.slice(0, 30);
-      return [...symLane, ...nonFile, ...grepLane, ...intentLane, ...file];
+      return [...chatHits, ...symLane, ...nonFile, ...wsLane, ...grepLane, ...intentLane, ...file];
     }
     return sortedPool.slice(0, scope === "file" ? FILE_RESULT_LIMIT : 200);
-  }, [all, agents, scope, debouncedRest, query, symbolHits, grepHits, intentRows]);
+  }, [all, agents, scope, debouncedRest, query, symbolHits, grepHits, intentRows, chatHits, workspaceEntries]);
 
   // Group the ranked hits into plain-language sections; `flat` is the same
   // rows concatenated in display order so arrow keys walk every row.
@@ -523,14 +663,17 @@ export function CommandPalette({
         onClose();
         return;
       }
-      if (e.key === "ArrowDown") {
+      // Down / Tab move forward, Up / Shift-Tab back — both wrap at the ends
+      // so the cursor rolls bottom-to-top instead of dead-ending, and Tab is a
+      // reliable alias for the arrows (Conductor parity).
+      if (e.key === "ArrowDown" || (e.key === "Tab" && !e.shiftKey)) {
         e.preventDefault();
-        setIdx((i) => Math.min(flat.length - 1, i + 1));
+        setIdx((i) => (flat.length ? (i + 1) % flat.length : 0));
         return;
       }
-      if (e.key === "ArrowUp") {
+      if (e.key === "ArrowUp" || (e.key === "Tab" && e.shiftKey)) {
         e.preventDefault();
-        setIdx((i) => Math.max(0, i - 1));
+        setIdx((i) => (flat.length ? (i - 1 + flat.length) % flat.length : 0));
         return;
       }
       if (e.key === "Enter") {
@@ -549,11 +692,14 @@ export function CommandPalette({
   return (
     <div
       className="fixed inset-0 flex items-start justify-center pt-[14vh] z-50"
-      style={{ background: "rgba(5,5,5,0.55)", backdropFilter: "blur(4px)" }}
+      style={{
+        background: "color-mix(in srgb, var(--color-bg-0) 72%, transparent)",
+        backdropFilter: "blur(4px)",
+      }}
       onMouseDown={onClose}
     >
       <div
-        className="w-full bg-bg-1 border border-line rounded-lg shadow-xl overflow-hidden"
+        className="w-full overflow-hidden rounded-lg border border-line-soft bg-bg-1 text-text-1 shadow-[var(--shadow-flyout)]"
         style={{ maxWidth: 640 }}
         onMouseDown={(e) => e.stopPropagation()}
       >
@@ -563,27 +709,10 @@ export function CommandPalette({
             <line x1="10" y1="10" x2="13.5" y2="13.5" stroke="currentColor" strokeWidth="1.4" />
           </svg>
           {scope !== "all" && (
-            <span
-              className="ml-3 px-1.5 py-0.5 rounded text-[10px] font-semibold uppercase tracking-wider"
-              style={{
-                background:
-                  scope === "aura"
-                    ? "color-mix(in oklab, var(--color-violet) 18%, transparent)"
-                    : scope === "agent"
-                      ? "color-mix(in oklab, var(--color-blue, #4a8cff) 18%, transparent)"
-                      : scope === "file"
-                        ? "color-mix(in oklab, var(--color-green, #4ade80) 18%, transparent)"
-                        : "color-mix(in oklab, var(--color-amber, #d4a017) 18%, transparent)",
-                color:
-                  scope === "aura"
-                    ? "var(--color-violet)"
-                    : scope === "agent"
-                      ? "var(--color-blue, #4a8cff)"
-                      : scope === "file"
-                        ? "var(--color-green, #4ade80)"
-                        : "var(--color-amber, #d4a017)",
-              }}
-            >
+            // One chip, one look. Five scopes wearing violet / blue / green /
+            // amber taught the user nothing the WORD in the chip doesn't
+            // already say, and two of those hues were off-token hex fallbacks.
+            <span className="ml-3 rounded bg-bg-2 px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wider text-text-3">
               {scope === "aura"
                 ? "Aura"
                 : scope === "agent"
@@ -602,13 +731,11 @@ export function CommandPalette({
               setQuery(e.target.value);
               setIdx(0);
             }}
-            placeholder="Search actions, files, code…  ·  @ agent  /  command  :  file"
+            placeholder="Search conversations, actions, files, code…  ·  @ agent  /  command  :  file"
             className="flex-1 bg-transparent outline-none ml-3 text-text-1 text-[13px] placeholder:text-text-4"
           />
-          {searching && (
-            <span className="text-[10px] text-text-4 mr-2 tracking-wider">
-              searching…
-            </span>
+          {(searching || chatSearching) && (
+            <AsciiSpinner className="mr-2 text-[11px]" />
           )}
           <span className="text-[10px] text-text-5 tracking-wider">esc</span>
         </div>
@@ -616,7 +743,11 @@ export function CommandPalette({
         <ul className="max-h-[58vh] overflow-y-auto py-1.5">
           {flat.length === 0 ? (
             <li className="px-4 py-6 text-center text-text-4 text-[12px]">
-              {searching ? "Searching…" : "No matches"}
+              {searching ? (
+                <AsciiSpinner className="text-[12px]" />
+              ) : (
+                "No matches"
+              )}
             </li>
           ) : (
             sections.map((section, si) => {
@@ -626,7 +757,7 @@ export function CommandPalette({
               return (
                 <li key={section.key}>
                   <div className="flex items-center gap-2 px-3.5 pb-1 pt-2.5">
-                    <span className="text-[10px] font-semibold uppercase tracking-[0.09em] text-text-5">
+                    <span className="text-[10px] font-semibold uppercase tracking-wider text-text-4">
                       {section.label}
                     </span>
                     <span className="text-[10px] text-text-5/60">
@@ -662,4 +793,3 @@ export function CommandPalette({
     </div>
   );
 }
-

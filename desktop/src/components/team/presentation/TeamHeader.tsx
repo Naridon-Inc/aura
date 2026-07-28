@@ -22,11 +22,13 @@ export function TeamHeader({
   manifest,
   onClaim,
   repoRoot,
+  label = "Team",
 }: {
   identity: TeamIdentity | null;
   manifest: TeamManifest | null;
   onClaim: () => void;
   repoRoot: string;
+  label?: string;
 }) {
   const [doctorOpen, setDoctorOpen] = useState(false);
   // Trace-style rail title — a glyph + "Team" header that matches the other
@@ -42,7 +44,7 @@ export function TeamHeader({
     <>
       <div className="ade-rail-title flex-shrink-0">
         <MembersGlyph />
-        <span>Team</span>
+        <span>{label}</span>
         {needsClaim && (
           <Button
             variant="accentSoft"
@@ -199,7 +201,7 @@ function ChatDoctorDialog({
         <div className="flex-1 overflow-y-auto px-3 py-3 text-[11.5px]">
           {busy && <div className="text-text-3">Probing…</div>}
           {err && (
-            <div className="rounded border border-red-500/30 bg-red-500/10 px-2 py-1.5 text-red-300">
+            <div className="rounded border border-red/30 bg-red/10 px-2 py-1.5 text-red">
               {err}
             </div>
           )}
@@ -469,7 +471,7 @@ function IdentityMismatchBanner({
         )}
       </div>
       {err && (
-        <div className="mt-1.5 text-red-300">{err}</div>
+        <div className="mt-1.5 text-red">{err}</div>
       )}
       <div className="mt-2 flex flex-wrap gap-2">
         {overrideActive ? (

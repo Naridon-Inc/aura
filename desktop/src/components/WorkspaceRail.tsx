@@ -9,6 +9,13 @@ import { RepoAvatar } from "./RepoAvatar";
 import { WorkspaceProgressPopover } from "./WorkspaceProgressPopover";
 import { WorkspaceFleetPips } from "./WorkspaceFleetPips";
 import { ClipsTray } from "./clips/ClipsTray";
+import { AsciiSpinner } from "./ui/ascii-spinner";
+import {
+  MENU_LABEL,
+  MENU_PANEL,
+  MENU_ROW,
+  MENU_SEP,
+} from "./ui/menuSurface";
 import { useEditorStore } from "../lib/editorStore";
 import {
   EMOJI_PRESETS,
@@ -43,34 +50,21 @@ export type Workspace = {
   active: boolean;
   accent?: string;    // ignored — kept for back-compat with App.tsx call site
   worktrees?: WorktreeRef[]; // sibling worktrees on this repo's git dir
+  /** Agents in this workspace currently waiting for the user. */
+  unread?: number;
 };
 
-// Per-workspace accent colour. Deterministic hash of the workspace root
-// → one of 8 muted tints. Used for the tile's left edge marker so the
-// user can tell projects apart at a glance without each tile screaming.
-// Cool/neutral palette only — amber/yellow tints were reading as
-// "yellow folder" in the rail and competed with the FileTree's neutral
-// folder glyphs. Lime trimmed for the same reason. Replacement: a
-// slate and a teal so we keep eight distinguishable tints without any
-// warm yellow on the rail.
-const ACCENT_TINTS = [
-  "rgb(125 211 252)", // sky-300
-  "rgb(110 231 183)", // emerald-300
-  "rgb(148 163 184)", // slate-400
-  "rgb(252 165 165)", // rose-300
-  "rgb(196 181 253)", // violet-300
-  "rgb(103 232 249)", // cyan-300
-  "rgb(94 234 212)",  // teal-300
-  "rgb(165 180 252)", // indigo-300
-];
-
-export function accentForRoot(root: string): string {
-  if (!root) return ACCENT_TINTS[0]!;
-  let h = 0;
-  for (let i = 0; i < root.length; i++) {
-    h = (h * 31 + root.charCodeAt(i)) | 0;
-  }
-  return ACCENT_TINTS[Math.abs(h) % ACCENT_TINTS.length]!;
+// Every project tile shares one neutral tint. The rail used to hash the
+// workspace root into one of eight hues; with more than a handful of projects
+// that read as a paint chart, and it gave colour a meaning it never carried —
+// a tile's identity is its avatar/letter, and the only tile that needs
+// emphasis is the one you're in. Colour comes back on a tile only when the
+// user picks an emoji for it (accentForEmoji) — i.e. when they asked for it.
+//
+// Still a function of the root because `Workspace.accent` is filled in
+// per-root by the app shell, and the emoji override is resolved beside it.
+export function accentForRoot(_root: string): string {
+  return "var(--color-text-3)";
 }
 
 type WorkspaceRailProps = {
@@ -182,12 +176,7 @@ export function WorkspaceRail({
         />
       ))}
 
-      {club && club.members.length >= 2 && (
-        <ClubTile
-          club={club}
-          memberAccents={club.members.map((m) => accentForRoot(m))}
-        />
-      )}
+      {club && club.members.length >= 2 && <ClubTile club={club} />}
 
       {inFlight.map((entry) => (
         <InFlightTile
@@ -263,6 +252,7 @@ function WorkspaceTile({
   // tiny brand-colored pips in the bottom-right corner of the tile.
   const editor = useEditorStore();
   const fleet = editor.agentTabs.filter((t) => t.repoRoot === workspace.id);
+  const unread = workspace.unread ?? 0;
 
   // Close worktree menu on outside click or Escape.
   useEffect(() => {
@@ -326,17 +316,13 @@ function WorkspaceTile({
   };
 
   const shortcutHint = shortcut ? ` (⌘${shortcut})` : "";
-  const tileTitle = `${workspace.id}${shortcutHint}${hasWorktrees ? `\n${countedWorktrees.length} parallel copies — right-click to switch` : "\nright-click for actions"}`;
+  const tileTitle = `${workspace.id}${shortcutHint}${unread ? `\n${unread} waiting for you` : ""}${hasWorktrees ? `\n${countedWorktrees.length} parallel copies — right-click to switch` : "\nright-click for actions"}`;
 
-  // Active tile pops in full accent. Inactive tiles still carry a very
-  // subtle hint of their accent (so projects stay distinguishable at a
-  // glance) plus a faint border — neither competes with the active one,
-  // but they read as "tiles", not invisible letters. Hover lifts both
-  // tint + border a notch.
-  // Emoji-picked tiles override the hash-derived cool palette with a
-  // hue that matches the glyph (🔥 → orange, 🧠 → pink, …). Otherwise
-  // fall back to the deterministic-hash accent so letter tiles stay
-  // distinguishable but neutral.
+  // The tile you're in reads as a lifted surface; the rest are quiet tiles
+  // with a faint border so they still read as tiles, not floating letters.
+  // Neutral by default — a project's identity is its avatar/letter. Colour
+  // enters only when the USER picks an emoji for the workspace (🔥 → orange,
+  // 🧠 → pink): that hue is a choice they made, not one we hashed for them.
   const accent = accentForEmoji(workspace.emoji) ?? accentForRoot(workspace.id);
   // Tab → workspace drop. The Tabs strip declares
   // `application/x-aura-tab-source-root` carrying the source repo root.
@@ -378,13 +364,15 @@ function WorkspaceTile({
         background: workspace.active
           ? `color-mix(in srgb, ${accent} 26%, var(--color-bg-2))`
           : `color-mix(in srgb, ${accent} 6%, var(--color-bg-2))`,
+        // A live drop target is the one thing here that needs you, so it —
+        // and only it — takes the product accent.
         border: dragOver
-          ? `1px dashed color-mix(in srgb, ${accent} 80%, white)`
+          ? "1px dashed var(--color-accent)"
           : workspace.active
             ? `1px solid color-mix(in srgb, ${accent} 60%, var(--color-line))`
             : `1px solid color-mix(in srgb, ${accent} 18%, transparent)`,
         boxShadow: dragOver
-          ? `0 0 0 2px color-mix(in srgb, ${accent} 45%, transparent)`
+          ? "0 0 0 2px color-mix(in srgb, var(--color-accent) 45%, transparent)"
           : "none",
       }}
     >
@@ -398,6 +386,30 @@ function WorkspaceTile({
         />
       </span>
       {hasWorktrees && <WorktreePip />}
+      {unread > 0 && (
+        <span
+          className="absolute pointer-events-none flex items-center justify-center font-semibold"
+          style={{
+            right: -4,
+            top: -4,
+            minWidth: 14,
+            height: 14,
+            padding: "0 3px",
+            borderRadius: 7,
+            // Waiting-for-you is an ask, not a failure — amber, the pack's
+            // attention slot; red stays reserved for things that broke and
+            // the accent for the tile you are actually standing in (the
+            // active tile's border, two properties up).
+            background: "var(--color-amber)",
+            color: "var(--color-bg-0)",
+            boxShadow: "0 0 0 2px var(--color-bg-1)",
+            fontSize: 9,
+          }}
+          aria-label={`${unread} agents waiting for you`}
+        >
+          {unread > 9 ? "9+" : unread}
+        </span>
+      )}
       <WorkspaceFleetPips tabs={fleet} anyRunning={fleet.length > 0} />
     </button>
   );
@@ -492,12 +504,10 @@ function WorkspaceMenu({
 
   return (
     <div
-      className="absolute z-30 left-full ml-2 top-0 bg-bg-1 border border-line rounded-lg shadow-lg py-1.5 px-1"
+      className={`${MENU_PANEL} absolute left-full ml-2 top-0`}
       style={{ minWidth: 240 }}
     >
-      <div className="px-2 py-1 text-[10px] uppercase tracking-wider text-text-4">
-        emoji
-      </div>
+      <div className={MENU_LABEL}>Icon</div>
       <div className="px-1 pb-1 grid grid-cols-8 gap-0.5">
         {EMOJI_PRESETS.map((e) => {
           const active = e === currentEmoji;
@@ -520,17 +530,17 @@ function WorkspaceMenu({
         <button
           type="button"
           onClick={() => onPickEmoji(undefined)}
-          className="w-full text-left px-2 py-1 rounded text-[11px] text-text-3 hover:bg-bg-2 hover:text-text-1"
+          className={MENU_ROW}
         >
           Reset to letter
         </button>
       )}
-      <div className="my-1 border-t border-line-soft" />
+      <div className={MENU_SEP} />
       {worktrees.length > 0 && (
         <>
-          <div className="px-2 py-1 text-[10px] uppercase tracking-wider text-text-4">
-            worktrees
-          </div>
+          {/* Plain language: "parallel copies", not "worktrees" — the
+              sidebar and the hover card already call them that. */}
+          <div className={MENU_LABEL}>Parallel copies</div>
           {worktrees.map((w) => {
             const tail = w.path.split("/").filter(Boolean).slice(-2).join("/");
             const isActive = w.path === workspaceId;
@@ -539,39 +549,33 @@ function WorkspaceMenu({
                 key={w.path}
                 type="button"
                 onClick={() => onPickWorktree(w.path)}
-                className={`w-full text-left px-2 py-1.5 rounded text-[11.5px] flex flex-col gap-0.5 ${
-                  isActive
-                    ? "bg-bg-2 text-text-1"
-                    : "text-text-2 hover:bg-bg-2 hover:text-text-1"
+                className={`${MENU_ROW} flex-col !items-start gap-0.5${
+                  isActive ? " bg-bg-2 text-text-1" : ""
                 }`}
               >
-                <div className="flex items-center gap-1.5">
+                <div className="flex w-full items-center gap-1.5">
                   <span className="font-medium truncate flex-1">{tail || w.path}</span>
                   {w.is_main && (
-                    <span className="text-[9.5px] uppercase tracking-wide text-text-5">
+                    <span className="text-[10px] tracking-wide text-text-4">
                       main
                     </span>
                   )}
                   {w.locked && (
-                    <span className="text-[9.5px] uppercase tracking-wide text-amber">
+                    <span className="text-[10px] tracking-wide text-text-4">
                       locked
                     </span>
                   )}
                 </div>
-                <div className="text-[10px] text-text-4 font-mono truncate">
+                <div className="w-full text-[11px] text-text-4 font-mono truncate">
                   {w.branch || w.head.slice(0, 7) || "—"}
                 </div>
               </button>
             );
           })}
-          <div className="my-1 border-t border-line-soft" />
+          <div className={MENU_SEP} />
         </>
       )}
-      <button
-        type="button"
-        onClick={onClose}
-        className="w-full text-left px-2 py-1.5 rounded text-[11.5px] text-text-2 hover:bg-bg-2 hover:text-text-1 flex items-center gap-1.5"
-      >
+      <button type="button" onClick={onClose} className={MENU_ROW}>
         <span className="text-text-4">
           <CloseGlyph />
         </span>
@@ -589,17 +593,12 @@ function CloseGlyph() {
   );
 }
 
-// Clubbed tile — sits below the workspace tiles when 2+ projects have
-// been clubbed. Renders a "knot" glyph composed of the member accents
-// so the user can read at a glance which workspaces are bundled. Right
-// click opens a menu to leave-member / dissolve.
-function ClubTile({
-  club,
-  memberAccents,
-}: {
-  club: ClubProps;
-  memberAccents: string[];
-}) {
+// Clubbed tile — sits below the workspace tiles when 2+ projects have been
+// clubbed. A knot glyph on the same neutral tile as every other rail tile;
+// which projects are bundled is answered by the right-click menu (it lists
+// them by name), not by a band of colours the user has to decode. Right click
+// opens that menu — leave-member / dissolve.
+function ClubTile({ club }: { club: ClubProps }) {
   const [menuOpen, setMenuOpen] = useState(false);
   const wrapRef = useRef<HTMLDivElement>(null);
   useEffect(() => {
@@ -619,23 +618,6 @@ function ClubTile({
       document.removeEventListener("keydown", onKey);
     };
   }, [menuOpen]);
-
-  // Background = layered gradient from the member accents so the tile
-  // visually reads as a blend rather than a single colour. Two members
-  // = simple 50/50 split; three+ = even bands.
-  const stops = memberAccents.length === 0
-    ? "var(--color-bg-2)"
-    : memberAccents.length === 1
-      ? `color-mix(in srgb, ${memberAccents[0]} 26%, var(--color-bg-2))`
-      : memberAccents
-          .map((c, i) => {
-            const from = Math.round((i / memberAccents.length) * 100);
-            const to = Math.round(((i + 1) / memberAccents.length) * 100);
-            return `color-mix(in srgb, ${c} 38%, var(--color-bg-2)) ${from}%, color-mix(in srgb, ${c} 38%, var(--color-bg-2)) ${to}%`;
-          })
-          .join(", ");
-  const background =
-    memberAccents.length >= 2 ? `linear-gradient(135deg, ${stops})` : stops;
 
   return (
     <div
@@ -657,37 +639,34 @@ function ClubTile({
           width: TILE,
           height: TILE,
           borderRadius: 7,
-          background,
+          // Same two-step tile treatment as WorkspaceTile: active reads as a
+          // lifted surface, idle as a whisper. Selection is the only state.
+          background: club.active
+            ? "var(--color-bg-3)"
+            : "var(--color-bg-2)",
           border: club.active
-            ? `1px solid color-mix(in srgb, ${memberAccents[0] ?? "white"} 60%, var(--color-line))`
-            : `1px solid var(--color-line-soft)`,
+            ? "1px solid var(--color-line)"
+            : "1px solid var(--color-line-soft)",
         }}
       >
         <ClubGlyph />
       </button>
       {menuOpen && (
         <div
-          className="absolute z-30 left-full ml-2 top-0 bg-bg-1 border border-line rounded-lg shadow-lg py-1.5 px-1"
+          className={`${MENU_PANEL} absolute left-full ml-2 top-0`}
           style={{ minWidth: 220 }}
         >
-          <div className="px-2 py-1 text-[10px] uppercase tracking-wider text-text-4">
-            members
-          </div>
-          {club.members.map((m, i) => {
+          <div className={MENU_LABEL}>Members</div>
+          {club.members.map((m) => {
             const tail = m.split("/").filter(Boolean).slice(-2).join("/");
             return (
               <div
                 key={m}
-                className="px-2 py-1 flex items-center gap-1.5 text-[11.5px] text-text-2"
+                className="px-2 py-1 flex items-center gap-2 text-[13px] leading-5 text-text-2"
               >
                 <span
-                  className="inline-block flex-shrink-0"
-                  style={{
-                    width: 8,
-                    height: 8,
-                    borderRadius: 4,
-                    background: memberAccents[i] ?? "currentColor",
-                  }}
+                  className="inline-block flex-shrink-0 bg-text-4"
+                  style={{ width: 5, height: 5, borderRadius: 3 }}
                 />
                 <span className="flex-1 truncate">{tail || m}</span>
                 <button
@@ -696,22 +675,22 @@ function ClubTile({
                     setMenuOpen(false);
                     club.onLeaveMember(m);
                   }}
-                  className="text-text-4 hover:text-text-1 text-[10px] uppercase tracking-wider"
+                  className="text-text-4 hover:text-text-1 text-[11px] tracking-wider"
                   title="Leave club"
                 >
-                  leave
+                  Leave
                 </button>
               </div>
             );
           })}
-          <div className="my-1 border-t border-line-soft" />
+          <div className={MENU_SEP} />
           <button
             type="button"
             onClick={() => {
               setMenuOpen(false);
               club.onDissolve();
             }}
-            className="w-full text-left px-2 py-1.5 rounded text-[11.5px] text-text-2 hover:bg-bg-2 hover:text-text-1"
+            className={MENU_ROW}
           >
             Dissolve club
           </button>
@@ -733,11 +712,12 @@ function ClubGlyph() {
   );
 }
 
-// Parity W8 — one optimistic launch in the rail. Spinner ring while the
-// worktree + fleet provision; green check when ready (click → open the new
+// Parity W8 — one optimistic launch in the rail. The app's one loader while
+// the worktree + fleet provision; a check when ready (click → open the new
 // workspace; auto-dismisses shortly after); red when something failed
 // (sticky — click to dismiss, error text in the tooltip so nothing is
-// silently swallowed).
+// silently swallowed). Only the failure keeps colour — "ready" is a
+// disappearing state you don't have to act on, so its check reads neutral.
 function InFlightTile({
   entry,
   onOpenWorktree,
@@ -772,18 +752,15 @@ function InFlightTile({
       title={label}
       className={`relative flex items-center justify-center rounded-lg transition-colors ${
         entry.status === "error"
-          ? "text-red-400 hover:bg-bg-2"
+          ? "text-red hover:bg-bg-2"
           : entry.status === "ready"
-            ? "text-green-400 hover:bg-bg-2"
+            ? "text-text-2 hover:bg-bg-2"
             : "text-text-3"
       }`}
       style={{ width: TILE, height: TILE }}
     >
       {busy ? (
-        <span
-          className="inline-block animate-spin rounded-full border-2 border-current border-t-transparent"
-          style={{ width: 14, height: 14 }}
-        />
+        <AsciiSpinner className="text-[12px]" />
       ) : entry.status === "ready" ? (
         <svg width="14" height="14" viewBox="0 0 16 16" fill="none">
           <path

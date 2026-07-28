@@ -21,6 +21,85 @@ real reason for the change, and never guess at intent the diff doesn't \
 support. Past tense, action verb first. Max 14 words. No filler, no \"this \
 commit\", no quotes. Output ONLY the sentence.";
 
+/// Plain-language "WHAT changed" prompt. Audience is a non-engineer
+/// (ADE): describe the change in everyday words so someone who doesn't
+/// read code understands it. Never leak symbol names, file paths, or
+/// git/AST jargon — that's the whole point of this variant.
+pub(crate) const WHAT_PROMPT: &str =
+    "You describe WHAT changed in a file in plain, everyday language a \
+non-programmer would understand. Read the diff and say what the change does \
+in real-world terms. Never name functions, classes, variables, or files, and \
+never use code or git jargon. Present tense, max 14 words. No filler, no \
+quotes. Output ONLY the sentence.";
+
+/// Plain-language "what it USED TO DO" prompt — powers the "before" column
+/// of the split-diff. Describes only the prior behaviour (the removed/replaced
+/// `-` side) so a non-engineer can see what the code did before this change.
+pub(crate) const BEFORE_PROMPT: &str =
+    "You describe what a part of a project USED TO DO before a change, in \
+plain, everyday language a non-programmer would understand. Read the diff and \
+describe only the old behaviour being replaced or removed (the lines starting \
+with '-'). Never name functions, classes, variables, or files, and never use \
+code or git jargon. Past tense, max 14 words. No filler, no quotes. Output \
+ONLY the sentence.";
+
+/// Plain-language "why + how" prompt — powers the reasoning band. Gives the
+/// reason for the change and the gist of the new approach, still without a
+/// single symbol name or line of jargon.
+pub(crate) const REASON_PROMPT: &str =
+    "You explain WHY a change was made and, briefly, HOW it now works, in \
+plain, everyday language a non-programmer would understand. Read the diff and \
+give the reason for the change and the gist of the new approach. Never name \
+functions, classes, variables, or files, and never use code or git jargon. \
+One sentence, max 24 words. No filler, no quotes. Output ONLY the sentence.";
+
+/// Plain-language "what THIS ONE piece does" prompt — powers the per-node
+/// "New is this" blurbs in the split-diff header. The reader is told WHICH
+/// piece to describe (its human title is already shown next to the blurb), so
+/// the model's only job is to say what that single piece does now, in real-
+/// world terms — not repeat its name, not describe the whole file.
+pub(crate) const SYMBOL_PROMPT: &str =
+    "You describe what ONE specific part of a project does, in plain, everyday \
+language a non-programmer would understand. You are told which piece to focus \
+on. Read the diff and say, in one sentence, what that piece does now — its \
+real-world job as of this change. Do NOT repeat its code name, do NOT name \
+other functions, classes, variables, or files, and never use code or git \
+jargon. Present tense, max 16 words. No filler, no quotes. Output ONLY the \
+sentence.";
+
+/// Plain-language "what THIS ONE piece USED TO DO" prompt — powers the per-node
+/// "Previous was this" blurbs. Same single-piece framing as {@link SYMBOL_PROMPT}
+/// but past tense: describe the old job this one piece did before the change.
+pub(crate) const SYMBOL_BEFORE_PROMPT: &str =
+    "You describe what ONE specific part of a project USED TO DO before a \
+change, in plain, everyday language a non-programmer would understand. You are \
+told which piece to focus on. Read the diff and say, in one sentence, what that \
+piece did before this change — its old real-world job. Do NOT repeat its code \
+name, do NOT name other functions, classes, variables, or files, and never use \
+code or git jargon. Past tense, max 16 words. No filler, no quotes. Output ONLY \
+the sentence.";
+
+/// Which one-line summary the caller wants from the model. `Why` is the
+/// original commit-intent statement (the reason); `What` is the
+/// plain-language description of the change for a non-engineer; `Before`
+/// describes the prior behaviour (the split-diff's "before" column); `Reason`
+/// is the plain-language "why this change, and how it works now" band.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum InferTask {
+    #[default]
+    Why,
+    What,
+    Before,
+    Reason,
+    /// Describe a single named piece (one changed function/class/…) in plain
+    /// words — the per-node "New is this" blurb. The piece to focus on is named
+    /// at the head of the diff excerpt.
+    Symbol,
+    /// Describe what a single named piece USED TO DO before the change — the
+    /// per-node "Previous was this" blurb. Past-tense counterpart to `Symbol`.
+    SymbolBefore,
+}
+
 #[derive(Debug, Clone)]
 pub struct InferContext {
     /// Files Claude touched in this coalesce window. Used to build the
@@ -33,6 +112,10 @@ pub struct InferContext {
     /// Tail of the assistant's last message — gives the model a
     /// natural-language hint about *why* the change happened.
     pub assistant_tail: String,
+    /// Which summary to produce: the commit-intent WHY (default) or the
+    /// plain-language WHAT. Selects both the system prompt and the
+    /// trailing instruction line.
+    pub task: InferTask,
 }
 
 impl InferContext {
@@ -41,6 +124,32 @@ impl InferContext {
     /// one prompt, not a system+user split like the HTTP APIs).
     pub(crate) fn user_prompt(&self) -> String {
         self.into_user_prompt()
+    }
+
+    /// System prompt matched to this context's task.
+    pub(crate) fn system_prompt(&self) -> &'static str {
+        match self.task {
+            InferTask::Why => SYSTEM_PROMPT,
+            InferTask::What => WHAT_PROMPT,
+            InferTask::Before => BEFORE_PROMPT,
+            InferTask::Reason => REASON_PROMPT,
+            InferTask::Symbol => SYMBOL_PROMPT,
+            InferTask::SymbolBefore => SYMBOL_BEFORE_PROMPT,
+        }
+    }
+
+    /// Trailing instruction line, matched to this context's task.
+    fn trailer(&self) -> &'static str {
+        match self.task {
+            InferTask::Why => "Write the intent.",
+            InferTask::What => "Describe in plain words what this change does.",
+            InferTask::Before => "Describe in plain words what this used to do before the change.",
+            InferTask::Reason => "Explain in plain words why this change was made and how it now works.",
+            InferTask::Symbol => "In one plain sentence, say what the piece named above does now.",
+            InferTask::SymbolBefore => {
+                "In one plain sentence, say what the piece named above used to do before this change."
+            }
+        }
     }
 
     fn into_user_prompt(&self) -> String {
@@ -70,8 +179,8 @@ impl InferContext {
                 .collect();
         }
         format!(
-            "Files edited:\n{}\n\nDiff summary (first ~40 lines):\n{}\n\nRecent assistant message context (last 200 chars):\n{}\n\nWrite the intent.",
-            files, diff, tail
+            "Files edited:\n{}\n\nDiff summary (first ~40 lines):\n{}\n\nRecent assistant message context (last 200 chars):\n{}\n\n{}",
+            files, diff, tail, self.trailer()
         )
     }
 }
@@ -146,6 +255,11 @@ impl InferenceBackend {
 #[derive(Debug, Clone, Default, serde::Serialize)]
 pub struct BackendDetection {
     pub ollama: Option<String>,
+    /// The Ollama model we'll actually call — a small tier that's genuinely
+    /// pulled on this machine. `None` (with `ollama` also `None`) when Ollama is
+    /// down OR has no models: an up-but-empty Ollama must NOT win selection, or
+    /// it shadows a working agent CLI and every inference 404s on a missing model.
+    pub ollama_model: Option<String>,
     /// Installed coding-agent CLIs we can use with zero key/ollama setup
     /// (Claude Code / Gemini CLI / Codex). Empty when none are on PATH.
     pub agent_clis: Vec<crate::aurawatch_agentcli::AgentCliInfo>,
@@ -175,12 +289,15 @@ impl Default for InferenceBackendKind {
 pub async fn detect_backends() -> BackendDetection {
     let mut det = BackendDetection::default();
 
-    // Ollama probe: 500ms TCP-level GET against /api/tags. If it
-    // answers we'll use it — otherwise fall through. Default URL only;
-    // user can override via the settings dialog (future).
+    // Ollama probe: ask /api/tags for the models it ACTUALLY has pulled and
+    // pick a small one to call. Only then does Ollama count as available — an
+    // up-but-empty Ollama returns None here and falls through to the agent CLIs,
+    // instead of winning selection and then failing every inference on a model
+    // it never had. Default URL only; user can override via settings (future).
     let ollama_url = "http://localhost:11434".to_string();
-    if probe_ollama(&ollama_url).await {
+    if let Some(model) = probe_ollama_model(&ollama_url).await {
         det.ollama = Some(ollama_url);
+        det.ollama_model = Some(model);
     }
 
     // Installed coding-agent CLIs — reuses `agent_discover()` (registry
@@ -257,9 +374,14 @@ fn backend_for_kind(
                 .ollama
                 .clone()
                 .unwrap_or_else(|| "http://localhost:11434".into()),
-            // 1B-class model — fast enough to feel real-time, smart
-            // enough to write a one-sentence commit message.
-            model: "llama3.2:1b".to_string(),
+            // The small tier we confirmed is actually pulled (see
+            // `probe_ollama_model`). The literal is only a last-ditch default
+            // for the (unreachable here) case where the kind is Ollama yet no
+            // model was recorded.
+            model: det
+                .ollama_model
+                .clone()
+                .unwrap_or_else(|| "llama3.2:1b".to_string()),
         },
         InferenceBackendKind::AgentCli => {
             // The active agent kind is whichever the UI marked, else the
@@ -386,7 +508,7 @@ async fn infer_ollama(
     let client = http_client();
     let body = json!({
         "model": model,
-        "system": SYSTEM_PROMPT,
+        "system": ctx.system_prompt(),
         "prompt": ctx.into_user_prompt(),
         "stream": false,
         "options": { "num_predict": 60, "temperature": 0.2 },
@@ -418,7 +540,7 @@ async fn infer_anthropic(
         "model": model,
         "max_tokens": 60,
         "temperature": 0.2,
-        "system": SYSTEM_PROMPT,
+        "system": ctx.system_prompt(),
         "messages": [{ "role": "user", "content": ctx.into_user_prompt() }],
     });
     let res = client
@@ -452,7 +574,7 @@ async fn infer_openai(
         "temperature": 0.2,
         "max_tokens": 60,
         "messages": [
-            { "role": "system", "content": SYSTEM_PROMPT },
+            { "role": "system", "content": ctx.system_prompt() },
             { "role": "user", "content": ctx.into_user_prompt() },
         ],
     });
@@ -485,7 +607,7 @@ async fn infer_gemini(
         "https://generativelanguage.googleapis.com/v1beta/models/{}:generateContent?key={}",
         model, key
     );
-    let combined = format!("{}\n\n{}", SYSTEM_PROMPT, ctx.into_user_prompt());
+    let combined = format!("{}\n\n{}", ctx.system_prompt(), ctx.into_user_prompt());
     let body = json!({
         "contents": [{ "parts": [{ "text": combined }] }],
         "generationConfig": { "temperature": 0.2, "maxOutputTokens": 60 },
@@ -509,7 +631,7 @@ async fn infer_gemini(
 
 async fn infer_mercury(key: &str, ctx: &InferContext) -> Result<String, InferError> {
     let client = http_client();
-    let combined = format!("{}\n\n{}", SYSTEM_PROMPT, ctx.into_user_prompt());
+    let combined = format!("{}\n\n{}", ctx.system_prompt(), ctx.into_user_prompt());
     let body = json!({
         "model": "mercury-2",
         "prompt": combined,
@@ -541,19 +663,52 @@ fn http_client() -> reqwest::Client {
         .unwrap_or_else(|_| reqwest::Client::new())
 }
 
-async fn probe_ollama(url: &str) -> bool {
-    let client = match reqwest::Client::builder()
-        .timeout(Duration::from_millis(500))
+/// Probe Ollama and, only if it's up AND has at least one model pulled, return
+/// the model we'll call. Prefers a small, fast tier (a `llama3.2` if present)
+/// but accepts whatever is actually installed, so a machine with only a bigger
+/// model still gets real output. Returns `None` when Ollama is unreachable OR
+/// has an empty model list — the caller then falls through to the next backend
+/// rather than locking onto an Ollama that will 404 every request.
+async fn probe_ollama_model(url: &str) -> Option<String> {
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_millis(700))
         .build()
-    {
-        Ok(c) => c,
-        Err(_) => return false,
-    };
+        .ok()?;
     let endpoint = format!("{}/api/tags", url.trim_end_matches('/'));
-    matches!(
-        client.get(&endpoint).send().await,
-        Ok(r) if r.status().is_success()
-    )
+    let resp = client.get(&endpoint).send().await.ok()?;
+    if !resp.status().is_success() {
+        return None;
+    }
+    let tags: OllamaTags = resp.json().await.ok()?;
+    let names: Vec<String> = tags
+        .models
+        .into_iter()
+        .map(|m| m.name)
+        .filter(|n| !n.is_empty())
+        .collect();
+    if names.is_empty() {
+        return None;
+    }
+    // Prefer a small llama3.2 tier; else the first pulled model.
+    names
+        .iter()
+        .find(|n| n.starts_with("llama3.2"))
+        .or_else(|| names.iter().find(|n| n.contains("llama3.2")))
+        .or_else(|| names.first())
+        .cloned()
+}
+
+/// Minimal shape of Ollama's `/api/tags` response — only the model names.
+#[derive(Debug, Default, Deserialize)]
+struct OllamaTags {
+    #[serde(default)]
+    models: Vec<OllamaTagModel>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct OllamaTagModel {
+    #[serde(default)]
+    name: String,
 }
 
 #[derive(Debug, Default, Deserialize)]

@@ -10,10 +10,16 @@
 // `editor.openPrDetail` (fromInbox stays false, so closing the detail
 // doesn't try to pop back to a center inbox that no longer exists here).
 //
+// The header count and the default "All" view reflect OPEN pull requests
+// only — merged/closed history no longer inflates the number (it reads as
+// PRs "from other projects"). Merged/closed stay reachable via their bucket
+// chips, which bucketize the full list. The whole section is collapsible via
+// the header chevron (owned by the host so it can reclaim the height).
+//
 // Data layer is shared with InboxPane through `prsCache`, so the two
 // never double-fetch and a label/approve elsewhere repaints this list.
 
-import { useCallback, useEffect, useMemo, useReducer, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { type PrSummary } from "../../lib/api";
 import {
   fetchPrList,
@@ -30,14 +36,23 @@ import {
 } from "../workpanes/InboxPane";
 import { useEditorStore } from "../../lib/editorStore";
 import { GhErrorNotice } from "../github/GhErrorNotice";
-import { sendToAmbientManager } from "../../lib/focusManager";
-import { PR_FLOW_INITIAL, prFlowReduce, describePrFlowStage } from "../../lib/prFlowState";
-import { PR_SKILLS, buildPrSkillPrompt, type PrSkillId } from "../../lib/prSkills";
+import { Churn } from "../diff/Churn";
+import { AsciiSpinner } from "../ui/ascii-spinner";
 
 // "all" is the implicit default chip; the rest mirror the Inbox buckets.
 type Filter = "all" | Bucket;
 
-export function PrRailPanel({ repoRoot }: { repoRoot: string }) {
+export function PrRailPanel({
+  repoRoot,
+  collapsed = false,
+  onToggleCollapsed,
+}: {
+  repoRoot: string;
+  /** When true the panel renders only its header; the host reclaims the
+   *  freed height. Wired to the chevron when `onToggleCollapsed` is set. */
+  collapsed?: boolean;
+  onToggleCollapsed?: () => void;
+}) {
   const editor = useEditorStore();
   const cached = getPrListCached(repoRoot);
   const [prs, setPrs] = useState<PrSummary[]>(cached ?? []);
@@ -72,6 +87,13 @@ export function PrRailPanel({ repoRoot }: { repoRoot: string }) {
     [repoRoot],
   );
 
+  // OPEN PRs drive the count + the default "All" list; merged/closed history
+  // is excluded so the number matches what's actually listed and actionable.
+  const openPrs = useMemo(
+    () => prs.filter((p) => p.state.toLowerCase() === "open"),
+    [prs],
+  );
+  // Buckets still see the full list so the Merged chip keeps working.
   const buckets = useMemo(() => bucketize(prs), [prs]);
   // Only surface chips that actually have PRs — an empty repo shows just
   // "All", not seven zero-count buckets.
@@ -82,7 +104,7 @@ export function PrRailPanel({ repoRoot }: { repoRoot: string }) {
 
   const rows =
     filter === "all"
-      ? [...prs].sort(
+      ? [...openPrs].sort(
           (a, b) => Date.parse(b.updated_at) - Date.parse(a.updated_at),
         )
       : buckets[filter];
@@ -90,52 +112,40 @@ export function PrRailPanel({ repoRoot }: { repoRoot: string }) {
   const selected =
     editor.selectedPr?.repoRoot === repoRoot ? editor.selectedPr.number : null;
 
-  // Parity W8 — PR copilot. Skill buttons expand a prompt template (repo
-  // override-able) and dispatch it into the project's ambient Manager chat.
-  // The local reducer drives the observable subset of the PR flow protocol
-  // (idle → collecting_context → drafting); once the brain has the prompt it
-  // owns the rest, so we RESET. FAIL sticks with the error until dismissed.
-  const [flow, dispatchFlow] = useReducer(prFlowReduce, PR_FLOW_INITIAL);
-  const [copilotError, setCopilotError] = useState<string | null>(null);
-  const copilotBusy = flow.stage !== "idle" && flow.stage !== "failed";
-
-  const runSkill = useCallback(
-    async (skillId: PrSkillId) => {
-      const skill = PR_SKILLS.find((s) => s.id === skillId);
-      if (!skill) return;
-      setCopilotError(null);
-      dispatchFlow({ type: "START" });
-      try {
-        const pr =
-          selected != null ? (prs.find((p) => p.number === selected) ?? null) : null;
-        const prompt = await buildPrSkillPrompt(
-          repoRoot,
-          skill,
-          pr ? { prNumber: pr.number, title: pr.title, headRef: pr.head_ref } : {},
-        );
-        dispatchFlow({ type: "CONTEXT_READY" });
-        await sendToAmbientManager(repoRoot, prompt);
-        // Prompt delivered — the brain owns the flow from here.
-        dispatchFlow({ type: "RESET" });
-      } catch (e) {
-        const msg = e instanceof Error ? e.message : String(e);
-        dispatchFlow({ type: "FAIL", error: msg });
-        setCopilotError(msg);
-      }
-    },
-    [prs, repoRoot, selected],
-  );
-
   return (
     <div className="h-full flex flex-col bg-bg-content">
-      {/* Header */}
+      {/* Header — click the title/chevron to collapse the whole section */}
       <div className="flex items-center gap-2 h-9 px-3 border-b border-line-soft shrink-0">
-        <span className="text-text-1 text-[12px] font-semibold">
-          Pull requests
-        </span>
-        <span className="text-text-4 text-[11px] tabular-nums">
-          {prs.length}
-        </span>
+        <button
+          type="button"
+          onClick={onToggleCollapsed}
+          disabled={!onToggleCollapsed}
+          title={collapsed ? "Expand pull requests" : "Collapse pull requests"}
+          className="flex items-center gap-1.5 min-w-0 text-text-1 hover:text-text-1 disabled:cursor-default"
+        >
+          {onToggleCollapsed && (
+            <svg
+              width="11"
+              height="11"
+              viewBox="0 0 16 16"
+              fill="none"
+              className={`text-text-4 transition-transform ${collapsed ? "-rotate-90" : ""}`}
+              aria-hidden
+            >
+              <path
+                d="M4 6l4 4 4-4"
+                stroke="currentColor"
+                strokeWidth="1.4"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+              />
+            </svg>
+          )}
+          <span className="text-[12px] font-semibold">Pull requests</span>
+          <span className="text-text-4 text-[11px] tabular-nums">
+            {openPrs.length}
+          </span>
+        </button>
         <button
           type="button"
           onClick={() => void refresh(true)}
@@ -155,99 +165,63 @@ export function PrRailPanel({ repoRoot }: { repoRoot: string }) {
         </button>
       </div>
 
-      {/* Filter chips — the bucket "views" */}
-      {activeChips.length > 0 && (
-        <div className="flex flex-wrap gap-1 px-2.5 py-2 border-b border-line-soft/60 shrink-0">
-          <Chip
-            label="All"
-            count={prs.length}
-            dot={null}
-            active={filter === "all"}
-            onClick={() => setFilter("all")}
-          />
-          {activeChips.map((b) => (
-            <Chip
-              key={b}
-              label={BUCKET_LABEL[b]}
-              count={buckets[b].length}
-              dot={BUCKET_DOT[b]}
-              active={filter === b}
-              onClick={() => setFilter(b)}
-            />
-          ))}
-        </div>
-      )}
-
-      {/* List */}
-      <div className="flex-1 min-h-0 overflow-y-auto">
-        {loading && prs.length === 0 ? (
-          <Hint>Loading PRs…</Hint>
-        ) : error ? (
-          <GhErrorNotice error={error} onRetry={() => void refresh(true)} />
-        ) : rows.length === 0 ? (
-          <Hint>
-            {filter === "all"
-              ? "No open pull requests."
-              : `Nothing in “${BUCKET_LABEL[filter]}”.`}
-          </Hint>
-        ) : (
-          rows.map((p) => (
-            <Row
-              key={p.number}
-              row={p}
-              selected={p.number === selected}
-              onSelect={() => editor.openPrDetail(repoRoot, p.number, p.title)}
-            />
-          ))
-        )}
-      </div>
-
-      {/* Ask Aura — PR skills dispatched into the ambient Manager chat */}
-      <div className="border-t border-line-soft px-2.5 py-2 shrink-0">
-        <div className="flex items-center gap-1.5 mb-1.5">
-          <span className="text-[10px] uppercase tracking-wide text-text-4 font-medium">
-            Ask Aura about this PR
-          </span>
-          {copilotBusy && (
-            <span className="text-[10px] text-text-3">
-              {describePrFlowStage(flow.stage)}
-            </span>
+      {collapsed ? null : (
+        <>
+          {/* Filter chips — the bucket "views" */}
+          {activeChips.length > 0 && (
+            <div className="flex flex-wrap gap-1 px-2.5 py-2 border-b border-line-soft/60 shrink-0">
+              <Chip
+                label="All"
+                count={openPrs.length}
+                dot={null}
+                active={filter === "all"}
+                onClick={() => setFilter("all")}
+              />
+              {activeChips.map((b) => (
+                <Chip
+                  key={b}
+                  label={BUCKET_LABEL[b]}
+                  count={buckets[b].length}
+                  dot={BUCKET_DOT[b]}
+                  active={filter === b}
+                  onClick={() => setFilter(b)}
+                />
+              ))}
+            </div>
           )}
-          <span className="ml-auto text-[10px] text-text-4 truncate">
-            {selected != null ? `#${selected}` : "current branch"}
-          </span>
-        </div>
-        <div className="flex flex-wrap gap-1">
-          {PR_SKILLS.map((s) => (
-            <button
-              key={s.id}
-              type="button"
-              disabled={copilotBusy}
-              title={s.summary}
-              onClick={() => void runSkill(s.id)}
-              className="px-2 py-1 rounded-md text-[11px] border border-line-soft text-text-2 hover:bg-bg-2 hover:text-text-1 transition-colors disabled:opacity-50"
-            >
-              {s.label}
-            </button>
-          ))}
-        </div>
-        {flow.stage === "failed" && copilotError && (
-          <div className="mt-1.5 flex items-start gap-1.5 text-[11px] text-red-400">
-            <span className="flex-1 break-words">{copilotError}</span>
-            <button
-              type="button"
-              title="Dismiss"
-              onClick={() => {
-                setCopilotError(null);
-                dispatchFlow({ type: "RESET" });
-              }}
-              className="shrink-0 text-text-4 hover:text-text-1"
-            >
-              ✕
-            </button>
+
+          {/* List */}
+          <div className="flex-1 min-h-0 overflow-y-auto">
+            {loading && prs.length === 0 ? (
+              <Hint>
+                <span className="inline-flex items-center gap-1.5">
+                  <AsciiSpinner className="text-[10px]" />
+                  Looking for pull requests…
+                </span>
+              </Hint>
+            ) : error ? (
+              <GhErrorNotice error={error} onRetry={() => void refresh(true)} />
+            ) : rows.length === 0 ? (
+              <Hint>
+                {filter === "all"
+                  ? "No open pull requests."
+                  : `Nothing in “${BUCKET_LABEL[filter]}”.`}
+              </Hint>
+            ) : (
+              rows.map((p) => (
+                <Row
+                  key={p.number}
+                  row={p}
+                  selected={p.number === selected}
+                  onSelect={() =>
+                    editor.openPrDetail(repoRoot, p.number, p.title)
+                  }
+                />
+              ))
+            )}
           </div>
-        )}
-      </div>
+        </>
+      )}
     </div>
   );
 }
@@ -291,19 +265,20 @@ function Row({
   selected: boolean;
   onSelect: () => void;
 }) {
+  // Colour only where it means "this needs you": a risky change is red, a
+  // slightly risky one amber, and "nothing to flag" stays on the neutral ramp
+  // rather than painting a green dot on every quiet row.
   const risk =
-    row.aura_risk_score === null
-      ? "bg-text-4/40"
-      : row.aura_risk_score > 60
-        ? "bg-red-500"
-        : row.aura_risk_score > 0
-          ? "bg-yellow-500"
-          : "bg-green-500";
+    row.aura_risk_score !== null && row.aura_risk_score > 60
+      ? "bg-red"
+      : row.aura_risk_score !== null && row.aura_risk_score > 0
+        ? "bg-amber"
+        : "bg-text-4/40";
   const decisionTone =
     row.review_decision === "APPROVED"
-      ? "text-green-400"
+      ? "text-accent-green"
       : row.review_decision === "CHANGES_REQUESTED"
-        ? "text-red-400"
+        ? "text-red"
         : "text-text-4";
   return (
     <button
@@ -334,19 +309,25 @@ function Row({
           <span
             className={`w-1.5 h-1.5 rounded-full shrink-0 ${
               row.checks_state === "success"
-                ? "bg-green-500"
+                ? "bg-accent-green"
                 : row.checks_state === "failure"
-                  ? "bg-red-500"
-                  : "bg-yellow-500"
+                  ? "bg-red"
+                  : "bg-amber"
             }`}
-            title={`CI ${row.checks_state}`}
+            title={
+              row.checks_state === "success"
+                ? "Checks passed"
+                : row.checks_state === "failure"
+                  ? "Checks failed"
+                  : "Checks still running"
+            }
           />
         )}
-        <span className="ml-auto tabular-nums shrink-0">
-          <span className="text-green-400">+{row.additions}</span>
-          <span className="text-text-4"> </span>
-          <span className="text-red-400">−{row.deletions}</span>
-        </span>
+        <Churn
+          additions={row.additions}
+          deletions={row.deletions}
+          className="ml-auto text-[11px]"
+        />
       </div>
     </button>
   );

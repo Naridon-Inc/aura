@@ -12,6 +12,7 @@
 
 import { useCallback, useEffect, useState } from "react";
 import { api, type Module } from "../../lib/api";
+import { AsciiSpinner } from "../ui/ascii-spinner";
 import { Button } from "../ui/button";
 import { Input } from "../ui/input";
 
@@ -85,13 +86,18 @@ export function ModuleSidebarPanel({
         </Button>
       </div>
       {loading && modules.length === 0 ? (
-        <div className="px-2 py-1 text-[11px] text-text-5">Loading…</div>
+        <div className="flex items-center gap-1.5 px-2 py-1 text-[11px] text-text-4">
+          <AsciiSpinner />
+          Loading…
+        </div>
       ) : error ? (
-        <div className="px-2 py-1 text-[11px] text-red-400" title={error}>
-          (failed to load)
+        <div className="px-2 py-1 text-[11px] text-red" title={error}>
+          Couldn't load modules.
         </div>
       ) : ordered.length === 0 ? (
-        <div className="px-2 py-1 text-[11px] text-text-5">No modules yet</div>
+        <div className="px-2 py-1 text-[11px] text-text-4 leading-snug">
+          No modules yet — use <span className="text-text-3">+ New</span> to start one.
+        </div>
       ) : (
         <ul className="flex flex-col">
           {ordered.map((m) => (
@@ -137,10 +143,10 @@ function ModuleRow({
 }) {
   const tone =
     mod.status === "in_progress"
-      ? "border-l-amber-500"
+      ? "border-l-accent"
       : mod.status === "completed"
         ? "border-l-text-5"
-        : "border-l-sky-500";
+        : "border-l-text-4";
   return (
     <li className="group">
       <button
@@ -163,7 +169,7 @@ function ModuleRow({
             e.stopPropagation();
             onDelete();
           }}
-          className="opacity-0 group-hover:opacity-100 text-text-5 hover:text-red-400 text-[10px] px-1"
+          className="opacity-0 group-hover:opacity-100 text-text-5 hover:text-red text-[10px] px-1"
           title="Delete module"
           aria-label={`Delete module ${mod.name}`}
         >

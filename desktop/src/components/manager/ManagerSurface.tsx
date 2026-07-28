@@ -14,8 +14,10 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { useManagerSession } from "../../lib/managerStore";
 import { useEditorStore } from "../../lib/editorStore";
 import { stripSteeringDirective } from "../../lib/steeringDirective";
+import { AsciiSpinner } from "../ui/ascii-spinner";
 import {
   api,
+  type AgentDescriptor,
   type AgentInfo,
   type ClaudeSession,
   type ManagerOverrideMode,
@@ -37,6 +39,7 @@ import { Badge } from "../ui/badge";
 import { Button } from "../ui/button";
 import { AgentIcon } from "../agent/AgentIcon";
 import { ResumeElsewhere } from "./chat/ResumeElsewhere";
+import { computeResumePortability } from "./chat/resumePortability";
 
 const DETAILS_PREF = "aura.manager.details_open";
 const LOOP_PREF = "aura.manager.loop_open";
@@ -79,7 +82,7 @@ function LoadingSession({ sessionId }: { sessionId: string }) {
   return (
     <div className="h-full w-full flex items-center justify-center bg-bg-0">
       <div className="flex max-w-[300px] flex-col items-center gap-3 px-6 text-center">
-        <div className="h-5 w-5 rounded-full border-2 border-line border-t-text-3 animate-spin" />
+        <AsciiSpinner />
         <div className="text-[13px] text-text-2">
           Loading conversation…
           {elapsed >= 3 && <span className="text-text-4"> · {elapsed}s</span>}
@@ -230,6 +233,23 @@ export function ManagerSurface({
   // multi-agent → replicated into every agent it used). The sheet loads the
   // installed-agent list itself.
   const [showResume, setShowResume] = useState(false);
+  // Installed-agent list, only so the header can offer a one-click "take this
+  // agent out" when the chat ran on exactly one resumable CLI. Loaded once;
+  // the portability read below is pure over (chat, agents).
+  const [agents, setAgents] = useState<AgentDescriptor[]>([]);
+
+  useEffect(() => {
+    let live = true;
+    void api
+      .agentsList()
+      .then((list) => {
+        if (live) setAgents(list);
+      })
+      .catch(() => {});
+    return () => {
+      live = false;
+    };
+  }, []);
 
   useEffect(() => {
     localStorage.setItem(DETAILS_PREF, showDetails ? "1" : "0");
@@ -307,6 +327,20 @@ export function ManagerSurface({
         ? "green"
         : "faint";
 
+  // "Take them out" fast path: when this chat ran on exactly ONE resumable CLI
+  // (Claude / Gemini / Codex, installed), offer a first-class header button to
+  // pop that single agent out into its own standalone session — which also
+  // writes it into that CLI's native resume store (`chat_export_for_agent`), so
+  // it shows up in e.g. `claude --resume`. The `aura:open-chat-in-agent` event
+  // is the same one the "Resume this chat elsewhere" sheet fires; App.tsx both
+  // exports to the CLI store and opens the standalone agent tab. The ⋯ menu keeps
+  // the full sheet for the multi-agent / advanced case.
+  const portability = computeResumePortability(session.chat ?? [], agents);
+  const soloAgent =
+    portability.kind === "single" && portability.used[0]?.canResume
+      ? portability.used[0]
+      : null;
+
   return (
     <div className="aura-chat panel h-full w-full">
       <ChatIconsSprite />
@@ -359,6 +393,42 @@ export function ManagerSurface({
             onClick={onNewThread}
           >
             <svg className="ico"><use href="#i-plus" /></svg>
+          </button>
+        )}
+        {soloAgent && (
+          <button
+            type="button"
+            className="icon-btn"
+            title={`Take ${soloAgent.label} out — reopens as a standalone ${soloAgent.label} session, and shows up in its CLI resume list`}
+            aria-label={`Take ${soloAgent.label} out`}
+            onClick={() => {
+              window.dispatchEvent(
+                new CustomEvent("aura:open-chat-in-agent", {
+                  detail: {
+                    sessionId,
+                    agentId: soloAgent.agentId,
+                    agentLabel: soloAgent.label,
+                  },
+                }),
+              );
+            }}
+          >
+            {/* A box with an arrow leaving it — "take this one out". */}
+            <svg width="13" height="13" viewBox="0 0 16 16" fill="none">
+              <path
+                d="M8.5 2.75H3.5A1.25 1.25 0 0 0 2.25 4v8.5A1.25 1.25 0 0 0 3.5 13.75h8.5A1.25 1.25 0 0 0 13.25 12.5v-5"
+                stroke="currentColor"
+                strokeWidth="1.2"
+                strokeLinecap="round"
+              />
+              <path
+                d="M9.5 2.75h4v4M13 3.25 7.75 8.5"
+                stroke="currentColor"
+                strokeWidth="1.2"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+              />
+            </svg>
           </button>
         )}
         <div ref={menuRef} className="relative">
@@ -622,7 +692,10 @@ function SessionHistoryButton({
             Resume a conversation
           </div>
           {sessions === null ? (
-            <div className="px-3 py-3 text-text-3">Loading…</div>
+            <div className="flex items-center gap-1.5 px-3 py-3 text-text-3">
+              <AsciiSpinner />
+              Loading…
+            </div>
           ) : sessions.length === 0 ? (
             <div className="px-3 py-3 text-text-3">No past conversations yet.</div>
           ) : (
@@ -713,11 +786,11 @@ function SessionHistoryButton({
 }
 
 const HISTORY_DOT: Record<ManagerStatus, string> = {
-  awaiting_approval: "bg-amber-400",
-  running: "bg-sky-400",
+  awaiting_approval: "bg-accent",
+  running: "bg-accent animate-pulse",
   paused: "bg-text-4",
-  completed: "bg-emerald-400",
-  cancelled: "bg-rose-400",
+  completed: "bg-text-4",
+  cancelled: "bg-text-5",
 };
 
 // Compact relative time for session rows. `secs` is a unix-seconds stamp
@@ -742,8 +815,8 @@ function MenuItem({
 }) {
   const cls =
     tone === "danger"
-      ? "text-rose-300 hover:bg-rose-500/10"
-      : "text-fg-strong hover:bg-bg-elev";
+      ? "text-red hover:bg-red/10"
+      : "text-text-1 hover:bg-bg-2";
   return (
     <button className={`block w-full text-left px-3 py-1.5 ${cls}`} onClick={onClick}>
       {label}
@@ -780,7 +853,7 @@ function DetailsPane({
     <div className="flex-1 min-h-0 flex flex-col">
       <div className="flex-1 min-h-0 overflow-auto p-3 border-b border-line-soft">
         {session.tasks.length === 0 ? (
-          <div className="text-fg-muted text-xs">
+          <div className="text-text-3 text-xs">
             No tasks yet. Ask the Manager to do something.
           </div>
         ) : (
@@ -873,11 +946,11 @@ function UsageChip({ session }: { session: ManagerSession }) {
       title={tooltip}
       className="flex items-center gap-1.5 text-[10.5px] px-2 py-0.5 rounded border border-line-soft"
     >
-      <span className="font-medium text-fg-strong tabular-nums">
+      <span className="font-medium text-text-1 tabular-nums">
         {formatTokens(total)}
       </span>
-      <span className="text-fg-muted">·</span>
-      <span className="font-medium text-emerald-300 tabular-nums">
+      <span className="text-text-3">·</span>
+      <span className="font-medium text-text-2 tabular-nums">
         {formatCost(agg.totalCostUsd)}
       </span>
     </div>
@@ -959,20 +1032,20 @@ function TaskCard({
       unlistenP.then((u) => u()).catch(() => {});
     };
   }, [sessionId, task.id, task.status]);
-  const ringClass = selected ? "ring-1 ring-emerald-400/60" : "";
+  const ringClass = selected ? "ring-1 ring-accent/50" : "";
   return (
     <div
       ref={cardRef}
-      className={`relative rounded border ${TASK_BORDER[task.status] ?? "border-line-soft"} ${ringClass} bg-bg-elev p-2 min-w-[180px] max-w-[260px] cursor-pointer hover:bg-bg-chrome`}
+      className={`relative rounded border ${TASK_BORDER[task.status] ?? "border-line-soft"} ${ringClass} bg-bg-3 p-2 min-w-[180px] max-w-[260px] cursor-pointer hover:bg-bg-chrome`}
       onClick={onSelect}
     >
       <div className="flex items-center justify-between gap-2">
         <div className="flex items-center gap-1.5 min-w-0">
-          <div className={`h-2 w-2 rounded-full flex-none ${TASK_DOT[task.status] ?? "bg-fg-muted"}`} />
+          <div className={`h-2 w-2 rounded-full flex-none ${TASK_DOT[task.status] ?? "bg-text-4"}`} />
           <Badge variant="muted">{task.agent_id ?? "auto"}</Badge>
         </div>
         <button
-          className="flex items-center justify-center w-5 h-5 rounded text-fg-muted hover:text-fg-strong hover:bg-bg-2 flex-shrink-0"
+          className="flex items-center justify-center w-5 h-5 rounded text-text-3 hover:text-text-1 hover:bg-bg-2 flex-shrink-0"
           onClick={(e) => {
             e.stopPropagation();
             setOpen((v) => !v);
@@ -986,7 +1059,7 @@ function TaskCard({
           </svg>
         </button>
       </div>
-      <div className="text-fg-strong t-sm mt-1.5 line-clamp-3">{task.description}</div>
+      <div className="text-text-1 t-sm mt-1.5 line-clamp-3">{task.description}</div>
       {(task.depends_on.length > 0 ||
         task.worktree_path ||
         task.a2a_task_id ||
@@ -1028,7 +1101,7 @@ function TaskCard({
             >
               <span
                 className={`inline-block h-1.5 w-1.5 rounded-full mr-1 align-middle ${
-                  pulse ? "bg-emerald-400" : "bg-fg-muted"
+                  pulse ? "bg-accent" : "bg-text-4"
                 } ${pulse ? "animate-pulse" : ""}`}
               />
               ≈{liveCount} lines
@@ -1085,11 +1158,11 @@ function RatingButtons({
       });
   };
   const baseCls =
-    "inline-flex items-center justify-center h-5 w-5 rounded text-fg-muted hover:text-fg-strong hover:bg-bg-chrome transition-colors";
+    "inline-flex items-center justify-center h-5 w-5 rounded text-text-3 hover:text-text-1 hover:bg-bg-chrome transition-colors";
   return (
     <div className="flex items-center gap-1 mt-1.5" onClick={(e) => e.stopPropagation()}>
       <button
-        className={`${baseCls} ${current === 1 ? "text-emerald-400 hover:text-emerald-300" : ""}`}
+        className={`${baseCls} ${current === 1 ? "text-text-1" : ""}`}
         onClick={(e) => fire(1, e)}
         title="Mark this task's output as good — feeds the cross-project skill ledger"
         aria-label="Thumbs up"
@@ -1100,7 +1173,7 @@ function RatingButtons({
         </svg>
       </button>
       <button
-        className={`${baseCls} ${current === -1 ? "text-rose-400 hover:text-rose-300" : ""}`}
+        className={`${baseCls} ${current === -1 ? "text-text-1" : ""}`}
         onClick={(e) => fire(-1, e)}
         title="Mark this task's output as bad — feeds the cross-project skill ledger"
         aria-label="Thumbs down"
@@ -1116,20 +1189,20 @@ function RatingButtons({
 
 const TASK_BORDER: Record<ManagerTaskStatus, string> = {
   pending: "border-line-soft",
-  running: "border-sky-500/50",
-  done: "border-emerald-500/40",
-  failed: "border-rose-500/50",
-  manual_pending: "border-amber-500/50",
-  skipped: "border-fg-muted/30",
+  running: "border-accent/40",
+  done: "border-line-soft",
+  failed: "border-red/50",
+  manual_pending: "border-accent/40",
+  skipped: "border-line-soft",
 };
 
 const TASK_DOT: Record<ManagerTaskStatus, string> = {
-  pending: "bg-fg-muted/40",
-  running: "bg-sky-400 animate-pulse",
-  done: "bg-emerald-400",
-  failed: "bg-rose-400",
-  manual_pending: "bg-amber-400",
-  skipped: "bg-fg-muted/40",
+  pending: "bg-text-4/40",
+  running: "bg-accent animate-pulse",
+  done: "bg-accent-green",
+  failed: "bg-red",
+  manual_pending: "bg-accent",
+  skipped: "bg-text-4/40",
 };
 
 function TaskActions({
@@ -1163,39 +1236,42 @@ function TaskActions({
     >
       {reassignOpen ? (
         <>
-          <div className="px-2 py-1 text-fg-muted">Pick agent:</div>
+          <div className="px-2 py-1 text-text-3">Pick agent:</div>
           {agents.length === 0 ? (
-            <div className="px-2 py-1 text-fg-muted">Loading…</div>
+            <div className="flex items-center gap-1.5 px-2 py-1 text-text-3">
+              <AsciiSpinner />
+              Loading…
+            </div>
           ) : (
             agents.map((a) => (
               <button
                 key={a.id}
-                className="block w-full text-left px-2 py-1 hover:bg-bg-elev"
+                className="block w-full text-left px-2 py-1 hover:bg-bg-2"
                 onClick={() => fire("reassign", a.id)}
               >
                 {a.label}
               </button>
             ))
           )}
-          <button className="block w-full text-left px-2 py-1 hover:bg-bg-elev" onClick={() => setReassignOpen(false)}>
+          <button className="block w-full text-left px-2 py-1 hover:bg-bg-2" onClick={() => setReassignOpen(false)}>
             Back
           </button>
         </>
       ) : (
         <>
-          <button className="block w-full text-left px-2 py-1 hover:bg-bg-elev" onClick={() => fire("rerun")}>
+          <button className="block w-full text-left px-2 py-1 hover:bg-bg-2" onClick={() => fire("rerun")}>
             Rerun
           </button>
-          <button className="block w-full text-left px-2 py-1 hover:bg-bg-elev" onClick={() => fire("skip")}>
+          <button className="block w-full text-left px-2 py-1 hover:bg-bg-2" onClick={() => fire("skip")}>
             Skip
           </button>
-          <button className="block w-full text-left px-2 py-1 hover:bg-bg-elev" onClick={() => setReassignOpen(true)}>
+          <button className="block w-full text-left px-2 py-1 hover:bg-bg-2" onClick={() => setReassignOpen(true)}>
             Reassign…
           </button>
-          <button className="block w-full text-left px-2 py-1 hover:bg-bg-elev" onClick={() => fire("take_over")}>
+          <button className="block w-full text-left px-2 py-1 hover:bg-bg-2" onClick={() => fire("take_over")}>
             Take over
           </button>
-          <button className="block w-full text-left px-2 py-1 hover:bg-bg-elev" onClick={onClose}>
+          <button className="block w-full text-left px-2 py-1 hover:bg-bg-2" onClick={onClose}>
             Close
           </button>
         </>
@@ -1252,35 +1328,35 @@ function TaskDetailPanel({
     <div className="h-full flex flex-col min-h-0">
       <div className="flex items-center justify-between px-3 py-2 border-b border-line-soft bg-bg-chrome">
         <div className="flex items-center gap-2 min-w-0">
-          <span className="text-[10px] uppercase tracking-wide text-fg-muted">Task #{task.id}</span>
-          <span className="text-fg-strong text-sm truncate">{task.description}</span>
+          <span className="text-[10px] uppercase tracking-wide text-text-3">Task #{task.id}</span>
+          <span className="text-text-1 text-sm truncate">{task.description}</span>
         </div>
         <Button
           variant="ghost"
           size="icon-sm"
-          className="text-fg-muted hover:text-fg-strong text-xs"
+          className="text-text-3 hover:text-text-1 text-xs"
           onClick={onClose}
         >
           ✕
         </Button>
       </div>
       <div className="flex-1 min-h-0 overflow-auto p-3">
-        <pre className="text-xs text-fg-strong whitespace-pre-wrap font-mono">{shown}</pre>
+        <pre className="text-xs text-text-1 whitespace-pre-wrap font-mono">{shown}</pre>
       </div>
       {(task.status === "manual_pending" || task.status === "failed") && (
         <div className="border-t border-line-soft p-3 flex flex-col gap-2">
-          <div className="text-[10px] uppercase tracking-wide text-fg-muted">
+          <div className="text-[10px] uppercase tracking-wide text-text-3">
             Mark done manually
           </div>
           <textarea
-            className="w-full bg-bg-elev text-fg-strong text-xs rounded border border-line-soft px-2 py-1 outline-none focus:border-line"
+            className="w-full bg-bg-3 text-text-1 text-xs rounded border border-line-soft px-2 py-1 outline-none focus:border-line"
             rows={3}
             value={manualOutput}
             onChange={(e) => setManualOutput(e.target.value)}
             placeholder="What did you do? (becomes the task's relay summary)"
           />
           <button
-            className="self-end text-xs px-3 py-1 rounded bg-emerald-500/20 text-emerald-300 hover:bg-emerald-500/30 disabled:opacity-50"
+            className="self-end text-xs px-3 py-1 rounded bg-accent/15 text-accent transition-colors hover:bg-accent/25 disabled:opacity-50"
             onClick={submitManual}
             disabled={submitting || !manualOutput.trim()}
           >
@@ -1294,14 +1370,14 @@ function TaskDetailPanel({
 
 function RibbonList({ ribbon }: { ribbon: RibbonEntry[] }) {
   if (ribbon.length === 0) {
-    return <div className="text-fg-muted text-sm">No events yet.</div>;
+    return <div className="text-text-3 text-sm">No events yet.</div>;
   }
   return (
     <ol className="flex flex-col gap-1 text-xs">
       {[...ribbon].reverse().map((entry, idx) => (
         <li key={idx} className="flex items-start gap-2 py-0.5">
-          <span className="text-fg-muted shrink-0 w-14">{formatTime(entry.at)}</span>
-          <span className="text-fg-strong">{describeEvent(entry)}</span>
+          <span className="text-text-3 shrink-0 w-14">{formatTime(entry.at)}</span>
+          <span className="text-text-1">{describeEvent(entry)}</span>
         </li>
       ))}
     </ol>

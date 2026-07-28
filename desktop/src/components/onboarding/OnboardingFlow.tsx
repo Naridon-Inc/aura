@@ -29,12 +29,17 @@ export function OnboardingFlow() {
   const [step, setStep] = useState<Step>("signin");
   const [newBusy, setNewBusy] = useState(false);
 
-  // Auto-open on first launch.
+  // No longer auto-opens on first launch. First-run onboarding is now the
+  // pre-populated "Get Started" workspace (Recipe Box) the app boots onto —
+  // seeing a real project beats a four-screen walkthrough — so this flow is
+  // opt-in only, re-opened from Settings via the `aura:open-onboarding` event
+  // below. We still stamp COMPLETE_KEY so anything keying off "onboarded" reads
+  // true from the first launch.
   useEffect(() => {
     try {
-      if (localStorage.getItem(COMPLETE_KEY) !== "1") setOpen(true);
+      localStorage.setItem(COMPLETE_KEY, "1");
     } catch {
-      setOpen(true);
+      /* private mode — ignore */
     }
   }, []);
 

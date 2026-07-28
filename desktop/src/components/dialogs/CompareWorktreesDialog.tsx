@@ -18,6 +18,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { Dialog } from "../Dialog";
 import { Button } from "../ui/button";
+import { AsciiSpinner } from "../ui/ascii-spinner";
 import { Select } from "../ui/select";
 import { api } from "../../lib/api";
 import type { BranchDiffFile, WorktreeEntry } from "../../lib/api";
@@ -133,7 +134,10 @@ export function CompareWorktreesDialog({ open, repoRoot, onClose }: Props) {
         </div>
 
         {busy ? (
-          <div className="text-text-4 italic">loading parallel copies…</div>
+          <div className="flex items-center gap-1.5 text-text-4" role="status">
+            <AsciiSpinner className="text-[11px] leading-none" />
+            Looking for parallel copies…
+          </div>
         ) : candidates.length === 0 ? (
           <div className="text-text-4 italic">
             no other parallel copies on this project yet. Aura creates one
@@ -281,7 +285,10 @@ function ComparePane({
       </div>
       <div className="overflow-y-auto" style={{ maxHeight: 300 }}>
         {loading ? (
-          <div className="px-2 py-2 text-text-4 italic">loading…</div>
+          <div className="flex items-center gap-1.5 px-2 py-2 text-text-4" role="status">
+            <AsciiSpinner className="text-[11px] leading-none" />
+            Comparing the two copies…
+          </div>
         ) : files.length === 0 ? (
           <div className="px-2 py-2 text-text-4 italic">no changes</div>
         ) : (

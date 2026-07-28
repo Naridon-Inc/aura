@@ -12,6 +12,94 @@
  * generating. */
 @config "../tailwind.config.cjs";
 
+/* ── Mixrank Monaco — the product typeface ────────────────────────────
+ * Local assets only: the Tauri CSP blocks external hosts, so every face
+ * is bundled and resolved by Vite from this file's directory
+ * (src/styles.css → ./assets/fonts/*.woff2). No network, no FOUT after
+ * first paint, works offline.
+ *
+ * The family ships four functionally different members. They are NOT
+ * interchangeable — each is registered under its own real internal name
+ * (taken from the fonts' `name` table / the vendor fonts.css, not guessed):
+ *
+ *   "Mixrank Monaco Grotesk"  — the UI/text face. Variable wght 100–900
+ *       (+ wdth 62–125, left at its 100 default), 653 codepoints, real
+ *       kern/liga/tnum/zero. x-height 0.526em, tight 1.088em line box —
+ *       built for dense 10–20px chrome. This is what drives --font-sans.
+ *   "Mixrank Monaco Mono"     — genuine fixed-pitch (post.isFixedPitch=1;
+ *       1566 of 1573 glyphs share a 1233/2048 = 0.602em advance, the only
+ *       exceptions being NULL and five zero-advance combining marks).
+ *       Full box-drawing + block + powerline coverage. Leads --font-mono.
+ *   "Mixrank Monaco Display"  — optical Display cut of the editorial
+ *       (high-contrast, low x-height) side of the family. Variable
+ *       wght 400–900. Headline-only, exposed as the .t-display utility.
+ *   "Mixrank Monaco"          — the drawn 6-weight wordmark face from
+ *       fonts/web. WARNING: it maps only 129 codepoints — letters,
+ *       digits, accents, and a handful of marks. It has NO space, NO
+ *       colon, NO @#%&:;"'[]{}<>=+ and no OpenType features at all. It
+ *       is a brand face, not a text face; it must never lead --font-sans.
+ *       Exposed as .t-wordmark, which falls through to --font-sans for
+ *       the whitespace and punctuation it cannot render.
+ *
+ * The Text/Caption/Book/Subhead/Poster optical cuts are deliberately NOT
+ * bundled — see the note above --font-sans. */
+@font-face {
+  font-family: "Mixrank Monaco Grotesk";
+  src: url("./assets/fonts/MixrankMonacoGrotesk-Roman.woff2") format("woff2");
+  font-weight: 100 900;
+  font-style: normal;
+  font-display: swap;
+}
+@font-face {
+  font-family: "Mixrank Monaco Grotesk";
+  src: url("./assets/fonts/MixrankMonacoGrotesk-Italic.woff2") format("woff2");
+  font-weight: 100 900;
+  font-style: italic;
+  font-display: swap;
+}
+@font-face {
+  font-family: "Mixrank Monaco Mono";
+  src: url("./assets/fonts/MixrankMonacoMono-Regular.woff2") format("woff2");
+  font-weight: 400;
+  font-style: normal;
+  font-display: swap;
+}
+@font-face {
+  font-family: "Mixrank Monaco Display";
+  src: url("./assets/fonts/MixrankMonacoDisplay-Roman.woff2") format("woff2");
+  font-weight: 400 900;
+  font-style: normal;
+  font-display: swap;
+}
+@font-face {
+  font-family: "Mixrank Monaco";
+  src: url("./assets/fonts/MixrankMonaco-Regular.woff2") format("woff2");
+  font-weight: 400;
+  font-style: normal;
+  font-display: swap;
+}
+@font-face {
+  font-family: "Mixrank Monaco";
+  src: url("./assets/fonts/MixrankMonaco-Medium.woff2") format("woff2");
+  font-weight: 500;
+  font-style: normal;
+  font-display: swap;
+}
+@font-face {
+  font-family: "Mixrank Monaco";
+  src: url("./assets/fonts/MixrankMonaco-SemiBold.woff2") format("woff2");
+  font-weight: 600;
+  font-style: normal;
+  font-display: swap;
+}
+@font-face {
+  font-family: "Mixrank Monaco";
+  src: url("./assets/fonts/MixrankMonaco-Bold.woff2") format("woff2");
+  font-weight: 700;
+  font-style: normal;
+  font-display: swap;
+}
+
 /*
  * Design tokens — port of aura-term/src/theme.rs verbatim. Token names
  * mirror the Rust constants so the migration is one-to-one (BG_0 → bg-0,
@@ -62,8 +150,8 @@
      for a cool slate-cyan so file-modified glyphs read as "in flight"
      not "warning". Anthropic's caret orange remains for the agent
      monogram only (one ref) — not promoted to a UI accent. */
-  --color-accent:        #6aa5ff;  /* arctic blue — primary accent */
-  --color-accent-soft:   #1c2a3d;  /* deep navy — accent-tinted bg */
+  --color-accent:        #10b981;  /* Aura emerald — the one proper highlight */
+  --color-accent-soft:   #10261b;  /* emerald-tinted elevated — selected rows/banners */
   --color-accent-green:  #4dc1a4;  /* teal status dot */
   --color-amber:         #7eb6c8;  /* slate-cyan — dirty/modified marker */
   --color-red:           #d05a76;  /* cool magenta-red — error */
@@ -116,15 +204,33 @@
   --radius-xl: 5px;
   --radius-panel: 4px;  /* inner-content top-left bend into chrome */
 
-  /* fonts — JetBrains Mono leads the stack on identifier-heavy surfaces
-     (CodeMirror, BlockCard payloads, file names) so dev users with it
-     installed get the punchier identifier rendering Phase H targets;
-     others fall through to SF Mono / Menlo / Consolas without download
-     or layout shift. No webfont link to keep cold-start fast and
-     offline-clean. */
-  --font-mono: "JetBrains Mono", ui-monospace, "SF Mono", "Menlo", "Consolas", monospace;
-  --font-sans: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont,
-               "Segoe UI", "Helvetica Neue", sans-serif;
+  /* fonts — Mixrank Monaco leads both stacks; both faces are bundled
+     locally (see the @font-face block at the top) so there is no network
+     hop and no layout shift after first paint.
+
+     --font-mono: the Mono cut is genuinely fixed-pitch (verified: 1566 of
+     1573 glyphs at a uniform 0.602em advance), so it can lead safely.
+     The old chain is kept behind it verbatim and does real work: it
+     catches every codepoint outside the cut's 1548 (braille spinners,
+     ✓/✗) at JetBrains Mono's 0.600em advance, so mixed lines stay
+     column-aligned. CAVEAT: the cut ships ONE weight (400). CSS matches
+     family before weight, so bold code does NOT fall through to
+     JetBrains Mono — WebKit synthesises it (+1px advance at 13px). If
+     that ever misaligns a code column, the fix is one line here: drop
+     the Mono cut from this chain. NOTE: the xterm terminal and the agent
+     transcript set their own font-family in TSX, not this token.
+
+     --font-sans: the Grotesk cut, not the 6-weight `Mixrank Monaco`
+     wordmark face — the wordmark maps 129 codepoints and has no space or
+     colon glyph, so leading with it would fall back mid-string on nearly
+     every label in the app. Grotesk is the family's real text face:
+     variable 100–900, full punctuation, kern/liga/tnum. The Text/Caption
+     optical cuts are the editorial (high-contrast, 0.46em x-height) side
+     of the family — they are deliberately not used for small UI text,
+     where they would lose legibility against the 10–13px ladder below. */
+  --font-mono: "Mixrank Monaco Mono", "JetBrains Mono", ui-monospace, "SF Mono", "Menlo", "Consolas", monospace;
+  --font-sans: "Mixrank Monaco Grotesk", ui-sans-serif, system-ui, -apple-system,
+               BlinkMacSystemFont, "Segoe UI", "Helvetica Neue", sans-serif;
 
   /* motion — Phase H polish: every transition snaps to ≤150ms with an
      ease-out curve so panels feel decisive rather than draggy. Pair
@@ -279,6 +385,11 @@
   --color-text-5:     #d0d0d6;
   --color-line:       #e1e1e6;
   --color-line-soft:  #ececf1;
+  /* Emerald highlight, pulled deeper (emerald-600) so it holds contrast on a
+     white ground; white text rides on top of it. */
+  --color-accent:            #059669;
+  --color-accent-soft:       #e4f5ec;
+  --color-accent-foreground: #ffffff;
 }
 
 /* Modal-inspired variant — homage to modal.com's notebook/dashboard
@@ -392,11 +503,11 @@
      now, not ember). Surfaces are a faint green-black — green channel a
      hair above red/blue at this darkness, so the L-frame reads cool, not
      warm. bg-1 (chrome) sits one notch under bg-0 (content). */
-  --color-bg-0:       #0f1311;  /* content — sidebar/work/review/statusbar */
-  --color-bg-1:       #0a0e0c;  /* chrome — workspace rail + topbar */
-  --color-bg-2:       #1a201c;  /* hover — icon buttons, popover rows */
-  --color-bg-3:       #1e251f;  /* elevated — composer, dialog cards */
-  --color-bg-layer-3: #232a25;
+  --color-bg-0:       #101214;  /* content — sidebar/work/review/statusbar */
+  --color-bg-1:       #0b0d0f;  /* chrome — workspace rail + topbar */
+  --color-bg-2:       #191c20;  /* hover — icon buttons, popover rows */
+  --color-bg-3:       #1c2126;  /* elevated — composer, dialog cards */
+  --color-bg-layer-3: #22262b;
 
   --color-bg-deep:    var(--color-bg-1);
   --color-bg-chrome:  var(--color-bg-0);
@@ -405,23 +516,23 @@
   --color-bg-hover:   var(--color-bg-2);
 
   /* text — cool-neutral grey ramp (faintly green to sit on the surfaces) */
-  --color-text-1: #e8ebe8;
-  --color-text-2: #b2b6b2;
-  --color-text-3: #a3a8a3;
-  --color-text-4: #676b67;
-  --color-text-5: #383b38;
+  --color-text-1: #e7e9ec;
+  --color-text-2: #b0b3b8;
+  --color-text-3: #a1a5ab;
+  --color-text-4: #666a70;
+  --color-text-5: #373a40;
 
-  --color-line:      #282b27;
-  --color-line-soft: #1f221f;
+  --color-line:      #26292e;
+  --color-line-soft: #1d2024;
 
   /* semantic / brand — deep-green palette. The forest green is the
      primary UI accent. Success/verified/running is a brighter emerald so
      "good/done" stays distinct from the interactive brand green. WARNING
      stays warm amber and ERROR stays red on purpose — a green "warning"
      would read as success and break the verify surfaces' honesty. */
-  --color-accent:        #2f9e6b;  /* deep green — primary accent */
-  --color-accent-soft:   #10231a;  /* green-tinted bg — selected rows/banners */
-  --color-accent-green:  #34d399;  /* brighter emerald — success / verified / running */
+  --color-accent:        #10b981;  /* Aura emerald — the one proper highlight */
+  --color-accent-soft:   #10261b;  /* emerald-tinted elevated — selected rows/banners */
+  --color-accent-green:  #34d399;  /* semantic status only — success / verified / running */
   --color-amber:         #f59e0b;  /* warm amber — warning / dirty (unchanged) */
   --color-red:           #cc4444;
   --color-violet:        #7b68ee;  /* indigo */
@@ -430,24 +541,24 @@
   --color-green:         #6fc096;  /* diff-add, green */
   /* --color-caret-orange inherits the base clay (#d97757) — agent only */
 
-  /* composer surface — green slate */
-  --color-composer-bg:           #141815;
-  --color-composer-border:       #262926;
-  --color-composer-border-focus: #343834;
-  --color-pill-bg:               #1e251f;
-  --color-pill-bg-hover:         #28302a;
-  --color-pill-fg:               #c4c8c4;
-  --color-kbd-bg:                #1e251f;
-  --color-kbd-fg:                #c4c8c4;
+  /* composer surface — cool-neutral slate */
+  --color-composer-bg:           #14171b;
+  --color-composer-border:       #24272c;
+  --color-composer-border-focus: #33373d;
+  --color-pill-bg:               #1c2126;
+  --color-pill-bg-hover:         #262b30;
+  --color-pill-fg:               #c3c6cb;
+  --color-kbd-bg:                #1c2126;
+  --color-kbd-fg:                #c3c6cb;
 
   /* popover */
-  --color-popover-bg:        #141815;
-  --color-popover-border:    #262926;
-  --color-popover-row-hover: #1f231f;
+  --color-popover-bg:        #14171b;
+  --color-popover-border:    #24272c;
+  --color-popover-row-hover: #1d2024;
 
-  /* avatar — green-tinted project-identity tile */
-  --color-avatar-bg: #14271c;
-  --color-avatar-fg: #88d9a8;
+  /* avatar — neutral project-identity tile (monochrome) */
+  --color-avatar-bg: #22262c;
+  --color-avatar-fg: #b7bcc4;
 
   /* Re-point shadcn aliases so primitives (Dialog/Popover/Button) adopt
      the variant without component-level rewrites. */
@@ -458,12 +569,12 @@
   --color-popover:              var(--color-popover-bg);
   --color-popover-foreground:   var(--color-text-1);
   --color-primary:              var(--color-accent);
-  --color-primary-foreground:   #04140d;
+  --color-primary-foreground:   #071019;
   --color-secondary:            var(--color-bg-2);
   --color-secondary-foreground: var(--color-text-1);
   --color-muted:                var(--color-bg-2);
   --color-muted-foreground:     var(--color-text-3);
-  --color-accent-foreground:    #04140d;
+  --color-accent-foreground:    #06180d;
   --color-destructive:          var(--color-red);
   --color-destructive-foreground: var(--color-text-1);
   --color-border:               var(--color-line);
@@ -473,7 +584,7 @@
   --color-sidebar:                       var(--color-bg-1);
   --color-sidebar-foreground:            var(--color-text-2);
   --color-sidebar-primary:               var(--color-accent);
-  --color-sidebar-primary-foreground:    #04140d;
+  --color-sidebar-primary-foreground:    #071019;
   --color-sidebar-accent:                var(--color-bg-2);
   --color-sidebar-accent-foreground:     var(--color-text-1);
   --color-sidebar-border:                var(--color-line-soft);
@@ -482,24 +593,19 @@
   --focus-ring-color: color-mix(in srgb, var(--color-accent) 55%, transparent);
 }
 
-/* Conductor variant — homage to Conductor's (Melty Labs) all-projects
- * dashboard. Two moves that make it read "Conductor" not "Aura":
- *   1. A WARM near-black ramp (red channel a hair above green above blue
- *      at every darkness) instead of the arctic/forest cool defaults —
- *      values sampled straight from the app (#151110 → #2c2826).
- *   2. A green primary (Conductor's "New"/success green) with a brighter
- *      mint for live status, and a yellow "working" amber. Selectable,
- *      dark-only — pinned to dark in themeStore so .light never fights
- *      the palette. Only the colour axis is overridden; radii, fonts and
- *      the type scale stay shared with the base @theme so density holds. */
-.theme-conductor {
-  /* warm near-black surfaces. bg-1 (chrome — rail/topbar) is the deepest
-     board-canvas black; bg-0 (content) sits a notch up; cards lift again. */
-  --color-bg-0:       #1a1615;  /* content — sidebar/work/review/statusbar */
-  --color-bg-1:       #141110;  /* chrome — workspace rail + topbar (deepest) */
-  --color-bg-2:       #26221f;  /* hover — icon buttons, popover rows, selected */
-  --color-bg-3:       #2b2724;  /* elevated — cards, composer, dialog surfaces */
-  --color-bg-layer-3: #322d2a;
+/* Aura Emerald — the original forest-green Aura palette, kept as a selectable
+ * theme after the default went monochrome-white. Same neutral green-black
+ * surfaces as the default shell; the one move is a forest-emerald primary
+ * accent (buttons / selection / links / focus). Success stays a brighter mint
+ * so "done/verified" reads distinct from the interactive brand green, and
+ * warning-amber / error-red are untouched so the verify surfaces stay honest.
+ * Dark-only — pinned to dark in themeStore so .light never fights the palette. */
+.theme-emerald {
+  --color-bg-0:       #101214;  /* content — sidebar/work/review/statusbar */
+  --color-bg-1:       #0b0d0f;  /* chrome — workspace rail + topbar */
+  --color-bg-2:       #191c20;  /* hover — icon buttons, popover rows */
+  --color-bg-3:       #1c2126;  /* elevated — composer, dialog cards */
+  --color-bg-layer-3: #22262b;
 
   --color-bg-deep:    var(--color-bg-1);
   --color-bg-chrome:  var(--color-bg-0);
@@ -507,53 +613,43 @@
   --color-bg-card:    var(--color-bg-3);
   --color-bg-hover:   var(--color-bg-2);
 
-  /* text — warm-neutral grey ramp (a hair of red so it sits on the warm
-     surfaces rather than looking blue-grey against them). */
-  --color-text-1: #f3efeb;
-  --color-text-2: #b3aaa1;
-  --color-text-3: #8a827a;
-  --color-text-4: #5c554f;
-  --color-text-5: #37322e;
+  --color-text-1: #e7e9ec;
+  --color-text-2: #b0b3b8;
+  --color-text-3: #a1a5ab;
+  --color-text-4: #666a70;
+  --color-text-5: #373a40;
 
-  --color-line:      #322d29;
-  --color-line-soft: #221e1b;
+  --color-line:      #26292e;
+  --color-line-soft: #1d2024;
 
-  /* semantic / brand — Conductor greens + working-yellow. The medium
-     green is Conductor's "New"/primary. Success/verified/running is the
-     brighter mint status dot. WARNING stays warm yellow-amber (Conductor's
-     "in progress" glyph) and ERROR stays red so the verify surfaces keep
-     their honesty. */
-  --color-accent:        #2ea15a;  /* Conductor green — primary accent */
-  --color-accent-soft:   #16281c;  /* green-tinted bg — selected rows/banners */
-  --color-accent-green:  #4be885;  /* bright mint — success / verified / running */
-  --color-amber:         #ffd23d;  /* Conductor yellow — working / dirty */
-  --color-red:           #e8675c;
-  --color-violet:        #b39ae0;
-  --color-blue:          #7fb0e0;
-  --color-pink:          #d9a4d0;
-  --color-green:         #4be885;  /* diff-add, green */
+  /* forest-emerald primary; brighter mint for status; amber/red unchanged */
+  --color-accent:        #2f9e6b;  /* Aura emerald — primary accent */
+  --color-accent-soft:   #10261b;  /* green-tinted bg — selected rows/banners */
+  --color-accent-green:  #34d399;  /* success / verified / running (distinct) */
+  --color-amber:         #f59e0b;
+  --color-red:           #cc4444;
+  --color-violet:        #7b68ee;
+  --color-blue:          #78a6df;
+  --color-pink:          #c4a4e8;
+  --color-green:         #6fc096;
 
-  /* composer surface — warm slate */
-  --color-composer-bg:           #1a1615;
-  --color-composer-border:       #2a2521;
-  --color-composer-border-focus: #2f4a37;
-  --color-pill-bg:               #2b2724;
-  --color-pill-bg-hover:         #332e2a;
-  --color-pill-fg:               #cbc3ba;
-  --color-kbd-bg:                #2b2724;
-  --color-kbd-fg:                #cbc3ba;
+  --color-composer-bg:           #14171b;
+  --color-composer-border:       #24272c;
+  --color-composer-border-focus: #33373d;
+  --color-pill-bg:               #1c2126;
+  --color-pill-bg-hover:         #262b30;
+  --color-pill-fg:               #c3c6cb;
+  --color-kbd-bg:                #1c2126;
+  --color-kbd-fg:                #c3c6cb;
 
-  /* popover */
-  --color-popover-bg:        #1a1615;
-  --color-popover-border:    #2a2521;
-  --color-popover-row-hover: #26221f;
+  --color-popover-bg:        #14171b;
+  --color-popover-border:    #24272c;
+  --color-popover-row-hover: #1d2024;
 
-  /* avatar — green-tinted project-identity tile */
-  --color-avatar-bg: #16281c;
-  --color-avatar-fg: #7fe0a0;
+  /* avatar — emerald-tinted project-identity tile */
+  --color-avatar-bg: #15281f;
+  --color-avatar-fg: #8fd6b0;
 
-  /* Re-point shadcn aliases so primitives (Dialog/Popover/Button) adopt
-     the variant without component-level rewrites. */
   --color-background:           var(--color-bg-0);
   --color-foreground:           var(--color-text-1);
   --color-card:                 var(--color-bg-3);
@@ -583,6 +679,196 @@
   --color-sidebar-ring:                  var(--color-accent);
 
   --focus-ring-color: color-mix(in srgb, var(--color-accent) 55%, transparent);
+}
+
+/* Amber — the DEFAULT pack, and the one everyone lands on. Amber here is the
+ * *ground*, not the ink: the surfaces are a warm, amber-lit near-black, and
+ * three separate roles sit on top of it, each doing one job.
+ *
+ *   1. GROUND — amber. Red runs 7–11 steps over blue at every darkness, far
+ *      enough to be seen as warm rather than as neutral charcoal, and short
+ *      of the point where it turns brown. This is the pack's identity; when
+ *      the warmth is dialled out the whole thing reads as generic dark mode.
+ *   2. BUTTON — white (#faf7f2) with black ink. On an amber ground white is
+ *      the single brightest value available, so the thing you're meant to
+ *      press is found by luminance alone and needs no hue. It is wired to
+ *      --color-primary, deliberately NOT aliased to the accent.
+ *   3. ACCENT — a muted green (#6aa885, 6.4:1 on bg-0). The house colour,
+ *      used as a *tint*: focus rings, active markers, links, selected rows,
+ *      the composer's focus edge. Sparing on purpose — a green sprayed over
+ *      buttons and chrome both stops meaning anything and bleaches the warmth
+ *      out of the ground.
+ *
+ * Semantics are unchanged: mint stays success/verified/running, red stays
+ * failure, and --color-caret-orange inherits the base Anthropic clay for the
+ * agent monogram. Because the accent is green rather than amber, --color-amber
+ * (dirty/modified + warnings) is free to be a genuine warm amber again, which
+ * is what every other tool has trained people to read it as. Ships a real
+ * .light.theme-amber ground too. Only the colour axis is overridden; radii,
+ * fonts and the type scale stay shared with the base @theme so density
+ * holds. */
+.theme-amber {
+  /* Amber-lit near-black. The warmth is the pack's whole identity, so it has
+     to be *seen*: roughly 7–11 steps of red over blue, which reads as a warm
+     lamp on the surface rather than neutral charcoal — while staying dark
+     enough to be a night ground. bg-1 (chrome — rail/topbar) is the deepest;
+     bg-0 (content) sits a notch up; cards lift again. */
+  --color-bg-0:       #1c1815;  /* content — sidebar/work/review/statusbar */
+  --color-bg-1:       #15120f;  /* chrome — workspace rail + topbar (deepest) */
+  --color-bg-2:       #272220;  /* hover — icon buttons, popover rows, selected */
+  --color-bg-3:       #2d2724;  /* elevated — cards, composer, dialog surfaces */
+  --color-bg-layer-3: #342d28;
+
+  --color-bg-deep:    var(--color-bg-1);
+  --color-bg-chrome:  var(--color-bg-0);
+  --color-bg-content: var(--color-bg-0);
+  --color-bg-card:    var(--color-bg-3);
+  --color-bg-hover:   var(--color-bg-2);
+
+  /* text — warm-neutral grey ramp. The warmth is deliberately faint (4–8
+     steps of red over blue, not the 16–18 of the old pack) so the ramp
+     reads as grey on a warm ground, never as tan. text-3 is the AA floor
+     for body copy: 4.68:1 on bg-0. */
+  --color-text-1: #f0ece7;
+  --color-text-2: #bab5ad;
+  --color-text-3: #898279;
+  --color-text-4: #5a554d;
+  --color-text-5: #3b3732;
+
+  --color-line:      #302b26;
+  --color-line-soft: #282320;
+
+  /* semantic / brand — two jobs, deliberately split so neither swamps the
+     ground:
+       · The BUTTON is white with black ink (--color-primary below). On an
+         amber ground white is the single brightest thing on screen, so the
+         one thing you're meant to press needs no hue to be found.
+       · The ACCENT is a muted green — the house colour, kept as a *tint*:
+         focus rings, active markers, links, selected rows. Sparing on
+         purpose; a green that shows up everywhere stops meaning anything and
+         washes the warmth out of the ground.
+     With the accent no longer amber, the amber slot is free to be genuinely
+     amber again: dirty/modified and warnings read warm, which is what every
+     other app has trained people to expect. */
+  --color-accent:        #6aa885;  /* muted green — accent tint, 6.4:1 on bg-0 */
+  --color-accent-soft:   #1d2a22;  /* faint green lift — selected rows/banners */
+  --color-accent-green:  #4ade80;  /* semantic status only — success / verified / running */
+  --color-amber:         #e0a33f;  /* warm amber — dirty/modified + warning marker */
+  --color-red:           #e05469;  /* rose-red — pulled off the agent clay (ΔE00 16) */
+  --color-violet:        #a78bfa;
+  --color-blue:          #78a6df;
+  --color-pink:          #c4a4e8;
+  --color-green:         #6fc096;  /* diff-add, green */
+  /* --color-caret-orange inherits the base clay (#d97757) — agent only */
+
+  /* composer surface — warm slate. The focus edge is the accent green at low
+     saturation: the composer is where the accent earns its keep, marking the
+     one field that has your keystrokes without painting the chrome. */
+  --color-composer-bg:           #1f1b18;
+  --color-composer-border:       #2d2825;
+  --color-composer-border-focus: #4d7a63;
+  --color-pill-bg:               #2d2724;
+  --color-pill-bg-hover:         #353029;
+  --color-pill-fg:               #c8c3bb;
+  --color-kbd-bg:                #2d2724;
+  --color-kbd-fg:                #c8c3bb;
+
+  /* popover */
+  --color-popover-bg:        #1f1b18;
+  --color-popover-border:    #2d2825;
+  --color-popover-row-hover: #272220;
+
+  /* avatar — neutral project-identity tile (monochrome) */
+  --color-avatar-bg: #2a2520;
+  --color-avatar-fg: #bdb5aa;
+
+  /* Re-point shadcn aliases so primitives (Dialog/Popover/Button) adopt
+     the variant without component-level rewrites. */
+  --color-background:           var(--color-bg-0);
+  --color-foreground:           var(--color-text-1);
+  --color-card:                 var(--color-bg-3);
+  --color-card-foreground:      var(--color-text-1);
+  --color-popover:              var(--color-popover-bg);
+  --color-popover-foreground:   var(--color-text-1);
+  /* The primary affordance is deliberately NOT the accent here. Everywhere
+     else in the app `--color-primary` aliases the accent, but this pack's
+     button is white-on-black by design and its accent is a tint — aliasing
+     them would either turn every button green or drag the accent back to
+     white and re-flatten the palette. */
+  --color-primary:              #faf7f2;  /* warm white — the button face */
+  --color-primary-foreground:   #000000;  /* black text on the white button */
+  --color-secondary:            var(--color-bg-2);
+  --color-secondary-foreground: var(--color-text-1);
+  --color-muted:                var(--color-bg-2);
+  --color-muted-foreground:     var(--color-text-3);
+  --color-accent-foreground:    #06120c;  /* near-black ink on the green tint */
+  --color-destructive:          var(--color-red);
+  --color-destructive-foreground: var(--color-text-1);
+  --color-border:               var(--color-line);
+  --color-input:                var(--color-line);
+  --color-ring:                 var(--color-accent);
+
+  --color-sidebar:                       var(--color-bg-1);
+  --color-sidebar-foreground:            var(--color-text-2);
+  --color-sidebar-primary:               var(--color-accent);
+  --color-sidebar-primary-foreground:    #000000;
+  --color-sidebar-accent:                var(--color-bg-2);
+  --color-sidebar-accent-foreground:     var(--color-text-1);
+  --color-sidebar-border:                var(--color-line-soft);
+  --color-sidebar-ring:                  var(--color-accent);
+
+  --focus-ring-color: color-mix(in srgb, var(--color-accent) 55%, transparent);
+}
+
+/* Amber on light ground. Currently INERT: `amber` is in
+ * DARK_ONLY_VARIANTS (themeStore.ts), so themeStore pins the scheme to
+ * dark and `.light` never lands on the same element as `.theme-amber`.
+ * It exists so the pack is already correct the moment that pin is lifted.
+ *
+ * It is the same three roles as the dark pack, inverted around the paper:
+ *
+ *   1. GROUND — amber-warm paper, not white. The dark pack runs 7–11
+ *      steps of red over blue on a near-black; the same move on a
+ *      near-white is 6–13 steps, which reads as warm stock rather than
+ *      the blue-white of a stock `.light`. Monotonically darker bg-0 →
+ *      bg-3, matching `.light` above so no component inverts.
+ *   2. BUTTON — the inversion of the dark pack's white key: a warm
+ *      near-black face (the dark pack's own bg-0) with paper ink. On
+ *      paper the brightest thing is ink, not white, so the thing you
+ *      press is again found by luminance alone and needs no hue. This is
+ *      why the block has to define --color-primary at all: the dark
+ *      pack's #faf7f2 button face would be invisible here.
+ *   3. ACCENT — the same muted green pulled deep enough to carry text:
+ *      #2f6b4d is 6.10:1 on bg-0 and 5.32:1 on bg-2, and 6.10:1 for the
+ *      paper ink that rides on top of it.
+ *
+ * The three semantic inks are overridden too, for the same reason the
+ * button is: their dark values are all ~1.6–2.2:1 on paper, so without
+ * this they would fall through from `.theme-amber` and render a warning
+ * that cannot be read. Same hues, pulled deep. */
+.light.theme-amber {
+  --color-bg-0:       #fdfbf7;  /* content — warm paper (R−B 6) */
+  --color-bg-1:       #f7f3ec;  /* chrome — rail + topbar (R−B 11) */
+  --color-bg-2:       #f0ebe4;  /* hover / selected (R−B 12) */
+  --color-bg-3:       #e9e4dc;  /* elevated — cards, composer (R−B 13) */
+  /* Warm-neutral ink ramp, the dark pack's mirrored: text-1 IS the dark
+     pack's bg-0. text-3 is the AA floor for body copy — 5.73:1 on bg-0
+     and still 4.68:1 down on bg-3. */
+  --color-text-1:     #1c1815;
+  --color-text-2:     #4b453d;
+  --color-text-3:     #6a635a;
+  --color-text-4:     #9c948a;
+  --color-text-5:     #cdc6bb;
+  --color-line:       #e3ddd2;
+  --color-line-soft:  #eee8de;
+  --color-accent:            #2f6b4d;  /* muted green, 6.10:1 on bg-0 / 5.32:1 on bg-2 */
+  --color-accent-soft:       #e4efe8;  /* faint green paper lift — accent ink on it is 5.35:1 */
+  --color-accent-foreground: #fdfbf7;  /* paper ink on the green tint */
+  --color-primary:            #1c1815;  /* warm near-black — the button face */
+  --color-primary-foreground: #faf7f2;  /* warm-white label, 16.50:1 */
+  --color-amber:        #8a5a08;  /* dirty/modified + warning, 5.73:1 on bg-0 */
+  --color-accent-green: #0a7346;  /* success / verified — vivid, 5.72:1 on bg-0 */
+  --color-red:          #b3283f;  /* failure, 6.17:1 on bg-0 */
 }
 
 /* ── Metallic 3D buttons ──────────────────────────────────────────────
@@ -639,6 +925,22 @@
   --btn3d-sheen: rgba(255, 255, 255, 0.28);
   color: var(--color-primary-foreground);
 }
+/* The amber pack's button face is NOT its accent — it's the warm white
+   above (--color-primary), so this skin has to be re-derived off that
+   token rather than off --color-accent like the stock one. The stock
+   skin also mixes 14% black into the bottom of its gradient to read as a
+   raised key; on a coloured accent that's a highlight, on a near-white
+   face it just makes the button grey. Here the key comes from a hairline
+   edge and the drop shadow instead, so the face stays the pack's white
+   and the label stays black. Tracks --color-primary, so it inverts
+   correctly under .light.theme-amber (near-black face, paper label). */
+.theme-amber .btn3d-primary {
+  --btn3d-top: var(--color-primary);
+  --btn3d-bot: color-mix(in oklab, var(--color-primary) 97%, black 3%);
+  --btn3d-border: color-mix(in oklab, var(--color-primary) 76%, black 24%);
+  --btn3d-sheen: rgba(255, 255, 255, 0.5);
+}
+
 .btn3d-neutral {
   --btn3d-top: color-mix(in oklab, var(--color-bg-3) 88%, white 12%);
   --btn3d-bot: color-mix(in oklab, var(--color-bg-3) 80%, black 20%);
@@ -699,7 +1001,7 @@
 /* Chrome dimensions — keep in sync with aura-term/src/theme.rs (TOPBAR_H,
  * STATUSBAR_H, NAV_RAIL_W). Custom properties so JS can read them too. */
 :root {
-  --topbar-h:   30px;  /* macOS Overlay title bar — slim. Traffic-lights vertically centered on the icon row. tao insets the lights by resizing the titlebar container to (closeBtnH + y) and centering the buttons in it, so light-center = (closeBtnH + y)/2 from the window top. The header is h tall with a 1px bottom border (border-box) → icon-center = (h−1)/2. Solve (closeBtnH + y)/2 = (h−1)/2 → y = h − 1 − closeBtnH. On macOS 26 (Tahoe / Darwin 25.x) the close-button container measures ≈13 (smaller than the ≈18 of earlier builds), so at h=30 → y:16, level with the sidebar toggle + search. NOTE: trafficLightPosition is a native window attribute — changing it needs an app rebuild/restart (it is NOT picked up by webview HMR). Keep trafficLightPosition.y in tauri.conf.json in sync (y = h − 1 − closeBtnH). */
+  --topbar-h:   30px;  /* macOS Overlay title bar — slim. Traffic-light geometry: tao insets the lights by resizing the titlebar container to (closeBtnH + y) and centering the buttons in it, so light-center = (closeBtnH + y)/2 from the window top. The header is h tall with a 1px bottom border (border-box) → icon-center = (h−1)/2. Exact vertical centering on the icon row is y = h − 1 − closeBtnH; on macOS 26 (Tahoe / Darwin 25.x) closeBtnH ≈13, so at h=30 that centering value is y:16. We deliberately run the lights a touch LOWER than dead-center — trafficLightPosition.y:21 in tauri.conf.json — so they read as nestled into the strip rather than crowding the icons above them; tune the two together. NOTE: trafficLightPosition is a native window attribute — changing it needs an app rebuild/restart (it is NOT picked up by webview HMR). */
   --statusbar-h: 28px; /* footer strip — inset rounded chips centered in a 28px bar (branch switcher, activity) */
   --nav-rail-w: 48px;
   --gap:        0px;   /* unified canvas: no gap between panes, borders separate them */
@@ -809,14 +1111,20 @@ html.vibrancy .ade-side {
 html.vibrancy .ade-side .ade-side {
   background: transparent;
 }
-/* Team surface mounted in the frost sidebar reads as glass like the Build
-   file tree + Plan section — its own opaque bg (bg-content root, bg-1 list)
-   would block the blur, so blank both to reveal the outer .ade-side frost.
-   Scoped to `.ade-side` so the SAME surface stays solid when it mounts in the
-   center work area (a content island with no frost behind it). The message
-   stream keeps its own bg-content, so chat prose never sits over blur. */
-html.vibrancy .ade-side .ade-team-surface,
-html.vibrancy .ade-side .ade-team-list {
+/* Team docked in the sidebar (navigator) is sidebar chrome, not a content
+   island — under glass it must frost through like every other section, not
+   sit as an opaque slab. Blank ALL its fills — including the topbar — so the
+   outer .ade-side frost reads through uniformly. The topbar used to carry a
+   leftover Slack-aubergine (#3f0e40) tint, which made the search/title strip
+   read as a stray purple band over the otherwise-dark frosted body; drop it so
+   the whole navigator frosts as one surface. The redesigned roster uses the
+   dark text ramp, so labels stay legible over the frost (the old light-Slack
+   labels are why this was once forced opaque). Scoped to `.ade-side`, so the
+   full Team WORKSPACE in the work pane keeps its solid content bg. */
+html.vibrancy .ade-side .slack-team-shell,
+html.vibrancy .ade-side .slack-team-body,
+html.vibrancy .ade-side .slack-team-sidebar,
+html.vibrancy .ade-side .slack-team-topbar {
   background: transparent;
 }
 body {
@@ -824,7 +1132,16 @@ body {
   color: var(--color-text-1);
   font-family: var(--font-sans);
   -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
   text-rendering: optimizeLegibility;
+  /* The Grotesk cut carries a real `kern` table (the wordmark face does
+     not) — pinned on so `text-rendering: optimizeLegibility` above can't
+     be swapped for optimizeSpeed later and silently drop it. Numerals
+     stay proportional by default; the existing tabular-nums surfaces now
+     resolve to the face's own `tnum`, so columns line up without any
+     component change. Ligatures are left at their default so the code
+     surfaces' behaviour is untouched. */
+  font-kerning: normal;
   user-select: none;
 }
 input, textarea {
@@ -955,6 +1272,33 @@ textarea:focus-visible,
 .t-heading { font-weight: var(--font-weight-heading); letter-spacing: var(--letter-spacing-tight); }
 .t-accent  { font-weight: var(--font-weight-accent); }
 
+/* Optical-size opt-ins. Mixrank Monaco is drawn at several optical
+ * sizes; the Grotesk cut behind --font-sans is the one tuned for the
+ * 10–20px UI ladder above, so these two exist for the places that sit
+ * OUTSIDE that ladder. Neither is applied to any component here — they
+ * are hooks, so opting in stays a deliberate act.
+ *
+ *   .t-display  — the Display optical cut (variable 400–900), for hero /
+ *                 empty-state headlines at --font-size-xl (20px) and up.
+ *                 High-contrast and low x-height by design: it looks
+ *                 wrong under ~20px, which is exactly why the Text and
+ *                 Caption cuts from the same optical set are not wired
+ *                 to small UI text.
+ *   .t-wordmark — the drawn 6-weight brand face, 400/500/600/700. It has
+ *                 no space or punctuation glyphs, so --font-sans sits
+ *                 behind it to supply them; only letterforms come from
+ *                 the brand face. Product name / short brand strings.
+ */
+.t-display {
+  font-family: "Mixrank Monaco Display", var(--font-sans);
+  letter-spacing: var(--letter-spacing-tight);
+  font-feature-settings: "kern", "liga";
+}
+.t-wordmark {
+  font-family: "Mixrank Monaco", var(--font-sans);
+  letter-spacing: var(--letter-spacing-normal);
+}
+
 /* Code-identifier helper — for inline names inside otherwise-prose
  * UI (block payloads, finding messages, status banners). Picks up
  * the JetBrains Mono lead and tightens letter-spacing so identifiers
@@ -984,8 +1328,12 @@ textarea:focus-visible,
  * to Aura green with zero blast radius on the rest of the app. accent-soft is
  * remapped in step so the mode chip's tinted fill tracks the new hue. */
 .aura-chat {
-  --color-accent: var(--color-accent-green);
-  --color-accent-soft: color-mix(in srgb, var(--color-accent-green) 14%, transparent);
+  /* Chat inherits the active theme's --color-accent (muted green under the
+     default amber pack, emerald under .theme-emerald) rather than hardcoding a
+     hue — so the mode chip, send button and caret track whatever accent the app
+     is wearing. Only the soft fill is re-derived here so it stays a translucent
+     tint of that accent. */
+  --color-accent-soft: color-mix(in srgb, var(--color-accent) 14%, transparent);
   /* Reading-column width shared by the message stream AND the composer dock.
      The conversation lives in a centered column (Conductor/Claude-style) rather
      than stretching edge-to-edge — calmer to read and it gives the interactive
@@ -1176,6 +1524,15 @@ textarea:focus-visible,
 .aura-chat .composer-docked.focus,
 .aura-chat .composer-docked:focus-within {
   box-shadow: none;
+}
+/* Once the composer is focused, dim the model's brand mark to monochrome so the
+   loud vendor colour (the Claude / Gemini logo) recedes while you're composing —
+   the chip label still says which model is armed. Only the brand <img> is
+   desaturated; the "Auto" sparkles glyph is already currentColor. */
+.aura-chat .composer:focus-within [data-tour="brain"] img {
+  filter: grayscale(1);
+  opacity: 0.85;
+  transition: filter 120ms ease, opacity 120ms ease;
 }
 .aura-chat .composer .inputline {
   width: 100%;
@@ -1776,8 +2133,11 @@ textarea:focus-visible,
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  /* Amber = an agent is on it (working). Calm muted when only queued. */
-  color: var(--color-accent-amber, rgb(217 154 43));
+  /* Amber = an agent is on it (working). Calm muted when only queued.
+     Same reading as CrewCanvas's STATUS_DOT and the Automations glance —
+     "live" is the pack's warning-warm slot everywhere, never the accent,
+     which is reserved for what you can act on. */
+  color: var(--color-amber);
 }
 .aura-chat .aura-crew-summary {
   min-width: 0;
@@ -1838,7 +2198,7 @@ textarea:focus-visible,
   height: 7px;
   margin: 0 5px;
   border-radius: 9999px;
-  background: #d66a6a;
+  background: var(--color-red);
 }
 .aura-chat .aura-crew-fail-msg {
   min-width: 0;
@@ -1847,7 +2207,7 @@ textarea:focus-visible,
   text-overflow: ellipsis;
   white-space: nowrap;
   font-size: 11px;
-  color: #d08a8a;
+  color: color-mix(in srgb, var(--color-red) 78%, var(--color-text-2));
 }
 .aura-chat .aura-crew-foot {
   margin-top: 2px;
@@ -1872,12 +2232,64 @@ textarea:focus-visible,
   margin: 9px -13px -9px;
   padding: 8px 13px;
   border-top: 1px solid var(--color-line-soft);
+  /* Query container for the responsive collapse below — when the composer
+     itself gets narrow (split panes / small window), the chips shed their
+     text labels and read as icons. Queries the row's own width, not the
+     viewport, so it's correct no matter what's docked beside the chat. */
+  container-type: inline-size;
+  container-name: composerbar;
 }
 .aura-chat .composer-bottom .right {
   margin-left: auto;
   display: flex;
   gap: 4px;
   align-items: center;
+}
+/* Active/selected chip — one accent language across every composer toggle
+   (Effort · Approvals · Mode · Fast). Replaces the old neutral-grey pressed
+   look + the one-off green mode chip so an armed control reads the same way
+   the rest of the app's primary affordances do. Higher specificity than the
+   Medusa button utilities so it wins the background + colour. */
+.aura-chat .composer-bottom button.chip-on {
+  color: var(--color-accent);
+  background: var(--color-accent-soft);
+  box-shadow: inset 0 0 0 1px
+    color-mix(in srgb, var(--color-accent) 30%, transparent);
+}
+.aura-chat .composer-bottom button.chip-on:hover {
+  color: var(--color-accent);
+  background: color-mix(in srgb, var(--color-accent) 16%, transparent);
+}
+/* Bypass approvals — the one deliberately-alarming state; red, never accent. */
+.aura-chat .composer-bottom button.chip-danger,
+.aura-chat .composer-bottom button.chip-danger:hover {
+  color: var(--color-red);
+  box-shadow: inset 0 0 0 1px
+    color-mix(in srgb, var(--color-red) 30%, transparent);
+}
+/* Compact chip text — the model name, effort level, and the Approvals / Goal /
+   Mode labels read as small captions rather than full-size button text, so the
+   whole toolbar stays a quiet strip under the textarea. Applied to every
+   direct child EXCEPT `.right` (the send / queue / stop cluster keeps its
+   size). Icons keep their own width/height sizing; only the type shrinks.
+   The second selector reaches the model chip, whose button is wrapped in a
+   positioning `div` (the picker's anchor) — without it that button keeps
+   Medusa's own font-size (a directly-applied class beats the inherited value),
+   which is why the model name stayed larger than its neighbours. Only the
+   trigger button (`> button`), never the switcher popover nested deeper. */
+.aura-chat .composer-bottom > :not(.right),
+.aura-chat .composer-bottom > :not(.right) > button {
+  font-size: var(--font-size-2xs);
+  line-height: var(--line-height-2xs);
+}
+/* Icon-only collapse: below this width the chips drop their labels (and the
+   send button drops its ⌘↵ hint) so the whole bar stays on one line. The
+   model picker keeps its short name — you always want to see which model. */
+@container composerbar (max-width: 500px) {
+  .aura-chat .composer-bottom .chip-label,
+  .aura-chat .composer-bottom .send-kbd {
+    display: none;
+  }
 }
 .aura-chat .chip {
   display: inline-flex;
@@ -2218,6 +2630,18 @@ textarea:focus-visible,
   white-space: nowrap;
   color: var(--color-text-4);
 }
+/* Exact per-message token readout (input · output), reported by the model.
+   Same quiet, tabular treatment as .saved — a factual credit in the left
+   cluster, mono numerals so the digits line up turn-to-turn. */
+.aura-chat .aura-msg-actions .msg-tokens {
+  font-size: var(--font-size-2xs);
+  line-height: 1;
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  margin-right: 6px;
+  white-space: nowrap;
+  color: var(--color-text-4);
+}
 /* Model credit, relocated from the identity line — small, minimal, and kept
    in the SAME left cluster as the time-taken + copy (not pushed to the far
    edge), so the whole row reads as one compact group that hugs its content
@@ -2306,15 +2730,6 @@ textarea:focus-visible,
   line-height: var(--line-height-sm);
   margin-bottom: 12px;
 }
-.aura-chat .thinking .spinner {
-  width: 12px;
-  height: 12px;
-  border-radius: 50%;
-  border: 1.5px solid var(--color-line);
-  border-top-color: var(--color-accent);
-  animation: aura-chat-spin 0.9s linear infinite;
-  flex: none;
-}
 .aura-chat .shimmer {
   color: var(--color-text-3);
   animation: aura-chat-shimmer 1.6s ease-in-out infinite;
@@ -2333,6 +2748,46 @@ textarea:focus-visible,
   50%      { opacity: 1; }
 }
 
+/* Stall watchdog — the escalation of the thinking line when an in-flight turn
+   has streamed nothing past the threshold. Calm amber (the same warn hue as
+   .system-line.warn / the AsciiSpinner braille) so it reads as "heads-up",
+   never an error; a slim inline row, never a bulky card. */
+.aura-chat .aura-stall-notice {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  margin: 2px 0 12px;
+  padding: 5px 10px;
+  border-radius: 8px;
+  color: var(--color-amber);
+  background: color-mix(in srgb, var(--color-amber) 10%, transparent);
+  border: 1px solid color-mix(in srgb, var(--color-amber) 28%, transparent);
+  font-size: var(--font-size-xs);
+  line-height: var(--line-height-xs);
+  animation: aura-chat-shimmer 2.4s ease-in-out infinite;
+}
+.aura-chat .aura-stall-notice .aura-stall-icon { flex: none; }
+.aura-chat .aura-stall-notice .aura-stall-text {
+  color: var(--color-text-2);
+  font-variant-numeric: tabular-nums;
+}
+.aura-chat .aura-stall-notice .aura-stall-stop {
+  margin-left: 2px;
+  padding: 2px 9px;
+  border-radius: 6px;
+  font-size: var(--font-size-2xs);
+  font-weight: 600;
+  color: var(--color-amber);
+  background: transparent;
+  border: 1px solid color-mix(in srgb, var(--color-amber) 45%, transparent);
+  cursor: pointer;
+  transition: background var(--motion-fast), border-color var(--motion-fast);
+}
+.aura-chat .aura-stall-notice .aura-stall-stop:hover {
+  background: color-mix(in srgb, var(--color-amber) 16%, transparent);
+  border-color: var(--color-amber);
+}
+
 /* system line — quiet italic note in-flow (no avatar gutter). */
 .aura-chat .system-line {
   color: var(--color-text-3);
@@ -2341,7 +2796,7 @@ textarea:focus-visible,
   font-style: italic;
   margin: 4px 0 8px;
 }
-.aura-chat .system-line.warn { color: var(--color-accent-amber, rgb(251 191 36)); }
+.aura-chat .system-line.warn { color: var(--color-amber); }
 .aura-chat .system-line.ok   { color: var(--color-accent-green); }
 
 /* Milestone divider — a centered rule with an inset caption marking a
@@ -2592,12 +3047,17 @@ textarea:focus-visible,
 
 /* Diagonal-hatch placeholder background — used to fill empty zones in
  * a block when there is no rich content (no architecture diagram, no
- * file refs, no description). Mirrors Medusa's empty-state texture. */
+ * file refs, no description). Mirrors Medusa's empty-state texture.
+ * "Nothing here yet" carries no status, so the hatch rides the text
+ * ramp, not a hue. It was mixing `--color-fg-soft`, a name no pack
+ * defines — an unresolvable var() inside color-mix() makes the whole
+ * declaration invalid at computed-value time, so both hatches were
+ * painting nothing at all. */
 .aura-hatch {
   background-image: repeating-linear-gradient(
     135deg,
-    color-mix(in srgb, var(--color-fg-soft) 18%, transparent) 0,
-    color-mix(in srgb, var(--color-fg-soft) 18%, transparent) 1px,
+    color-mix(in srgb, var(--color-text-4) 18%, transparent) 0,
+    color-mix(in srgb, var(--color-text-4) 18%, transparent) 1px,
     transparent 1px,
     transparent 7px
   );
@@ -2607,8 +3067,8 @@ textarea:focus-visible,
 .aura-hatch-sm {
   background-image: repeating-linear-gradient(
     135deg,
-    color-mix(in srgb, var(--color-fg-soft) 22%, transparent) 0,
-    color-mix(in srgb, var(--color-fg-soft) 22%, transparent) 1px,
+    color-mix(in srgb, var(--color-text-4) 22%, transparent) 0,
+    color-mix(in srgb, var(--color-text-4) 22%, transparent) 1px,
     transparent 1px,
     transparent 5px
   );
@@ -2633,8 +3093,12 @@ textarea:focus-visible,
 /* v0.2.11 — pinned-panel jump highlight. Briefly flash a ring + tint
  * around the destination message so the user spots it after the
  * scrollIntoView lands. */
+/* `--color-accent-blue` was never a token in any pack, so this ring only
+   ever rendered its hard-coded blue fallback — a hue the palette dropped.
+   A "here it is" flash is a focus cue, which is exactly what the accent
+   is for, and the tint is mixed from it so the two can never drift. */
 @keyframes aura-msg-flash {
-  0%   { box-shadow: 0 0 0 2px var(--color-accent-blue, #5b8def); background: rgba(91, 141, 239, 0.10); }
+  0%   { box-shadow: 0 0 0 2px var(--color-accent); background: color-mix(in srgb, var(--color-accent) 10%, transparent); }
   100% { box-shadow: 0 0 0 0 transparent; background: transparent; }
 }
 .aura-msg-flash {
@@ -2741,8 +3205,13 @@ textarea:focus-visible,
   height: var(--action-btn);
   padding: 0 12px;
   border-radius: var(--action-btn-radius);
-  background: var(--color-accent);
-  color: var(--color-bg-0);
+  /* The filled key of the bar — the thing you press, so it wears the
+     pack's BUTTON slot, not the accent tint. In every pack but amber the
+     two resolve to the same value; in amber the button is deliberately
+     the white face and the accent is a tint, and painting the primary
+     action with the tint is what turns a page of controls green. */
+  background: var(--color-primary);
+  color: var(--color-primary-foreground);
   border: 0;
   cursor: pointer;
   font-size: var(--font-size-sm);
@@ -2794,8 +3263,12 @@ textarea:focus-visible,
   width: 38px;
   height: 38px;
   border-radius: 50%;
-  background: var(--color-accent);
-  color: #ffffff;
+  /* A FAB is nothing but "press me", so it takes the BUTTON slot. The old
+     `#ffffff` label was hard-coded against a coloured accent and goes
+     invisible the moment the face itself is light — the paired
+     foreground token is the only value that is always legible on it. */
+  background: var(--color-primary);
+  color: var(--color-primary-foreground);
   border: 0;
   display: grid;
   place-items: center;
@@ -2939,7 +3412,65 @@ textarea:focus-visible,
   align-items: flex-start;
 }
 .tiptap-pane ul[data-type="taskList"] li > label {
-  margin-top: 0.3em;
+  flex: 0 0 auto;
+  /* Center the circle on the first text line. The content <p> below has its
+   * own margin/padding zeroed, so its line box starts at the row top; this
+   * offset ≈ (line-height − checkbox)/2 lands the circle on the text center. */
+  margin-top: 0.28em;
+}
+/* Task text is a <p> inside the item's content div — strip the default
+ * paragraph margin/padding so the words align with the checkbox instead of
+ * sitting a few pixels below it. */
+.tiptap-pane ul[data-type="taskList"] li > div > p,
+.tiptap-pane ul[data-type="taskList"] li p {
+  margin: 0;
+  padding: 0;
+}
+/* Checkboxes mirror the status-row circle glyphs (ChecksPanel Row): a
+ * stroked circle at rest, filled accent-green with a check when done — so a
+ * markdown checklist reads as the same "status" affordance everywhere. */
+.tiptap-pane ul[data-type="taskList"] input[type="checkbox"] {
+  appearance: none;
+  -webkit-appearance: none;
+  display: inline-block;
+  box-sizing: border-box;
+  /* Pin BOTH axes hard: a flex parent stretching one axis + aspect-ratio
+   * driving the other was turning the circle into an egg. min/max on width
+   * and height lock it to a true 15×15 square no matter the row layout. */
+  width: 15px;
+  height: 15px;
+  min-width: 15px;
+  min-height: 15px;
+  max-width: 15px;
+  max-height: 15px;
+  flex: 0 0 15px;
+  align-self: flex-start;
+  padding: 0;
+  margin: 0;
+  border: 1.4px solid var(--color-text-4);
+  border-radius: 50%;
+  background: transparent;
+  cursor: pointer;
+  position: relative;
+  transition: background-color var(--motion-fast), border-color var(--motion-fast);
+}
+.tiptap-pane ul[data-type="taskList"] input[type="checkbox"]:hover {
+  border-color: var(--color-text-2);
+}
+.tiptap-pane ul[data-type="taskList"] input[type="checkbox"]:checked {
+  background: var(--color-accent-green);
+  border-color: var(--color-accent-green);
+}
+.tiptap-pane ul[data-type="taskList"] input[type="checkbox"]:checked::after {
+  content: "";
+  position: absolute;
+  left: 4.5px;
+  top: 1.5px;
+  width: 4px;
+  height: 7px;
+  border: solid var(--color-bg-1);
+  border-width: 0 1.6px 1.6px 0;
+  transform: rotate(45deg);
 }
 
 .tiptap-pane blockquote {
@@ -2974,6 +3505,193 @@ textarea:focus-visible,
   padding: 0;
   font-size: inherit;
   color: inherit;
+}
+
+/* ── Code blocks (NodeView) ───────────────────────────────────────────────
+ * One clean surface — a slim header (language + copy) over an editable code
+ * pane. The NodeView wrapper IS the box; the inner <pre> is reset flat so it
+ * never nests a second frame. Syntax colours come from the Prism decoration
+ * plugin (tiptap/codeHighlight.ts) via the `.token.*` rules below. */
+.tiptap-pane .tiptap-codeblock,
+.tiptap-pane .tiptap-mermaid {
+  margin: 0.75em 0;
+  border: 1px solid var(--color-line-soft);
+  border-radius: 9px;
+  background: var(--color-bg-1);
+  overflow: hidden;
+}
+.tiptap-pane .tiptap-codeblock__bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  min-height: 30px;
+  padding: 3px 6px 3px 8px;
+  border-bottom: 1px solid var(--color-line-soft);
+  background: color-mix(in srgb, var(--color-bg-2) 55%, var(--color-bg-1));
+  user-select: none;
+}
+/* Language picker — a styled label with the native <select> laid transparently
+ * on top so a click opens the OS menu while our label stays the visible chip. */
+.tiptap-codeblock__lang-wrap {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+}
+.tiptap-codeblock__lang-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 6px;
+  border-radius: 5px;
+  font-size: 10.5px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--color-text-4);
+  transition: color var(--motion-fast, 120ms) ease,
+    background var(--motion-fast, 120ms) ease;
+}
+.tiptap-codeblock__lang-label::after {
+  content: "";
+  width: 7px;
+  height: 7px;
+  margin-left: 1px;
+  background: currentColor;
+  opacity: 0.75;
+  clip-path: polygon(50% 70%, 12% 28%, 22% 18%, 50% 48%, 78% 18%, 88% 28%);
+}
+.tiptap-codeblock__lang-wrap:hover .tiptap-codeblock__lang-label {
+  color: var(--color-text-2);
+  background: var(--color-bg-2);
+}
+.tiptap-codeblock__auto {
+  padding: 1px 4px;
+  border-radius: 4px;
+  font-size: 8.5px;
+  letter-spacing: 0.06em;
+  color: var(--color-text-5);
+  background: var(--color-bg-2);
+}
+.tiptap-codeblock__lang-select {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  opacity: 0;
+  cursor: pointer;
+  -webkit-appearance: none;
+  appearance: none;
+}
+.tiptap-codeblock__btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  border-radius: 5px;
+  color: var(--color-text-4);
+  transition: color var(--motion-fast, 120ms) ease,
+    background var(--motion-fast, 120ms) ease;
+}
+.tiptap-codeblock__btn:hover {
+  color: var(--color-text-2);
+  background: var(--color-bg-2);
+}
+/* Flat inner pane — three classes so it beats `.pages-doc .tiptap-pane pre`. */
+.tiptap-pane .tiptap-codeblock .tiptap-codeblock__pre,
+.tiptap-pane .tiptap-mermaid .tiptap-codeblock__pre {
+  margin: 0;
+  padding: 12px 14px;
+  max-width: none;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  overflow-x: auto;
+  font-size: 12.5px;
+  line-height: 1.6;
+}
+.tiptap-pane .tiptap-mermaid .mermaid-frame {
+  background: transparent;
+}
+
+/* ── Syntax palette (Prism token classes) ────────────────────────────────── */
+:root {
+  --code-comment: #6b7180;
+  --code-punct: #9aa1ac;
+  --code-keyword: #c792ea;
+  --code-string: #9ccc65;
+  --code-number: #f78c6c;
+  --code-function: #82aaff;
+  --code-class: #ffcb6b;
+  --code-operator: #89ddff;
+  --code-variable: #f07178;
+}
+.light {
+  --code-comment: #8a919b;
+  --code-punct: #5b6370;
+  --code-keyword: #9333ea;
+  --code-string: #15803d;
+  --code-number: #c2410c;
+  --code-function: #2563eb;
+  --code-class: #b45309;
+  --code-operator: #0e7490;
+  --code-variable: #dc2626;
+}
+.tiptap-pane :is(.token.comment, .token.prolog, .token.doctype, .token.cdata) {
+  color: var(--code-comment);
+  font-style: italic;
+}
+.tiptap-pane .token.punctuation {
+  color: var(--code-punct);
+}
+.tiptap-pane
+  :is(
+    .token.property,
+    .token.tag,
+    .token.boolean,
+    .token.number,
+    .token.constant,
+    .token.symbol,
+    .token.deleted
+  ) {
+  color: var(--code-number);
+}
+.tiptap-pane
+  :is(
+    .token.selector,
+    .token.attr-name,
+    .token.string,
+    .token.char,
+    .token.builtin,
+    .token.inserted
+  ) {
+  color: var(--code-string);
+}
+.tiptap-pane :is(.token.operator, .token.entity, .token.url) {
+  color: var(--code-operator);
+}
+.tiptap-pane :is(.token.atrule, .token.attr-value, .token.keyword) {
+  color: var(--code-keyword);
+}
+.tiptap-pane .token.function {
+  color: var(--code-function);
+}
+.tiptap-pane .token.class-name {
+  color: var(--code-class);
+}
+.tiptap-pane :is(.token.regex, .token.important, .token.variable) {
+  color: var(--code-variable);
+}
+.tiptap-pane .token.important,
+.tiptap-pane .token.bold {
+  font-weight: 600;
+}
+.tiptap-pane .token.italic {
+  font-style: italic;
 }
 
 /* Wikilinks (aura-wiki: scheme) — dotted accent underline so they
@@ -3118,10 +3836,10 @@ textarea:focus-visible,
  * surface gets the premium treatment without touching task-card editors.
  */
 
-/* Task list — real, clickable checkboxes (Notion-style). The TaskItem
- * NodeView renders `label > input[type=checkbox]`; we restyle the box to
- * a rounded square that fills with the accent when checked, and strike +
- * dim the completed line. */
+/* Task list — clickable circle checkboxes that match the status-row glyphs
+ * (see the generic `.tiptap-pane` rule above): stroked circle at rest, filled
+ * accent-green with a check when done. Here we only tune the document layout
+ * (alignment, gap, top-align of the box) and strike + dim the completed line. */
 .pages-doc .tiptap-pane ul[data-type="taskList"] {
   margin: 0.3em 0;
 }
@@ -3137,37 +3855,6 @@ textarea:focus-visible,
 .pages-doc .tiptap-pane ul[data-type="taskList"] li > div {
   flex: 1 1 auto;
   min-width: 0;
-}
-.pages-doc .tiptap-pane ul[data-type="taskList"] input[type="checkbox"] {
-  appearance: none;
-  -webkit-appearance: none;
-  width: 15px;
-  height: 15px;
-  margin: 0;
-  border: 1.5px solid var(--color-line);
-  border-radius: 4px;
-  background: transparent;
-  cursor: pointer;
-  position: relative;
-  transition: background-color var(--motion-fast), border-color var(--motion-fast);
-}
-.pages-doc .tiptap-pane ul[data-type="taskList"] input[type="checkbox"]:hover {
-  border-color: var(--color-accent);
-}
-.pages-doc .tiptap-pane ul[data-type="taskList"] input[type="checkbox"]:checked {
-  background: var(--color-accent);
-  border-color: var(--color-accent);
-}
-.pages-doc .tiptap-pane ul[data-type="taskList"] input[type="checkbox"]:checked::after {
-  content: "";
-  position: absolute;
-  left: 4px;
-  top: 1px;
-  width: 4px;
-  height: 8px;
-  border: solid var(--color-bg-0, #0b0b0d);
-  border-width: 0 2px 2px 0;
-  transform: rotate(45deg);
 }
 .pages-doc .tiptap-pane ul[data-type="taskList"] li[data-checked="true"] > div {
   text-decoration: line-through;
@@ -3329,8 +4016,9 @@ textarea:focus-visible,
 }
 /* "beta" tag sitting right after the Aura wordmark — every current build is
  * the beta channel, so this is a standing identity, not a transient chip.
- * Arctic-blue accent (primary brand label); status greens/agent orange stay
- * reserved for their own meanings. */
+ * Wears the product accent as a brand label; the status slots (amber for
+ * in-flight/attention, mint for verified, red for failure) and the agent
+ * clay stay reserved for their own meanings. */
 .ade-tb-beta {
   display: inline-flex;
   align-items: center;
@@ -3368,6 +4056,22 @@ textarea:focus-visible,
 }
 .ade-tb-av:hover {
   filter: brightness(1.08);
+}
+/* Compact square variant for the sidebar-header profile chip — small,
+   neutral (no accent/green fill), rounded-square so it reads as quiet
+   chrome next to the icon buttons rather than a brand badge. */
+.ade-tb-av--sq {
+  width: 17px;
+  height: 17px;
+  border-radius: 5px;
+  font-size: 9.5px;
+  color: var(--color-text-2);
+  background: color-mix(in srgb, var(--color-text-1) 12%, transparent);
+}
+.ade-tb-av--sq:hover {
+  filter: none;
+  color: var(--color-text-1);
+  background: color-mix(in srgb, var(--color-text-1) 20%, transparent);
 }
 
 /* ── multi-colour liquid AURA wordmark (WorkSurface empty state) ───────
@@ -3531,51 +4235,9 @@ textarea:focus-visible,
   display: flex;
   flex-direction: column;
 }
-.ade-subtabs {
-  display: flex;
-  gap: 2px;
-  padding: 2px;
-  margin: 0 0 4px;
-  background: var(--color-bg-2);
-  border: 1px solid var(--color-line);
-  border-radius: var(--radius-md);
-}
-.ade-subtabs button {
-  flex: 1;
-  padding: 3px 8px;
-  font-size: var(--font-size-xs);
-  font-weight: var(--font-weight-ui);
-  color: var(--color-text-3);
-  background: transparent;
-  border: none;
-  border-radius: calc(var(--radius-md) - 2px);
-  cursor: pointer;
-}
-.ade-subtabs button:hover {
-  color: var(--color-text-1);
-}
-.ade-subtabs button.active {
-  color: var(--color-text-1);
-  background: var(--color-bg-0);
-  box-shadow: var(--shadow-xs, 0 1px 2px rgba(0, 0, 0, 0.25));
-}
-/* Secondary launcher inside the Tasks/Pages toggle — it opens the
-   Standup center pane rather than toggling a sidebar surface, so it
-   stays its content width (not flex:1) and is fenced off with a divider
-   so it never reads as a third toggle state. */
-.ade-subtabs .ade-subtab-aux {
-  flex: 0 0 auto;
-  margin-left: 4px;
-  padding-left: 10px;
-  padding-right: 9px;
-  color: var(--color-text-4);
-  border-left: 1px solid var(--color-line);
-  border-radius: 0 calc(var(--radius-md) - 2px) calc(var(--radius-md) - 2px) 0;
-}
-.ade-subtabs .ade-subtab-aux:hover {
-  color: var(--color-text-1);
-  background: var(--color-bg-0);
-}
+/* The Tasks/Pages sub-tab toggle now uses the shared <Segment> control
+   (see PlanSection in AdeSidebar.tsx); its old `.ade-subtabs` styles were
+   removed with it. */
 /* Rail section title — a glyph + name header for a full-bleed mounted
    section (Trace). Sits above the rows with a hairline divider, like
    Build's nav, and supplies the top padding the -8px full-bleed margin
@@ -3654,8 +4316,13 @@ textarea:focus-visible,
   height: 17px;
   padding: 0 5px;
   border-radius: 9px;
-  background: var(--color-accent);
-  color: #fff;
+  /* A count of things waiting on you — the pack's attention slot, not the
+     accent. The accent's job in this rail is to mark WHERE YOU ARE (the
+     active row above); if every unread badge is also filled with it, the
+     one thing the accent is supposed to point at stops standing out and
+     the whole rail reads as one tinted wash. */
+  background: var(--color-amber);
+  color: var(--color-bg-0);
   font-size: var(--font-size-2xs);
   font-weight: var(--font-weight-accent);
   display: grid;
@@ -4019,8 +4686,11 @@ textarea:focus-visible,
   padding: 5px 14px;
   font-size: var(--font-size-xs);
   font-weight: var(--font-weight-ui);
-  color: #fff;
-  background: var(--color-accent);
+  /* Save is the form's one committing action — BUTTON slot, paired ink.
+     (`.auto-run` beside it stays an accent *tint* on purpose: running a
+     preset is reversible, saving the preset is not.) */
+  color: var(--color-primary-foreground);
+  background: var(--color-primary);
   border: none;
   border-radius: var(--radius-md);
   cursor: pointer;
@@ -4246,7 +4916,12 @@ textarea:focus-visible,
   background: var(--color-red);
 }
 .auto-run-dot.live {
-  background: var(--color-accent);
+  /* An agent is on it right now. Amber is the pack's "in flight" slot —
+     the same value AutomationsSurface's runDotColor() and the chat's
+     crew glyph use — so a live run reads identically wherever it shows.
+     The accent is reserved for things you can act on; a run in progress
+     is something you wait for. */
+  background: var(--color-amber);
   animation: auto-pulse 1.4s ease-in-out infinite;
 }
 @keyframes auto-pulse {
@@ -4381,6 +5056,15 @@ textarea:focus-visible,
 .ph-name:hover {
   background: var(--color-bg-2);
 }
+/* Project-header working indicator — the amber AsciiSpinner keeps its own
+   colour; this just reserves its slot on the identity line so it never
+   collapses against the name or the header action cluster. */
+.ph-working {
+  display: inline-flex;
+  align-items: center;
+  flex: 0 0 auto;
+  margin: 0 2px;
+}
 .ade-proj-h .nm {
   flex: 1;
   min-width: 0;
@@ -4500,9 +5184,9 @@ textarea:focus-visible,
   flex-direction: column;
   /* Breathing space: worktree rows sat flush against the workspace name
      line and each other — a slight top inset lifts the first row off the
-     name, and a per-row gap gives each copy its own air (calmer, easier to
-     scan than a dense stack). */
-  gap: 3px;
+     name, and a per-row gap gives each copy its own air (Conductor's
+     generous vertical rhythm — calmer, easier to scan than a dense stack). */
+  gap: 4px;
   padding-top: 3px;
   padding-left: 0;
 }
@@ -4573,6 +5257,9 @@ textarea:focus-visible,
   background: color-mix(in srgb, var(--color-accent) 10%, transparent);
   /* No left accent lip — the background tint alone marks the active row. */
 }
+/* A copy with an agent mid-turn shows the amber spinner in place of its glyph
+   (see renderRow). That animated loader is the whole signal — no row tint, no
+   warmed name; the motion alone reads as "working" without recolouring the row. */
 /* The row is a focusable role="button"; the global focus ring is an
    offset outline, but this row lives in an overflow-clipped scroller, so
    only its right segment escapes — into the panel seam — as a stray
@@ -4615,29 +5302,42 @@ textarea:focus-visible,
 }
 .ade-wrow .badges {
   /* Rides the L1 name line now (single-line rows). The name is flex:1 and
-     eats the slack, so the whole right cluster — agents · badges · ⋯ —
-     packs at the row's right edge; no auto-margin needed. */
+     eats the slack, so the whole right cluster — diff · PR/status — packs at
+     the row's right edge, aligned into one calm status column (Conductor).
+     No auto-margin needed. */
   margin-left: 0;
   display: flex;
   align-items: center;
-  gap: 5px;
+  gap: 6px;
   flex: none;
 }
-.ade-wrow .diff-add {
-  font-family: var(--font-mono);
-  font-size: var(--font-size-2xs);
-  color: var(--color-green);
-}
+/* Diff counts: monospaced + tabular so the +/− figures line up column-wise
+   from row to row (Conductor's aligned status column).
+   Deliberately COLOURLESS. This is a navigation list — the figure summarises a
+   copy you might switch to, it isn't the change itself, and a long roster each
+   row painting a green number and a red number is a traffic light where nothing
+   stands out. The roster already marks the copy you're standing in (active row
+   lift + name weight), so the count doesn't have to shout it a second time.
+   Same neutral ramp the shared Churn badge uses for list rows; real green/red
+   is spent where the number IS the change — the Changes surface. */
+.ade-wrow .diff-add,
 .ade-wrow .diff-del {
   font-family: var(--font-mono);
   font-size: var(--font-size-2xs);
-  color: var(--color-red);
+  font-weight: 500;
+  font-variant-numeric: tabular-nums;
+  line-height: 1;
+  color: var(--color-text-3);
 }
-/* open-PR pill — the mockup's "#816". Tinted by PR state so a merged or
-   closed ref reads differently from an open one. */
+/* PR / merge-status pill — the mockup's "#816" for an open ref, and a plain
+   short status word for a settled one: "Merged" (violet) or "Closed" (muted).
+   Open keeps the arctic accent (a live link to jump to); merged/closed drop
+   the accent so a settled ref never competes with an active one. State comes
+   straight off the badge — no "Ready to merge"/"Merge conflicts" is fabricated. */
 .ade-wrow .pr-pill {
   font-family: var(--font-mono);
   font-size: var(--font-size-2xs);
+  font-weight: 500;
   line-height: 1;
   padding: 2px 5px;
   border-radius: var(--radius-sm);
@@ -4645,15 +5345,21 @@ textarea:focus-visible,
   background: color-mix(in srgb, var(--color-accent) 14%, transparent);
   border: 1px solid color-mix(in srgb, var(--color-accent) 26%, transparent);
 }
+/* Merged = shipped: violet word, no number needed (the ref is settled; its
+   full detail lives in the hover card). */
 .ade-wrow .pr-pill.merged {
-  color: var(--color-purple, var(--color-accent));
-  background: color-mix(in srgb, var(--color-purple, var(--color-accent)) 14%, transparent);
-  border-color: color-mix(in srgb, var(--color-purple, var(--color-accent)) 26%, transparent);
+  font-family: inherit;
+  color: var(--color-violet);
+  background: color-mix(in srgb, var(--color-violet) 14%, transparent);
+  border-color: color-mix(in srgb, var(--color-violet) 26%, transparent);
 }
+/* Closed (not merged) = abandoned, not an error — muted neutral, so alarm-red
+   stays reserved for true conflicts. */
 .ade-wrow .pr-pill.closed {
-  color: var(--color-red);
-  background: color-mix(in srgb, var(--color-red) 12%, transparent);
-  border-color: color-mix(in srgb, var(--color-red) 24%, transparent);
+  font-family: inherit;
+  color: var(--color-text-3);
+  background: color-mix(in srgb, var(--color-text-1) 7%, transparent);
+  border-color: color-mix(in srgb, var(--color-text-1) 14%, transparent);
 }
 
 /* The agent's live state now reads from the L1 session name + the
@@ -5105,6 +5811,16 @@ textarea:focus-visible,
   height: 15px;
   color: var(--color-text-3);
 }
+/* Main-checkout mark carries a touch more weight than a parallel copy — it's
+   the canonical, rooted trunk. Both stay strictly monochrome (color is spent
+   only on status accents); the active row lifts its mark to the brightest
+   text tier so the copy you're standing in reads first. */
+.wsa-glyph.main {
+  color: var(--color-text-2);
+}
+.ade-wrow.active .wsa-glyph {
+  color: var(--color-text-1);
+}
 /* ⌘-hold quick-switch number, shown in the glyph's place while Command is
    down. Accent-tinted so it reads as an actionable shortcut (⌘+N), not
    status; tabular so 1–9 sit centred. */
@@ -5294,7 +6010,13 @@ textarea:focus-visible,
   background: var(--color-amber);
 }
 .ala-card-status.ok .ala-card-dot {
-  background: var(--color-accent);
+  /* Settled — the agent is here and nothing is wrong. Deliberately off
+     the colour ramp: green above means a turn is genuinely running and
+     amber means it wants you, so "fine, idle" has to be quieter than
+     both or the lane grows a third status colour that says nothing.
+     One tier up from the unknown-state dot so "we checked" still reads
+     as different from "we have no signal". */
+  background: var(--color-text-3);
 }
 .ala-card-act {
   min-width: 0;
@@ -5352,6 +6074,25 @@ textarea:focus-visible,
 .ade-seg button svg {
   width: 14px;
   height: 14px;
+}
+
+/* Horizontal variant — the right rail's section tabs. Same flat, accent-tint
+ * active language as the sidebar-foot switcher, but laid out in a row with the
+ * glyph beside the label (not stacked) and hugging its content so the strip
+ * scrolls rather than squishing when there are many tabs. */
+.ade-seg--row {
+  gap: 2px;
+}
+.ade-seg--row button {
+  flex: 0 0 auto;
+  flex-direction: row;
+  gap: 6px;
+  height: 26px;
+  padding: 0 10px;
+}
+.ade-seg--row button svg {
+  width: 13px;
+  height: 13px;
 }
 
 /* ── segment notification badges ────────────────────────────────────
@@ -5426,6 +6167,13 @@ textarea:focus-visible,
 .tiptap-pane .callout[data-callout-type="warning"] { --callout-accent: #eab308; --callout-bg: rgba(234, 179, 8, 0.14); }
 .tiptap-pane .callout[data-callout-type="danger"]  { --callout-accent: #ef4444; --callout-bg: rgba(239, 68, 68, 0.12); }
 .tiptap-pane .callout[data-callout-type="success"] { --callout-accent: #22c55e; --callout-bg: rgba(34, 197, 94, 0.12); }
+
+/* GitHub-style markdown callouts (remarkCallouts + Callout.tsx). Trim the
+   first/last child margins so the box hugs its prose, and un-italicise —
+   these ride on renderers whose blockquote is styled italic. */
+.aura-callout-body > :first-child { margin-top: 0; }
+.aura-callout-body > :last-child { margin-bottom: 0; }
+.aura-callout, .aura-callout-body, .aura-callout-body * { font-style: normal; }
 
 /* Toggle / details — NodeView renders a div[data-type=details] wrapper with a
  * bare <button> (we draw the triangle) + an inner content div holding the
@@ -5692,89 +6440,262 @@ textarea:focus-visible,
 }
 
 
-/* ── Pages compact document redesign ────────────────────────────────────────
-   Fixed Conductor-style document scale: compact, readable, non-user-sized. */
+/* ── Pages document chrome ──────────────────────────────────────────────────
+   Neutral, theme-aware document surface: the palette maps onto the app's own
+   tokens (no bespoke warm panel), and the topbar + tab segment are kept flush
+   and compact so the reading column — not the chrome — is what you notice. */
 .pages-doc {
-  --pd-col-pad: 20px;
-  --pages-doc-measure: 640px;
-  background: var(--color-bg-content);
+  --pages-doc-bg: var(--color-bg-content);
+  --pages-doc-header: var(--color-bg-content);
+  --pages-doc-header-border: var(--color-line);
+  --pages-doc-line: var(--color-line-soft);
+  --pages-doc-text: var(--color-text-1);
+  --pages-doc-muted: var(--color-text-3);
+  --pages-doc-subtle: var(--color-text-4);
+  --pages-doc-pill: var(--color-bg-2);
+  --pages-doc-pill-active: var(--color-bg-3);
+  --pages-doc-measure: 812px;
+  background: var(--pages-doc-bg);
+  color: var(--pages-doc-text);
 }
-@media (min-width: 640px) {
-  .pages-doc { --pd-col-pad: 32px; }
+.pages-doc-topbar {
+  min-height: 34px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 0 8px 0 12px;
+  background: var(--pages-doc-header);
+  border-bottom: 1px solid var(--pages-doc-header-border);
+}
+.pages-doc-badge {
+  display: inline-flex;
+  align-items: center;
+  height: 17px;
+  padding: 0 6px;
+  border: 1px solid var(--color-line);
+  border-radius: 4px;
+  color: var(--color-text-3);
+  background: var(--color-bg-2);
+  font-size: 9px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  line-height: 1;
+  white-space: nowrap;
+}
+.pages-doc-title-input {
+  min-width: 0;
+  flex: 1;
+  resize: none;
+  border: 0;
+  outline: 0;
+  padding: 0;
+  background: transparent;
+  color: var(--pages-doc-text);
+  font-size: 13px;
+  font-weight: 600;
+  line-height: 17px;
+  letter-spacing: -0.01em;
+}
+.pages-doc-title-input::placeholder { color: var(--pages-doc-subtle); }
+.pages-doc-save {
+  display: inline-flex;
+  align-items: center;
+  height: 20px;
+  padding: 0 9px;
+  border-radius: 5px;
+  color: var(--color-text-3);
+  background: var(--color-bg-2);
+  font-size: 10.5px;
+  font-weight: 600;
+  line-height: 1;
+  white-space: nowrap;
+}
+.pages-doc-save.is-dirty {
+  /* Unsaved edits. `--color-amber` is the pack's dirty/modified marker —
+     the same paint the changed-file glyphs and the tab dot use — so an
+     unsaved page reads like every other unsaved thing in the app. The
+     ink was a hard-coded green-black that only worked while the accent
+     was green; bg-0 tracks whatever the face turns into. */
+  color: var(--color-bg-0);
+  background: var(--color-amber);
+}
+.pages-doc-menu-button {
+  display: grid;
+  width: 24px;
+  height: 24px;
+  place-items: center;
+  border-radius: 5px;
+  color: var(--pages-doc-muted);
+  outline: none;
+  transition: var(--motion-fast) background, var(--motion-fast) color;
+}
+.pages-doc-menu-button:hover,
+.pages-doc-menu-button[data-state="open"] {
+  background: var(--pages-doc-pill-active);
+  color: var(--pages-doc-text);
+}
+.pages-doc-tabs {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  height: 30px;
+  padding: 0 max(24px, calc((100% - var(--pages-doc-measure)) / 2));
+  border-bottom: 1px solid var(--pages-doc-header-border);
+  background: var(--pages-doc-bg);
+}
+.pages-doc-tab {
+  display: inline-flex;
+  align-items: center;
+  height: 21px;
+  padding: 0 10px;
+  border-radius: 6px;
+  color: var(--pages-doc-muted);
+  font-size: 11px;
+  font-weight: 500;
+  line-height: 1;
+  transition: var(--motion-fast) background, var(--motion-fast) color;
+}
+.pages-doc-tab:hover {
+  background: color-mix(in srgb, var(--pages-doc-pill) 70%, transparent);
+  color: var(--pages-doc-text);
+}
+.pages-doc-tab.is-active {
+  background: var(--pages-doc-pill-active);
+  color: var(--pages-doc-text);
+}
+.pages-doc-body,
+.pages-doc-scroll,
+.pages-doc-source {
+  background: var(--pages-doc-bg);
+}
+.pages-doc-column {
+  color: var(--pages-doc-muted);
+}
+.pages-doc-source {
+  color: var(--pages-doc-muted);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-size: 14px;
+  line-height: 1.65;
 }
 .pages-doc .tiptap-pane,
 .pages-doc .tiptap-pane.ProseMirror,
-.pages-doc .ProseMirror {
+.pages-doc .ProseMirror,
+.pages-doc-preview {
   max-width: var(--pages-doc-measure);
   margin-inline: auto;
-  font-size: 12.75px !important;
-  line-height: 1.62 !important;
+  color: var(--pages-doc-muted);
+  font-size: 13px !important;
+  line-height: 1.6 !important;
   letter-spacing: 0;
-  color: var(--color-text-1);
 }
-.pages-doc .tiptap-pane p {
-  margin: 0.08em 0;
-  padding: 0;
-  color: var(--color-text-1);
+.pages-doc .tiptap-pane p,
+.pages-doc-preview p {
+  margin: 0 0 11px;
+  color: var(--pages-doc-muted);
 }
 .pages-doc .tiptap-pane h1,
 .pages-doc .tiptap-pane h2,
 .pages-doc .tiptap-pane h3,
-.pages-doc .tiptap-pane h4 {
-  color: var(--color-text-1);
+.pages-doc .tiptap-pane h4,
+.pages-doc-preview h1,
+.pages-doc-preview h2,
+.pages-doc-preview h3,
+.pages-doc-preview h4 {
+  color: var(--pages-doc-text);
   font-weight: 650;
-  letter-spacing: -0.012em;
+  letter-spacing: -0.018em;
 }
-.pages-doc .tiptap-pane h1 {
-  font-size: 1.34em !important;
-  line-height: 1.24;
-  margin: 0.95em 0 0.3em;
-}
-.pages-doc .tiptap-pane h2 {
-  font-size: 1.18em !important;
+.pages-doc .tiptap-pane h1,
+.pages-doc-preview h1 {
+  font-size: 16px !important;
   line-height: 1.3;
-  margin: 0.85em 0 0.25em;
+  margin: 0 0 8px;
 }
-.pages-doc .tiptap-pane h3 {
-  font-size: 1.06em !important;
+.pages-doc .tiptap-pane h2,
+.pages-doc-preview h2 {
+  font-size: 14px !important;
   line-height: 1.35;
-  margin: 0.7em 0 0.2em;
+  margin: 18px 0 8px;
+  color: var(--pages-doc-text);
+  font-weight: 600;
 }
-.pages-doc .tiptap-pane h4 {
-  font-size: 1em !important;
+.pages-doc .tiptap-pane h3,
+.pages-doc-preview h3 {
+  font-size: 13px !important;
   line-height: 1.4;
-  margin: 0.6em 0 0.15em;
-  color: var(--color-text-2);
+  margin: 16px 0 6px;
+  color: var(--pages-doc-muted);
+  font-weight: 650;
 }
-.pages-doc .tiptap-pane h1:first-child,
-.pages-doc .tiptap-pane h2:first-child,
-.pages-doc .tiptap-pane h3:first-child {
-  margin-top: 0;
+.pages-doc .tiptap-pane h4,
+.pages-doc-preview h4 {
+  font-size: 12.5px !important;
+  margin: 12px 0 6px;
+  color: var(--pages-doc-subtle);
 }
 .pages-doc .tiptap-pane ul,
-.pages-doc .tiptap-pane ol {
-  margin: 0.22em 0;
-  padding-left: 1.2em;
+.pages-doc .tiptap-pane ol,
+.pages-doc-preview ul,
+.pages-doc-preview ol {
+  margin: 0 0 12px;
+  padding-left: 0;
+  list-style: none;
 }
-.pages-doc .tiptap-pane li { margin: 0.06em 0; }
-.pages-doc .tiptap-pane blockquote {
-  margin: 0.45em 0;
-  padding: 0.05em 0.7em;
-  border-left: 2px solid var(--color-line);
-  color: var(--color-text-2);
+.pages-doc .tiptap-pane li,
+.pages-doc-preview li {
+  position: relative;
+  margin: 0 0 4px;
+  padding-left: 18px;
+  color: var(--pages-doc-text);
+  font-size: 13px;
+  line-height: 1.6;
 }
-.pages-doc .tiptap-pane code:not(pre code) {
+.pages-doc .tiptap-pane li::before,
+.pages-doc-preview li::before {
+  content: "";
+  position: absolute;
+  left: 4px;
+  top: 0.66em;
+  width: 4px;
+  height: 4px;
+  background: var(--pages-doc-muted);
+  border-radius: 999px;
+}
+.pages-doc .tiptap-pane blockquote,
+.pages-doc-preview blockquote {
+  margin: 12px 0;
+  padding: 0 0 0 14px;
+  border-left: 2px solid var(--pages-doc-header-border);
+  color: var(--pages-doc-muted);
+}
+.pages-doc .tiptap-pane code:not(pre code),
+.pages-doc-preview code:not(pre code) {
   border-radius: 5px;
   padding: 0.05em 0.35em;
-  background: var(--color-bg-2);
+  background: var(--pages-doc-pill);
+  color: var(--pages-doc-text);
   font-size: 0.92em;
 }
-.pages-doc .tiptap-pane pre {
+/* The editable code NodeView owns its own frame (`.tiptap-codeblock`); this
+ * bordered-pre treatment is only for the static Markdown preview + any stray
+ * bare <pre>, so exclude the NodeView's inner pane to avoid a double box. */
+.pages-doc .tiptap-pane pre:not(.tiptap-codeblock__pre),
+.pages-doc-preview pre {
   max-width: var(--pages-doc-measure);
-  margin: 0.55em auto;
-  font-size: 11.5px !important;
-  line-height: 1.55;
+  margin: 12px auto;
+  border: 1px solid var(--pages-doc-line);
   border-radius: 8px;
+  background: var(--color-bg-1);
+  color: var(--pages-doc-muted);
+  font-size: 12px;
+  line-height: 1.55;
+}
+.pages-doc .tiptap-pane hr,
+.pages-doc-preview hr {
+  margin: 18px 0;
+  border-color: var(--pages-doc-line);
 }
 .pages-doc .tiptap-pane table,
 .pages-doc .tiptap-pane .tableWrapper,
@@ -5782,10 +6703,2079 @@ textarea:focus-visible,
 .pages-doc .tiptap-pane .tiptap-image {
   max-width: min(100%, calc(var(--pages-doc-measure) + 96px));
 }
-.pages-doc .tiptap-pane hr { margin: 0.85em 0; }
 .pages-doc .tiptap-pane [style*="font-size"] { font-size: inherit !important; }
 .pages-doc .tiptap-pane [style*="text-align"] { text-align: left !important; }
 .pages-doc [data-radix-popper-content-wrapper] [role="menu"],
 .pages-doc [data-radix-popper-content-wrapper] [role="menu"] * {
   font-size: 12px;
+}
+/* ── Team workspace: Slack desktop visual language ─────────────────────────
+   The Team bounded context keeps Aura's existing data/application layer, but
+   deliberately carries its own bright content palette and aubergine chrome.
+   Scoping every override to `.slack-team-shell` prevents the workspace from
+   retheming editor, source-control, Tasks, or any other Aura surface. */
+.slack-team-shell {
+  background: var(--color-bg-0);
+  color: var(--color-text-1);
+  font-family: "Slack-Lato", Lato, ui-sans-serif, system-ui, -apple-system,
+    BlinkMacSystemFont, "Segoe UI", sans-serif;
+}
+
+.slack-team-topbar {
+  height: 40px;
+  flex: 0 0 40px;
+  display: grid;
+  grid-template-columns: minmax(116px, 1fr) minmax(260px, 510px) minmax(44px, 1fr);
+  align-items: center;
+  gap: 12px;
+  padding: 0 12px;
+  color: rgba(255, 255, 255, 0.92);
+  background: #3f0e40;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+}
+.slack-topbar-history {
+  justify-self: end;
+  display: flex;
+  align-items: center;
+  gap: 18px;
+  padding-right: 2px;
+  opacity: 0.88;
+}
+.slack-team-search {
+  height: 28px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 0 11px;
+  color: rgba(255, 255, 255, 0.86);
+  background: rgba(255, 255, 255, 0.19);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 6px;
+  box-shadow: 0 1px 1px rgba(0, 0, 0, 0.12);
+}
+.slack-team-search:focus-within {
+  background: rgba(255, 255, 255, 0.24);
+  box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.42);
+}
+.slack-team-search input {
+  width: 100%;
+  min-width: 0;
+  color: #fff;
+  background: transparent;
+  border: 0;
+  outline: 0;
+  font-size: 13px;
+}
+.slack-team-search input::placeholder { color: rgba(255, 255, 255, 0.88); }
+.slack-topbar-help {
+  justify-self: start;
+  width: 22px;
+  height: 22px;
+  border: 1.5px solid currentColor;
+  border-radius: 50%;
+  color: rgba(255, 255, 255, 0.8);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.slack-team-body { background: #ffffff; }
+.slack-app-rail {
+  width: 74px;
+  flex: 0 0 74px;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 9px;
+  padding: 12px 8px 12px;
+  color: #f7eef7;
+  background: #481449;
+  border-right: 1px solid rgba(255, 255, 255, 0.07);
+}
+.slack-app-logo {
+  width: 40px;
+  height: 40px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  margin-bottom: 1px;
+  color: #4a154b;
+  background: #fff;
+  border-radius: 10px;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.25);
+}
+.slack-app-rail-item {
+  width: 56px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 3px;
+  color: rgba(255, 255, 255, 0.84);
+}
+.slack-app-rail-item > span {
+  width: 36px;
+  height: 36px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 9px;
+  transition: background 120ms ease, color 120ms ease;
+}
+.slack-app-rail-item:hover > span,
+.slack-app-rail-item.is-active > span { background: rgba(255, 255, 255, 0.18); color: #fff; }
+.slack-app-rail-item small { color: inherit; font-size: 10px; line-height: 12px; }
+.slack-app-rail-spacer { flex: 1; }
+.slack-app-rail-add {
+  width: 38px;
+  height: 38px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: #fff;
+  background: rgba(255, 255, 255, 0.22);
+  border-radius: 50%;
+}
+.slack-app-rail .relative.inline-flex:last-child { margin-top: 2px; }
+
+.slack-team-sidebar {
+  min-width: 220px;
+  display: flex;
+  flex-direction: column;
+  color: var(--color-text-2);
+  background: var(--color-bg-1);
+  border-right: 0;
+}
+.slack-team-sidebar .ade-rail-title {
+  min-height: 48px;
+  height: 48px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 0 16px;
+  color: #fff;
+  background: transparent;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+  font-size: 17px;
+  font-weight: 700;
+  letter-spacing: -0.2px;
+}
+.slack-team-sidebar .ade-rail-title > svg:first-child { display: none; }
+.slack-team-sidebar .ade-rail-title > span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.slack-team-sidebar .ade-rail-title button { color: rgba(255, 255, 255, 0.82); }
+.slack-team-sidebar .ade-rail-title button:hover { color: #fff; background: rgba(255, 255, 255, 0.12); }
+
+/* Chats | Tasks — persistent segmented control (shared ui/segmented) under
+   the project name. Just the wrapper's inset + hairline; the control styles
+   itself. */
+.team-nav-tabs {
+  flex-shrink: 0;
+  padding: 8px 8px 8px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.slack-sidebar-shortcuts { padding: 6px 8px 2px; }
+.slack-sidebar-shortcut,
+.slack-conversation-row,
+.slack-sidebar-empty {
+  width: 100%;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  color: rgba(255, 255, 255, 0.88);
+  text-align: left;
+  border-radius: 5px;
+}
+.slack-sidebar-shortcut {
+  height: 30px;
+  gap: 9px;
+  padding: 0 8px;
+  font-size: 14px;
+}
+.slack-sidebar-shortcut:hover,
+.slack-sidebar-shortcut.is-active { color: #fff; background: rgba(255, 255, 255, 0.13); }
+.slack-sidebar-shortcut-icon {
+  width: 18px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.slack-sidebar-badge,
+.slack-mention-badge {
+  min-width: 20px;
+  height: 18px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  margin-left: auto;
+  padding: 0 5px;
+  color: #611f69;
+  background: #fff;
+  border-radius: 9px;
+  font-size: 10px;
+  font-weight: 800;
+  line-height: 18px;
+}
+.slack-unread-glyph { width: 15px; display: flex; flex-direction: column; gap: 2px; }
+.slack-unread-glyph i { height: 1.5px; background: currentColor; border-radius: 2px; }
+.slack-unread-glyph i:nth-child(2) { width: 11px; }
+.slack-unread-glyph i:nth-child(3) { width: 7px; }
+
+.slack-sidebar-notice {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin: 6px 12px;
+  padding: 8px 9px;
+  color: rgba(255, 255, 255, 0.76);
+  background: rgba(255, 255, 255, 0.1);
+  border: 1px solid rgba(255, 255, 255, 0.11);
+  border-radius: 6px;
+  font-size: 11px;
+  line-height: 15px;
+}
+.slack-sidebar-notice strong { color: #fff; font-weight: 700; }
+.slack-sidebar-notice-link { color: #fff; text-decoration: underline; text-underline-offset: 2px; }
+.slack-sidebar-scroll {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 2px 8px 12px;
+  scrollbar-color: rgba(255, 255, 255, 0.22) transparent;
+}
+.slack-sidebar-group { margin-top: 12px; }
+.slack-sidebar-group-header {
+  height: 25px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 3px;
+  color: #fff;
+}
+.slack-sidebar-group-toggle {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 13px;
+  font-weight: 700;
+}
+.slack-sidebar-group-toggle svg { transition: transform 120ms ease; }
+.slack-sidebar-group-toggle svg.is-collapsed { transform: rotate(-90deg); }
+.slack-sidebar-group-action {
+  width: 24px;
+  height: 24px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 5px;
+  color: rgba(255, 255, 255, 0.78);
+}
+.slack-sidebar-group-action:hover { color: #fff; background: rgba(255, 255, 255, 0.13); }
+.slack-sidebar-group-rows { display: flex; flex-direction: column; gap: 1px; }
+.slack-conversation-row {
+  height: 28px;
+  gap: 7px;
+  padding: 0 8px;
+  font-size: 14px;
+}
+.slack-conversation-row:hover { color: #fff; background: rgba(255, 255, 255, 0.1); }
+.slack-conversation-row.is-active {
+  color: #401142;
+  background: #f4e9f5;
+}
+.slack-conversation-row.is-unread { color: #fff; font-weight: 700; }
+.slack-conversation-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.slack-channel-glyph {
+  width: 20px;
+  height: 20px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 20px;
+  color: currentColor;
+  font-size: 16px;
+}
+.slack-unread-dot { width: 7px; height: 7px; margin-left: auto; background: #fff; border-radius: 50%; }
+.slack-conversation-row.is-active .slack-unread-dot { background: #611f69; }
+.slack-sidebar-empty { height: 28px; gap: 8px; padding: 0 8px; color: rgba(255, 255, 255, 0.65); font-size: 13px; }
+.slack-sidebar-empty:not(:disabled):hover { color: #fff; background: rgba(255, 255, 255, 0.1); }
+.slack-app-icon {
+  width: 20px;
+  height: 20px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: #522653;
+  background: #fff;
+  border-radius: 4px;
+}
+.slack-app-more { opacity: 0; }
+.slack-app-row:hover .slack-app-more { opacity: 0.8; }
+
+.slack-channel-header { background: #fff; color: #1d1c1d; }
+.slack-channel-header-row { min-height: 40px; border-bottom: 0; }
+.slack-header-back {
+  width: 28px;
+  height: 28px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: #454245;
+  border-radius: 4px;
+}
+.slack-header-back:hover { background: #f1f1f1; }
+.slack-channel-title {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: #1d1c1d;
+  font-size: 14px;
+  font-weight: 700;
+}
+.slack-channel-title > span:not(.relative) { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.slack-channel-title-hash { color: #454245; font-size: 15px; font-weight: 500; }
+.slack-member-facepile {
+  height: 28px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0 10px 0 4px;
+  color: #454245;
+  background: #fff;
+  border: 1px solid #ddd;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 700;
+}
+.slack-member-facepile:hover,
+.slack-member-facepile.is-active { background: #f8f8f8; border-color: #b7b7b7; }
+.slack-facepile-avatars { display: flex; align-items: center; margin-right: 2px; }
+/* Circular stacked set: round the OUTER avatar span so its overlap ring is a
+ * circle (not a square), and let each disc bite into the previous one. */
+.slack-facepile-avatars > span {
+  border-radius: 50% !important;
+  margin-left: -7px;
+  box-shadow: 0 0 0 2px #fff;
+}
+.slack-facepile-avatars > span:first-child { margin-left: 0; }
+.slack-facepile-avatars > span > span { border-radius: 50% !important; }
+.slack-channel-header .w-7.h-7.rounded {
+  width: 28px;
+  height: 28px;
+  color: #454245;
+  border: 1px solid #ddd;
+  border-radius: 7px;
+}
+.slack-channel-header .w-7.h-7.rounded:hover,
+.slack-channel-header .w-7.h-7.rounded.bg-bg-2 { color: #1d1c1d; background: #f4f4f4; }
+.slack-channel-header .w-7.h-7.rounded.bg-bg-2 {
+  color: #1264a3;
+  border-color: #1264a3;
+  box-shadow: 0 0 0 2px rgba(18, 100, 163, 0.12);
+}
+.slack-channel-tabs {
+  min-height: 28px;
+  border-top: 1px solid #f2f2f2;
+}
+.slack-channel-tabs button { color: #616061; font-size: 11px; }
+.slack-channel-tabs button:hover { color: #1d1c1d; background: #f8f8f8; }
+
+.slack-message-stream { padding: 0 0 18px; background: #fff; }
+.slack-channel-welcome {
+  position: relative;
+  max-width: 860px;
+  margin: 0 auto;
+  padding: 46px 32px 26px;
+  color: #1d1c1d;
+}
+.slack-channel-welcome.is-spacious {
+  min-height: 100%;
+  display: flex;
+  flex-direction: column;
+  justify-content: flex-end;
+  padding-bottom: 36px;
+}
+.slack-channel-welcome h1 {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  margin: 0 0 4px;
+  font-size: 28px;
+  line-height: 34px;
+  font-weight: 900;
+  letter-spacing: -0.8px;
+}
+.slack-channel-welcome > p { margin: 0; color: #616061; font-size: 14px; line-height: 21px; }
+.slack-channel-welcome p strong { display: inline-flex; align-items: center; gap: 3px; }
+.slack-channel-description { margin-top: 1px !important; }
+.slack-channel-welcome-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 15px; }
+.slack-channel-welcome-actions button {
+  height: 34px;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0 12px;
+  color: #1d1c1d;
+  background: #fff;
+  border: 1px solid #b9b9b9;
+  border-radius: 5px;
+  box-shadow: 0 1px 1px rgba(0, 0, 0, 0.06);
+  font-size: 13px;
+  font-weight: 700;
+}
+.slack-channel-welcome-actions button:hover { background: #f8f8f8; }
+.slack-channel-welcome-actions button.is-primary {
+  border-color: #d39a23;
+  box-shadow: 0 0 0 4px rgba(255, 193, 34, 0.28);
+}
+.slack-channel-tip {
+  position: relative;
+  width: min(430px, calc(100% - 24px));
+  display: flex;
+  flex-direction: column;
+  margin: 7px 0 -4px 70px;
+  padding: 16px 74px 16px 28px;
+  color: #1d1c1d;
+  background: #ffc107;
+  border-radius: 0 38px 38px 38px;
+  font-size: 13px;
+  line-height: 19px;
+  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.16);
+}
+.slack-channel-tip strong { font-size: 14px; }
+.slack-tip-facepile { position: absolute; right: 18px; bottom: 14px; display: flex; }
+.slack-tip-facepile span {
+  width: 24px;
+  height: 24px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  margin-left: -7px;
+  background: #fff;
+  border: 2px solid #ffc107;
+  border-radius: 50%;
+  font-size: 12px;
+}
+
+.slack-message-row {
+  position: relative;
+  display: grid;
+  grid-template-columns: 30px minmax(0, 1fr);
+  gap: 8px;
+  padding: 5px 26px 5px 16px;
+  color: #1d1c1d;
+}
+.slack-message-row.is-grouped { padding-top: 2px; padding-bottom: 2px; }
+.slack-message-row:hover { background: #f8f8f8; }
+.slack-message-row.is-pinned { box-shadow: inset 3px 0 #e8912d; }
+/* Thread panel reuses the channel Bubble, but this narrow rail can't afford
+ * the channel's wide 16/26px side padding — zero the row's horizontal padding
+ * so the list wrapper's own 12px inset is all that's left. */
+.slack-thread-view .slack-message-row { padding-left: 0; padding-right: 0; }
+.slack-message-avatar-col { width: 30px; display: flex; justify-content: flex-end; padding-top: 1px; }
+.slack-message-avatar-col > span:not(.slack-grouped-time) {
+  width: 26px !important;
+  height: 26px !important;
+  border-radius: 5px !important;
+}
+.slack-grouped-time {
+  display: none;
+  padding-top: 3px;
+  color: #868686;
+  font-size: 9px;
+  white-space: nowrap;
+}
+.slack-message-row:hover .slack-grouped-time { display: inline; }
+.slack-message-content { min-width: 0; display: flex; flex-direction: column; align-items: flex-start; }
+.slack-message-meta { display: flex; align-items: baseline; gap: 6px; min-width: 0; line-height: 16px; }
+.slack-message-meta strong { color: #1d1c1d; font-size: 12px; font-weight: 600; }
+.slack-message-meta time { color: #868686; font-size: 9.5px; }
+.slack-agent-badge,
+.slack-you-badge {
+  padding: 1px 4px;
+  color: #616061;
+  background: #e8e8e8;
+  border-radius: 3px;
+  font-size: 8px;
+  font-weight: 800;
+  line-height: 13px;
+}
+.slack-you-badge { color: #1264a3; background: #e7f3fa; }
+.slack-message-body {
+  width: 100%;
+  color: #1d1c1d;
+  font-size: 12px;
+  line-height: 17px;
+  overflow-wrap: anywhere;
+}
+.slack-message-body a { color: #1264a3; }
+.slack-message-body code { color: #1d1c1d; background: #f4f4f4; border: 1px solid #ddd; }
+.slack-message-reactions { margin-top: 3px; }
+.slack-message-footer { display: flex; align-items: center; gap: 9px; margin-top: 2px; color: #616061; }
+.slack-message-footer .mt-1 { margin-top: 0; }
+.slack-message-footer .mt-0\.5 { margin-top: 0; }
+.slack-message-hover-actions {
+  position: absolute;
+  top: -12px;
+  right: 24px;
+  min-height: 30px;
+  display: none;
+  align-items: center;
+  padding: 0 8px;
+  color: #454245;
+  background: #fff;
+  border: 1px solid #ddd;
+  border-radius: 6px;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.12);
+  z-index: 4;
+}
+.slack-message-row:hover .slack-message-hover-actions { display: flex; }
+.slack-message-hover-actions > span { opacity: 1 !important; gap: 10px; }
+.slack-system-message {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 26px 6px 60px;
+  color: #616061;
+  font-size: 13px;
+  line-height: 18px;
+}
+.slack-system-message strong { color: #1d1c1d; }
+.slack-empty-dm { color: #1d1c1d; }
+
+.slack-composer-wrap { padding: 0 20px 20px; border-top: 0; }
+.slack-composer-surface {
+  overflow: hidden;
+  color: #1d1c1d;
+  background: #fff;
+  border: 1px solid #b7b7b7;
+  border-radius: 8px;
+  box-shadow: 0 1px 1px rgba(0, 0, 0, 0.04);
+}
+.slack-composer-surface:focus-within {
+  border-color: #616061;
+  box-shadow: 0 0 0 1px #616061;
+}
+.slack-composer-input {
+  min-height: 43px;
+  padding: 10px 12px 4px;
+  color: #1d1c1d;
+  font-size: 14px;
+  line-height: 20px;
+}
+.slack-composer-input::placeholder { color: #9b9b9b; }
+.slack-composer-toolbar {
+  min-height: 36px;
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  padding: 2px 7px 5px;
+}
+.slack-composer-tool,
+.slack-composer-toolbar button[title="Attach files"] {
+  width: 28px;
+  height: 28px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: #616061;
+  border-radius: 4px;
+}
+.slack-composer-tool:hover,
+.slack-composer-toolbar button[title="Attach files"]:hover { color: #1d1c1d; background: #f1f1f1; }
+.slack-composer-divider { width: 1px; height: 20px; margin: 0 3px; background: #ddd; }
+.slack-composer-send {
+  width: 30px;
+  height: 28px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  color: #fff;
+  background: #007a5a;
+  border-radius: 4px;
+}
+.slack-composer-send:disabled { color: #b8b8b8; background: transparent; cursor: default; }
+
+.slack-utility-view { flex: 1; min-width: 0; display: flex; flex-direction: column; color: #1d1c1d; background: #fff; }
+.slack-utility-header {
+  height: 49px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 18px;
+  border-bottom: 1px solid #ddd;
+}
+.slack-utility-header h1 { margin: 0; font-size: 17px; font-weight: 900; }
+.slack-utility-header button { width: 30px; height: 30px; display: flex; align-items: center; justify-content: center; border-radius: 5px; }
+.slack-utility-header button:hover { background: #f3f3f3; }
+.slack-utility-heading { min-width: 0; display: flex; align-items: center; gap: 6px; }
+.slack-utility-header .slack-utility-back {
+  flex: 0 0 30px;
+  color: #454245;
+}
+.slack-utility-content { flex: 1; min-height: 0; overflow-y: auto; padding: 22px min(5vw, 54px) 38px; }
+.slack-recap-hero {
+  display: flex;
+  gap: 13px;
+  align-items: flex-start;
+  margin-bottom: 18px;
+  padding: 18px;
+  color: #1d1c1d;
+  background: #f8f3fc;
+  border: 1px solid #e3d5e8;
+  border-radius: 10px;
+}
+.slack-recap-hero > span { width: 38px; height: 38px; display: flex; align-items: center; justify-content: center; color: #611f69; background: #fff; border-radius: 9px; }
+.slack-recap-hero h2 { margin: 0 0 3px; font-size: 16px; font-weight: 900; }
+.slack-recap-hero p { margin: 0; color: #616061; font-size: 13px; }
+.slack-utility-list { overflow: hidden; border: 1px solid #ddd; border-radius: 9px; }
+.slack-utility-list > button,
+.slack-utility-message-list > div {
+  width: 100%;
+  min-height: 61px;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 14px;
+  text-align: left;
+  border-bottom: 1px solid #e8e8e8;
+}
+.slack-utility-list > button:last-child,
+.slack-utility-message-list > div:last-child { border-bottom: 0; }
+.slack-utility-list > button:hover { background: #f8f8f8; }
+.slack-utility-channel-mark { width: 34px; height: 34px; display: flex; align-items: center; justify-content: center; color: #616061; background: #f1f1f1; border-radius: 7px; font-size: 18px; }
+.slack-utility-row-copy { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+.slack-utility-row-copy strong { color: #1d1c1d; font-size: 13px; font-weight: 800; }
+.slack-utility-row-copy small { overflow: hidden; color: #616061; font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }
+.slack-utility-list > button > b { min-width: 21px; height: 21px; display: flex; align-items: center; justify-content: center; color: #fff; background: #c13b5a; border-radius: 11px; font-size: 10px; }
+.slack-utility-empty { min-height: 280px; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 12px; color: #868686; text-align: center; }
+.slack-utility-empty p { max-width: 340px; margin: 0; font-size: 13px; line-height: 19px; }
+.slack-drafts-empty { display: flex; align-items: center; gap: 12px; padding: 15px; margin-bottom: 22px; border: 1px dashed #c9c9c9; border-radius: 9px; }
+.slack-drafts-empty > div { display: flex; flex-direction: column; gap: 2px; }
+.slack-drafts-empty strong { font-size: 13px; }
+.slack-drafts-empty span:not(.slack-draft-glyph) { color: #616061; font-size: 12px; }
+.slack-draft-glyph { width: 36px; height: 36px; display: flex; align-items: center; justify-content: center; color: #611f69; background: #f2e8f3; border-radius: 8px; font-size: 21px; }
+.slack-utility-section-title { margin: 0 0 9px; font-size: 13px; font-weight: 900; }
+
+/* Explicit right-hand Team panes. Details, members, canvas, pinned messages,
+   and threads can be opened together; each follows the active DM/channel. */
+.slack-context-stack {
+  max-width: calc(100% - 220px);
+  overflow-x: auto;
+  background: #fff;
+  border-left: 1px solid #ddd;
+}
+.slack-context-pane {
+  min-width: 260px;
+  flex: 0 0 auto;
+  background: #fff;
+  border-right: 1px solid #ddd;
+}
+.slack-context-pane:last-child { border-right: 0; }
+.slack-context-pane > aside { border-left: 0; background: #fff; }
+.slack-context-header {
+  min-height: 49px;
+  color: #1d1c1d;
+  background: #fff;
+}
+.slack-context-header > strong {
+  font-size: 16px;
+  font-weight: 900;
+  letter-spacing: -0.2px;
+}
+.slack-context-subtitle {
+  max-width: 45%;
+  color: #616061;
+  font-size: 12px;
+}
+.slack-context-header .w-7.h-7.rounded {
+  width: 30px;
+  height: 30px;
+  color: #454245;
+  border: 0;
+}
+.slack-context-header .w-7.h-7.rounded:hover { background: #f2f2f2; }
+.slack-details-view { padding: 22px 20px 36px; color: #1d1c1d; background: #fff; }
+.slack-details-hero { display: flex; flex-direction: column; align-items: center; text-align: center; }
+.slack-details-hero h2 { margin: 12px 0 2px; font-size: 20px; line-height: 25px; font-weight: 900; }
+.slack-details-hero p { margin: 0; color: #2bac76; font-size: 12px; }
+.slack-details-channel-icon {
+  width: 72px;
+  height: 72px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: #454245;
+  background: #f3f3f3;
+  border: 1px solid #ddd;
+  border-radius: 14px;
+  font-size: 36px;
+  font-weight: 700;
+}
+.slack-details-channel-icon.is-private { font-size: 25px; }
+.slack-details-actions { display: grid; grid-template-columns: repeat(3, 1fr); gap: 7px; margin: 20px 0; }
+.slack-details-actions button {
+  height: 34px;
+  color: #1264a3;
+  background: #fff;
+  border: 1px solid #bbb;
+  border-radius: 6px;
+  font-size: 12px;
+  font-weight: 700;
+}
+.slack-details-actions button:hover { background: #f8f8f8; }
+.slack-details-card { margin-top: 20px; overflow: hidden; border: 1px solid #ddd; border-radius: 9px; }
+.slack-details-card > div { min-height: 48px; margin: 0; padding: 10px 12px; border-bottom: 1px solid #e7e7e7; }
+.slack-details-card > div:last-child { border-bottom: 0; }
+.slack-context-pane [data-slot="channel-canvas"] { background: #fff; }
+.slack-context-pane .aura-channel-canvas,
+.slack-context-pane .channel-canvas { background: #fff; }
+
+.slack-team-shell.is-one-column .slack-app-rail { display: none; }
+.slack-team-shell.is-one-column .slack-team-topbar { grid-template-columns: 1fr; padding: 0 8px; }
+.slack-team-shell.is-one-column .slack-topbar-history,
+.slack-team-shell.is-one-column .slack-topbar-help { display: none; }
+.slack-team-shell.is-one-column .slack-team-sidebar { min-width: 100%; }
+
+@media (max-width: 760px) {
+  .slack-member-facepile { display: none; }
+  .slack-channel-tip { margin-left: 0; }
+  .slack-composer-tool:nth-of-type(n + 5) { display: none; }
+  .slack-context-stack { max-width: 100%; }
+}
+
+/* Composer member and emoji pickers. */
+.slack-team-shell .slack-mention-picker {
+  position: absolute;
+  bottom: calc(100% - 10px);
+  left: 20px;
+  z-index: 40;
+  width: min(500px, calc(100% - 40px));
+  max-height: 330px;
+  overflow-y: auto;
+  padding: 5px 0;
+  color: var(--color-text-1);
+  background: var(--color-bg-2);
+  border: 1px solid var(--color-line);
+  border-radius: 8px;
+  box-shadow: var(--shadow-flyout);
+}
+.slack-team-shell .slack-mention-picker > button {
+  width: 100%;
+  min-height: 37px;
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding: 5px 13px;
+  text-align: left;
+}
+.slack-team-shell .slack-mention-picker > button:hover,
+.slack-team-shell .slack-mention-picker > button:focus-visible {
+  color: #fff;
+  background: #1264a3;
+  outline: 0;
+}
+.slack-team-shell .slack-mention-picker strong { min-width: max-content; font-size: 13px; }
+.slack-team-shell .slack-mention-picker small { min-width: 0; overflow: hidden; color: var(--color-text-2); font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }
+.slack-team-shell .slack-mention-picker > button:hover small { color: rgba(255, 255, 255, 0.84); }
+.slack-team-shell .slack-mention-special,
+.slack-team-shell .slack-mention-avatar {
+  width: 24px;
+  height: 24px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 24px;
+  border-radius: 5px;
+}
+.slack-team-shell .slack-mention-special { color: var(--color-text-2); background: var(--color-bg-3); }
+.slack-team-shell .slack-mention-presence { width: 8px; height: 8px; flex: 0 0 8px; border: 1.5px solid var(--color-text-2); border-radius: 50%; }
+.slack-team-shell .slack-emoji-picker {
+  position: absolute;
+  z-index: 45;
+  width: 310px;
+  overflow: hidden;
+  color: var(--color-text-1);
+  background: var(--color-bg-2);
+  border: 1px solid var(--color-line);
+  border-radius: 9px;
+  box-shadow: var(--shadow-flyout);
+}
+.slack-team-shell .slack-emoji-picker header { height: 39px; display: flex; align-items: center; justify-content: space-between; padding: 0 12px; border-bottom: 1px solid var(--color-line); }
+.slack-team-shell .slack-emoji-picker header button { width: 26px; height: 26px; color: var(--color-text-2); border-radius: 5px; font-size: 19px; }
+.slack-team-shell .slack-emoji-picker header button:hover { color: var(--color-text-1); background: var(--color-bg-3); }
+.slack-team-shell .slack-emoji-picker > div { display: grid; grid-template-columns: repeat(8, 1fr); gap: 2px; padding: 10px; }
+.slack-team-shell .slack-emoji-picker > div button { width: 34px; height: 34px; display: flex; align-items: center; justify-content: center; border-radius: 5px; font-size: 20px; }
+.slack-team-shell .slack-emoji-picker > div button:hover { background: var(--color-bg-3); transform: scale(1.08); }
+
+/* Compact Medusa-style Team dialogs. These intentionally stay dark even
+   when another Aura surface temporarily switches palette. */
+.slack-team-shell .slack-channel-header {
+  border-bottom: 1px solid #232326 !important;
+}
+.slack-team-shell .slack-channel-tabs {
+  border-top: 0 !important;
+  border-bottom-color: #232326;
+}
+.slack-channel-dialog-layer {
+  --medusa-bg: #111315;
+  --medusa-card: #181a1d;
+  --medusa-hover: #202328;
+  --medusa-border: #2a2d32;
+  --medusa-text: #f3f4f6;
+  --medusa-muted: #92969d;
+  color: var(--medusa-text);
+}
+.slack-channel-dialog-backdrop { background: rgba(3, 4, 5, 0.68); }
+.slack-channel-dialog {
+  width: min(520px, calc(100vw - 32px));
+  height: auto;
+  max-height: min(610px, calc(100vh - 48px));
+  color: var(--medusa-text);
+  background: var(--medusa-bg);
+  border-color: var(--medusa-border);
+  border-radius: 8px;
+  box-shadow: 0 18px 48px rgba(0, 0, 0, 0.48);
+}
+.slack-channel-dialog-header {
+  min-height: 48px;
+  display: flex;
+  align-items: center;
+  padding: 0 14px;
+  border-bottom: 1px solid var(--medusa-border);
+}
+.slack-channel-dialog-title { gap: 6px; font-size: 14px; }
+.slack-channel-dialog-title > span { color: var(--medusa-muted); }
+.slack-channel-dialog-close {
+  position: static;
+  width: 28px;
+  height: 28px;
+  margin-left: auto;
+  color: var(--medusa-muted);
+  border-radius: 5px;
+}
+.slack-channel-dialog-close:hover { color: var(--medusa-text); background: var(--medusa-hover); }
+.slack-channel-dialog-tabs {
+  min-height: 35px;
+  gap: 14px;
+  padding: 0 14px;
+  background: #141619;
+  border-color: var(--medusa-border);
+}
+.slack-channel-dialog-tabs button { color: var(--medusa-muted); font-size: 11px; }
+.slack-channel-dialog-tabs button.is-active { color: var(--medusa-text); font-weight: 600; }
+.slack-channel-dialog-tabs button.is-active::after { height: 1px; background: var(--medusa-text); }
+.slack-channel-dialog-body {
+  min-height: 150px;
+  max-height: 520px;
+  padding: 12px;
+  background: var(--medusa-bg);
+}
+.slack-channel-about-card { gap: 0; }
+.slack-channel-about-card > section,
+.slack-channel-settings > section {
+  min-height: 48px;
+  gap: 2px;
+  padding: 9px 38px 9px 11px;
+  color: var(--medusa-muted);
+  background: var(--medusa-card);
+  border-color: var(--medusa-border);
+  border-radius: 0;
+  font-size: 11px;
+}
+.slack-channel-about-card > section:first-child,
+.slack-channel-settings > section:first-child { border-radius: 7px 7px 0 0; }
+.slack-channel-about-card > section + section,
+.slack-channel-settings > section + section { margin-top: -1px; border-top-color: var(--medusa-border); }
+.slack-channel-about-card > section:nth-last-of-type(1),
+.slack-channel-settings > section:last-child { border-radius: 0 0 7px 7px; }
+.slack-channel-about-card strong,
+.slack-channel-settings strong { color: var(--medusa-text); font-size: 11px; font-weight: 600; }
+.slack-channel-about-card section button {
+  top: 50%;
+  right: 10px;
+  width: 24px;
+  height: 24px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--medusa-muted);
+  border-radius: 4px;
+  transform: translateY(-50%);
+}
+.slack-channel-about-card section button:hover { color: var(--medusa-text); background: var(--medusa-hover); }
+.slack-channel-id { margin: 9px 2px 0; color: #686d75; font-size: 10px; }
+.slack-channel-members-toolbar { display: flex; align-items: center; gap: 7px; margin-bottom: 8px; }
+.slack-channel-dialog-search {
+  height: 32px;
+  flex: 1;
+  gap: 7px;
+  padding: 0 9px;
+  color: var(--medusa-muted);
+  background: var(--medusa-card);
+  border-color: var(--medusa-border);
+  border-radius: 6px;
+}
+.slack-channel-dialog-search:focus-within { border-color: #4b5058; box-shadow: 0 0 0 1px #4b5058; }
+.slack-channel-dialog-search input { color: var(--medusa-text); font-size: 11px; }
+.slack-channel-add-member {
+  height: 32px;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0 10px;
+  color: var(--medusa-text);
+  background: var(--medusa-card);
+  border: 1px solid var(--medusa-border);
+  border-radius: 6px;
+  font-size: 11px;
+}
+.slack-channel-add-member:hover { background: var(--medusa-hover); }
+.slack-channel-member-card {
+  overflow: hidden;
+  background: var(--medusa-card);
+  border: 1px solid var(--medusa-border);
+  border-radius: 7px;
+}
+.slack-channel-member-row {
+  min-height: 44px;
+  gap: 9px;
+  padding: 6px 9px;
+  border-bottom: 1px solid var(--medusa-border);
+}
+.slack-channel-member-row:last-child { border-bottom: 0; }
+.slack-channel-member-row:hover { background: var(--medusa-hover); border-radius: 0; }
+.slack-channel-member-row strong { color: var(--medusa-text); font-size: 11px; font-weight: 600; }
+.slack-channel-member-row span { color: var(--medusa-muted); font-size: 10px; }
+.slack-channel-member-more {
+  width: 26px;
+  height: 26px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  margin-left: auto;
+  color: var(--medusa-muted);
+  border-radius: 4px;
+  opacity: 0;
+}
+.slack-channel-member-row:hover .slack-channel-member-more { opacity: 1; }
+.slack-channel-member-more:hover { color: var(--medusa-text); background: #292c31; }
+.slack-channel-dialog-no-results { padding: 28px 12px; color: var(--medusa-muted); font-size: 11px; text-align: center; }
+.slack-channel-dialog-empty { min-height: 170px; color: var(--medusa-muted); }
+.slack-channel-dialog-empty > svg { width: 22px; height: 22px; }
+.slack-channel-dialog-empty h3 { margin: 8px 0 3px; color: var(--medusa-text); font-size: 13px; }
+.slack-channel-dialog-empty p { max-width: 310px; font-size: 11px; }
+.slack-dialog-primary {
+  margin-top: 11px;
+  padding: 6px 9px;
+  color: var(--medusa-text);
+  background: var(--medusa-card);
+  border-color: var(--medusa-border);
+  border-radius: 5px;
+  font-size: 11px;
+}
+.slack-dialog-primary:hover { background: var(--medusa-hover); }
+.slack-channel-tab-settings h3 { color: var(--medusa-text); font-size: 12px; }
+.slack-channel-tab-settings > p { margin: 2px 0 8px; color: var(--medusa-muted); font-size: 10px; }
+.slack-channel-tab-settings > div {
+  min-height: 36px;
+  padding: 0 10px;
+  color: var(--medusa-text);
+  background: var(--medusa-card);
+  border: 1px solid var(--medusa-border);
+  border-bottom: 0;
+  font-size: 11px;
+}
+.slack-channel-tab-settings > div:first-of-type { border-radius: 7px 7px 0 0; }
+.slack-channel-tab-settings > div:last-of-type { border-bottom: 1px solid var(--medusa-border); border-radius: 0 0 7px 7px; }
+.slack-channel-tab-settings > div button { color: var(--medusa-muted); }
+
+/* Composer add menu — one compact + entry point for canvas, lists, files,
+   snippets, workflows, and local uploads. */
+.slack-team-shell .slack-composer-add {
+  width: 28px;
+  height: 28px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 28px;
+  color: var(--color-text-2);
+  background: var(--color-bg-3);
+  border-radius: 50%;
+}
+.slack-team-shell .slack-composer-add:hover,
+.slack-team-shell .slack-composer-add.is-open {
+  color: var(--color-text-1);
+  background: color-mix(in srgb, var(--color-text-3) 45%, var(--color-bg-3));
+}
+.slack-team-shell .slack-composer-add svg { transition: transform 120ms ease; }
+.slack-team-shell .slack-composer-add.is-open svg { transform: rotate(45deg); }
+.slack-team-shell .slack-composer-add-menu {
+  position: absolute;
+  left: 20px;
+  bottom: 62px;
+  z-index: 44;
+  width: 318px;
+  padding: 6px;
+  color: var(--color-text-1);
+  background: #1b1d21;
+  border: 1px solid #32353b;
+  border-radius: 8px;
+  box-shadow: 0 14px 38px rgba(0, 0, 0, 0.5);
+}
+.slack-team-shell .slack-composer-add-menu > button {
+  width: 100%;
+  min-height: 34px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 0 9px;
+  color: #e7e8ea;
+  border-radius: 5px;
+  text-align: left;
+  font-size: 12px;
+}
+.slack-team-shell .slack-composer-add-menu > button:hover,
+.slack-team-shell .slack-composer-add-menu > button:focus-visible {
+  color: #fff;
+  background: #272a2f;
+  outline: 0;
+}
+.slack-team-shell .slack-composer-add-menu > button > svg:first-child {
+  flex: 0 0 16px;
+  color: #a8abb1;
+}
+.slack-team-shell .slack-composer-add-menu > button:hover > svg:first-child { color: #fff; }
+.slack-team-shell .slack-composer-add-menu > button span { min-width: 0; flex: 1; }
+.slack-team-shell .slack-composer-add-menu kbd,
+.slack-team-shell .slack-add-menu-end {
+  margin-left: auto;
+  color: #848890;
+  font-family: inherit;
+  font-size: 10px;
+}
+.slack-team-shell .slack-add-menu-separator {
+  height: 1px;
+  margin: 5px -6px;
+  background: #303238;
+}
+
+/* Final compact dialog geometry: content-sized card with a vertical utility
+   rail. No fixed-height Slack sheet and no empty lower canvas. */
+.slack-channel-dialog {
+  width: min(520px, calc(100vw - 24px));
+  height: fit-content;
+  max-height: min(440px, calc(100vh - 32px));
+}
+.slack-channel-dialog-header { min-height: 42px; height: 42px; padding: 0 11px 0 13px; }
+.slack-channel-dialog-content {
+  display: flex;
+  align-items: stretch;
+  min-height: 0;
+  max-height: 396px;
+}
+.slack-channel-dialog-tabs {
+  width: 126px;
+  min-width: 126px;
+  min-height: 0;
+  height: auto;
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 2px;
+  overflow: visible;
+  padding: 8px;
+  background: #141619;
+  border-right: 1px solid var(--medusa-border);
+  border-bottom: 0;
+}
+.slack-channel-dialog-tabs button {
+  min-width: 0;
+  min-height: 29px;
+  display: flex;
+  align-items: center;
+  justify-content: flex-start;
+  padding: 0 8px;
+  border-radius: 5px;
+  text-align: left;
+  line-height: 1.2;
+}
+.slack-channel-dialog-tabs button:hover { color: var(--medusa-text); background: #1d2024; }
+.slack-channel-dialog-tabs button.is-active { color: var(--medusa-text); background: #25282d; }
+.slack-channel-dialog-tabs button.is-active::after { display: none; }
+.slack-channel-dialog-body {
+  flex: 1 1 auto;
+  min-width: 0;
+  min-height: 0;
+  max-height: 396px;
+  overflow-y: auto;
+  padding: 10px;
+}
+.slack-channel-dialog-empty { min-height: 164px; }
+
+@media (max-width: 520px) {
+  .slack-channel-dialog-content { flex-direction: column; }
+  .slack-channel-dialog-tabs {
+    width: 100%;
+    min-width: 0;
+    flex-direction: row;
+    overflow-x: auto;
+    border-right: 0;
+    border-bottom: 1px solid var(--medusa-border);
+  }
+  .slack-channel-dialog-tabs button { min-width: max-content; }
+}
+
+/* Slack-style recorded clips ------------------------------------------------ */
+.slack-voice-note { width: min(520px, 100%); margin-top: 6px; }
+.slack-voice-player {
+  height: 54px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 7px 10px;
+  color: #454245;
+  background: #fff;
+  border: 1px solid #ddd;
+  border-radius: 10px;
+}
+.slack-voice-play {
+  width: 36px;
+  height: 36px;
+  display: flex;
+  flex: 0 0 36px;
+  align-items: center;
+  justify-content: center;
+  padding-left: 2px;
+  color: #fff;
+  background: #1264a3;
+  border-radius: 50%;
+  transition: transform 140ms cubic-bezier(0.2, 0, 0, 1), background 100ms ease;
+}
+.slack-voice-play:active { transform: scale(0.94); }
+.slack-voice-play:hover { background: #0b4f86; }
+.slack-voice-wave {
+  height: 34px;
+  min-width: 80px;
+  flex: 1;
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  overflow: hidden;
+}
+.slack-voice-wave i { width: 2px; flex: 1 1 2px; max-width: 3px; min-height: 4px; background: #c6c6c6; border-radius: 2px; }
+.slack-voice-wave i.is-played { background: #1264a3; }
+.slack-voice-time { min-width: 31px; color: #1d1c1d; font-size: 12px; font-weight: 700; font-variant-numeric: tabular-nums; }
+.slack-voice-mini { width: 25px; height: 25px; display: flex; align-items: center; justify-content: center; border-radius: 4px; color: #616061; }
+.slack-voice-mini:hover { background: #f1f1f1; color: #1d1c1d; }
+.slack-voice-speed { min-width: 25px; height: 25px; padding: 0 3px; color: #454245; border-radius: 4px; font-size: 11px; font-weight: 700; }
+.slack-voice-speed:hover { background: #f1f1f1; }
+.slack-voice-transcript { margin: 8px 0 3px; padding: 2px 12px 2px 14px; color: #616061; border-left: 3px solid #ddd; font-size: 13px; line-height: 19px; }
+.slack-view-transcript { margin: 4px 0 0 5px; padding: 3px 8px; color: #1264a3; background: #fff; border: 1px solid #d5a524; border-radius: 11px; font-size: 11px; font-weight: 700; }
+
+.slack-voice-recorder {
+  min-height: 58px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 9px 10px;
+  color: #1d1c1d;
+  background: #fff;
+  border: 1px solid #b7b7b7;
+  border-radius: 8px;
+  box-shadow: 0 1px 1px rgba(0,0,0,.05);
+  animation: slack-recorder-enter 220ms cubic-bezier(0.2, 0, 0, 1) both;
+}
+@keyframes slack-recorder-enter { from { opacity: 0; transform: translateY(7px) scale(.99); } to { opacity: 1; transform: none; } }
+.slack-recorder-cancel,
+.slack-recorder-round { width: 34px; height: 34px; display: flex; flex: 0 0 34px; align-items: center; justify-content: center; border-radius: 50%; color: #616061; }
+.slack-recorder-cancel:hover { color: #d72b3f; background: #fff0f2; }
+.slack-recorder-round { color: #1d1c1d; background: #f1f1f1; }
+.slack-recorder-dot { width: 9px; height: 9px; flex: 0 0 9px; background: #e01e5a; border-radius: 50%; animation: slack-record-pulse 1.2s ease-in-out infinite; }
+.slack-recorder-dot.is-paused { animation: none; opacity: .45; }
+@keyframes slack-record-pulse { 50% { opacity: .35; transform: scale(.82); } }
+.slack-recorder-time { min-width: 36px; color: #1d1c1d; font-size: 12px; font-weight: 800; font-variant-numeric: tabular-nums; }
+.slack-recorder-wave { height: 31px; min-width: 90px; flex: 1; display: flex; align-items: center; justify-content: center; gap: 2px; overflow: hidden; }
+.slack-recorder-wave i { width: 2px; background: #611f69; border-radius: 2px; animation: slack-live-wave 760ms ease-in-out infinite alternate; }
+.slack-recorder-wave.is-paused i { animation-play-state: paused; opacity: .45; }
+@keyframes slack-live-wave { from { transform: scaleY(.35); } to { transform: scaleY(1); } }
+.slack-recorder-send { min-width: 70px; height: 34px; padding: 0 13px; color: #fff; background: #007a5a; border-radius: 5px; font-size: 12px; font-weight: 800; }
+.slack-recorder-send:disabled { opacity: .45; }
+.slack-recorder-error { min-width: 0; flex: 1; overflow: hidden; color: #c92c3d; font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
+
+/* Full Slack-style huddle stage ------------------------------------------- */
+.slack-huddle-stage { background: #4a0f4b; font-family: "Slack-Lato", Lato, ui-sans-serif, system-ui, sans-serif; }
+.slack-huddle-topbar { position: relative; color: rgba(255,255,255,.82); background: linear-gradient(90deg,#4a0f4b,#370536); font-size: 12px; }
+.slack-huddle-topbar strong { color: #fff; font-weight: 700; }
+.slack-huddle-popout { position: absolute; right: 14px; width: 28px; height: 28px; display: flex; align-items: center; justify-content: center; border-radius: 5px; color: rgba(255,255,255,.8); }
+.slack-huddle-popout:hover { color: #fff; background: rgba(255,255,255,.12); }
+.slack-huddle-main { padding: 0 4px; background: #4a0f4b; }
+.slack-huddle-video-stage { background: #dfd0df; border-radius: 7px; }
+.slack-huddle-video-stage > .flex.h-full { justify-content: center; }
+.slack-huddle-participant { aspect-ratio: 1 / 1 !important; border-radius: 12px; box-shadow: none !important; transition: transform 180ms cubic-bezier(0.2,0,0,1), box-shadow 180ms cubic-bezier(0.2,0,0,1); }
+.slack-huddle-participant:has(video) { background: #222; }
+.slack-huddle-participant:hover { transform: translateY(-1px); }
+.slack-huddle-video-stage .grid { max-width: 620px; gap: 14px; }
+.slack-huddle-video-stage .slack-huddle-participant > div:last-child { opacity: 0; transition: opacity 100ms ease; }
+.slack-huddle-video-stage .slack-huddle-participant:hover > div:last-child { opacity: 1; }
+.slack-huddle-footer { color: #fff; background: linear-gradient(90deg,#4a0f4b,#541054); }
+.slack-huddle-footer > button:not(.slack-huddle-thread-toggle) { border: 1px solid rgba(255,255,255,.18); border-radius: 50% !important; }
+.slack-huddle-footer > button:nth-last-of-type(1):not(.slack-huddle-thread-toggle) { border-radius: 5px !important; }
+.slack-huddle-meta { position: absolute; left: 18px; display: flex; align-items: center; gap: 7px; color: rgba(255,255,255,.8); font-size: 13px; }
+.slack-huddle-meta i { width: 1px; height: 20px; margin: 0 3px; background: rgba(255,255,255,.2); }
+.slack-huddle-meta strong { color: #fff; font-weight: 700; }
+.slack-huddle-thread-toggle { position: absolute; right: 18px; width: 48px; height: 48px; display: flex; align-items: center; justify-content: center; color: #4a154b; background: #fff; border-radius: 50%; transition: transform 140ms cubic-bezier(0.2,0,0,1), box-shadow 140ms ease; }
+.slack-huddle-thread-toggle:hover { transform: scale(1.04); box-shadow: 0 4px 12px rgba(0,0,0,.22); }
+.slack-huddle-thread-toggle.is-active { box-shadow: inset 0 0 0 2px #1264a3; }
+
+.slack-huddle-thread { width: min(360px, 34vw); min-width: 300px; display: flex; flex-direction: column; color: #1d1c1d; background: #fff; border-radius: 7px; overflow: hidden; }
+.slack-huddle-thread > header { min-height: 50px; display: flex; align-items: center; gap: 12px; padding: 0 14px; border-bottom: 1px solid #ddd; }
+.slack-huddle-thread > header strong { font-size: 18px; font-weight: 900; }
+.slack-huddle-thread > header button { width: 26px; height: 26px; font-size: 23px; line-height: 24px; color: #616061; }
+.slack-huddle-thread-messages { flex: 1; min-height: 0; overflow-y: auto; padding: 18px 11px 10px; }
+.slack-huddle-thread-intro { display: flex; align-items: flex-start; gap: 9px; margin: max(8vh, 26px) 3px 18px; }
+.slack-huddle-thread-intro svg { flex: 0 0 auto; margin-top: 2px; }
+.slack-huddle-thread-intro p { margin: 0; font-size: 13px; line-height: 19px; }
+.slack-huddle-thread-intro b { color: #1264a3; font-weight: 500; }
+.slack-huddle-thread-message { display: flex; align-items: flex-start; gap: 8px; padding: 6px 2px; }
+.slack-huddle-thread-message > div { min-width: 0; }
+.slack-huddle-thread-message p { display: flex; align-items: baseline; gap: 5px; margin: 0; font-size: 13px; }
+.slack-huddle-thread-message p strong { font-weight: 900; }
+.slack-huddle-thread-message time { color: #868686; font-size: 10px; }
+.slack-huddle-thread-message span { color: #1d1c1d; font-size: 13px; line-height: 18px; }
+.slack-huddle-external { display: flex; align-items: center; gap: 8px; margin: 0 10px; padding: 9px 10px; color: #454245; background: #fff4ef; border-radius: 7px 7px 0 0; font-size: 11px; }
+.slack-huddle-external b { width: 17px; height: 17px; display: flex; align-items: center; justify-content: center; color: #fff; background: #e01e5a; border-radius: 3px; font-size: 10px; }
+.slack-huddle-reply { margin: 0 10px 10px; border: 1px solid #cfcfcf; border-radius: 7px; }
+.slack-huddle-reply textarea { width: 100%; min-height: 45px; display: block; resize: none; padding: 9px 10px 2px; color: #1d1c1d; background: transparent; outline: none; font-size: 13px; }
+.slack-huddle-reply > div { display: flex; align-items: center; gap: 2px; padding: 2px 6px 5px; }
+.slack-huddle-reply button { min-width: 27px; height: 27px; display: flex; align-items: center; justify-content: center; color: #616061; border-radius: 4px; font-size: 14px; }
+.slack-huddle-reply button:hover { color: #1d1c1d; background: #f1f1f1; }
+.slack-huddle-reply button.is-send { color: #007a5a; }
+.slack-huddle-reply button:disabled { color: #bbb; }
+.slack-huddle-reply small { display: block; padding: 0 8px 6px; color: #c92c3d; font-size: 10px; }
+
+@media (prefers-reduced-motion: reduce) {
+  .slack-recorder-dot,
+  .slack-recorder-wave i { animation: none !important; }
+  .slack-voice-recorder { animation: none; }
+}
+
+@media (max-width: 900px) {
+  .slack-huddle-thread { width: 320px; min-width: 280px; }
+  .slack-huddle-video-stage { padding: 18px; }
+  .slack-huddle-meta { display: none; }
+}
+
+/* ── Team: native Aura dark treatment ────────────────────────────────────
+   Team uses the shell's real surface/text tokens. This keeps the docked
+   navigator visually continuous with Build/Plan/Trace and gives DMs,
+   channels, canvases, files, threads, and huddles one coherent dark mode. */
+.slack-team-shell,
+.slack-team-shell .slack-team-body,
+.slack-team-shell .slack-message-stream,
+.slack-team-shell .slack-utility-view,
+.slack-team-shell .slack-context-stack,
+.slack-team-shell .slack-context-pane,
+.slack-team-shell .slack-context-pane > aside {
+  color: var(--color-text-1);
+  background: var(--color-bg-0);
+}
+
+.slack-team-shell .slack-team-topbar {
+  color: var(--color-text-2);
+  background: var(--color-bg-1);
+  border-color: var(--color-line-soft);
+}
+.slack-team-shell .slack-team-search {
+  color: var(--color-text-2);
+  background: var(--color-bg-3);
+  border-color: var(--color-line);
+  box-shadow: none;
+}
+.slack-team-shell .slack-team-search:focus-within {
+  background: var(--color-bg-3);
+  border-color: var(--color-composer-border-focus);
+  box-shadow: 0 0 0 1px var(--color-composer-border-focus);
+}
+.slack-team-shell .slack-team-search input { color: var(--color-text-1); }
+.slack-team-shell .slack-team-search input::placeholder { color: var(--color-text-3); }
+.slack-team-shell .slack-topbar-help { color: var(--color-text-3); }
+
+.slack-team-shell .slack-app-rail {
+  color: var(--color-text-2);
+  background: var(--color-bg-1);
+  border-color: var(--color-line-soft);
+}
+.slack-team-shell .slack-app-logo {
+  color: var(--color-accent);
+  background: var(--color-bg-3);
+  box-shadow: 0 0 0 1px var(--color-line);
+}
+.slack-team-shell .slack-app-rail-item { color: var(--color-text-3); }
+.slack-team-shell .slack-app-rail-item:hover > span,
+.slack-team-shell .slack-app-rail-item.is-active > span {
+  color: var(--color-text-1);
+  background: var(--color-bg-3);
+}
+.slack-team-shell .slack-app-rail-add {
+  color: var(--color-text-2);
+  background: var(--color-bg-3);
+}
+
+.slack-team-shell .slack-team-sidebar {
+  color: var(--color-text-2);
+  background: var(--color-bg-1);
+  border-right: 1px solid var(--color-line);
+}
+.slack-team-shell .slack-team-sidebar .ade-rail-title {
+  color: var(--color-text-1);
+  border-color: var(--color-line-soft);
+}
+.slack-team-shell .slack-team-sidebar .ade-rail-title button,
+.slack-team-shell .slack-sidebar-group-header { color: var(--color-text-2); }
+.slack-team-shell .slack-sidebar-shortcut,
+.slack-team-shell .slack-conversation-row,
+.slack-team-shell .slack-sidebar-empty { color: var(--color-text-2); }
+.slack-team-shell .slack-sidebar-shortcut:hover,
+.slack-team-shell .slack-sidebar-shortcut.is-active,
+.slack-team-shell .slack-conversation-row:hover {
+  color: var(--color-text-1);
+  background: var(--color-bg-2);
+}
+.slack-team-shell .slack-conversation-row.is-active {
+  color: var(--color-text-1);
+  background: color-mix(in srgb, var(--color-text-2) 25%, var(--color-bg-2));
+}
+.slack-team-shell .slack-conversation-row.is-unread { color: var(--color-text-1); }
+.slack-team-shell .slack-sidebar-badge,
+.slack-team-shell .slack-mention-badge {
+  color: #22131a;
+  background: #ef91b1;
+}
+.slack-team-shell .slack-unread-dot { background: var(--color-text-2); }
+.slack-team-shell .slack-conversation-row.is-active .slack-unread-dot { background: var(--color-accent); }
+.slack-team-shell .slack-sidebar-group-action,
+.slack-team-shell .slack-team-sidebar .ade-rail-title button { color: var(--color-text-3); }
+.slack-team-shell .slack-sidebar-group-action:hover,
+.slack-team-shell .slack-team-sidebar .ade-rail-title button:hover {
+  color: var(--color-text-1);
+  background: var(--color-bg-2);
+}
+.slack-team-shell .slack-sidebar-notice {
+  color: var(--color-text-2);
+  background: var(--color-bg-2);
+  border-color: var(--color-line);
+}
+.slack-team-shell .slack-sidebar-notice strong,
+.slack-team-shell .slack-sidebar-notice-link { color: var(--color-text-1); }
+.slack-team-shell .slack-app-icon {
+  color: var(--color-text-1);
+  background: var(--color-bg-3);
+}
+
+.slack-team-shell .slack-channel-header,
+.slack-team-shell .slack-context-header {
+  color: var(--color-text-1);
+  background: var(--color-bg-0);
+  border-color: var(--color-line);
+}
+.slack-team-shell .slack-channel-title,
+.slack-team-shell .slack-channel-title-hash { color: var(--color-text-1); }
+.slack-team-shell .slack-header-back { color: var(--color-text-2); }
+.slack-team-shell .slack-header-back:hover { background: var(--color-bg-2); }
+.slack-team-shell .slack-member-facepile {
+  color: var(--color-text-2);
+  background: var(--color-bg-2);
+  border-color: var(--color-line);
+}
+.slack-team-shell .slack-member-facepile:hover,
+.slack-team-shell .slack-member-facepile.is-active {
+  color: var(--color-text-1);
+  background: var(--color-bg-3);
+  border-color: var(--color-text-4);
+}
+.slack-team-shell .slack-facepile-avatars > span { box-shadow: 0 0 0 2px var(--color-bg-2); }
+.slack-team-shell .slack-channel-header .w-7.h-7.rounded {
+  color: var(--color-text-2);
+  background: var(--color-bg-0);
+  border-color: var(--color-line);
+}
+.slack-team-shell .slack-channel-header .w-7.h-7.rounded:hover,
+.slack-team-shell .slack-channel-header .w-7.h-7.rounded.bg-bg-2 {
+  color: var(--color-text-1);
+  background: var(--color-bg-2);
+}
+
+.slack-team-shell .slack-channel-tabs {
+  min-height: 30px;
+  display: flex;
+  align-items: stretch;
+  gap: 2px;
+  overflow-x: auto;
+  padding: 0 10px;
+  color: var(--color-text-2);
+  background: var(--color-bg-0);
+  border-bottom: 1px solid var(--color-line);
+}
+.slack-team-shell .slack-channel-tabs button {
+  position: relative;
+  min-width: max-content;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 0 8px;
+  color: var(--color-text-2);
+  font-size: 11px;
+}
+.slack-team-shell .slack-channel-tabs button:hover {
+  color: var(--color-text-1);
+  background: var(--color-bg-2);
+}
+.slack-team-shell .slack-channel-tabs button.is-active {
+  color: var(--color-text-1);
+  font-weight: 650;
+}
+.slack-team-shell .slack-channel-tabs button.is-active::after {
+  content: "";
+  position: absolute;
+  right: 7px;
+  bottom: 0;
+  left: 7px;
+  height: 2px;
+  background: var(--color-accent);
+}
+.slack-team-shell .slack-channel-tabs .slack-channel-tab-add { width: 30px; min-width: 30px; padding: 0; justify-content: center; }
+
+.slack-team-shell .slack-channel-welcome,
+.slack-team-shell .slack-message-row,
+.slack-team-shell .slack-message-body,
+.slack-team-shell .slack-message-meta strong,
+.slack-team-shell .slack-empty-dm { color: var(--color-text-1); }
+.slack-team-shell .slack-channel-welcome > p,
+.slack-team-shell .slack-message-footer,
+.slack-team-shell .slack-system-message { color: var(--color-text-2); }
+.slack-team-shell .slack-message-row:hover { background: var(--color-bg-2); }
+.slack-team-shell .slack-message-meta time { color: var(--color-text-3); }
+.slack-team-shell .slack-agent-badge,
+.slack-team-shell .slack-you-badge {
+  color: var(--color-text-2);
+  background: var(--color-bg-3);
+}
+.slack-team-shell .slack-you-badge { color: var(--color-accent); }
+.slack-team-shell .slack-message-body code {
+  color: var(--color-text-1);
+  background: var(--color-bg-3);
+  border-color: var(--color-line);
+}
+.slack-team-shell .slack-channel-welcome-actions button {
+  color: var(--color-text-1);
+  background: var(--color-bg-2);
+  border-color: var(--color-line);
+}
+.slack-team-shell .slack-channel-welcome-actions button:hover { background: var(--color-bg-3); }
+.slack-team-shell .slack-channel-welcome-actions button.is-primary { border-color: var(--color-accent); box-shadow: none; }
+.slack-team-shell .slack-channel-tip {
+  color: var(--color-text-1);
+  background: var(--color-bg-3);
+  border: 1px solid var(--color-line);
+  box-shadow: none;
+}
+.slack-team-shell .slack-tip-facepile span {
+  background: var(--color-bg-2);
+  border-color: var(--color-bg-3);
+}
+
+.slack-team-shell .slack-message-hover-actions {
+  top: -16px;
+  right: 18px;
+  min-height: 38px;
+  padding: 0;
+  color: var(--color-text-2);
+  background: var(--color-bg-3);
+  border-color: var(--color-line);
+  border-radius: 10px;
+  box-shadow: var(--shadow-flyout);
+}
+.slack-team-shell .slack-hover-action-strip { gap: 0; }
+.slack-team-shell .slack-hover-action {
+  width: 34px;
+  height: 34px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--color-text-2);
+  border-radius: 6px;
+}
+.slack-team-shell .slack-hover-action:hover {
+  color: var(--color-text-1);
+  background: var(--color-bg-2);
+}
+.slack-team-shell .slack-hover-action.is-emoji { font-size: 16px; }
+.slack-team-shell .slack-hover-action.is-active { color: var(--color-accent); }
+
+.slack-team-shell .slack-composer-wrap {
+  padding: 0 20px 18px;
+  background: var(--color-bg-0);
+}
+.slack-team-shell .slack-composer-surface {
+  color: var(--color-text-1);
+  background: var(--color-bg-2);
+  border-color: var(--color-text-4);
+  box-shadow: none;
+}
+.slack-team-shell .slack-composer-surface:focus-within {
+  border-color: var(--color-composer-border-focus);
+  box-shadow: 0 0 0 1px var(--color-composer-border-focus);
+}
+.slack-team-shell .slack-composer-formatbar {
+  min-height: 34px;
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  padding: 3px 9px 0;
+  color: var(--color-text-3);
+}
+.slack-team-shell .slack-composer-formatbar > span {
+  width: 1px;
+  height: 18px;
+  margin: 0 3px;
+  background: var(--color-line);
+}
+.slack-team-shell .slack-composer-formatbar button,
+.slack-team-shell .slack-composer-tool,
+.slack-team-shell .slack-composer-toolbar button[title="Attach files"] {
+  width: 27px;
+  height: 27px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--color-text-3);
+  border-radius: 4px;
+  font-size: 12px;
+}
+.slack-team-shell .slack-composer-formatbar button:hover,
+.slack-team-shell .slack-composer-tool:hover,
+.slack-team-shell .slack-composer-toolbar button[title="Attach files"]:hover {
+  color: var(--color-text-1);
+  background: var(--color-bg-3);
+}
+.slack-team-shell .slack-composer-input {
+  min-height: 45px;
+  color: var(--color-text-1);
+  background: transparent;
+}
+.slack-team-shell .slack-composer-input::placeholder { color: var(--color-text-3); }
+.slack-team-shell .slack-composer-divider { background: var(--color-line); }
+.slack-team-shell .slack-composer-send { color: var(--color-text-1); background: var(--color-accent-soft); }
+.slack-team-shell .slack-composer-send:disabled { color: var(--color-text-4); background: transparent; }
+
+.slack-team-shell .slack-utility-header,
+.slack-team-shell .slack-context-stack,
+.slack-team-shell .slack-context-pane { border-color: var(--color-line); }
+.slack-team-shell .slack-utility-header button:hover,
+.slack-team-shell .slack-context-header .w-7.h-7.rounded:hover { background: var(--color-bg-2); }
+.slack-team-shell .slack-utility-content { color: var(--color-text-1); }
+.slack-team-shell .slack-recap-hero,
+.slack-team-shell .slack-utility-list,
+.slack-team-shell .slack-drafts-empty,
+.slack-team-shell .slack-details-card {
+  color: var(--color-text-1);
+  background: var(--color-bg-2);
+  border-color: var(--color-line);
+}
+.slack-team-shell .slack-recap-hero > span,
+.slack-team-shell .slack-utility-channel-mark,
+.slack-team-shell .slack-draft-glyph {
+  color: var(--color-accent);
+  background: var(--color-bg-3);
+}
+.slack-team-shell .slack-recap-hero p,
+.slack-team-shell .slack-utility-row-copy small,
+.slack-team-shell .slack-drafts-empty span:not(.slack-draft-glyph) { color: var(--color-text-2); }
+.slack-team-shell .slack-utility-row-copy strong { color: var(--color-text-1); }
+.slack-team-shell .slack-utility-list > button,
+.slack-team-shell .slack-utility-message-list > div,
+.slack-team-shell .slack-details-card > div { border-color: var(--color-line); }
+.slack-team-shell .slack-utility-list > button:hover { background: var(--color-bg-3); }
+
+.slack-team-shell .slack-context-header strong,
+.slack-team-shell .slack-details-view,
+.slack-team-shell .slack-details-hero h2 { color: var(--color-text-1); }
+.slack-team-shell .slack-context-subtitle,
+.slack-team-shell .slack-details-card > div,
+.slack-team-shell .slack-details-hero p { color: var(--color-text-2); }
+.slack-team-shell .slack-details-view { background: var(--color-bg-0); }
+.slack-team-shell .slack-details-channel-icon {
+  color: var(--color-text-2);
+  background: var(--color-bg-2);
+  border-color: var(--color-line);
+}
+.slack-team-shell .slack-details-actions button {
+  color: var(--color-accent);
+  background: var(--color-bg-2);
+  border-color: var(--color-line);
+}
+.slack-team-shell .slack-details-actions button:hover { background: var(--color-bg-3); }
+
+.slack-team-shell .slack-voice-player,
+.slack-team-shell .slack-voice-recorder {
+  color: var(--color-text-1);
+  background: var(--color-bg-2);
+  border-color: var(--color-line);
+}
+.slack-team-shell .slack-voice-time,
+.slack-team-shell .slack-recorder-time { color: var(--color-text-1); }
+.slack-team-shell .slack-voice-mini,
+.slack-team-shell .slack-voice-speed { color: var(--color-text-2); }
+.slack-team-shell .slack-voice-mini:hover,
+.slack-team-shell .slack-voice-speed:hover { color: var(--color-text-1); background: var(--color-bg-3); }
+
+.slack-huddle-stage,
+.slack-huddle-main,
+.slack-huddle-topbar,
+.slack-huddle-footer { background: var(--color-bg-1); }
+.slack-huddle-video-stage { background: var(--color-bg-0); }
+.slack-huddle-thread {
+  color: var(--color-text-1);
+  background: var(--color-bg-0);
+  border: 1px solid var(--color-line);
+}
+.slack-huddle-thread > header,
+.slack-huddle-reply { border-color: var(--color-line); }
+.slack-huddle-thread-message span,
+.slack-huddle-reply textarea { color: var(--color-text-1); }
+.slack-huddle-reply button { color: var(--color-text-2); }
+.slack-huddle-reply button:hover { color: var(--color-text-1); background: var(--color-bg-2); }
+.slack-huddle-external { color: var(--color-text-2); background: var(--color-bg-2); }
+
+/* Team channel dialog — members and channel metadata are foreground dialogs,
+   while threads/canvases remain true split panes. */
+.slack-channel-dialog-layer {
+  position: fixed;
+  inset: 0;
+  z-index: 1000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 28px;
+}
+.slack-channel-dialog-backdrop {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  border: 0;
+  background: rgba(0, 0, 0, 0.66);
+  backdrop-filter: blur(1px);
+}
+.slack-channel-dialog {
+  position: relative;
+  width: min(640px, calc(100vw - 56px));
+  height: min(780px, calc(100vh - 76px));
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  color: var(--color-text-1);
+  background: var(--color-bg-2);
+  border: 1px solid var(--color-line);
+  border-radius: 10px;
+  box-shadow: 0 24px 80px rgba(0, 0, 0, 0.56);
+}
+.slack-channel-dialog-header { flex: 0 0 auto; padding: 26px 30px 12px; }
+.slack-channel-dialog-title { display: flex; align-items: center; gap: 7px; font-size: 22px; }
+.slack-channel-dialog-title > span { color: var(--color-text-2); }
+.slack-channel-dialog-close {
+  position: absolute;
+  top: 22px;
+  right: 22px;
+  width: 34px;
+  height: 34px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--color-text-2);
+  border-radius: 6px;
+}
+.slack-channel-dialog-close:hover { color: var(--color-text-1); background: var(--color-bg-3); }
+.slack-channel-dialog-actions { display: flex; align-items: center; gap: 8px; margin-top: 17px; }
+.slack-channel-dialog-actions button {
+  min-height: 34px;
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  padding: 0 12px;
+  color: var(--color-text-1);
+  border: 1px solid var(--color-line-strong, var(--color-line));
+  border-radius: 6px;
+}
+.slack-channel-dialog-actions button:first-child { width: 42px; justify-content: center; padding: 0; }
+.slack-channel-dialog-actions button:hover { background: var(--color-bg-3); }
+.slack-channel-dialog-tabs {
+  min-height: 42px;
+  display: flex;
+  align-items: stretch;
+  gap: 19px;
+  overflow-x: auto;
+  padding: 0 30px;
+  border-bottom: 1px solid var(--color-line);
+}
+.slack-channel-dialog-tabs button { position: relative; min-width: max-content; color: var(--color-text-2); font-size: 13px; }
+.slack-channel-dialog-tabs button:hover { color: var(--color-text-1); }
+.slack-channel-dialog-tabs button.is-active { color: var(--color-text-1); font-weight: 650; }
+.slack-channel-dialog-tabs button.is-active::after {
+  content: "";
+  position: absolute;
+  right: 0;
+  bottom: 0;
+  left: 0;
+  height: 2px;
+  background: var(--color-text-1);
+}
+.slack-channel-dialog-body { flex: 1; min-height: 0; overflow-y: auto; padding: 18px 30px 30px; }
+.slack-channel-dialog-search {
+  height: 44px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 0 13px;
+  color: var(--color-text-2);
+  background: var(--color-bg-1);
+  border: 1px solid var(--color-text-3);
+  border-radius: 7px;
+}
+.slack-channel-dialog-search:focus-within { border-color: var(--color-accent); box-shadow: 0 0 0 3px color-mix(in srgb, var(--color-accent) 28%, transparent); }
+.slack-channel-dialog-search input { flex: 1; min-width: 0; color: var(--color-text-1); background: transparent; border: 0; outline: 0; font-size: 14px; }
+.slack-channel-member-row { width: 100%; min-height: 58px; display: flex; align-items: center; gap: 13px; padding: 8px 4px; text-align: left; }
+.slack-channel-member-row > div:last-child { min-width: 0; display: flex; flex-direction: column; gap: 1px; }
+.slack-channel-member-row strong { color: var(--color-text-1); font-size: 13px; }
+.slack-channel-member-row span,
+.slack-channel-member-row small { color: var(--color-text-2); font-size: 12px; }
+.slack-channel-member-row:hover { background: var(--color-bg-3); border-radius: 6px; }
+.slack-channel-member-row.is-add { margin-top: 13px; }
+.slack-member-add-icon { width: 38px; height: 38px; display: flex; align-items: center; justify-content: center; color: var(--color-accent); background: color-mix(in srgb, var(--color-accent) 14%, var(--color-bg-3)); border-radius: 6px; }
+.slack-channel-about-card { display: flex; flex-direction: column; gap: 16px; }
+.slack-channel-about-card > section,
+.slack-channel-settings > section {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 18px 22px;
+  color: var(--color-text-2);
+  background: var(--color-bg-1);
+  border: 1px solid var(--color-line);
+}
+.slack-channel-about-card > section:first-child,
+.slack-channel-settings > section:first-child { border-radius: 10px 10px 0 0; }
+.slack-channel-about-card > section + section,
+.slack-channel-settings > section + section { margin-top: -17px; border-top-color: var(--color-line-soft); }
+.slack-channel-about-card > section:nth-last-of-type(1),
+.slack-channel-settings > section:last-child { border-radius: 0 0 10px 10px; }
+.slack-channel-about-card strong,
+.slack-channel-settings strong { color: var(--color-text-1); }
+.slack-channel-about-card section button { position: absolute; top: 18px; right: 20px; color: var(--color-accent); }
+.slack-channel-id { margin: 0 22px; color: var(--color-text-3); font-size: 12px; }
+.slack-channel-dialog-empty { min-height: 300px; display: flex; flex-direction: column; align-items: center; justify-content: center; text-align: center; color: var(--color-text-2); }
+.slack-channel-dialog-empty h3 { margin: 12px 0 5px; color: var(--color-text-1); font-size: 17px; }
+.slack-channel-dialog-empty p { max-width: 380px; }
+.slack-dialog-primary { display: inline-flex; align-items: center; gap: 7px; margin-top: 16px; padding: 8px 13px; color: var(--color-text-1); background: var(--color-accent-soft); border: 1px solid var(--color-accent); border-radius: 6px; }
+.slack-channel-tab-settings h3 { color: var(--color-text-1); font-size: 16px; }
+.slack-channel-tab-settings > p { margin: 4px 0 18px; color: var(--color-text-2); }
+.slack-channel-tab-settings > div { display: flex; align-items: center; justify-content: space-between; padding: 12px 2px; border-bottom: 1px solid var(--color-line); }
+.slack-channel-tab-settings > div button { color: var(--color-text-3); }
+
+/* Full Files & links browser. */
+.slack-files-browser { color: var(--color-text-1); background: var(--color-bg-0); }
+.slack-files-inner { width: min(860px, calc(100% - 48px)); margin: 0 auto; padding: 24px 0 56px; }
+.slack-files-search { height: 40px; display: flex; align-items: center; gap: 11px; padding: 0 13px; color: var(--color-text-3); background: var(--color-bg-1); border: 1px solid var(--color-line-strong, var(--color-line)); border-radius: 7px; }
+.slack-files-search:focus-within { border-color: var(--color-text-3); }
+.slack-files-search input { flex: 1; color: var(--color-text-1); background: transparent; border: 0; outline: 0; }
+.slack-files-controls { display: flex; align-items: center; justify-content: space-between; gap: 14px; margin: 20px 0 24px; }
+.slack-files-filters { display: flex; gap: 8px; }
+.slack-files-filters button,
+.slack-files-sort { min-height: 33px; padding: 0 13px; color: var(--color-text-1); border: 1px solid var(--color-line-strong, var(--color-line)); border-radius: 5px; }
+.slack-files-filters button:hover,
+.slack-files-sort:hover { background: var(--color-bg-2); }
+.slack-files-filters button.is-active { color: #07151a; background: #36c5f0; border-color: #36c5f0; font-weight: 650; }
+.slack-files-sort { display: inline-flex; align-items: center; gap: 7px; }
+.slack-files-section { margin-top: 22px; }
+.slack-files-section-heading { display: flex; align-items: center; justify-content: space-between; margin-bottom: 10px; color: var(--color-text-2); font-size: 12px; }
+.slack-files-section-heading button { color: #36c5f0; }
+.slack-media-grid { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 10px; }
+.slack-media-card { min-width: 0; aspect-ratio: 1.25; overflow: hidden; color: var(--color-text-2); background: var(--color-bg-2); border: 1px solid var(--color-line); border-radius: 7px; }
+.slack-media-card:hover { border-color: var(--color-text-3); }
+.slack-media-card img { width: 100%; height: 100%; object-fit: cover; }
+.slack-media-card > span { height: 100%; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 6px; }
+.slack-media-card small { max-width: 90%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.slack-files-list,
+.slack-link-results { overflow: hidden; background: var(--color-bg-1); border: 1px solid var(--color-line); border-radius: 8px; }
+.slack-file-result { padding: 10px 13px; border-bottom: 1px solid var(--color-line); }
+.slack-file-result:last-child { border-bottom: 0; }
+.slack-file-result > button { margin-top: 5px; color: var(--color-text-3); font-size: 11px; }
+.slack-link-result { min-height: 65px; display: flex; align-items: center; gap: 13px; padding: 10px 13px; border-bottom: 1px solid var(--color-line); }
+.slack-link-result:last-child { border-bottom: 0; }
+.slack-link-result-icon { width: 38px; height: 38px; display: flex; align-items: center; justify-content: center; flex: 0 0 38px; color: var(--color-text-2); background: var(--color-bg-3); border-radius: 6px; }
+.slack-link-result > div { min-width: 0; flex: 1; display: flex; flex-direction: column; }
+.slack-link-result a { overflow: hidden; color: var(--color-text-1); font-weight: 650; text-overflow: ellipsis; white-space: nowrap; }
+.slack-link-result a:hover { text-decoration: underline; }
+.slack-link-result span,
+.slack-link-result small,
+.slack-link-result > button { color: var(--color-text-3); font-size: 11px; }
+.slack-files-more { margin-top: 34px; }
+.slack-files-more h3 { margin-bottom: 13px; font-size: 14px; }
+.slack-files-more > div { display: flex; gap: 12px; }
+.slack-files-more button { min-width: 110px; display: flex; align-items: center; gap: 8px; padding: 10px 12px; color: var(--color-text-1); border: 1px solid var(--color-line); border-radius: 8px; }
+.slack-files-more button:hover { background: var(--color-bg-2); }
+.slack-files-more button span { margin-left: auto; }
+.slack-files-no-results { padding: 64px 20px; color: var(--color-text-3); text-align: center; }
+
+/* The Team surface sits flush against Aura's bottom navigation/status area. */
+.ade-team-surface,
+.ade-team-surface .slack-team-body { border-bottom: 0 !important; box-shadow: none !important; }
+
+@media (max-width: 760px) {
+  .slack-channel-dialog-layer { padding: 12px; }
+  .slack-channel-dialog { width: calc(100vw - 24px); height: calc(100vh - 24px); }
+  .slack-channel-dialog-header,
+  .slack-channel-dialog-body { padding-right: 18px; padding-left: 18px; }
+  .slack-channel-dialog-tabs { padding: 0 18px; }
+  .slack-files-inner { width: calc(100% - 28px); }
+  .slack-media-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+
+/* Channel details is a utility popover, not a full Slack sheet. Keep this
+   final, layer-scoped contract after the legacy Team rules so no earlier
+   fixed-height dialog declaration can stretch it into an empty canvas. */
+.slack-channel-dialog-layer {
+  padding: 16px;
+}
+.slack-channel-dialog-layer .slack-channel-dialog {
+  width: min(600px, calc(100vw - 32px));
+  height: auto;
+  max-height: min(500px, calc(100vh - 32px));
+  flex: 0 1 auto;
+  color: var(--medusa-text, #f3f4f6);
+  background: var(--medusa-bg, #111315);
+  border: 1px solid var(--medusa-border, #2a2d32);
+  border-radius: 8px;
+  box-shadow: 0 18px 48px rgba(0, 0, 0, 0.48);
+}
+.slack-channel-dialog-layer .slack-channel-dialog-header {
+  min-height: 46px;
+  height: 46px;
+  flex: 0 0 46px;
+  display: flex;
+  align-items: center;
+  padding: 0 9px 0 12px;
+  border-bottom: 1px solid var(--medusa-border, #2a2d32);
+}
+.slack-channel-dialog-layer .slack-channel-dialog-title {
+  gap: 6px;
+  font-size: 16px;
+}
+.slack-channel-dialog-layer .slack-channel-dialog-title > span {
+  color: var(--medusa-muted, #92969d);
+}
+.slack-channel-dialog-layer .slack-channel-dialog-close {
+  position: static;
+  width: 26px;
+  height: 26px;
+  margin-left: auto;
+  color: var(--medusa-muted, #92969d);
+  border-radius: 5px;
+}
+.slack-channel-dialog-layer .slack-channel-dialog-close:hover {
+  color: var(--medusa-text, #f3f4f6);
+  background: var(--medusa-hover, #202328);
+}
+.slack-channel-dialog-layer .slack-channel-dialog-content {
+  display: flex;
+  align-items: stretch;
+  min-height: 0;
+  max-height: 454px;
+}
+.slack-channel-dialog-layer .slack-channel-dialog-tabs {
+  width: 136px;
+  min-width: 136px;
+  min-height: 0;
+  height: auto;
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 2px;
+  overflow: visible;
+  padding: 8px;
+  background: #141619;
+  border-right: 1px solid var(--medusa-border, #2a2d32);
+  border-bottom: 0;
+}
+.slack-channel-dialog-layer .slack-channel-dialog-tabs button {
+  position: relative;
+  min-width: 0;
+  min-height: 32px;
+  display: flex;
+  align-items: center;
+  justify-content: flex-start;
+  padding: 0 9px;
+  color: var(--medusa-muted, #92969d);
+  border-radius: 5px;
+  font-size: 12px;
+  line-height: 1.2;
+  text-align: left;
+}
+.slack-channel-dialog-layer .slack-channel-dialog-tabs button:hover {
+  color: var(--medusa-text, #f3f4f6);
+  background: #1d2024;
+}
+.slack-channel-dialog-layer .slack-channel-dialog-tabs button.is-active {
+  color: var(--medusa-text, #f3f4f6);
+  background: #25282d;
+  font-weight: 600;
+}
+.slack-channel-dialog-layer .slack-channel-dialog-tabs button.is-active::after {
+  display: none;
+}
+.slack-channel-dialog-layer .slack-channel-dialog-body {
+  min-width: 0;
+  min-height: 0;
+  max-height: 454px;
+  flex: 0 1 464px;
+  overflow-y: auto;
+  padding: 12px;
+  background: var(--medusa-bg, #111315);
+}
+.slack-channel-dialog-layer .slack-channel-members-toolbar {
+  gap: 8px;
+  margin-bottom: 8px;
+}
+.slack-channel-dialog-layer .slack-channel-dialog-search {
+  height: 36px;
+  gap: 8px;
+  padding: 0 10px;
+  color: var(--medusa-muted, #92969d);
+  background: var(--medusa-card, #181a1d);
+  border: 1px solid var(--medusa-border, #2a2d32);
+  border-radius: 6px;
+}
+.slack-channel-dialog-layer .slack-channel-dialog-search:focus-within {
+  border-color: #4b5058;
+  box-shadow: 0 0 0 1px #4b5058;
+}
+.slack-channel-dialog-layer .slack-channel-dialog-search input {
+  color: var(--medusa-text, #f3f4f6);
+  font-size: 12px;
+}
+.slack-channel-dialog-layer .slack-channel-add-member {
+  height: 36px;
+  gap: 6px;
+  padding: 0 11px;
+  color: var(--medusa-text, #f3f4f6);
+  background: var(--medusa-card, #181a1d);
+  border: 1px solid var(--medusa-border, #2a2d32);
+  border-radius: 6px;
+  font-size: 12px;
+}
+.slack-channel-dialog-layer .slack-channel-member-card {
+  overflow: hidden;
+  background: var(--medusa-card, #181a1d);
+  border: 1px solid var(--medusa-border, #2a2d32);
+  border-radius: 7px;
+}
+.slack-channel-dialog-layer .slack-channel-member-row {
+  width: 100%;
+  min-height: 48px;
+  gap: 10px;
+  padding: 7px 10px;
+  border-bottom: 1px solid var(--medusa-border, #2a2d32);
+  border-radius: 0;
+}
+.slack-channel-dialog-layer .slack-channel-member-row:last-child {
+  border-bottom: 0;
+}
+.slack-channel-dialog-layer .slack-channel-member-row:hover {
+  background: var(--medusa-hover, #202328);
+  border-radius: 0;
+}
+.slack-channel-dialog-layer .slack-channel-member-row strong {
+  color: var(--medusa-text, #f3f4f6);
+  font-size: 12.5px;
+  font-weight: 600;
+}
+.slack-channel-dialog-layer .slack-channel-member-row span,
+.slack-channel-dialog-layer .slack-channel-member-row small {
+  color: var(--medusa-muted, #92969d);
+  font-size: 11.5px;
+}
+.slack-channel-dialog-layer .slack-channel-about-card {
+  gap: 0;
+}
+.slack-channel-dialog-layer .slack-channel-about-card > section,
+.slack-channel-dialog-layer .slack-channel-settings > section {
+  min-height: 52px;
+  gap: 2px;
+  padding: 8px 34px 8px 10px;
+  color: var(--medusa-muted, #92969d);
+  background: var(--medusa-card, #181a1d);
+  border-color: var(--medusa-border, #2a2d32);
+  border-radius: 0;
+  font-size: 12px;
+}
+.slack-channel-dialog-layer .slack-channel-about-card > section + section,
+.slack-channel-dialog-layer .slack-channel-settings > section + section {
+  margin-top: -1px;
+}
+.slack-channel-dialog-layer .slack-channel-about-card strong,
+.slack-channel-dialog-layer .slack-channel-settings strong {
+  color: var(--medusa-text, #f3f4f6);
+  font-size: 12px;
+  font-weight: 600;
+}
+.slack-channel-dialog-layer .slack-channel-about-card section button {
+  top: 50%;
+  right: 8px;
+  transform: translateY(-50%);
+}
+.slack-channel-dialog-layer .slack-channel-dialog-empty {
+  min-height: 196px;
+  color: var(--medusa-muted, #92969d);
+}
+.slack-channel-dialog-layer .slack-channel-dialog-empty h3 {
+  margin: 10px 0 4px;
+  color: var(--medusa-text, #f3f4f6);
+  font-size: 14px;
+}
+.slack-channel-dialog-layer .slack-channel-dialog-empty p {
+  max-width: 340px;
+  font-size: 12px;
+}
+
+@media (max-width: 520px) {
+  .slack-channel-dialog-layer .slack-channel-dialog {
+    width: calc(100vw - 24px);
+    max-height: calc(100vh - 24px);
+  }
+  .slack-channel-dialog-layer .slack-channel-dialog-content {
+    flex-direction: column;
+  }
+  .slack-channel-dialog-layer .slack-channel-dialog-tabs {
+    width: 100%;
+    min-width: 0;
+    flex-direction: row;
+    overflow-x: auto;
+    padding: 6px;
+    border-right: 0;
+    border-bottom: 1px solid var(--medusa-border, #2a2d32);
+  }
+  .slack-channel-dialog-layer .slack-channel-dialog-tabs button {
+    min-width: max-content;
+  }
+  .slack-channel-dialog-layer .slack-channel-dialog-body {
+    flex: 0 1 auto;
+  }
 }

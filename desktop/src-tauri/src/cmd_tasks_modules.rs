@@ -368,7 +368,7 @@ mod tests {
             id: "m1".into(),
             name: "Module 1".into(),
             description: "purpose".into(),
-            lead_id: Some("owner".into()),
+            lead_id: Some("ashiq".into()),
             status: "planned".into(),
             task_ids: vec!["task_a".into(), "task_b".into()],
             created_at: now.clone(),
@@ -388,6 +388,6 @@ mod tests {
         assert_eq!(m.name, "Renamed");
         assert_eq!(m.status, "in_progress");
         assert_eq!(m.task_ids, vec!["task_a".to_string(), "task_b".to_string()]);
-        assert_eq!(m.lead_id.as_deref(), Some("owner"));
+        assert_eq!(m.lead_id.as_deref(), Some("ashiq"));
     }
 }

@@ -5,6 +5,7 @@
 use std::sync::OnceLock;
 
 use aura_redact::{RedactionConfig, Redactor};
+use base64::{engine::general_purpose::URL_SAFE_NO_PAD as B64URL, Engine};
 use uuid::Uuid;
 
 use super::identity;
@@ -77,14 +78,23 @@ pub fn emit(input: EmitInput) -> AwarenessEvent {
         ts: live_events::now_ms(),
         key_id: None,
         sig: None,
+        pubkey: None,
+        // Which checkout this came from. Peers reading the shared feed see
+        // "claude, in barcelona" instead of a branch name they have to map
+        // back to a directory themselves.
+        worktree: crate::worktree::paths::current_worktree(),
     };
 
     // M3a: sign the canonical bytes so the event can't be spoofed by another
-    // actor. Unsigned emission still works if no keystore is available.
+    // actor. The 32-byte verifying key rides along (self-certifying) so any
+    // teammate can verify on ingest without a key registry — the pubkey
+    // re-derives `key_id`, pinning the two together. Unsigned emission still
+    // works if no keystore is available.
     if let Some(key) = identity::load() {
         let sig = key.sign(&ev.signing_bytes());
         ev.key_id = Some(key.key_id());
         ev.sig = Some(sig.to_b64());
+        ev.pubkey = Some(B64URL.encode(key.verifying_key().to_bytes()));
     }
 
     let _ = store::append(&ev);

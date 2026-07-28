@@ -13,43 +13,31 @@ import {
   ContextMenuTrigger,
 } from "../ui/context-menu";
 import { Tooltip, TooltipTrigger, TooltipContent } from "../ui/tooltip";
+import { InlineDiff } from "./InlineDiff";
+import { Churn } from "../diff/Churn";
 
 type Props = {
   file: ChangedFile;
   isSelected: boolean;
-  /** v0.2.7 Phase 5 — receives the MouseEvent so the caller can branch
-   *  on Cmd/Shift modifiers. Plain click opens the diff in the active
-   *  workpane; Shift opens it in a new tab; Cmd opens the file in
-   *  edit (not diff) mode. */
+  /** Row click routes to the work surface: a plain click opens the Monaco diff
+   *  view; Shift opens the diff in a new tab; Cmd/Ctrl opens the file in edit
+   *  mode. Receives the MouseEvent so the caller can branch on the modifiers.
+   *  The inline +/− peek is a separate affordance on the leading caret. */
   onClick: (e: React.MouseEvent) => void;
+  /** Marks the row active (selection highlight) — fired alongside the click. */
+  onSelect?: () => void;
   onStage?: () => void;
   onUnstage?: () => void;
   onDiscard?: () => void;
   /** Disable buttons while a mutation is in flight for this row. */
   isBusy?: boolean;
-  /** Worktree path for the right-click "Reveal" / "Copy path" actions. */
+  /** Worktree path for the right-click "Reveal" / "Copy path" actions, and
+   *  the root the inline diff fetches against. */
   repoRoot?: string;
 };
 
 function fileName(path: string): string {
   return path.split("/").pop() || path;
-}
-
-function statusColor(status: string): string {
-  switch (status) {
-    case "M":
-      return "text-amber";
-    case "A":
-      return "text-green";
-    case "D":
-      return "text-red";
-    case "R":
-      return "text-violet";
-    case "?":
-      return "text-text-3";
-    default:
-      return "text-text-3";
-  }
 }
 
 function statusGlyph(status: string): string {
@@ -69,10 +57,30 @@ function statusGlyph(status: string): string {
   }
 }
 
+/** What the letter means, in words — the badge is a one-letter shorthand, so
+ *  the hover carries the plain-language read for anyone who doesn't know it. */
+function statusWord(status: string): string {
+  switch (status) {
+    case "M":
+      return "edited";
+    case "A":
+      return "added";
+    case "D":
+      return "removed";
+    case "R":
+      return "renamed";
+    case "?":
+      return "brand new — not tracked yet";
+    default:
+      return "changed";
+  }
+}
+
 export function FileRow({
   file,
   isSelected,
   onClick,
+  onSelect,
   onStage,
   onUnstage,
   onDiscard,
@@ -80,6 +88,7 @@ export function FileRow({
   repoRoot,
 }: Props) {
   const [confirmDiscard, setConfirmDiscard] = useState(false);
+  const [expanded, setExpanded] = useState(false);
   const name = fileName(file.path);
   const showStats = file.additions > 0 || file.deletions > 0;
   const isDelete = file.status === "?" || file.status === "A";
@@ -110,15 +119,50 @@ export function FileRow({
         isSelected ? "bg-bg-2" : "hover:bg-bg-2/60"
       }`}
     >
+      {/* Leading caret — the secondary affordance: toggles the inline +/−
+          peek in the rail without leaving it. Stops propagation so the row's
+          primary click (open the Monaco diff) doesn't also fire. */}
+      <button
+        type="button"
+        onClick={(e) => {
+          e.stopPropagation();
+          setExpanded((v) => !v);
+        }}
+        aria-label={expanded ? "Hide inline diff" : "Peek diff inline"}
+        aria-expanded={expanded}
+        className="shrink-0 flex items-center justify-center w-4 text-text-5 hover:text-text-2 transition-colors"
+      >
+        <span
+          className={`transition-transform ${expanded ? "rotate-90" : ""}`}
+          aria-hidden
+        >
+          <svg width="8" height="8" viewBox="0 0 16 16" fill="none">
+            <path
+              d="M6 3l5 5-5 5"
+              stroke="currentColor"
+              strokeWidth="1.7"
+              strokeLinecap="round"
+              strokeLinejoin="round"
+            />
+          </svg>
+        </span>
+      </button>
       <Tooltip>
         <TooltipTrigger asChild>
           <button
             type="button"
-            onClick={onClick}
-            className="flex items-center gap-2 flex-1 min-w-0 overflow-hidden py-1.5"
+            onClick={(e) => {
+              // Primary action: open the file in the work surface. Plain click
+              // → Monaco diff view; Shift → new tab; Cmd/Ctrl → editor (all
+              // resolved from the modifiers inside `onClick`).
+              onSelect?.();
+              onClick(e);
+            }}
+            className="flex items-center gap-1.5 flex-1 min-w-0 overflow-hidden py-1.5"
           >
             <span
-              className={`shrink-0 w-4 h-4 rounded-sm flex items-center justify-center text-[10px] font-mono font-semibold bg-bg-1 ${statusColor(file.status)}`}
+              className="shrink-0 w-4 h-4 rounded-sm flex items-center justify-center text-[10px] font-mono font-semibold bg-bg-1 text-text-3"
+              title={statusWord(file.status)}
             >
               {statusGlyph(file.status)}
             </span>
@@ -127,14 +171,11 @@ export function FileRow({
                 {name}
               </span>
               {showStats && (
-                <span className="flex items-center gap-1 text-[10.5px] font-mono shrink-0 whitespace-nowrap font-medium">
-                  {file.additions > 0 && (
-                    <span className="text-green">+{file.additions}</span>
-                  )}
-                  {file.deletions > 0 && (
-                    <span className="text-red">−{file.deletions}</span>
-                  )}
-                </span>
+                <Churn
+                  additions={file.additions}
+                  deletions={file.deletions}
+                  className="text-[10.5px]"
+                />
               )}
             </span>
           </button>
@@ -142,7 +183,7 @@ export function FileRow({
         <TooltipContent side="left" className="text-[10.5px]">
           <div className="font-medium mb-0.5 truncate max-w-[260px]">{file.path}</div>
           <div className="text-text-3 leading-snug">
-            click: diff &nbsp;·&nbsp; ⇧ click: new tab &nbsp;·&nbsp; ⌘ click: editor
+            click: diff view &nbsp;·&nbsp; ⇧ click: new tab &nbsp;·&nbsp; ⌘ click: editor
           </div>
         </TooltipContent>
       </Tooltip>
@@ -204,35 +245,38 @@ export function FileRow({
   );
 
   return (
-    <ContextMenu>
-      <ContextMenuTrigger asChild>{row}</ContextMenuTrigger>
-      <ContextMenuContent className="w-44">
-        <ContextMenuItem onClick={copyPath}>Copy path</ContextMenuItem>
-        <ContextMenuItem onClick={copyRelative}>
-          Copy relative path
-        </ContextMenuItem>
-        {(onStage || onUnstage || onDiscard) && <ContextMenuSeparator />}
-        {onStage && (
-          <ContextMenuItem onClick={onStage} disabled={isBusy}>
-            Stage
+    <>
+      <ContextMenu>
+        <ContextMenuTrigger asChild>{row}</ContextMenuTrigger>
+        <ContextMenuContent className="w-44">
+          <ContextMenuItem onClick={copyPath}>Copy path</ContextMenuItem>
+          <ContextMenuItem onClick={copyRelative}>
+            Copy relative path
           </ContextMenuItem>
-        )}
-        {onUnstage && (
-          <ContextMenuItem onClick={onUnstage} disabled={isBusy}>
-            Unstage
-          </ContextMenuItem>
-        )}
-        {onDiscard && (
-          <ContextMenuItem
-            onClick={onDiscard}
-            disabled={isBusy}
-            className="text-red focus:text-red"
-          >
-            {discardLabel}
-          </ContextMenuItem>
-        )}
-      </ContextMenuContent>
-    </ContextMenu>
+          {(onStage || onUnstage || onDiscard) && <ContextMenuSeparator />}
+          {onStage && (
+            <ContextMenuItem onClick={onStage} disabled={isBusy}>
+              Stage
+            </ContextMenuItem>
+          )}
+          {onUnstage && (
+            <ContextMenuItem onClick={onUnstage} disabled={isBusy}>
+              Unstage
+            </ContextMenuItem>
+          )}
+          {onDiscard && (
+            <ContextMenuItem
+              onClick={onDiscard}
+              disabled={isBusy}
+              className="text-red focus:text-red"
+            >
+              {discardLabel}
+            </ContextMenuItem>
+          )}
+        </ContextMenuContent>
+      </ContextMenu>
+      {expanded && repoRoot && <InlineDiff repoRoot={repoRoot} path={file.path} />}
+    </>
   );
 }
 

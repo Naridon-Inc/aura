@@ -44,7 +44,11 @@ const GROUP_LABEL: Record<TaskStateGroup, string> = {
 // conic-gradient fill, completed/cancelled a full fill. Maps state.color
 // onto the ring/fill so custom palette entries keep their colour while
 // still picking up the group affordance.
-function StateGlyph({
+//
+// Exported so other surfaces (e.g. Mission Control's plan sidebar) can render
+// the EXACT same status glyph the tasks board uses — one shape vocabulary for
+// state across the app, never a bare "means-nothing" colour dot.
+export function StateGlyph({
   group,
   color,
   size = 11,

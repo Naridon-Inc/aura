@@ -28,9 +28,11 @@ import {
 import {
   bindChannelMeta,
   forgetAgentStream,
+  getChannelEvents,
   persistLastSession,
   pushEvent,
   readPersistedSession,
+  setResumedHistory,
   streamChannel,
 } from "../../lib/agentStreamStore";
 import { AgentTerminalView } from "./AgentTerminalView";
@@ -430,6 +432,29 @@ function PtySurface({ tab, onClosePane }: AgentSurfaceProps) {
           unlisten?.();
           return;
         }
+        // Seed the bubble view with this session's EXISTING transcript before
+        // the live watcher attaches. `claudeSessionWatch` seeks straight to
+        // end-of-file and only emits *newly appended* lines — it assumes the
+        // history was already read (via claudeLoadSession). Without this seed,
+        // returning to a workspace (which drops the in-memory stream channel on
+        // unmount — 5-min idle-drop, or immediately on respawn) leaves the chat
+        // blank, replaying only what the agent writes AFTER the remount: the
+        // "starting from zero" loss. The on-disk JSONL is intact, so we replay
+        // it. Only seed when the channel is empty so we never clobber events
+        // that survived a brief detach or a live in-flight turn — and re-check
+        // after the await, since the watcher/live wire may have populated it
+        // while we were reading.
+        if (getChannelEvents(channel).length === 0) {
+          try {
+            const history = await api.claudeLoadSession(mine.file_path);
+            if (cancelled) return;
+            if (getChannelEvents(channel).length === 0) {
+              setResumedHistory(channel, history);
+            }
+          } catch {
+            /* best-effort — a missing/locked file just means no pre-roll */
+          }
+        }
         watchStarted = api.claudeSessionWatch(tab.sessionId, mine.file_path);
         await watchStarted;
       } catch {
@@ -812,7 +837,7 @@ function ViewToggleButton({
     <button
       type="button"
       onClick={onClick}
-      className="px-2 h-6 text-[11px] font-medium transition-colors"
+      className="px-2 h-6 text-[11px] font-medium transition-colors hover:text-text-1 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-accent/50"
       style={{
         background: active
           ? "color-mix(in srgb, var(--color-accent) 16%, transparent)"

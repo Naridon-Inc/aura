@@ -27,6 +27,8 @@ import {
   X,
   Search,
   Plus,
+  Group as GroupIcon,
+  ArrowUpDown,
 } from "lucide-react";
 import {
   Popover,
@@ -409,7 +411,7 @@ function CheckRow({
         className={cn(
           "inline-flex w-3 h-3 rounded-sm border items-center justify-center",
           checked
-            ? "bg-accent border-accent text-white"
+            ? "bg-accent border-accent text-[color:var(--color-accent-foreground)]"
             : "bg-bg-content border-line-soft",
         )}
       >
@@ -485,7 +487,7 @@ function ChipRow({
             type="button"
             onClick={() => onRemove(c.dim, c.value)}
             title={`Remove ${c.keyLabel}: ${c.valLabel}`}
-            className="inline-flex items-center justify-center w-3.5 h-3.5 rounded-[3px] text-text-5 hover:text-rose-300 hover:bg-bg-2 transition-colors"
+            className="inline-flex items-center justify-center w-3.5 h-3.5 rounded-[3px] text-text-5 hover:text-red hover:bg-bg-2 transition-colors"
           >
             <X className="w-2.5 h-2.5" strokeWidth={1.75} aria-hidden />
           </button>
@@ -514,12 +516,14 @@ function GroupOrderControls({
     <div className="flex items-center gap-1">
       <MiniSelect
         label="Group"
+        icon={<GroupIcon className="w-3 h-3" strokeWidth={1.5} aria-hidden />}
         value={groupBy}
         options={GROUP_BY_OPTIONS}
         onChange={(v) => onGroupBy(v as TaskViewGroupBy)}
       />
       <MiniSelect
         label="Order"
+        icon={<ArrowUpDown className="w-3 h-3" strokeWidth={1.5} aria-hidden />}
         value={orderBy}
         options={ORDER_BY_OPTIONS}
         onChange={(v) => onOrderBy(v as TaskViewOrderBy)}
@@ -538,11 +542,16 @@ function GroupOrderControls({
 
 function MiniSelect({
   label,
+  icon,
   value,
   options,
   onChange,
 }: {
   label: string;
+  /** Small leading glyph that says what the picker controls (group vs
+   *  order), replacing the old uppercase text prefix. `title` still
+   *  carries the words for hover/a11y. */
+  icon?: React.ReactNode;
   value: string;
   options: { id: string; label: string }[];
   onChange: (v: string) => void;
@@ -554,12 +563,11 @@ function MiniSelect({
       <PopoverTrigger asChild>
         <button
           type="button"
-          className="inline-flex items-center gap-1 h-[26px] px-2 text-[11px] rounded-[3px] bg-bg-2 border-[0.5px] border-line-soft text-text-3 hover:text-text-1 hover:border-line transition-colors"
+          className="inline-flex items-center gap-1 h-[26px] px-2 text-[11px] rounded-[3px] bg-bg-2 border-[0.5px] border-line-soft text-text-3 hover:text-text-1 hover:border-line transition-colors [&_svg]:text-text-5"
           title={`${label} by`}
+          aria-label={`${label} by`}
         >
-          <span className="text-text-5 text-[9.5px] uppercase tracking-wider">
-            {label}
-          </span>
+          {icon}
           <span>{current?.label ?? value}</span>
           <ChevronDown className="w-2.5 h-2.5" strokeWidth={1.5} aria-hidden />
         </button>

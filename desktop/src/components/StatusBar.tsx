@@ -30,7 +30,6 @@ import {
   useCallSnapshot,
 } from "../lib/callStore";
 import {
-  GitBranch,
   Headphones,
   HeadphoneOff,
   Mic,
@@ -42,6 +41,7 @@ import {
 import { api } from "../lib/api";
 import { BranchSwitcherModal } from "./git/BranchSwitcherModal";
 import { Tooltip, TooltipTrigger, TooltipContent } from "./ui/tooltip";
+import { MENU_PANEL } from "./ui/menuSurface";
 import { ClaudeUsageRing } from "./manager/chat/ClaudeUsageRing";
 import { AuraMark } from "./AuraMark";
 import {
@@ -198,7 +198,7 @@ export function StatusBar({
             >
               <span
                 className="inline-block w-1.5 h-1.5 rounded-full"
-                style={{ background: "var(--color-accent-purple, var(--color-accent-blue))" }}
+                style={{ background: "var(--color-text-4)" }}
                 aria-hidden
               />
               <span className="text-text-3">{p.id}</span>
@@ -351,7 +351,7 @@ function CliVersionChip({
         {dotTone === "green" && (
           <span
             className="inline-block w-1.5 h-1.5 rounded-full"
-            style={{ background: "var(--color-accent-green, #10b981)" }}
+            style={{ background: "var(--color-accent-green)" }}
             aria-hidden
           />
         )}
@@ -359,13 +359,8 @@ function CliVersionChip({
       </Item>
       {open && (
         <div
-          className="absolute right-0 bottom-full mb-1 rounded-md shadow-lg z-50 p-3 text-[11.5px]"
-          style={{
-            background: "var(--color-bg-3)",
-            border: "1px solid var(--color-line-soft)",
-            minWidth: 320,
-            color: "var(--color-text-2)",
-          }}
+          className={`${MENU_PANEL} absolute right-0 bottom-full mb-1 !p-3 text-[11.5px] text-text-2`}
+          style={{ minWidth: 320 }}
         >
           <div className="flex items-center justify-between mb-2">
             <span className="font-medium text-text-1">Aura CLI</span>
@@ -388,10 +383,10 @@ function CliVersionChip({
               style={{
                 color:
                   dotTone === "green"
-                    ? "var(--color-accent-green, #10b981)"
+                    ? "var(--color-accent-green)"
                     : dotTone === "amber"
-                      ? "var(--color-amber, #d97706)"
-                      : "var(--color-red, #ef4444)",
+                      ? "var(--color-amber)"
+                      : "var(--color-red)",
               }}
             >
               {info.status}
@@ -447,7 +442,7 @@ function CliVersionChip({
               {updateError && (
                 <div
                   className="text-[10.5px] mb-2"
-                  style={{ color: "var(--color-red, #ef4444)" }}
+                  style={{ color: "var(--color-red)" }}
                 >
                   {updateError}
                 </div>
@@ -508,16 +503,12 @@ function Item({
     tone === "red"
       ? "var(--color-red)"
       : tone === "amber"
-        ? "var(--color-amber, #d97706)"
+        ? "var(--color-amber)"
         : dim
           ? "var(--color-text-4)"
           : "var(--color-text-2)";
   const toneBg =
-    tone === "red"
-      ? "bg-red-500/10"
-      : tone === "amber"
-        ? "bg-amber-500/10"
-        : "";
+    tone === "red" ? "bg-red/10" : tone === "amber" ? "bg-amber/10" : "";
   const className = `inline-flex items-center gap-1.5 h-[20px] px-2 rounded-[6px] whitespace-nowrap flex-none transition-colors ${toneBg} ${
     interactive ? "hover:bg-bg-2 cursor-pointer" : ""
   }`;
@@ -665,7 +656,27 @@ function BranchSwitcher({ repoRoot, dirty }: { repoRoot: string; dirty: boolean 
                 </span>
               ) : (
                 <>
-                  <GitBranch size={12} className="text-text-3 shrink-0" />
+                  {/* Horizontal git-fork — one node splitting into two.
+                      Deliberately not a vertical trunk. */}
+                  <svg
+                    width={12}
+                    height={12}
+                    viewBox="0 0 24 24"
+                    fill="none"
+                    stroke="currentColor"
+                    strokeWidth={2}
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                    className="text-text-3 shrink-0"
+                    aria-hidden
+                  >
+                    <circle cx="5" cy="12" r="2" />
+                    <circle cx="19" cy="6" r="2" />
+                    <circle cx="19" cy="18" r="2" />
+                    <path d="M7 12h5" />
+                    <path d="M12 12C14.5 12 14.5 6 17 6" />
+                    <path d="M12 12C14.5 12 14.5 18 17 18" />
+                  </svg>
                   <span className="truncate font-medium">{branch ?? "—"}</span>
                 </>
               )}
@@ -710,7 +721,7 @@ function Dot({ tone }: { tone: "red" | "amber" }) {
     <span
       className="inline-block w-1.5 h-1.5 rounded-full"
       style={{
-        background: tone === "red" ? "var(--color-red)" : "var(--color-amber, #d97706)",
+        background: tone === "red" ? "var(--color-red)" : "var(--color-amber)",
       }}
     />
   );
@@ -858,8 +869,8 @@ function CallStatusPill({ suppressed = false }: { suppressed?: boolean }) {
   // (Leave cancels the pending join via the CallPanel fallback).
   const isConnecting = snap.connecting && !snap.active;
   const stripBg = isConnecting
-    ? "rgba(217, 119, 6, 0.10)"
-    : "rgba(16, 185, 129, 0.10)";
+    ? "color-mix(in srgb, var(--color-amber) 10%, transparent)"
+    : "color-mix(in srgb, var(--color-accent-green) 10%, transparent)";
 
   return (
     <span
@@ -882,8 +893,8 @@ function CallStatusPill({ suppressed = false }: { suppressed?: boolean }) {
           className={`inline-block w-2 h-2 rounded-full ${isConnecting ? "animate-pulse" : ""}`}
           style={{
             background: isConnecting
-              ? "var(--color-amber, #d97706)"
-              : "var(--color-accent-green, #10b981)",
+              ? "var(--color-amber)"
+              : "var(--color-accent-green)",
           }}
           aria-hidden
         />
@@ -902,7 +913,7 @@ function CallStatusPill({ suppressed = false }: { suppressed?: boolean }) {
         style={{
           color: micPref
             ? "var(--color-text-2)"
-            : "var(--color-red, #ef4444)",
+            : "var(--color-red)",
         }}
       >
         {micPref ? <Mic size={12} /> : <MicOff size={12} />}
@@ -919,7 +930,7 @@ function CallStatusPill({ suppressed = false }: { suppressed?: boolean }) {
         className="inline-flex items-center gap-1.5 px-2 hover:bg-bg-2 transition-colors disabled:opacity-50 disabled:hover:bg-transparent"
         style={{
           color: deafenPref
-            ? "var(--color-red, #ef4444)"
+            ? "var(--color-red)"
             : "var(--color-text-2)",
         }}
       >
@@ -948,9 +959,9 @@ function CallStatusPill({ suppressed = false }: { suppressed?: boolean }) {
         className="relative inline-flex items-center gap-1.5 px-2 hover:bg-bg-2 transition-colors disabled:opacity-50 disabled:hover:bg-transparent"
         style={{
           color: localSharing
-            ? "var(--color-red, #ef4444)"
+            ? "var(--color-red)"
             : remoteSharing
-              ? "var(--color-accent-blue, #3b82f6)"
+              ? "var(--color-text-2)"
               : "var(--color-text-2)",
         }}
       >
@@ -970,7 +981,7 @@ function CallStatusPill({ suppressed = false }: { suppressed?: boolean }) {
         {localSharing && (
           <span
             className="absolute top-0.5 right-1 w-1.5 h-1.5 rounded-full"
-            style={{ background: "var(--color-red, #ef4444)" }}
+            style={{ background: "var(--color-red)" }}
             aria-hidden
           />
         )}
@@ -981,8 +992,8 @@ function CallStatusPill({ suppressed = false }: { suppressed?: boolean }) {
         onClick={() => leaveCall()}
         title="Leave huddle (Esc)"
         aria-label="Leave huddle"
-        className="inline-flex items-center gap-1.5 px-2 hover:bg-red-500/15 transition-colors"
-        style={{ color: "var(--color-red, #ef4444)" }}
+        className="inline-flex items-center gap-1.5 px-2 hover:bg-red/15 transition-colors"
+        style={{ color: "var(--color-red)" }}
       >
         <PhoneOff size={12} />
         <span className="text-[11px] font-medium">Leave</span>
@@ -1014,8 +1025,8 @@ function MicVuBar() {
         style={{
           width: widthPx,
           background: peaking
-            ? "var(--color-amber, #d97706)"
-            : "var(--color-accent-green, #10b981)",
+            ? "var(--color-amber)"
+            : "var(--color-accent-green)",
         }}
       />
     </span>

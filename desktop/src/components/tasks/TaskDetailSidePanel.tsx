@@ -81,13 +81,6 @@ const PRIORITY_OPTIONS: { id: TaskPriority; label: string }[] = [
   { id: "none", label: "None" },
 ];
 
-const AGENT_TINT: Record<string, string> = {
-  claude: "rgb(217, 119, 87)",
-  gemini: "rgb(96, 165, 250)",
-  codex: "rgb(132, 204, 168)",
-  opencode: "rgb(192, 132, 252)",
-};
-
 type Props = {
   task: Task;
   /** All tasks in the workspace — needed to resolve dependency ids
@@ -501,8 +494,13 @@ export function AssignmentCard({
               <span
                 className="inline-flex items-center px-1.5 h-5 rounded uppercase tracking-wider text-[10px] font-medium"
                 style={{
-                  background: `${AGENT_TINT[task.agent_assignee] ?? "rgb(160,160,160)"}25`,
-                  color: AGENT_TINT[task.agent_assignee] ?? "rgb(200,200,200)",
+                  // One agent colour for every agent, not a brand wheel: the
+                  // chip already spells the name, and orange is this app's
+                  // reserved "an agent did this" signal. (The old map also
+                  // produced invalid CSS — `rgb(…)25` never rendered.)
+                  background:
+                    "color-mix(in oklab, var(--color-caret-orange) 15%, transparent)",
+                  color: "var(--color-caret-orange)",
                 }}
                 title={`Agent: ${task.agent_assignee}`}
               >
@@ -672,7 +670,7 @@ export function DependenciesCard({
                     key={id}
                     className="flex items-center gap-2 text-[12px] text-text-2"
                   >
-                    <span className="w-3 h-3 rounded-sm bg-amber-500/20 text-amber-300 text-[9px] flex items-center justify-center font-bold">
+                    <span className="w-3 h-3 rounded-sm bg-bg-3 text-text-3 text-[9px] flex items-center justify-center font-bold">
                       ⇠
                     </span>
                     <span className="truncate" title={upstream?.title ?? id}>
@@ -705,7 +703,7 @@ export function DependenciesCard({
                   key={t.id}
                   className="flex items-center gap-2 text-[12px] text-text-2"
                 >
-                  <span className="w-3 h-3 rounded-sm bg-sky-500/20 text-sky-300 text-[9px] flex items-center justify-center font-bold">
+                  <span className="w-3 h-3 rounded-sm bg-bg-3 text-text-3 text-[9px] flex items-center justify-center font-bold">
                     ⇢
                   </span>
                   <span className="truncate" title={t.title}>
@@ -944,7 +942,7 @@ export function SubIssuesCard({
           </div>
         )}
         {error && (
-          <div className="text-[10.5px] text-rose-400 leading-snug">
+          <div className="text-[10.5px] text-red leading-snug">
             {error}
           </div>
         )}
@@ -1120,7 +1118,7 @@ export function RelationsCard({
                         onClick={() => void removeRelation(r.id)}
                         disabled={busy}
                         title="Remove relation"
-                        className="ml-auto text-text-5 hover:text-rose-400"
+                        className="ml-auto text-text-5 hover:text-red"
                       >
                         ×
                       </Button>
@@ -1180,7 +1178,7 @@ export function RelationsCard({
           </div>
         )}
         {error && (
-          <div className="text-[10.5px] text-rose-400 leading-snug">
+          <div className="text-[10.5px] text-red leading-snug">
             {error}
           </div>
         )}
@@ -1320,8 +1318,8 @@ export function ActivityCard({
               <span
                 className={`text-[10.5px] leading-snug ${
                   mintMsg.startsWith("Proof")
-                    ? "text-emerald-400"
-                    : "text-rose-400"
+                    ? "text-text-2"
+                    : "text-red"
                 }`}
               >
                 {mintMsg}
@@ -1610,7 +1608,7 @@ export function CommentsCard({
             </Button>
           </div>
           {error && (
-            <div className="text-[10.5px] text-rose-400 leading-snug">
+            <div className="text-[10.5px] text-red leading-snug">
               {error}
             </div>
           )}
@@ -1688,7 +1686,7 @@ function CommentRow({
                 size="xs"
                 onClick={onDelete}
                 disabled={busy}
-                className="px-1 text-[10.5px] text-text-5 hover:text-rose-400"
+                className="px-1 text-[10.5px] text-text-5 hover:text-red"
               >
                 Delete
               </Button>

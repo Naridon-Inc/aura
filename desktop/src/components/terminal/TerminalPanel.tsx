@@ -321,29 +321,40 @@ function TerminalBody({
   onSessionOpened: (termId: string, daemonSessionId: string) => void;
 }) {
   if (layout) {
+    // The focus outline only earns its keep when there is more than one pane
+    // to tell apart. A single pane renders completely flush — terminal output
+    // is never boxed in by chrome.
+    const multi = countCells(layout) > 1;
     return (
       <div className="h-full w-full">
-        {renderTree(layout, tabs, activeTermId, repoRoot, onFocus, onSessionOpened)}
+        {renderTree(layout, tabs, activeTermId, repoRoot, onFocus, onSessionOpened, multi)}
       </div>
     );
   }
   const tab = soloTermId ? tabs.get(soloTermId) : null;
   if (!tab) {
     return (
-      <div className="h-full w-full grid place-items-center text-text-5 text-[12px]">
-        No terminal.
+      <div className="h-full w-full grid place-items-center text-text-5 text-[11px]">
+        No terminals.
       </div>
     );
   }
   return (
     <TermCell
       tab={tab}
-      active
+      active={false}
       repoRoot={repoRoot}
       onFocus={onFocus}
       onSessionOpened={onSessionOpened}
     />
   );
+}
+
+/** How many terminal cells a split tree renders. Drives whether the active
+ *  pane needs a focus outline at all. */
+function countCells(tree: WorkSplitTree): number {
+  if (tree.kind === "leaf") return 1;
+  return tree.children.reduce((n, child) => n + countCells(child), 0);
 }
 
 function renderTree(
@@ -353,6 +364,7 @@ function renderTree(
   repoRoot: string,
   onFocus: (termId: string) => void,
   onSessionOpened: (termId: string, daemonSessionId: string) => void,
+  multi: boolean,
 ): ReactNode {
   if (tree.kind === "leaf") {
     const ref = tree.tabs[tree.activeIndex] ?? tree.tabs[0];
@@ -362,7 +374,7 @@ function renderTree(
     return (
       <TermCell
         tab={tab}
-        active={tab.termId === activeTermId}
+        active={multi && tab.termId === activeTermId}
         repoRoot={repoRoot}
         onFocus={onFocus}
         onSessionOpened={onSessionOpened}
@@ -374,7 +386,7 @@ function renderTree(
     <div className={`h-full w-full flex ${flexDir} gap-px bg-line-soft`}>
       {tree.children.map((child, i) => (
         <div key={i} className="flex-1 min-w-0 min-h-0 bg-bg-content">
-          {renderTree(child, tabs, activeTermId, repoRoot, onFocus, onSessionOpened)}
+          {renderTree(child, tabs, activeTermId, repoRoot, onFocus, onSessionOpened, multi)}
         </div>
       ))}
     </div>
@@ -399,7 +411,7 @@ function TermCell({
       onMouseDownCapture={() => onFocus(tab.termId)}
       className={[
         "h-full w-full relative",
-        active ? "ring-1 ring-inset ring-[var(--color-accent)]/40" : "",
+        active ? "ring-1 ring-inset ring-accent/50" : "",
       ].join(" ")}
     >
       <Terminal

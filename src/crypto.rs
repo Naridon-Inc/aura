@@ -350,9 +350,13 @@ mod tests {
     /// the on-disk `.aura/keys/*` files don't leak into the real repo.
     #[test]
     fn active_key_seal_then_decrypt_roundtrip() {
+        // The cwd is process-global; every test that moves it must hold the
+        // one shared lock, or it yanks the ground out from under a test in
+        // another module (and `CwdGuard` puts it back even on panic).
+        let _lk = crate::TEST_CWD_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let tmp = std::env::temp_dir().join(format!("aura-crypto-test-{}", std::process::id()));
         std::fs::create_dir_all(&tmp).unwrap();
-        let prev_cwd = std::env::current_dir().unwrap();
+        let _cwd = crate::worktree::testing::CwdGuard::enter();
         std::env::set_current_dir(&tmp).unwrap();
 
         let org_id = "org-abc";
@@ -377,7 +381,6 @@ mod tests {
         let pt = decrypt_for_active(&ct_b64, &nonce_b64, ver).expect("decrypt");
         assert_eq!(pt.as_bytes(), body);
 
-        std::env::set_current_dir(prev_cwd).unwrap();
         let _ = std::fs::remove_dir_all(&tmp);
     }
 }

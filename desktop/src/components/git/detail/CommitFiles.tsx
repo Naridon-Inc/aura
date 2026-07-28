@@ -9,16 +9,18 @@ import { useEffect, useState } from "react";
 import { FileText } from "lucide-react";
 
 import { api, type GitCommitFileStat } from "../../../lib/api";
+import { Churn } from "../../diff/Churn";
 
-// Plain-language word + tone for a single-letter git status. Deletions fall
-// back to text-text-3 (there's no red text utility, the established decision).
-function statusMeta(status: string): { word: string; tone: string; letter: string } {
+// Plain-language word for a single-letter git status. The letter is a category,
+// not a warning, so it stays on the neutral ramp — the word in the hover is what
+// actually tells you what happened.
+function statusMeta(status: string): { word: string; letter: string } {
   const s = status.trim().toUpperCase();
-  if (s.startsWith("A")) return { word: "added", tone: "text-accent-green", letter: "A" };
-  if (s.startsWith("D")) return { word: "removed", tone: "text-text-3", letter: "D" };
-  if (s.startsWith("R")) return { word: "renamed", tone: "text-text-2", letter: "R" };
-  if (s.startsWith("C")) return { word: "copied", tone: "text-text-2", letter: "C" };
-  return { word: "edited", tone: "text-text-2", letter: "M" };
+  if (s.startsWith("A")) return { word: "added", letter: "A" };
+  if (s.startsWith("D")) return { word: "removed", letter: "D" };
+  if (s.startsWith("R")) return { word: "renamed", letter: "R" };
+  if (s.startsWith("C")) return { word: "copied", letter: "C" };
+  return { word: "edited", letter: "M" };
 }
 
 function baseName(p: string): string {
@@ -99,7 +101,7 @@ export function CommitFiles({
           >
             <FileText size={13} className="shrink-0 text-text-4" />
             <span
-              className={"w-3 shrink-0 text-center font-mono text-[10px] " + meta.tone}
+              className="w-3 shrink-0 text-center font-mono text-[10px] text-text-3"
               title={meta.word}
             >
               {meta.letter}
@@ -120,13 +122,11 @@ export function CommitFiles({
             {binary ? (
               <span className="shrink-0 text-[10px] text-text-4">binary</span>
             ) : (
-              (f.added > 0 || f.deleted > 0) && (
-                <span className="shrink-0 font-mono text-[10.5px] tabular-nums">
-                  {f.added > 0 && <span className="text-accent-green">+{f.added}</span>}
-                  {f.added > 0 && f.deleted > 0 && <span className="text-text-5"> </span>}
-                  {f.deleted > 0 && <span className="text-text-3">−{f.deleted}</span>}
-                </span>
-              )
+              <Churn
+                additions={f.added}
+                deletions={f.deleted}
+                className="text-[10.5px]"
+              />
             )}
           </button>
         );

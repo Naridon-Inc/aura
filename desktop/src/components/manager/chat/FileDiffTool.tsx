@@ -16,6 +16,7 @@
 //! mounted when there's a real diff to show.
 
 import { Suspense, lazy, useMemo, useState } from "react";
+import { AsciiSpinner } from "../../ui/ascii-spinner";
 
 import { languageSlugForPath } from "../../../lib/monacoLanguage";
 import { configureMonacoDiagnostics } from "../../../lib/monacoDiagnostics";
@@ -262,8 +263,9 @@ export function FileDiffTool({
 
 function DiffLoading() {
   return (
-    <div className="h-full w-full flex items-center justify-center text-[11px] text-text-4">
-      Loading diff…
+    <div className="h-full w-full flex items-center justify-center gap-1.5 text-[11px] text-text-4">
+      <AsciiSpinner />
+      Loading the changes…
     </div>
   );
 }

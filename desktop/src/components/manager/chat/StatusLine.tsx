@@ -16,8 +16,9 @@
 //! content they sit beside.
 
 import { useEffect, useRef, useState } from "react";
-import { Sparkles } from "lucide-react";
+import { AlertTriangle, Sparkles } from "lucide-react";
 
+import { AsciiSpinner } from "../../ui/ascii-spinner";
 import type { ToolStatus } from "./types";
 
 /** Format an in-flight turn's elapsed seconds for the working indicator —
@@ -72,7 +73,7 @@ export function ThinkingLine({
   const elapsedSec = useElapsedSeconds(startedAt);
   return (
     <div className="thinking">
-      <span className="spinner" />
+      <AsciiSpinner />
       <span className="shimmer">{label}</span>
       {elapsedSec >= 1 && (
         <span className="thinking-elapsed">{formatElapsed(elapsedSec)}</span>
@@ -96,11 +97,64 @@ export function PlanningStatusLine({
   const elapsedSec = useElapsedSeconds(startedAt);
   return (
     <div className="thinking">
-      <span className="spinner" />
+      <AsciiSpinner />
       <span className="shimmer">{label}</span>
       {elapsedSec >= 1 && (
         <span className="thinking-elapsed">{formatElapsed(elapsedSec)}</span>
       )}
+    </div>
+  );
+}
+
+/** Stall watchdog — the escalation of `ThinkingLine` for a turn that has gone
+ *  worryingly quiet. A brain (especially a CLI-wrapper like Kimi) can accept a
+ *  turn and then stream nothing for many minutes — hung subprocess, dropped
+ *  socket, a model wedged on a huge context — and the plain shimmer line just
+ *  spins forever with no way to tell "still working" from "stuck".
+ *
+ *  This anchors on a caller-supplied *last-activity* getter, NOT the turn's
+ *  start: every streamed delta refreshes it, so a legitimately long answer that
+ *  keeps producing tokens/reasoning never trips the notice — only true silence
+ *  does. Once `idle ≥ thresholdSec` it fades in a calm amber row that names how
+ *  long it's been quiet and offers a one-click Stop, so the user isn't left
+ *  guessing or force-quitting the app.
+ *
+ *  Like `ThinkingLine`, the 1s ticker lives on this leaf, so the watch costs no
+ *  transcript re-renders; below the threshold it renders nothing at all. */
+export function StallNotice({
+  getIdleSince,
+  brainLabel,
+  onStop,
+  thresholdSec = 90,
+}: {
+  /** Epoch-ms of the turn's last observed activity (its last streamed delta,
+   *  or its start if nothing has streamed). Read live off a ref each tick. */
+  getIdleSince: () => number;
+  /** Human name of the brain running the turn, for the copy ("No response
+   *  from Kimi…"). Falls back to a generic phrasing when absent. */
+  brainLabel?: string;
+  /** Halt the in-flight turn — the same handler the composer's Stop uses. */
+  onStop: () => void;
+  /** Seconds of silence before the notice appears. */
+  thresholdSec?: number;
+}) {
+  const [, setTick] = useState(0);
+  useEffect(() => {
+    const iv = window.setInterval(() => setTick((n) => (n + 1) % 1_000_000), 1000);
+    return () => window.clearInterval(iv);
+  }, []);
+  const idleSec = Math.max(0, Math.round((Date.now() - getIdleSince()) / 1000));
+  if (idleSec < thresholdSec) return null;
+  const who = brainLabel ?? "the model";
+  return (
+    <div className="aura-stall-notice" role="status">
+      <AlertTriangle size={13} strokeWidth={2} className="aura-stall-icon" aria-hidden />
+      <span className="aura-stall-text">
+        No response from {who} for {formatElapsed(idleSec)} — it may be stuck.
+      </span>
+      <button type="button" className="aura-stall-stop" onClick={onStop}>
+        Stop
+      </button>
     </div>
   );
 }

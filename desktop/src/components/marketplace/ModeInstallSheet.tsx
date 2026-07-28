@@ -9,7 +9,8 @@
 // must tick before the install button enables.
 
 import { useEffect, useMemo, useState } from "react";
-import { AlertTriangle, Loader2 } from "lucide-react";
+import { AlertTriangle } from "lucide-react";
+import { AsciiSpinner } from "../ui/ascii-spinner";
 
 import { Button } from "../ui/button";
 import { Input } from "../ui/input";
@@ -178,12 +179,12 @@ export function ModeInstallSheet({ open, entry, onClose, onInstalled }: Props) {
 
           {preview.kind === "loading" && (
             <div className="flex items-center gap-2 text-[12px] text-text-3">
-              <Loader2 className="h-3.5 w-3.5 animate-spin" /> Fetching…
+              <AsciiSpinner /> Fetching…
             </div>
           )}
 
           {preview.kind === "error" && (
-            <div className="text-[12px] text-red-700 dark:text-red-300 bg-red-100/30 dark:bg-red-900/20 rounded p-2">
+            <div className="text-[12px] text-red bg-red/10 rounded p-2">
               {preview.message}
             </div>
           )}
@@ -197,18 +198,18 @@ export function ModeInstallSheet({ open, entry, onClose, onInstalled }: Props) {
               </div>
 
               {preview.needsAdvanced && (
-                <div className="rounded border border-amber-300 bg-amber-50/60 dark:border-amber-700 dark:bg-amber-900/20 p-3 space-y-2">
+                <div className="rounded border border-amber/30 bg-amber/[0.08] p-3 space-y-2">
                   <div className="flex items-start gap-2">
-                    <AlertTriangle className="h-4 w-4 text-amber-700 dark:text-amber-300 flex-shrink-0 mt-0.5" />
-                    <div className="text-[12px] text-amber-900 dark:text-amber-200">
+                    <AlertTriangle className="h-4 w-4 text-amber flex-shrink-0 mt-0.5" />
+                    <div className="text-[12px] text-amber">
                       This mode wants <b>advanced tools</b> that can mutate
                       your system. Review and acknowledge before installing.
                     </div>
                   </div>
-                  <div className="text-[11px] text-amber-900 dark:text-amber-200 ml-6 font-mono">
+                  <div className="text-[11px] text-amber ml-6 font-mono">
                     {preview.wantedReserved.join(", ")}
                   </div>
-                  <label className="flex items-center gap-2 ml-6 text-[12px] text-amber-900 dark:text-amber-200">
+                  <label className="flex items-center gap-2 ml-6 text-[12px] text-amber">
                     <Checkbox
                       checked={acknowledged}
                       onCheckedChange={(v) => setAcknowledged(v === true)}
@@ -222,20 +223,20 @@ export function ModeInstallSheet({ open, entry, onClose, onInstalled }: Props) {
           )}
 
           {installError && (
-            <div className="text-[12px] text-red-700 dark:text-red-300">
+            <div className="text-[12px] text-red">
               Install failed: {installError}
             </div>
           )}
         </div>
 
         <DialogFooter>
-          <Button variant="ghost" onClick={onClose} disabled={installing}>
+          <Button variant="ghost" size="xs" onClick={onClose} disabled={installing}>
             Cancel
           </Button>
-          <Button onClick={handleInstall} disabled={!canInstall || installing}>
+          <Button size="xs" onClick={handleInstall} disabled={!canInstall || installing}>
             {installing ? (
               <>
-                <Loader2 className="h-3.5 w-3.5 animate-spin mr-1" />
+                <AsciiSpinner className="text-[12px] leading-none mr-1" />
                 Installing…
               </>
             ) : (

@@ -1,0 +1,60 @@
+{
+  "tasks": [
+    {
+      "id": "task_5a1c0001-0000-4000-8000-000000000001",
+      "sequence_id": 1,
+      "title": "Add a dark-mode toggle",
+      "description": "People cook late at night — a bright white screen is rough. Add a 🌙 button in the header that switches the whole page to a warm dark theme and remembers the choice.\n\nDone by Claude Code — open the chat under Build to see how, or the Trace tab for the why.",
+      "status": "done",
+      "state_id": "completed",
+      "priority": "high",
+      "assignee_ids": [],
+      "labels": ["ux"],
+      "agent_assignee": "claude",
+      "created_at": "{{ISO_MINUS_2D}}",
+      "updated_at": "{{ISO_MINUS_2D}}"
+    },
+    {
+      "id": "task_5a1c0002-0000-4000-8000-000000000002",
+      "sequence_id": 2,
+      "title": "Add a search box to filter recipes",
+      "description": "As the list grows it's hard to find a recipe. Add a search field at the top that filters the cards as you type — match on the recipe name and the tag.\n\nIn progress right now — there's a live chat working on it under Build.",
+      "status": "in_progress",
+      "state_id": "started",
+      "priority": "medium",
+      "assignee_ids": [],
+      "labels": ["feature"],
+      "agent_assignee": "codex",
+      "created_at": "{{ISO_MINUS_1D}}",
+      "updated_at": "{{ISO_MINUS_20M}}"
+    },
+    {
+      "id": "task_5a1c0003-0000-4000-8000-000000000003",
+      "sequence_id": 3,
+      "title": "Let people favourite a recipe",
+      "description": "Add a ♥ button on each card so people can mark the ones they love, and show favourites first. Not started yet — pick it up whenever you're ready.",
+      "status": "todo",
+      "state_id": "unstarted",
+      "priority": "medium",
+      "assignee_ids": [],
+      "labels": ["feature"],
+      "agent_assignee": null,
+      "created_at": "{{ISO_MINUS_1D}}",
+      "updated_at": "{{ISO_MINUS_1D}}"
+    },
+    {
+      "id": "task_5a1c0004-0000-4000-8000-000000000004",
+      "sequence_id": 4,
+      "title": "Tidy the spacing on the recipe cards",
+      "description": "The cards feel a little cramped on small screens. A small polish pass — nothing urgent.",
+      "status": "backlog",
+      "state_id": "backlog",
+      "priority": "low",
+      "assignee_ids": [],
+      "labels": ["polish"],
+      "agent_assignee": null,
+      "created_at": "{{ISO_MINUS_1D}}",
+      "updated_at": "{{ISO_MINUS_1D}}"
+    }
+  ]
+}

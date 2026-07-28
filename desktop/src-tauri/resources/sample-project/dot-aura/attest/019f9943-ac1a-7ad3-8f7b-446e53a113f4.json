@@ -1,0 +1,91 @@
+{
+  "id": "019f9943-ac1a-7ad3-8f7b-446e53a113f4",
+  "schema_version": {
+    "major": 1,
+    "minor": 0,
+    "patch": 0
+  },
+  "kind": {
+    "kind": "sentinel_event"
+  },
+  "parent_id": null,
+  "prior_sibling_id": null,
+  "supersedes_id": null,
+  "anchor": {
+    "kind": "none"
+  },
+  "intent": {
+    "summary": "Add a favorite star to each recipe card so you can mark the ones you love.",
+    "detail": "Add a favorite star to each recipe card so you can mark the ones you love.",
+    "parent_intent": null
+  },
+  "declared_impacts": {
+    "writes_paths": [
+      "app.js"
+    ],
+    "reads_paths": [],
+    "network": [],
+    "touches_zones": [],
+    "installs_packages": [],
+    "mutates_secrets": [],
+    "deploys": []
+  },
+  "actual_impacts": {
+    "writes_paths": [
+      "app.js",
+      "recipes.js"
+    ],
+    "reads_paths": [],
+    "network": [],
+    "touches_zones": [],
+    "installs_packages": [],
+    "mutates_secrets": [],
+    "deploys": []
+  },
+  "payload": {
+    "type": "sentinel",
+    "event_type": "intent",
+    "body": {
+      "agent_id": "claude",
+      "intent": "Add a favorite star to each recipe card so you can mark the ones you love.",
+      "ts_unix": 1784982776
+    }
+  },
+  "state": "completed",
+  "policy": null,
+  "provenance": {
+    "actor": "did:aura:agent/claude",
+    "on_behalf_of": null,
+    "origin_host": "unknown",
+    "signature": {
+      "algo": "ed25519",
+      "key_id": "did:aura:key/MByIG90LiBg",
+      "sig_b64": "rqZmmUf6xL4eQovetc0rGq87rEibuBnakP9+8tKvEiU6wS5Q1uZ8eLZYipALAtzkOyaHGs1LQLEkJfxxz/33AA"
+    }
+  },
+  "attestations": {
+    "items": []
+  },
+  "created_at": [
+    2026,
+    206,
+    12,
+    32,
+    56,
+    858310000,
+    0,
+    0,
+    0
+  ],
+  "updated_at": [
+    2026,
+    206,
+    12,
+    32,
+    57,
+    117962000,
+    0,
+    0,
+    0
+  ]
+}

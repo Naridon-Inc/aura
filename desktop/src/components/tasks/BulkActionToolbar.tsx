@@ -123,7 +123,7 @@ export function BulkActionToolbar({
                 >
                   <span
                     className="w-2 h-2 rounded-full"
-                    style={{ backgroundColor: s.color || "#64748b" }}
+                    style={{ backgroundColor: s.color || "var(--color-text-4)" }}
                   />
                   {s.name}
                 </button>
@@ -231,7 +231,7 @@ export function BulkActionToolbar({
                 >
                   <span
                     className="w-2 h-2 rounded-full"
-                    style={{ backgroundColor: l.color || "#64748b" }}
+                    style={{ backgroundColor: l.color || "var(--color-text-4)" }}
                   />
                   {l.name}
                 </button>
@@ -261,7 +261,7 @@ export function BulkActionToolbar({
         type="button"
         onClick={() => setConfirmingDelete(true)}
         disabled={busy != null}
-        className="text-[11.5px] px-2 py-1 rounded bg-rose-500/15 hover:bg-rose-500/25 text-rose-300 hover:text-rose-200 disabled:opacity-40"
+        className="text-[11.5px] px-2 py-1 rounded bg-red/15 hover:bg-red/25 text-red hover:text-red disabled:opacity-40"
       >
         Delete
       </button>
@@ -281,18 +281,18 @@ export function BulkActionToolbar({
       {result && (
         <div className="ml-2 text-[10.5px] leading-snug">
           {result.errors.length === 0 ? (
-            <span className="text-emerald-400">
+            <span className="text-text-2">
               {result.affected.length} updated
             </span>
           ) : (
-            <span className="text-amber-400">
+            <span className="text-red">
               {result.affected.length} ok · {result.errors.length} failed
             </span>
           )}
         </div>
       )}
       {error && (
-        <div className="ml-2 text-[10.5px] text-rose-400 leading-snug">
+        <div className="ml-2 text-[10.5px] text-red leading-snug">
           {error}
         </div>
       )}
@@ -324,7 +324,7 @@ export function BulkActionToolbar({
                   api.tasksBulkDelete(repoRoot, selectedIds),
                 );
               }}
-              className="bg-rose-500/20 hover:bg-rose-500/30 text-rose-300 hover:text-rose-200 px-2 py-1 rounded"
+              className="bg-red/20 hover:bg-red/30 text-red hover:text-red px-2 py-1 rounded"
             >
               Delete
             </button>

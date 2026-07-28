@@ -11,6 +11,8 @@
 
 import { useEffect, useRef, useState } from "react";
 import { api } from "../lib/api";
+import { AsciiSpinner } from "./ui/ascii-spinner";
+import { ToastActionButton, ToastCard, ToastStack, type ToastTone } from "./ui/toast";
 
 /** What the version check / install returns. Mirrors the Rust struct. */
 type CliCheck = {
@@ -283,149 +285,56 @@ export function CliUpdateToast({
 
   if (!phase) return null;
 
-  const tone =
+  const tone: ToastTone =
     phase.kind === "done"
-      ? "var(--color-accent-green)"
+      ? "success"
       : phase.kind === "failed" || phase.kind === "needs-auth"
-        ? "var(--color-amber)"
-        : "var(--color-accent)";
+        ? "warning"
+        : "info";
 
   return (
-    <div
-      style={{
-        position: "fixed",
-        bottom: 16,
-        right: 16,
-        zIndex: 9998,
-        maxWidth: 360,
-        background: "var(--color-bg-2)",
-        border: "1px solid var(--color-line)",
-        borderLeft: `2px solid ${tone}`,
-        borderRadius: "var(--radius-md)",
-        boxShadow: "0 8px 24px rgba(0,0,0,0.35)",
-        color: "var(--color-text-2)",
-        fontSize: 12.5,
-        padding: "11px 13px",
-        display: "flex",
-        alignItems: "flex-start",
-        gap: 10,
-      }}
-    >
-      <span
-        aria-hidden
-        style={{
-          marginTop: 3,
-          width: 7,
-          height: 7,
-          borderRadius: "50%",
-          flex: "0 0 auto",
-          background: tone,
-          ...(phase.kind === "updating"
-            ? { animation: "aura-cli-pulse 1.1s ease-in-out infinite" }
-            : {}),
-        }}
-      />
-      <div style={{ minWidth: 0 }}>
-        {phase.kind === "updating" && (
-          <div
-            style={{
-              display: "flex",
-              alignItems: "center",
-              gap: 8,
-              color: "var(--color-text-1)",
-            }}
-          >
-            <span>Updating Aura CLI to {phase.to}…</span>
-            <button
-              type="button"
-              onClick={dismiss}
-              aria-label="Dismiss"
-              title="Dismiss — the update keeps running in the background"
-              style={{
-                marginLeft: "auto",
-                background: "transparent",
-                color: "var(--color-text-4)",
-                border: "none",
-                borderRadius: "var(--radius-sm)",
-                padding: "0 2px",
-                cursor: "pointer",
-                fontSize: 13,
-                lineHeight: 1,
-              }}
-            >
-              ✕
-            </button>
-          </div>
-        )}
-        {phase.kind === "done" && (
-          <span style={{ color: "var(--color-text-1)" }}>
-            Aura CLI updated to {phase.version}
-          </span>
-        )}
-        {phase.kind === "needs-auth" && (
-          <div>
-            <div style={{ color: "var(--color-text-1)", marginBottom: 6 }}>
-              Aura CLI {phase.to} is ready, but the install location needs an
-              administrator password to update.
-            </div>
-            <div style={{ display: "flex", gap: 6 }}>
-              <button
-                type="button"
-                onClick={authorize}
-                style={{
-                  background: "var(--color-accent)",
-                  color: "var(--color-bg-0)",
-                  border: "1px solid transparent",
-                  borderRadius: "var(--radius-sm)",
-                  padding: "3px 9px",
-                  cursor: "pointer",
-                  fontSize: 11.5,
-                }}
-              >
-                Authorize update…
-              </button>
-              <button
-                type="button"
-                onClick={dismiss}
-                style={{
-                  background: "transparent",
-                  color: "var(--color-text-3)",
-                  border: "1px solid var(--color-line)",
-                  borderRadius: "var(--radius-sm)",
-                  padding: "3px 9px",
-                  cursor: "pointer",
-                  fontSize: 11.5,
-                }}
-              >
-                Later
-              </button>
-            </div>
-          </div>
-        )}
-        {phase.kind === "failed" && (
-          <div>
-            <div style={{ color: "var(--color-text-1)", marginBottom: 6 }}>
-              {phase.message}
-            </div>
-            <button
-              type="button"
-              onClick={dismiss}
-              style={{
-                background: "transparent",
-                color: "var(--color-text-3)",
-                border: "1px solid var(--color-line)",
-                borderRadius: "var(--radius-sm)",
-                padding: "3px 9px",
-                cursor: "pointer",
-                fontSize: 11.5,
-              }}
-            >
-              Dismiss
-            </button>
-          </div>
-        )}
-      </div>
-      <style>{`@keyframes aura-cli-pulse { 0%,100% { opacity: 1 } 50% { opacity: 0.35 } }`}</style>
-    </div>
+    <ToastStack zIndex={9998}>
+      {phase.kind === "updating" && (
+        <ToastCard
+          tone={tone}
+          icon={<AsciiSpinner className="mt-px shrink-0 text-[12px] leading-none" />}
+          title={`Updating the Aura command line tool to ${phase.to}…`}
+          onDismiss={dismiss}
+          dismissTitle="Dismiss — the update keeps running in the background"
+        />
+      )}
+      {phase.kind === "done" && (
+        <ToastCard
+          tone={tone}
+          title={`Aura command line tool updated to ${phase.version}`}
+          onDismiss={dismiss}
+        />
+      )}
+      {phase.kind === "needs-auth" && (
+        <ToastCard
+          tone={tone}
+          title="One more step to finish the update"
+          message={`Aura command line tool ${phase.to} is ready, but the folder it installs into needs your administrator password.`}
+          onDismiss={dismiss}
+          actions={
+            <>
+              <ToastActionButton onClick={dismiss}>Later</ToastActionButton>
+              <ToastActionButton variant="primary" onClick={() => void authorize()}>
+                Enter password
+              </ToastActionButton>
+            </>
+          }
+        />
+      )}
+      {phase.kind === "failed" && (
+        <ToastCard
+          tone={tone}
+          role="alert"
+          title="The Aura command line tool didn't update"
+          message={phase.message}
+          onDismiss={dismiss}
+        />
+      )}
+    </ToastStack>
   );
 }

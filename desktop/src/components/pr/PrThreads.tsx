@@ -111,7 +111,7 @@ export function PrThreads({
         </span>
         {unreadCount > 0 && (
           <span
-            className="w-1.5 h-1.5 rounded-full bg-accent-violet"
+            className="w-1.5 h-1.5 rounded-full bg-accent"
             title={`${unreadCount} unread`}
           />
         )}
@@ -324,7 +324,7 @@ function ThreadCard({
           type="checkbox"
           checked={selected}
           onChange={onToggleSelect}
-          className="w-3 h-3 accent-accent-violet"
+          className="w-3 h-3" style={{ accentColor: "var(--color-accent)" }}
           title="Select to convert into a Manager plan"
         />
         {thread.root.path && (
@@ -354,7 +354,7 @@ function ThreadCard({
           variant="ghost"
           size="xs"
           onClick={onConvert}
-          className="h-5 px-1.5 text-[10.5px] text-accent-violet hover:text-text-1"
+          className="h-5 px-1.5 text-[10.5px] text-accent hover:text-text-1"
           title="Convert this thread into a Manager plan"
         >
           → Plan
@@ -438,10 +438,10 @@ function CommentBody({
             type="checkbox"
             checked={!!selected}
             onChange={onToggleSelect}
-            className="w-3 h-3 accent-accent-violet"
+            className="w-3 h-3" style={{ accentColor: "var(--color-accent)" }}
           />
         )}
-        {unread && <span className="w-1.5 h-1.5 rounded-full bg-accent-violet" />}
+        {unread && <span className="w-1.5 h-1.5 rounded-full bg-accent" />}
         <span className="text-[11px] text-text-2 font-medium">{c.author}</span>
         <span className="text-[10.5px] text-text-4 tabular-nums">
           {formatAge(c.created_at)}
@@ -451,7 +451,7 @@ function CommentBody({
             variant="ghost"
             size="xs"
             onClick={onConvert}
-            className="ml-auto h-5 px-1.5 text-[10.5px] text-accent-violet hover:text-text-1"
+            className="ml-auto h-5 px-1.5 text-[10.5px] text-accent hover:text-text-1"
           >
             → Plan
           </Button>

@@ -19,6 +19,7 @@ import type { PrLineRelayPayload } from "../../lib/auraRelay";
 import { repoSlugFor } from "../../lib/repoSlug";
 import { AuraRelayMenu } from "../auraRelayMenu";
 import { PR_DIFF_EAGER_MOUNT_LIMIT, PrDiffBody, groupThreads } from "./PrDiffBody";
+import { PrDiffMeaning } from "./PrDiffMeaning";
 import { usePrThreadActive, usePrThreadRegister } from "./PrThreadColumn";
 import { StatusChip } from "../ui/statusChip";
 import { Button } from "../ui/button";
@@ -409,6 +410,11 @@ function PrFileDiffCard({
       {expanded && (
         chunk ? (
           <>
+            <PrDiffMeaning
+              repoRoot={repoRoot}
+              filePath={file.path}
+              diff={chunk}
+            />
             <PrDiffBody
               repoRoot={repoRoot}
               prNumber={prNumber}

@@ -10,20 +10,28 @@
 // on a cold `gh pr list`. Row styling mirrors BranchSwitcherModal.
 
 import { useEffect, useMemo, useRef, useState } from "react";
-import { Check, GitBranch, GitPullRequest, Search } from "lucide-react";
+import { Check, CircleDot, GitBranch, GitPullRequest, Search } from "lucide-react";
 
-import { api, type GitBranchRich, type PrSummary } from "../../lib/api";
+import {
+  api,
+  type GitBranchRich,
+  type GithubIssue,
+  type PrSummary,
+} from "../../lib/api";
 import { fetchPrList, getPrListCached } from "../../lib/prsCache";
 
 /** What the picker resolves to — the worktree's start point plus a
  *  human label for the chip and the kind so the chip can show the right
  *  glyph. `ref` is the git start point (branch name or PR head_ref). */
 export type CreateFromSelection = {
-  kind: "branch" | "pr";
+  kind: "branch" | "pr" | "issue";
   /** Git start point for the new worktree — branch name or PR head_ref. */
   ref: string;
   /** Chip label, e.g. "main" or "#36 feat: …". */
   label: string;
+  /** Issue selections seed the composer with this complete mission. */
+  prompt?: string;
+  issueNumber?: number;
 };
 
 type Props = {
@@ -49,7 +57,9 @@ function isDefaultBranch(b: GitBranchRich, branches: GitBranchRich[]): boolean {
 export function CreateFromPicker({ repoRoot, value, onPick, onClose }: Props) {
   const [branches, setBranches] = useState<GitBranchRich[]>([]);
   const [prs, setPrs] = useState<PrSummary[]>(() => getPrListCached(repoRoot) ?? []);
+  const [issues, setIssues] = useState<GithubIssue[]>([]);
   const [loadingBranches, setLoadingBranches] = useState(true);
+  const [loadingIssues, setLoadingIssues] = useState(true);
   const [query, setQuery] = useState("");
   const rootRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
@@ -91,6 +101,27 @@ export function CreateFromPicker({ repoRoot, value, onPick, onClose }: Props) {
     };
   }, [repoRoot]);
 
+  // Issues are workspace missions rather than git start points. A selection
+  // starts from HEAD and seeds the complete issue body into the composer.
+  useEffect(() => {
+    let alive = true;
+    setLoadingIssues(true);
+    api
+      .githubIssueList(repoRoot)
+      .then((rows) => {
+        if (alive) setIssues(rows);
+      })
+      .catch(() => {
+        if (alive) setIssues([]);
+      })
+      .finally(() => {
+        if (alive) setLoadingIssues(false);
+      });
+    return () => {
+      alive = false;
+    };
+  }, [repoRoot]);
+
   // Focus the filter the moment the popover mounts.
   useEffect(() => {
     const id = requestAnimationFrame(() => inputRef.current?.focus());
@@ -122,6 +153,17 @@ export function CreateFromPicker({ repoRoot, value, onPick, onClose }: Props) {
     );
   }, [prs, q]);
 
+  const filteredIssues = useMemo(() => {
+    if (!q) return issues;
+    return issues.filter(
+      (issue) =>
+        String(issue.number).includes(q) ||
+        issue.title.toLowerCase().includes(q) ||
+        issue.body.toLowerCase().includes(q) ||
+        issue.labels.some((label) => label.toLowerCase().includes(q)),
+    );
+  }, [issues, q]);
+
   // Local branches only for "start new work from" — current first, then the
   // backend's committerdate order (already sorted).
   const filteredBranches = useMemo(() => {
@@ -138,13 +180,39 @@ export function CreateFromPicker({ repoRoot, value, onPick, onClose }: Props) {
     onClose();
   }
 
+  function pickIssue(issue: GithubIssue) {
+    const prompt = [
+      `Work on GitHub issue #${issue.number}: ${issue.title}`,
+      issue.body.trim(),
+      `Issue: ${issue.url}`,
+      "Implement the issue completely, verify the behavior, and report any decisions or remaining risks.",
+    ]
+      .filter(Boolean)
+      .join("\n\n");
+    onPick({
+      kind: "issue",
+      ref: "HEAD",
+      label: `#${issue.number} ${issue.title}`,
+      prompt,
+      issueNumber: issue.number,
+    });
+    onClose();
+  }
+
   function pickBranch(b: GitBranchRich) {
     onPick({ kind: "branch", ref: b.name, label: b.name });
     onClose();
   }
 
-  const isSelected = (kind: "branch" | "pr", ref: string) =>
-    value != null && value.kind === kind && value.ref === ref;
+  const isSelected = (
+    kind: "branch" | "pr" | "issue",
+    ref: string,
+    issueNumber?: number,
+  ) =>
+    value != null &&
+    value.kind === kind &&
+    value.ref === ref &&
+    (kind !== "issue" || value.issueNumber === issueNumber);
 
   return (
     <div
@@ -160,7 +228,7 @@ export function CreateFromPicker({ repoRoot, value, onPick, onClose }: Props) {
           ref={inputRef}
           value={query}
           onChange={(e) => setQuery(e.target.value)}
-          placeholder="Search branches and pull requests…"
+          placeholder="Search branches, pull requests, and issues…"
           className="flex-1 bg-transparent text-[12.5px] text-text-1 placeholder:text-text-4 focus:outline-none"
         />
       </div>
@@ -202,6 +270,50 @@ export function CreateFromPicker({ repoRoot, value, onPick, onClose }: Props) {
                 )}
               </button>
             ))}
+          </>
+        )}
+
+        {/* Start from a GitHub issue */}
+        {(loadingIssues || filteredIssues.length > 0) && (
+          <>
+            <SectionLabel>Work on a GitHub issue</SectionLabel>
+            {loadingIssues && filteredIssues.length === 0 ? (
+              <div className="px-3 py-2 text-[11.5px] text-text-4">
+                Loading issues…
+              </div>
+            ) : (
+              filteredIssues.map((issue) => (
+                <button
+                  key={`issue-${issue.number}`}
+                  type="button"
+                  onMouseDown={(e) => {
+                    e.preventDefault();
+                    pickIssue(issue);
+                  }}
+                  className="flex w-full items-start gap-2.5 px-3 py-1.5 text-left transition-colors hover:bg-bg-2"
+                >
+                  <CircleDot size={13} className="mt-0.5 shrink-0 text-text-4" />
+                  <span className="flex min-w-0 flex-1 flex-col gap-0.5">
+                    <span className="flex items-center gap-1.5">
+                      <span className="shrink-0 font-mono text-[11px] text-text-3 tabular-nums">
+                        #{issue.number}
+                      </span>
+                      <span className="truncate text-[12.5px] text-text-1">
+                        {issue.title}
+                      </span>
+                    </span>
+                    {issue.labels.length > 0 && (
+                      <span className="truncate text-[10px] text-text-4">
+                        {issue.labels.join(" · ")}
+                      </span>
+                    )}
+                  </span>
+                  {isSelected("issue", "HEAD", issue.number) && (
+                    <Check size={13} className="mt-0.5 shrink-0 text-accent" />
+                  )}
+                </button>
+              ))
+            )}
           </>
         )}
 

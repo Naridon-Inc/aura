@@ -6,9 +6,10 @@
 // manager rather than half-doing it here.
 
 import { useState } from "react";
-import { Loader2, Plug, Settings2 } from "lucide-react";
+import { Plug, Settings2 } from "lucide-react";
 
 import { api, type McpServerEntry } from "../../../lib/api";
+import { AsciiSpinner } from "../../ui/ascii-spinner";
 import { Button } from "../../ui/button";
 import { Switch } from "../../ui/switch";
 import {
@@ -96,7 +97,7 @@ export function McpServersPane({
                 </div>
               </div>
               {busy === row.name ? (
-                <Loader2 size={15} className="shrink-0 animate-spin text-text-4" />
+                <AsciiSpinner className="shrink-0 text-[14px]" />
               ) : (
                 <Switch
                   checked={row.enabled}

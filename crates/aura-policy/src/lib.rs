@@ -27,5 +27,5 @@ pub mod cedar;
 
 pub use advisor::{AdvisorSuggestion, FrequencyAdvisor, PolicyAdvisor, SuggestionKind};
 pub use context::{EvalContext, RateState, WindowKey};
-pub use evaluator::evaluate;
+pub use evaluator::{evaluate, undeclared_writes};
 pub use schema::{load_from_path, load_from_str, CompiledPolicy, PolicyError};

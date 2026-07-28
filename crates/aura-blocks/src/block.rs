@@ -82,7 +82,7 @@ impl Default for BlockId {
 /// Stable identity for anything that can *produce* a block.
 /// Decentralized-ID shape: `did:<method>:<identifier>` so humans, agents,
 /// teams, and external orgs all fit one type. Examples:
-///   did:aura:user/you
+///   did:aura:user/muhammed
 ///   did:aura:agent/claude-code/session-01JC...
 ///   did:aura:team/naridon
 ///   did:ext:github/app/renovate-bot
@@ -299,7 +299,7 @@ pub struct PolicyDecision {
 pub struct Provenance {
     /// Who produced this block (human, agent, external system).
     pub actor: AgentRef,
-    /// On whose behalf (e.g., Claude Code acting for did:aura:user/you).
+    /// On whose behalf (e.g., Claude Code acting for did:aura:user/muhammed).
     pub on_behalf_of: Option<AgentRef>,
     /// Machine the block was created on. Resume across machines is a later
     /// block with supersedes_id → this block; the origin stays pinned here.
@@ -503,12 +503,12 @@ mod tests {
             payload: BlockPayload::Command {
                 command: "ls -la".into(),
                 shell: Some("zsh".into()),
-                cwd: "/home/you/naridon".into(),
+                cwd: "/home/muhammed/naridon".into(),
             },
             state: BlockState::Proposed,
             policy: None,
             provenance: Provenance {
-                actor: AgentRef("did:aura:user/you".into()),
+                actor: AgentRef("did:aura:user/muhammed".into()),
                 on_behalf_of: None,
                 origin_host: "wayanad-laptop".into(),
                 signature: None,

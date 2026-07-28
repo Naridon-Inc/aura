@@ -27,7 +27,8 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
-import { Loader2, RadioTower, X } from "lucide-react";
+import { RadioTower, X } from "lucide-react";
+import { AsciiSpinner } from "../../ui/ascii-spinner";
 
 import { api, type LaneOutcome, type LaneStatus, type WaveOutcome } from "../../../lib/api";
 
@@ -198,7 +199,7 @@ export function CrewLiveTranscript({
             {lane ? (
               <div className="mt-0.5 flex items-center gap-1.5 text-[11px] text-text-4">
                 {live ? (
-                  <Loader2 size={11} className="animate-spin text-accent" />
+                  <AsciiSpinner className="text-[11px]" />
                 ) : null}
                 <span>{STATUS_WORD[lane.status]}</span>
                 {lane.provider_id ? (
@@ -297,7 +298,7 @@ function StopLaneButton({ laneId }: { laneId: string }) {
       className="inline-flex items-center gap-1 rounded-full border border-line-soft px-2.5 py-1 text-[10.5px] font-medium text-text-3 hover:border-text-3 hover:text-text-1 disabled:opacity-60"
       title="Stop this agent — ends its session and frees the files it was editing"
     >
-      {stopping ? <Loader2 size={11} className="animate-spin" /> : null}
+      {stopping ? <AsciiSpinner className="text-[11px]" /> : null}
       {stopping ? "Stopping…" : "Stop this agent"}
     </button>
   );
@@ -315,7 +316,7 @@ function CenteredNote({
   return (
     <div className="flex h-full flex-col items-center justify-center gap-2 px-8 text-center">
       {loading ? (
-        <Loader2 size={18} className="animate-spin text-text-4" />
+        <AsciiSpinner className="text-base" />
       ) : null}
       <div className="text-[12.5px] font-medium text-text-2">{title}</div>
       <div className="max-w-[280px] text-[11.5px] leading-snug text-text-4">

@@ -67,7 +67,7 @@ export function TerminalOverflowMenu({
         <DropdownMenuSeparator />
         <DropdownMenuItem onSelect={onKill} variant="destructive">
           <Trash2 />
-          Kill Terminal
+          Close Terminal
         </DropdownMenuItem>
       </DropdownMenuContent>
     </DropdownMenu>

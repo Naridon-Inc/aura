@@ -28,6 +28,7 @@
 
 import { useEffect, useRef, useState } from "react";
 import {
+  AlignLeft,
   Download,
   ExternalLink,
   File as FileIcon,
@@ -37,10 +38,13 @@ import {
   FileSpreadsheet,
   FileText,
   FileVideo,
-  Loader2,
+  MoreVertical,
+  Pause,
+  Play,
   X,
 } from "lucide-react";
 import { languageSlugForPath } from "../../lib/monacoLanguage";
+import { AsciiSpinner } from "../ui/ascii-spinner";
 
 // ───────────────────────────────────────────────────────────────────────
 // Types + wire format
@@ -53,6 +57,11 @@ export type ChatAttachment = {
   size: number;
   /** Optional — present on uploads returned by the cloud upload endpoint. */
   sha256?: string;
+  /** Rich metadata added by the in-composer recorder. Older audio uploads
+   *  omit it and still receive the same custom player. */
+  kind?: "voice-note";
+  duration?: number;
+  transcript?: string;
 };
 
 const SENTINEL_OPEN = "<aura:attachments>";
@@ -97,6 +106,9 @@ export function parseAttachments(body: string): {
               : "application/octet-stream",
           size: typeof a.size === "number" && a.size >= 0 ? a.size : 0,
           sha256: typeof a.sha256 === "string" ? a.sha256 : undefined,
+          kind: a.kind === "voice-note" ? "voice-note" : undefined,
+          duration: typeof a.duration === "number" ? a.duration : undefined,
+          transcript: typeof a.transcript === "string" ? a.transcript : undefined,
         }));
     }
   } catch {
@@ -120,6 +132,9 @@ export function encodeAttachments(
     mime: a.mime,
     size: a.size,
     ...(a.sha256 ? { sha256: a.sha256 } : {}),
+    ...(a.kind ? { kind: a.kind } : {}),
+    ...(typeof a.duration === "number" ? { duration: a.duration } : {}),
+    ...(a.transcript ? { transcript: a.transcript } : {}),
   }));
   const sentinel = `${SENTINEL_OPEN}${JSON.stringify(payload)}${SENTINEL_CLOSE}`;
   return trimmed ? `${trimmed}\n${sentinel}` : sentinel;
@@ -164,6 +179,12 @@ function isImage(mime: string): boolean {
   return IMAGE_MIMES.has(mime.toLowerCase());
 }
 
+function isAudio(mime: string, filename: string): boolean {
+  const ext = extOf(filename);
+  return mime.toLowerCase().startsWith("audio/") ||
+    ["mp3", "wav", "ogg", "m4a", "aac", "flac"].includes(ext);
+}
+
 function isPreviewable(mime: string, filename: string): boolean {
   if (mime.startsWith("text/")) return true;
   if (mime === "application/json") return true;
@@ -178,12 +199,11 @@ function formatBytes(n: number): string {
   return `${(n / (1024 * 1024)).toFixed(1)} MB`;
 }
 
-// File-type → icon + accent. Drives the colored icon badge on the file
-// card so a PDF reads red, an archive amber, a sheet green, etc. The
-// colors are theme-token-ish literals chosen to read on both bubbles.
+// File-type → icon + label. Drives the icon badge on the file card. The
+// icon shape and the extension label carry the type; the badge itself stays
+// neutral so a list of attachments doesn't read as a pile of status colours.
 type FileKind = {
   Icon: typeof FileIcon;
-  color: string;
   label: string;
 };
 
@@ -193,24 +213,23 @@ function fileKind(mime: string, filename: string): FileKind {
   const has = (...xs: string[]) => xs.includes(ext);
 
   if (m === "application/pdf" || ext === "pdf")
-    return { Icon: FileText, color: "#d05a76", label: "PDF" };
+    return { Icon: FileText, label: "PDF" };
   if (has("zip", "tar", "gz", "tgz", "rar", "7z", "bz2", "xz"))
-    return { Icon: FileArchive, color: "#d59f4f", label: ext.toUpperCase() };
+    return { Icon: FileArchive, label: ext.toUpperCase() };
   if (has("xls", "xlsx", "csv", "ods", "tsv"))
-    return { Icon: FileSpreadsheet, color: "#4dc1a4", label: ext.toUpperCase() };
+    return { Icon: FileSpreadsheet, label: ext.toUpperCase() };
   if (has("doc", "docx", "rtf", "odt", "pages"))
-    return { Icon: FileText, color: "#78a6df", label: ext.toUpperCase() };
+    return { Icon: FileText, label: ext.toUpperCase() };
   if (has("ppt", "pptx", "key", "odp"))
-    return { Icon: FileText, color: "#d59f4f", label: ext.toUpperCase() };
+    return { Icon: FileText, label: ext.toUpperCase() };
   if (m.startsWith("audio/") || has("mp3", "wav", "ogg", "m4a", "flac", "aac"))
-    return { Icon: FileAudio, color: "#78a6df", label: ext.toUpperCase() || "Audio" };
+    return { Icon: FileAudio, label: ext.toUpperCase() || "Audio" };
   if (m.startsWith("video/") || has("mp4", "mov", "webm", "mkv", "avi"))
-    return { Icon: FileVideo, color: "#a78bfa", label: ext.toUpperCase() || "Video" };
+    return { Icon: FileVideo, label: ext.toUpperCase() || "Video" };
   if (isPreviewable(mime, filename) || has("xml", "lock", "env", "ini", "conf"))
-    return { Icon: FileCode, color: "#a78bfa", label: ext.toUpperCase() || "Code" };
+    return { Icon: FileCode, label: ext.toUpperCase() || "Code" };
   return {
     Icon: FileIcon,
-    color: "#9a9aa0",
     label: ext ? ext.toUpperCase() : "File",
   };
 }
@@ -273,10 +292,113 @@ export function FileAttachment({ attachment }: FileAttachmentProps) {
   if (isImage(attachment.mime)) {
     return <ImageAttachment attachment={attachment} variant="single" />;
   }
+  if (attachment.kind === "voice-note" || isAudio(attachment.mime, attachment.filename)) {
+    return <VoiceNoteAttachment attachment={attachment} />;
+  }
   if (isPreviewable(attachment.mime, attachment.filename)) {
     return <CodePreviewAttachment attachment={attachment} />;
   }
   return <FileCard attachment={attachment} />;
+}
+
+function VoiceNoteAttachment({ attachment }: { attachment: ChatAttachment }) {
+  const audioRef = useRef<HTMLAudioElement | null>(null);
+  const [playing, setPlaying] = useState(false);
+  const [current, setCurrent] = useState(0);
+  const [duration, setDuration] = useState(attachment.duration ?? 0);
+  const [speed, setSpeed] = useState(1);
+  const [showTranscript, setShowTranscript] = useState(false);
+  const total = duration || attachment.duration || 0;
+  const progress = total > 0 ? Math.min(1, current / total) : 0;
+  const bars = waveformFor(attachment.sha256 || attachment.filename, 48);
+
+  const toggle = async () => {
+    const audio = audioRef.current;
+    if (!audio) return;
+    if (audio.paused) {
+      await audio.play();
+    } else {
+      audio.pause();
+    }
+  };
+
+  const cycleSpeed = () => {
+    const next = speed === 1 ? 1.5 : speed === 1.5 ? 2 : 1;
+    setSpeed(next);
+    if (audioRef.current) audioRef.current.playbackRate = next;
+  };
+
+  return (
+    <div className="slack-voice-note">
+      <audio
+        ref={audioRef}
+        src={attachment.url}
+        preload="metadata"
+        onLoadedMetadata={(event) => setDuration(event.currentTarget.duration || attachment.duration || 0)}
+        onTimeUpdate={(event) => setCurrent(event.currentTarget.currentTime)}
+        onPlay={() => setPlaying(true)}
+        onPause={() => setPlaying(false)}
+        onEnded={() => {
+          setPlaying(false);
+          setCurrent(0);
+        }}
+      />
+      <div className="slack-voice-player">
+        <button type="button" className="slack-voice-play" onClick={() => void toggle()} aria-label={playing ? "Pause voice note" : "Play voice note"}>
+          {playing ? <Pause size={17} fill="currentColor" /> : <Play size={17} fill="currentColor" />}
+        </button>
+        <button
+          type="button"
+          className="slack-voice-wave"
+          onClick={(event) => {
+            const audio = audioRef.current;
+            if (!audio || total <= 0) return;
+            const rect = event.currentTarget.getBoundingClientRect();
+            audio.currentTime = Math.max(0, Math.min(total, ((event.clientX - rect.left) / rect.width) * total));
+          }}
+          aria-label="Seek voice note"
+        >
+          {bars.map((height, index) => (
+            <i key={index} className={index / bars.length <= progress ? "is-played" : ""} style={{ height }} />
+          ))}
+        </button>
+        <span className="slack-voice-time">{formatDuration(total > 0 ? total - current : attachment.duration ?? 0)}</span>
+        <button type="button" className="slack-voice-mini" aria-label="Show transcript" onClick={() => setShowTranscript((value) => !value)}>
+          <AlignLeft size={15} />
+        </button>
+        <button type="button" className="slack-voice-speed" onClick={cycleSpeed}>{speed}×</button>
+        <button type="button" className="slack-voice-mini" aria-label="More voice-note actions">
+          <MoreVertical size={15} />
+        </button>
+      </div>
+      {showTranscript && (
+        <div className="slack-voice-transcript">
+          {attachment.transcript?.trim() || "A transcript is not available for this voice note."}
+        </div>
+      )}
+      <button type="button" className="slack-view-transcript" onClick={() => setShowTranscript((value) => !value)}>
+        {showTranscript ? "Hide transcript" : "View transcript"}
+      </button>
+    </div>
+  );
+}
+
+function waveformFor(seed: string, count: number): number[] {
+  let hash = 2166136261;
+  for (let i = 0; i < seed.length; i += 1) {
+    hash ^= seed.charCodeAt(i);
+    hash = Math.imul(hash, 16777619);
+  }
+  return Array.from({ length: count }, (_, index) => {
+    hash = Math.imul(hash ^ index, 2246822519);
+    return 6 + (Math.abs(hash) % 24);
+  });
+}
+
+function formatDuration(seconds: number): string {
+  if (!Number.isFinite(seconds) || seconds <= 0) return "0:00";
+  const rounded = Math.max(0, Math.round(seconds));
+  return `${Math.floor(rounded / 60)}:${String(rounded % 60).padStart(2, "0")}`;
 }
 
 // ── Image + lightbox ─────────────────────────────────────────────────
@@ -295,7 +417,7 @@ function ImageAttachment({
   if (errored) return <FileCard attachment={attachment} />;
 
   const ring = fromMe
-    ? "1px solid rgba(0,0,0,0.18)"
+    ? "1px solid var(--color-line)"
     : "1px solid var(--color-line-soft)";
 
   return (
@@ -425,7 +547,7 @@ function Lightbox({
 // ── File card (non-image, non-preview) ───────────────────────────────
 
 function FileCard({ attachment }: { attachment: ChatAttachment }) {
-  const { Icon, color, label } = fileKind(attachment.mime, attachment.filename);
+  const { Icon, label } = fileKind(attachment.mime, attachment.filename);
   return (
     <div
       className="flex w-[300px] max-w-full items-center gap-2.5 rounded-lg border px-2.5 py-2"
@@ -437,8 +559,8 @@ function FileCard({ attachment }: { attachment: ChatAttachment }) {
       <span
         className="flex h-9 w-9 shrink-0 items-center justify-center rounded-md"
         style={{
-          background: `color-mix(in srgb, ${color} 18%, transparent)`,
-          color,
+          background: "var(--color-bg-2)",
+          color: "var(--color-text-3)",
         }}
         aria-hidden
       >
@@ -514,7 +636,7 @@ function CodePreviewAttachment({ attachment }: { attachment: ChatAttachment }) {
   }, [attachment.url]);
 
   const lang = languageSlugForPath(attachment.filename);
-  const { Icon, color } = fileKind(attachment.mime, attachment.filename);
+  const { Icon } = fileKind(attachment.mime, attachment.filename);
 
   return (
     <div
@@ -529,8 +651,8 @@ function CodePreviewAttachment({ attachment }: { attachment: ChatAttachment }) {
         <span
           className="flex h-7 w-7 shrink-0 items-center justify-center rounded-md"
           style={{
-            background: `color-mix(in srgb, ${color} 18%, transparent)`,
-            color,
+            background: "var(--color-bg-2)",
+            color: "var(--color-text-3)",
           }}
           aria-hidden
         >
@@ -564,7 +686,7 @@ function CodePreviewAttachment({ attachment }: { attachment: ChatAttachment }) {
       >
         {loading ? (
           <div className="flex items-center gap-1.5 text-[11px] text-text-3">
-            <Loader2 size={11} className="animate-spin" />
+            <AsciiSpinner />
             <span>Loading preview…</span>
           </div>
         ) : error ? (

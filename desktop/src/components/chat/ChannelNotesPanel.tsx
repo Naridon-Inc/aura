@@ -17,8 +17,9 @@
 
 import { forwardRef, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { MonacoEditor } from "../MonacoEditor";
-import { ChannelCanvasView } from "./ChannelCanvasView";
+import { TiptapEditor } from "../notes/TiptapEditor";
 import { api, type NoteDoc, type NoteEntry, type TeamIdentity, type TeamMember } from "../../lib/api";
+import { AsciiSpinner } from "../ui/ascii-spinner";
 
 type Mode = "feed" | "canvas";
 type CanvasView = "rendered" | "source";
@@ -507,35 +508,48 @@ export function ChannelNotesPanel({ repoRoot }: Props) {
             <div className="flex items-center gap-2 text-[11px] text-text-4">
               {mode === "canvas" ? (
                 <>
-                  <span>
-                    {canvasLoading ? "Loading…" : `Last edited: ${relativeTime(updatedAt)}`}
-                  </span>
+                  {canvasLoading ? (
+                    <span className="flex items-center gap-1.5">
+                      <AsciiSpinner />
+                      Loading…
+                    </span>
+                  ) : (
+                    <span>Last edited: {relativeTime(updatedAt)}</span>
+                  )}
                   {saving && (
                     <span
-                      className="inline-block h-2 w-2 animate-pulse rounded-full bg-text-4"
+                      className="flex items-center gap-1.5"
                       aria-label="Saving"
-                    />
+                    >
+                      <AsciiSpinner />
+                      Saving…
+                    </span>
                   )}
                   {canvasError && (
-                    <span className="truncate text-red-400" title={canvasError}>
+                    <span className="truncate text-red" title={canvasError}>
                       {canvasError}
                     </span>
                   )}
                 </>
               ) : (
                 <>
-                  <span>
-                    {feedLoading
-                      ? "Loading…"
-                      : `${entries.length} ${entries.length === 1 ? "note" : "notes"}`}
-                  </span>
+                  {feedLoading ? (
+                    <span className="flex items-center gap-1.5">
+                      <AsciiSpinner />
+                      Loading…
+                    </span>
+                  ) : (
+                    <span>
+                      {entries.length} {entries.length === 1 ? "note" : "notes"}
+                    </span>
+                  )}
                   {feedScope === "user" && (
                     <span className="rounded bg-bg-2 px-1 text-[10px] uppercase tracking-wide text-text-3">
                       local-only
                     </span>
                   )}
                   {feedError && (
-                    <span className="truncate text-red-400" title={feedError}>
+                    <span className="truncate text-red" title={feedError}>
                       {feedError}
                     </span>
                   )}
@@ -615,10 +629,10 @@ export function ChannelNotesPanel({ repoRoot }: Props) {
               repoRoot={repoRoot}
             />
           ) : (
-            <ChannelCanvasView
+            <TiptapEditor
               value={body}
               onChange={onBodyChange}
-              selfHandle={selfHandle}
+              bare
               placeholder={
                 canvasTarget.kind === "team"
                   ? "Team-wide canvas — start typing."
@@ -745,7 +759,7 @@ export function _FeedRow({
             <button
               type="button"
               onClick={onDelete}
-              className="ml-auto opacity-0 transition-opacity hover:text-red-400 group-hover:opacity-100"
+              className="ml-auto opacity-0 transition-opacity hover:text-red group-hover:opacity-100"
               title="Delete note"
             >
               Delete
@@ -761,7 +775,7 @@ export function _FeedRow({
                 key={i}
                 className={`rounded px-1 ${
                   selfHandle && c.handle.toLowerCase() === selfHandle.toLowerCase()
-                    ? "bg-amber-500/20 text-amber-300"
+                    ? "bg-accent/15 text-accent"
                     : "bg-accent-blue/20 text-accent-blue"
                 }`}
               >

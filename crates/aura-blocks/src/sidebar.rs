@@ -13,7 +13,7 @@ pub struct SidebarCard {
     pub block_id: BlockId,
     pub kind: BlockKind,
     pub state: BlockState,
-    /// "you", "claude-code", "github" — denormalized from provenance.
+    /// "muhammed", "claude-code", "github" — denormalized from provenance.
     pub actor_label: String,
     /// "apply_limiter", "PR #1203" — denormalized from anchor.
     pub anchor_label: Option<String>,

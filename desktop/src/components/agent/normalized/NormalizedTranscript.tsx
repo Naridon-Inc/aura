@@ -36,6 +36,7 @@ import type {
 } from "../../../lib/agentProtocol";
 import { StreamingBubble } from "../../manager/chat/ToolCard";
 import { MarkdownBody } from "../../manager/chat/Markdown";
+import { AgentIcon } from "../AgentIcon";
 import { Button } from "../../ui/button";
 import { toTranscriptGroups, type GroupUsage } from "./blockMap";
 import { LinkifiedText } from "./TaskChip";
@@ -327,12 +328,11 @@ function InitChip({ ev }: { ev: SessionInitEvent }) {
   const tools = ev.tools?.length ?? 0;
   return (
     <div className="flex items-center gap-2 text-[11px] text-text-3">
-      <span
-        className="inline-block w-1.5 h-1.5 rounded-full"
-        style={{ background: "var(--color-accent)" }}
-      />
+      {/* Real brand mark for the model instead of a decorative accent dot —
+          the model id (e.g. "claude-opus-4-8") resolves to its vendor glyph. */}
+      <AgentIcon agentId={ev.model ?? "session"} size={14} />
       <span className="font-medium">{ev.model ?? "session"}</span>
-      {tools > 0 && <span>· {tools} tools</span>}
+      {tools > 0 && <span className="tabular-nums">· {tools} tools</span>}
     </div>
   );
 }
@@ -537,10 +537,10 @@ function TodoCard({ ev }: { ev: TodoEvent }) {
 function TodoMark({ status }: { status: "pending" | "in_progress" | "completed" }) {
   const color =
     status === "completed"
-      ? "var(--color-positive, #16a34a)"
+      ? "var(--color-accent-green)"
       : status === "in_progress"
         ? "var(--color-accent)"
-        : "var(--color-line-strong, var(--color-line-soft))";
+        : "var(--color-line)";
   return (
     <span
       className="inline-block w-3 h-3 rounded-full flex-shrink-0"
@@ -624,9 +624,9 @@ function SessionUsageStrip({ usage }: { usage: { context: number; tokens: number
     >
       <span className="font-medium text-text-3">This session</span>
       <span>·</span>
-      <span>{compactTokens(usage.context)} context</span>
+      <span className="tabular-nums">{compactTokens(usage.context)} context</span>
       <span>·</span>
-      <span>{compactTokens(usage.tokens)} tokens used</span>
+      <span className="tabular-nums">{compactTokens(usage.tokens)} tokens used</span>
     </div>
   );
 }
@@ -643,8 +643,8 @@ function ResultFooter({ ev }: { ev: ResultEvent }) {
         className="inline-block w-1.5 h-1.5 rounded-full"
         style={{
           background: ok
-            ? "var(--color-positive, #16a34a)"
-            : "var(--color-negative, #dc2626)",
+            ? "var(--color-accent-green)"
+            : "var(--color-red)",
         }}
       />
       <span className="font-medium">{ok ? "Done" : "Ended with an error"}</span>
@@ -688,9 +688,9 @@ function ErrorRow({ ev }: { ev: ErrorEvent }) {
     <div
       className="rounded-lg px-3 py-2 text-[12.5px]"
       style={{
-        background: "color-mix(in srgb, var(--color-negative, #dc2626) 8%, transparent)",
-        color: "var(--color-negative, #dc2626)",
-        border: "1px solid color-mix(in srgb, var(--color-negative, #dc2626) 28%, transparent)",
+        background: "color-mix(in srgb, var(--color-red) 8%, transparent)",
+        color: "var(--color-red)",
+        border: "1px solid color-mix(in srgb, var(--color-red) 28%, transparent)",
       }}
     >
       {ev.message}

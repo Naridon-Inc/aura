@@ -11,6 +11,7 @@
 import { useEffect, useState } from "react";
 import { api, type PrStackNode } from "../../lib/api";
 import { useEditorStore } from "../../lib/editorStore";
+import { AsciiSpinner } from "../ui/ascii-spinner";
 
 type Props = {
   repoRoot: string;
@@ -76,7 +77,12 @@ export function PrStackView({ repoRoot, prNumber }: Props) {
   }, [repoRoot, prNumber]);
 
   if (loading) {
-    return <div className="px-3 py-3 text-text-4 text-[12px]">loading…</div>;
+    return (
+      <div className="flex items-center gap-1.5 px-3 py-3 text-text-4 text-[12px]">
+        <AsciiSpinner className="text-[10px]" />
+        <span>Looking for related pull requests…</span>
+      </div>
+    );
   }
   if (error) {
     return (
@@ -87,8 +93,9 @@ export function PrStackView({ repoRoot, prNumber }: Props) {
   }
   if (nodes.length <= 1) {
     return (
-      <div className="px-3 py-3 text-text-4 text-[12px]">
-        no stack — this PR doesn't share a head/base ref with any other open PR.
+      <div className="px-3 py-3 text-text-4 text-[12px] leading-relaxed">
+        This change stands on its own — it isn’t built on top of another open
+        pull request, so there’s no chain to show.
       </div>
     );
   }
@@ -97,9 +104,19 @@ export function PrStackView({ repoRoot, prNumber }: Props) {
   // by base/head linkage. For typical linear stacks this just orders top
   // → bottom.
   const ordered = orderStack(nodes);
+  // Graphite owns this stack when any branch's parent came from its local
+  // stack metadata rather than the GitHub base ref — surface that so the
+  // reviewer knows the chain is `gt`'s, not head/base inference.
+  const graphiteStack = ordered.some((n) => n.gt_managed);
 
   return (
     <div className="px-2 py-2 space-y-1">
+      {graphiteStack && (
+        <div className="flex items-center gap-1.5 px-2 pb-1.5 text-[10.5px] uppercase tracking-wider text-text-4">
+          <GraphiteMark />
+          Stacked with Graphite
+        </div>
+      )}
       {ordered.map((n, i) => {
         const active = n.number === prNumber;
         return (
@@ -109,33 +126,48 @@ export function PrStackView({ repoRoot, prNumber }: Props) {
               onClick={() =>
                 editor.openPrDetail(repoRoot, n.number, n.title)
               }
-              className={`w-full flex items-center gap-2 px-2 py-1.5 rounded text-left ${
+              className={`w-full flex items-center gap-2 px-2 py-1.5 rounded text-left transition-colors ${
                 active
-                  ? "bg-accent-violet/20 border border-accent-violet/40"
-                  : "hover:bg-bg-2 border border-transparent"
+                  ? "bg-bg-2 border border-line-soft"
+                  : "hover:bg-bg-2/60 border border-transparent"
               }`}
             >
               <span className="text-[11px] text-text-4 tabular-nums w-10 flex-shrink-0">
                 #{n.number}
               </span>
               <div className="flex-1 min-w-0">
-                <div className="text-[12px] text-text-1 truncate">{n.title}</div>
+                <div className="flex items-center gap-1.5">
+                  <span className="text-[12px] text-text-1 truncate">{n.title}</span>
+                  {n.gt_managed && (
+                    <span
+                      className="flex items-center gap-0.5 text-[9px] uppercase tracking-wide text-text-4 border border-line-soft rounded px-1 py-px flex-shrink-0"
+                      title="Parent branch tracked by Graphite (gt)"
+                    >
+                      <GraphiteMark />
+                      gt
+                    </span>
+                  )}
+                </div>
                 <div className="text-[10.5px] text-text-4 font-mono truncate">
                   {n.head_ref} → {n.base_ref}
                 </div>
               </div>
-              {n.aura_risk_score !== null && (
+              {/* Same rule as the PR rail: colour only when there's something
+                  to flag, so a clean stack stays quiet. */}
+              {n.aura_risk_score !== null && n.aura_risk_score > 0 && (
                 <span
                   className="w-1.5 h-1.5 rounded-full flex-shrink-0"
                   style={{
                     background:
                       n.aura_risk_score > 60
                         ? "var(--color-red)"
-                        : n.aura_risk_score > 0
-                          ? "#d59f4f"
-                          : "var(--color-accent-green)",
+                        : "var(--color-amber)",
                   }}
-                  title={`risk ${n.aura_risk_score}`}
+                  title={
+                    n.aura_risk_score > 60
+                      ? "Worth a careful look before merging"
+                      : "A couple of things worth a look"
+                  }
                 />
               )}
             </button>
@@ -146,6 +178,25 @@ export function PrStackView({ repoRoot, prNumber }: Props) {
         );
       })}
     </div>
+  );
+}
+
+// Graphite's mark — three stacked bars, echoing a stack of branches. Inline
+// SVG (no asset, no network) so it renders anywhere the chip does.
+function GraphiteMark() {
+  return (
+    <svg
+      width="9"
+      height="9"
+      viewBox="0 0 12 12"
+      fill="none"
+      aria-hidden
+      className="flex-shrink-0"
+    >
+      <rect x="1.5" y="1.5" width="9" height="1.6" rx="0.8" fill="currentColor" />
+      <rect x="1.5" y="5.2" width="9" height="1.6" rx="0.8" fill="currentColor" />
+      <rect x="1.5" y="8.9" width="9" height="1.6" rx="0.8" fill="currentColor" />
+    </svg>
   );
 }
 

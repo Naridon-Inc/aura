@@ -24,6 +24,7 @@ import {
   Quote,
   ShieldCheck,
   Sparkles,
+  Users,
   XCircle,
 } from "lucide-react";
 import {
@@ -150,6 +151,8 @@ export function AuraRefUnfurl({ url, repoRoot }: { url: string; repoRoot: string
       return <TaskUnfurl refData={ref} repoRoot={repoRoot} />;
     case "page":
       return <PageUnfurl refData={ref} repoRoot={repoRoot} />;
+    case "workspace":
+      return <WorkspaceUnfurl refData={ref} url={url} />;
     default:
       return null;
   }
@@ -174,20 +177,23 @@ function CardShell({
   detail?: React.ReactNode;
   cta?: React.ReactNode;
 }) {
+  // green = it worked, amber = it wants you, red = it broke, accent = the
+  // neutral "here is a thing" card. `warn` briefly shared the accent with the
+  // neutral tone, which erased the only difference between the two.
   const toneColor =
     tone === "good"
-      ? "#86efac"
+      ? "var(--color-accent-green)"
       : tone === "warn"
-        ? "#fbbf24"
+        ? "var(--color-amber)"
         : tone === "bad"
-          ? "#f87171"
+          ? "var(--color-red)"
           : "var(--color-accent)";
   return (
     <div className="mt-1.5 rounded-md border border-line-soft bg-bg-2 max-w-[420px] overflow-hidden">
       <div className="flex items-center gap-2 px-2.5 py-1.5 border-b border-line-soft">
         <span
           className="w-5 h-5 rounded flex items-center justify-center flex-shrink-0"
-          style={{ background: `${toneColor}22`, color: toneColor }}
+          style={{ background: `color-mix(in srgb, ${toneColor} 14%, transparent)`, color: toneColor }}
         >
           {icon}
         </span>
@@ -727,6 +733,48 @@ function PageUnfurl({
   );
 }
 
+// A live cloud workspace someone shared (aura://workspace/<id>). Pasting the
+// link into Team chat lands this card so a teammate recognises the shared
+// session and can re-share it with "Copy link". Joining the live session
+// in-app (multiplayer — prompt-together) rides on the cloud session WS hub
+// and lands with that consumer; today the card names the workspace + copies.
+function WorkspaceUnfurl({
+  refData,
+  url,
+}: {
+  refData: Extract<AuraRef, { kind: "workspace" }>;
+  url: string;
+}) {
+  const [copied, setCopied] = useState(false);
+  const copy = async () => {
+    try {
+      await navigator.clipboard.writeText(url);
+      setCopied(true);
+      window.setTimeout(() => setCopied(false), 1500);
+    } catch {
+      /* clipboard blocked — leave the button as-is */
+    }
+  };
+  // Show a short, recognisable slice of the opaque external id.
+  const shortId =
+    refData.id.length > 12 ? `${refData.id.slice(0, 12)}…` : refData.id;
+  return (
+    <CardShell
+      icon={<Users size={11} />}
+      tone="neutral"
+      label="workspace"
+      title="Live workspace"
+      detail={
+        <>
+          A shared cloud session ·{" "}
+          <span className="font-mono text-[10.5px]">{shortId}</span>
+        </>
+      }
+      cta={<CtaButton label={copied ? "Copied" : "Copy link"} onClick={copy} />}
+    />
+  );
+}
+
 // ─── pr_opened / pr_line cards ───────────────────────────────────────
 //
 // A `pr_opened` card lands when the cloud webhook fans a new PR into
@@ -755,10 +803,10 @@ function PrOpenedCard({
     openPrDetail(repoRoot, payload.number, payload.title);
   };
   const onTake = async () => {
-    // TODO(U.1): wire team manifest assignee setter so this also
-    // marks the PR as picked-up in `team.json`. For now we post a
-    // chat-only acknowledgement in the same channel so the rest of
-    // the team can see who grabbed it.
+    // Taking a review is announced in the channel, not written into the
+    // team manifest — the manifest is the source of truth for who owns a
+    // repo area, and picking up one review does not change that. The
+    // channel post is what the rest of the team actually reads.
     try {
       const identity = await api.teamIdentity(repoRoot).catch(() => null);
       const who = identity?.handle || identity?.name || "someone";
@@ -776,11 +824,11 @@ function PrOpenedCard({
     payload.additions != null || payload.deletions != null ? (
       <span className="font-mono">
         {payload.additions != null ? (
-          <span className="text-green-400">+{payload.additions}</span>
+          <span className="tabular-nums text-accent-green">+{payload.additions}</span>
         ) : null}
         {payload.additions != null && payload.deletions != null ? " " : ""}
         {payload.deletions != null ? (
-          <span className="text-red-400">-{payload.deletions}</span>
+          <span className="tabular-nums text-red">-{payload.deletions}</span>
         ) : null}
         {payload.changed_files != null ? (
           <span className="text-text-4"> · {payload.changed_files}f</span>

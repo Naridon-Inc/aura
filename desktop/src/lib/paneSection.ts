@@ -29,19 +29,22 @@ export type PaneSection = AdeSection;
 /** Classify a workpane ref into its owning left-nav section.
  *
  *  Mirrors the section-follow switch that used to live inline in `App.tsx`:
- *    - Plan  — tasks / task / standup / plan / pages / automations
- *    - Team  — screenshare / channels
+ *    - Plan  — standup / plan / pages / automations
+ *    - Team  — tasks / task / screenshare / channels (the board is collaborative)
  *    - Trace — trace tools (Review / Rewind / Attestations / Doctor / Memory)
  *    - Build — agent / terminal / manager / file / empty */
 export function sectionForRef(ref: WorkPaneRef): PaneSection {
   switch (ref.kind) {
+    // Tasks live in Team now — the board is a collaborative team surface, so
+    // an open board / task pane reads as Team, not Plan.
     case "tasks":
     case "task":
+      return "team";
     case "standup":
     case "plan":
     case "pages":
     // Automations (scheduled / orchestrated runs) is a planning surface — it
-    // re-homed from the Build rail into Plan alongside Tasks & Pages.
+    // re-homed from the Build rail into Plan alongside Pages.
     case "automations":
       return "plan";
     case "screenshare":
@@ -62,7 +65,7 @@ export function sectionForRef(ref: WorkPaneRef): PaneSection {
     case "graph":
       return "trace";
     default:
-      // agent / terminal / manager / file / empty
+      // agent / terminal / manager / file / empty / browser
       return "build";
   }
 }

@@ -80,9 +80,28 @@ export function SplitDiff({ diff, path }: { diff: string; path: string }) {
   const [ignoreWs, setIgnoreWs] = useState(getIgnoreWhitespace);
   useEffect(() => subscribeIgnoreWhitespace(setIgnoreWs), []);
   const monacoRef = useRef<Monaco | null>(null);
-  const onMount: DiffOnMount = (_editor, monaco) => {
+  const editorRef = useRef<Parameters<DiffOnMount>[0] | null>(null);
+  const onMount: DiffOnMount = (editor, monaco) => {
+    editorRef.current = editor;
     monacoRef.current = monaco;
   };
+  // Switching files reuses the SAME editor (no `key`-forced remount below), so
+  // Monaco carries the previous scroll position onto the next file. Reset both
+  // sides to the top on a path change to match the fresh-view UX a remount used
+  // to give — WITHOUT the remount, whose model dispose fires the "TextModel got
+  // disposed before DiffEditorWidget model got reset" teardown race on every
+  // file switch. (True unmount still disposes; that path is guarded in
+  // AppErrorBoundary.)
+  useEffect(() => {
+    const ed = editorRef.current;
+    if (!ed) return;
+    try {
+      ed.getOriginalEditor()?.setScrollTop(0);
+      ed.getModifiedEditor()?.setScrollTop(0);
+    } catch {
+      /* editor mid-teardown — nothing to reset */
+    }
+  }, [path, diff]);
   // Re-read tokens + reapply when the app theme/variant flips at runtime.
   useEffect(() => {
     const monaco = monacoRef.current;
@@ -92,7 +111,6 @@ export function SplitDiff({ diff, path }: { diff: string; path: string }) {
   }, [isDark, variant]);
   return (
     <DiffEditor
-      key={path}
       original={sides.original}
       modified={sides.modified}
       language={language}

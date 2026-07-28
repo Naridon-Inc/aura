@@ -24,6 +24,7 @@ import {
   type GraphRowLayout,
 } from "../lib/commitGraphLayout";
 import { Avatar } from "./team/presentation/Avatar";
+import { AsciiSpinner } from "./ui/ascii-spinner";
 
 const ROW_H = 32;
 const LANE_W = 14;
@@ -204,7 +205,10 @@ export function CommitGraph({ repoRoot, limit = 300, showHeader = true }: Props)
 
       <div ref={parentRef} className="flex-1 min-h-0 overflow-y-auto">
         {loading && commits.length === 0 ? (
-          <div className="px-4 py-3 text-text-4 text-[11px]">loading…</div>
+          <div className="flex items-center gap-1.5 px-4 py-3 text-text-4 text-[11px]">
+            <AsciiSpinner className="text-[10px]" />
+            <span>Reading the project’s story…</span>
+          </div>
         ) : error ? (
           <div className="px-4 py-3 text-text-4 text-[11px]">
             Couldn’t read history here.
@@ -310,7 +314,7 @@ function GraphRow({
               key={i}
               d={d}
               fill="none"
-              stroke={isWorking && s.half === "bottom" ? "var(--color-accent, #4aa3ff)" : s.color}
+              stroke={isWorking && s.half === "bottom" ? "var(--color-amber)" : s.color}
               strokeWidth={1.6}
               strokeLinecap="round"
               strokeDasharray={isWorking && s.half === "bottom" ? "2 2.5" : undefined}
@@ -324,7 +328,13 @@ function GraphRow({
             cy={mid}
             r={NODE_R + 0.5}
             fill="var(--color-bg-0)"
-            stroke="var(--color-accent, #4aa3ff)"
+            /* The working row is uncommitted edits — the dirty/modified
+               state, which is exactly what `--color-amber` names, and what
+               the changed-file glyphs and the unsaved tab dot already use.
+               The accent stays on the HEAD pill below ("you are here"), so
+               "where I am" and "what I have not saved" stay distinguishable
+               inside one graph. */
+            stroke="var(--color-amber)"
             strokeWidth={1.5}
             strokeDasharray="2 1.8"
           />
@@ -347,7 +357,7 @@ function GraphRow({
               <div className="flex items-center gap-1.5 min-w-0">
                 <span
                   className="text-[12px] truncate font-medium"
-                  style={{ color: "var(--color-accent, #4aa3ff)" }}
+                  style={{ color: "var(--color-amber)" }}
                 >
                   Your unsaved changes
                 </span>
@@ -384,8 +394,11 @@ function GraphRow({
   );
 }
 
-/** A branch tip / tag / HEAD pill. HEAD ("You are here") leads in
- *  arctic-blue; tags amber; remote dim; local outlined in its lane colour. */
+/** A branch tip / tag / HEAD pill. HEAD ("You are here") is the one orientation
+ *  cue that earns the accent; tags are a category, so they sit on the neutral
+ *  ramp; local/remote stay outlined in their lane colour because that mapping
+ *  IS the graph. Kept identical to the History list's badge (CommitList) so the
+ *  two views of history read the same. */
 function RefBadge({
   name,
   kind,
@@ -400,14 +413,14 @@ function RefBadge({
       <span
         className="flex-shrink-0 inline-flex items-center gap-1 text-[9.5px] font-medium px-1.5 h-[15px] rounded-full"
         style={{
-          background: "var(--color-accent, #4aa3ff)",
-          color: "#fff",
+          background: "var(--color-accent)",
+          color: "var(--color-accent-foreground)",
         }}
         title="You are here — the version you’re working from"
       >
         <span
           className="inline-block w-1 h-1 rounded-full"
-          style={{ background: "#fff" }}
+          style={{ background: "currentColor" }}
         />
         {name}
       </span>
@@ -416,11 +429,7 @@ function RefBadge({
   if (kind === "tag") {
     return (
       <span
-        className="flex-shrink-0 inline-flex items-center text-[9.5px] px-1.5 h-[15px] rounded"
-        style={{
-          background: "rgba(245,158,11,0.14)",
-          color: "#f59e0b",
-        }}
+        className="flex-shrink-0 inline-flex items-center rounded-full border border-line-soft px-1.5 h-[15px] text-[9.5px] text-text-3"
         title="A named release point"
       >
         ⌖ {name}

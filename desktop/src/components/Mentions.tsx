@@ -53,6 +53,10 @@ type MentionInputProps = {
   disabled?: boolean;
   /** Optional callback fired whenever the user picks a mention. */
   onMention?: (handle: string) => void;
+  /** Fired when the field loses focus. Safe for commit-on-blur: the mention
+   *  popover selects via onMouseDown+preventDefault so picking a candidate
+   *  never blurs the textarea — only a genuine focus-out fires this. */
+  onBlur?: () => void;
 };
 
 export const MentionInput = forwardRef<MentionInputHandle, MentionInputProps>(
@@ -70,6 +74,7 @@ export const MentionInput = forwardRef<MentionInputHandle, MentionInputProps>(
       autoFocus,
       disabled,
       onMention,
+      onBlur,
     },
     ref,
   ) {
@@ -169,6 +174,7 @@ export const MentionInput = forwardRef<MentionInputHandle, MentionInputProps>(
       onKeyUp: handleSelectionChange,
       onClick: handleSelectionChange,
       onKeyDown: handleKeyDown,
+      onBlur,
       placeholder,
       className,
       style,

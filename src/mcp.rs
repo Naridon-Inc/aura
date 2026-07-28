@@ -191,11 +191,12 @@ impl McpServer {
                             },
                             {
                                 "name": "aura_log_intent",
-                                "description": "MANDATORY: You MUST call this tool after making code changes and BEFORE committing. Logs your architectural intent so Aura can link your reasoning to the AST changes. If you skip this, the pre-commit hook will detect 'Intent Poisoning' and may block the commit. Call this every time you finish a set of edits. Optionally pass `intent_type` to tag the entry — one of FeatureAdd, BugFix, Refactor, Revert, Performance, Docs, Deps. Tagged entries are queryable via aura_intent_query.",
+                                "description": "MANDATORY: You MUST call this tool after making code changes and BEFORE committing. Logs your architectural intent so Aura can link your reasoning to the AST changes. If you skip this, the pre-commit hook will detect 'Intent Poisoning' and may block the commit. Call this every time you finish a set of edits. Pass `writes` with the files you touched so Aura can verify at commit that you did exactly what you said — anything you touch beyond that list is flagged (and blocked in strict mode). Optionally pass `intent_type` to tag the entry — one of FeatureAdd, BugFix, Refactor, Revert, Performance, Docs, Deps. Tagged entries are queryable via aura_intent_query.",
                                 "inputSchema": {
                                     "type": "object",
                                     "properties": {
                                         "intent": { "type": "string", "description": "1-2 sentence explanation of WHY you made these changes. Must reference the functions/classes you modified." },
+                                        "writes": { "type": "array", "items": { "type": "string" }, "description": "The repo-relative paths this change touches (the files you edited/created). Aura records them as your declared scope and, at commit, flags any file you changed that isn't listed here — the 'did exactly what I said' check. List the files honestly; leave empty only if you truly can't scope the change." },
                                         "intent_type": { "type": "string", "description": "Optional canonical type for this intent. One of: FeatureAdd, BugFix, Refactor, Revert, Performance, Docs, Deps. Case-sensitive. Invalid values are rejected with isError." }
                                     },
                                     "required": ["intent"]
@@ -325,7 +326,7 @@ impl McpServer {
                                 "inputSchema": {
                                     "type": "object",
                                     "properties": {
-                                        "human": { "type": "string", "description": "Filter to blocks signed for this human (raw env value e.g. 'owner@example.com' OR DID form e.g. 'did:aura:human/owner-example-com')." },
+                                        "human": { "type": "string", "description": "Filter to blocks signed for this human (raw env value e.g. 'ashiq@naridon' OR DID form e.g. 'did:aura:human/ashiq-naridon')." },
                                         "intent_type": { "type": "string", "description": "Filter to one canonical type. Invalid values rejected with isError." }
                                     }
                                 },
@@ -1294,6 +1295,8 @@ impl McpServer {
                                         "input": { "type": "string", "description": "Task description / payload the worker will act on." },
                                         "repo": { "type": "string", "description": "Optional repo full-name (org/name) to scope the task." },
                                         "context_id": { "type": "string", "description": "Optional A2A context grouping (free-form)." },
+                                        "task_kind": { "type": "string", "enum": ["plan", "wave", "task", "subtask"], "description": "Bucket-K hierarchy level. Defaults to 'subtask' (a leaf that needs no acceptance criteria) when omitted. plan/wave/task REQUIRE a non-empty acceptance_criteria." },
+                                        "acceptance_criteria": { "type": "array", "items": { "type": "string" }, "description": "Concrete, checkable done-conditions. Required (non-empty) when task_kind is plan, wave, or task; optional for subtask." },
                                         "metadata": { "type": "object", "description": "Optional client-supplied metadata bag." }
                                     },
                                     "required": ["agent_kind", "input"]
@@ -2028,6 +2031,64 @@ impl McpServer {
                                 }
                             },
                             {
+                                "name": "aura_worktrees",
+                                "description": "Cross-worktree control plane — the one view of EVERY checkout of this repository at once: which agent is in each, what symbols each holds, and where two checkouts are converging on the same code. A repo commonly has several worktrees live at the same time (one per agent, one per branch under review); before this, each could only see itself. Call it at session start and before editing a file you don't own: `summary.cross_worktree_symbols > 0` means another checkout holds a symbol you are about to touch, which merge will have to reconcile — coordinate with `aura_worktree_say` first. `stranded` lists agents whose checkout git no longer lists but whose claims are still held. Local-only; no network.",
+                                "inputSchema": {
+                                    "type": "object",
+                                    "properties": {
+                                        "no_git_status": { "type": "boolean", "description": "Skip the per-checkout working-tree read (uncommitted count, drift from trunk). Two git invocations per checkout, so worth setting on a repo with many worktrees when you only need the roster." },
+                                        "whoami": { "type": "boolean", "description": "Instead of the board, return just which checkout THIS session is in and where its shared/private state resolves to." }
+                                    }
+                                },
+                                "annotations": {
+                                    "title": "Worktree Control Plane",
+                                    "readOnlyHint": true,
+                                    "destructiveHint": false,
+                                    "idempotentHint": true,
+                                    "openWorldHint": false,
+                                    "auraCapability": "auto"
+                                }
+                            },
+                            {
+                                "name": "aura_worktree_say",
+                                "description": "Message another CHECKOUT of this repo by name — 'whoever is working in barcelona' — rather than by session id, which you rarely know. This is the coordination step when `aura_worktrees` shows contention: tell the other checkout what you are about to change before you change it. Use `main` to address the main checkout. Omit `to` to reach every agent in every checkout. Returns how many sessions can actually hear it, so 'delivered to nobody' never looks like success.",
+                                "inputSchema": {
+                                    "type": "object",
+                                    "properties": {
+                                        "message": { "type": "string", "description": "What to say. Be concrete: the file/symbol and what you intend to do to it." },
+                                        "to": { "type": "string", "description": "Checkout name to address, e.g. 'barcelona', or 'main' for the main checkout. Omit to broadcast to every checkout." },
+                                        "to_session": { "type": "string", "description": "Optional: a specific session_id, when you do know it. Takes precedence over `to`." }
+                                    },
+                                    "required": ["message"]
+                                },
+                                "annotations": {
+                                    "title": "Message a Checkout",
+                                    "readOnlyHint": false,
+                                    "destructiveHint": false,
+                                    "idempotentHint": false,
+                                    "openWorldHint": false,
+                                    "auraCapability": "auto"
+                                }
+                            },
+                            {
+                                "name": "aura_worktree_inbox",
+                                "description": "Read what other checkouts have said to this one. Each message names the checkout it came from, so you know which branch the sender is on. Marks them read. Call when a tool response reports unread sentinel messages, or before starting work in a repo with several live worktrees.",
+                                "inputSchema": {
+                                    "type": "object",
+                                    "properties": {
+                                        "limit": { "type": "integer", "description": "Max messages to return (default 20)." }
+                                    }
+                                },
+                                "annotations": {
+                                    "title": "Checkout Inbox",
+                                    "readOnlyHint": false,
+                                    "destructiveHint": false,
+                                    "idempotentHint": false,
+                                    "openWorldHint": false,
+                                    "auraCapability": "auto"
+                                }
+                            },
+                            {
                                 "name": "aura_radar_emit",
                                 "description": "Announce in-flight work onto the Team Awareness radar so teammates and other agents are aware of it BEFORE you commit/push. Emit when you start on a symbol/file, declare an intent (the why), or report a projected impact. Events are Ed25519-signed with the repo-local identity so they can't be spoofed. Keep it meaningful, not chatty — one event per real unit of work (the radar dedups and ages events out, but a per-keystroke firehose defeats the point). Pass `agent` with your label so you're attributed as an agent, not the human.",
                                 "inputSchema": {
@@ -2197,6 +2258,9 @@ impl McpServer {
                     "aura_page_read" => Self::tool_page_read(args),
                     "aura_page_write" => Self::tool_page_write(args),
                     "aura_team_radar" => Self::tool_team_radar(args),
+                    "aura_worktrees" => Self::tool_worktrees(args),
+                    "aura_worktree_say" => Self::tool_worktree_say(args),
+                    "aura_worktree_inbox" => Self::tool_worktree_inbox(args),
                     "aura_radar_emit" => Self::tool_radar_emit(args),
                     _ => json!({ "isError": true, "content": [{ "type": "text", "text": "Unknown tool" }] })
                 };
@@ -2398,7 +2462,7 @@ impl McpServer {
 
                 // Push-based: Inject sentinel collision alerts
                 if name != "aura_sentinel_status" && name != "aura_sentinel_release" {
-                    let sentinel_marker_path = crate::session::worktree_aura_path("sentinel/collisions_pending");
+                    let sentinel_marker_path = crate::worktree::paths::shared_aura_path("sentinel/collisions_pending");
                     let sentinel_marker = std::path::Path::new(&sentinel_marker_path);
                     if sentinel_marker.exists() {
                         if let Ok(contents) = std::fs::read_to_string(sentinel_marker) {
@@ -2555,6 +2619,42 @@ impl McpServer {
             .map(|n| n as usize)
             .unwrap_or(20);
         let data = crate::awareness::api::radar(focus.as_deref(), limit, as_actor.as_deref());
+        let body = serde_json::to_string_pretty(&data).unwrap_or_else(|_| "{}".into());
+        json!({ "content": [{ "type": "text", "text": body }] })
+    }
+
+    fn tool_worktrees(args: Value) -> Value {
+        let data = if args.get("whoami").and_then(|v| v.as_bool()).unwrap_or(false) {
+            crate::worktree::api::whoami()
+        } else {
+            let skip = args
+                .get("no_git_status")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+            crate::worktree::api::plane(!skip)
+        };
+        let body = serde_json::to_string_pretty(&data).unwrap_or_else(|_| "{}".into());
+        json!({ "content": [{ "type": "text", "text": body }] })
+    }
+
+    fn tool_worktree_say(args: Value) -> Value {
+        let Some(message) = Self::arg_str(&args, "message") else {
+            return Self::board_err("`message` is required.");
+        };
+        let to = Self::arg_str(&args, "to");
+        let to_session = Self::arg_str(&args, "to_session");
+        let data = crate::worktree::api::say(&message, to.as_deref(), to_session.as_deref());
+        let body = serde_json::to_string_pretty(&data).unwrap_or_else(|_| "{}".into());
+        json!({ "content": [{ "type": "text", "text": body }] })
+    }
+
+    fn tool_worktree_inbox(args: Value) -> Value {
+        let limit = args
+            .get("limit")
+            .and_then(|v| v.as_u64())
+            .map(|n| n as usize)
+            .unwrap_or(20);
+        let data = crate::worktree::api::inbox(limit);
         let body = serde_json::to_string_pretty(&data).unwrap_or_else(|_| "{}".into());
         json!({ "content": [{ "type": "text", "text": body }] })
     }
@@ -2750,6 +2850,21 @@ impl McpServer {
             }
         };
 
+        // Optional declared write-scope: the repo-relative paths (or globs)
+        // the agent says THIS change will touch. Persisted into the signed
+        // block's declared_impacts so the pre-commit reconciler can flag any
+        // file touched beyond them — the "did exactly what it said" check.
+        // Absent / non-array ⇒ no scope claim, divergence gate stays dormant.
+        let declared_writes: Vec<String> = match args.get("writes") {
+            Some(Value::Array(a)) => a
+                .iter()
+                .filter_map(|v| v.as_str())
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect(),
+            _ => Vec::new(),
+        };
+
         // The real coding agent driving this MCP session (captured at
         // initialize), used to attribute both the session and the intent row.
         let agent = caller_agent_id();
@@ -2767,7 +2882,8 @@ impl McpServer {
         //    (no key, write error), we fall through to the JSONL-only
         //    path that's existed since v0.1. The block_id is stamped
         //    into the JSONL row so a verifier can find the signed file.
-        let signed = sign_intent_best_effort(&intent, intent_type.as_deref());
+        let signed =
+            sign_intent_best_effort(&intent, intent_type.as_deref(), &declared_writes, "MCP Agent");
         let signed_block_id: Option<String> = signed.as_ref().map(|(bid, _)| bid.clone());
         let signed_key_id: Option<String> = signed.as_ref().map(|(_, kid)| kid.clone());
 
@@ -3703,16 +3819,86 @@ impl McpServer {
 
     pub(crate) fn tool_prove(args: Value) -> Value {
         let goal = match args["goal"].as_str() {
-            Some(g) => g.to_string(),
-            None => return json!({ "isError": true, "content": [{ "type": "text", "text": "goal is required." }] }),
+            Some(g) if !g.trim().is_empty() => g.to_string(),
+            _ => return json!({ "isError": true, "content": [{ "type": "text", "text": "goal is required." }] }),
         };
 
-        // Capture stdout from prove_goal (it uses println!)
-        let output = Self::capture_stdout(|| {
-            crate::gsd::GsdEngine::prove_goal(&goal);
+        // Prove against the current code via the structured API and reshape the
+        // outcome here. We do NOT read the CLI report: `prove_goal` renders it
+        // with `eprintln!` (stderr), so capturing stdout would come back empty.
+        // We still run the call inside `capture_stdout` — not for its result, but
+        // to swallow any stray stdout `decompose_goal` might emit, which would
+        // otherwise corrupt the JSON-RPC pipe.
+        let mut outcome = serde_json::Value::Null;
+        let _ = Self::capture_stdout(|| {
+            outcome = crate::gsd::GsdEngine::prove_goal_structured(&goal);
         });
 
-        json!({ "content": [{ "type": "text", "text": output }] })
+        if let Some(err) = outcome["error"].as_str() {
+            return json!({ "content": [{ "type": "text", "text": format!("Couldn't check \"{}\" yet: {}", goal, err) }] });
+        }
+
+        let passed = outcome["passed"].as_u64().unwrap_or(0);
+        let total = outcome["total"].as_u64().unwrap_or(0);
+
+        // A zero score is NOT automatically "not started". Nothing passing while
+        // every part exists means the pieces are built and simply aren't wired
+        // together — saying "not started yet" there contradicts the very lines
+        // printed underneath it ("'createNote' is built but isn't connected").
+        // Read the checks and say which of those three worlds this actually is.
+        let checks = outcome["checks"].as_array().cloned().unwrap_or_default();
+        let built = checks
+            .iter()
+            .filter(|c| {
+                c["exists"].as_bool().unwrap_or(false) && !c["is_stub"].as_bool().unwrap_or(false)
+            })
+            .count() as u64;
+        let existing = checks
+            .iter()
+            .filter(|c| c["exists"].as_bool().unwrap_or(false))
+            .count() as u64;
+
+        let headline = if total > 0 && passed == total {
+            "built and checked"
+        } else if passed > 0 {
+            "almost there"
+        } else if existing == 0 {
+            "not started yet"
+        } else if built == 0 {
+            "only placeholders so far"
+        } else {
+            "built, but not connected up yet"
+        };
+
+        // Count what's honestly true: fully-in-place parts, and — when that
+        // undersells it — how many are built but still waiting to be wired.
+        let tally = if passed == 0 && built > 0 {
+            format!("{} of {} parts built, none connected yet", built, total)
+        } else {
+            format!("{} of {} parts in place", passed, total)
+        };
+
+        let mut lines = vec![format!("{} — {} ({})", goal, headline, tally), String::new()];
+        for check in &checks {
+            let name = check["node_name"].as_str().unwrap_or("unknown");
+            let exists = check["exists"].as_bool().unwrap_or(false);
+            let is_stub = check["is_stub"].as_bool().unwrap_or(false);
+            let must_call = check["must_call"].as_str().unwrap_or("");
+            let line = if !exists {
+                format!("  · '{}' isn't built yet", name)
+            } else if is_stub {
+                format!("  · '{}' is only a placeholder so far", name)
+            } else {
+                match check["wired"].as_bool() {
+                    Some(true) => format!("  ✓ '{}' is built and connected to '{}'", name, must_call),
+                    Some(false) => format!("  · '{}' is built but isn't connected to '{}' yet", name, must_call),
+                    None => format!("  ✓ '{}' is built", name),
+                }
+            };
+            lines.push(line);
+        }
+
+        json!({ "content": [{ "type": "text", "text": lines.join("\n") }] })
     }
 
     /// Prove a goal through the DURABLE ledger: decompose-once (cached), prove
@@ -3742,20 +3928,40 @@ impl McpServer {
         }
 
         let verdict = outcome["verdict"].as_str().unwrap_or("unknown");
-        let headline = match verdict {
-            "verified" => "built and checked",
-            "partial" => "almost there",
-            "not_wired" => "not started yet",
-            _ => "not checked yet",
-        };
         let passed = outcome["passed"].as_u64().unwrap_or(0);
         let total = outcome["total"].as_u64().unwrap_or(0);
 
-        let mut lines = vec![
-            format!("{} — {} ({} of {} parts in place)", goal, headline, passed, total),
-            String::new(),
-        ];
-        for check in outcome["checks"].as_array().into_iter().flatten() {
+        // `not_wired` means the parts exist but aren't connected — reporting that
+        // as "not started yet" contradicts the per-check lines right below it.
+        // Separate the two: nothing built at all vs built-but-unwired.
+        let goal_checks = outcome["checks"].as_array().cloned().unwrap_or_default();
+        let built = goal_checks
+            .iter()
+            .filter(|c| {
+                c["exists"].as_bool().unwrap_or(false) && !c["is_stub"].as_bool().unwrap_or(false)
+            })
+            .count() as u64;
+        let existing = goal_checks
+            .iter()
+            .filter(|c| c["exists"].as_bool().unwrap_or(false))
+            .count() as u64;
+
+        let headline = match verdict {
+            "verified" => "built and checked",
+            "partial" => "almost there",
+            "not_wired" if existing == 0 => "not started yet",
+            "not_wired" if built == 0 => "only placeholders so far",
+            "not_wired" => "built, but not connected up yet",
+            _ => "not checked yet",
+        };
+        let tally = if passed == 0 && built > 0 {
+            format!("{} of {} parts built, none connected yet", built, total)
+        } else {
+            format!("{} of {} parts in place", passed, total)
+        };
+
+        let mut lines = vec![format!("{} — {} ({})", goal, headline, tally), String::new()];
+        for check in &goal_checks {
             let reason = check["reason"].as_str().unwrap_or("");
             let ok = check["passed"].as_bool().unwrap_or(false);
             let glyph = if ok { "✓" } else { "·" };
@@ -3941,15 +4147,69 @@ impl McpServer {
 
     // --- Helper functions ---
 
-    /// Capture stdout from functions that use println! instead of returning values
+    /// Run `f` and return everything it prints to stdout.
+    ///
+    /// Several tool bodies call CLI routines that `println!` their result
+    /// straight to stdout instead of returning it. Over MCP, stdout *is* the
+    /// JSON-RPC pipe — so those prints were lost to the caller (and corrupting
+    /// the protocol), and the tool returned a fixed "Command executed"
+    /// placeholder instead. That's why `aura_goals_list` and the `aura_plan_*`
+    /// tools looked like they returned the same canned boilerplate every call,
+    /// regardless of input (and `aura_prove` too, before it moved to the
+    /// structured API and stopped relying on capture for its result). Here we
+    /// redirect fd 1 to a temp file for the duration of `f`, then read it back,
+    /// so the real output reaches the tool result and never leaks onto the pipe.
+    #[cfg(unix)]
     fn capture_stdout<F: FnOnce()>(f: F) -> String {
-        use std::process::Command;
-        // Since we can't easily redirect Rust's println! in-process,
-        // run the aura CLI as a subprocess to capture output
-        // For now, call the function directly and return a status message
+        use std::io::{Read, Seek, SeekFrom, Write};
+        use std::os::unix::io::AsRawFd;
+
+        // Push anything already buffered onto the real pipe before we divert it,
+        // so prior output isn't swept into the capture file.
+        let _ = std::io::stdout().flush();
+
+        let mut tmp = match tempfile::tempfile() {
+            Ok(t) => t,
+            // Capture unavailable — still run the closure for its side effects;
+            // a lost message beats a skipped action.
+            Err(_) => {
+                f();
+                return String::new();
+            }
+        };
+
+        let stdout_fd = libc::STDOUT_FILENO;
+        let saved = unsafe { libc::dup(stdout_fd) };
+        if saved < 0 {
+            f();
+            return String::new();
+        }
+        // Point fd 1 at the temp file for the length of the call.
+        unsafe {
+            libc::dup2(tmp.as_raw_fd(), stdout_fd);
+        }
+
         f();
-        // The function printed to stdout directly which goes to the MCP pipe.
-        // This is a limitation — ideally these functions should return strings.
+
+        // Flush the closure's output into the temp file, then restore stdout so
+        // the MCP loop can write its JSON-RPC reply to the real pipe again.
+        let _ = std::io::stdout().flush();
+        unsafe {
+            libc::dup2(saved, stdout_fd);
+            libc::close(saved);
+        }
+
+        let _ = tmp.seek(SeekFrom::Start(0));
+        let mut out = String::new();
+        let _ = tmp.read_to_string(&mut out);
+        out
+    }
+
+    /// Non-Unix fallback: in-process fd redirection isn't portable, so keep the
+    /// prior placeholder behavior rather than break the build on those targets.
+    #[cfg(not(unix))]
+    fn capture_stdout<F: FnOnce()>(f: F) -> String {
+        f();
         "Command executed. Check .aura/plans/ for generated artifacts.".to_string()
     }
 
@@ -5796,6 +6056,27 @@ impl McpServer {
         };
         let cloud_url = config.cloud_url.unwrap_or_else(|| "https://auravcs.com".to_string());
         let url = format!("{}/api/v2/a2a/tasks", cloud_url.trim_end_matches('/'));
+        // Bucket-K default: the server rejects plan/wave/task without a
+        // non-empty acceptance_criteria (400). Callers that pass neither a
+        // task_kind nor acceptance_criteria mean "just run this" — mint a
+        // `subtask` (a leaf, no AC required) so agents/CLI can create cloud
+        // tasks without spelling out the hierarchy.
+        let mut body = args;
+        if let Some(obj) = body.as_object_mut() {
+            let has_kind = obj
+                .get("task_kind")
+                .and_then(|v| v.as_str())
+                .map(|s| !s.trim().is_empty())
+                .unwrap_or(false);
+            let has_ac = obj
+                .get("acceptance_criteria")
+                .and_then(|v| v.as_array())
+                .map(|a| !a.is_empty())
+                .unwrap_or(false);
+            if !has_kind && !has_ac {
+                obj.insert("task_kind".to_string(), json!("subtask"));
+            }
+        }
         let client = reqwest::blocking::Client::builder()
             .timeout(std::time::Duration::from_secs(20))
             .build()
@@ -5803,12 +6084,16 @@ impl McpServer {
         match client
             .post(&url)
             .header("Authorization", format!("Bearer {}", token))
-            .json(&args)
+            .json(&body)
             .send()
         {
             Ok(resp) => {
                 let status = resp.status();
-                match resp.json::<Value>() {
+                // Read the raw body once, then try to parse. An error body may
+                // be empty or plain text (not JSON) — reporting the text keeps
+                // the real cause visible instead of a misleading parse error.
+                let body_text = resp.text().unwrap_or_default();
+                match serde_json::from_str::<Value>(&body_text) {
                     Ok(v) => {
                         if !status.is_success() {
                             return json!({ "isError": true, "content": [{ "type": "text", "text": format!("a2a-task-create HTTP {}: {}", status, v) }] });
@@ -5816,7 +6101,7 @@ impl McpServer {
                         let pretty = serde_json::to_string_pretty(&v).unwrap_or_else(|_| v.to_string());
                         json!({ "content": [{ "type": "text", "text": pretty }] })
                     }
-                    Err(e) => json!({ "isError": true, "content": [{ "type": "text", "text": format!("a2a-task-create parse failed (HTTP {}): {}", status, e) }] }),
+                    Err(_) => json!({ "isError": true, "content": [{ "type": "text", "text": format!("a2a-task-create HTTP {}: {}", status, if body_text.trim().is_empty() { "(empty response body)" } else { body_text.trim() }) }] }),
                 }
             }
             Err(e) => json!({ "isError": true, "content": [{ "type": "text", "text": format!("a2a-task-create request failed: {}", e) }] }),
@@ -7087,9 +7372,17 @@ pub(crate) fn xml_escape(s: &str) -> String {
 /// same canonical type as the JSONL row. Caller validates against the
 /// canonical set BEFORE calling so this signing path stays a thin
 /// builder over already-trusted input.
+///
+/// `agent_label` names the coding agent in the signed block's payload
+/// (`did:aura:agent/<label>`). The MCP path passes "MCP Agent"; the CLI
+/// `sign-intent` surface passes whatever brain drove the edit (e.g.
+/// "aura-shell" for a native Aura-chat turn) so attribution is honest
+/// regardless of which capture surface sealed the intent.
 pub(crate) fn sign_intent_best_effort(
     intent: &str,
     intent_type: Option<&str>,
+    declared_writes: &[String],
+    agent_label: &str,
 ) -> Option<(String, String)> {
     let key_path = crate::manifest_sig::default_signing_key_path().ok()?;
     let sk = aura_attestation::load_or_create(&key_path).ok()?;
@@ -7106,14 +7399,23 @@ pub(crate) fn sign_intent_best_effort(
         .ok()
         .filter(|s| !s.trim().is_empty());
     let now = time::OffsetDateTime::now_utc();
-    let block = crate::intent_block::build_intent_block(
+    let mut block = crate::intent_block::build_intent_block(
         intent,
-        "MCP Agent",
+        agent_label,
         human_id.as_deref(),
         &host,
         now,
         intent_type,
     );
+    // Record the agent's declared write scope so the commit-time reconciler
+    // (intent_reconcile) can catch any file it touches beyond what it said it
+    // would. Empty ⇒ no scope claim, and the divergence gate stays dormant
+    // for this intent. Set BEFORE signing — declared_impacts is part of the
+    // signed canonical envelope (unlike actual_impacts, which is reconciled
+    // in afterward).
+    if !declared_writes.is_empty() {
+        block.declared_impacts.writes_paths = declared_writes.to_vec();
+    }
     let dir = std::path::Path::new(".aura/blocks");
     let (id, _path) = crate::intent_block::sign_and_persist(block, &sk, dir).ok()?;
 

@@ -150,7 +150,7 @@ impl Brain for OpenAINativeBrain {
             }
         }
 
-        let client = reqwest::Client::new();
+        let client = super::http::shared_client();
         let res = client
             .post(&endpoint)
             .bearer_auth(&api_key)

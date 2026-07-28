@@ -90,3 +90,47 @@ export function mapKeyEvent(e: KeyboardEvent): Uint8Array | null {
 
   return null;
 }
+
+/** IO seam for {@link handleClipboardKey}: pull the pane's current
+ *  selection and write raw bytes to its PTY. Each terminal wires its own
+ *  write path (agent PTY vs. system PTY). */
+export interface ClipboardKeyIO {
+  getSelection: () => string;
+  writeBytes: (bytes: number[]) => void;
+}
+
+/** Handle macOS ⌘C (copy the xterm selection) / ⌘V (paste the clipboard
+ *  into the PTY). Returns true when the event was a clipboard shortcut we
+ *  consumed — the caller must then `preventDefault()` and suppress xterm.
+ *  Returns false to let normal keymap handling proceed.
+ *
+ *  Why this can't be left to the browser: xterm keeps its selection on a
+ *  canvas rather than as a DOM selection, so WKWebView's native ⌘C copies
+ *  nothing; and a Tauri window exposes no Edit menu, so ⌘V never reaches
+ *  xterm's paste path. We bridge both through navigator.clipboard, which
+ *  the webview does grant. Paste is bracketed so multiline content is
+ *  inserted rather than submitted by bracketed-paste-aware TUIs (Claude
+ *  Code, Codex) — matching the Shift+Enter path above. */
+export function handleClipboardKey(e: KeyboardEvent, io: ClipboardKeyIO): boolean {
+  if (e.type !== "keydown" || !e.metaKey || e.altKey || e.ctrlKey) return false;
+  const key = e.key.toLowerCase();
+  if (key === "c") {
+    const sel = io.getSelection();
+    // No selection → let ⌘C fall through so it doesn't shadow anything;
+    // interrupt stays ⌃C, which is unaffected here.
+    if (!sel) return false;
+    void navigator.clipboard?.writeText(sel).catch(() => {});
+    return true;
+  }
+  if (key === "v") {
+    void navigator.clipboard
+      ?.readText()
+      .then((text) => {
+        if (!text) return;
+        io.writeBytes(Array.from(ENC.encode(`\x1b[200~${text}\x1b[201~`)));
+      })
+      .catch(() => {});
+    return true;
+  }
+  return false;
+}

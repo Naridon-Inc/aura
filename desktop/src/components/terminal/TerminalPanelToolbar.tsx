@@ -49,7 +49,7 @@ type Props = {
 };
 
 const BTN =
-  "h-6 w-6 grid place-items-center rounded text-text-4 hover:text-text-2 hover:bg-bg-hover disabled:opacity-40 disabled:hover:bg-transparent";
+  "h-6 w-6 grid place-items-center rounded text-text-4 transition-colors hover:text-text-2 hover:bg-bg-hover disabled:opacity-40 disabled:hover:bg-transparent";
 
 export function TerminalPanelToolbar({
   activeProfileName,
@@ -77,18 +77,18 @@ export function TerminalPanelToolbar({
 }: Props) {
   return (
     <div className="h-8 px-2 flex items-center gap-1 border-b border-line-soft bg-bg-chrome flex-shrink-0">
-      <span className="text-text-3 text-[11px] font-medium mr-1">Terminal</span>
+      <span className="text-text-3 text-[11px] font-medium mr-1 flex-shrink-0">Terminal</span>
 
       <TerminalNewMenu
         trigger={
           <button
             type="button"
-            title="Launch profile"
-            className="h-6 px-2 flex items-center gap-1 rounded text-text-3 text-[11px] hover:text-text-1 hover:bg-bg-hover"
+            title="Choose which shell to open"
+            className="h-6 px-2 flex items-center gap-1 min-w-0 rounded text-text-3 text-[11px] transition-colors hover:text-text-1 hover:bg-bg-hover"
           >
             <span className="font-mono text-text-4 text-[10px]">{">_"}</span>
             <span className="max-w-[120px] truncate">{activeProfileName}</span>
-            <ChevronDown className="h-3 w-3 opacity-70" />
+            <ChevronDown className="h-3.5 w-3.5 flex-shrink-0" />
           </button>
         }
         profiles={profiles}
@@ -126,7 +126,7 @@ export function TerminalPanelToolbar({
       </button>
       <button
         type="button"
-        title="Kill Terminal"
+        title="Close Terminal"
         className={BTN}
         disabled={!hasActive}
         onClick={onKill}
@@ -136,7 +136,7 @@ export function TerminalPanelToolbar({
 
       <TerminalOverflowMenu
         trigger={
-          <button type="button" title="More actions" className={BTN} disabled={!hasActive}>
+          <button type="button" title="More Actions" className={BTN} disabled={!hasActive}>
             <MoreHorizontal className="h-3.5 w-3.5" />
           </button>
         }
@@ -150,7 +150,7 @@ export function TerminalPanelToolbar({
 
       <button
         type="button"
-        title={sideListOpen ? "Hide terminal list" : "Show terminal list"}
+        title={sideListOpen ? "Hide Terminal List" : "Show Terminal List"}
         className={BTN}
         onClick={onToggleSideList}
       >
@@ -162,7 +162,7 @@ export function TerminalPanelToolbar({
       </button>
       <button
         type="button"
-        title="Open terminal in editor"
+        title="Open Terminal in Editor"
         className={BTN}
         disabled={!hasActive}
         onClick={onOpenInEditor}
@@ -171,13 +171,13 @@ export function TerminalPanelToolbar({
       </button>
       <button
         type="button"
-        title={maximized ? "Restore panel" : "Maximize panel"}
+        title={maximized ? "Restore Panel" : "Maximize Panel"}
         className={BTN}
         onClick={onToggleMaximize}
       >
         {maximized ? <ChevronDown className="h-3.5 w-3.5" /> : <ChevronUp className="h-3.5 w-3.5" />}
       </button>
-      <button type="button" title="Close panel" className={BTN} onClick={onClosePanel}>
+      <button type="button" title="Close Panel" className={BTN} onClick={onClosePanel}>
         <X className="h-3.5 w-3.5" />
       </button>
     </div>

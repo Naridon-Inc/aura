@@ -27,6 +27,7 @@ pub mod identity;
 pub mod keychain;
 pub mod keyfile;
 pub mod keys;
+pub mod repo_identity;
 pub mod signature;
 pub mod team_keys;
 
@@ -39,4 +40,8 @@ pub use error::{AttestationError, VerifyError};
 pub use identity::{ActorKind, ActorRef, LocalIdentity, Nid};
 pub use keyfile::{load_or_create, load_signing_key, rotate_key, save_signing_key};
 pub use keys::{SigningKey, VerifyingKey};
+pub use repo_identity::{
+    RepoIdentityError, RepoIdentityManifest, MANIFEST_REL_PATH, REPO_MANIFEST_VERSION,
+    ROOM_ID_DOMAIN,
+};
 pub use signature::SignatureBytes;

@@ -17,6 +17,8 @@ use std::collections::HashMap;
 use std::process::Command;
 use std::sync::Arc;
 
+pub mod antigravity;
+pub mod builtin_catalog;
 pub mod claude_code;
 pub mod codex;
 pub mod cursor;
@@ -178,6 +180,19 @@ impl ApprovalPolicy {
             ApprovalPolicy::AcceptEdits => vec!["--sandbox".into(), "workspace-write".into()],
             ApprovalPolicy::Plan => vec!["--sandbox".into(), "read-only".into()],
             ApprovalPolicy::Bypass => vec!["--dangerously-bypass-approvals-and-sandbox".into()],
+        }
+    }
+
+    /// Antigravity `agy` approval args. `Default` → none. `AcceptEdits` and
+    /// `Plan` map onto agy's `--mode` (accept-edits / plan); `Bypass` drops
+    /// all permission prompting. Verified against `agy --help` (v1.1.5):
+    /// `--mode <accept-edits|plan>` and `--dangerously-skip-permissions`.
+    pub fn antigravity_args(self) -> Vec<String> {
+        match self {
+            ApprovalPolicy::Default => Vec::new(),
+            ApprovalPolicy::AcceptEdits => vec!["--mode".into(), "accept-edits".into()],
+            ApprovalPolicy::Plan => vec!["--mode".into(), "plan".into()],
+            ApprovalPolicy::Bypass => vec!["--dangerously-skip-permissions".into()],
         }
     }
 
@@ -376,6 +391,9 @@ pub fn canonical_agent_id(id: &str) -> &str {
         "gem" => "gemini",
         // Codex CLI.
         "cx" => "codex",
+        // Antigravity — `agy` is the bin name; the provider id matches the
+        // brand mark file (antigravity.svg) so its icon resolves.
+        "agy" => "antigravity",
         _ => id,
     }
 }
@@ -436,8 +454,16 @@ impl Registry {
         r.push(Arc::new(codex::Codex));
         r.push(Arc::new(cursor::Cursor));
         r.push(Arc::new(kimi_coder::KimiCoder));
+        r.push(Arc::new(antigravity::Antigravity));
         r.push(Arc::new(opencode::OpenCode));
         r.push(Arc::new(pi::Pi));
+        // Well-known extra CLIs Aura recognises but drives interactively
+        // (Aider, Amp…). Seeded through the generic provider so each is pure
+        // data — no bespoke module — and any of them can still be overridden
+        // by a same-id entry in ~/.aura/agents.toml below.
+        for cfg in builtin_catalog::extras() {
+            r.push(Arc::new(generic_cli::GenericCliProvider::new(cfg)));
+        }
         // Best-effort. Bad TOML logs to stderr but doesn't fatal — a
         // typo in agents.toml shouldn't brick the shell.
         if let Err(e) = toml_loader::merge_user_toml(&mut r) {

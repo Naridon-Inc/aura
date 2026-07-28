@@ -279,7 +279,7 @@ function PostRow({ post }: { post: Post }) {
               </span>
             ) : null}
             {post.over18 ? (
-              <span className="text-[9px] font-semibold text-rose-400 border border-rose-500/40 rounded px-1">
+              <span className="text-[9px] font-semibold text-red border border-red/30 rounded px-1">
                 NSFW
               </span>
             ) : null}

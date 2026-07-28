@@ -9,32 +9,50 @@
 import { useCallback, useEffect, useState } from "react";
 import { api, type ZoneRule } from "../../../lib/api";
 import { useDocumentVisibility } from "../../../lib/useDocumentVisibility";
+import { peekCache, writeCache } from "../../../lib/resourceCache";
 import { Input } from "../../ui/input";
 import { CategorySection } from "../CategorySection";
-import { agoFromTs } from "./radarFormat";
+import { agoFromTs, nameLooksLikeAgent } from "./radarFormat";
+import { ActorMark } from "./ActorMark";
 
 const POLL_MS = 10000;
+
+/** Cache the zone list per repo so the radar band's ownership layer repaints
+ *  instantly on remount instead of cold-loading empty. Same resourceCache the
+ *  radar feed uses. */
+function zonesCacheKey(repoRoot: string): string {
+  return `radar:zones:${repoRoot}`;
+}
 /** Desktop-claimed zones carry this session id (cmd_zones.rs stamps it);
  *  same constant Tabs.tsx uses to decide a zone is self-owned. */
 const SELF_SESSION = "aura-shell";
 
 // Status hues only — warn shares the "likely" amber, block the "direct"
 // red, so severity reads identically across collisions and zones.
-const WARN_COLOR = "#e0a96d";
-const BLOCK_COLOR = "#e5484d";
+const WARN_COLOR = "var(--color-amber)";
+const BLOCK_COLOR = "var(--color-red)";
 
 /** Shared zone poll for the radar band. Lives here (not useTeamRadar) so
  *  the zone list refreshes immediately after claim/release mutations
  *  without waiting out the radar's own cadence. */
 export function useZones(repoRoot: string, enabled: boolean) {
-  const [zones, setZones] = useState<ZoneRule[]>([]);
+  const [zones, setZones] = useState<ZoneRule[]>(
+    () => peekCache<ZoneRule[]>(zonesCacheKey(repoRoot)) ?? [],
+  );
   const visible = useDocumentVisibility();
   const refresh = useCallback(async () => {
     if (!repoRoot || !enabled) return;
+    // Stale-while-revalidate: seed already painted the cached list; fetch and
+    // update, but a failed poll keeps the last-known zones rather than blanking.
+    const key = zonesCacheKey(repoRoot);
+    const cached = peekCache<ZoneRule[]>(key);
+    if (cached) setZones(cached);
     try {
-      setZones(await api.zoneList(repoRoot));
+      const list = await api.zoneList(repoRoot);
+      writeCache(key, list);
+      setZones(list);
     } catch {
-      setZones([]);
+      if (!cached) setZones([]);
     }
   }, [repoRoot, enabled]);
   useEffect(() => {
@@ -157,10 +175,10 @@ export function ZonesSection({
                 mine ? "this desktop" : z.session_id
               }\n${z.patterns.join("\n")}`}
             >
-              <span
-                className="shrink-0 w-1.5 h-1.5 rounded-full"
-                style={{ background: block ? BLOCK_COLOR : WARN_COLOR }}
-                aria-hidden
+              <ActorMark
+                actor={z.session_id}
+                isAgent={nameLooksLikeAgent(z.session_id)}
+                size={18}
               />
               <span className="flex-1 min-w-0">
                 <span className="flex items-center gap-1.5 min-w-0">
@@ -176,7 +194,7 @@ export function ZonesSection({
                       } 14%, transparent)`,
                     }}
                   >
-                    {block ? "block" : "warn"}
+                    {block ? "locked" : "announced"}
                   </span>
                 </span>
                 <span className="block text-[10px] text-text-4 truncate">
@@ -193,11 +211,11 @@ export function ZonesSection({
                   className="h-5 px-1.5 rounded text-[9.5px] text-text-3 hover:text-text-1 hover:bg-bg-hover disabled:opacity-50 transition-colors"
                   title={
                     block
-                      ? "Soften to warn — colliding edits get flagged, not rejected"
-                      : "Harden to block — colliding edits are actively rejected"
+                      ? "Unlock — back to announced; colliding edits get flagged, not rejected"
+                      : "Lock — colliding edits are actively rejected"
                   }
                 >
-                  {block ? "soften" : "harden"}
+                  {block ? "unlock" : "lock"}
                 </button>
                 <button
                   type="button"
@@ -277,9 +295,9 @@ function ZoneClaimComposer({
                 ? "bg-bg-2 text-text-1 font-medium"
                 : "text-text-4 hover:text-text-2"
             }`}
-            title="Soft claim — colliding edits get a warning"
+            title="Announce — a heads-up; colliding edits get flagged"
           >
-            warn
+            announced
           </button>
           <button
             type="button"
@@ -290,9 +308,9 @@ function ZoneClaimComposer({
                 : "text-text-4 hover:text-text-2"
             }`}
             style={mode === "block" ? { color: BLOCK_COLOR } : undefined}
-            title="Hard lock — colliding edits are rejected"
+            title="Lock — colliding edits are rejected"
           >
-            block
+            locked
           </button>
         </div>
         <button

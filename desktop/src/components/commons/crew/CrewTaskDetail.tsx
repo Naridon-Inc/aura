@@ -21,14 +21,15 @@ import {
   ArrowLeft,
   Check,
   ChevronRight,
+  CircleDashed,
   CornerDownRight,
-  Loader2,
   Play,
   RotateCcw,
   Send,
 } from "lucide-react";
 
 import type { LoopTask } from "../../../lib/api";
+import { AsciiSpinner } from "../../ui/ascii-spinner";
 import { Button } from "../../ui/button";
 import { StatusChip, type ChipSpec } from "../../ui/statusChip";
 import { TaskMarkdown } from "../../tasks/TaskMarkdown";
@@ -385,16 +386,33 @@ export function CrewTaskDetail({
             <div className="flex flex-wrap items-center gap-2">
               {task.commit_sha ? <CommitChip sha={task.commit_sha} /> : null}
               {best ? (
+                // Proven / almost / not-built — the ledger recorded a check for
+                // this commit.
                 <ProofPill proof={best} />
-              ) : (
-                <span className="text-[11px] text-text-5">
-                  Not checked against a goal
+              ) : place.goal ? (
+                // It DOES belong to a goal — Aura just hasn't recorded a check
+                // for this commit yet (the goal needs a checkable "done when",
+                // or the auto-prove hook hasn't run). Say that honestly instead
+                // of the old "not checked against a goal", which read as if the
+                // task had no goal at all.
+                <span
+                  className="inline-flex items-center gap-1.5 rounded-full border border-line-soft bg-bg-1/60 px-2 py-0.5 text-[11px] text-text-4"
+                  title="This task is part of a goal, but Aura hasn't confirmed it's met for this commit yet."
+                >
+                  <CircleDashed size={11} />
+                  Not confirmed yet
                 </span>
+              ) : (
+                <span className="text-[11px] text-text-5">No goal set yet</span>
               )}
             </div>
             {best?.goalText ? (
               <p className="mt-2 text-[11.5px] leading-relaxed text-text-3">
                 Goal: {best.goalText}
+              </p>
+            ) : place.goal ? (
+              <p className="mt-2 text-[11.5px] leading-relaxed text-text-4">
+                Goal: {place.goal}
               </p>
             ) : null}
             {best && best.files.length > 0 ? (
@@ -421,7 +439,7 @@ export function CrewTaskDetail({
         {/* Failed → the error. */}
         {life === "failed" && (task.error_message ?? "").trim() ? (
           <Section label="What went wrong">
-            <p className="whitespace-pre-wrap rounded-md border border-line-soft bg-bg-1/60 px-2.5 py-2 text-[11.5px] leading-relaxed text-[#c2706f]">
+            <p className="whitespace-pre-wrap rounded-md border border-line-soft bg-bg-1/60 px-2.5 py-2 text-[11.5px] leading-relaxed text-red">
               {task.error_message?.trim()}
             </p>
           </Section>
@@ -480,12 +498,12 @@ export function CrewTaskDetail({
 // A tone → colour for the timeline dots and flow ticks. Green = behind us,
 // amber = happening now, muted = still ahead, red = stopped.
 const TICK_COLOR: Record<Lifecycle, string> = {
-  done: "#3fa66a",
-  working: "#d99a2b",
-  ready: "#5b8def",
-  blocked: "#717c8a",
-  paused: "#717c8a",
-  failed: "#c2706f",
+  done: "var(--color-accent-green)",
+  working: "var(--color-amber)",
+  ready: "var(--color-text-3)",
+  blocked: "var(--color-text-4)",
+  paused: "var(--color-text-4)",
+  failed: "var(--color-red)",
 };
 
 /** This task's own life as a short vertical timeline — the missing answer to
@@ -523,12 +541,12 @@ function StepTimeline({ task, life }: { task: LoopTask; life: Lifecycle }) {
   }
   const color = (tone: Step["tone"]) =>
     tone === "done"
-      ? "#3fa66a"
+      ? "var(--color-accent-green)"
       : tone === "now"
-        ? "#d99a2b"
+        ? "var(--color-amber)"
         : tone === "fail"
-          ? "#c2706f"
-          : "#717c8a";
+          ? "var(--color-red)"
+          : "var(--color-text-4)";
   return (
     <ol className="space-y-0">
       {steps.map((s, i) => {
@@ -654,13 +672,9 @@ function StatusTick({ life }: { life: Lifecycle }) {
     );
   }
   if (life === "working") {
-    return (
-      <Loader2
-        size={12}
-        className="shrink-0 animate-spin"
-        style={{ color: TICK_COLOR.working }}
-      />
-    );
+    // TICK_COLOR.working is amber, which is the shared spinner's own colour —
+    // so the one loader in the app covers this tick with nothing lost.
+    return <AsciiSpinner className="shrink-0 text-[12px]" />;
   }
   return (
     <span

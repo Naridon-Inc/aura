@@ -23,5 +23,6 @@ pub mod policy;
 pub mod relevance;
 pub mod render;
 pub mod store;
+pub mod verify;
 
 pub use model::{AwarenessEvent, AwarenessKind};

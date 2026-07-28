@@ -198,6 +198,7 @@ pub fn notify(
             is_agent: false,
             delivery_status: "pending".to_string(),
             seq: None,
+            from_device_id: None,
         };
 
         // Send first; only record once the rail has durably accepted it,

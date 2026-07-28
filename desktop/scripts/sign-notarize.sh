@@ -54,6 +54,23 @@ fi
 IDENTITY="Developer ID Application: Aikolumi Software Private Limited (A5S8X4RCAS)"
 ENTITLEMENTS="src-tauri/entitlements.plist"
 
+# ── Clear the kernel code-signing cache lock ───────────────────────────────
+# `bun tauri build` already Developer-ID-signs the .app. We then cp
+# aura-shell-mcp + aura into Contents/MacOS, so the bundle must be re-signed.
+# But macOS AMFI pins the *inode* of every binary the build already validated
+# (aura-shell, aura-pty-daemon), and `codesign --force` on those inodes fails
+# with the opaque "internal error in Code Signing subsystem" — it cannot
+# replace a signature the kernel is caching. Giving every file a fresh inode
+# (ditto to a new tree, swap in place) drops that association so re-signing
+# succeeds. Cheap on a local SSD; skipped if the bundle is somehow absent.
+if [ -d "$APP" ]; then
+  echo "▸ resetting bundle inodes (clears kernel code-signing cache lock)"
+  rm -rf "$APP.reinode"
+  ditto "$APP" "$APP.reinode"
+  rm -rf "$APP"
+  mv "$APP.reinode" "$APP"
+fi
+
 echo "▸ deep-signing $APP"
 # Sign every nested binary first (deep signing isn't always reliable
 # with hardenedRuntime + jit entitlements, so we do them explicitly).
@@ -113,13 +130,14 @@ else
 fi
 
 # Now rebuild the DMG with the signed/stapled app inside.
-echo "▸ rebuilding DMG"
+# Use make-dmg.sh so the shipped image has the Applications shortcut + branded
+# layout (drag-to-install). A bare `hdiutil create -srcfolder Aura.app` packages
+# only the app, which left users running Aura from the read-only mounted image
+# and broke auto-update ("Auto-install isn't supported on this drive" — issue #5).
+echo "▸ rebuilding DMG (drag-to-install layout)"
 rm -f "$TARGET_DIR/dmg/Aura_local"*.dmg
 mkdir -p "$TARGET_DIR/dmg"
-hdiutil create -volname Aura \
-  -srcfolder "$APP" \
-  -ov -format UDZO \
-  "$DMG"
+bash "$(dirname "${BASH_SOURCE[0]}")/make-dmg.sh" "$APP" "$DMG" "Aura"
 
 echo "▸ signing DMG"
 codesign --force --timestamp --sign "$IDENTITY" "$DMG"

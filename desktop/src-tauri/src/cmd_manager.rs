@@ -52,6 +52,11 @@ pub struct ManagerRuntime {
     /// `ensure_cloud_inbox_poller` doesn't leak tasks if it's called
     /// multiple times for the same session.
     cloud_inbox_sessions: Mutex<std::collections::HashSet<String>>,
+    /// Session IDs we've already attempted a transcript backfill for this
+    /// process, so the startup sweep + a later resume don't double-upload
+    /// (and don't race each other's cloud-empty check). See
+    /// `ensure_transcript_backfilled`.
+    transcript_backfilled: Mutex<std::collections::HashSet<String>>,
 }
 
 impl ManagerRuntime {
@@ -60,6 +65,7 @@ impl ManagerRuntime {
             sessions: Mutex::new(HashMap::new()),
             app_handle: Mutex::new(None),
             cloud_inbox_sessions: Mutex::new(std::collections::HashSet::new()),
+            transcript_backfilled: Mutex::new(std::collections::HashSet::new()),
         }
     }
 
@@ -268,6 +274,8 @@ pub async fn manager_import_agent_session(
                 tool_calls: Vec::new(),
                 thinking: None,
                 saved_tokens: None,
+                input_tokens: None,
+                output_tokens: None,
             },
         );
     }
@@ -475,6 +483,8 @@ fn map_preroll_turns(
             // No savings signal in an imported transcript — the estimate is
             // computed only when Aura's own native tools run a turn.
             saved_tokens: None,
+            input_tokens: None,
+            output_tokens: None,
         });
     }
     out
@@ -687,6 +697,114 @@ pub async fn manager_list(
     }
     summaries.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
     Ok(summaries)
+}
+
+/// One global conversation-search result. Unlike `manager_list`, this scans
+/// the persisted message bodies across every workspace, so Command Palette
+/// can find an old discussion without first switching into its project.
+#[derive(Debug, Clone, Serialize)]
+pub struct ManagerSearchHit {
+    pub session_id: String,
+    pub objective: String,
+    pub repo_root: Option<String>,
+    pub role: String,
+    pub snippet: String,
+    pub turn_index: Option<usize>,
+    pub updated_at: u64,
+}
+
+fn search_snippet(text: &str, query_lower: &str) -> Option<String> {
+    let line = text
+        .lines()
+        .map(str::trim)
+        .find(|line| line.to_lowercase().contains(query_lower))?;
+    let collapsed = line.split_whitespace().collect::<Vec<_>>().join(" ");
+    if collapsed.chars().count() <= 220 {
+        Some(collapsed)
+    } else {
+        Some(format!("{}…", collapsed.chars().take(219).collect::<String>()))
+    }
+}
+
+fn session_search_hits(session: &ManagerSession, query_lower: &str) -> Vec<ManagerSearchHit> {
+    let mut hits = Vec::new();
+    let repo_root = session.projects.first().map(|project| project.root.clone());
+    if let Some(snippet) = search_snippet(&session.objective, query_lower) {
+        hits.push(ManagerSearchHit {
+            session_id: session.id.clone(),
+            objective: session.objective.clone(),
+            repo_root: repo_root.clone(),
+            role: "title".to_string(),
+            snippet,
+            turn_index: None,
+            updated_at: session.updated_at,
+        });
+    }
+    for (turn_index, turn) in session.chat.iter().enumerate().rev() {
+        let Some(snippet) = search_snippet(&turn.text, query_lower) else {
+            continue;
+        };
+        let role = match turn.role {
+            ChatRole::User => "you",
+            ChatRole::Manager => "assistant",
+            ChatRole::System => "system",
+        };
+        hits.push(ManagerSearchHit {
+            session_id: session.id.clone(),
+            objective: session.objective.clone(),
+            repo_root: repo_root.clone(),
+            role: role.to_string(),
+            snippet,
+            turn_index: Some(turn_index),
+            updated_at: session.updated_at,
+        });
+        // A few strong matches from one long chat are useful; hundreds are not.
+        if hits.len() >= 4 {
+            break;
+        }
+    }
+    hits
+}
+
+/// Search all native Aura conversations, newest first. A two-character floor
+/// avoids scanning the session archive for accidental single-key palette input.
+#[tauri::command]
+pub async fn manager_search(
+    runtime: State<'_, ManagerRuntime>,
+    query: String,
+    limit: Option<usize>,
+) -> Result<Vec<ManagerSearchHit>, String> {
+    let query_lower = query.trim().to_lowercase();
+    if query_lower.chars().count() < 2 {
+        return Ok(Vec::new());
+    }
+    let limit = limit.unwrap_or(40).clamp(1, 100);
+    let runtime_ids: std::collections::HashSet<String> =
+        runtime.sessions.lock().unwrap().keys().cloned().collect();
+    let mut sessions: Vec<ManagerSession> = runtime
+        .sessions
+        .lock()
+        .unwrap()
+        .values()
+        .map(|live| live.state.lock().unwrap().clone())
+        .collect();
+    for id in persist::list_session_ids() {
+        if !runtime_ids.contains(&id) {
+            if let Ok(session) = persist::load(&id) {
+                sessions.push(session);
+            }
+        }
+    }
+    sessions.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
+    let mut hits = Vec::new();
+    for session in sessions {
+        hits.extend(session_search_hits(&session, &query_lower));
+        if hits.len() >= limit {
+            break;
+        }
+    }
+    hits.truncate(limit);
+    Ok(hits)
 }
 
 /// Replay a native Aura chat session as the same `StreamEvent` stream the
@@ -972,6 +1090,7 @@ pub async fn manager_session_changeset(
             status,
             additions,
             deletions,
+            symbols: Vec::new(),
             commit: None,
             base: base.clone(),
         });
@@ -1230,6 +1349,86 @@ fn ensure_cloud_session_pushed(runtime: &ManagerRuntime, session_id: &str) {
             );
         }
     }
+}
+
+/// Fire a one-time (per process) transcript backfill for a session. Snapshots
+/// the chat — from the live runtime if attached, else cold-loaded from disk —
+/// and hands it to the cloud sync, which uploads it only when the cloud has no
+/// messages for the session yet. This is what makes a session's *earlier* turns
+/// (authored before the live-push code, or while signed out) reach a paired
+/// phone that would otherwise show "No transcript synced yet".
+///
+/// Guarded by `transcript_backfilled` so the startup sweep, a later resume, and
+/// any other trigger collapse to a single attempt — which also keeps two
+/// triggers from racing the cloud-empty check and double-uploading.
+fn ensure_transcript_backfilled(runtime: &ManagerRuntime, session_id: &str) {
+    {
+        let mut set = runtime.transcript_backfilled.lock().unwrap();
+        if !set.insert(session_id.to_string()) {
+            return; // already attempted this run
+        }
+    }
+    // Prefer the live in-memory chat; fall back to the on-disk copy for a
+    // session that isn't attached to the runtime.
+    let chat = {
+        let lock = runtime.sessions.lock().unwrap();
+        lock.get(session_id)
+            .map(|live| live.state.lock().unwrap().chat.clone())
+    };
+    let chat = match chat.or_else(|| persist::load(session_id).ok().map(|s| s.chat)) {
+        Some(c) => c,
+        None => return, // nothing on disk — nothing to backfill
+    };
+    let turns: Vec<crate::cloud_session_sync::BackfillTurn> = chat
+        .iter()
+        .filter(|t| !t.text.trim().is_empty())
+        .map(|t| crate::cloud_session_sync::BackfillTurn {
+            role: chat_role_label(t.role),
+            body: t.text.clone(),
+            at_unix_secs: t.at,
+        })
+        .collect();
+    crate::cloud_session_sync::spawn_backfill_messages(session_id.to_string(), turns);
+}
+
+/// Startup sweep: backfill the transcripts of recently-active Manager sessions
+/// so a paired phone opening one sees its history without the user having to
+/// send a fresh turn on the laptop first. Runs once, a few seconds after launch
+/// (after the session heartbeat + roster sync have had their first ticks, so
+/// the cloud rows the backfill writes against already exist). Bounded to the
+/// most-recently-touched sessions by file mtime — cheap to pick, and older
+/// sessions are unlikely to be opened on the phone. Each session still passes
+/// through the cloud-empty guard, so this is a no-op for anything already
+/// synced, and login-gated end to end.
+pub fn spawn_startup_transcript_backfill(app: AppHandle) {
+    // How long to wait so the heartbeat (first tick ~6s) + roster sync (~8s)
+    // have registered live sessions' cloud rows before we upload against them.
+    const STARTUP_DELAY: Duration = Duration::from_secs(14);
+    // Cap on how many recent sessions we sweep — one GET (+ maybe N POSTs) each.
+    const MAX_SESSIONS: usize = 50;
+    tauri::async_runtime::spawn(async move {
+        tokio::time::sleep(STARTUP_DELAY).await;
+        // Signed out → the backfill is a no-op anyway; skip the disk walk.
+        match crate::cloud_session_sync::read_credentials() {
+            Ok(creds) if crate::cloud_session_sync::cloud_token(&creds).is_some() => {}
+            _ => return,
+        }
+        // Pick the most-recently-modified session files without parsing them all.
+        let mut stamped: Vec<(std::time::SystemTime, String)> = persist::list_session_ids()
+            .into_iter()
+            .filter_map(|id| {
+                let path = persist::sessions_dir()?.join(format!("{id}.json"));
+                let mtime = std::fs::metadata(&path).ok()?.modified().ok()?;
+                Some((mtime, id))
+            })
+            .collect();
+        stamped.sort_by(|a, b| b.0.cmp(&a.0)); // newest first
+        stamped.truncate(MAX_SESSIONS);
+        let runtime = app.state::<ManagerRuntime>();
+        for (_, id) in stamped {
+            ensure_transcript_backfilled(&runtime, &id);
+        }
+    });
 }
 
 /// Start the cloud inbox poller for an existing session if one isn't
@@ -1659,7 +1858,7 @@ pub fn set_pending_plan(
     Ok(())
 }
 
-/// User clicked Build or Cancel on the PlanCard. Resolves the bridge
+/// User clicked Build, Request changes, or Cancel on the PlanCard. Resolves the bridge
 /// waiter (which unblocks the `aura propose-plan` CLI process so claude
 /// continues), clears `pending_plan`, and appends a visible chat turn.
 ///
@@ -1677,6 +1876,7 @@ pub async fn manager_decide_plan(
     session_id: String,
     plan_id: String,
     decision: String,
+    feedback: Option<String>,
     notify_team: Option<bool>,
     parallelism: Option<String>,
 ) -> Result<(), String> {
@@ -1705,6 +1905,22 @@ pub async fn manager_decide_plan(
     };
 
     let is_build = decision == "build";
+    let is_revise = decision == "revise";
+    if !matches!(decision.as_str(), "build" | "revise" | "cancel") {
+        return Err(format!("unknown plan decision: {decision}"));
+    }
+    let revision_feedback = if is_revise {
+        let value = feedback.unwrap_or_default().trim().to_string();
+        if value.is_empty() {
+            return Err("plan revision feedback cannot be empty".to_string());
+        }
+        if value.chars().count() > 8_000 {
+            return Err("plan revision feedback is limited to 8,000 characters".to_string());
+        }
+        Some(value)
+    } else {
+        None
+    };
 
     // Bucket D3 — resolve the user's parallelism pick from the segmented
     // control. Falls back to whatever `pending_plan.parallelism` already
@@ -1729,13 +1945,19 @@ pub async fn manager_decide_plan(
     mutate(&runtime, &session_id, |s| {
         if let Some(p) = s.pending_plan.as_ref() {
             if p.id == plan_id {
-                let label = if is_build { "Build" } else { "Cancel" };
+                let message = if is_build {
+                    "Build the plan".to_string()
+                } else if let Some(ref feedback) = revision_feedback {
+                    format!("Request plan changes:\n\n{feedback}")
+                } else {
+                    "Cancel the plan".to_string()
+                };
                 // Snapshot parallelism onto the session before we clear
                 // pending_plan. Build only — Cancel won't dispatch anything.
                 if is_build {
                     s.plan_parallelism = resolved_parallelism.unwrap_or(p.parallelism);
                 }
-                chat::append(s, ChatRole::User, format!("{label} the plan"));
+                chat::append(s, ChatRole::User, message);
                 s.pending_plan = None;
             }
         }
@@ -1780,6 +2002,8 @@ pub async fn manager_decide_plan(
             a2a_task_ids: result.todo_task_ids,
             plan_task_id: result.plan_task_id,
         }
+    } else if let Some(feedback) = revision_feedback {
+        PlanDecision::Revise { feedback }
     } else {
         PlanDecision::Cancel
     };
@@ -1815,6 +2039,7 @@ pub async fn manager_decide_plan(
 fn action_plan_task_id(action: &PlanDecision) -> Option<String> {
     match action {
         PlanDecision::Build { plan_task_id, .. } => plan_task_id.clone(),
+        PlanDecision::Revise { .. } => None,
         PlanDecision::Cancel => None,
     }
 }
@@ -3116,6 +3341,11 @@ fn ensure_attached(
     if let Some(app) = app {
         tauri::async_runtime::spawn(loop_session(app, sid, state.clone(), in_flight, kick_rx));
     }
+    // A session cold-loaded here (resumed after a shell restart) may pre-date
+    // the live message-push code — seed its history to the cloud once so a
+    // paired phone opening it doesn't show "No transcript synced yet". No-op if
+    // already synced or signed out.
+    ensure_transcript_backfilled(runtime, session_id);
     Ok(state)
 }
 
@@ -3376,7 +3606,12 @@ async fn spawn_task(
             model: None,
             approval: None,
         }) {
-            Ok(i) => i,
+            Ok(mut i) => {
+                // Enforce the fleet agent-CLI config policy (e.g. codex
+                // service_tier repair) before this task dispatches.
+                crate::agent_policy::apply_to_invocation(&provider_id, &mut i);
+                i
+            }
             Err(e) => {
                 let t = s.task_mut(task_id).unwrap();
                 t.status = ManagerTaskStatus::Failed;
@@ -4087,5 +4322,24 @@ mod scan_deletion_guard_tests {
         let (dels, reason) = scan_deletion_guard(sample).unwrap();
         assert_eq!(dels, vec!["drop_user"]);
         assert!(reason.contains("warning"));
+    }
+}
+
+#[cfg(test)]
+mod conversation_search_tests {
+    use super::search_snippet;
+
+    #[test]
+    fn finds_case_insensitive_matching_line() {
+        let hit = search_snippet("first line\n  Fix OAuth Refresh now  \nlast", "oauth refresh");
+        assert_eq!(hit.as_deref(), Some("Fix OAuth Refresh now"));
+    }
+
+    #[test]
+    fn clamps_long_snippets_on_character_boundaries() {
+        let text = format!("needle {}", "é".repeat(300));
+        let hit = search_snippet(&text, "needle").unwrap();
+        assert_eq!(hit.chars().count(), 220);
+        assert!(hit.ends_with('…'));
     }
 }

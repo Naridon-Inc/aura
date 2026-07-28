@@ -1,6 +1,6 @@
 [package]
 name = "aura"
-version = "0.19.21"
+version = "0.19.33"
 edition = "2024"
 
 # Public release workspace: the aura CLI (root package) + its vendored
@@ -16,6 +16,14 @@ exclude = ["crates/aura-stackgraph"]
 resolver = "2"
 
 [dependencies]
+# These three live under `crates/` rather than beside us at the repo root.
+# They began as standalone Naridon-Inc repos and were still being consumed as
+# `../aura-toon` etc. — paths that pointed at working copies nobody but us had,
+# because those directories are separate git repos and were gitignored here. A
+# fresh clone therefore failed to *resolve* this manifest, let alone build it.
+# Vendored in at `crates/<name>` they are ordinary tracked files, so `git clone`
+# + `cargo build` works with no second step. See `crates/README.md` for the
+# upstream remotes and the commits each was taken from.
 aura-toon = { path = "crates/aura-toon" }
 aura-merge = { path = "crates/aura-merge" }
 aura-agents = { path = "crates/aura-agents" }
@@ -70,7 +78,7 @@ tokio = { version = "1.49.0", features = ["full", "rt-multi-thread"] }
 tree-sitter = "0.26.6"
 tree-sitter-python = "0.25.0"
 tree-sitter-rust = "0.24.0"
-uuid = { version = "1.21.0", features = ["v4"] }
+uuid = { version = "1.21.0", features = ["v4", "v7"] }
 regex = "1.12.3"
 dialoguer = "0.12.0"
 directories = "6.0.0"

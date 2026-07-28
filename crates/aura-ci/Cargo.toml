@@ -1,6 +1,6 @@
 [package]
 name = "aura-ci"
-version = "0.19.21"
+version = "0.1.0"
 edition = "2021"
 license = "Apache-2.0 OR MIT"
 description = "Semantic CI — declarative .aura/pipelines that orchestrate the gates Aura already owns. Orchestration + verdict + GitHub-Actions export; the CLI supplies the semantic facts."

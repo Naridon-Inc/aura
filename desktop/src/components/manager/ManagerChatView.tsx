@@ -15,6 +15,7 @@
 
 import {
   Fragment,
+  memo,
   useCallback,
   useEffect,
   useLayoutEffect,
@@ -37,6 +38,7 @@ import {
   MoreHorizontal,
   Pencil,
   SquareArrowOutUpRight,
+  Target,
   X,
 } from "lucide-react";
 import {
@@ -56,10 +58,12 @@ import {
   type RibbonEntry,
 } from "../../lib/api";
 import { trackFeature } from "../../lib/track";
+import { attachSessionGoal } from "../../lib/goalStore";
 import {
   markManagerTurnInFlight,
   clearManagerTurnInFlight,
   isManagerTurnInFlight,
+  subscribeManagerTurns,
   getManagerTurnStartedAt,
   setManagerTurnStartedAt,
   clearManagerTurnStartedAt,
@@ -72,7 +76,11 @@ import { ScoutCard } from "./ScoutCard";
 import { WaveDispatchPanel } from "./WaveDispatchPanel";
 import { useEditorStore, getActiveWorkspaceRoot, openManagerSession } from "../../lib/editorStore";
 import { openPlanWizard } from "../../lib/planWizardStore";
-import { stripSteeringDirective } from "../../lib/steeringDirective";
+import {
+  buildGoalDirective,
+  hasGoalDirective,
+  stripSteeringDirective,
+} from "../../lib/steeringDirective";
 import { openPopout } from "../../lib/popout";
 import { pendingPlanToMarkdown, planPageId } from "../../lib/planMarkdown";
 import { handleChatSlash, type SlashInteractive, type SlashResumeRow } from "../../lib/chatSlashHandler";
@@ -118,6 +126,7 @@ import { ChatEmptyState } from "./chat/ChatEmptyState";
 import {
   ThinkingLine,
   PlanningStatusLine,
+  StallNotice,
   humanizeBrainId,
   brainAgentId,
 } from "./chat/StatusLine";
@@ -329,6 +338,7 @@ function loadQueue(sid: string): QueuedMessage[] {
         effort: m.effort ?? null,
         fast: !!m.fast,
         approval: (m.approval as QueuedMessage["approval"]) ?? null,
+        goal: !!m.goal,
       }));
   } catch {
     return [];
@@ -482,6 +492,21 @@ export function ManagerChatView({ session }: Props) {
   // vanishes. `null` when idle; the rising edge of busy/planBuilding stamps
   // the start, the falling edge resets it.
   const turnStartRef = useRef<number | null>(null);
+  // Last-activity stamp for the stall watchdog. Distinct from `turnStartRef`:
+  // it advances on every streamed delta (see the effect below), so a long but
+  // still-producing turn never looks stalled — only genuine silence does. The
+  // StallNotice reads it live off this ref each tick. A ref (not state) so the
+  // per-token refresh triggers no render.
+  const lastActivityRef = useRef<number>(Date.now());
+  // Brain of the current + previous turn dispatched from THIS view, used to
+  // surface a live brain-handoff divider the instant the user switches models
+  // (before any turn on the new brain persists — a stuck CLI wrapper never
+  // does). `cur` is the brain `send` will run; `prev` is the one the last turn
+  // ran. Set in `send`; a ref so the update piggybacks the send's own render.
+  const liveTurnBrainRef = useRef<{ cur: string | null; prev: string | null }>({
+    cur: null,
+    prev: null,
+  });
   // #294 — which stream path the in-flight turn took, so Stop cancels the
   // right one. The native (brain-trait) path persists partial output on
   // abort via a Drop guard and emits End{interrupted}; the legacy path
@@ -544,6 +569,14 @@ export function ManagerChatView({ session }: Props) {
   // cross-channel race a `session.pending_question` check would have (the
   // question snapshot and the busy delta arrive on separate channels).
   const lastExitRef = useRef<"clean" | "stop" | "question" | "error">("clean");
+  // Steer-in-flight: set when the user redirects a running turn (⌘↵ or the
+  // "steer" follow-up pref). The steer message is parked at the FRONT of the
+  // queue and the running turn is interrupted; unlike a plain Stop, this exit
+  // MUST drain the queue so the redirect fires the moment the interrupt lands.
+  // The drain effect reads it alongside `lastExitRef` (the interrupted End
+  // clobbers lastExitRef to "stop", so a dedicated ref is what carries intent
+  // across the interrupt). Cleared by the drain the instant it re-sends.
+  const steerPendingRef = useRef(false);
   // The mode steering directive is a STANDING instruction, not a per-message
   // one — once the brain is told "AUTO MODE", it keeps the conversation's full
   // history, so repeating the bracketed block on every turn is noise (and it
@@ -708,8 +741,23 @@ export function ManagerChatView({ session }: Props) {
       turnStartRef.current =
         getManagerTurnStartedAt(session.id) ??
         setManagerTurnStartedAt(session.id, Date.now());
+      // Anchor the stall clock to the turn's rising edge. On a remount of an
+      // already-running (possibly stuck) turn we can't know the real last
+      // activity, so start it "now" — the watchdog re-warns 90s later rather
+      // than firing instantly on the remount.
+      lastActivityRef.current = Date.now();
     }
   }, [busy, planBuilding, session.id]);
+
+  // Stall watchdog input — refresh the last-activity stamp on every streamed
+  // delta (text, reasoning, or tool block; each produces a fresh `streamBlocks`
+  // reference). A turn that keeps producing output stays "active" and never
+  // trips the StallNotice; only true silence (a hung CLI wrapper like Kimi with
+  // zero bytes for minutes) lets the idle gap grow past the threshold. Ref
+  // write only — no render cost per token.
+  useEffect(() => {
+    lastActivityRef.current = Date.now();
+  }, [streamBlocks]);
 
   // Resolve the currently-active brain so `send` can pick legacy
   // (CLI wrapper PTY) vs new (Brain-trait stream). Re-runs on session
@@ -742,6 +790,19 @@ export function ManagerChatView({ session }: Props) {
     void (async () => {
       unlisten = await listen<ManagerStreamDelta>(channel, (evt) => {
         const d = evt.payload;
+        // Safety net (mirrors the native chunk path): any content delta means a
+        // turn is genuinely running — light the working indicator regardless of
+        // how it was started. A message injected from Checks / PR surfaces never
+        // ran this view's local `send`, so without this the legacy path streamed
+        // tokens with no "Working…" status. Terminal kinds (question/done/error)
+        // below own turning it back off.
+        if (
+          d.kind === "text_delta" ||
+          d.kind === "tool_use" ||
+          d.kind === "tool_result"
+        ) {
+          setBusy(true);
+        }
         if (d.kind === "text_delta") {
           setStreamBlocks((prev) => upsertText(prev, d.block_idx, d.text));
         } else if (d.kind === "tool_use") {
@@ -823,6 +884,20 @@ export function ManagerChatView({ session }: Props) {
     void (async () => {
       unlisten = await listen<BrainChatChunk>(channel, (evt) => {
         const c = evt.payload;
+        // Safety net: if content is streaming, a turn is genuinely running —
+        // light the working indicator regardless of how the turn was started.
+        // The mount-seed + adopt-subscription cover the marker paths; this
+        // guarantees the indicator for ANY live stream (idempotent when already
+        // busy). Excludes the terminal end/error chunks, which own turning it
+        // off, so a late content chunk can never resurrect a settled turn.
+        if (
+          c.kind === "text" ||
+          c.kind === "reasoning" ||
+          c.kind === "tool_use" ||
+          c.kind === "tool_result"
+        ) {
+          setBusy(true);
+        }
         if (c.kind === "text") {
           setStreamBlocks((prev) => upsertText(prev, c.block_idx, c.text));
         } else if (c.kind === "reasoning") {
@@ -866,10 +941,15 @@ export function ManagerChatView({ session }: Props) {
             // (onStop already marks "stop"; set it again defensively in case
             // an interrupted End ever arrives without the click path.)
             lastExitRef.current = "stop";
-            setSlashLog((prev) => [
-              ...prev,
-              { at: Date.now() / 1000, text: "Interrupted", tone: "info" },
-            ]);
+            // A steer isn't a stop — it's a redirect. Skip the "Interrupted"
+            // seam so the new turn reads as a continuation, not a halt. The
+            // drain (which keys off steerPendingRef) fires the redirect next.
+            if (!steerPendingRef.current) {
+              setSlashLog((prev) => [
+                ...prev,
+                { at: Date.now() / 1000, text: "Interrupted", tone: "info" },
+              ]);
+            }
           }
           // The native turn has terminated server-side — retire the durable
           // in-flight marker so a later remount of this session doesn't seed a
@@ -1119,6 +1199,83 @@ export function ManagerChatView({ session }: Props) {
     }
   }, [session.id, session.chat, streamBlocks.length]);
 
+  // Self-healing dedupe for the live-stream → persisted-turn handoff. The live
+  // `streamBlocks` copy is meant to be wiped the instant the settled turn lands
+  // in `session.chat` — the stream's terminal end/done chunk calls
+  // `setStreamBlocks([])`. When that chunk is delayed or dropped (a cancelled or
+  // interrupted turn, a flaky socket, a brain that closed the stream without a
+  // clean terminator) the settled `manager` turn renders in the timeline AND the
+  // stale live copy renders right below it — the SAME reply painted twice
+  // back-to-back (the reported duplicate). Here we notice that the last persisted
+  // manager turn already carries this stream's prose and clear the orphan.
+  //
+  // Guarded tightly so it can never eat a legitimately-different live turn:
+  //   - only fires once a `manager` turn is actually the last entry (during
+  //     streaming the last entry is the just-persisted `user` turn, so this
+  //     no-ops until the reply settles);
+  //   - requires non-empty streamed prose that the persisted text already
+  //     contains (equal, or a prefix once the final chunk was folded in
+  //     server-side) — an interrupted partial whose text diverges is kept.
+  useEffect(() => {
+    if (streamBlocks.length === 0) return;
+    // Compare on whitespace-normalized text. The backend joins a turn's text
+    // blocks with "\n\n" when it persists them (and streams paragraph breaks as
+    // "\n\n" deltas), while the live buffer concatenates block text directly —
+    // so a byte-equality check spuriously failed for any multi-paragraph or
+    // multi-block reply, which is exactly when the duplicate showed.
+    const norm = (s: string) => s.replace(/\s+/g, " ").trim();
+    const streamedText = norm(
+      streamBlocks.map((b) => (b.kind === "text" ? b.text : "")).join(" "),
+    );
+    if (!streamedText) return;
+    const chat = session.chat ?? [];
+    if (chat[chat.length - 1]?.role !== "manager") return;
+    // A reply that ran tools is persisted across several passes — one `manager`
+    // turn per pass — so fold the whole trailing manager run, not just the last
+    // turn, before checking whether the settled transcript already carries this
+    // stream's prose.
+    let persisted = "";
+    for (let i = chat.length - 1; i >= 0 && chat[i]?.role === "manager"; i--) {
+      persisted = `${chat[i]!.text ?? ""} ${persisted}`;
+    }
+    persisted = norm(persisted);
+    if (!persisted) return;
+    if (persisted === streamedText || persisted.startsWith(streamedText)) {
+      // The settled turn now owns this prose. While the turn is still running
+      // (busy) drop ONLY the duplicated text from the live buffer — the live
+      // tool cards and reasoning keep streaming and the terminal chunk clears
+      // the rest at turn end. If the stream already ended without a clean
+      // terminator (cancelled/interrupted/flaky socket), wipe the stale buffer.
+      setStreamBlocks((prev) =>
+        busy ? prev.filter((b) => b.kind !== "text") : [],
+      );
+    }
+  }, [session.chat, streamBlocks, busy]);
+
+  // Adopt a turn started OUTSIDE this view. When a message reaches the brain by
+  // any path other than this component's own `send` — the floating HUD or a
+  // sidebar composer routing through `sendAmbientManagerTurn` — the turn arms
+  // the durable in-flight registry but never flips this view's local `busy`,
+  // and because `session.id` is unchanged the re-seed effect above doesn't
+  // re-run. The result the user reported: an injected message streams tokens
+  // but shows no "Working…" status, and nothing at all in the pre-first-token
+  // gap. Subscribe to the registry and mirror the marker for the bound session
+  // so every turn — typed here or injected elsewhere — lights the same
+  // indicator. We only ever turn it ON here: turning it OFF is owned by the
+  // stream's terminal end/error chunk (this view listens to `sid`'s channel)
+  // and the local send/stop paths. A marker-driven OFF would wrongly stomp
+  // `busy` for turns that run without a registry marker (edit-and-resend).
+  useEffect(() => {
+    const adopt = () => {
+      if (isManagerTurnInFlight(session.id)) setBusy(true);
+    };
+    const unsub = subscribeManagerTurns(adopt);
+    // A turn may have armed between this session binding and the subscribe;
+    // reconcile once so we don't miss that edge.
+    adopt();
+    return unsub;
+  }, [session.id]);
+
   // Drop the slash log when the session changes — it's session-scoped (a fresh
   // conversation starts with no ephemeral slash output shown).
   useEffect(() => {
@@ -1177,6 +1334,7 @@ export function ManagerChatView({ session }: Props) {
       effort: ReasoningEffort | null = null,
       fast: boolean = false,
       approval: ApprovalPolicy | null = null,
+      goal: boolean = false,
     ) => {
       const trimmed = msg.trim();
       if (busy) return;
@@ -1324,6 +1482,18 @@ export function ManagerChatView({ session }: Props) {
       // (error / question_asked / Stop) overwrite it before their own
       // setBusy(false), so the queue drains only on a genuine clean end.
       lastExitRef.current = "clean";
+      // Record which brain THIS turn runs on (override → picked model's brain →
+      // global active), rolling the prior value into `prev`, so the render can
+      // show a live "Continued on X" divider the moment a switch goes in-flight
+      // — before the new brain has streamed (or persisted) anything.
+      liveTurnBrainRef.current = {
+        cur:
+          brainOverride?.id ??
+          modelOverride?.brainId ??
+          activeBrain?.provider_id ??
+          null,
+        prev: liveTurnBrainRef.current.cur,
+      };
       setBusy(true);
       setError(null);
       trackFeature("chat_message", { mode: effectiveMode });
@@ -1335,7 +1505,21 @@ export function ManagerChatView({ session }: Props) {
         planBuildingTimer.current = null;
       }
       setPlanBuilding(effectiveMode === "plan");
-      const finalText = pipeMarker + steering + outbound;
+      // Sent as a goal — record it durably (session-tagged, so the Goals
+      // workbench sees it) and lead the turn with the goal steering block so
+      // the brain treats it as a standing outcome to plan through the crew loop
+      // and prove. The block is strippable + drives the "Sent as goal" badge on
+      // the bubble; unlike mode steering it's per-message (always sent when
+      // armed), never suppressed by the standing-directive de-dupe.
+      const goalDirective = goal ? buildGoalDirective() : "";
+      if (goal && resolvedRepoRoot && outbound) {
+        try {
+          attachSessionGoal(resolvedRepoRoot, outbound, session.id);
+        } catch (e) {
+          console.warn("[goal] attach failed", e);
+        }
+      }
+      const finalText = goalDirective + pipeMarker + steering + outbound;
       try {
         // v0.2.31 LL.0 — Brain-trait stream path for native brains.
         // CLI wrappers stay on the legacy `manager_chat` path because
@@ -1458,6 +1642,7 @@ export function ManagerChatView({ session }: Props) {
       effort: ReasoningEffort | null,
       fast: boolean,
       approval: ApprovalPolicy | null,
+      goal: boolean = false,
     ) => {
       setQueue((q) => [
         ...q,
@@ -1470,10 +1655,111 @@ export function ManagerChatView({ session }: Props) {
           effort,
           fast,
           approval,
+          goal,
         },
       ]);
     },
     [],
+  );
+
+  // Halt the in-flight turn. Shared by the composer's Stop button and the
+  // stall watchdog's Stop, so both paths cancel identically.
+  const stopTurn = useCallback(() => {
+    // Stop is not a clean turn-end — mark it so the queue does NOT drain the
+    // next message (the bug was Stop advancing the queue instead of halting).
+    // The queue itself is preserved, not cleared.
+    lastExitRef.current = "stop";
+    // #294 — preserve what already printed. The native path's backend Drop
+    // guard persists the partial turn and emits End{interrupted}, whose
+    // handler retires the live blocks AND drops an "Interrupted" marker — so we
+    // must NOT wipe streamBlocks here (that's what made printed output
+    // vanish). The legacy path has no such guard, so we keep its old reset.
+    // Explicit Stop — retire the in-flight marker on both paths (the
+    // interrupted End may arrive after the surface is already gone, so don't
+    // rely on the chunk handler alone to clear it).
+    clearManagerTurnInFlight(session.id);
+    if (inflightNativeRef.current) {
+      void api.brainChatCancel(session.id).catch(() => {});
+      setBusy(false);
+    } else {
+      void api.managerCancel(session.id).catch(() => {});
+      setBusy(false);
+      setStreamBlocks([]);
+    }
+  }, [session.id]);
+
+  // Steer — redirect the running turn instead of waiting for it to finish.
+  // (⌘↵, or plain ↵ when the follow-up pref is "steer".) Idle steers are just
+  // sends. While busy: park the message at the FRONT of the queue, flag the
+  // steer, and interrupt the turn. The interrupt persists the partial turn
+  // server-side (context is kept) and flips busy→false; the drain effect then
+  // fires this head as a fresh turn that picks up right where the agent was.
+  // We intentionally do NOT setBusy(false) ourselves on the native path — we
+  // let the interrupted End land first so the old turn's listener fully retires
+  // before the new turn starts (same safe ordering the clean-end drain gets).
+  const steer = useCallback(
+    (
+      message: string,
+      attachments: ComposerAttachment[],
+      mode: "auto" | "plan" | "build" | "ask",
+      pipeTargetSessionId: string | null,
+      effort: ReasoningEffort | null,
+      fast: boolean,
+      approval: ApprovalPolicy | null,
+      goal: boolean = false,
+    ) => {
+      const payload = {
+        id: newQueueId(),
+        text: message,
+        attachments,
+        mode,
+        pipeTargetSessionId,
+        effort,
+        fast,
+        approval,
+        goal,
+      };
+      // Nothing to redirect — behave like a normal send.
+      if (!busy) {
+        void send(message, attachments, mode, pipeTargetSessionId, effort, fast, approval, goal);
+        return;
+      }
+      steerPendingRef.current = true;
+      setQueue((q) => [payload, ...q]);
+      // Interrupt the in-flight turn. The partial turn is persisted, so the
+      // redirect's fresh turn resumes with full context.
+      clearManagerTurnInFlight(session.id);
+      if (inflightNativeRef.current) {
+        // Native brain: let the interrupted End flip busy→false and trigger the
+        // drain (avoids re-sending mid-teardown).
+        void api.brainChatCancel(session.id).catch(() => {});
+        // Fallback so the redirect can never get stuck. The native path relies
+        // on the interrupted `end` chunk arriving to flip busy→false and fire
+        // the drain that turns this parked message into a real turn. If the
+        // brain closes the stream without a clean terminator — a dropped
+        // socket, or a cancel that races the turn's own natural end — that
+        // chunk never lands and the steered message sits in the queue forever,
+        // invisible as a chat bubble. This was the "steered message doesn't
+        // come up in the chat view" report. Arm a short timer: if we're still
+        // waiting when it fires (steerPendingRef not yet consumed by the real
+        // end/drain), force the busy true→false transition ourselves so the
+        // drain runs. `steerPendingRef` is the whole signal: the drain consumes
+        // it atomically, so a still-true flag means neither the real end nor a
+        // Stop has drained yet — this timer is the only thing left to unstick
+        // it. It no-ops the instant the real end lands first.
+        window.setTimeout(() => {
+          if (!steerPendingRef.current) return; // real end already drained it
+          setStreamBlocks([]);
+          setBusy(false);
+        }, 2000);
+      } else {
+        // Legacy/PTY path emits no End — flip busy here so the drain fires.
+        void api.managerCancel(session.id).catch(() => {});
+        setStreamBlocks([]);
+        setBusy(false);
+      }
+    },
+    [busy, send, session.id],
   );
 
   const removeQueued = useCallback(
@@ -1518,11 +1804,19 @@ export function ManagerChatView({ session }: Props) {
   // the transition (not just `!busy`) keeps the whole queue from firing at
   // once; guarding on the exit reason keeps Stop / a pending question / an
   // error from auto-firing the next message (the lastExitRef machinery above).
+  // A steer is the one non-clean exit that MUST drain — the interrupt clobbers
+  // lastExitRef to "stop", so steerPendingRef carries the "fire now" intent
+  // across it; we consume the flag the instant we drain.
   const prevBusyRef = useRef(busy);
   useEffect(() => {
     const wasBusy = prevBusyRef.current;
     prevBusyRef.current = busy;
-    if (wasBusy && !busy && lastExitRef.current === "clean") {
+    // Only the true busy→idle transition drains — and only then do we consume
+    // the steer flag, so intermediate re-renders (e.g. the setQueue that parks
+    // the steer message while the interrupt is still in flight) don't clear it
+    // early and swallow the redirect.
+    if (wasBusy && !busy && (lastExitRef.current === "clean" || steerPendingRef.current)) {
+      steerPendingRef.current = false;
       setQueue((q) => {
         if (q.length === 0) return q;
         const [head, ...rest] = q;
@@ -1538,6 +1832,7 @@ export function ManagerChatView({ session }: Props) {
             head.effort,
             head.fast,
             head.approval,
+            head.goal ?? false,
           );
         });
         return rest;
@@ -1679,19 +1974,6 @@ export function ManagerChatView({ session }: Props) {
   // workspace are valid pipe targets. Stream-mode tabs are managed by
   // the brain itself, so piping into them would race with the
   // streaming connection.
-  const pipeTargets = useMemo(
-    () =>
-      editor.agentTabs
-        .filter(
-          (t) => t.mode === "pty" && (!repoRootForChat || t.repoRoot === repoRootForChat),
-        )
-        .map((t) => ({
-          sessionId: t.sessionId,
-          label: t.agentLabel,
-          monogram: t.agentMonogram,
-        })),
-    [editor.agentTabs, repoRootForChat],
-  );
   // Pre-first-message state: a brand-new chat (blank objective, no turns,
   // nothing streaming or pending). The chat view IS the empty state — it
   // shows the Aura wordmark until the user sends, instead of a separate
@@ -1711,6 +1993,40 @@ export function ManagerChatView({ session }: Props) {
     }
     return null;
   }, [streamBlocks, busy]);
+
+  // Brain of the most recent PERSISTED assistant turn (nearest-first). Native
+  // brain_chat_turn turns don't persist a brain, so this can be null even mid-
+  // conversation; the live-handoff fallback below covers that across remounts.
+  const lastPersistedBrain = useMemo<string | null>(() => {
+    const chat = session.chat ?? [];
+    for (let j = chat.length - 1; j >= 0; j--) {
+      const t = chat[j];
+      if (t.role !== "user" && t.brain) return t.brain;
+    }
+    return null;
+  }, [session.chat]);
+
+  // #1 — live brain-handoff divider. The persisted "Continued on X" divider
+  // only lands once a turn on the new brain is SAVED, so switching to a brain
+  // that then streams nothing (a stuck CLI wrapper like Kimi) left the switch
+  // invisible. This surfaces the handoff the instant the turn goes in-flight.
+  // `cur` is the brain this turn runs on; `prev` is the last turn's brain in
+  // this view, falling back to the last persisted assistant brain across a
+  // remount. Compared by display label so id families (`anthropic` vs
+  // `anthropic_native`, `cli:kimi` vs `moonshot`) don't false-trigger. Cleared
+  // when the turn settles (busy→false); the persisted divider then takes over.
+  const liveHandoffBrain: string | null = (() => {
+    if (!busy) return null;
+    const cur = liveTurnBrainRef.current.cur;
+    if (!cur) return null;
+    const prev = liveTurnBrainRef.current.prev ?? lastPersistedBrain;
+    if (!prev) return null;
+    return humanizeBrainId(cur) !== humanizeBrainId(prev) ? cur : null;
+  })();
+  // Human label of the in-flight brain, for the stall watchdog's copy.
+  const liveBrainLabel = liveTurnBrainRef.current.cur
+    ? humanizeBrainId(liveTurnBrainRef.current.cur)
+    : undefined;
 
   const hasLiveContent =
     timeline.length > 0 ||
@@ -1779,11 +2095,13 @@ export function ManagerChatView({ session }: Props) {
   const hiddenCount = windowStart;
   return (
     <ChatRepoRootContext.Provider value={repoRootForChat}>
-    <div className="flex flex-col h-full min-h-0">
+    <div className="relative flex flex-col h-full min-h-0">
       {/* Scroll region + scrollback rail share ONE positioning context so the
           rail spans only the messages and ends above the composer dock (not
-          running to the very bottom of the pane). */}
-      <div className="relative flex-1 min-h-0 flex flex-col">
+          running to the very bottom of the pane). Also an OS-drop zone for
+          "composer": a file dragged from Finder onto the conversation (not
+          just the tiny input box) routes to the composer as an attachment. */}
+      <div className="relative flex-1 min-h-0 flex flex-col" data-os-drop="composer">
       <div
         ref={scrollRef}
         onScroll={onScroll}
@@ -2009,6 +2327,12 @@ export function ManagerChatView({ session }: Props) {
             );
           }
         })}
+        {liveHandoffBrain && (
+          // #1 — the switch shows the instant the turn goes in-flight, above
+          // the live area, instead of waiting for a turn on the new brain to
+          // persist (which never happens when that brain hangs with no output).
+          <BrainHandoffDivider brain={liveHandoffBrain} chat={session.chat ?? []} />
+        )}
         {streamBlocks.length > 0 && (
           // Polite, non-atomic live region: screen readers announce the
           // assistant's reply as it streams in (WCAG 2.2 § 4.1.3 Status
@@ -2082,11 +2406,31 @@ export function ManagerChatView({ session }: Props) {
               <ThinkingLine startedAt={turnStartRef.current} />
             )
           )}
+        {/* #3 — stall watchdog. When a turn is genuinely waiting on the brain
+            (not building a plan, not running a tool, no pending question/plan)
+            and it has streamed nothing for a while, surface a calm "may be
+            stuck" notice with a Stop. Anchored on last-activity, so a turn that
+            keeps producing output never trips it — only true silence (a hung
+            CLI wrapper) does. Suppressed while a tool runs: that has its own
+            live timer and is legitimately long. */}
+        {busy &&
+          !planBuilding &&
+          !runningTool &&
+          !session.pending_question &&
+          !session.pending_plan &&
+          !session.pending_scout &&
+          !error && (
+            <StallNotice
+              getIdleSince={() => lastActivityRef.current}
+              brainLabel={liveBrainLabel}
+              onStop={stopTurn}
+            />
+          )}
         {error && (
           <div
             role="alert"
             aria-live="assertive"
-            className="text-rose-400 text-xs px-2 py-1 bg-rose-500/10 rounded border border-rose-500/30 mt-2"
+            className="text-red text-xs px-2 py-1 bg-red/10 rounded border border-red/30 mt-2"
           >
             {error}
           </div>
@@ -2105,6 +2449,13 @@ export function ManagerChatView({ session }: Props) {
           panel. */}
       <div
         className="p-dock"
+        // OS-drop zone for "composer" too — the sibling zone above only covers
+        // the message scroll region, so a screenshot dropped on the dock chrome
+        // (the input's padding, a docked question card, the queue stack, the
+        // running-command strip) used to hit-test to no zone and silently drop.
+        // Cover the whole dock so any drop onto what the user reads as "the
+        // composer" attaches, matching the terminal's full-pane drop target.
+        data-os-drop="composer"
         style={{
           borderTop: "none",
           // A docked choice/multi question — the plan-paused banner — or the
@@ -2148,10 +2499,15 @@ export function ManagerChatView({ session }: Props) {
               fusePlan ? "" : "mb-1"
             }`}
             style={{
+              // A paused brain is a stall, so the strip wears the same amber
+              // as `.aura-stall-notice` in the stylesheet rather than the
+              // accent — a stalled turn and a selected row must not look
+              // alike. The "Open plan" button below keeps the accent: that
+              // one IS the thing you press to clear the stall.
               background:
-                "color-mix(in srgb, var(--color-accent) 8%, var(--color-bg-card))",
+                "color-mix(in srgb, var(--color-amber) 8%, var(--color-bg-card))",
               border:
-                "1px solid color-mix(in srgb, var(--color-accent) 30%, transparent)",
+                "1px solid color-mix(in srgb, var(--color-amber) 30%, transparent)",
               // When fused, the banner becomes the composer's header strip:
               // round only the top, drop the seam border so it meets the
               // composer (which squares its own top via .composer-docked) on
@@ -2165,7 +2521,7 @@ export function ManagerChatView({ session }: Props) {
           >
             <span
               className="inline-block w-1.5 h-1.5 rounded-full"
-              style={{ background: "var(--color-accent)" }}
+              style={{ background: "var(--color-amber)" }}
             />
             <span className="flex-1">
               Brain paused on plan decision. Build or Cancel to continue, or
@@ -2273,41 +2629,26 @@ export function ManagerChatView({ session }: Props) {
           docked={fuseQuestion || fusePlan || fuseResume || !!runningTool}
           busy={busy}
           usage={usage}
-          pipeTargets={pipeTargets}
           sessionId={session.id}
+          // Presence enables the composer's Goal toggle. The toggle no longer
+          // fires on click — arming it tags the next Send (the `goal` flag on
+          // onSend/onQueue), which routes the message into the chat with a
+          // "Sent as goal" badge and steers the brain to plan it via the crew
+          // loop. This callback is kept only as the enable-gate.
+          onPlanGoal={() => {}}
           onBrainOverrideChange={setBrainOverride}
           modelOverride={modelOverride}
           onModelOverrideChange={setModelOverride}
-          onSend={(msg, attachments, mode, pipeTo, effort, fast, approval) =>
-            void send(msg, attachments, mode, pipeTo, effort, fast, approval)
+          onSend={(msg, attachments, mode, pipeTo, effort, fast, approval, goal) =>
+            void send(msg, attachments, mode, pipeTo, effort, fast, approval, goal)
           }
-          onQueue={(msg, attachments, mode, pipeTo, effort, fast, approval) =>
-            enqueue(msg, attachments, mode, pipeTo, effort, fast, approval)
+          onQueue={(msg, attachments, mode, pipeTo, effort, fast, approval, goal) =>
+            enqueue(msg, attachments, mode, pipeTo, effort, fast, approval, goal)
           }
-          onStop={() => {
-            // Stop is not a clean turn-end — mark it so the queue does NOT
-            // drain the next message (the bug was Stop advancing the queue
-            // instead of halting). The queue itself is preserved, not cleared.
-            lastExitRef.current = "stop";
-            // #294 — preserve what already printed. The native path's
-            // backend Drop guard persists the partial turn and emits
-            // End{interrupted}, whose handler retires the live blocks AND
-            // drops an "Interrupted" marker — so we must NOT wipe
-            // streamBlocks here (that's what made printed output vanish).
-            // The legacy path has no such guard, so we keep its old reset.
-            // Explicit user Stop — retire the in-flight marker on both paths
-            // (the interrupted End may arrive after the surface is already
-            // gone, so don't rely on the chunk handler alone to clear it).
-            clearManagerTurnInFlight(session.id);
-            if (inflightNativeRef.current) {
-              void api.brainChatCancel(session.id).catch(() => {});
-              setBusy(false);
-            } else {
-              void api.managerCancel(session.id).catch(() => {});
-              setBusy(false);
-              setStreamBlocks([]);
-            }
-          }}
+          onSteer={(msg, attachments, mode, pipeTo, effort, fast, approval, goal) =>
+            steer(msg, attachments, mode, pipeTo, effort, fast, approval, goal)
+          }
+          onStop={stopTurn}
         />
       </div>
     </div>
@@ -2437,11 +2778,12 @@ function RunningCommandStatus({
   }, [tool.tool_use_id]);
 
   const { verb, detail, mono } = runningLabel(tool);
-  // In-flight amber. `--color-warn` is the warning token; the codebase pairs it
-  // with the warm-amber hex fallback (#d9920a — same as the PlanCard "Building…"
-  // status) since not every theme defines the var, so the running state always
-  // reads amber rather than falling back to ink.
-  const warn = "var(--color-warn, #d9920a)";
+  // In-flight amber. `--color-amber` is the pack's warning/in-flight slot and
+  // every pack defines it, so a running tool reads amber the same way the
+  // PlanCard's "Building…" status, the crew glyph and the Automations run dot
+  // do — no hex fallback needed, and no borrowing of the accent, which means
+  // "something you can act on".
+  const warn = "var(--color-amber)";
   return (
     <div
       className={
@@ -2544,7 +2886,9 @@ function PlanCard({
   grouped?: boolean;
   repoRoot?: string | null;
 }) {
-  const [submitting, setSubmitting] = useState<"build" | "cancel" | null>(null);
+  const [submitting, setSubmitting] = useState<"build" | "revise" | "cancel" | null>(null);
+  const [revisionOpen, setRevisionOpen] = useState(false);
+  const [revisionFeedback, setRevisionFeedback] = useState("");
   // Bucket N3 — opt-in team broadcast on Build. Default off so the
   // common single-developer case stays quiet. When set, the backend
   // fires `aura msg send "Plan built: <title> (<plan_task_id>)"` after
@@ -2570,8 +2914,10 @@ function PlanCard({
   const approvedAt = approvalOverlay?.approved_at ?? plan.approved_at ?? null;
 
   const decide = useCallback(
-    async (decision: "build" | "cancel") => {
+    async (decision: "build" | "revise" | "cancel") => {
       if (submitting) return;
+      const feedback = revisionFeedback.trim();
+      if (decision === "revise" && !feedback) return;
       setSubmitting(decision);
       // Optimistic hand-off: the moment Build is pressed, ask the parent to
       // show "Spinning up the crew…" so the chat never goes silent during the
@@ -2584,13 +2930,14 @@ function PlanCard({
           decision,
           decision === "build" ? notifyTeam : false,
           decision === "build" ? parallelism : undefined,
+          decision === "revise" ? feedback : undefined,
         );
       } catch (e) {
         onError(e instanceof Error ? e.message : String(e));
         setSubmitting(null);
       }
     },
-    [submitting, sessionId, plan.id, onError, onBuildStart, notifyTeam, parallelism],
+    [submitting, sessionId, plan.id, onError, onBuildStart, notifyTeam, parallelism, revisionFeedback],
   );
 
   // "Open plan" → the proper fullscreen wizard overlay (Document / Tasks),
@@ -2686,12 +3033,18 @@ function PlanCard({
       ? { label: "Building…", tone: "amber", pulse: true }
       : submitting === "cancel"
         ? { label: "Cancelling…", tone: "muted", pulse: true }
+        : submitting === "revise"
+          ? { label: "Sending feedback…", tone: "amber", pulse: true }
         : approvedBy
           ? { label: "Approved", tone: "accent", pulse: false }
           : { label: "Awaiting review", tone: "accent", pulse: true };
+  // The "amber" tone above is the plan mid-flight (Building… / Sending
+  // feedback…) — genuinely the in-flight slot, so it takes --color-amber.
+  // The "accent" tone is Approved / Awaiting review: states you can act on,
+  // which is what the accent is for.
   const statusColor =
     status.tone === "amber"
-      ? "var(--color-warn, #d9920a)"
+      ? "var(--color-amber)"
       : status.tone === "muted"
         ? "var(--color-text-3)"
         : "var(--color-accent)";
@@ -2712,7 +3065,7 @@ function PlanCard({
       <button
         type="button"
         onClick={openAsTab}
-        className="w-full text-left flex items-start gap-3 px-3 py-2.5 transition-colors hover:bg-[color-mix(in_srgb,var(--color-fg-soft)_4%,transparent)]"
+        className="w-full text-left flex items-start gap-3 px-3 py-2.5 transition-colors hover:bg-bg-2"
         title="Open the full plan — phases, architecture, file refs — in its own tab"
       >
         <span
@@ -2858,7 +3211,7 @@ function PlanCard({
                     setOptionsOpen(false);
                     void approve();
                   }}
-                  className="px-3 py-1.5 t-sm text-left disabled:opacity-50 transition-colors hover:bg-[color-mix(in_srgb,var(--color-fg-soft)_6%,transparent)]"
+                  className="px-3 py-1.5 t-sm text-left disabled:opacity-50 transition-colors hover:bg-bg-2"
                   style={{ color: "var(--color-text-2)" }}
                   title="Stamp this plan with your handle + timestamp. Persists across reload; does not Build."
                 >
@@ -2880,7 +3233,7 @@ function PlanCard({
                 />
               </div>
               <label
-                className="px-3 py-1.5 t-sm flex items-center gap-2 select-none cursor-pointer hover:bg-[color-mix(in_srgb,var(--color-fg-soft)_6%,transparent)]"
+                className="px-3 py-1.5 t-sm flex items-center gap-2 select-none cursor-pointer hover:bg-bg-2"
                 style={{ color: "var(--color-text-2)" }}
                 title="Send 'Plan built: <title>' to your team via aura msg when this kicks off."
               >
@@ -2893,6 +3246,47 @@ function PlanCard({
                 />
                 Notify team
               </label>
+              <button
+                type="button"
+                disabled={submitting !== null}
+                onClick={() => setRevisionOpen((value) => !value)}
+                className="px-3 py-1.5 t-sm text-left disabled:opacity-50 transition-colors hover:bg-bg-2"
+                style={{ color: "var(--color-text-2)" }}
+              >
+                Request changes
+              </button>
+              {revisionOpen && (
+                <div className="px-3 pb-2 flex flex-col gap-2">
+                  <textarea
+                    autoFocus
+                    value={revisionFeedback}
+                    onChange={(event) => setRevisionFeedback(event.target.value)}
+                    rows={3}
+                    maxLength={8000}
+                    placeholder="What should the plan change?"
+                    className="w-full resize-y t-xs px-2 py-1.5 outline-none"
+                    style={{
+                      color: "var(--color-text-1)",
+                      background: "var(--color-bg-2)",
+                      border: "1px solid var(--color-line)",
+                      borderRadius: "var(--radius-sm)",
+                    }}
+                  />
+                  <button
+                    type="button"
+                    disabled={submitting !== null || !revisionFeedback.trim()}
+                    onClick={() => void decide("revise")}
+                    className="self-end t-xs px-2 py-1 disabled:opacity-50"
+                    style={{
+                      color: "var(--color-bg-0)",
+                      background: "var(--color-accent)",
+                      borderRadius: "var(--radius-sm)",
+                    }}
+                  >
+                    {submitting === "revise" ? "Sending…" : "Send feedback"}
+                  </button>
+                </div>
+              )}
               <div
                 className="my-1"
                 style={{ borderTop: "1px solid var(--color-line)" }}
@@ -2904,7 +3298,7 @@ function PlanCard({
                   setOptionsOpen(false);
                   void decide("cancel");
                 }}
-                className="px-3 py-1.5 t-sm text-left disabled:opacity-50 transition-colors hover:bg-[color-mix(in_srgb,var(--color-fg-soft)_6%,transparent)]"
+                className="px-3 py-1.5 t-sm text-left disabled:opacity-50 transition-colors hover:bg-bg-2"
                 style={{ color: "var(--color-text-2)" }}
               >
                 {submitting === "cancel" ? "Cancelling…" : "Cancel plan"}
@@ -3106,7 +3500,7 @@ function SystemCard({ text, tone }: { text: string; tone: "info" | "warn" | "ok"
   }
   const accent =
     tone === "warn"
-      ? "var(--color-accent-amber, rgb(251 191 36))"
+      ? "var(--color-accent)"
       : "var(--color-accent-green)";
   const Glyph = tone === "warn" ? AlertTriangle : Check;
   return (
@@ -3458,8 +3852,8 @@ function SpecialistStatusChip({ status }: { status: SettledSpecialist["status"] 
   // Status colours only (green = ok, warning-amber = skipped). A skipped
   // reviewer reads as a calm "Skipped", never an alarming failure.
   const tone = failed
-    ? "var(--color-warning, #d97706)"
-    : "var(--color-success, #16a34a)";
+    ? "var(--color-accent)"
+    : "var(--color-accent-green)";
   return (
     <span
       className="t-2xs t-ui px-1.5 py-0.5 shrink-0"
@@ -3669,47 +4063,90 @@ function formatSavedTokens(n: number): string {
   return n >= 1000 ? `${(n / 1000).toFixed(1)}k` : String(Math.round(n));
 }
 
-// User-attached images on a chat turn, rendered as inline thumbnails inside
-// the bubble. The bytes are persisted base64 on the turn (the same copy the
-// brain receives), so this re-renders correctly on reload. Clicking a
-// thumbnail toggles it to full width so a small preview can be read in place.
+// User-attached images on a chat turn, rendered as small image CARDS that sit
+// BELOW the text bubble (not inside it) — so the bubble stays text-only and a
+// pasted screenshot reads as a compact attachment card, no chip chrome around
+// it. Each card shows the image itself at a small size; clicking toggles a
+// larger preview under the row. The bytes are persisted base64 on the turn
+// (the same copy the brain receives), so this re-renders correctly on reload.
 // Renders nothing when the turn carried no images.
-function ChatAttachmentThumbs({
+function ChatAttachmentCards({
   attachments,
 }: {
   attachments?: ChatImageAttachment[] | null;
 }) {
+  const [openIdx, setOpenIdx] = useState<number | null>(null);
   if (!attachments || attachments.length === 0) return null;
+  const open = openIdx !== null ? attachments[openIdx] : null;
   return (
-    <div className="flex flex-wrap gap-2 mb-2">
-      {attachments.map((a, i) => (
-        <AttachmentThumb key={i} att={a} />
-      ))}
+    <div className="mt-1 flex flex-col items-end gap-1">
+      <div className="flex flex-wrap justify-end gap-1.5">
+        {attachments.map((a, i) => (
+          <AttachmentCard
+            key={i}
+            att={a}
+            active={openIdx === i}
+            onToggle={() => setOpenIdx((v) => (v === i ? null : i))}
+          />
+        ))}
+      </div>
+      {open && (
+        <img
+          src={`data:${open.media_type};base64,${open.data_base64}`}
+          alt={open.name ?? "attached image"}
+          className="rounded-lg border object-contain"
+          style={{
+            borderColor: "var(--color-line-soft)",
+            maxHeight: 320,
+            maxWidth: "100%",
+          }}
+        />
+      )}
     </div>
   );
 }
 
-function AttachmentThumb({ att }: { att: ChatImageAttachment }) {
-  const [full, setFull] = useState(false);
+function AttachmentCard({
+  att,
+  active,
+  onToggle,
+}: {
+  att: ChatImageAttachment;
+  active: boolean;
+  onToggle: () => void;
+}) {
   const src = `data:${att.media_type};base64,${att.data_base64}`;
   return (
-    <img
-      src={src}
-      alt={att.name ?? "attached image"}
-      title={att.name ?? undefined}
-      onClick={() => setFull((v) => !v)}
-      className="rounded cursor-pointer border object-contain"
+    <button
+      type="button"
+      onClick={onToggle}
+      title={active ? "Hide preview" : att.name || "image"}
+      // No padding — the card IS the image, just a thin rounded frame. lineHeight
+      // 0 kills the inline-image descender gap so the border hugs the pixels.
+      className="block rounded-lg overflow-hidden border transition-colors"
       style={{
-        borderColor: "var(--color-line-soft)",
-        maxHeight: full ? "none" : 160,
-        maxWidth: "100%",
-        width: full ? "100%" : "auto",
+        borderColor: active ? "var(--color-line)" : "var(--color-line-soft)",
+        lineHeight: 0,
       }}
-    />
+    >
+      <img
+        src={src}
+        alt={att.name || "attached image"}
+        className="object-cover"
+        style={{ height: 72, maxWidth: 176, width: "auto", display: "block" }}
+      />
+    </button>
   );
 }
 
-function ChatBubble({
+// Memoized: while a turn streams, ManagerChatView re-renders on every token
+// (streamBlocks grows), which would otherwise re-render every settled bubble in
+// the timeline. All of a settled bubble's props are stable across a stream tick
+// — `turn` is a stable session.chat object, `busy` holds one value for the
+// whole in-flight turn, and `onEditResend` / `onFork` are useCallback-stable —
+// so shallow memo lets the finished transcript sit still while only the live
+// StreamingBubble repaints.
+const ChatBubble = memo(function ChatBubble({
   turn,
   chatIndex,
   busy,
@@ -3746,6 +4183,10 @@ function ChatBubble({
 }) {
   const [editing, setEditing] = useState(false);
   const visibleText = turn.role === "user" ? stripModeDirective(turn.text) : turn.text;
+  // The turn kept its raw `[GOAL …]` steering prefix (stripped from the visible
+  // text above) — badge it so "send as goal" is legible after reload, from the
+  // persisted turn alone.
+  const sentAsGoal = turn.role === "user" && hasGoalDirective(turn.text);
   const [editText, setEditText] = useState(visibleText);
   const [restoreChoice, setRestoreChoice] = useState(false);
   const [copied, setCopied] = useState(false);
@@ -3753,7 +4194,8 @@ function ChatBubble({
   const moreRef = useRef<HTMLDivElement | null>(null);
   const taRef = useRef<HTMLTextAreaElement | null>(null);
   // Experimental "Saved ~N tokens" chip — gated on the reactive settings flag.
-  const { show_token_savings: showSavings } = useFlagPrefs();
+  const { show_token_savings: showSavings, show_message_tokens: showMsgTokens } =
+    useFlagPrefs();
 
   // Close the More menu on any outside click / Escape.
   useEffect(() => {
@@ -3988,14 +4430,31 @@ function ChatBubble({
       );
     }
     return (
-      <div className="relative group user-bubble w-fit max-w-[85%]">
-        <ChatAttachmentThumbs attachments={turn.attachments} />
-        {visibleText}
-        <BubbleActions
-          onCopy={copyText}
-          copied={copied}
-          onEdit={canEdit ? startEdit : null}
-        />
+      // Wrapper right-aligns the whole message (bubble + any attachment cards)
+      // and caps its width. The image now hangs BELOW the bubble as its own
+      // compact card instead of living inside the padded text bubble.
+      <div className="ml-auto w-fit max-w-[85%] flex flex-col items-end">
+        {(visibleText.trim() || sentAsGoal) && (
+          <div className="relative group user-bubble">
+            {sentAsGoal && (
+              <div
+                className="mb-1 inline-flex items-center gap-1 t-xs t-ui select-none"
+                style={{ color: "var(--color-accent)" }}
+                title="Sent as a goal — Aura is driving this through the crew work-loop and proving it"
+              >
+                <Target size={11} strokeWidth={2} style={{ flex: "none" }} />
+                <span>Sent as goal</span>
+              </div>
+            )}
+            {visibleText}
+            <BubbleActions
+              onCopy={copyText}
+              copied={copied}
+              onEdit={canEdit ? startEdit : null}
+            />
+          </div>
+        )}
+        <ChatAttachmentCards attachments={turn.attachments} />
       </div>
     );
   }
@@ -4064,6 +4523,22 @@ function ChatBubble({
               Saved ~{formatSavedTokens(turn.saved_tokens)} tokens
             </span>
           )}
+        {showMsgTokens &&
+          (typeof turn.input_tokens === "number" ||
+            typeof turn.output_tokens === "number") && (
+            <span
+              className="msg-tokens"
+              title="Tokens this reply actually used, reported by the model — input (context sent in) and output (text generated back)."
+            >
+              {typeof turn.input_tokens === "number" &&
+                `${formatSavedTokens(turn.input_tokens)} in`}
+              {typeof turn.input_tokens === "number" &&
+                typeof turn.output_tokens === "number" &&
+                " · "}
+              {typeof turn.output_tokens === "number" &&
+                `${formatSavedTokens(turn.output_tokens)} out`}
+            </span>
+          )}
         <button
           type="button"
           onClick={copyText}
@@ -4125,7 +4600,7 @@ function ChatBubble({
       )}
     </div>
   );
-}
+});
 
 /** Format a turn's elapsed seconds for the per-message action row, matching
  *  Conductor's terse stat (`0s` / `8s` / `2m` / `1h`). Sub-second rounds to
@@ -4433,7 +4908,7 @@ function ProverBlock({ report }: { report: ProverReport }) {
           style={{
             fontFamily: "var(--font-mono)",
             fontSize: "10.5px",
-            color: pct === 100 ? "var(--color-accent-green, rgb(110 231 183))" : "var(--color-text-3)",
+            color: pct === 100 ? "var(--color-accent-green)" : "var(--color-text-3)",
             letterSpacing: "0.04em",
           }}
         >
@@ -4451,10 +4926,10 @@ function ProverBlock({ report }: { report: ProverReport }) {
 
 function ProverCheckRow({ check }: { check: ProverCheck }) {
   const palette: Record<ProverCheckStatus, { color: string; label: string; mark: string }> = {
-    passed: { color: "var(--color-accent-green, rgb(110 231 183))", label: "PASS", mark: "✓" },
-    stub: { color: "var(--color-amber, rgb(251 191 36))", label: "STUB", mark: "!" },
-    missing: { color: "var(--color-red, rgb(244 114 182))", label: "MISSING", mark: "✗" },
-    unwired: { color: "var(--color-red, rgb(244 114 182))", label: "UNWIRED", mark: "✗" },
+    passed: { color: "var(--color-accent-green)", label: "PASS", mark: "✓" },
+    stub: { color: "var(--color-amber)", label: "STUB", mark: "!" },
+    missing: { color: "var(--color-red)", label: "MISSING", mark: "✗" },
+    unwired: { color: "var(--color-red)", label: "UNWIRED", mark: "✗" },
   };
   const p = palette[check.status];
   return (
@@ -4518,7 +4993,7 @@ function ProverCheckRow({ check }: { check: ProverCheck }) {
             color:
               check.wiring.status === "passed"
                 ? "var(--color-text-3)"
-                : "var(--color-red, rgb(244 114 182))",
+                : "var(--color-red)",
             fontFamily: "var(--font-mono)",
           }}
         >
@@ -4817,7 +5292,7 @@ function WaveTimelineRow({ wave }: { wave: AggregatedWave }) {
           style={{
             fontFamily: "var(--font-mono)",
             fontSize: "10.5px",
-            color: "var(--color-accent-green, rgb(110 231 183))",
+            color: "var(--color-accent-green)",
           }}
           title={`Commit ${wave.commit}`}
         >
@@ -4841,7 +5316,7 @@ function WaveStatusPip({ status }: { status: WaveStatus }) {
   // Anything else → muted hollow ring.
   const SIZE = 14;
   if (status === "shipped") {
-    const color = "var(--color-accent-green, rgb(110 231 183))";
+    const color = "var(--color-accent-green)";
     return (
       <span
         title="Shipped"
@@ -4858,7 +5333,7 @@ function WaveStatusPip({ status }: { status: WaveStatus }) {
     );
   }
   if (status === "blocked") {
-    const color = "var(--color-red, rgb(244 114 182))";
+    const color = "var(--color-red)";
     return (
       <span
         title="Blocked"
@@ -4958,7 +5433,7 @@ function HookEventBlock({ text }: { text: string }) {
     >
       <span
         className="aura-block-label shrink-0 mt-[2px]"
-        style={{ color: "var(--color-red, rgb(244 114 182))" }}
+        style={{ color: "var(--color-red)" }}
       >
         HOOK
       </span>
@@ -5010,4 +5485,3 @@ function BubbleActions({
     </div>
   );
 }
-

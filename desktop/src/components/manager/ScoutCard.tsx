@@ -38,18 +38,23 @@ const KIND_CHANNEL: Record<SpecialistKind, string> = {
 
 const SEVERITY_TONE: Record<ScoutSeverity, string> = {
   info: "var(--color-text-3)",
-  warn: "var(--color-warning, #d97706)",
-  block: "var(--color-danger, #dc2626)",
+  // A warning IS the amber slot — routing it through the accent made every
+  // advisory finding look like a link you could follow.
+  warn: "var(--color-amber)",
+  block: "var(--color-red)",
 };
 
 // A reviewer that didn't finish (timed out / skipped / claude missing) is a
 // calm amber state — the build proceeds without it, so it must never read as
-// an alarming red failure. Matches the settled SpecialistStatusChip.
+// an alarming red failure. Matches the settled SpecialistStatusChip. `running`
+// keeps the accent because it is the live rung the eye should land on while
+// the review is in flight; `failed` is the thing that wants your attention
+// afterwards, so it takes amber and the two stay tellable apart.
 const STATUS_DOT: Record<SpecialistStatus, string> = {
   pending: "var(--color-text-3)",
   running: "var(--color-accent)",
-  done: "var(--color-success, #16a34a)",
-  failed: "var(--color-warning, #d97706)",
+  done: "var(--color-accent-green)",
+  failed: "var(--color-amber)",
 };
 
 export function ScoutCard({
@@ -273,9 +278,11 @@ function SpecialistRow({
               <span
                 className="t-2xs t-ui px-1.5 py-0.5 shrink-0"
                 style={{
-                  color: "var(--color-warning, #d97706)",
+                  // Matches STATUS_DOT.failed above — the chip and the dot
+                  // that labels it must never disagree.
+                  color: "var(--color-amber)",
                   border:
-                    "1px solid color-mix(in srgb, var(--color-warning, #d97706) 40%, transparent)",
+                    "1px solid color-mix(in srgb, var(--color-amber) 40%, transparent)",
                   borderRadius: "var(--radius-xs)",
                 }}
               >

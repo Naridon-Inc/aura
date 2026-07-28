@@ -58,6 +58,19 @@ if [ "$APP_VER" != "$CLI_VER" ]; then
 fi
 echo "▸ CLI ⇄ app version parity OK ($APP_VER)"
 
+# ── Memory safety: keep the compile under the swap line ────────────────────
+# The aura-shell lib is a large crate (wgpu + tauri + the whole aura stack).
+# At the default job count rustc's peak RSS + a running Aura.app (whose
+# `radar show` can balloon to multiple GB) tips the machine into swap, and the
+# OS SIGTERMs rustc mid-compile — the build dies with "signal: 15". Capping the
+# parallel job count bounds peak memory so a release can build *without closing
+# the app you're dogfooding*. Override with AURA_BUILD_JOBS=<n> on a big box.
+#   Tier-1 of "build Aura with Aura open"; Tier-2 (radar memory fix) +
+#   Tier-3 (app build-mode) remove the pressure at the source.
+export CARGO_BUILD_JOBS="${AURA_BUILD_JOBS:-2}"
+export NODE_OPTIONS="${NODE_OPTIONS:---max-old-space-size=8192}"
+echo "▸ memory-safe build: CARGO_BUILD_JOBS=$CARGO_BUILD_JOBS (override with AURA_BUILD_JOBS)"
+
 # Ensure native macOS xattr beats anaconda's shadow.
 export PATH="/usr/bin:/usr/sbin:/bin:/sbin:$PATH"
 

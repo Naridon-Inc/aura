@@ -15,6 +15,7 @@ import { invalidatePrList, patchCachedPr } from "../../lib/prsCache";
 import { invalidatePrDetail } from "../../lib/prDetailCache";
 import { Button } from "../ui/button";
 import { Input } from "../ui/input";
+import { AsciiSpinner } from "../ui/ascii-spinner";
 
 type Props = {
   repoRoot: string;
@@ -225,10 +226,13 @@ function LabelPicker({
       </div>
       <div className="max-h-64 overflow-y-auto">
         {loading ? (
-          <div className="text-text-4 text-[11.5px] px-3 py-3">loading…</div>
+          <div className="flex items-center gap-1.5 text-text-4 text-[11.5px] px-3 py-3">
+            <AsciiSpinner className="text-[10px]" />
+            <span>Loading labels…</span>
+          </div>
         ) : matches.length === 0 ? (
           <div className="text-text-4 text-[11.5px] px-3 py-3">
-            no labels match.
+            No labels match that.
           </div>
         ) : (
           matches.map((l) => (

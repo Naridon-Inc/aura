@@ -5,7 +5,7 @@
 // "aura"; AuraRailPanel re-reads the persisted sid when the project root
 // matches.
 
-import { api } from "./api";
+import { sendAmbientManagerTurn } from "./managerTurn";
 
 export type FocusManagerDetail = {
   repoRoot: string;
@@ -29,53 +29,25 @@ export function focusAmbientManager(repoRoot: string, sessionId: string): void {
   );
 }
 
-/** Trailing-slash-tolerant root compare — same rule AuraRailPanel applies
- *  when validating a persisted ambient sid. */
-function sameRoot(a: string, b: string): boolean {
-  const norm = (p: string) => (p.length > 1 ? p.replace(/\/+$/, "") : p);
-  return norm(a) === norm(b);
-}
-
 /**
- * Parity W8 — send a message INTO the project's ambient Manager session,
- * creating one when none exists, then focus the rail on it. This is how
- * non-chat surfaces (PR copilot buttons, launch glue) dispatch work to the
- * brain without reimplementing AuraRailPanel's session bookkeeping.
+ * Send a message INTO the project's ambient Manager session, creating one when
+ * none exists, then focus the rail on it. This is how non-chat surfaces (the
+ * Checks bar's Review/Prove/Attest rows, PR copilot buttons, launch glue)
+ * dispatch work to the brain.
  *
- * Reuses the persisted ambient sid only after validating it still belongs to
- * this project (`manager_status` → projects roster) — a stale or
- * cross-workspace sid falls through to a fresh `manager_chat_start`, never a
- * silent misroute. Returns the session id the message landed in.
+ * Delegates to `sendAmbientManagerTurn` — the SAME faithful path the in-app
+ * composer and the floating HUD use. That was the fix for the reported bug: a
+ * message written to the chat from Checks (not typed in the composer) showed no
+ * working state and no streamed tool calls. The bare `manager_chat` this used
+ * to call never armed the in-flight registry (so ManagerChatView's "adopt a
+ * turn started outside this view" effect never lit "Working…") and never took
+ * the native `brain_chat_turn` path (so tool_use cards never streamed into the
+ * open chat). Routing through `sendAmbientManagerTurn` marks the turn in-flight,
+ * stamps the elapsed timer, and dispatches on the correct native/legacy path —
+ * so an injected turn now behaves exactly like a typed one. It also validates
+ * the persisted ambient sid still belongs to this project and focuses the rail
+ * internally. Returns the session id the message landed in.
  */
 export async function sendToAmbientManager(repoRoot: string, text: string): Promise<string> {
-  let sid: string | null = null;
-  try {
-    sid = localStorage.getItem(ambientKey(repoRoot));
-  } catch {
-    sid = null;
-  }
-
-  if (sid) {
-    try {
-      const session = await api.managerStatus(sid);
-      const owns = session.projects.some((p) => sameRoot(p.root, repoRoot));
-      if (!owns) sid = null;
-    } catch {
-      // Session gone (app restart pruned it, file deleted) — start fresh.
-      sid = null;
-    }
-  }
-
-  if (sid) {
-    await api.managerChat(sid, text);
-  } else {
-    // manager_chat_start seeds the session with the prompt as its objective;
-    // the follow-up manager_chat delivers it as the first user turn so the
-    // brain actually runs on it (same two-step AuraRailPanel.startSession does).
-    sid = await api.managerChatStart(repoRoot, text);
-    void api.managerChat(sid, text);
-  }
-
-  focusAmbientManager(repoRoot, sid);
-  return sid;
+  return sendAmbientManagerTurn(repoRoot, text);
 }

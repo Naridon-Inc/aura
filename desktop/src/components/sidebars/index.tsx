@@ -33,6 +33,7 @@ import { CommitGraph } from "../CommitGraph";
 import { Button } from "../ui/button";
 import { Input } from "../ui/input";
 import { Select } from "../ui/select";
+import { AsciiSpinner } from "../ui/ascii-spinner";
 
 type Common = { repoRoot: string };
 
@@ -433,7 +434,7 @@ export function HistorySidebar({
       ) : (
       <div ref={parentRef} className="flex-1 min-h-0 overflow-y-auto">
         {loading && flat.length === 0 ? (
-          <Hint>loading…</Hint>
+          <HintLoading />
         ) : flat.length === 0 ? (
           <HistoryEmpty filter={filter} />
         ) : (
@@ -462,7 +463,7 @@ export function HistorySidebar({
                 >
                   {isSentinel ? (
                     <div className="px-4 py-2 text-text-4 text-[11px]">
-                      {loading ? "loading…" : "·"}
+                      {loading ? <AsciiSpinner /> : "·"}
                     </div>
                   ) : item!.kind === "header" ? (
                     <div className="px-4 pt-3 pb-1 text-text-3 text-[10.5px] uppercase tracking-wider">
@@ -495,16 +496,13 @@ function HistoryRow({
   onOpen: () => void;
   repoRoot: string;
 }) {
+  // Event KIND is carried by the row's glyph and its label — inking each kind
+  // its own colour (violet / amber / green) made a scrolling history read as
+  // confetti and taught nothing. Only a real failure keeps colour.
   const tone =
-    ev.kind === "intent"
-      ? "text-violet"
-      : ev.kind === "snapshot"
-        ? "text-amber"
-        : ev.kind === "commit"
-          ? "text-accent-green"
-          : ev.entry.severity === "fail"
-            ? "text-red"
-            : "text-amber";
+    ev.kind === "audit" && ev.entry.severity === "fail"
+      ? "text-red"
+      : "text-text-3";
   const time = ev.ts ? hhmm(ev.ts) : "";
   const [primary, secondary] = labelFor(ev);
   // Intent-only: changeset preview chip + right-click split/merge.
@@ -749,7 +747,7 @@ export function SearchSidebar({ repoRoot }: Common) {
       </div>
       <div className="flex-1 min-h-0 overflow-y-auto pb-2">
         {loading ? (
-          <Hint>Searching…</Hint>
+          <HintLoading />
         ) : rows.length === 0 ? (
           <Hint>{query ? "No matches" : "Type to search"}</Hint>
         ) : (
@@ -1252,7 +1250,7 @@ function SentinelInboxPane({ repoRoot }: Common) {
       </header>
       <div className="overflow-y-auto" style={{ maxHeight: 260 }}>
         {loading ? (
-          <Hint>loading…</Hint>
+          <HintLoading />
         ) : messages.length === 0 ? (
           <Hint>no messages — teammates' broadcasts and DMs land here</Hint>
         ) : (
@@ -1343,7 +1341,7 @@ function SentinelInboxRow({
           </span>
         )}
         {isBroadcast && (
-          <span className="text-[9px] uppercase tracking-wider text-text-4 px-1 py-0.5 rounded border border-line-soft">
+          <span className="text-[10px] uppercase tracking-wider text-text-4 px-1 py-0.5 rounded border border-line-soft">
             all
           </span>
         )}
@@ -1456,7 +1454,7 @@ function ActivityPane({ repoRoot }: Common) {
       </header>
       <div className="overflow-y-auto" style={{ maxHeight: 200 }}>
         {loading ? (
-          <Hint>loading…</Hint>
+          <HintLoading />
         ) : events.length === 0 ? (
           <Hint>no activity yet — create a task or claim one to see events</Hint>
         ) : (
@@ -1470,9 +1468,9 @@ function ActivityPane({ repoRoot }: Common) {
                   {formatRelative(ev.at)}
                 </span>
                 <span className="text-text-1 truncate">
-                  <span className="text-sky-300">{ev.actor}</span>{" "}
+                  <span className="text-text-1">{ev.actor}</span>{" "}
                   <span className="text-text-3">{ev.verb}</span>{" "}
-                  <span className="text-amber-300 font-mono text-[11px]">{ev.target}</span>
+                  <span className="text-text-2 font-mono text-[11px]">{ev.target}</span>
                   {ev.summary && (
                     <span className="text-text-3"> — {ev.summary}</span>
                   )}
@@ -1564,7 +1562,7 @@ export function AgentsSidebar({
       </header>
       <div className="flex-1 min-h-0 overflow-y-auto">
         {loading ? (
-          <Hint>loading…</Hint>
+          <HintLoading />
         ) : error ? (
           <Hint>{error}</Hint>
         ) : agents.length === 0 ? (
@@ -1619,7 +1617,9 @@ function AgentCard({
             width: 6,
             height: 6,
             borderRadius: "50%",
-            background: stale ? "var(--text-5, #555)" : "var(--color-accent-green, #4ade80)",
+            background: stale
+              ? "var(--color-text-5)"
+              : "var(--color-accent-green)",
           }}
         />
       </div>
@@ -1727,7 +1727,7 @@ export function ZonesSidebar({ repoRoot }: Common) {
       </header>
       <div className="flex-1 min-h-0 overflow-y-auto">
         {loading ? (
-          <Hint>loading…</Hint>
+          <HintLoading />
         ) : error ? (
           <Hint>{error}</Hint>
         ) : zones.length === 0 ? (
@@ -1788,14 +1788,14 @@ function ZoneGroupedList({
             <div className="flex items-baseline gap-2 px-4 pt-2 pb-1">
               <span
                 className={`w-1.5 h-1.5 rounded-full ${
-                  mine ? "bg-sky-400" : "bg-amber"
+                  mine ? "bg-accent" : "bg-text-4"
                 }`}
               />
               <span className="text-text-1 text-[12px] font-mono truncate">
                 {g.owner === "system" ? "system" : g.owner.slice(0, 16)}
               </span>
               {mine && (
-                <span className="text-[9px] uppercase tracking-wider text-sky-400 px-1 py-0.5 rounded border border-sky-400/40">
+                <span className="text-[10px] uppercase tracking-wider text-accent px-1 py-0.5 rounded border border-accent/40">
                   you
                 </span>
               )}
@@ -1858,6 +1858,22 @@ function relAge(ts: number): string {
 
 function Hint({ children }: { children: React.ReactNode }) {
   return <div className="text-text-4 text-[11.5px] px-4 py-3">{children}</div>;
+}
+
+// Waiting state for a whole panel. Same frame as Hint so the panel doesn't
+// jump when the content arrives — but the app has ONE loading mark, the
+// braille spinner, so these panels no longer spell out "loading…" in six
+// slightly different ways.
+function HintLoading() {
+  return (
+    <div
+      role="status"
+      aria-label="Loading"
+      className="text-[11.5px] px-4 py-3"
+    >
+      <AsciiSpinner />
+    </div>
+  );
 }
 
 // Per-filter empty-state copy. Each variant nudges the user toward the

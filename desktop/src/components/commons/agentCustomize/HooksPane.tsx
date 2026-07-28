@@ -5,9 +5,10 @@
 // switch, plain words — no talk of git hooks unless you ask.
 
 import { useState } from "react";
-import { Loader2, ShieldCheck } from "lucide-react";
+import { ShieldCheck } from "lucide-react";
 
 import { api, type CaptureStatus } from "../../../lib/api";
+import { AsciiSpinner } from "../../ui/ascii-spinner";
 import { Switch } from "../../ui/switch";
 import { Card, EmptyHint, PaneIntro, PaneScroll, PaneSpinner } from "./customizeShared";
 
@@ -83,7 +84,7 @@ export function HooksPane({
               </div>
             </div>
             {busy ? (
-              <Loader2 size={16} className="shrink-0 animate-spin text-text-4" />
+              <AsciiSpinner className="shrink-0 text-[14px]" />
             ) : (
               <Switch
                 checked={capture.enabled}

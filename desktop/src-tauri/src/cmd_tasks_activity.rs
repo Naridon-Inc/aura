@@ -54,7 +54,7 @@ pub struct TaskActivity {
     pub actor_handle: String,
     /// Event-specific structured payload. Examples:
     ///   - state_changed → {"from": "backlog", "to": "started"}
-    ///   - assigned → {"added": ["owner"]}
+    ///   - assigned → {"added": ["ashiq"]}
     ///   - labeled → {"added": ["bug"], "removed": ["frontend"]}
     ///   - linked → {"target_id": "task_abc", "kind": "blocked_by"}
     #[serde(default)]
@@ -209,12 +209,12 @@ mod tests {
             &repo,
             "task_a",
             "created",
-            "owner",
+            "ashiq",
             serde_json::json!({ "title": "test" }),
         )
         .unwrap();
         assert!(row.id.starts_with("act_"));
-        assert_eq!(row.actor_handle, "owner");
+        assert_eq!(row.actor_handle, "ashiq");
         let rows = read_all(&repo).unwrap();
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].task_id, "task_a");
@@ -224,9 +224,9 @@ mod tests {
     #[test]
     fn list_returns_newest_first_and_filters_by_task() {
         let repo = tmp_repo("newest");
-        append_activity(&repo, "t1", "created", "owner", serde_json::json!({})).unwrap();
-        append_activity(&repo, "t2", "created", "owner", serde_json::json!({})).unwrap();
-        append_activity(&repo, "t1", "updated", "owner", serde_json::json!({})).unwrap();
+        append_activity(&repo, "t1", "created", "ashiq", serde_json::json!({})).unwrap();
+        append_activity(&repo, "t2", "created", "ashiq", serde_json::json!({})).unwrap();
+        append_activity(&repo, "t1", "updated", "ashiq", serde_json::json!({})).unwrap();
         let rows = read_all(&repo).unwrap();
         assert_eq!(rows.len(), 3);
         // Filter for t1 newest-first

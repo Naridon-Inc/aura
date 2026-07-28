@@ -1,16 +1,17 @@
-// mentionSources — unified @-mention catalog for the Pages editor. Loads the
-// three things a page can reference (people from the team roster, tasks from
-// the board, and other pages) once, then offers a single fuzzy search over
-// the merged set. The editor's @ popover passes a query (and an optional kind
-// filter) and renders grouped results.
+// mentionSources — unified @-mention catalog for the Pages + Scribble editors.
+// Loads the four things a doc can reference (people from the team roster, pull
+// requests, tasks from the board, and other pages) once, then offers a single
+// fuzzy search over the merged set. The editor's @ popover passes a query (and
+// an optional kind filter) and renders the flattened results.
 //
 // People → inserted as `@handle` so the Rust mentioned_handles extractor +
-// auto-DM fire. Tasks → `[AURA-<n>](aura://task/<id>)`. Pages → `[[Title]]`.
+// auto-DM fire. PRs → `[#<n>](aura://pr/<n>)`. Tasks →
+// `[AURA-<n>](aura://task/<id>)`. Pages → `[[Title]]`.
 
 import { invoke } from "@tauri-apps/api/core";
 import { notesList } from "./pagesApi";
 
-export type MentionKind = "person" | "task" | "page";
+export type MentionKind = "person" | "pr" | "task" | "page";
 
 export type MentionItem = {
   kind: MentionKind;
@@ -26,12 +27,15 @@ export type MentionItem = {
   avatarHandle?: string;
   /** Tasks only — rendered token `AURA-<n>`. */
   taskRef?: string;
+  /** PRs only — the pull-request number for the `aura://pr/<n>` token. */
+  prNumber?: number;
   /** Pages only — exact title for the `[[Title]]` wikilink. */
   pageTitle?: string;
 };
 
 export type MentionSources = {
   people: MentionItem[];
+  prs: MentionItem[];
   tasks: MentionItem[];
   pages: MentionItem[];
 };
@@ -49,21 +53,70 @@ type BoardTask = {
   sequence_id?: number | null;
   title?: string | null;
 };
+type PrRow = {
+  number: number;
+  title?: string | null;
+  state?: string | null;
+};
 
-const EMPTY: MentionSources = { people: [], tasks: [], pages: [] };
+/** A fully-populated empty catalog. Callers that need a fallback value should
+ *  use this rather than an inline literal, so adding a new source kind can't
+ *  silently leave a call site with a missing group. */
+export const EMPTY_MENTION_SOURCES: MentionSources = {
+  people: [],
+  prs: [],
+  tasks: [],
+  pages: [],
+};
 
-/** Load people, tasks and pages for a repo. Resilient — a failing source
- *  yields an empty group rather than failing the whole load. */
+const EMPTY = EMPTY_MENTION_SOURCES;
+
+// Module-level catalog cache. The @-mention catalog (people, PRs, tasks, pages)
+// rarely changes within a session, yet every editor that mounts an @ popover
+// would otherwise fire four fresh Tauri round-trips (team_load, pr_list,
+// tasks_list, notes_list) before the first keystroke can resolve — so a user
+// typing `@AURA-` right after opening sees NO tasks until that batch lands, and
+// every surface remount refetches from scratch. Keeping the whole catalog on the
+// module (survives React remounts), keyed by repoRoot, lets a caller paint the
+// last-known catalog synchronously and revalidate in the background (SWR), the
+// same contract pagesApi uses for cachedNote / cachedList.
+const catalogCache = new Map<string, MentionSources>();
+
+/** Last-known mention catalog for a repo, or undefined if never loaded this
+ *  session. Seed editor state with this synchronously so the @ popover has
+ *  people / PRs / tasks / pages on the very first keystroke, then revalidate via
+ *  {@link loadMentionSources}. */
+export function cachedMentionSources(
+  repoRoot: string,
+): MentionSources | undefined {
+  return repoRoot ? catalogCache.get(repoRoot) : undefined;
+}
+
+/** Load people, PRs, tasks and pages for a repo. Resilient — a failing source
+ *  yields an empty group rather than failing the whole load. Populates the
+ *  module catalog cache on completion so the next mount is an instant hit. */
 export async function loadMentionSources(
   repoRoot: string,
 ): Promise<MentionSources> {
   if (!repoRoot) return EMPTY;
-  const [people, tasks, pages] = await Promise.all([
+  const [people, prs, tasks, pages] = await Promise.all([
     loadPeople(repoRoot),
+    loadPrs(repoRoot),
     loadTasks(repoRoot),
     loadPages(repoRoot),
   ]);
-  return { people, tasks, pages };
+  const prior = catalogCache.get(repoRoot);
+  // Don't let a transient failure of one source (which is swallowed to an empty
+  // group) wipe a group we already had — keep the last-known non-empty group so
+  // a hiccup in tasks_list never blanks the task mentions until a full reload.
+  const merged: MentionSources = {
+    people: people.length || !prior ? people : prior.people,
+    prs: prs.length || !prior ? prs : prior.prs,
+    tasks: tasks.length || !prior ? tasks : prior.tasks,
+    pages: pages.length || !prior ? pages : prior.pages,
+  };
+  catalogCache.set(repoRoot, merged);
+  return merged;
 }
 
 async function loadPeople(repoRoot: string): Promise<MentionItem[]> {
@@ -83,6 +136,27 @@ async function loadPeople(repoRoot: string): Promise<MentionItem[]> {
           avatarHandle: m.name || handle,
         };
       });
+  } catch {
+    return [];
+  }
+}
+
+async function loadPrs(repoRoot: string): Promise<MentionItem[]> {
+  try {
+    const prs = await invoke<PrRow[]>("pr_list", { repoRoot });
+    // Open PRs first, then the rest — you mention live work far more often.
+    const ordered = [...prs].sort((a, b) => {
+      const ao = (a.state ?? "").toLowerCase() === "open" ? 0 : 1;
+      const bo = (b.state ?? "").toLowerCase() === "open" ? 0 : 1;
+      return ao - bo || b.number - a.number;
+    });
+    return ordered.map((p) => ({
+      kind: "pr" as const,
+      id: String(p.number),
+      label: `#${p.number}`,
+      sublabel: p.title ?? undefined,
+      prNumber: p.number,
+    }));
   } catch {
     return [];
   }
@@ -153,7 +227,12 @@ export function searchMentions(
   query: string,
   kindFilter?: MentionKind,
   limitPerKind = 6,
-): { people: MentionItem[]; tasks: MentionItem[]; pages: MentionItem[] } {
+): {
+  people: MentionItem[];
+  prs: MentionItem[];
+  tasks: MentionItem[];
+  pages: MentionItem[];
+} {
   const q = query.trim().toLowerCase();
   const pick = (items: MentionItem[]): MentionItem[] => {
     if (!q) return items.slice(0, limitPerKind);
@@ -166,19 +245,21 @@ export function searchMentions(
   };
   return {
     people: kindFilter && kindFilter !== "person" ? [] : pick(sources.people),
+    prs: kindFilter && kindFilter !== "pr" ? [] : pick(sources.prs),
     tasks: kindFilter && kindFilter !== "task" ? [] : pick(sources.tasks),
     pages: kindFilter && kindFilter !== "page" ? [] : pick(sources.pages),
   };
 }
 
-/** Flatten the grouped search into a single ordered list (people → tasks →
- *  pages) for keyboard navigation. */
+/** Flatten the grouped search into a single ordered list (people → PRs → tasks
+ *  → pages) for keyboard navigation. */
 export function flattenMentionResults(grouped: {
   people: MentionItem[];
+  prs: MentionItem[];
   tasks: MentionItem[];
   pages: MentionItem[];
 }): MentionItem[] {
-  return [...grouped.people, ...grouped.tasks, ...grouped.pages];
+  return [...grouped.people, ...grouped.prs, ...grouped.tasks, ...grouped.pages];
 }
 
 /** The exact markdown a picked mention inserts. People stay `@handle` so the
@@ -186,6 +267,9 @@ export function flattenMentionResults(grouped: {
  *  link; pages become a page link. */
 export function mentionInsertText(item: MentionItem): string {
   if (item.kind === "person") return `@${item.handle ?? item.id} `;
+  if (item.kind === "pr") {
+    return `[#${item.prNumber ?? item.id}](aura://pr/${item.prNumber ?? item.id}) `;
+  }
   if (item.kind === "task") {
     return `[${item.taskRef ?? item.label}](aura://task/${item.id}) `;
   }

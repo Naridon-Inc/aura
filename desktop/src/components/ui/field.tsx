@@ -44,7 +44,11 @@ export function Field({
       )}
       {children}
       {error != null ? (
-        <p className="text-[13px] leading-[20.8px] text-red-400">{error}</p>
+        // role="alert" so the message is announced when it appears, not only
+        // when the reader happens to tab back over the field.
+        <p role="alert" className="text-[13px] leading-[20.8px] text-red">
+          {error}
+        </p>
       ) : description != null ? (
         <p className="text-[13px] leading-[20.8px] text-text-3">{description}</p>
       ) : null}

@@ -11,11 +11,9 @@
 
 #![cfg(feature = "brain_anthropic_native")]
 
-use async_stream::try_stream;
 use async_trait::async_trait;
-use futures_util::{StreamExt, stream::BoxStream};
-use serde_json::{Value, json};
-use tokio::io::{AsyncBufReadExt, BufReader};
+use futures_util::stream::BoxStream;
+use serde_json::json;
 
 use super::{
     Brain,
@@ -138,7 +136,7 @@ impl Brain for AnthropicNativeBrain {
             }
         }
 
-        let client = reqwest::Client::new();
+        let client = super::http::shared_client();
         let mut req_builder = client
             .post(&endpoint)
             .header("x-api-key", &api_key)
@@ -164,165 +162,8 @@ impl Brain for AnthropicNativeBrain {
             });
         }
 
-        // Adapt reqwest's bytes stream to a tokio AsyncBufRead so we can
-        // read SSE lines ergonomically.
-        let byte_stream = res.bytes_stream().map(|r| {
-            r.map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))
-        });
-        let reader = BufReader::new(tokio_util::io::StreamReader::new(byte_stream));
-
-        let stream = try_stream! {
-            let mut lines = reader.lines();
-            let mut current_block: Option<usize> = None;
-            let mut current_tool: Option<(String, String, String)> = None; // (id, name, json_buf)
-            // Token accounting — Anthropic reports `input_tokens` on
-            // `message_start` and the running `output_tokens` on each
-            // `message_delta`. We carry the latest of each and emit a single
-            // `Usage` chunk just before `End` so the context-fill meter has
-            // real numbers. Defaults to 0 when a field is absent.
-            let mut input_tokens: u32 = 0;
-            let mut output_tokens: u32 = 0;
-
-            while let Some(line) = lines.next_line().await.map_err(|e| BrainError::Network {
-                message: format!("read: {e}"),
-            })? {
-                let Some(payload) = line.strip_prefix("data: ") else {
-                    continue;
-                };
-                if payload == "[DONE]" {
-                    break;
-                }
-
-                let event: Value = match serde_json::from_str(payload) {
-                    Ok(v) => v,
-                    Err(e) => {
-                        Err(BrainError::Parse { message: format!("sse: {e}") })?;
-                        unreachable!()
-                    }
-                };
-
-                let kind = event.get("type").and_then(|v| v.as_str()).unwrap_or("");
-
-                match kind {
-                    "message_start" => {
-                        // The opening event carries the billed prompt size.
-                        if let Some(n) = event
-                            .get("message")
-                            .and_then(|m| m.get("usage"))
-                            .and_then(|u| u.get("input_tokens"))
-                            .and_then(|v| v.as_u64())
-                        {
-                            input_tokens = n as u32;
-                        }
-                    }
-                    "content_block_start" => {
-                        let idx = event
-                            .get("index")
-                            .and_then(|v| v.as_u64())
-                            .unwrap_or(0) as usize;
-                        current_block = Some(idx);
-                        let block = event.get("content_block").cloned().unwrap_or(json!({}));
-                        if block.get("type").and_then(|v| v.as_str()) == Some("tool_use") {
-                            let id = block
-                                .get("id")
-                                .and_then(|v| v.as_str())
-                                .unwrap_or("")
-                                .to_string();
-                            let name = block
-                                .get("name")
-                                .and_then(|v| v.as_str())
-                                .unwrap_or("")
-                                .to_string();
-                            current_tool = Some((id, name, String::new()));
-                        }
-                    }
-                    "content_block_delta" => {
-                        let idx = event
-                            .get("index")
-                            .and_then(|v| v.as_u64())
-                            .unwrap_or(0) as usize;
-                        let delta = event.get("delta").cloned().unwrap_or(json!({}));
-                        match delta.get("type").and_then(|v| v.as_str()) {
-                            Some("text_delta") => {
-                                let text = delta
-                                    .get("text")
-                                    .and_then(|v| v.as_str())
-                                    .unwrap_or("")
-                                    .to_string();
-                                if !text.is_empty() {
-                                    yield ChatChunk::Text { block_idx: idx, text };
-                                }
-                            }
-                            // Extended thinking — the model streams its
-                            // chain-of-thought as `thinking_delta` blocks when
-                            // the caller enabled a thinking budget (effort
-                            // chip). Surface them as a separate Reasoning
-                            // block so the UI can collapse them away from the
-                            // answer prose. `signature_delta` (the opaque
-                            // thinking signature) carries no readable text and
-                            // is intentionally dropped.
-                            Some("thinking_delta") => {
-                                let text = delta
-                                    .get("thinking")
-                                    .and_then(|v| v.as_str())
-                                    .unwrap_or("")
-                                    .to_string();
-                                if !text.is_empty() {
-                                    yield ChatChunk::Reasoning { block_idx: idx, text };
-                                }
-                            }
-                            Some("input_json_delta") => {
-                                if let Some((_, _, buf)) = current_tool.as_mut() {
-                                    if let Some(s) = delta
-                                        .get("partial_json")
-                                        .and_then(|v| v.as_str())
-                                    {
-                                        buf.push_str(s);
-                                    }
-                                }
-                            }
-                            _ => {}
-                        }
-                    }
-                    "content_block_stop" => {
-                        if let Some((id, name, buf)) = current_tool.take() {
-                            let input: Value = serde_json::from_str(&buf)
-                                .unwrap_or(json!({}));
-                            yield ChatChunk::ToolUse {
-                                block_idx: current_block.unwrap_or(0),
-                                tool_use_id: id,
-                                name,
-                                input,
-                            };
-                        }
-                    }
-                    "message_delta" => {
-                        // stop_reason lands here on the final delta; we
-                        // surface it via the End chunk below when the
-                        // stream completes. The cumulative output-token count
-                        // also rides on this event's `usage` block.
-                        if let Some(n) = event
-                            .get("usage")
-                            .and_then(|u| u.get("output_tokens"))
-                            .and_then(|v| v.as_u64())
-                        {
-                            output_tokens = n as u32;
-                        }
-                    }
-                    "message_stop" => {
-                        // Emit token accounting just before End so the UI's
-                        // context-fill meter updates atomically with turn end.
-                        if input_tokens > 0 || output_tokens > 0 {
-                            yield ChatChunk::Usage { input_tokens, output_tokens };
-                        }
-                        yield ChatChunk::End { stop_reason: None };
-                        break;
-                    }
-                    _ => {}
-                }
-            }
-        };
-
-        Ok(Box::pin(stream))
+        // Decode the SSE body via the shared Anthropic decoder (also used by
+        // the Vertex brain, which speaks the identical event stream).
+        Ok(super::anthropic_sse::decode_stream(res))
     }
 }

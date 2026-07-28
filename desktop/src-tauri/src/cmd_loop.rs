@@ -288,6 +288,30 @@ pub async fn loop_sync_board(repo_root: String) -> Result<LoopSyncResult, String
         if let Some(sprint) = t.sprint.as_ref().map(|s| s.trim()).filter(|s| !s.is_empty()) {
             tags.push(format!("sprint:{sprint}"));
         }
+        // Auto-bind a goal to every card that doesn't already carry one, so no
+        // task ever lands as loose "Other tasks" — every node belongs to a goal
+        // the crew view can group under and the prove hook can check. We prefer
+        // the card's parent epic title (so sibling subtasks cluster into one
+        // goal) and fall back to the card's own title (a one-task goal). A card
+        // that already has a `goal:` label — from chat's plan-a-goal or an
+        // explicit "attach to a flow" — keeps it untouched. This mirrors the
+        // post-commit prove hook, which likewise names a goal from the task
+        // title when none is linked, so the board and the ledger stay aligned.
+        let has_goal = tags
+            .iter()
+            .any(|tag| tag.trim().to_lowercase().starts_with("goal:"));
+        if !has_goal {
+            let goal_name = t
+                .parent_id
+                .as_ref()
+                .and_then(|p| by_id.get(p.as_str()))
+                .map(|parent| parent.title.trim())
+                .filter(|s| !s.is_empty())
+                .unwrap_or_else(|| t.title.trim());
+            if !goal_name.is_empty() {
+                tags.push(format!("goal:{goal_name}"));
+            }
+        }
         let proj = BoardProjection {
             board_task_id: t.id.clone(),
             title: t.title.clone(),
@@ -1922,4 +1946,186 @@ pub async fn loop_plan_order(repo_root: String) -> Result<PlanOrderResult, Strin
         objectives,
         deferred,
     })
+}
+
+// ─── Cloud roundtrip (P1) — the desktop face of the always-on runner ────────
+//
+// "Keep coding on your Mac → hand a job to your always-on machine → pull the
+// result back", one-click, zero CLI. Two legs, each a thin bridge over an
+// existing `aura` verb so the cloud HTTP + credential logic stays in one place
+// (and reuses `recall_cloud_creds`, the same store the desktop's `cloud_auth_*`
+// writes — signed in here means these just work):
+//
+//   * `loop_cloud_send` → `aura a2a-task create` — mint a *submitted* task on
+//     the shared cloud A2A board; a runner draining that board picks it up.
+//   * `loop_cloud_sync` → `aura loop cloud-sync` — pull finished cloud work into
+//     the local graph (claimed so a 2nd runner won't double-run) and push
+//     finished local nodes back up. Returns `{repo, pulled, pushed, notes}`.
+//
+// Both are scoped to the same `owner/repo` (derived from `origin`) so a job you
+// send is exactly what a later sync pulls back — no cross-repo drift.
+
+#[derive(Serialize)]
+pub struct CloudSyncResult {
+    pub repo: Option<String>,
+    pub pulled: u32,
+    pub pushed: u32,
+    pub notes: Vec<String>,
+}
+
+#[derive(Serialize)]
+pub struct CloudSendResult {
+    pub id: String,
+    pub status: String,
+}
+
+/// `owner/repo` from the repo's `origin` remote, or None for a non-GitHub /
+/// missing remote (then the cloud legs run org-wide). Kept deliberately small —
+/// enough to keep send + sync scoped to the same repo.
+fn origin_full_name(repo_root: &str) -> Option<String> {
+    let out = std::process::Command::new("git")
+        .args(["-C", repo_root, "remote", "get-url", "origin"])
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let url = String::from_utf8_lossy(&out.stdout);
+    let s = url.trim().trim_end_matches(".git");
+    let tail = match s.find("github.com") {
+        Some(i) => &s[i + "github.com".len()..],
+        None => return None, // only GitHub remotes resolve to owner/repo
+    };
+    let tail = tail.trim_start_matches([':', '/']);
+    let parts: Vec<&str> = tail.split('/').filter(|p| !p.is_empty()).collect();
+    if parts.len() >= 2 {
+        Some(format!(
+            "{}/{}",
+            parts[parts.len() - 2],
+            parts[parts.len() - 1]
+        ))
+    } else {
+        None
+    }
+}
+
+/// Bring cloud-worked results home + report finished local work up. `pull`/
+/// `push` gate the two legs; passing neither (both false) runs both, matching
+/// the CLI's default cycle.
+#[tauri::command]
+pub async fn loop_cloud_sync(
+    repo_root: String,
+    pull: bool,
+    push: bool,
+) -> Result<CloudSyncResult, String> {
+    let bin = crate::agent_event_listener::resolve_aura_bin();
+    let mut cmd = tokio::process::Command::new(&bin);
+    cmd.arg("loop").arg("cloud-sync");
+    if pull && !push {
+        cmd.arg("--pull");
+    } else if push && !pull {
+        cmd.arg("--push");
+    }
+    cmd.arg("--json").current_dir(&repo_root);
+    let out = cmd
+        .output()
+        .await
+        .map_err(|e| format!("run aura loop cloud-sync: {e}"))?;
+    if !out.status.success() {
+        let err = String::from_utf8_lossy(&out.stderr);
+        return Err(format!("cloud sync failed: {}", err.trim()));
+    }
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let v: Value = serde_json::from_str(stdout.trim())
+        .map_err(|e| format!("parse cloud-sync json: {e} — {stdout}"))?;
+    Ok(CloudSyncResult {
+        repo: v
+            .get("repo")
+            .and_then(|x| x.as_str())
+            .map(|s| s.to_string()),
+        pulled: v.get("pulled").and_then(|x| x.as_u64()).unwrap_or(0) as u32,
+        pushed: v.get("pushed").and_then(|x| x.as_u64()).unwrap_or(0) as u32,
+        notes: v
+            .get("notes")
+            .and_then(|x| x.as_array())
+            .map(|a| {
+                a.iter()
+                    .filter_map(|n| n.as_str().map(|s| s.to_string()))
+                    .collect()
+            })
+            .unwrap_or_default(),
+    })
+}
+
+/// Send a job to the always-on cloud runner. `agent` is the bare provider id
+/// (e.g. "claude"); the cloud board namespaces it as `a2a:<agent>`. An optional
+/// acceptance line makes it a provable task. Returns the cloud task id + status.
+#[tauri::command]
+pub async fn loop_cloud_send(
+    repo_root: String,
+    text: String,
+    agent: String,
+    acceptance: Option<String>,
+) -> Result<CloudSendResult, String> {
+    let text = text.trim();
+    if text.is_empty() {
+        return Err("Describe the work to send to the cloud first.".into());
+    }
+    let agent = {
+        let a = agent.trim();
+        if a.is_empty() {
+            "claude"
+        } else {
+            a
+        }
+    };
+    let agent_kind = format!("a2a:{agent}");
+    let bin = crate::agent_event_listener::resolve_aura_bin();
+    let mut cmd = tokio::process::Command::new(&bin);
+    cmd.arg("a2a-task")
+        .arg("create")
+        .arg("--agent-kind")
+        .arg(&agent_kind)
+        .arg("--input")
+        .arg(text);
+    if let Some(fullname) = origin_full_name(&repo_root) {
+        cmd.arg("--repo").arg(fullname);
+    }
+    if let Some(ac) = acceptance
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        // Acceptance requires kind ∈ plan|wave|task; a sent job is a `task`.
+        cmd.arg("--kind")
+            .arg("task")
+            .arg("--acceptance-criteria")
+            .arg(ac);
+    }
+    cmd.arg("--json").current_dir(&repo_root);
+    let out = cmd
+        .output()
+        .await
+        .map_err(|e| format!("run aura a2a-task create: {e}"))?;
+    if !out.status.success() {
+        let err = String::from_utf8_lossy(&out.stderr);
+        return Err(format!("send to cloud failed: {}", err.trim()));
+    }
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let v: Value = serde_json::from_str(stdout.trim())
+        .map_err(|e| format!("parse a2a-task create json: {e} — {stdout}"))?;
+    let id = v
+        .get("id")
+        .and_then(|x| x.as_str())
+        .unwrap_or("")
+        .to_string();
+    if id.is_empty() {
+        return Err(format!("cloud did not return a task id — {stdout}"));
+    }
+    let status = v
+        .get("status")
+        .and_then(|x| x.as_str())
+        .unwrap_or("submitted")
+        .to_string();
+    Ok(CloudSendResult { id, status })
 }

@@ -25,6 +25,7 @@ import {
   RefreshCw,
   ShieldCheck,
 } from "lucide-react";
+import { AsciiSpinner } from "../ui/ascii-spinner";
 
 import {
   metaPlaneLog,
@@ -341,7 +342,7 @@ function goalLabel(verdict: string): string {
 function LoadingState() {
   return (
     <div className="flex flex-col items-center justify-center gap-2 px-6 py-16 text-center">
-      <RefreshCw size={16} className="animate-spin text-text-4" />
+      <AsciiSpinner className="text-base" />
       <p className="text-[12px] text-text-3">Reading the record…</p>
     </div>
   );

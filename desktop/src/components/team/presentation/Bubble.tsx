@@ -3,9 +3,15 @@
  *  Moved verbatim out of the CommsPanel monolith; logic unchanged.
  *  Imports are filled in after extraction. */
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { memo, useEffect, useMemo, useRef, useState } from "react";
 import { onExternalAnchorClick } from "../../../lib/openExternal";
-import { Pin as PinLucide } from "lucide-react";
+import {
+  Bookmark,
+  MessageSquareReply,
+  MoreHorizontal,
+  Pin as PinLucide,
+  SmilePlus,
+} from "lucide-react";
 import { type TeamMember } from "../../../lib/api";
 import { ChatMarkdown } from "../../chat/ChatMarkdown";
 import { PICKER_EMOJIS, reactionsStore } from "../../../lib/reactionsStore";
@@ -14,30 +20,15 @@ import { RepoFileChip, parseRepoFiles } from "../../chat/RepoFileChip";
 import { AuraRefUnfurl, RelayCardView } from "../../chat/AuraRefCard";
 import { parseRelay, pickSoloAuraRef } from "../../../lib/auraRelay";
 import { animalForName, tintForName } from "../../../lib/identityColors";
-import { hhmm, isSelfSender, type Msg, type ReadCursorEntry, type SelfKeys } from "../domain";
+import { hhmm, isSelfSender, norm, type Msg, type ReadCursorEntry, type SelfKeys } from "../domain";
 import { MiniAvatar } from "./MiniAvatar";
+import { Avatar } from "./Avatar";
 import { ActivityRow } from "./ActivityRow";
 import { isSystemNotice, pickSoloLink, relativeTime, useUniqueAuthors } from "./messageHelpers";
 
 // ── message bubble ───────────────────────────────────────────────────
 
-export function Bubble({
-  msg,
-  prev,
-  repoRoot,
-  members,
-  selfHandle,
-  selfKeys,
-  replyCount,
-  replies,
-  channel,
-  myDeviceId,
-  myDisplay,
-  seenBy,
-  onReply,
-  onTogglePin,
-  onResend,
-}: {
+type BubbleProps = {
   msg: Msg;
   prev?: Msg;
   repoRoot: string;
@@ -60,7 +51,25 @@ export function Bubble({
   onReply?: () => void;
   onTogglePin?: () => void;
   onResend?: () => void;
-}) {
+};
+
+function BubbleImpl({
+  msg,
+  prev,
+  repoRoot,
+  members,
+  selfHandle,
+  selfKeys,
+  replyCount,
+  replies,
+  channel,
+  myDeviceId,
+  myDisplay,
+  seenBy,
+  onReply,
+  onTogglePin,
+  onResend,
+}: BubbleProps) {
   const grouped =
     prev && prev.sender === msg.sender && Math.abs(msg.ts - (prev.ts || 0)) < 300;
   const tail = !grouped;
@@ -73,7 +82,21 @@ export function Bubble({
   // the current `selfHandle` (the root of the "my message shows as a
   // colleague" bug) is still recognised as ours. Exact membership only:
   // no fuzzy local-part split that could absorb a lookalike peer.
-  const fromMe = msg.fromMe || isSelfSender(msg.sender, selfKeys);
+  //
+  // A foreign device id VETOES a baked `fromMe`: a colleague who shares our
+  // git-email local-part would otherwise inherit our "you" badge (identity is
+  // derived, not verified). We only trust the baked flag when no device id
+  // contradicts it (synthetic rows and our own local echoes carry none).
+  const foreignDevice =
+    !!msg.senderDeviceId &&
+    !!myDeviceId &&
+    norm(msg.senderDeviceId) !== norm(myDeviceId);
+  const fromMe =
+    isSelfSender(msg.sender, selfKeys, {
+      senderDeviceId: msg.senderDeviceId ?? null,
+      myDeviceId,
+    }) ||
+    (msg.fromMe && !foreignDevice);
 
   // Structured project-feed rows (commits, sentinel intents, snapshots,
   // sentinel messages). Rendered as a tight activity row, not a bubble.
@@ -87,9 +110,11 @@ export function Bubble({
   if (msg.kind === "system" || isSystemNotice(msg)) {
     const text = msg.kind === "system" ? msg.body : msg.body;
     return (
-      <div className="my-1 px-9 text-text-4 italic text-[11.5px] leading-snug">
-        <span className="text-text-3 font-medium not-italic">@{msg.sender}</span>{" "}
+      <div className="slack-system-message">
+        <MiniAvatar name={msg.sender} agent={msg.is_agent} />
+        <span><strong>@{msg.sender}</strong>{" "}
         {text}
+        </span>
       </div>
     );
   }
@@ -159,7 +184,7 @@ export function Bubble({
       channel={channel}
       myDeviceId={myDeviceId}
       myDisplay={myDisplay}
-      fromMe={!!msg.fromMe}
+      fromMe={fromMe}
     />
   );
   const hoverActions = (
@@ -210,124 +235,81 @@ export function Bubble({
   const seenByRow =
     fromMe && seenBy && seenBy.length > 0 ? <SeenByRow peers={seenBy} /> : null;
 
-  if (fromMe) {
-    return (
-      <div className={`flex justify-end ${tail ? "mt-1" : "mt-px"} group`}>
-        <div className="flex flex-col items-end relative" style={{ maxWidth: "78%" }}>
-          {pinBadge}
-          <div
-            className={`relative text-text-1 text-[12.5px] leading-relaxed px-2.5 py-1 break-words border w-fit min-w-0 max-w-full shadow-[var(--shadow-card)] ${
-              msg.pinned ? "ring-1 ring-yellow-500/40" : ""
-            }`}
-            style={{
-              // Subtle self-tint — a soft wash of the accent over the base
-              // surface rather than a full-saturation fill, so it reads as
-              // "mine" without shouting. Mixed over bg-2 (not bg-1) so it LIFTS
-              // off the bg-content canvas like the incoming bubbles, rather
-              // than sinking into the near-black. Matches the calm peer/agent
-              // bubbles' raised-card elevation.
-              background:
-                "color-mix(in srgb, var(--color-accent) 10%, var(--color-bg-2))",
-              borderColor:
-                "color-mix(in srgb, var(--color-accent) 22%, transparent)",
-              // Tighter radius than the old 18px pill — reads as the app's
-              // calm card language, not an iMessage bubble; the tail corner
-              // stays sharp so grouped runs still read as one voice.
-              borderTopLeftRadius: 12,
-              borderTopRightRadius: 12,
-              borderBottomLeftRadius: 12,
-              borderBottomRightRadius: tail ? 4 : 10,
-            }}
-          >
-            {bodyContent}
-            {/* Reactions float over the bottom edge — no vertical gap
-             *  reserved below the bubble. */}
-            <div className="absolute -bottom-2 right-2 z-10 pointer-events-auto">
-              {reactionStrip}
-            </div>
-          </div>
-          {/* Persistent delivery receipt — sending (pulse) → delivered
-           *  (gray ✓✓) → read (accent ✓✓). Surfaced without hover so the
-           *  full progression reads at a glance, the way the reference chat
-           *  apps show it; the "Seen by" row below adds *who* once read. */}
-          {deliveryBadge && (
-            <div className="flex items-center justify-end mt-0.5 mr-1">
-              {deliveryBadge}
-            </div>
-          )}
-          {seenByRow}
-          <div className="flex items-center gap-2 mt-px h-0 opacity-0 group-hover:h-auto group-hover:mt-1 group-hover:opacity-100 transition-[opacity] overflow-visible">
-            {replyChip}
-            {!replyChip && hoverActions}
-          </div>
-        </div>
-      </div>
-    );
-  }
+  const displayMember = members.find((member) => member.handle === msg.sender);
+  const displayName = displayMember?.name || msg.sender;
 
   return (
-    <div className={`flex items-end gap-2 ${tail ? "mt-1" : "mt-px"} group`}>
-      {tail ? (
-        <span className="flex-shrink-0 relative">
-          <MiniAvatar name={msg.sender} agent={msg.is_agent} />
-        </span>
-      ) : (
-        <span className="w-6" />
-      )}
-      <div className="flex flex-col items-start relative" style={{ maxWidth: "78%" }}>
+    <div
+      className={`slack-message-row group ${grouped ? "is-grouped" : ""} ${
+        fromMe ? "is-mine" : ""
+      } ${msg.pinned ? "is-pinned" : ""}`}
+    >
+      <div className="slack-message-avatar-col">
+        {tail ? (
+          msg.is_agent ? (
+            <MiniAvatar name={msg.sender} agent />
+          ) : (
+            <Avatar
+              name={displayName}
+              size={36}
+              src={
+                displayMember?.github_login
+                  ? `https://github.com/${encodeURIComponent(displayMember.github_login)}.png?size=72`
+                  : null
+              }
+            />
+          )
+        ) : (
+          <span className="slack-grouped-time">{msg.ts ? hhmm(msg.ts) : ""}</span>
+        )}
+      </div>
+      <div className="slack-message-content">
         {tail && (
-          <span className="text-text-4 text-[10px] mb-0.5 px-2.5">
-            {msg.sender} {msg.ts ? `· ${hhmm(msg.ts)}` : ""}
-            {msg.is_agent ? (
-              <span
-                className="ml-1 px-1 rounded uppercase tracking-wider"
-                style={{
-                  background:
-                    "color-mix(in srgb, var(--color-accent) 16%, transparent)",
-                  color: "var(--color-accent)",
-                  fontSize: 9,
-                }}
-              >
-                agent
-              </span>
-            ) : null}
-          </span>
+          <div className="slack-message-meta">
+            <strong>{displayName}</strong>
+            {msg.is_agent && <span className="slack-agent-badge">APP</span>}
+            {fromMe && <span className="slack-you-badge">you</span>}
+            <time>{msg.ts ? hhmm(msg.ts) : ""}</time>
+          </div>
         )}
         {pinBadge}
-        <div
-          className={`relative text-text-1 text-[12.5px] leading-relaxed px-3 py-1.5 break-words border w-fit min-w-0 max-w-full bg-bg-2 shadow-[var(--shadow-card)] ${
-            msg.pinned ? "ring-1 ring-yellow-500/40" : ""
-          }`}
-          style={{
-            // Incoming bubbles LIFT off the stream canvas — bg-2 (#1f1f22) sits
-            // a notch above the bg-content (#161618) surface, plus the app's
-            // card shadow, so messages read as raised cards, not sinking into a
-            // near-black void (peer bubbles used to be bg-1, darker than the
-            // canvas). Agent vs peer stay distinct by border colour below.
-            // Match the calmer self-bubble radius — app card language, not an
-            // iMessage pill; tail corner stays sharp for grouped runs.
-            borderTopLeftRadius: 12,
-            borderTopRightRadius: 12,
-            borderBottomRightRadius: 12,
-            borderBottomLeftRadius: tail ? 4 : 10,
-            borderColor: msg.is_agent
-              ? "color-mix(in srgb, var(--color-accent) 24%, transparent)"
-              : "var(--color-line-soft)",
-          }}
-        >
-          {bodyContent}
-          <div className="absolute -bottom-2 left-2 z-10 pointer-events-auto">
-            {reactionStrip}
+        <div className="slack-message-body">{bodyContent}</div>
+        <div className="slack-message-reactions">{reactionStrip}</div>
+        {(replyChip || deliveryBadge || seenByRow) && (
+          <div className="slack-message-footer">
+            {replyChip}
+            {deliveryBadge}
+            {seenByRow}
           </div>
-        </div>
-        <div className="flex items-center gap-2 mt-px h-0 opacity-0 group-hover:h-auto group-hover:mt-1 group-hover:opacity-100 transition-[opacity] self-start ml-1 overflow-visible">
-          {replyChip}
-          {!replyChip && hoverActions}
-        </div>
+        )}
       </div>
+      <div className="slack-message-hover-actions">{hoverActions}</div>
     </div>
   );
 }
+
+// Rows are memoized: a chat stream re-renders on every new message, reaction,
+// typing tick, and read-cursor advance, but any given bubble's *content* rarely
+// changes. We compare the data props by reference and deliberately ignore the
+// `onReply` / `onTogglePin` / `onResend` callbacks — MessageStream recreates
+// those inline per row every render, yet each closes only over `msg` (compared
+// here) plus stable parent handlers, so skipping their identity is safe and is
+// what lets the memo actually bite. `replies` is now a stable Map-backed array
+// (see MessageStream.repliesByParent), so it too compares cleanly.
+export const Bubble = memo(BubbleImpl, (a, b) =>
+  a.msg === b.msg &&
+  a.prev === b.prev &&
+  a.repoRoot === b.repoRoot &&
+  a.members === b.members &&
+  a.selfHandle === b.selfHandle &&
+  a.selfKeys === b.selfKeys &&
+  a.replyCount === b.replyCount &&
+  a.replies === b.replies &&
+  a.channel === b.channel &&
+  a.myDeviceId === b.myDeviceId &&
+  a.myDisplay === b.myDisplay &&
+  a.seenBy === b.seenBy,
+);
 
 // Read cursors carry an RFC3339 timestamp string (not epoch seconds), so
 // `hhmm` does not apply. Render a short local "h:mm AM/PM" for the tooltip,
@@ -382,8 +364,9 @@ function SeenByRow({ peers }: { peers: ReadCursorEntry[] }) {
   );
 }
 
-// Hover-only action row: thumbtack + "Reply" + "+" emoji picker —
-// appears on `group-hover`.
+// Hover-only action row: quick reactions + picker + thread reply + save +
+// overflow. This mirrors the reference interaction while preserving Aura's
+// existing reaction, thread, and pin persistence paths.
 function HoverActions({
   pinned,
   onTogglePin,
@@ -400,17 +383,27 @@ function HoverActions({
   const [pickerOpen, setPickerOpen] = useState(false);
   if (!onTogglePin && !onReply && !onAddReaction) return null;
   return (
-    <span className="relative opacity-0 group-hover:opacity-100 flex items-center gap-2">
+    <span className="slack-hover-action-strip relative opacity-0 group-hover:opacity-100 flex items-center">
       {onAddReaction && (
         <>
+          {PICKER_EMOJIS.slice(0, 3).map((emoji) => (
+            <button
+              key={emoji}
+              type="button"
+              className="slack-hover-action is-emoji"
+              onClick={() => onAddReaction(emoji)}
+              title={`React with ${emoji}`}
+            >
+              {emoji}
+            </button>
+          ))}
           <button
             type="button"
             onClick={() => setPickerOpen((v) => !v)}
-            className="text-[10px] text-text-4 hover:text-text-1 flex items-center gap-0.5"
+            className="slack-hover-action"
             title="Add reaction"
           >
-            <span aria-hidden>😀</span>
-            <span>+</span>
+            <SmilePlus size={16} />
           </button>
           {pickerOpen && (
             <EmojiPickerPopover
@@ -427,24 +420,25 @@ function HoverActions({
         <button
           type="button"
           onClick={onTogglePin}
-          className={`text-[10px] flex items-center gap-0.5 ${
-            pinned ? "text-yellow-500" : "text-text-4 hover:text-text-1"
-          }`}
-          title={pinned ? "Unpin" : "Pin to channel"}
+          className={`slack-hover-action ${pinned ? "is-active" : ""}`}
+          title={pinned ? "Remove bookmark" : "Save for later"}
         >
-          <PinLucide size={10} />
-          {pinned ? "Pinned" : "Pin"}
+          <Bookmark size={15} fill={pinned ? "currentColor" : "none"} />
         </button>
       )}
       {onReply && (
         <button
           type="button"
           onClick={onReply}
-          className="text-[10px] text-text-4 hover:text-text-1"
+          className="slack-hover-action"
+          title="Reply in thread"
         >
-          Reply
+          <MessageSquareReply size={16} />
         </button>
       )}
+      <button type="button" className="slack-hover-action" title="More actions">
+        <MoreHorizontal size={16} />
+      </button>
     </span>
   );
 }
@@ -606,7 +600,7 @@ function EmojiPickerPopover({
 // Tiny "📌 Pinned" tag above a pinned bubble.
 function PinnedTag() {
   return (
-    <div className="flex items-center gap-1 px-2 mb-0.5 text-[10px] text-yellow-500 font-medium">
+    <div className="flex items-center gap-1 px-2 mb-0.5 text-[10px] text-text-4 font-medium">
       <PinLucide size={10} />
       <span>Pinned</span>
     </div>
@@ -639,7 +633,7 @@ function DeliveryBadge({
       <button
         type="button"
         onClick={onResend}
-        className="text-[10px] text-rose-400 hover:text-rose-300 font-medium"
+        className="text-[10px] text-red hover:text-red font-medium"
         title="Send failed — click to retry"
       >
         ! retry

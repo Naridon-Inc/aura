@@ -13,6 +13,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { FileText, Search as SearchIcon } from "lucide-react";
 import { api, type GrepHit, type GrepOpts, type ReplaceReport } from "../lib/api";
+import { AsciiSpinner } from "./ui/ascii-spinner";
 import { Kbd } from "./ui/kbd";
 import { Input } from "./ui/input";
 
@@ -356,13 +357,15 @@ export function SearchWorkpane({ repoRoot, open, onClose }: Props) {
       </div>
 
       {error && (
-        <div className="px-4 py-2 text-[11.5px] text-red-400 bg-red-500/10 border-b border-line-soft">
+        <div className="px-4 py-2 text-[11.5px] text-red bg-red/10 border-b border-line-soft">
           {error}
         </div>
       )}
 
+      {/* A finished replace is a receipt, not an alarm — it reads on the
+          neutral ramp; only the failure banner above carries colour. */}
       {report && (
-        <div className="px-4 py-2 text-[11.5px] text-emerald-400 bg-emerald-500/10 border-b border-line-soft">
+        <div className="px-4 py-2 text-[11.5px] text-text-2 bg-bg-2 border-b border-line-soft">
           Replaced {report.total_replacements} occurrence
           {report.total_replacements === 1 ? "" : "s"} across{" "}
           {report.files_changed} file{report.files_changed === 1 ? "" : "s"}.
@@ -466,7 +469,12 @@ export function SearchWorkpane({ repoRoot, open, onClose }: Props) {
           </div>
 
           <div className="p-3 text-[11px] text-text-5 flex flex-col gap-1">
-            {searching && <div>Searching…</div>}
+            {searching && (
+              <div className="flex items-center gap-1.5 text-text-4">
+                <AsciiSpinner />
+                Searching…
+              </div>
+            )}
             {!searching && query.trim() && (
               <div>
                 {totalHits} match{totalHits === 1 ? "" : "es"} in{" "}

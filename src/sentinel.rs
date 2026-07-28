@@ -1,13 +1,29 @@
+//! Sentinel — the shared plane.
+//!
+//! Claims, zones and agent-to-agent messages exist to tell one agent what
+//! another is doing. That only works if every checkout of the repository reads
+//! and writes ONE set of them, so every path here resolves through
+//! [`crate::worktree::paths::shared_aura_path`] (the repository root), not the
+//! per-checkout private plane. Session state, transcripts and memory stay
+//! private — see the module docs on `worktree::paths` for why the split runs
+//! this way.
+//!
+//! Every record carries the worktree it came from, so the answer to "who holds
+//! `resolve_handle`?" is "claude, in `barcelona`" rather than "someone".
+
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use crate::session::worktree_aura_path;
+use crate::worktree::paths::{repo_relative, shared_aura_path};
 
 // ── Data structures ──
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct FunctionClaim {
+    /// Repository-relative. Absolute paths carry the checkout they were
+    /// recorded in, which would make the same file look like two different
+    /// files to two worktrees and hide every cross-worktree collision.
     pub file_path: String,
     pub function_name: String,
     pub node_id: Option<String>,
@@ -21,6 +37,13 @@ pub struct SentinelClaims {
     pub pid: u32,
     pub last_heartbeat: u64,
     pub claims: Vec<FunctionClaim>,
+    /// Checkout this session is working in. `None` = the main checkout (also
+    /// what records written before the shared plane existed deserialize to).
+    #[serde(default)]
+    pub worktree: Option<String>,
+    /// Branch that checkout was on when the claim was last written.
+    #[serde(default)]
+    pub branch: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
@@ -35,6 +58,9 @@ pub struct ZoneRule {
     pub session_id: String,
     pub patterns: Vec<String>,
     pub mode: ZoneMode,
+    /// Checkout the zone was claimed from. `None` = the main checkout.
+    #[serde(default)]
+    pub worktree: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -43,6 +69,9 @@ pub struct Collision {
     pub function_name: String,
     pub held_by_session: String,
     pub held_by_agent: String,
+    /// Checkout the other agent is holding it from. `None` = main checkout.
+    #[serde(default)]
+    pub held_by_worktree: Option<String>,
 }
 
 // ── Messaging ──
@@ -56,6 +85,14 @@ pub struct SentinelMessage {
     pub content: String,
     pub timestamp: u64,
     pub read_by: Vec<String>,        // session_ids that have read this
+    /// Checkout the sender is working in, so the reader knows where the
+    /// message came from without looking the session up.
+    #[serde(default)]
+    pub from_worktree: Option<String>,
+    /// Set when the message was addressed to a checkout rather than a single
+    /// session ("whoever is working in `barcelona`").
+    #[serde(default)]
+    pub to_worktree: Option<String>,
 }
 
 // ── Manager ──
@@ -63,30 +100,45 @@ pub struct SentinelMessage {
 pub struct SentinelManager;
 
 impl SentinelManager {
-    fn claims_dir() -> String {
-        worktree_aura_path("sentinel/claims")
+    pub(crate) fn claims_dir() -> String {
+        shared_aura_path("sentinel/claims")
     }
 
-    fn zones_dir() -> String {
-        worktree_aura_path("sentinel/zones")
+    pub(crate) fn zones_dir() -> String {
+        shared_aura_path("sentinel/zones")
     }
 
     fn collisions_marker() -> String {
-        worktree_aura_path("sentinel/collisions_pending")
+        shared_aura_path("sentinel/collisions_pending")
     }
 
-    fn messages_dir() -> String {
-        worktree_aura_path("sentinel/messages")
+    pub(crate) fn messages_dir() -> String {
+        shared_aura_path("sentinel/messages")
     }
 
     fn unread_marker() -> String {
-        worktree_aura_path("sentinel/unread_pending")
+        shared_aura_path("sentinel/unread_pending")
     }
 
     fn ensure_dirs() {
         let _ = fs::create_dir_all(Self::claims_dir());
         let _ = fs::create_dir_all(Self::zones_dir());
         let _ = fs::create_dir_all(Self::messages_dir());
+        // Claims/zones/messages written while sentinel was still per-checkout
+        // are folded into the shared set on first touch, so nobody loses the
+        // work they had in flight when they upgrade.
+        crate::worktree::migrate::adopt_legacy_sentinel_state();
+    }
+
+    /// The checkout this process is running in — stamped onto everything it
+    /// writes so peers can attribute it.
+    fn here() -> Option<String> {
+        crate::worktree::paths::current_worktree()
+    }
+
+    fn here_branch() -> Option<String> {
+        let b = crate::live_events::current_branch();
+        if b.is_empty() { None } else { Some(b) }
     }
 
     fn now() -> u64 {
@@ -108,8 +160,9 @@ impl SentinelManager {
         Ok(())
     }
 
-    /// Load all claim files (one per session)
-    fn load_all_claims() -> Vec<SentinelClaims> {
+    /// Load all claim files (one per session), across every checkout of the
+    /// repository. Public so the worktree control plane can group them.
+    pub fn load_all_claims() -> Vec<SentinelClaims> {
         let dir = Self::claims_dir();
         let mut all = Vec::new();
         if let Ok(entries) = fs::read_dir(&dir) {
@@ -127,7 +180,7 @@ impl SentinelManager {
     }
 
     /// Check if a PID is still alive
-    fn is_pid_alive(pid: u32) -> bool {
+    pub(crate) fn is_pid_alive(pid: u32) -> bool {
         use sysinfo::System;
         let mut sys = System::new();
         sys.refresh_processes(sysinfo::ProcessesToUpdate::Some(&[sysinfo::Pid::from_u32(pid)]), true);
@@ -171,25 +224,26 @@ impl SentinelManager {
     ) -> Vec<Collision> {
         Self::ensure_dirs();
 
+        // Keyed repo-relative so a claim made in one checkout matches the same
+        // file seen from another.
+        let file_path = &repo_relative(file_path);
+
+        let blank = || SentinelClaims {
+            session_id: session_id.to_string(),
+            agent_id: agent_id.to_string(),
+            pid,
+            last_heartbeat: Self::now(),
+            claims: Vec::new(),
+            worktree: Self::here(),
+            branch: Self::here_branch(),
+        };
+
         // Load existing claims for this session
         let path = Self::claim_path(session_id);
-        let mut my_claims = if let Ok(content) = fs::read_to_string(&path) {
-            serde_json::from_str::<SentinelClaims>(&content).unwrap_or_else(|_| SentinelClaims {
-                session_id: session_id.to_string(),
-                agent_id: agent_id.to_string(),
-                pid,
-                last_heartbeat: Self::now(),
-                claims: Vec::new(),
-            })
-        } else {
-            SentinelClaims {
-                session_id: session_id.to_string(),
-                agent_id: agent_id.to_string(),
-                pid,
-                last_heartbeat: Self::now(),
-                claims: Vec::new(),
-            }
-        };
+        let mut my_claims = fs::read_to_string(&path)
+            .ok()
+            .and_then(|c| serde_json::from_str::<SentinelClaims>(&c).ok())
+            .unwrap_or_else(blank);
 
         // Check for collisions against other sessions
         let others = Self::load_all_claims();
@@ -201,12 +255,13 @@ impl SentinelManager {
                     continue;
                 }
                 for claim in &other.claims {
-                    if claim.file_path == file_path && claim.function_name == *func_name {
+                    if claim.file_path == *file_path && claim.function_name == *func_name {
                         collisions.push(Collision {
                             file_path: file_path.to_string(),
                             function_name: func_name.clone(),
                             held_by_session: other.session_id.clone(),
                             held_by_agent: other.agent_id.clone(),
+                            held_by_worktree: other.worktree.clone(),
                         });
                     }
                 }
@@ -214,7 +269,7 @@ impl SentinelManager {
 
             // Add/update our claim
             let already = my_claims.claims.iter().any(|c| {
-                c.file_path == file_path && c.function_name == *func_name
+                c.file_path == *file_path && c.function_name == *func_name
             });
             if !already {
                 my_claims.claims.push(FunctionClaim {
@@ -226,8 +281,23 @@ impl SentinelManager {
             }
         }
 
-        // Update heartbeat and write
+        // Drop any symbol this record holds twice. The push above already
+        // guards against it, but a record written by an older build or by two
+        // writers racing can carry a duplicate, and a session that appears to
+        // hold the same symbol twice reads downstream as two agents colliding.
+        // Self-healing on write, so the bad row disappears the next time the
+        // session claims anything.
+        let mut seen = std::collections::HashSet::new();
+        my_claims
+            .claims
+            .retain(|c| seen.insert((c.file_path.clone(), c.function_name.clone())));
+
+        // Update heartbeat and write. Re-stamp the checkout every time: a
+        // session file written by an older build carries no worktree, and a
+        // resumed session can legitimately move between checkouts.
         my_claims.last_heartbeat = Self::now();
+        my_claims.worktree = Self::here();
+        my_claims.branch = Self::here_branch();
         if let Ok(json) = serde_json::to_string_pretty(&my_claims) {
             let _ = Self::atomic_write(&path, json.as_bytes());
         }
@@ -247,6 +317,7 @@ impl SentinelManager {
 
     /// Release claims for a specific file within a session
     pub fn release_file_claims(session_id: &str, file_path: &str) {
+        let file_path = repo_relative(file_path);
         let path = Self::claim_path(session_id);
         if let Ok(content) = fs::read_to_string(&path) {
             if let Ok(mut claims) = serde_json::from_str::<SentinelClaims>(&content) {
@@ -260,24 +331,18 @@ impl SentinelManager {
         Self::update_collision_marker();
     }
 
-    /// Check if a file falls within any zone claimed by another session
+    /// Check if a file falls within any zone claimed by another session —
+    /// including a session in a different checkout, which is the point: a zone
+    /// that only protected the worktree that declared it protected nothing.
     pub fn check_zone(session_id: &str, file_path: &str) -> Option<ZoneRule> {
-        let dir = Self::zones_dir();
-        if let Ok(entries) = fs::read_dir(&dir) {
-            for entry in entries.flatten() {
-                if entry.path().extension().map(|x| x == "json").unwrap_or(false) {
-                    if let Ok(content) = fs::read_to_string(entry.path()) {
-                        if let Ok(zone) = serde_json::from_str::<ZoneRule>(&content) {
-                            if zone.session_id == session_id {
-                                continue; // Own zone
-                            }
-                            for pattern in &zone.patterns {
-                                if file_matches_pattern(file_path, pattern) {
-                                    return Some(zone);
-                                }
-                            }
-                        }
-                    }
+        let file_path = repo_relative(file_path);
+        for zone in Self::list_zones() {
+            if zone.session_id == session_id {
+                continue; // Own zone
+            }
+            for pattern in &zone.patterns {
+                if file_matches_pattern(&file_path, pattern) {
+                    return Some(zone);
                 }
             }
         }
@@ -321,6 +386,12 @@ impl SentinelManager {
                                 "function": my_claim.function_name,
                                 "held_by_session": other.session_id,
                                 "held_by_agent": other.agent_id,
+                                "held_by_worktree": other.worktree,
+                                "held_by_branch": other.branch,
+                                // A collision inside one checkout is two agents
+                                // in the same tree; across checkouts it is two
+                                // branches heading for the same merge.
+                                "cross_worktree": other.worktree != mine.worktree,
                             }));
                         }
                     }
@@ -346,6 +417,8 @@ impl SentinelManager {
                 "pid": o.pid,
                 "claim_count": o.claims.len(),
                 "last_heartbeat": o.last_heartbeat,
+                "worktree": o.worktree,
+                "branch": o.branch,
             })).collect::<Vec<_>>(),
             "collisions": collisions,
             "zones": zones.iter().map(|z| serde_json::json!({
@@ -353,8 +426,10 @@ impl SentinelManager {
                 "session_id": z.session_id,
                 "patterns": z.patterns,
                 "mode": format!("{:?}", z.mode),
+                "worktree": z.worktree,
             })).collect::<Vec<_>>(),
             "total_active_sessions": all.len(),
+            "worktree": own.and_then(|c| c.worktree.clone()),
         })
     }
 
@@ -367,6 +442,7 @@ impl SentinelManager {
             session_id: session_id.to_string(),
             patterns,
             mode,
+            worktree: Self::here(),
         };
         let path = format!("{}/{}.json", Self::zones_dir(), zone_id);
         if let Ok(json) = serde_json::to_string_pretty(&zone) {
@@ -395,11 +471,84 @@ impl SentinelManager {
 
     // ── Messaging ──
 
+    /// Canonical token for addressing a checkout. The main checkout has no
+    /// worktree name, so it answers to the literal `main`.
+    pub fn worktree_token(worktree: Option<&str>) -> String {
+        worktree.unwrap_or("main").to_string()
+    }
+
+    /// The claim record for one session, if it has ever claimed anything.
+    fn load_claims(session_id: &str) -> Option<SentinelClaims> {
+        fs::read_to_string(Self::claim_path(session_id))
+            .ok()
+            .and_then(|c| serde_json::from_str::<SentinelClaims>(&c).ok())
+    }
+
+    /// Which checkout a session is working in, read from its claim file.
+    pub fn worktree_of_session(session_id: &str) -> Option<String> {
+        Self::load_claims(session_id).and_then(|c| c.worktree)
+    }
+
+    /// Which checkout to judge a session's mail against.
+    ///
+    /// A session in the main checkout records `worktree: None`, which reads
+    /// identically to "this session has no record at all" — so presence of the
+    /// *file* is what decides, not the field. Only a session we have never
+    /// seen falls back to this process's checkout, which is what lets an agent
+    /// receive mail before its first claim lands. The distinction matters
+    /// because the control plane reads every session's inbox from whichever
+    /// checkout the command happened to run in.
+    fn worktree_context(session_id: &str) -> Option<String> {
+        match Self::load_claims(session_id) {
+            Some(c) => c.worktree,
+            None => Self::here(),
+        }
+    }
+
+    /// Every session currently claiming work from `worktree` (use `main` for
+    /// the main checkout). This is how "message whoever is in barcelona"
+    /// resolves to real recipients.
+    pub fn sessions_in_worktree(worktree: &str) -> Vec<SentinelClaims> {
+        Self::load_all_claims()
+            .into_iter()
+            .filter(|c| Self::worktree_token(c.worktree.as_deref()).eq_ignore_ascii_case(worktree))
+            .collect()
+    }
+
+    /// Is this message meant for `session_id`, sitting in `my_worktree`?
+    fn addressed_to(
+        msg: &SentinelMessage,
+        session_id: &str,
+        my_worktree: Option<&str>,
+    ) -> bool {
+        if let Some(to) = &msg.to_session {
+            return to == session_id;
+        }
+        if let Some(to_wt) = &msg.to_worktree {
+            return Self::worktree_token(my_worktree).eq_ignore_ascii_case(to_wt);
+        }
+        true // broadcast
+    }
+
     /// Send a message to a specific session or broadcast to all
     pub fn send_message(
         from_session: &str,
         from_agent: &str,
         to_session: Option<&str>,
+        content: &str,
+    ) -> SentinelMessage {
+        Self::send_message_to(from_session, from_agent, to_session, None, content)
+    }
+
+    /// Send a message addressed to a session, to a whole checkout, or to
+    /// everyone. Addressing a checkout ("whoever is working in `barcelona`")
+    /// is the cross-worktree case: you rarely know a peer's session id, but you
+    /// always know which tree they are in.
+    pub fn send_message_to(
+        from_session: &str,
+        from_agent: &str,
+        to_session: Option<&str>,
+        to_worktree: Option<&str>,
         content: &str,
     ) -> SentinelMessage {
         Self::ensure_dirs();
@@ -411,6 +560,8 @@ impl SentinelManager {
             content: content.to_string(),
             timestamp: Self::now(),
             read_by: vec![from_session.to_string()], // sender has "read" it
+            from_worktree: Self::here(),
+            to_worktree: to_worktree.map(|s| s.to_string()),
         };
         let path = format!("{}/{}.json", Self::messages_dir(), msg.id);
         if let Ok(json) = serde_json::to_string_pretty(&msg) {
@@ -426,15 +577,16 @@ impl SentinelManager {
         Self::ensure_dirs();
         let dir = Self::messages_dir();
         let mut messages = Vec::new();
+        let my_wt = Self::worktree_context(session_id);
 
         if let Ok(entries) = fs::read_dir(&dir) {
             for entry in entries.flatten() {
                 if entry.path().extension().map(|x| x == "json").unwrap_or(false) {
                     if let Ok(content) = fs::read_to_string(entry.path()) {
                         if let Ok(msg) = serde_json::from_str::<SentinelMessage>(&content) {
-                            // Include if: broadcast, or addressed to us, or sent by us
-                            let dominated = msg.to_session.is_none()
-                                || msg.to_session.as_deref() == Some(session_id)
+                            // Include if: for us (broadcast, direct, or to our
+                            // checkout), or sent by us.
+                            let dominated = Self::addressed_to(&msg, session_id, my_wt.as_deref())
                                 || msg.from_session == session_id;
                             if dominated {
                                 messages.push((entry.path(), msg));
@@ -469,53 +621,41 @@ impl SentinelManager {
     /// Get unread messages for a specific session WITHOUT marking them as read.
     /// Returns messages sorted by timestamp descending (newest first).
     pub fn get_unread_messages(session_id: &str) -> Vec<SentinelMessage> {
-        let dir = Self::messages_dir();
-        let mut unread = Vec::new();
-        if let Ok(entries) = fs::read_dir(&dir) {
-            for entry in entries.flatten() {
-                if entry.path().extension().map(|x| x == "json").unwrap_or(false) {
-                    if let Ok(content) = fs::read_to_string(entry.path()) {
-                        if let Ok(msg) = serde_json::from_str::<SentinelMessage>(&content) {
-                            let dominated = msg.to_session.is_none()
-                                || msg.to_session.as_deref() == Some(session_id);
-                            if dominated
-                                && msg.from_session != session_id
-                                && !msg.read_by.contains(&session_id.to_string())
-                            {
-                                unread.push(msg);
-                            }
-                        }
-                    }
-                }
-            }
-        }
+        let my_wt = Self::worktree_context(session_id);
+        let mut unread: Vec<SentinelMessage> = Self::all_messages()
+            .into_iter()
+            .filter(|msg| {
+                Self::addressed_to(msg, session_id, my_wt.as_deref())
+                    && msg.from_session != session_id
+                    && !msg.read_by.contains(&session_id.to_string())
+            })
+            .collect();
         unread.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
         unread
     }
 
     /// Count unread messages for a specific session
     pub fn unread_count(session_id: &str) -> u64 {
+        Self::get_unread_messages(session_id).len() as u64
+    }
+
+    /// Every message on the shared plane, unsorted. The control plane reads
+    /// this to show what has been said across checkouts.
+    pub fn all_messages() -> Vec<SentinelMessage> {
         let dir = Self::messages_dir();
-        let mut count = 0u64;
+        let mut out = Vec::new();
         if let Ok(entries) = fs::read_dir(&dir) {
             for entry in entries.flatten() {
                 if entry.path().extension().map(|x| x == "json").unwrap_or(false) {
                     if let Ok(content) = fs::read_to_string(entry.path()) {
                         if let Ok(msg) = serde_json::from_str::<SentinelMessage>(&content) {
-                            let dominated = msg.to_session.is_none()
-                                || msg.to_session.as_deref() == Some(session_id);
-                            if dominated
-                                && msg.from_session != session_id
-                                && !msg.read_by.contains(&session_id.to_string())
-                            {
-                                count += 1;
-                            }
+                            out.push(msg);
                         }
                     }
                 }
             }
         }
-        count
+        out
     }
 
     /// List all active agents (alive sessions with their agent types)
@@ -530,6 +670,8 @@ impl SentinelManager {
                 "pid": c.pid,
                 "claim_count": c.claims.len(),
                 "last_heartbeat": c.last_heartbeat,
+                "worktree": c.worktree,
+                "branch": c.branch,
                 "files": c.claims.iter()
                     .map(|cl| cl.file_path.clone())
                     .collect::<std::collections::HashSet<_>>()
@@ -567,29 +709,20 @@ impl SentinelManager {
 
     /// Update the unread marker file (total unread across all sessions)
     fn update_unread_marker() {
-        let dir = Self::messages_dir();
         let mut total_unread = 0u64;
 
         // Count messages that have at least one session that hasn't read them
         let all_sessions = Self::load_all_claims();
-        if let Ok(entries) = fs::read_dir(&dir) {
-            for entry in entries.flatten() {
-                if entry.path().extension().map(|x| x == "json").unwrap_or(false) {
-                    if let Ok(content) = fs::read_to_string(entry.path()) {
-                        if let Ok(msg) = serde_json::from_str::<SentinelMessage>(&content) {
-                            for sess in &all_sessions {
-                                if sess.session_id == msg.from_session {
-                                    continue;
-                                }
-                                let dominated = msg.to_session.is_none()
-                                    || msg.to_session.as_deref() == Some(&sess.session_id);
-                                if dominated && !msg.read_by.contains(&sess.session_id) {
-                                    total_unread += 1;
-                                    break; // count each message once
-                                }
-                            }
-                        }
-                    }
+        for msg in Self::all_messages() {
+            for sess in &all_sessions {
+                if sess.session_id == msg.from_session {
+                    continue;
+                }
+                if Self::addressed_to(&msg, &sess.session_id, sess.worktree.as_deref())
+                    && !msg.read_by.contains(&sess.session_id)
+                {
+                    total_unread += 1;
+                    break; // count each message once
                 }
             }
         }

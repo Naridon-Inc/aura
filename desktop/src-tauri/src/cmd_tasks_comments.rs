@@ -236,11 +236,11 @@ mod tests {
                 "task_a".into(),
                 "hello world".into(),
                 None,
-                Some("owner".into()),
+                Some("ashiq".into()),
             ))
             .unwrap();
         assert!(c.id.starts_with("cmt_"));
-        assert_eq!(c.author_handle, "owner");
+        assert_eq!(c.author_handle, "ashiq");
         let listed = rt()
             .block_on(tasks_comments_list(
                 repo.to_string_lossy().into_owned(),
@@ -260,7 +260,7 @@ mod tests {
                 "task_a".into(),
                 "root".into(),
                 None,
-                Some("owner".into()),
+                Some("ashiq".into()),
             ))
             .unwrap();
         let child = rt()
@@ -269,7 +269,7 @@ mod tests {
                 "task_a".into(),
                 "reply".into(),
                 Some(root.id.clone()),
-                Some("owner".into()),
+                Some("ashiq".into()),
             ))
             .unwrap();
         assert_eq!(child.parent_comment_id.as_deref(), Some(root.id.as_str()));

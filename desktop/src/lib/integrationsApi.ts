@@ -184,6 +184,24 @@ export const integrationsApi = {
    *  upstream-side new-project discovery stops. */
   jiraAutoMirrorDisable: () =>
     invoke<ConnectionStatus>("integrations_jira_auto_mirror_disable"),
+
+  /** Start Linear OAuth. Same one-call shape as `jiraConnect`: opens the
+   *  browser, awaits the loopback callback, exchanges the code, probes
+   *  the workspace identity, and persists the token. Emits
+   *  `aura:integrations:linear:auth_url` for the "didn't open?" link. */
+  linearConnect: () => invoke<ConnectionStatus>("integrations_linear_connect"),
+  /** Cancel an in-flight Linear OAuth flow. The pending `linearConnect`
+   *  promise rejects with "connect cancelled" and the port is released.
+   *  Idempotent. */
+  linearCancel: () => invoke<void>("integrations_linear_cancel"),
+  /** Current Linear connection status. Linear access tokens are
+   *  long-lived and carry no refresh token, so there's no refresh step —
+   *  a genuinely expired token simply reports disconnected and the UI
+   *  prompts a reconnect. Identity is read from the local state cache. */
+  linearStatus: () => invoke<ConnectionStatus>("integrations_linear_status"),
+  /** Wipe Linear tokens + cached state. Idempotent. */
+  linearDisconnect: () => invoke<void>("integrations_linear_disconnect"),
+
   /** Snapshot of all integrations for the settings list view. */
   list: () => invoke<ConnectionStatus[]>("integrations_list"),
 

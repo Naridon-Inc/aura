@@ -10,8 +10,10 @@
 import { forwardRef, useEffect, useRef, useState, type ReactNode } from "react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { StatusPills } from "./topbar/StatusPills";
+import { windowControlsInset } from "./topbar/windowControls";
 import { Tooltip, TooltipTrigger, TooltipContent } from "./ui/tooltip";
 import { Kbd } from "./ui/kbd";
+import { MENU_PANEL, MENU_ROW } from "./ui/menuSurface";
 import { AccountMenu } from "./account/AccountMenu";
 import {
   ProjectSwitcher,
@@ -79,6 +81,10 @@ type TopBarProps = {
   userInitial?: string;
   /** Profile button — opens Settings → Identity (ADE header only). */
   onOpenProfile?: () => void;
+  /** ADE v2 re-homes the profile + settings + help cluster into the left
+   *  sidebar (Conductor pattern) so the work-surface header can stop before
+   *  the review rail. When set, the header keeps only the pane toggles. */
+  hideAccountCluster?: boolean;
   /** ADE breadcrumb switcher — the current project › worktree, opening the
    *  nested project/worktree picker (Image #1 / #2). Only wired for the
    *  full-height ADE shell; omit and the breadcrumb simply doesn't render. */
@@ -116,6 +122,7 @@ export function TopBar({
   adeChrome,
   userInitial,
   onOpenProfile,
+  hideAccountCluster,
   activeRoot,
   activeName,
   activeEmoji,
@@ -134,20 +141,22 @@ export function TopBar({
   if (adeChrome) {
     return (
       <div
-        data-tauri-drag-region
-        onMouseDown={handleDrag}
+        data-tauri-drag-region={fullscreen ? undefined : true}
+        onMouseDown={fullscreen ? undefined : handleDrag}
         className="relative flex items-center w-full h-full pr-2 gap-1.5 text-text-3"
       >
-        {/* Left — traffic-light reservation (no workspace rail in ADE),
-            then the sidebar toggle FIRST so it sits right beside the macOS
-            lights on the same baseline (they read as one control row),
-            then new-session, then a compact brand mark. In fullscreen the
-            lights are gone, so the 76px inset would be an empty gap —
-            collapse it to a normal edge pad. */}
+        {/* Left — the window-buttons gutter (no workspace rail in ADE), then
+            the sidebar toggle FIRST so it sits right beside the macOS lights
+            on the same baseline (they read as one control row), then
+            new-session, then a compact brand mark. The gutter is reserved only
+            when the sidebar is COLLAPSED: open, the sidebar is the leftmost
+            column and its own header owns the corner, so this strip starts
+            right of the lights and takes a plain edge pad. Same helper the
+            sidebar header uses — one number, one rule. */}
         <div
-          data-tauri-drag-region
+          data-tauri-drag-region={fullscreen ? undefined : true}
           className="flex items-center gap-1"
-          style={{ paddingLeft: sidebarOpen ? 8 : fullscreen ? 12 : 76 }}
+          style={{ paddingLeft: windowControlsInset(!sidebarOpen) }}
         >
           {/* The full-height sidebar owns the project switcher, search,
               extensions and window nav now. All that remains here is a
@@ -226,26 +235,30 @@ export function TopBar({
               {reviewOpen ? "Hide review rail (⌘R)" : "Show review rail (⌘R)"}
             </TooltipContent>
           </Tooltip>
-          <span className="w-px h-4 bg-line-soft mx-0.5" aria-hidden />
-          <Tooltip>
-            <TooltipTrigger asChild>
-              <ChromeBtn title="Help & support" onClick={openHelpPane} tooltip>
-                <HelpGlyph />
-              </ChromeBtn>
-            </TooltipTrigger>
-            <TooltipContent side="bottom">Help &amp; support</TooltipContent>
-          </Tooltip>
-          {onOpenSettings && (
-            <Tooltip>
-              <TooltipTrigger asChild>
-                <ChromeBtn title="Settings" onClick={onOpenSettings} tooltip>
-                  <GearGlyph />
-                </ChromeBtn>
-              </TooltipTrigger>
-              <TooltipContent side="bottom">Settings</TooltipContent>
-            </Tooltip>
+          {!hideAccountCluster && (
+            <>
+              <span className="w-px h-4 bg-line-soft mx-0.5" aria-hidden />
+              <Tooltip>
+                <TooltipTrigger asChild>
+                  <ChromeBtn title="Help & support" onClick={openHelpPane} tooltip>
+                    <HelpGlyph />
+                  </ChromeBtn>
+                </TooltipTrigger>
+                <TooltipContent side="bottom">Help &amp; support</TooltipContent>
+              </Tooltip>
+              {onOpenSettings && (
+                <Tooltip>
+                  <TooltipTrigger asChild>
+                    <ChromeBtn title="Settings" onClick={onOpenSettings} tooltip>
+                      <GearGlyph />
+                    </ChromeBtn>
+                  </TooltipTrigger>
+                  <TooltipContent side="bottom">Settings</TooltipContent>
+                </Tooltip>
+              )}
+              <AccountMenu userInitial={userInitial} onOpenProfile={onOpenProfile} />
+            </>
           )}
-          <AccountMenu userInitial={userInitial} onOpenProfile={onOpenProfile} />
         </div>
       </div>
     );
@@ -569,7 +582,7 @@ export function MoreMenu({
       </Tooltip>
       {open && (
         <div
-          className={`absolute right-0 z-50 bg-bg-1 border border-line rounded-lg shadow-xl py-1.5 px-1 ${
+          className={`${MENU_PANEL} absolute right-0 ${
             placement === "up" ? "bottom-[26px]" : "top-[26px]"
           }`}
           style={{ minWidth: 260 }}
@@ -594,10 +607,10 @@ export function MoreMenu({
                   it.handler?.();
                 }}
                 disabled={!it.handler || busy}
-                className="w-full text-left px-2.5 py-1.5 rounded text-text-2 hover:bg-bg-2 hover:text-text-1 disabled:opacity-40 disabled:cursor-not-allowed flex flex-col gap-0.5"
+                className={`${MENU_ROW} flex-col !items-start gap-0.5`}
               >
-                <span className="text-[12px] font-medium">{it.label}</span>
-                <span className="text-[10.5px] text-text-4 leading-tight">
+                <span className="font-medium">{it.label}</span>
+                <span className="text-[11px] text-text-4 leading-tight">
                   {it.hint}
                 </span>
               </button>
@@ -605,10 +618,12 @@ export function MoreMenu({
           })}
           {updateStatusLine && (
             <div
-              className={`mt-1 mx-1 px-2.5 py-1.5 rounded text-[10.5px] leading-tight border ${
+              // A failed update is a real failure, so it keeps red — but on
+              // the app's own `--color-red` token, not a raw Tailwind rose.
+              className={`mt-1 mx-1 px-2.5 py-1.5 rounded text-[11px] leading-tight border ${
                 updateState.kind === "error"
-                  ? "border-rose-500/30 bg-rose-500/10 text-rose-200"
-                  : "border-line bg-bg-2 text-text-3"
+                  ? "border-red/30 bg-red/10 text-red"
+                  : "border-line-soft bg-bg-2 text-text-3"
               }`}
             >
               {updateStatusLine}
@@ -700,17 +715,17 @@ export function ResourcePill({
       </button>
       {open && (
         <div
-          className={`absolute right-0 z-50 bg-bg-1 border border-line rounded-lg shadow-xl ${
+          className={`${MENU_PANEL} absolute right-0 !p-0 ${
             placement === "up" ? "bottom-[26px]" : "top-[26px]"
           }`}
           style={{ width: 320 }}
         >
-          <div className="px-3 pt-2.5 pb-1.5 border-b border-line">
-            <div className="text-[10px] tracking-[0.08em] uppercase text-text-4">
+          <div className="px-3 pt-2.5 pb-1.5 border-b border-line-soft">
+            <div className="text-[10px] font-semibold tracking-wider uppercase text-text-4">
               Resource Usage
             </div>
           </div>
-          <div className="px-3 py-2 grid grid-cols-3 gap-2 border-b border-line">
+          <div className="px-3 py-2 grid grid-cols-3 gap-2 border-b border-line-soft">
             <ResourceStat
               label="CPU"
               value={snap ? `${snap.cpu_percent.toFixed(1)}%` : "—"}
@@ -729,7 +744,7 @@ export function ResourcePill({
             />
           </div>
           <div className="px-3 pt-2 pb-1">
-            <div className="text-[10px] tracking-[0.08em] uppercase text-text-4">
+            <div className="text-[10px] font-semibold tracking-wider uppercase text-text-4">
               Aura processes
             </div>
           </div>
@@ -740,13 +755,13 @@ export function ResourcePill({
                   key={p.pid}
                   className="flex items-center gap-2 px-1.5 py-1 rounded hover:bg-bg-2"
                 >
-                  <span className="text-[11.5px] text-text-1 flex-1 truncate font-medium">
+                  <span className="text-[12px] text-text-1 flex-1 truncate font-medium">
                     {p.name}
                   </span>
-                  <span className="text-[10.5px] text-text-4 tabular-nums w-12 text-right">
+                  <span className="text-[11px] text-text-4 tabular-nums w-12 text-right">
                     {p.cpu_percent.toFixed(1)}%
                   </span>
-                  <span className="text-[10.5px] text-text-3 tabular-nums w-14 text-right">
+                  <span className="text-[11px] text-text-3 tabular-nums w-14 text-right">
                     {p.memory_mb} MB
                   </span>
                 </div>
@@ -766,7 +781,7 @@ export function ResourcePill({
 function ResourceStat({ label, value }: { label: string; value: string }) {
   return (
     <div className="flex flex-col gap-0.5">
-      <span className="text-[9.5px] tracking-[0.08em] uppercase text-text-4">
+      <span className="text-[10px] font-semibold tracking-wider uppercase text-text-4">
         {label}
       </span>
       <span className="text-[12px] text-text-1 tabular-nums">{value}</span>
@@ -782,8 +797,10 @@ function formatMb(mb: number): string {
 // Gear glyph for the ADE header settings button (mirrors the one that
 // used to live in the AdeSidebar head before the chrome consolidation).
 function GearGlyph() {
+  // 1.9 is the app's gear weight (sidebar header + roster menu both use it);
+  // this one was drawn a hair heavier and read bolder beside them.
   return (
-    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.9">
       <circle cx="12" cy="12" r="3" />
       <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1Z" />
     </svg>

@@ -43,7 +43,16 @@ export function OnboardingShell({
   children: ReactNode;
 }) {
   return (
-    <div className="fixed inset-0 z-[60] bg-bg-1 flex flex-col" data-onboarding-v2>
+    // A modal surface: it owns the whole window until first-run finishes, so
+    // screen readers should treat everything behind it as inert. No Escape —
+    // there is nothing to fall back to until setup is done.
+    <div
+      className="fixed inset-0 z-[60] bg-bg-1 flex flex-col"
+      role="dialog"
+      aria-modal="true"
+      aria-label="Set up Aura"
+      data-onboarding-v2
+    >
       {onBack ? (
         <Button
           type="button"

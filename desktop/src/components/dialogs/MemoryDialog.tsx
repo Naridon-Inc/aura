@@ -299,7 +299,7 @@ export function MemoryDialog({ open, repoRoot, onClose, inline = false }: Memory
             {importing ? "Importing…" : "Import from Claude Code"}
           </Button>
           <Button variant="ghost" size="xs" onClick={reload} disabled={loading}>
-            {loading ? "Loading…" : "Refresh"}
+            {loading ? "Refreshing…" : "Refresh"}
           </Button>
           <Button variant="default" size="xs" onClick={onClose}>
             Close
@@ -327,7 +327,7 @@ export function MemoryDialog({ open, repoRoot, onClose, inline = false }: Memory
         )}
 
         {error ? (
-          <div className="text-red text-[12px] px-1 py-4">{error}</div>
+          <div role="alert" className="text-red text-[12px] px-1 py-4">{error}</div>
         ) : !memory && loading ? (
           <div className="text-text-4 text-[12px] py-10 text-center">
             Reading what Aura remembers…
@@ -590,10 +590,9 @@ function FilterChip({
       title={title}
       className={`flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-[11.5px] transition-colors ${
         active
-          ? "border-transparent"
+          ? "border-transparent bg-accent text-bg-0"
           : "border-line-soft text-text-3 hover:text-text-1 hover:bg-bg-2"
       }`}
-      style={active ? { background: "var(--color-accent)", color: "#05140b" } : undefined}
     >
       <span>{label}</span>
       <span className={active ? "opacity-70" : "text-text-4"}>{count}</span>

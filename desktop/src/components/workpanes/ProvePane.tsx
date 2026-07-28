@@ -338,7 +338,7 @@ function VerdictHero({
             msg:
               total === 0
                 ? "Nothing to check yet. Describe it in plain words — what should work when this is done?"
-                : "None of what this needs is built yet.",
+                : "None of what this needs is working yet — parts may be built, but nothing's wired up.",
           };
   return (
     <div className="rounded-lg border border-line-soft bg-bg-0 shadow-[var(--shadow-card)] p-3">

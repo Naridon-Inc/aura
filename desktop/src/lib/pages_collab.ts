@@ -61,6 +61,19 @@ const PUSH_MAX_BACKOFF_MS = 15_000;
 const RECONNECT_BASE_MS = 500;
 const RECONNECT_MAX_MS = 15_000;
 
+// Local Y.Doc persistence (instant-open cache). We stash each page's CRDT
+// state under a page-keyed localStorage entry so a re-open rehydrates the doc
+// synchronously — no network, no blank flash. Keyed by page identity (NOT the
+// author) because the document content is the same whoever opens it.
+const YDOC_LS_PREFIX = "aura.pages2.ydoc.";
+const YDOC_LRU_KEY = "aura.pages2.ydoc.__lru";
+// Keep the most-recently-opened N pages' state on disk; older ones evict so a
+// heavy Pages user can't exhaust the 5MB origin budget (shared with the
+// pagesApi markdown cache under the same aura.pages2.* namespace).
+const YDOC_LRU_CAP = 30;
+// Coalesce the burst of doc updates a keystroke produces into one write.
+const PERSIST_DEBOUNCE_MS = 400;
+
 function b64encode(bytes: Uint8Array): string {
   let binary = "";
   for (let i = 0; i < bytes.length; i++) binary += String.fromCharCode(bytes[i]);
@@ -74,6 +87,82 @@ function b64decode(s: string): Uint8Array {
   return out;
 }
 
+// ── Local Y.Doc persistence helpers ──────────────────────────────────────
+// All localStorage access is wrapped so a disabled/quota-full store degrades
+// to "no local cache" (still fully functional over the network) rather than
+// throwing into the provider's hot path.
+
+function lsGetRaw(key: string): string | null {
+  try {
+    return typeof localStorage !== "undefined" ? localStorage.getItem(key) : null;
+  } catch {
+    return null;
+  }
+}
+
+function lsSetRaw(key: string, value: string): boolean {
+  try {
+    if (typeof localStorage === "undefined") return false;
+    localStorage.setItem(key, value);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function lsRemoveRaw(key: string): void {
+  try {
+    if (typeof localStorage !== "undefined") localStorage.removeItem(key);
+  } catch {
+    /* ignore */
+  }
+}
+
+function readYdocLru(): string[] {
+  const raw = lsGetRaw(YDOC_LRU_KEY);
+  if (!raw) return [];
+  try {
+    const arr = JSON.parse(raw);
+    return Array.isArray(arr) ? arr.filter((k): k is string => typeof k === "string") : [];
+  } catch {
+    return [];
+  }
+}
+
+/** Load a page's persisted CRDT state (raw update bytes), or null if none. */
+function loadYdocState(persistKey: string): Uint8Array | null {
+  const saved = lsGetRaw(YDOC_LS_PREFIX + persistKey);
+  if (!saved) return null;
+  try {
+    return b64decode(saved);
+  } catch {
+    return null;
+  }
+}
+
+/** Persist a page's CRDT state, marking it most-recently-used and evicting the
+ *  oldest entries (on cap or on a quota rejection) so the cache stays bounded. */
+function saveYdocState(persistKey: string, b64: string): void {
+  const storageKey = YDOC_LS_PREFIX + persistKey;
+  // Try the write, evicting the oldest entry and retrying if the store is full.
+  for (let attempt = 0; attempt < 8; attempt++) {
+    if (lsSetRaw(storageKey, b64)) break;
+    const keys = readYdocLru().filter((k) => k !== persistKey);
+    const oldest = keys.shift();
+    if (!oldest) return; // nothing left to evict — store simply unavailable
+    lsRemoveRaw(YDOC_LS_PREFIX + oldest);
+    lsSetRaw(YDOC_LRU_KEY, JSON.stringify(keys));
+  }
+  // Mark most-recently-used (append) and enforce the cap from the front.
+  const keys = readYdocLru().filter((k) => k !== persistKey);
+  keys.push(persistKey);
+  while (keys.length > YDOC_LRU_CAP) {
+    const evicted = keys.shift();
+    if (evicted) lsRemoveRaw(YDOC_LS_PREFIX + evicted);
+  }
+  lsSetRaw(YDOC_LRU_KEY, JSON.stringify(keys));
+}
+
 /** Construction-time identity — known synchronously the instant a page opens
  *  (it's just the local user's handle + cursor colour), so the provider can be
  *  minted before the room/device lookups resolve. The Y.Doc + Awareness are
@@ -84,6 +173,13 @@ export type PagesProviderInit = {
   /** Stable cursor colour for this user — derived shell-side via
    *  hashHandleToColor(handle). */
   authorColor: string;
+  /** Stable, author-independent page identity (scope|bucket|uuid). When set,
+   *  the provider persists the doc's CRDT state to localStorage under this key
+   *  and rehydrates it SYNCHRONOUSLY at construction — so a re-opened page
+   *  paints its last-seen content instantly, before the network bootstrap (or
+   *  even the solo device-lookup) lands, instead of blanking each open. Omit
+   *  for ephemeral docs that shouldn't be cached to disk. */
+  persistKey?: string;
 };
 
 /** Connection-time coordinates — resolved async (Tauri device lookups) and
@@ -153,15 +249,38 @@ export class PagesProvider {
   // into one socket frame (~80ms), so we don't flood the hub per keystroke.
   private presenceTimer: ReturnType<typeof setTimeout> | null = null;
   private presenceDirty = false;
+  // Local instant-open cache. When set, the doc's CRDT state is mirrored to
+  // localStorage under this key (debounced) and restored synchronously in the
+  // constructor. null disables persistence.
+  private persistKey: string | null;
+  private persistTimer: ReturnType<typeof setTimeout> | null = null;
 
   constructor(init: PagesProviderInit) {
     this.options = init;
+    this.persistKey = init.persistKey ?? null;
     this.doc = new Y.Doc();
     this.awareness = new Awareness(this.doc);
     this.awareness.setLocalStateField("user", {
       name: init.authorHandle,
       color: init.authorColor,
     });
+    // Instant open: rehydrate the doc from the last locally-persisted CRDT
+    // state BEFORE the update listener is attached and before the editor's
+    // first render reads the fragment. `this` as the origin tag keeps this
+    // restore from being mistaken for a fresh local edit (so it isn't queued
+    // for push), and applying it before bootstrap is safe — the server
+    // snapshot is a CRDT merge over the same doc history, so re-applying it is
+    // idempotent and never duplicates content.
+    if (this.persistKey) {
+      const saved = loadYdocState(this.persistKey);
+      if (saved) {
+        try {
+          Y.applyUpdate(this.doc, saved, this);
+        } catch (err) {
+          console.warn("[pages_collab] restore persisted state failed", err);
+        }
+      }
+    }
     this.doc.on("update", this.handleLocalUpdate);
     // Presence: CollaborationCaret's yCursorPlugin writes the local caret
     // into awareness (`cursor` field, a JSON-encoded Y.RelativePosition) and
@@ -297,6 +416,23 @@ export class PagesProvider {
         /* noop */
       }
       this.ws = null;
+    }
+    // Flush the latest CRDT state to the local cache before tearing the doc
+    // down, so the next open of this page restores exactly what the user last
+    // saw (inline rather than via persistNow — `destroyed` is already set).
+    if (this.persistTimer) {
+      clearTimeout(this.persistTimer);
+      this.persistTimer = null;
+    }
+    if (this.persistKey) {
+      try {
+        saveYdocState(
+          this.persistKey,
+          b64encode(Y.encodeStateAsUpdate(this.doc)),
+        );
+      } catch (err) {
+        console.warn("[pages_collab] final persist failed", err);
+      }
     }
     this.awareness.destroy();
     this.doc.destroy();
@@ -486,11 +622,15 @@ export class PagesProvider {
   }
 
   private handleLocalUpdate = (update: Uint8Array, origin: unknown) => {
+    if (this.destroyed) return;
+    // Mirror EVERY change to the local cache — local edits AND remote/bootstrap
+    // applies (origin === this) — so the on-disk copy always reflects the full
+    // doc the user last saw, ready to paint instantly on the next open.
+    if (this.persistKey) this.schedulePersist();
     // Updates we applied ourselves (bootstrap, ops pull, WS frames) carry
     // `this` as origin. Anything else is a real local edit that must be
     // pushed to the server.
     if (origin === this) return;
-    if (this.destroyed) return;
     this.pendingUpdates.push(update);
     if (this.pushTimer) return;
     this.pushTimer = setTimeout(() => {
@@ -498,6 +638,25 @@ export class PagesProvider {
       void this.flushPush();
     }, PUSH_DEBOUNCE_MS);
   };
+
+  /** Debounced mirror of the doc's CRDT state to the local instant-open cache.
+   *  Coalesces the update burst a keystroke produces into a single write. */
+  private schedulePersist(): void {
+    if (!this.persistKey || this.persistTimer) return;
+    this.persistTimer = setTimeout(() => {
+      this.persistTimer = null;
+      this.persistNow();
+    }, PERSIST_DEBOUNCE_MS);
+  }
+
+  private persistNow(): void {
+    if (!this.persistKey || this.destroyed) return;
+    try {
+      saveYdocState(this.persistKey, b64encode(Y.encodeStateAsUpdate(this.doc)));
+    } catch (err) {
+      console.warn("[pages_collab] persist state failed", err);
+    }
+  }
 
   // Awareness changed. Skip remote-applied changes (origin === this) — those
   // came in over the wire and re-broadcasting them would echo-loop. Anything
@@ -670,6 +829,7 @@ export function createPagesConnectedProvider(
   const provider = new PagesProvider({
     authorHandle: opts.authorHandle,
     authorColor: opts.authorColor,
+    persistKey: opts.pageId,
   });
   void provider.connect({
     roomId: opts.roomId,

@@ -18,6 +18,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { Search } from "lucide-react";
+import { AsciiSpinner } from "../ui/ascii-spinner";
 
 import type { BrainChoice, ModelCatalog } from "../../lib/api";
 import {
@@ -45,6 +46,14 @@ type Props = {
   /** Toggle a row's favourite star. */
   onToggleFav: (brainId: string, model: CatalogModel) => void;
   onClose: () => void;
+  /** Optional config block pinned below the rows (e.g. defaults + auto-routing).
+   *  Rendered outside the scrollable navigable list so its own controls
+   *  (selects, disclosures) never collide with arrow-key row navigation. */
+  footer?: React.ReactNode;
+  /** Per-turn controls (Fast + Effort) pinned just below the filter, above the
+   *  model list (#17). Rendered outside the navigable list so its buttons never
+   *  collide with arrow-key row navigation. */
+  turnControls?: React.ReactNode;
 };
 
 /** A brain whose required API key is absent can't run — its rows are shown but
@@ -86,6 +95,8 @@ export function BrainSwitcherModal({
   onPickAuto,
   onToggleFav,
   onClose,
+  footer,
+  turnControls,
 }: Props) {
   const [query, setQuery] = useState("");
   const [idx, setIdx] = useState(0);
@@ -159,7 +170,7 @@ export function BrainSwitcherModal({
   return createPortal(
     <div
       className="fixed inset-0 z-[60] flex items-start justify-center pt-[14vh]"
-      style={{ background: "rgba(5,5,5,0.5)", backdropFilter: "blur(3px)" }}
+      style={{ background: "rgba(0,0,0,0.4)", backdropFilter: "blur(3px)" }}
       onMouseDown={onClose}
       onKeyDown={onKeyDown}
     >
@@ -184,10 +195,12 @@ export function BrainSwitcherModal({
           <span className="text-[10px] tracking-wider text-text-5">esc</span>
         </div>
 
+        {turnControls}
+
         {loadError && (
           <div
             className="border-b border-line-soft px-3.5 py-2 text-[11.5px]"
-            style={{ color: "var(--color-red)", background: "rgba(239,68,68,0.08)" }}
+            style={{ color: "var(--color-red)", background: "color-mix(in srgb, var(--color-red) 10%, transparent)" }}
           >
             {loadError}
           </div>
@@ -196,7 +209,10 @@ export function BrainSwitcherModal({
         {/* Rows */}
         <div ref={listRef} className="max-h-[56vh] overflow-y-auto py-1">
           {loading && brains.length === 0 ? (
-            <div className="px-3.5 py-3 text-[12px] text-text-4">Loading models…</div>
+            <div className="flex items-center gap-1.5 px-3.5 py-3 text-[12px] text-text-4">
+              <AsciiSpinner />
+              Loading models…
+            </div>
           ) : entries.length === 0 ? (
             <div className="px-3.5 py-3 text-[12px] text-text-4">No models match.</div>
           ) : (
@@ -233,6 +249,11 @@ export function BrainSwitcherModal({
             })
           )}
         </div>
+
+        {/* Config footer — defaults + auto-routing, pinned below the navigable
+            rows. Optional; collapsed by default so the modal stays a fast
+            per-turn switcher. */}
+        {footer}
       </div>
     </div>,
     document.body,
@@ -324,7 +345,7 @@ function BrainModelRow({
           {brain.requires_api_key && (
             <span
               className={`h-1.5 w-1.5 shrink-0 rounded-full ${
-                brain.has_api_key ? "bg-emerald-400" : "bg-amber-400"
+                brain.has_api_key ? "bg-accent-green" : "bg-text-5"
               }`}
               title={brain.has_api_key ? "API key connected" : "API key missing"}
               aria-hidden
@@ -338,7 +359,7 @@ function BrainModelRow({
               active
             </span>
           )}
-          {missingKey && <span className="ml-auto text-[9.5px] text-amber-400">needs key</span>}
+          {missingKey && <span className="ml-auto text-[9.5px] text-text-4">needs key</span>}
         </div>
       )}
       <div
@@ -380,7 +401,7 @@ function BrainModelRow({
           className={`ml-auto transition-opacity ${
             favorited
               ? "opacity-100 text-accent"
-              : "opacity-0 group-hover/row:opacity-60 text-text-3 hover:!opacity-100"
+              : "opacity-0 group-hover/row:opacity-60 focus-visible:opacity-100 text-text-3 hover:!opacity-100"
           }`}
           title={favorited ? "Unfavorite" : "Favorite"}
           onMouseDown={(e) => {

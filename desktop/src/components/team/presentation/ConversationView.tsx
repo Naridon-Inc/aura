@@ -12,7 +12,14 @@
  *
  *  Pure-presentational on the `useTeamChat` bundle. */
 
-import { useState } from "react";
+import { useEffect, useState, type ReactNode } from "react";
+import {
+  Bookmark,
+  FileText,
+  Link2,
+  MessageCircle,
+  Plus,
+} from "lucide-react";
 import type { TeamChatModel } from "../application/useTeamChat";
 import {
   AURA_GLOBAL_CHANNEL,
@@ -33,23 +40,29 @@ import { Composer } from "./Composer";
 import { ChannelCanvasTab } from "./ChannelCanvasTab";
 import { ChannelCustomTab } from "./ChannelCustomTab";
 import { Button } from "../../ui/button";
+import {
+  ChannelDetailsDialog,
+  type ChannelDialogTab,
+} from "./ChannelDetailsDialog";
 
 export function ConversationView({
   chat,
   repoRoot,
+  wide: wideOverride,
   onExpand,
-  contextTab,
+  contextTabs,
   onSelectContext,
 }: {
   chat: TeamChatModel;
   repoRoot: string;
+  /** Width belongs to this presentation mount, not the shared chat model. */
+  wide?: boolean;
   /** Narrow-mount "open in main pane" affordance; omitted by the wide mount
    *  that is already expanded. */
   onExpand?: () => void;
-  /** The context panel's current tab, or null when it's collapsed — drives
-   *  the channel header's Members / Pins active highlight. */
-  contextTab: ContextTab | null;
-  /** Open the context panel at a tab (toggles it closed if already there). */
+  /** Explicit split panes currently open for the active conversation. */
+  contextTabs: ContextTab[];
+  /** Open or close a synchronized split pane. */
   onSelectContext: (tab: ContextTab) => void;
 }) {
   const {
@@ -59,7 +72,7 @@ export function ConversationView({
     members,
     topLevel,
     fetchActive,
-    wide,
+    wide: chatWide,
     setActiveId,
     msgSearchOpen,
     setMsgSearchOpen,
@@ -83,6 +96,7 @@ export function ConversationView({
     addChannelTab,
     removeChannelTab,
   } = chat;
+  const wide = wideOverride ?? chatWide;
 
   // #aura first-entry disclosure — shown once per device (localStorage
   // marker), dismissed locally for the rest of this mount. The default
@@ -92,6 +106,17 @@ export function ConversationView({
   const [disclosureSeen, setDisclosureSeen] = useState(
     () => localStorage.getItem("aura.chat.disclosure.aura") != null,
   );
+  const [channelDialogTab, setChannelDialogTab] = useState<ChannelDialogTab | null>(null);
+
+  useEffect(() => {
+    const onSelectTab = (event: Event) => {
+      const detail = (event as CustomEvent<{ conversationId?: string; tab?: ChannelTab }>).detail;
+      if (!active || detail?.conversationId !== active.id || !detail.tab) return;
+      setChannelTab((tabs) => ({ ...tabs, [active.id]: detail.tab! }));
+    };
+    window.addEventListener("aura:team-select-tab", onSelectTab);
+    return () => window.removeEventListener("aura:team-select-tab", onSelectTab);
+  }, [active, setChannelTab]);
 
   if (!active) return <EmptyNoSelection />;
 
@@ -108,13 +133,6 @@ export function ConversationView({
   const setTab = (next: ChannelTab) =>
     setChannelTab((m) => ({ ...m, [active.id]: next }));
 
-  // Custom URL tabs live on repo channels only — DMs and the cross-repo
-  // #aura channel have no manifest entry for the backend to attach them
-  // to (and the "+" hides when this is undefined).
-  const canCarryTabs =
-    !!active.channel &&
-    (active.kind === "channel" || active.kind === "custom") &&
-    active.channel !== AURA_GLOBAL_CHANNEL;
   // The active custom tab's definition, if a teammate hasn't removed it
   // from under us — when they have, the body falls back gracefully.
   const activeCustomTab = activeTab.startsWith("custom:")
@@ -127,15 +145,26 @@ export function ConversationView({
         conv={active}
         repoRoot={repoRoot}
         memberCount={members.length}
-        membersOpen={contextTab === "members"}
-        onToggleMembers={() => onSelectContext("members")}
-        pinsOpen={contextTab === "pinned"}
+        members={members}
+        membersOpen={channelDialogTab === "members"}
+        onToggleMembers={() => setChannelDialogTab("members")}
+        detailsOpen={
+          active.kind === "dm"
+            ? contextTabs.includes("details")
+            : channelDialogTab !== null
+        }
+        onToggleDetails={() =>
+          active.kind === "dm"
+            ? onSelectContext("details")
+            : setChannelDialogTab("about")
+        }
+        canvasOpen={contextTabs.includes("canvas")}
+        onToggleCanvas={() => onSelectContext("canvas")}
+        pinsOpen={contextTabs.includes("pinned")}
         onTogglePins={() => onSelectContext("pinned")}
         pinCount={topLevel.filter((m) => m.pinned).length}
         onRefresh={fetchActive}
         onBackToRail={!wide ? () => setActiveId(null) : undefined}
-        activeTab={activeTab}
-        onChangeTab={setTab}
         searchActive={msgSearchOpen}
         onToggleSearch={() => {
           setTab("messages");
@@ -145,9 +174,20 @@ export function ConversationView({
         voiceMembers={active.channel ? voiceByChannel[active.channel] ?? [] : []}
         inThisVoice={!!active.channel && myVoiceChannel === active.channel}
         onExpand={onExpand}
-        onAddTab={
-          canCarryTabs
-            ? (label, url) => addChannelTab(active.channel!, label, url)
+      />
+      <ConversationTabs
+        active={active}
+        activeTab={activeTab}
+        onSelect={setTab}
+        onAddCustomTab={
+          active.channel && active.kind !== "dm"
+            ? async () => {
+                const label = window.prompt("Tab name");
+                if (!label?.trim()) return;
+                const url = window.prompt("Tab URL");
+                if (!url?.trim()) return;
+                await addChannelTab(active.channel!, label.trim(), url.trim());
+              }
             : undefined
         }
       />
@@ -222,6 +262,7 @@ export function ConversationView({
             myDeviceId={myDevice?.device_id ?? null}
             myDisplay={myDevice?.display ?? null}
             readCursors={activeChannelCursors}
+            onOpenMembers={() => setChannelDialogTab("members")}
             onOpenReplies={(m) => setActiveThread(m)}
             onTogglePin={(msgId) => togglePin(active.id, msgId)}
             onResend={
@@ -249,7 +290,6 @@ export function ConversationView({
           repoRoot={repoRoot}
           channel={active.channel ?? null}
           channelName={active.name}
-          selfHandle={selfHandle}
         />
       ) : activeTab === "files" ? (
         <ChannelFilesTab
@@ -279,6 +319,72 @@ export function ConversationView({
           onUnpin={(msgId) => togglePin(active.id, msgId)}
         />
       )}
+      {channelDialogTab && active.kind !== "dm" && (
+        <ChannelDetailsDialog
+          conv={active}
+          members={members}
+          initialTab={channelDialogTab}
+          onTabChange={setChannelDialogTab}
+          onClose={() => setChannelDialogTab(null)}
+        />
+      )}
     </section>
+  );
+}
+
+function ConversationTabs({
+  active,
+  activeTab,
+  onSelect,
+  onAddCustomTab,
+}: {
+  active: NonNullable<TeamChatModel["active"]>;
+  activeTab: ChannelTab;
+  onSelect: (tab: ChannelTab) => void;
+  onAddCustomTab?: () => void;
+}) {
+  const tabs: Array<{
+    value: ChannelTab;
+    label: string;
+    icon: ReactNode;
+  }> = [
+    { value: "messages", label: "Messages", icon: <MessageCircle size={13} /> },
+    { value: "canvas", label: active.kind === "dm" ? "Canvas" : "Canvas", icon: <FileText size={13} /> },
+    { value: "files", label: "Files & links", icon: <Link2 size={13} /> },
+    ...(active.kind === "dm"
+      ? []
+      : ([{ value: "bookmarks", label: "Bookmarks", icon: <Bookmark size={13} /> }] as const)),
+    ...(active.tabs ?? []).map((tab) => ({
+      value: `custom:${tab.id}` as ChannelTab,
+      label: tab.label,
+      icon: <FileText size={13} />,
+    })),
+  ];
+
+  return (
+    <nav className="slack-channel-tabs" aria-label="Conversation sections">
+      {tabs.map((tab) => (
+        <button
+          key={tab.value}
+          type="button"
+          className={activeTab === tab.value ? "is-active" : ""}
+          onClick={() => onSelect(tab.value)}
+        >
+          {tab.icon}
+          <span>{tab.label}</span>
+        </button>
+      ))}
+      {onAddCustomTab && (
+        <button
+          type="button"
+          className="slack-channel-tab-add"
+          onClick={onAddCustomTab}
+          title="Add a tab"
+          aria-label="Add a tab"
+        >
+          <Plus size={14} />
+        </button>
+      )}
+    </nav>
   );
 }

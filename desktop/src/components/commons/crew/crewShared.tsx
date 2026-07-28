@@ -5,14 +5,15 @@
 
 import {
   GitCommitHorizontal,
-  Loader2,
   ShieldCheck,
 } from "lucide-react";
+import { AsciiSpinner } from "../../ui/ascii-spinner";
 
 import type { LoopTask } from "../../../lib/api";
 import { AgentIcon } from "../../agent/AgentIcon";
 import { agentDisplayLabel, canonicalAgentId } from "../../../lib/agentIdentity";
 import { StatusChip, type ChipTone } from "../../ui/statusChip";
+import { StateGlyph } from "../../tasks/StatePill";
 import { proofLabel, type CrewProof } from "./crewProof";
 
 // One palette, used as a left-border accent everywhere. Arctic-blue for "ready
@@ -20,9 +21,9 @@ import { proofLabel, type CrewProof } from "./crewProof";
 // muted for blocked/other. Green/red are status-only — never affordances.
 export const CREW_ACCENT = {
   ready: "var(--color-accent)",
-  working: "#d99a2b",
-  done: "#3fa66a",
-  failed: "#d66a6a",
+  working: "var(--color-amber)",
+  done: "var(--color-accent-green)",
+  failed: "var(--color-red)",
   blocked: "var(--color-text-5)",
   paused: "var(--color-text-5)",
   other: "var(--color-text-5)",
@@ -34,6 +35,34 @@ export const PRIORITY_TONE: Record<string, ChipTone> = {
   medium: "blue",
   low: "neutral",
 };
+
+// Each lifecycle state → the SAME per-group glyph the tasks board draws
+// (dashed ring / solid ring / half-conic / filled), tinted by our status
+// palette. Started→half-fill (amber), ready→solid ring, blocked→dashed ring,
+// paused→muted solid ring, done→filled green, failed→filled red. So a status
+// reads as a shape, not a colour you have to decode.
+const CREW_STATUS_GLYPH: Record<string, { group: string; color: string }> = {
+  working: { group: "started", color: CREW_ACCENT.working },
+  ready: { group: "unstarted", color: CREW_ACCENT.ready },
+  blocked: { group: "backlog", color: CREW_ACCENT.blocked },
+  paused: { group: "unstarted", color: CREW_ACCENT.paused },
+  failed: { group: "completed", color: CREW_ACCENT.failed },
+  done: { group: "completed", color: CREW_ACCENT.done },
+  other: { group: "unstarted", color: CREW_ACCENT.other },
+};
+
+/** The tasks-board status glyph, keyed by a crew lifecycle status — one shape
+ *  vocabulary for state everywhere. */
+export function StatusGlyph({
+  status,
+  size = 9,
+}: {
+  status: string;
+  size?: number;
+}) {
+  const g = CREW_STATUS_GLYPH[status] ?? CREW_STATUS_GLYPH.other!;
+  return <StateGlyph group={g.group} color={g.color} size={size} />;
+}
 
 /** Plain-language "how long ago", tolerant of seconds- or millis-epoch (loop
  *  nodes stamp seconds; the goals ledger stamps millis). Empty for missing. */
@@ -50,8 +79,10 @@ export function relativeTime(unix: number | null | undefined): string {
   if (h < 24) return `${h}h ago`;
   const d = Math.floor(h / 24);
   if (d < 7) return `${d}d ago`;
-  const w = Math.floor(d / 7);
-  return `${w}w ago`;
+  if (d < 30) return `${Math.floor(d / 7)}w ago`;
+  const mo = Math.floor(d / 30);
+  if (mo < 12) return `${mo}mo ago`;
+  return `${Math.floor(mo / 12)}y ago`;
 }
 
 /** The agent logo for a node, or a neutral "unassigned" dot. */
@@ -180,7 +211,7 @@ export function WorkingLine({ agentKind }: { agentKind?: string | null }) {
   const canonical = agentKind ? canonicalAgentId(agentKind) : null;
   return (
     <span className="inline-flex items-center gap-1 text-[10.5px] text-text-4">
-      <Loader2 size={10} className="animate-spin" />
+      <AsciiSpinner />
       running on {canonical ? agentDisplayLabel(canonical) : "the Aura brain"}
     </span>
   );

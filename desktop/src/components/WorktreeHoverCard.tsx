@@ -9,9 +9,8 @@
 // clean, in-sync copy offers nothing at all. Opening the copy is the card body
 // itself (and the row) — the button is reserved for what git is asking for.
 //
-// The judgement actions (a commit message, a PR title+body) don't run raw git
-// here — they hand the work to Aura's chat, which opens in THIS copy's own
-// workspace and does it, auto-sent, so the user watches it happen.
+// Commit/pull judgement still hands work to Aura's chat. Pull-request creation
+// is native: it opens the shared authoring dialog with this copy's exact branch.
 //
 // Real data only. Ahead/behind + origin are fetched on hover (the card mounts
 // only while open). A copy with no agent, no action and no PR simply shows less.
@@ -22,10 +21,10 @@ import { api } from "../lib/api";
 import { streamChannel, useAgentStream } from "../lib/agentStreamStore";
 import { relAge, summarizeEvents } from "../lib/streamSummary";
 import { AgentIcon } from "./agent/AgentIcon";
+import { requestPrAuthoring } from "./dialogs/PrAuthoringDialog";
 import {
   askAuraToRun,
   commitPushPrompt,
-  createPrPrompt,
   deriveWtAction,
   openPr,
   pullPrompt,
@@ -159,8 +158,8 @@ export function WorktreeHoverCard({
 
 /** The copy's one contextual action, styled Conductor-compact + outline. For
  *  Create PR it's a split button: the face opens a normal PR, the caret opens
- *  a small menu (draft PR / push only). Every judgement action hands off to
- *  Aura's chat via `askAuraToRun`; opening an existing PR goes to the browser. */
+ *  a small menu (draft PR / push only). PR creation opens native authoring;
+ *  commit/pull/push-only still use `askAuraToRun`. */
 function ActionButton({
   action,
   branch,
@@ -255,7 +254,14 @@ function ActionButton({
       <button
         type="button"
         className="wt-hc-act wt-hc-act-outline wt-hc-split-face"
-        onClick={() => run("Create PR", createPrPrompt(branch, title))}
+        onClick={() =>
+          requestPrAuthoring({
+            mode: "create",
+            repoRoot: cwd,
+            headBranch: branch,
+            title,
+          })
+        }
       >
         <Icons.GitBranch size={12} />
         {action.label}
@@ -275,7 +281,13 @@ function ActionButton({
             className="wt-hc-menu-item"
             onClick={() => {
               setMenu(false);
-              run("Create draft PR", createPrPrompt(branch, title, true));
+              requestPrAuthoring({
+                mode: "create",
+                repoRoot: cwd,
+                headBranch: branch,
+                title,
+                draft: true,
+              });
             }}
           >
             Create draft PR
@@ -317,6 +329,10 @@ function AgentRow({ agent, repoRoot }: { agent: HoverAgent; repoRoot: string }) 
               working
             </span>
           ) : agent.attention ? (
+            // "Needs you" is the attention state, which is exactly what
+            // `--color-amber` names — the stylesheet already inks
+            // `.wt-hc-attn` with it, so no inline override is needed and
+            // the two can never drift apart again.
             <span className="wt-hc-attn">needs you</span>
           ) : (
             <span className="wt-hc-idle">idle</span>
@@ -339,22 +355,43 @@ function AgentRow({ agent, repoRoot }: { agent: HoverAgent; repoRoot: string }) 
  *  "working" pulse lives on the agent row, so the header never spins for a
  *  copy merely attached to an idle agent. */
 function StatusRing({ kind }: { kind: RingKind }) {
-  const glyph = (() => {
+  // The SHAPE carries the rung — dashed ring → half arc → three-quarter arc →
+  // solid disc — so the glyph reads without colour at all. Colour is then free
+  // to mean one thing: amber, the pack's attention slot, marks the only rung
+  // that is waiting on YOU. Everything else rides the neutral text ramp. (It
+  // used to be four raw Tailwind hues — emerald / sky / amber / grey — which
+  // put a traffic light on a card that appears on every hover; and briefly the
+  // product accent, which collided with "this is the copy you're standing in".)
+  const { ink, fill } = (() => {
     switch (kind) {
-      case "done": // merged — the board's solid "done" disc
-        return "border-[1.5px] border-emerald-500 bg-emerald-500";
-      case "attention": // waiting on you — the board's "in review" arc
-        return "border-[1.5px] border-sky-400 bg-[conic-gradient(theme(colors.sky.400)_75%,transparent_75%)]";
-      case "in-use": // an agent is on it — the board's "in progress" arc
+      case "done": // merged — solid "done" disc, finished, nothing to do
+        return { ink: "var(--color-text-3)", fill: "var(--color-text-3)" };
+      case "attention": // waiting on you — three-quarter arc
+        return {
+          ink: "var(--color-amber)",
+          fill:
+            "conic-gradient(var(--color-amber) 75%, transparent 75%)",
+        };
+      case "in-use": // an agent is on it — half arc
       case "unsaved": // changes in flight — same rung, both "in progress"
-        return "border-[1.5px] border-amber-400 bg-[conic-gradient(theme(colors.amber.400)_50%,transparent_50%)]";
-      default: // idle / dormant — the board's dashed "backlog" ring
-        return "border-dashed border-[1.5px] border-text-4";
+        return {
+          ink: "var(--color-text-2)",
+          fill:
+            "conic-gradient(var(--color-text-2) 50%, transparent 50%)",
+        };
+      default: // idle / dormant — dashed "backlog" ring
+        return { ink: "var(--color-text-4)", fill: "transparent" };
     }
   })();
   return (
     <span className="wt-hc-ring" aria-label={ringLabel(kind)} title={ringLabel(kind)}>
-      <span className={`w-3 h-3 rounded-full box-border block ${glyph}`} aria-hidden />
+      <span
+        className={`w-3 h-3 rounded-full box-border block border-[1.5px]${
+          kind === "idle" ? " border-dashed" : ""
+        }`}
+        style={{ borderColor: ink, background: fill }}
+        aria-hidden
+      />
     </span>
   );
 }

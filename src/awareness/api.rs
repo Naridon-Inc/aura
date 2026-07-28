@@ -12,10 +12,24 @@ use crate::live_events;
 /// Recency cutoff for live, in-flight collisions (mirrors `conflict.rs`).
 pub const CONFLICT_WINDOW_MS: u64 = 45 * 60 * 1000;
 
+/// Recency cutoff for the ambient feed. The radar answers "who is working
+/// near me *now*" — an event from six weeks ago answers nothing, and a feed
+/// with no window silently ages into a list of unrelated paths that reads as
+/// noise. Wider than the collision window (a teammate who touched this file
+/// yesterday is still worth knowing about), far short of forever.
+pub const FEED_WINDOW_MS: u64 = 24 * 60 * 60 * 1000;
+
 /// JSON for one event — the model serializes directly; we keep this as the
-/// single conversion point so callers never reach into the struct shape.
+/// single conversion point so callers never reach into the struct shape. A
+/// computed `verified` flag is stamped on here (not a stored field): true when
+/// the event's embedded pubkey re-derives its `key_id` and validates the
+/// signature, so every reader — CLI, MCP, desktop — learns trust from one place.
 pub fn event_json(e: &AwarenessEvent) -> Value {
-    serde_json::to_value(e).unwrap_or(Value::Null)
+    let mut v = serde_json::to_value(e).unwrap_or(Value::Null);
+    if let Some(obj) = v.as_object_mut() {
+        obj.insert("verified".into(), Value::Bool(super::verify::verify_event(e)));
+    }
+    v
 }
 
 /// JSON for one reasoned collision.
@@ -46,6 +60,23 @@ pub fn radar(focus: Option<&str>, limit: usize, as_actor: Option<&str>) -> Value
     let all = broadcast::merged_events();
 
     let mut rows: Vec<&AwarenessEvent> = relevance::filter(&all, focus);
+
+    // Scope to THIS repository. The event log is append-only and shared, so
+    // without this a checkout picks up rows about paths that live in another
+    // project entirely — the single loudest source of "the radar shows random
+    // things". Branch is deliberately NOT filtered: seeing a teammate working
+    // the same file on a different branch is the whole point of the plane.
+    let repo = live_events::repo_name();
+    rows.retain(|e| e.repo == repo);
+
+    // Drop anything past the feed window, and count what was dropped so the
+    // surface can say "nothing recent" instead of padding the list with
+    // six-week-old rows that look live.
+    let now = live_events::now_ms();
+    let before_window = rows.len();
+    rows.retain(|e| now.saturating_sub(e.ts) <= FEED_WINDOW_MS);
+    let stale_hidden = before_window - rows.len();
+
     rows.sort_by(|a, b| b.ts.cmp(&a.ts));
     rows.truncate(limit);
 
@@ -60,6 +91,11 @@ pub fn radar(focus: Option<&str>, limit: usize, as_actor: Option<&str>) -> Value
         "branch": live_events::current_branch(),
         "events": rows.iter().map(|e| event_json(e)).collect::<Vec<_>>(),
         "conflicts": collisions.iter().map(collision_json).collect::<Vec<_>>(),
+        // How far back the feed looked, and how many in-repo events fell
+        // outside it. Lets a surface distinguish "nobody has been here"
+        // from "nobody has been here lately" without guessing.
+        "feed_window_ms": FEED_WINDOW_MS,
+        "stale_hidden": stale_hidden,
         "focus": {
             "files": my_focus.files,
             "symbols": my_focus.symbols,
@@ -72,7 +108,10 @@ pub fn radar(focus: Option<&str>, limit: usize, as_actor: Option<&str>) -> Value
 pub fn conflicts(as_actor: Option<&str>, include_possible: bool) -> Value {
     let _ = broadcast::pull_remote(false);
     let all = broadcast::merged_events();
-    let my_focus = conflict::focus_from_repo(as_actor);
+    // The callgraph ripple edges are only built when the Possible tier is
+    // actually wanted — they cost a full checkpoint-store read (see
+    // `conflict::focus_from_repo_opts`).
+    let my_focus = conflict::focus_from_repo_opts(as_actor, include_possible);
     let mut collisions = conflict::detect(&my_focus, &all, live_events::now_ms(), CONFLICT_WINDOW_MS);
     if !include_possible {
         collisions.retain(|c| c.severity != conflict::Severity::Possible);

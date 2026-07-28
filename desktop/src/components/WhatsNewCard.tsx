@@ -10,23 +10,30 @@ import type { ReleaseNote } from "../lib/releaseNotes";
 type Props = {
   note: ReleaseNote;
   onDismiss: () => void;
+  /** Same contract as the modal: the card dismisses itself, then acts. */
+  onCta?: (kind: NonNullable<ReleaseNote["cta"]>["kind"]) => void;
 };
 
-export function WhatsNewCard({ note, onDismiss }: Props) {
+export function WhatsNewCard({ note, onDismiss, onCta }: Props) {
   const lead = note.highlights[0] ?? note.title;
   return (
     <div
       className="mx-3 mt-3 rounded-lg border p-2.5 text-xs"
+      // `--color-bg-elevated` is defined by no pack, so this card was painted
+      // by its fallbacks — a cold grey box with a blue edge, frozen against
+      // every theme. `--color-bg-3` is the real elevated surface. The accent
+      // stays: a left edge + the spark are the "something new landed" mark,
+      // which is exactly what the accent slot is for.
       style={{
-        background: "var(--color-bg-elevated, #1a1a1a)",
-        borderColor: "var(--color-border, #2a2a2a)",
-        borderLeft: "3px solid var(--color-accent, #5aa9e6)",
+        background: "var(--color-bg-3)",
+        borderColor: "var(--color-line)",
+        borderLeft: "3px solid var(--color-accent)",
       }}
     >
       <div className="flex items-start gap-2">
         <Sparkles
           className="mt-px h-3.5 w-3.5 shrink-0"
-          style={{ color: "var(--color-accent, #5aa9e6)" }}
+          style={{ color: "var(--color-accent)" }}
           aria-hidden="true"
         />
         <div className="min-w-0 flex-1">
@@ -34,6 +41,20 @@ export function WhatsNewCard({ note, onDismiss }: Props) {
             Updated to {note.version}
           </div>
           <div className="mt-0.5 leading-snug text-text-3">{lead}</div>
+          {note.cta && onCta && (
+            <button
+              type="button"
+              onClick={() => {
+                const { kind } = note.cta!;
+                onDismiss();
+                onCta(kind);
+              }}
+              className="mt-1.5 font-medium underline-offset-2 hover:underline"
+              style={{ color: "var(--color-accent)" }}
+            >
+              {note.cta.label}
+            </button>
+          )}
         </div>
         <button
           type="button"

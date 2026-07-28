@@ -68,7 +68,11 @@ export function providerAccent(providerId: string): string {
   if (id.includes("codex") || id.includes("openai")) return "var(--color-green)";
   if (id.includes("cursor")) return "var(--color-violet)";
   if (id === "openai-compat" || id.startsWith("openai-compat")) {
-    return "var(--color-teal, #5eead4)";
+    // No pack defines `--color-teal`, so this bar drew a hard-coded teal that
+    // ignored every theme. A compat endpoint is OpenAI-shaped but is not
+    // OpenAI, so it reads as the codex green pulled back toward the surface —
+    // same family, visibly quieter.
+    return "color-mix(in srgb, var(--color-green) 58%, var(--color-text-3))";
   }
   if (id.includes("aura")) return "var(--color-accent)";
   return "var(--color-text-3)";

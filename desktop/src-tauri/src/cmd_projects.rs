@@ -170,6 +170,11 @@ pub fn projects_register(
     // Cap at 32 — keeps the file small and the Manager launcher legible.
     entries.truncate(32);
     write_all(&entries)?;
+    // Register this project with the cloud so the paired phone's repo switcher
+    // lists it the moment it's opened — no live session or manual backfill
+    // needed. Fire-and-forget; a quiet no-op when signed out. Managed worktrees
+    // returned above, so this only fires for real user workspaces.
+    crate::cloud_session_sync::spawn_roster_push_one(entry.root.clone());
     Ok(entry)
 }
 

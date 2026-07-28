@@ -21,6 +21,8 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   ChevronRight,
   ChevronDown,
+  ArrowLeft,
+  ArrowRight,
   FileText,
   FolderPlus,
   Plus,
@@ -208,6 +210,15 @@ type Props = {
   query?: string;
   onQuery?: (s: string) => void;
   className?: string;
+  // ── Back / forward through visited-page history ───────────────────────────
+  /** Step back to the previously-open page. Rendered only when provided. */
+  onBack?: () => void;
+  /** Step forward again after going back. */
+  onForward?: () => void;
+  /** Whether there's an earlier page to step back to. */
+  canBack?: boolean;
+  /** Whether there's a later page to step forward to. */
+  canForward?: boolean;
   // ── Folders (optional — when absent the tree renders flat as before) ──────
   /** All folders across the visible scopes, keyed by id below. */
   folders?: PageFolder[];
@@ -231,6 +242,10 @@ export function PagesSidebar({
   query = "",
   onQuery,
   className,
+  onBack,
+  onForward,
+  canBack = false,
+  canForward = false,
   folders,
   expandedFolders,
   onToggleFolder,
@@ -382,6 +397,28 @@ export function PagesSidebar({
           action rides the header's right slot. paddingInline:14 aligns the
           label + action with the 14px content inset of the rows below. */}
       <div className="ade-sec-h h-8 text-[10.5px]" style={{ paddingInline: 12 }}>
+        {(onBack || onForward) && (
+          <span className="flex items-center gap-0.5 mr-2 -ml-1">
+            <button
+              type="button"
+              onClick={onBack}
+              disabled={!canBack}
+              title="Back"
+              className="w-5 h-5 grid place-items-center rounded text-text-4 enabled:hover:text-text-1 enabled:hover:bg-bg-2 disabled:opacity-30 disabled:cursor-default transition-colors"
+            >
+              <ArrowLeft className="w-3.5 h-3.5" strokeWidth={1.75} aria-hidden />
+            </button>
+            <button
+              type="button"
+              onClick={onForward}
+              disabled={!canForward}
+              title="Forward"
+              className="w-5 h-5 grid place-items-center rounded text-text-4 enabled:hover:text-text-1 enabled:hover:bg-bg-2 disabled:opacity-30 disabled:cursor-default transition-colors"
+            >
+              <ArrowRight className="w-3.5 h-3.5" strokeWidth={1.75} aria-hidden />
+            </button>
+          </span>
+        )}
         Pages
         {(onCreateFolder || onCreate) && (
           <span className="right flex items-center gap-0.5">
@@ -718,6 +755,20 @@ export function PagesSidebarMount({ repoRoot, onClose }: PagesSidebarMountProps)
   const [activeKey, setActiveKey] = useState<string | null>(null);
   const [query, setQuery] = useState("");
   const [folders, setFolders] = useState<PageFolder[]>([]);
+  // Visited-page history for the back/forward arrows. `stack` is the ordered
+  // trail of page keys; `idx` is where we currently sit in it. A back/forward
+  // move sets `navigatingRef` so the visit-recording effect below doesn't push
+  // the resulting activeKey change as a NEW entry (which would strand forward
+  // history). Every open path — sidebar click, mention/backlink jump, the
+  // mirror from the surface — funnels through `activeKey`, so recording off it
+  // captures them all.
+  const [nav, setNav] = useState<{ stack: string[]; idx: number }>({
+    stack: [],
+    idx: -1,
+  });
+  const navRef = useRef(nav);
+  navRef.current = nav;
+  const navigatingRef = useRef(false);
   const [expandedFolders, setExpandedFolders] = useState<Set<string>>(() => {
     try {
       const raw = localStorage.getItem(FOLDERS_EXPANDED_KEY);
@@ -916,25 +967,71 @@ export function PagesSidebarMount({ repoRoot, onClose }: PagesSidebarMountProps)
       );
   }, []);
 
-  function openPage(s: NoteSummary) {
-    const key = keyOf(s);
+  // Open a page by its `scope|bucket|id` key. Two dispatches so a rail click
+  // always lands somewhere:
+  //   • `aura:pages:open` — caught immediately IF a Pages pane is already
+  //     mounted (NotesWorkpane / pages2 PagesSurface listen for it).
+  //   • `aura:open-page` — App.tsx's handler runs `editor.openPages(root)`
+  //     first and then re-opens the page, so clicking from the rail while
+  //     the centre shows the agent (or anything else) opens the Pages pane
+  //     instead of silently doing nothing.
+  const openKey = useCallback((key: string) => {
     setActiveKey(key);
-    // Two dispatches so a rail click always lands somewhere:
-    //   • `aura:pages:open` — caught immediately IF a Pages pane is already
-    //     mounted (NotesWorkpane / pages2 PagesSurface listen for it).
-    //   • `aura:open-page` — App.tsx's handler runs `editor.openPages(root)`
-    //     first and then re-opens the page, so clicking from the rail while
-    //     the centre shows the agent (or anything else) opens the Pages pane
-    //     instead of silently doing nothing.
     window.dispatchEvent(
       new CustomEvent("aura:pages:open", { detail: { key } }),
     );
-    window.dispatchEvent(
-      new CustomEvent("aura:open-page", {
-        detail: { scope: s.scope, bucket: s.bucket, id: s.id },
-      }),
-    );
-  }
+    const parts = key.split("|");
+    if (parts.length >= 3) {
+      const [scope, bucket, ...rest] = parts;
+      window.dispatchEvent(
+        new CustomEvent("aura:open-page", {
+          detail: { scope, bucket, id: rest.join("|") },
+        }),
+      );
+    }
+  }, []);
+
+  const openPage = useCallback(
+    (s: NoteSummary) => openKey(keyOf(s)),
+    [openKey],
+  );
+
+  // Record each visit as activeKey settles. A back/forward move already set
+  // navigatingRef, so we consume it and skip pushing (the trail is unchanged,
+  // only `idx` moved). Otherwise truncate any forward entries and append.
+  useEffect(() => {
+    if (!activeKey) return;
+    if (navigatingRef.current) {
+      navigatingRef.current = false;
+      return;
+    }
+    setNav((prev) => {
+      if (prev.stack[prev.idx] === activeKey) return prev;
+      const trail = prev.stack.slice(0, prev.idx + 1);
+      trail.push(activeKey);
+      // Cap the trail so a long session can't grow it without bound.
+      const capped = trail.slice(-50);
+      return { stack: capped, idx: capped.length - 1 };
+    });
+  }, [activeKey]);
+
+  // Step through history. Reads the latest trail from the ref (so rapid clicks
+  // don't act on a stale closure), flags the move, then re-opens the target.
+  const navigate = useCallback(
+    (delta: number) => {
+      const cur = navRef.current;
+      const idx = cur.idx + delta;
+      if (idx < 0 || idx >= cur.stack.length) return;
+      navigatingRef.current = true;
+      setNav({ stack: cur.stack, idx });
+      openKey(cur.stack[idx]);
+    },
+    [openKey],
+  );
+  const goBack = useCallback(() => navigate(-1), [navigate]);
+  const goForward = useCallback(() => navigate(1), [navigate]);
+  const canBack = nav.idx > 0;
+  const canForward = nav.idx < nav.stack.length - 1;
 
   function newPage() {
     // Default to a blank team page — matches the in-workpane "+ new"
@@ -982,6 +1079,10 @@ export function PagesSidebarMount({ repoRoot, onClose }: PagesSidebarMountProps)
         onCreate={newPage}
         query={query}
         onQuery={setQuery}
+        onBack={goBack}
+        onForward={goForward}
+        canBack={canBack}
+        canForward={canForward}
         className="border-r-0 flex-1 min-h-0"
         folders={folders}
         expandedFolders={expandedSet}

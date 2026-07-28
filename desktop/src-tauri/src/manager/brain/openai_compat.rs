@@ -38,6 +38,17 @@ pub const PROVIDER_PREFIX: &str = "openai_compat:";
 
 const DEFAULT_MAX_TOKENS: u32 = 4096;
 
+/// How the endpoint expects the API key to be presented on the wire.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AuthStyle {
+    /// `Authorization: Bearer <key>` — OpenAI, OpenRouter, Groq, Together,
+    /// vLLM, ollama, LiteLLM. The default.
+    Bearer,
+    /// `api-key: <key>` — Azure OpenAI, which rejects the Bearer header
+    /// and authenticates deployments via its own header instead.
+    ApiKey,
+}
+
 #[derive(Debug, Clone)]
 pub struct OpenAICompatBrain {
     /// Full provider id (`openai_compat:<slug>`). Owned so we can hand
@@ -52,6 +63,11 @@ pub struct OpenAICompatBrain {
     api_key: String,
     /// Model id passed through verbatim in the request body.
     model: String,
+    /// Header scheme for the key. Bearer for everyone except Azure.
+    auth_style: AuthStyle,
+    /// Extra query parameters appended to the request URL. Azure OpenAI
+    /// mandates `api-version=<ver>`; empty for standard endpoints.
+    query: Vec<(String, String)>,
 }
 
 impl OpenAICompatBrain {
@@ -73,13 +89,29 @@ impl OpenAICompatBrain {
             base_url: base_url.into(),
             api_key: api_key.into(),
             model: model.into(),
+            auth_style: AuthStyle::Bearer,
+            query: Vec::new(),
         }
+    }
+
+    /// Override the key header scheme (Azure uses `api-key:`). Chainable.
+    pub fn with_auth_style(mut self, style: AuthStyle) -> Self {
+        self.auth_style = style;
+        self
+    }
+
+    /// Append extra query params to every request (Azure `api-version`).
+    /// Chainable; empty is a no-op.
+    pub fn with_query(mut self, query: Vec<(String, String)>) -> Self {
+        self.query = query;
+        self
     }
 
     /// Construct the request URL by appending `/chat/completions` to
     /// the user-supplied base. We trim a trailing slash so users who
     /// configure `https://api.foo/v1/` and `https://api.foo/v1` both
-    /// land at the same URL.
+    /// land at the same URL. Query params (if any) are attached on the
+    /// request builder, not here.
     fn endpoint(&self) -> String {
         let base = self.base_url.trim_end_matches('/');
         format!("{base}/chat/completions")
@@ -109,6 +141,8 @@ impl Brain for OpenAICompatBrain {
     ) -> Result<BoxStream<'static, Result<ChatChunk, BrainError>>, BrainError> {
         let endpoint = self.endpoint();
         let api_key = self.api_key.clone();
+        let auth_style = self.auth_style;
+        let query = self.query.clone();
         // Per-turn model override from the composer's model picker; Auto
         // falls back to this endpoint's configured model.
         let model = request
@@ -153,11 +187,22 @@ impl Brain for OpenAICompatBrain {
             .post(&endpoint)
             .header("content-type", "application/json")
             .json(&body);
-        // Blank keys → skip Authorization. Some endpoints (ollama, local
+        // Azure (and any endpoint that needs it) attaches extra query
+        // params — most importantly `api-version`, which Azure rejects
+        // requests without.
+        if !query.is_empty() {
+            req = req.query(&query);
+        }
+        // Blank keys → skip the auth header. Some endpoints (ollama, local
         // vLLM without auth) reject the header entirely; others just
-        // ignore it. Skipping is the safe default.
+        // ignore it. Skipping is the safe default. Non-blank keys use the
+        // scheme the endpoint expects: Bearer for OpenAI-style servers,
+        // the `api-key` header for Azure.
         if !api_key.is_empty() {
-            req = req.header("authorization", format!("Bearer {api_key}"));
+            req = match auth_style {
+                AuthStyle::Bearer => req.header("authorization", format!("Bearer {api_key}")),
+                AuthStyle::ApiKey => req.header("api-key", api_key.clone()),
+            };
         }
 
         let res = req.send().await.map_err(|e| BrainError::Network {

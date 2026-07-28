@@ -1,10 +1,6 @@
 [package]
 name = "aura-prdiff"
-version = "0.19.21"
+version = "0.1.0"
 edition = "2021"
-
-# Standalone, dependency-free. Shared by the local `aura review post` path
-# (aura-cli) and the cloud PR-review path (aura-cloud) so both anchor inline
-# comments to real diff lines the same way.
 
 [dependencies]

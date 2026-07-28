@@ -300,7 +300,7 @@ export function TaskDetailPane({
             variant="subtle"
             size="xs"
             onClick={() => void onDelete()}
-            className="text-rose-300 hover:text-rose-200"
+            className="text-red hover:text-red"
           >
             Delete
           </Button>
@@ -667,7 +667,7 @@ function SubTasksTab({
           {createErr && (
             <div
               role="alert"
-              className="mt-0.5 flex items-center gap-1.5 px-0.5 text-[11px] text-rose-300"
+              className="mt-0.5 flex items-center gap-1.5 px-0.5 text-[11px] text-red"
             >
               <span aria-hidden>⚠</span>
               <span>{createErr}</span>

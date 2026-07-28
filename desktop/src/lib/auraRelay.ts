@@ -291,6 +291,7 @@ export async function relay<K extends RelayKind>(
 //   aura://function/<path>:<name>   (path is URL-encoded if it contains `/`)
 //   aura://prove/<goal>             (goal is URL-encoded)
 //   aura://pr-review/<base>
+//   aura://workspace/<id>           (id is the cloud session external id)
 //
 // Anything else returns null.
 
@@ -302,7 +303,8 @@ export type AuraRef =
   | { kind: "prove"; goal: string }
   | { kind: "pr_review"; base: string }
   | { kind: "task"; id: string }
-  | { kind: "page"; scope: string; bucket: string; id: string };
+  | { kind: "page"; scope: string; bucket: string; id: string }
+  | { kind: "workspace"; id: string };
 
 const AURA_URL_RE = /^aura:\/\/([a-z_-]+)\/(.+)$/i;
 
@@ -356,9 +358,25 @@ export function parseAuraRef(url: string): AuraRef | null {
       if (!scope || !id) return null;
       return { kind: "page", scope, bucket, id };
     }
+    case "workspace": {
+      // aura://workspace/<id> — the cloud session's opaque external id.
+      // Shared so a teammate can join the same live workspace; the desktop
+      // resolves it against Aura Cloud.
+      const id = decodeURIComponent(rest.split(/[?#]/)[0]);
+      if (!id) return null;
+      return { kind: "workspace", id };
+    }
     default:
       return null;
   }
+}
+
+/** Build the shareable `aura://workspace/<id>` link for a cloud session's
+ *  external id. Pasting it into Team chat unfurls into a "join workspace"
+ *  card for teammates (see AuraRefUnfurl). The id is path-segment encoded so
+ *  odd characters survive the round-trip through `parseAuraRef`. */
+export function workspaceRefUrl(externalId: string): string {
+  return `aura://workspace/${encodeURIComponent(externalId)}`;
 }
 
 /** Find the first aura:// URL in a body, if it's solo enough that we

@@ -130,12 +130,25 @@ impl AgentProvider for KimiCoder {
     fn build_invocation(&self, req: &InvokeRequest) -> Result<Invocation, String> {
         let bin = resolve_bin().unwrap_or("kimi").to_string();
         match req.mode {
-            InvokeMode::OneShot | InvokeMode::StreamJson => Ok(Invocation {
-                bin,
-                args: vec!["-p".into(), req.plan_steered_prompt()],
-                env: vec![],
-                stdout_is_stream_json: false,
-            }),
+            InvokeMode::OneShot | InvokeMode::StreamJson => {
+                let mut args: Vec<String> = vec![];
+                // Per-turn model from the composer picker → `kimi -m <id>`
+                // (verified: `kimi --help` shows `-m/--model TEXT`). `None`
+                // leaves kimi on its configured `default_model`, so the
+                // invocation stays byte-identical to the pre-picker build.
+                if let Some(model) = req.model {
+                    args.push("-m".into());
+                    args.push(model.into());
+                }
+                args.push("-p".into());
+                args.push(req.plan_steered_prompt());
+                Ok(Invocation {
+                    bin,
+                    args,
+                    env: vec![],
+                    stdout_is_stream_json: false,
+                })
+            }
             InvokeMode::PtyRepl => Ok(Invocation {
                 bin,
                 args: vec![],

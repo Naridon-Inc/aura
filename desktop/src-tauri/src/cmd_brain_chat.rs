@@ -210,6 +210,27 @@ pub async fn brain_chat_turn(
     // both for persistence and for the (no-prior-session) fallback message.
     let user_text = user_message.clone();
 
+    // Perceived-latency fix — persist + emit the user turn FIRST, before we
+    // touch the Keychain to resolve the brain below. `persist_turn` writes the
+    // turn into `session.chat` and emits a `manager:<sid>` snapshot, so the
+    // user's own message renders the instant this command reaches Rust instead
+    // of waiting on the ~100ms macOS Keychain read that brain resolution
+    // incurs. That wait was why the native chat felt slow to "start showing
+    // things" next to the Conductor PTY (which echoes locally). Moving the
+    // persist above brain-resolution changes nothing downstream: it still lands
+    // before `load_session_for_request` (so the request is rebuilt from the
+    // authoritative `session.chat`, current message included exactly once) and
+    // before `maybe_compact_for_turn`.
+    //
+    // It also keeps the native path reload-safe (native turns previously never
+    // touched `ManagerSession`, so a reload dropped the whole conversation) and
+    // now matches the legacy `manager_chat` path in one more way: if brain
+    // resolution below fails, the user's message stays on screen alongside the
+    // error reply instead of vanishing.
+    if !user_text.is_empty() {
+        persist_turn(&app, &session_id, ChatRole::User, user_text.clone(), None);
+    }
+
     // Resolve the brain ONCE on the calling thread so keychain /
     // settings errors surface as a Tauri command error (user-actionable)
     // rather than as a stream-side `ChatChunk::Error` (looks the same as
@@ -234,22 +255,6 @@ pub async fn brain_chat_turn(
     // produced it (WW-B1). Captured now — `active` moves into the stream
     // task below.
     let brain_id = active.provider_id().to_string();
-
-    // gotcha #1 fix — persist the user turn + emit a `manager:<sid>`
-    // snapshot so the native brain path is reload-safe and the user's
-    // message renders immediately, exactly like the legacy `manager_chat`
-    // path. Native turns previously never touched `ManagerSession`, so a
-    // reload silently dropped the whole conversation.
-    //
-    // ORDER MATTERS: we persist the user turn into `session.chat` FIRST, then
-    // read the session back below to rebuild the request from that
-    // authoritative store. This is exactly how the request avoids
-    // double-counting the current user message — it lives in `session.chat`
-    // (written here, once) and the request is reconstructed from `chat`, so
-    // we never also append it a second time.
-    if !user_text.is_empty() {
-        persist_turn(&app, &session_id, ChatRole::User, user_text.clone(), None);
-    }
 
     // Continuity spine — compact the older transcript (if it has grown past
     // budget) BEFORE rebuilding the request from `session.chat`, so the brain
@@ -851,6 +856,7 @@ async fn stream_one_brain(
                     Some(brain_id.to_string()),
                     std::mem::take(&mut turn_tools),
                     turn_saved_tokens,
+                    last_usage,
                 );
             } else {
                 full_text.disarm();
@@ -957,6 +963,7 @@ async fn stream_one_brain(
             Some(brain_id.to_string()),
             std::mem::take(&mut turn_tools),
             turn_saved_tokens,
+            last_usage,
         );
     } else {
         full_text.disarm();
@@ -1017,6 +1024,12 @@ async fn run_interactive_tool(
                     false,
                 )
             }
+            crate::cli_bridge::PlanDecision::Revise { feedback } => (
+                format!(
+                    "The user requested changes to the plan:\n\n{feedback}\n\nRevise the plan to address this feedback, then call the plan proposal tool again. Do not start implementation yet."
+                ),
+                false,
+            ),
             crate::cli_bridge::PlanDecision::Cancel => (
                 "User cancelled the plan. Do NOT create tasks, fan out agents, or start any of this work. Ask the user what they'd like to change, or simply wait for their next message."
                     .to_string(),
@@ -1157,7 +1170,7 @@ fn persist_turn(
     text: String,
     brain: Option<String>,
 ) {
-    persist_turn_with_tools(app, session_id, role, text, brain, Vec::new(), 0);
+    persist_turn_with_tools(app, session_id, role, text, brain, Vec::new(), 0, None);
 }
 
 /// Like [`persist_turn`], but also records the tool calls the brain made on
@@ -1172,6 +1185,10 @@ fn persist_turn_with_tools(
     brain: Option<String>,
     tool_calls: Vec<crate::manager::PersistedToolCall>,
     saved_tokens: u32,
+    // Provider-reported (input, output) token usage for this turn (the final
+    // round's figures). `None` when the brain didn't report usage — the
+    // per-message token readout then simply doesn't render for this turn.
+    usage: Option<(u32, u32)>,
 ) {
     use tauri::Manager as _;
     // `manager_status` returns the in-memory `ManagerRuntime` snapshot when
@@ -1209,6 +1226,10 @@ fn persist_turn_with_tools(
                 if saved_tokens > 0 {
                     last.saved_tokens = Some(saved_tokens);
                 }
+                if let Some((input, output)) = usage {
+                    last.input_tokens = Some(input);
+                    last.output_tokens = Some(output);
+                }
             }
             // Surface the failure loudly instead of swallowing it with
             // `let _ =`. The turn stays in the live in-memory session, so it
@@ -1235,6 +1256,10 @@ fn persist_turn_with_tools(
                 }
                 if saved_tokens > 0 {
                     last.saved_tokens = Some(saved_tokens);
+                }
+                if let Some((input, output)) = usage {
+                    last.input_tokens = Some(input);
+                    last.output_tokens = Some(output);
                 }
             }
             if let Err(e) = persist::save(&session) {

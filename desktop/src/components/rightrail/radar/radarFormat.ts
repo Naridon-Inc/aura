@@ -49,6 +49,65 @@ export function kindGlyph(kind: string): string {
   }
 }
 
+// Code extensions we strip when a raw file path stands in for a symbol, so
+// "passwordReset.ts" reads as "password reset", not "password reset ts".
+const CODE_EXT = /\.(tsx?|jsx?|rs|py|go|java|rb|md|json|toml|css|html)$/i;
+
+/** Turn a raw code identifier into plain words a non-engineer can read:
+ *  `createSession` → "create session", `sendResetEmail` → "send reset email",
+ *  `requestPasswordReset` → "request password reset", `passwordReset.ts` →
+ *  "password reset". Splits camelCase/PascalCase, snake_case and kebab-case,
+ *  strips any leading path + code extension, and lowercases the result. */
+export function humanizeSymbol(raw: string | null | undefined): string {
+  if (!raw) return "";
+  let s = raw;
+  const slash = s.lastIndexOf("/");
+  if (slash >= 0) s = s.slice(slash + 1);
+  s = s.replace(CODE_EXT, "");
+  s = s.replace(/[_-]+/g, " ");
+  // camelCase / PascalCase word boundaries, plus acronym→word (HTTPServer).
+  s = s.replace(/([a-z0-9])([A-Z])/g, "$1 $2");
+  s = s.replace(/([A-Z]+)([A-Z][a-z])/g, "$1 $2");
+  return s.toLowerCase().replace(/\s+/g, " ").trim();
+}
+
+/** A plain-language, one-line status for an Activity row — the human answer to
+ *  "what is this person actually doing?". Prefers the actor's own stated intent
+ *  (their words win); otherwise describes the piece of work in plain English
+ *  keyed off the awareness kind, with no function names or git jargon leaking
+ *  through (the ADE audience is non-engineers). */
+export function activityStatus(e: {
+  kind: string;
+  symbol?: string | null;
+  file?: string | null;
+  intent?: string | null;
+}): string {
+  const intent = e.intent?.trim();
+  if (intent) return intent;
+  const what = humanizeSymbol(e.symbol || e.file || "");
+  if (!what) return kindLabel(e.kind);
+  switch (e.kind) {
+    case "editing":
+      return `working on ${what}`;
+    case "started":
+      return `picked up ${what}`;
+    case "intent":
+      return `planning ${what}`;
+    case "committed":
+      return `finished ${what}`;
+    case "paused":
+      return `paused ${what}`;
+    case "abandoned":
+      return `set aside ${what}`;
+    case "impact":
+      return `${what} affects other code`;
+    case "zone":
+      return `claimed ${what}`;
+    default:
+      return `${kindLabel(e.kind)} ${what}`;
+  }
+}
+
 /** Human label for an awareness kind. */
 export function kindLabel(kind: string): string {
   switch (kind) {
@@ -87,12 +146,12 @@ export type SeverityMeta = {
 export function severityMeta(severity: RadarCollision["severity"]): SeverityMeta {
   switch (severity) {
     case "direct":
-      return { label: "direct", color: "#e5484d", disposition: "coordinate" };
+      return { label: "direct", color: "var(--color-red)", disposition: "coordinate" };
     case "likely":
-      return { label: "likely", color: "#e0a96d", disposition: "heads-up" };
+      return { label: "likely", color: "var(--color-amber)", disposition: "heads-up" };
     case "possible":
     default:
-      return { label: "possible", color: "#7d8590", disposition: "fyi" };
+      return { label: "possible", color: "var(--color-text-4)", disposition: "fyi" };
   }
 }
 
@@ -100,4 +159,34 @@ export function severityMeta(severity: RadarCollision["severity"]): SeverityMeta
  *  "claude". The full handle stays available in the tooltip. */
 export function actorShort(actor: string): string {
   return actor.split("@")[0] || actor;
+}
+
+// Vendor handles that mean "this actor is a coding agent, not a person". Used
+// where the source (a zone rule) carries a session id but no is_agent flag, so
+// the row can still pick a brand logo over a human portrait.
+const AGENT_NAME_HINTS = [
+  "claude",
+  "gemini",
+  "codex",
+  "cursor",
+  "kimi",
+  "opencode",
+  "aider",
+  "copilot",
+  "aura-manager",
+  "gpt",
+  "llama",
+  "qwen",
+  "deepseek",
+  "grok",
+  "mistral",
+];
+
+/** Best-effort agent-vs-human guess from a bare name/session id (no is_agent
+ *  flag available). Matches a known vendor handle exactly or as a prefix, so
+ *  "gemini" and "codex@cli" read as agents while "priya" / "aura-shell" (the
+ *  desktop's own session) read as people. */
+export function nameLooksLikeAgent(name: string): boolean {
+  const s = actorShort(name).toLowerCase();
+  return AGENT_NAME_HINTS.some((k) => s === k || s.startsWith(k));
 }

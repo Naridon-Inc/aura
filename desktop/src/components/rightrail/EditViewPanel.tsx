@@ -8,6 +8,7 @@ import { useGitChanges, type ChangedFile } from "../../lib/useGitChanges";
 import { isToolMetadataPath } from "../../lib/categorizeChange";
 import { useDocumentVisibility } from "../../lib/useDocumentVisibility";
 import { AgentIcon, brandFor } from "../agent/AgentIcon";
+import { Churn } from "../diff/Churn";
 
 type Props = {
   repoRoot: string;
@@ -211,12 +212,9 @@ export function EditViewPanel({ repoRoot }: Props) {
             <span className="text-text-1 text-[13px] font-medium">
               {story.length} file{story.length === 1 ? "" : "s"} changed
             </span>
-            {additions > 0 && (
-              <span className="text-green text-[11px] font-mono">+{additions}</span>
-            )}
-            {deletions > 0 && (
-              <span className="text-red text-[11px] font-mono">-{deletions}</span>
-            )}
+            {/* This IS the workspace you're in right now — the one churn
+                readout on screen that earns its colour. */}
+            <Churn additions={additions} deletions={deletions} tone="active" />
           </div>
           <TimelineRibbon
             latestIntent={latestIntent}
@@ -289,12 +287,7 @@ function IntentTimelineRow({ entry }: { entry: IntentEntry }) {
             {files.length}f
           </span>
         )}
-        {adds > 0 && (
-          <span className="text-[10px] font-mono text-green tabular-nums shrink-0">+{adds}</span>
-        )}
-        {dels > 0 && (
-          <span className="text-[10px] font-mono text-red tabular-nums shrink-0">-{dels}</span>
-        )}
+        <Churn additions={adds} deletions={dels} className="text-[10px]" />
       </button>
       {open && (
         <div className="border-t border-line-soft px-2 py-1.5 space-y-1.5">
@@ -330,17 +323,11 @@ function IntentTimelineRow({ entry }: { entry: IntentEntry }) {
                       {f.status}
                     </span>
                   )}
-                  {(f.additions != null || f.deletions != null) && (
-                    <span className="text-[10px] font-mono tabular-nums shrink-0">
-                      {f.additions != null && (
-                        <span className="text-green">+{f.additions}</span>
-                      )}
-                      {f.additions != null && f.deletions != null && " "}
-                      {f.deletions != null && (
-                        <span className="text-red">-{f.deletions}</span>
-                      )}
-                    </span>
-                  )}
+                  <Churn
+                    additions={f.additions ?? 0}
+                    deletions={f.deletions ?? 0}
+                    className="text-[10px]"
+                  />
                 </li>
               ))}
             </ul>
@@ -497,7 +484,7 @@ function SignalChip({
 }) {
   const cls =
     tone === "warn"
-      ? "border-amber-500/40 text-amber-300 bg-amber-500/5"
+      ? "border-amber/40 text-amber bg-amber/5"
       : tone === "ok"
         ? "border-line/40 text-text-2 bg-bg-1"
         : "border-line/40 text-text-3 bg-bg-1";
@@ -553,16 +540,11 @@ function SnippetCallout({ item }: { item: FileStoryItem }) {
           {directoryLabel(item.filePath)}
           <span className="text-text-1">{baseName(item.filePath)}</span>
         </span>
-        {item.additions > 0 && (
-          <span className="ml-auto text-green text-[11px] font-mono shrink-0">
-            +{item.additions}
-          </span>
-        )}
-        {item.deletions > 0 && (
-          <span className="text-red text-[11px] font-mono shrink-0">
-            -{item.deletions}
-          </span>
-        )}
+        <Churn
+          additions={item.additions}
+          deletions={item.deletions}
+          className="ml-auto"
+        />
         {item.contributors.length > 0 ? (
           <ContributorChips contributors={item.contributors} />
         ) : (
@@ -999,10 +981,13 @@ function trimDiff(diff: string): string[] {
     .filter((line) => !line.startsWith("diff --git") && !line.startsWith("index "));
 }
 
+/** Diff-body tone, matching UnifiedDiff / InlineDiff: a restrained tinted row
+ *  with the code itself on the neutral ramp. The leading +/− is the marker;
+ *  colouring the whole line as well turns a snippet into a highlighter. */
 function diffTone(line: string): string {
-  if (line.startsWith("+")) return "bg-green/10 text-green";
-  if (line.startsWith("-")) return "bg-red/10 text-red";
-  if (line.startsWith("@@")) return "bg-accent-blue/10 text-accent-blue";
+  if (line.startsWith("+")) return "bg-green/[0.08] text-text-2";
+  if (line.startsWith("-")) return "bg-red/[0.07] text-text-2";
+  if (line.startsWith("@@")) return "bg-bg-2/70 text-text-4";
   return "text-text-3";
 }
 

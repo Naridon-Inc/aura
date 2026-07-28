@@ -11,6 +11,10 @@
 //! run     = "npm run dev"
 //! archive = "docker compose down"
 //!
+//! [scripts]
+//! dev = "npm run dev"
+//! test = "npm test"
+//!
 //! [git]
 //! base = "main"            # default start-point for new worktrees
 //!
@@ -42,6 +46,17 @@ pub struct RepoWorktreeSettings {
     /// `[copy] files` — repo-root-relative paths (or simple globs) copied into
     /// each fresh worktree. Serializes as `copyFiles`.
     pub copy_files: Vec<String>,
+    /// Additional one-click commands shown by the Run control. Stored under
+    /// `[scripts]` without changing the CLI's legacy setup/run contract.
+    #[serde(default)]
+    pub named_scripts: Vec<NamedScript>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct NamedScript {
+    pub name: String,
+    pub command: String,
 }
 
 /// Read the repo's worktree settings. Returns defaults (all `None` / empty vec)
@@ -118,6 +133,21 @@ fn parse(text: &str) -> RepoWorktreeSettings {
         }
     }
 
+    if let Some(table) = doc.get("scripts").and_then(|item| item.as_table()) {
+        for (name, item) in table.iter() {
+            if let Some(command) = item.as_str() {
+                let name = name.trim();
+                let command = command.trim();
+                if !name.is_empty() && !command.is_empty() {
+                    s.named_scripts.push(NamedScript {
+                        name: name.to_string(),
+                        command: command.to_string(),
+                    });
+                }
+            }
+        }
+    }
+
     s
 }
 
@@ -149,6 +179,30 @@ fn render(existing: &str, settings: &RepoWorktreeSettings) -> Result<String, Str
             arr.push(*f);
         }
         table["files"] = toml_edit::value(arr);
+    }
+
+    doc.remove("scripts");
+    let mut scripts = Vec::new();
+    let mut script_names = std::collections::HashSet::new();
+    for script in &settings.named_scripts {
+        let name = script.name.trim();
+        let command = script.command.trim();
+        if name.is_empty() || command.is_empty() {
+            continue;
+        }
+        if !script_names.insert(name.to_string()) {
+            return Err(format!("duplicate named script: {name}"));
+        }
+        scripts.push(NamedScript {
+            name: name.to_string(),
+            command: command.to_string(),
+        });
+    }
+    if !scripts.is_empty() {
+        let table = ensure_table(&mut doc, "scripts");
+        for script in scripts {
+            table[&script.name] = toml_edit::value(script.command);
+        }
     }
 
     prune_empty_owned_tables(&mut doc);
@@ -185,7 +239,7 @@ fn clear_key(doc: &mut toml_edit::DocumentMut, table: &str, key: &str) {
 
 /// Drop only OUR tables once we've emptied them; foreign tables are never touched.
 fn prune_empty_owned_tables(doc: &mut toml_edit::DocumentMut) {
-    for table in ["worktree", "git", "copy"] {
+    for table in ["worktree", "git", "copy", "scripts"] {
         let empty = doc
             .get(table)
             .and_then(|t| t.as_table())
@@ -219,6 +273,9 @@ mod tests {
             base = "main"
             [copy]
             files = [".env", ".env.local"]
+            [scripts]
+            dev = "npm run dev"
+            test = "npm test"
         "#;
         let s = parse(doc);
         assert_eq!(s.setup.as_deref(), Some("npm install"));
@@ -226,6 +283,13 @@ mod tests {
         assert_eq!(s.archive.as_deref(), Some("down"));
         assert_eq!(s.base.as_deref(), Some("main"));
         assert_eq!(s.copy_files, vec![".env".to_string(), ".env.local".to_string()]);
+        assert_eq!(
+            s.named_scripts,
+            vec![
+                NamedScript { name: "dev".into(), command: "npm run dev".into() },
+                NamedScript { name: "test".into(), command: "npm test".into() },
+            ]
+        );
     }
 
     #[test]
@@ -274,5 +338,18 @@ mod tests {
         let out = render(existing, &s).unwrap();
         assert!(!out.contains("[worktree]"));
         assert!(out.contains("[editor]"));
+    }
+
+    #[test]
+    fn rejects_duplicate_named_scripts_in_structured_settings() {
+        let settings = RepoWorktreeSettings {
+            named_scripts: vec![
+                NamedScript { name: "test".into(), command: "cargo test".into() },
+                NamedScript { name: "test".into(), command: "bun test".into() },
+            ],
+            ..RepoWorktreeSettings::default()
+        };
+        let error = render("", &settings).unwrap_err();
+        assert!(error.contains("duplicate named script: test"));
     }
 }

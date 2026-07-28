@@ -17,38 +17,16 @@ fn transcripts_dir() -> String {
     worktree_aura_path("transcripts")
 }
 
+/// State that belongs to **this checkout only** — the session you are in, its
+/// transcript, its memory. Namespaced per worktree so two agents working side
+/// by side never overwrite each other.
+///
+/// This is the *private* half of the split; coordination state (sentinel
+/// claims, zones, messages, the awareness feed) deliberately goes the other
+/// way, to [`crate::worktree::paths::shared_aura_path`]. See the module docs on
+/// `worktree::paths` for why.
 pub(crate) fn worktree_aura_path(subdir: &str) -> String {
-    // Check if we're in a worktree by looking for .git file (not directory)
-    let git_path = std::path::Path::new(".git");
-    if git_path.is_file() {
-        // We're in a worktree — .git is a file pointing to the main repo.
-        // Derive a unique aura dir from the worktree directory name to
-        // prevent concurrent agents from colliding on session state.
-        if let Ok(cwd) = std::env::current_dir() {
-            let worktree_name = cwd.file_name()
-                .map(|n| n.to_string_lossy().to_string())
-                .unwrap_or_else(|| "default".to_string());
-            // Also find the main repo root to store worktree data there
-            if let Ok(git_content) = fs::read_to_string(".git") {
-                // .git file contains "gitdir: /path/to/main/.git/worktrees/<name>"
-                if let Some(main_git) = git_content.trim().strip_prefix("gitdir: ") {
-                    // Navigate up from .git/worktrees/<name> to repo root
-                    let main_git_path = Path::new(main_git);
-                    if let Some(repo_root) = main_git_path.parent()
-                        .and_then(|p| p.parent())
-                        .and_then(|p| p.parent())
-                    {
-                        let wt_aura = repo_root.join(".aura").join("worktrees")
-                            .join(&worktree_name).join(subdir);
-                        return wt_aura.to_string_lossy().to_string();
-                    }
-                }
-            }
-            // Fallback: use worktree-namespaced dir locally
-            return format!(".aura/worktrees/{}/{}", worktree_name, subdir);
-        }
-    }
-    format!(".aura/{}", subdir)
+    crate::worktree::paths::private_aura_path(subdir)
 }
 
 /// Session phase — tracks lifecycle of an agent conversation

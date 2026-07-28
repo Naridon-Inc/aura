@@ -162,11 +162,11 @@ pub struct GitCommit {
 
 pub fn mock_git_commits() -> Vec<GitCommit> {
     vec![
-        GitCommit { hash: "a8f3c21".into(), subject: "Add sidebar tabs scaffolding".into(),    author: "You".into(), relative_time: "2m".into() },
-        GitCommit { hash: "b1e90df".into(), subject: "Wire project_header plumbing".into(),    author: "You".into(), relative_time: "1h".into() },
-        GitCommit { hash: "c44d018".into(), subject: "Fix rail hover glitch".into(),           author: "You".into(), relative_time: "3h".into() },
-        GitCommit { hash: "d9021ab".into(), subject: "Introduce team/zone fixtures".into(),    author: "You".into(), relative_time: "yesterday".into() },
-        GitCommit { hash: "e7712f6".into(), subject: "Bump iced to 0.14".into(),               author: "You".into(), relative_time: "2d".into() },
+        GitCommit { hash: "a8f3c21".into(), subject: "Add sidebar tabs scaffolding".into(),    author: "Muhammed".into(), relative_time: "2m".into() },
+        GitCommit { hash: "b1e90df".into(), subject: "Wire project_header plumbing".into(),    author: "Muhammed".into(), relative_time: "1h".into() },
+        GitCommit { hash: "c44d018".into(), subject: "Fix rail hover glitch".into(),           author: "Muhammed".into(), relative_time: "3h".into() },
+        GitCommit { hash: "d9021ab".into(), subject: "Introduce team/zone fixtures".into(),    author: "Muhammed".into(), relative_time: "yesterday".into() },
+        GitCommit { hash: "e7712f6".into(), subject: "Bump iced to 0.14".into(),               author: "Muhammed".into(), relative_time: "2d".into() },
     ]
 }
 
@@ -437,7 +437,7 @@ pub struct TeamMember {
 
 pub fn mock_team_members() -> Vec<TeamMember> {
     vec![
-        TeamMember { name: "You".into(), avatar_letter: 'M', accent: theme::CARET_ORANGE,  editing: Some("src/ui/sidebar.rs".into()) },
+        TeamMember { name: "Muhammed".into(), avatar_letter: 'M', accent: theme::CARET_ORANGE,  editing: Some("src/ui/sidebar.rs".into()) },
         TeamMember { name: "Claude".into(),   avatar_letter: 'C', accent: theme::AGENT_CLAUDE,  editing: Some("src/ui/sidebar_tab_files.rs".into()) },
         TeamMember { name: "Gemini".into(),   avatar_letter: 'G', accent: theme::AGENT_GEMINI,  editing: None },
     ]

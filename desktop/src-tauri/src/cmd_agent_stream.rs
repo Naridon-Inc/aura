@@ -212,7 +212,7 @@ pub async fn agent_stream_send(
         .get(&agent_id)
         .ok_or_else(|| format!("unknown agent: {agent_id}"))?;
     let use_stdin_json = agent_id == "claude" && !attachments.is_empty();
-    let inv = provider
+    let mut inv = provider
         .build_invocation(&aura_agents::InvokeRequest {
             prompt: &prompt,
             mode: aura_agents::InvokeMode::StreamJson,
@@ -224,6 +224,8 @@ pub async fn agent_stream_send(
             approval: None,
         })
         .map_err(|e| format!("build invocation for {agent_id}: {e}"))?;
+    // Enforce the fleet agent-CLI config policy (e.g. codex service_tier repair).
+    crate::agent_policy::apply_to_invocation(&agent_id, &mut inv);
     let bin = inv.bin.clone();
 
     let mut cmd = Command::new(&bin);

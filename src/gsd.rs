@@ -2,7 +2,7 @@ use std::fs;
 use colored::Colorize;
 use serde_json::json;
 use crate::config::ConfigManager;
-use crate::checkpoint::CheckpointStore;
+use crate::checkpoint::{CheckpointData, CheckpointStore};
 use git2::Repository;
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -685,17 +685,108 @@ impl GsdEngine {
         // the AST check (fast, deterministic, free) are now separate steps.
         // Ad-hoc `aura prove` runs both; the goal ledger caches the
         // decomposition and re-runs only the AST half on every build.
-        let requirements = match Self::decompose_goal(goal) {
-            Some(reqs) if !reqs.is_empty() => reqs,
-            _ => {
+        //
+        // A goal already curated in the ledger proves with THAT breakdown —
+        // same rule as `prove_goal_structured_at`. Without it an ad-hoc prove
+        // re-invents the decomposition on every call and can land on a
+        // different `must_call` than the ledger's (e.g. checking the notes
+        // functions against the `NOTES` store instead of `getSession`), so an
+        // agent asking "is this done?" gets a verdict that contradicts the same
+        // goal on the Goals surface. Curated first, decompose live only when
+        // this ask is genuinely new.
+        let requirements = match Self::curated_requirements(goal) {
+            Some(reqs) => reqs,
+            None => match Self::decompose_goal(goal) {
+                Some(reqs) if !reqs.is_empty() => reqs,
+                _ => {
+                    return json!({
+                        "goal": goal, "checks": [], "passed": 0, "total": 0,
+                        "verdict": "unknown",
+                        "error": "Couldn't work out what this goal needs yet.",
+                    });
+                }
+            },
+        };
+        Self::prove_requirements(goal, &requirements)
+    }
+
+    /// Commit-anchored structured proof: decompose AND check the goal against the
+    /// snapshot **at `commit_sha`** — both halves grounded on the same checkpoint,
+    /// so the requirement names line up with the code they're checked against.
+    /// This is the honest way to prove a session's goals: it reads the code that
+    /// session produced, not whatever branch is currently checked out (which is why
+    /// a feature built on another branch stops reading a false 0%).
+    ///
+    /// Same shape and `verdict` contract as [`Self::prove_goal_structured`].
+    pub fn prove_goal_structured_at(goal: &str, commit_sha: &str) -> serde_json::Value {
+        // Resolve the commit's snapshot ONCE and use it for both halves. Grounding
+        // decomposition on the latest checkout while proving at an older commit
+        // would let the auditor name requirements after symbols that snapshot
+        // never had — a spurious "not started". Consistency is the whole point.
+        let repo = match Repository::open(".") {
+            Ok(r) => r,
+            Err(_) => {
                 return json!({
                     "goal": goal, "checks": [], "passed": 0, "total": 0,
-                    "verdict": "unknown",
-                    "error": "Couldn't work out what this goal needs yet.",
+                    "verdict": "unknown", "error": "Not a git repository.",
                 });
             }
         };
-        Self::prove_requirements(goal, &requirements)
+        let snapshot = match CheckpointStore::get_checkpoint_for_commit(&repo, commit_sha) {
+            Some(s) => s,
+            None => {
+                return json!({
+                    "goal": goal, "checks": [], "passed": 0, "total": 0,
+                    "verdict": "unknown",
+                    "error": "No snapshot of the code at that point to check against.",
+                });
+            }
+        };
+
+        // A goal already curated in the ledger (a human-reviewed decomposition)
+        // proves with THAT breakdown — deterministic, so a session card reading
+        // this ask shows the same honest verdict every run, instead of the model
+        // re-inventing a fresh (and often degenerate) decomposition each time.
+        // Only when none is curated do we ground the model on this commit's own
+        // symbols and decompose live.
+        let requirements = match Self::curated_requirements(goal) {
+            Some(reqs) => reqs,
+            None => {
+                let catalog = Self::symbol_catalog_from(&snapshot, goal, None);
+                match Self::decompose_goal_grounded(goal, None, catalog) {
+                    Some(reqs) if !reqs.is_empty() => reqs,
+                    _ => {
+                        return json!({
+                            "goal": goal, "checks": [], "passed": 0, "total": 0,
+                            "verdict": "unknown",
+                            "error": "Couldn't work out what this goal needs yet.",
+                        });
+                    }
+                }
+            }
+        };
+        Self::check_requirements_against(goal, &requirements, &snapshot)
+    }
+
+    /// Reuse a human-curated decomposition when this goal's text matches one
+    /// already in the goal ledger (`.aura/goals.jsonl`). A curated breakdown is
+    /// deterministic and stable, so re-proving the same ask never drifts — the
+    /// opposite of a fresh model decomposition, which can vary (or degenerate)
+    /// run to run. Matched on the canonical `id_for_text` key so incidental
+    /// whitespace/case never misses. Returns `None` (→ caller decomposes live)
+    /// when no curated goal matches or the match carries no decomposition yet.
+    fn curated_requirements(goal: &str) -> Option<Vec<crate::goals::Requirement>> {
+        let want = crate::goals::store::id_for_text(goal);
+        let reqs = crate::goals::store::load(std::path::Path::new("."))
+            .into_iter()
+            .find(|rec| crate::goals::store::id_for_text(&rec.text) == want)
+            .and_then(|rec| rec.decomposition)
+            .map(|d| d.requirements)?;
+        if reqs.is_empty() {
+            None
+        } else {
+            Some(reqs)
+        }
     }
 
     /// The **costed** half of proving: ask the auditor model to break a goal
@@ -722,7 +813,20 @@ impl GsdEngine {
         // Feeding the real, goal-relevant identifiers in makes the model name
         // requirements after code that's really there (or genuinely absent).
         let catalog = Self::repo_symbol_catalog(goal, context);
+        Self::decompose_goal_grounded(goal, context, catalog)
+    }
 
+    /// The model half of decomposition, grounded on a **caller-supplied** symbol
+    /// catalog. Splitting this out lets a commit-anchored prove ground its
+    /// breakdown on the symbols that existed **at that commit** (via
+    /// [`Self::symbol_catalog_from`]) instead of the latest checkout — so the
+    /// requirement names it invents line up with the same snapshot it will then
+    /// check against. Pass `None` to decompose ungrounded (new repo, no snapshot).
+    pub fn decompose_goal_grounded(
+        goal: &str,
+        context: Option<&str>,
+        catalog: Option<String>,
+    ) -> Option<Vec<crate::goals::Requirement>> {
         let system_prompt = "You are the Aura Semantic Auditor. Break the user's software goal into 3-5 'Semantic Requirements' — the specific code that must exist for the goal to be met. \n\
             Each requirement is: \n\
             - One specific Logic Node (Function, Class, or Struct) that must exist.\n\
@@ -781,11 +885,22 @@ impl GsdEngine {
     /// new repo genuinely has nothing to ground against). Token-bounded by the
     /// `MAX` cap so a large repo can't blow the prompt budget.
     fn repo_symbol_catalog(goal: &str, context: Option<&str>) -> Option<String> {
-        const MAX: usize = 60;
-
         let repo = Repository::open(".").ok()?;
         let checkpoints = CheckpointStore::get_all_checkpoints(&repo).ok()?;
         let latest = checkpoints.first()?;
+        Self::symbol_catalog_from(latest, goal, context)
+    }
+
+    /// The scoring core of [`Self::repo_symbol_catalog`], operating on a **given**
+    /// checkpoint rather than always the latest. A commit-anchored prove passes
+    /// the commit's own checkpoint here so decomposition is grounded on the code
+    /// that existed at that commit — the same snapshot it then proves against.
+    fn symbol_catalog_from(
+        checkpoint: &CheckpointData,
+        goal: &str,
+        context: Option<&str>,
+    ) -> Option<String> {
+        const MAX: usize = 60;
 
         // The vocabulary we're matching symbols against: words from the goal and
         // any live reasoning, lowercased, length-filtered to kill noise words.
@@ -804,7 +919,7 @@ impl GsdEngine {
         // sub-words (split on snake_case / camelCase) appear in the goal vocab.
         let mut seen: std::collections::HashSet<&str> = std::collections::HashSet::new();
         let mut scored: Vec<(usize, &str, &str)> = Vec::new();
-        for node in &latest.ast_nodes {
+        for node in &checkpoint.ast_nodes {
             let ident = match node.identifier.as_deref() {
                 Some(i) if !i.is_empty() => i,
                 _ => continue,
@@ -894,6 +1009,61 @@ impl GsdEngine {
             }
         };
 
+        Self::check_requirements_against(goal, requirements, latest)
+    }
+
+    /// Same deterministic AST check as [`Self::prove_requirements`], but against
+    /// the snapshot **at a specific commit** rather than the latest checkpoint.
+    /// This is what makes a session's goals prove against the code that session
+    /// produced — even when that code lives on a branch that isn't checked out.
+    /// Falls back through nearest-descendant / nearest-ancestor checkpoints (see
+    /// [`CheckpointStore::get_checkpoint_for_commit`]); "unknown" when none exist.
+    pub fn prove_requirements_at(
+        goal: &str,
+        requirements: &[crate::goals::Requirement],
+        commit_sha: &str,
+    ) -> serde_json::Value {
+        if requirements.is_empty() {
+            return json!({
+                "goal": goal, "checks": [], "passed": 0, "total": 0,
+                "verdict": "unknown",
+                "error": "Couldn't work out what this goal needs yet.",
+            });
+        }
+
+        let repo = match Repository::open(".") {
+            Ok(r) => r,
+            Err(_) => {
+                return json!({
+                    "goal": goal, "checks": [], "passed": 0, "total": 0,
+                    "verdict": "unknown", "error": "Not a git repository.",
+                });
+            }
+        };
+        let snapshot = match CheckpointStore::get_checkpoint_for_commit(&repo, commit_sha) {
+            Some(s) => s,
+            None => {
+                return json!({
+                    "goal": goal, "checks": [], "passed": 0, "total": 0,
+                    "verdict": "unknown",
+                    "error": "No snapshot of the code at that point to check against.",
+                });
+            }
+        };
+
+        Self::check_requirements_against(goal, requirements, &snapshot)
+    }
+
+    /// The per-requirement AST evaluation shared by [`Self::prove_requirements`]
+    /// and [`Self::prove_requirements_at`]: given a decoded checkpoint, decide
+    /// for each requirement whether the node exists, is a stub, and is wired.
+    /// Deterministic, no model call. Assumes `requirements` is non-empty (callers
+    /// guard that, so an empty set never masquerades as a trivially "verified" goal).
+    fn check_requirements_against(
+        goal: &str,
+        requirements: &[crate::goals::Requirement],
+        latest: &CheckpointData,
+    ) -> serde_json::Value {
         let total = requirements.len();
         let mut passed = 0usize;
         let mut checks: Vec<serde_json::Value> = Vec::with_capacity(total);
@@ -979,13 +1149,38 @@ impl GsdEngine {
         println!("{}", serde_json::to_string_pretty(&outcome).unwrap_or_else(|_| "{}".into()));
     }
 
+    /// Machine-readable proof at a specific commit — backs `aura prove --json --at
+    /// <sha>` and the desktop Goals surface when it anchors a session's proof to
+    /// the commit that session produced.
+    pub fn prove_goal_json_at(goal: &str, commit_sha: &str) {
+        let outcome = Self::prove_goal_structured_at(goal, commit_sha);
+        println!("{}", serde_json::to_string_pretty(&outcome).unwrap_or_else(|_| "{}".into()));
+    }
+
     pub fn prove_goal(goal: &str) {
         eprintln!("{} {} {}", "🧪".bold(), "Aura Prover: Verifying Goal Achievement:".bold().cyan(), goal.yellow());
         eprintln!("  {} Analyzing behavioral requirements via local context...", "↳".dimmed());
         eprintln!("  {} Scanning Merkle-Graph for logic nodes and wiring...", "↳".dimmed());
 
         let outcome = Self::prove_goal_structured(goal);
+        Self::render_prove_report(goal, &outcome);
+    }
 
+    /// Human-readable proof at a specific commit — `aura prove --at <sha>`. Same
+    /// report as [`Self::prove_goal`] but reads the code as it was at that commit.
+    pub fn prove_goal_at(goal: &str, commit_sha: &str) {
+        eprintln!("{} {} {}", "🧪".bold(), "Aura Prover: Verifying Goal Achievement:".bold().cyan(), goal.yellow());
+        eprintln!("  {} Anchoring proof to commit {}...", "↳".dimmed(), commit_sha.dimmed());
+        eprintln!("  {} Scanning Merkle-Graph for logic nodes and wiring...", "↳".dimmed());
+
+        let outcome = Self::prove_goal_structured_at(goal, commit_sha);
+        Self::render_prove_report(goal, &outcome);
+    }
+
+    /// Render a structured proof outcome as the human-readable terminal report.
+    /// Shared by [`Self::prove_goal`] and [`Self::prove_goal_at`] so the ad-hoc
+    /// and commit-anchored paths never drift on how a proof is presented.
+    fn render_prove_report(goal: &str, outcome: &serde_json::Value) {
         if let Some(err) = outcome["error"].as_str() {
             eprintln!("{} {}", "✗".red(), err);
             return;

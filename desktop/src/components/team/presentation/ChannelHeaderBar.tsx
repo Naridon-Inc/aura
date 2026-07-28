@@ -7,23 +7,27 @@
  *  CommsPanel monolith; logic unchanged. */
 
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
-import { FileText, Globe, Headphones, MoreHorizontal } from "lucide-react";
 import {
-  animalForName,
-  colorForName,
-  tintForName,
-} from "../../../lib/identityColors";
+  ChevronDown,
+  File,
+  FileText,
+  Headphones,
+  Image as ImageIcon,
+  Link2,
+  MoreHorizontal,
+  Search as SearchLucide,
+  Sparkles,
+  SquarePen,
+} from "lucide-react";
 import { type TeamMember } from "../../../lib/api";
 import {
   prettyName,
   previewBody,
   formatPinTime,
-  type ChannelTab,
   type Conversation,
   type Msg,
 } from "../domain";
 import {
-  BellIcon,
   ExpandToPaneIcon,
   MembersIcon,
   PinIcon,
@@ -31,40 +35,47 @@ import {
   RefreshIcon,
   SearchIcon,
 } from "./icons";
-import { leaveCall } from "../../../lib/callStore";
+import { callScreenshareWorkpaneId, leaveCall } from "../../../lib/callStore";
 import {
   FileAttachment,
   parseAttachments,
   type ChatAttachment,
 } from "../../chat/FileAttachment";
-import { Button } from "../../ui/button";
-import { Input } from "../../ui/input";
+import { Avatar } from "./Avatar";
+import { onExternalAnchorClick } from "../../../lib/openExternal";
 
 export function ChannelHeader({
   conv,
   repoRoot,
   memberCount,
+  members,
   membersOpen,
   onToggleMembers,
+  detailsOpen,
+  onToggleDetails,
+  canvasOpen,
+  onToggleCanvas,
   pinsOpen,
   onTogglePins,
   pinCount,
   onRefresh,
   onBackToRail,
-  activeTab,
-  onChangeTab,
   searchActive,
   onToggleSearch,
   voiceMembers,
   inThisVoice,
   onExpand,
-  onAddTab,
 }: {
   conv: Conversation;
   repoRoot: string;
   memberCount: number;
+  members: TeamMember[];
   membersOpen: boolean;
   onToggleMembers: () => void;
+  detailsOpen: boolean;
+  onToggleDetails: () => void;
+  canvasOpen: boolean;
+  onToggleCanvas: () => void;
   /** Move the whole chat into the wide center pane. Only the narrow ADE
    *  sidebar mount passes this; the center mount leaves it undefined. */
   onExpand?: () => void;
@@ -77,8 +88,6 @@ export function ChannelHeader({
    *  item's active state). The bar + query live in the parent. */
   searchActive: boolean;
   onToggleSearch: () => void;
-  activeTab: ChannelTab;
-  onChangeTab: (next: ChannelTab) => void;
   /** Teammates currently in this channel's voice room, derived from the
    * presence beacon. Drives the inline roster + "Leave" affordance. */
   voiceMembers: TeamMember[];
@@ -86,21 +95,17 @@ export function ChannelHeader({
    *  callStore in the parent — no local-state callbacks needed (the
    *  callStore snapshot is the single source of truth for "am I live"). */
   inThisVoice: boolean;
-  /** Pin a team-shared custom URL tab onto this channel (any member —
-   *  Slack-bookmark semantics). Absent for conversations that can't carry
-   *  tabs (DMs, the cross-repo #aura channel), which hides the "+". */
-  onAddTab?: (label: string, url: string) => Promise<void>;
 }) {
   const isDm = conv.kind === "dm";
   return (
-    <header className="flex-shrink-0 flex flex-col border-b border-line-soft bg-bg-content">
+    <header className="slack-channel-header flex-shrink-0 flex flex-col border-b border-line-soft bg-bg-content">
       {/* Row 1 — title + right-side icons */}
-      <div className="flex items-center gap-2 px-2 h-10">
+      <div className="slack-channel-header-row flex items-center gap-2 px-3 h-10">
         {onBackToRail && (
           <button
             type="button"
             onClick={onBackToRail}
-            className="w-7 h-7 rounded text-text-2 hover:text-text-1 hover:bg-bg-2 flex items-center justify-center"
+            className="slack-header-back"
             title="Back"
           >
             <svg width="14" height="14" viewBox="0 0 16 16" fill="none">
@@ -114,36 +119,46 @@ export function ChannelHeader({
           </button>
         )}
 
-        {isDm ? (
-          <span className="flex-shrink-0 relative">
-            <span
-              className="w-7 h-7 rounded-full flex items-center justify-center"
-              style={{ background: tintForName(conv.name), fontSize: 14 }}
-            >
-              {animalForName(conv.name)}
-            </span>
-            {/* TODO(parallel): presence-dot beside DM avatar in header */}
-            {/* <div data-slot="presence-dot" /> */}
-          </span>
-        ) : (
-          <ChannelGlyph conv={conv} />
-        )}
+        <button
+          type="button"
+          className="slack-channel-title"
+          title={isDm ? conv.hint || prettyName(conv) : "Open channel details"}
+          onClick={onToggleDetails}
+        >
+          {isDm ? (
+            <Avatar name={conv.name} size={20} presence="online" />
+          ) : conv.private ? (
+            <RailLockIcon />
+          ) : (
+            <span className="slack-channel-title-hash">#</span>
+          )}
+          <span>{prettyName(conv).replace(/^#/, "")}</span>
+          <ChevronDown size={13} />
+        </button>
 
-        <div className="flex-1 min-w-0">
-          <div className="text-text-1 text-[12.5px] font-medium truncate flex items-baseline gap-1.5">
-            {prettyName(conv)}
-            {!isDm && conv.kind !== "project" && (
-              <span className="text-text-4 text-[10.5px] font-normal tabular-nums">
-                · {memberCount}
-              </span>
-            )}
-          </div>
-          <div className="text-text-4 text-[10.5px] truncate -mt-0.5">
-            {isDm
-              ? /* slot: future "Last active …" / status text */ conv.hint || "Direct message"
-              : conv.hint || ""}
-          </div>
-        </div>
+        <div className="flex-1" />
+
+        {!isDm && (
+          <button
+            type="button"
+            className={`slack-member-facepile ${membersOpen ? "is-active" : ""}`}
+            onClick={onToggleMembers}
+            title="View channel members"
+          >
+            <span className="slack-facepile-avatars">
+              {members.slice(0, 3).map((member) => (
+                <Avatar
+                  key={member.handle}
+                  name={member.name || member.handle}
+                  size={22}
+                  presence={memberIsOnline(member) ? "online" : null}
+                  src={memberAvatarUrl(member)}
+                />
+              ))}
+            </span>
+            <span>{memberCount}</span>
+          </button>
+        )}
 
         {/* Voice: one compact headset for every channel — toggles the
             LiveKit huddle. The wide roster pill ate too much header space,
@@ -169,6 +184,15 @@ export function ChannelHeader({
                 detail: { repoRoot, channel, channelName: conv.name },
               }),
             );
+            window.dispatchEvent(
+              new CustomEvent("aura:open-screenshare", {
+                detail: {
+                  workpaneId: callScreenshareWorkpaneId(repoRoot, channel),
+                  repoRoot,
+                  channel,
+                },
+              }),
+            );
           }}
         >
           <span className="relative flex items-center justify-center">
@@ -181,92 +205,40 @@ export function ChannelHeader({
             )}
           </span>
         </HeaderIconButton>
-        <ChannelOverflowMenu
-          membersOpen={membersOpen}
-          onToggleMembers={onToggleMembers}
-          pinsOpen={pinsOpen}
-          onTogglePins={onTogglePins}
-          pinCount={pinCount}
-          searchActive={searchActive}
-          onToggleSearch={onToggleSearch}
-          onRefresh={onRefresh}
-          onExpand={onExpand}
-        />
-      </div>
-
-      {/* Row 2 — body-routing tabs (Slack-style underline) */}
-      <div className="flex items-center gap-0 px-2 -mb-px">
-        <ChannelTabButton
-          label="Messages"
-          active={activeTab === "messages"}
-          onClick={() => onChangeTab("messages")}
-        />
-        <ChannelTabButton
-          label="Canvas"
-          icon={<FileText size={11} />}
-          active={activeTab === "canvas"}
-          onClick={() => onChangeTab("canvas")}
-          title="Channel canvas — a Slack-style markdown doc backed by .aura/team/channels/<channel>.notes.md"
-        />
-        <ChannelTabButton
-          label="Files"
-          active={activeTab === "files"}
-          onClick={() => onChangeTab("files")}
-        />
-        <ChannelTabButton
-          label="Bookmarks"
-          active={activeTab === "bookmarks"}
-          onClick={() => onChangeTab("bookmarks")}
-        />
-        {(conv.tabs ?? []).map((t) => (
-          <ChannelTabButton
-            key={t.id}
-            label={t.label}
-            icon={<Globe size={11} />}
-            active={activeTab === `custom:${t.id}`}
-            onClick={() => onChangeTab(`custom:${t.id}`)}
-            title={t.url}
+        <HeaderIconButton title="Channel recap" onClick={() => onRefresh()}>
+          <Sparkles size={15} />
+        </HeaderIconButton>
+        {!isDm && (
+          <HeaderIconButton
+            title={canvasOpen ? "Close canvas" : "Open canvas"}
+            onClick={onToggleCanvas}
+            active={canvasOpen}
+          >
+            <FileText size={15} />
+          </HeaderIconButton>
+        )}
+        <HeaderIconButton
+          title={detailsOpen ? "Close details" : isDm ? "Open profile details" : "Open channel details"}
+          onClick={onToggleDetails}
+          active={detailsOpen}
+        >
+          <SquarePen size={15} />
+        </HeaderIconButton>
+        {onExpand && (
+          <ChannelOverflowMenu
+            membersOpen={membersOpen}
+            onToggleMembers={onToggleMembers}
+            pinsOpen={pinsOpen}
+            onTogglePins={onTogglePins}
+            pinCount={pinCount}
+            searchActive={searchActive}
+            onToggleSearch={onToggleSearch}
+            onRefresh={onRefresh}
+            onExpand={onExpand}
           />
-        ))}
-        {onAddTab && <ChannelAddTabButton onAdd={onAddTab} />}
+        )}
       </div>
     </header>
-  );
-}
-
-function ChannelTabButton({
-  label,
-  active,
-  onClick,
-  icon,
-  title,
-}: {
-  label: string;
-  active: boolean;
-  onClick: () => void;
-  icon?: ReactNode;
-  title?: string;
-}) {
-  return (
-    <button
-      type="button"
-      onClick={onClick}
-      title={title ?? label}
-      className={`relative flex items-center gap-1 px-2.5 py-1 text-[11.5px] transition-colors ${
-        active
-          ? "text-text-1"
-          : "text-text-3 hover:text-text-1"
-      }`}
-    >
-      {icon}
-      <span>{label}</span>
-      {active && (
-        <span
-          className="absolute left-1 right-1 -bottom-px h-[2px] rounded-full bg-text-1"
-          aria-hidden
-        />
-      )}
-    </button>
   );
 }
 
@@ -331,132 +303,6 @@ export function ChannelSearchBar({
   );
 }
 
-// "+" → a small inline form that pins a team-shared URL tab onto the
-// channel (label + link). Submits through `onAdd` (the Rust command via
-// useTeamChat) so the new tab lands in team.json and re-derives on every
-// device; backend errors (max 6, duplicate URL, bad scheme) surface
-// inline instead of vanishing into the console.
-function ChannelAddTabButton({
-  onAdd,
-}: {
-  onAdd: (label: string, url: string) => Promise<void>;
-}) {
-  const [open, setOpen] = useState(false);
-  const [label, setLabel] = useState("");
-  const [url, setUrl] = useState("");
-  const [err, setErr] = useState<string | null>(null);
-  const [busy, setBusy] = useState(false);
-
-  const close = () => {
-    setOpen(false);
-    setLabel("");
-    setUrl("");
-    setErr(null);
-  };
-
-  const submit = async () => {
-    const l = label.trim();
-    let u = url.trim();
-    if (!l || !u) {
-      setErr("Label and URL are both required");
-      return;
-    }
-    // Forgive a missing scheme — "ci.example.com" means https.
-    if (!/^https?:\/\//i.test(u)) u = `https://${u}`;
-    setBusy(true);
-    setErr(null);
-    try {
-      await onAdd(l, u);
-      close();
-    } catch (e) {
-      setErr(String(e));
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  return (
-    <div className="relative">
-      <button
-        type="button"
-        onClick={() => (open ? close() : setOpen(true))}
-        className="px-2 py-1.5 text-[11.5px] text-text-4 hover:text-text-1"
-        title="Add a custom tab (a URL everyone on the team sees)"
-        aria-label="Add tab"
-      >
-        +
-      </button>
-      {open && (
-        <div
-          className="absolute right-0 top-full z-40 mt-1 w-64 rounded border border-line-soft bg-bg-1 p-3 shadow-lg"
-          role="dialog"
-          onKeyDown={(e) => {
-            if (e.key === "Escape") {
-              e.preventDefault();
-              close();
-            }
-          }}
-        >
-          <div className="mb-2 text-[11.5px] font-medium text-text-1">
-            Add a tab
-          </div>
-          <Input
-            type="text"
-            autoFocus
-            value={label}
-            onChange={(e) => setLabel(e.target.value)}
-            onKeyDown={(e) => {
-              if (e.key === "Enter") void submit();
-            }}
-            placeholder="Label (e.g. CI, Dashboard)"
-            maxLength={24}
-            className="mb-1.5 h-7 text-[11.5px]"
-          />
-          <Input
-            type="text"
-            value={url}
-            onChange={(e) => setUrl(e.target.value)}
-            onKeyDown={(e) => {
-              if (e.key === "Enter") void submit();
-            }}
-            placeholder="https://…"
-            className="h-7 text-[11.5px]"
-          />
-          {err && (
-            <div className="mt-1.5 text-[10.5px] leading-snug text-red-400">
-              {err}
-            </div>
-          )}
-          <div className="mt-2 flex items-center justify-between">
-            <span className="text-[10px] text-text-5">
-              Shared with the whole team
-            </span>
-            <div className="flex items-center gap-1">
-              <Button
-                variant="ghost"
-                size="xs"
-                onClick={close}
-                className="text-[11px] text-text-3"
-              >
-                Cancel
-              </Button>
-              <Button
-                variant="accentSoft"
-                size="xs"
-                onClick={() => void submit()}
-                disabled={busy}
-                className="text-[11px]"
-              >
-                {busy ? "Adding…" : "Add"}
-              </Button>
-            </div>
-          </div>
-        </div>
-      )}
-    </div>
-  );
-}
-
 function ChannelTabPlaceholder({ title, body }: { title: string; body: string }) {
   return (
     <div className="flex flex-1 flex-col items-center justify-center px-6 py-12 text-center">
@@ -480,6 +326,9 @@ export function ChannelFilesTab({
   members: TeamMember[];
   onJump: (msgId: string) => void;
 }) {
+  const [filter, setFilter] = useState<"all" | "files" | "media" | "links">("all");
+  const [query, setQuery] = useState("");
+  const [newestFirst, setNewestFirst] = useState(true);
   const files = useMemo(() => {
     const out: {
       att: ChatAttachment;
@@ -497,47 +346,157 @@ export function ChannelFilesTab({
     out.sort((a, b) => b.ts - a.ts);
     return out;
   }, [msgs]);
+  const links = useMemo(() => {
+    const out: { url: string; sender: string; ts: number; msgId: string }[] = [];
+    const seen = new Set<string>();
+    for (const message of msgs) {
+      const { text } = parseAttachments(message.body ?? "");
+      for (const match of text.matchAll(/https?:\/\/[^\s<>()\]]+/gi)) {
+        const url = match[0].replace(/[.,;:!?]+$/, "");
+        const key = `${message.id}:${url}`;
+        if (seen.has(key)) continue;
+        seen.add(key);
+        out.push({ url, sender: message.sender, ts: message.ts, msgId: message.id });
+      }
+    }
+    return out.sort((a, b) => b.ts - a.ts);
+  }, [msgs]);
 
-  if (files.length === 0) {
+  const normalizedQuery = query.trim().toLowerCase();
+  const searchedFiles = files.filter((item) =>
+    !normalizedQuery || `${item.att.filename} ${item.sender}`.toLowerCase().includes(normalizedQuery),
+  );
+  const media = searchedFiles.filter((item) =>
+    /^(image|video)\//i.test(item.att.mime),
+  );
+  const documents = searchedFiles.filter((item) =>
+    !/^(image|video)\//i.test(item.att.mime),
+  );
+  const searchedLinks = links.filter((item) =>
+    !normalizedQuery || `${item.url} ${item.sender}`.toLowerCase().includes(normalizedQuery),
+  );
+  const ordered = <T extends { ts: number }>(items: T[]) =>
+    [...items].sort((a, b) => newestFirst ? b.ts - a.ts : a.ts - b.ts);
+
+  if (files.length === 0 && links.length === 0) {
     return (
       <ChannelTabPlaceholder
-        title="No files yet"
-        body="Files shared in this channel's messages collect here. Attach one from the composer to get started."
+        title="No files or links yet"
+        body="Files and links shared in this conversation collect here automatically."
       />
     );
   }
   return (
-    <div className="flex-1 overflow-y-auto px-3 py-3">
-      <div className="text-[10.5px] uppercase tracking-wide text-text-3 font-semibold mb-2">
-        {files.length} {files.length === 1 ? "file" : "files"}
-      </div>
-      <div className="flex flex-col gap-2">
-        {files.map((f) => {
-          const author =
-            members.find((x) => x.handle === f.sender)?.name || f.sender || "Unknown";
-          return (
-            <div
-              key={`${f.msgId}:${f.idx}`}
-              className="rounded-md border border-line-soft/60 bg-bg-1 p-2"
-            >
-              <FileAttachment attachment={f.att} />
+    <div className="slack-files-browser flex-1 overflow-y-auto">
+      <div className="slack-files-inner">
+        <label className="slack-files-search">
+          <SearchLucide size={18} />
+          <input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search" />
+        </label>
+        <div className="slack-files-controls">
+          <div className="slack-files-filters">
+            {(["all", "files", "media", "links"] as const).map((value) => (
               <button
+                key={value}
                 type="button"
-                onClick={() => onJump(f.msgId)}
-                className="mt-1.5 flex items-center gap-1.5 text-[10.5px] text-text-4 hover:text-text-2"
-                title="Jump to message"
+                className={filter === value ? "is-active" : ""}
+                onClick={() => setFilter(value)}
               >
-                <span className="truncate max-w-[140px]">{author}</span>
-                <span>·</span>
-                <span className="tabular-nums">{formatPinTime(f.ts)}</span>
-                <span className="opacity-60">· jump ↗</span>
+                {value === "all" ? "All" : value[0].toUpperCase() + value.slice(1)}
               </button>
+            ))}
+          </div>
+          <button type="button" className="slack-files-sort" onClick={() => setNewestFirst((current) => !current)}>
+            {newestFirst ? "Newest" : "Oldest"} <ChevronDown size={14} />
+          </button>
+        </div>
+
+        {(filter === "all" || filter === "media") && media.length > 0 && (
+          <section className="slack-files-section">
+            <div className="slack-files-section-heading"><strong>Photos and videos</strong><button type="button" onClick={() => setFilter("media")}>See all</button></div>
+            <div className="slack-media-grid">
+              {ordered(media).slice(0, filter === "all" ? 5 : undefined).map((item) => (
+                <button key={`${item.msgId}:${item.idx}`} type="button" className="slack-media-card" onClick={() => onJump(item.msgId)} title={item.att.filename}>
+                  {item.att.mime.toLowerCase().startsWith("image/") ? (
+                    <img src={item.att.url} alt={item.att.filename} />
+                  ) : (
+                    <span><ImageIcon size={28} /><small>{item.att.filename}</small></span>
+                  )}
+                </button>
+              ))}
             </div>
-          );
-        })}
+          </section>
+        )}
+
+        {(filter === "all" || filter === "files") && documents.length > 0 && (
+          <section className="slack-files-section">
+            <div className="slack-files-section-heading"><strong>Files</strong><button type="button" onClick={() => setFilter("files")}>See all</button></div>
+            <div className="slack-files-list">
+              {ordered(documents).map((item) => {
+                const author = members.find((member) => member.handle === item.sender)?.name || item.sender || "Unknown";
+                return (
+                  <div key={`${item.msgId}:${item.idx}`} className="slack-file-result">
+                    <FileAttachment attachment={item.att} />
+                    <button type="button" onClick={() => onJump(item.msgId)}>{author} · {formatPinTime(item.ts)} · Jump ↗</button>
+                  </div>
+                );
+              })}
+            </div>
+          </section>
+        )}
+
+        {(filter === "all" || filter === "links") && searchedLinks.length > 0 && (
+          <section className="slack-files-section">
+            <div className="slack-files-section-heading"><strong>Links</strong><button type="button" onClick={() => setFilter("links")}>See all</button></div>
+            <div className="slack-link-results">
+              {ordered(searchedLinks).map((item) => {
+                const author = members.find((member) => member.handle === item.sender)?.name || item.sender || "Unknown";
+                return (
+                  <div key={`${item.msgId}:${item.url}`} className="slack-link-result">
+                    <span className="slack-link-result-icon"><Link2 size={18} /></span>
+                    <div>
+                      <a href={item.url} target="_blank" rel="noreferrer" onClick={onExternalAnchorClick}>{linkLabel(item.url)}</a>
+                      <span>{safeHost(item.url)}</span>
+                      <small>{author} · {formatPinTime(item.ts)}</small>
+                    </div>
+                    <button type="button" onClick={() => onJump(item.msgId)}>Jump ↗</button>
+                  </div>
+                );
+              })}
+            </div>
+          </section>
+        )}
+
+        {normalizedQuery && searchedFiles.length === 0 && searchedLinks.length === 0 && (
+          <div className="slack-files-no-results">No files or links match “{query}”.</div>
+        )}
+
+        {filter === "all" && (
+          <section className="slack-files-more">
+            <h3>More results by type</h3>
+            <div>
+              <button type="button" onClick={() => setFilter("files")}><File size={16} /> Files <span>›</span></button>
+              <button type="button" onClick={() => setFilter("media")}><ImageIcon size={16} /> Media <span>›</span></button>
+              <button type="button" onClick={() => setFilter("links")}><Link2 size={16} /> Links <span>›</span></button>
+            </div>
+          </section>
+        )}
       </div>
     </div>
   );
+}
+
+function safeHost(url: string) {
+  try { return new URL(url).hostname; } catch { return url; }
+}
+
+function linkLabel(url: string) {
+  try {
+    const parsed = new URL(url);
+    return decodeURIComponent(parsed.pathname.split("/").filter(Boolean).pop() || parsed.hostname);
+  } catch {
+    return url;
+  }
 }
 
 // Bookmarks tab — the channel's pinned messages, surfaced as a durable
@@ -644,6 +603,19 @@ export function TypingIndicator({
       <span className="italic">{label}…</span>
     </div>
   );
+}
+
+function memberIsOnline(member: TeamMember) {
+  const backendOnline = !!(member as TeamMember & { online?: boolean }).online;
+  const recentlySeen =
+    member.last_seen > 0 && Math.floor(Date.now() / 1000) - member.last_seen <= 90;
+  return backendOnline || recentlySeen;
+}
+
+function memberAvatarUrl(member: TeamMember) {
+  return member.github_login
+    ? `https://github.com/${encodeURIComponent(member.github_login)}.png?size=64`
+    : null;
 }
 
 function HeaderIconButton({
@@ -817,62 +789,5 @@ function OverflowItem({
         </span>
       )}
     </button>
-  );
-}
-
-function ChannelGlyph({ conv }: { conv: Conversation }) {
-  if (conv.kind === "project") {
-    return (
-      <span
-        className="w-7 h-7 rounded-full flex items-center justify-center flex-shrink-0"
-        style={{
-          background: "var(--color-bg-1)",
-          color: "var(--color-accent)",
-          border: "1px solid var(--color-line-soft)",
-          fontSize: 14,
-        }}
-      >
-        ✦
-      </span>
-    );
-  }
-  if (conv.kind === "system") {
-    return (
-      <span
-        className="w-7 h-7 rounded-full flex items-center justify-center flex-shrink-0 text-text-3"
-        style={{
-          background: "var(--color-bg-1)",
-          border: "1px solid var(--color-line-soft)",
-        }}
-      >
-        <BellIcon />
-      </span>
-    );
-  }
-  return (
-    <span className="relative flex-shrink-0">
-      <span
-        className="w-7 h-7 rounded-full flex items-center justify-center font-medium"
-        style={{
-          background: tintForName(conv.name),
-          color: colorForName(conv.name),
-          fontSize: 12,
-        }}
-      >
-        {conv.name.charAt(0).toLowerCase() || "·"}
-      </span>
-      {conv.private && (
-        <span
-          className="absolute -bottom-0.5 -right-0.5 w-3.5 h-3.5 rounded-full flex items-center justify-center"
-          style={{
-            background: "var(--color-bg-content)",
-            color: "var(--color-text-4)",
-          }}
-          title="Private channel"
-        >
-          <RailLockIcon />
-        </span>
-      )}
-    </span>
   );
 }

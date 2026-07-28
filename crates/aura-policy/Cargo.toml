@@ -1,6 +1,6 @@
 [package]
 name    = "aura-policy"
-version = "0.19.21"
+version = "0.1.0"
 edition = "2024"
 license = "Apache-2.0 OR MIT"
 description = "Deterministic policy evaluator for Aura work-surface block proposals."

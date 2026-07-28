@@ -21,7 +21,7 @@
 
 use std::time::Duration;
 
-use crate::aurawatch_inference::{InferContext, InferError, SYSTEM_PROMPT};
+use crate::aurawatch_inference::{InferContext, InferError};
 use crate::cmd_agents::agent_discover;
 
 /// One installed, runnable coding-agent CLI we can use to fill in a
@@ -129,10 +129,9 @@ pub async fn infer_agent_cli(
 /// user prompt because the headless agent CLIs take a single `-p`/exec
 /// string, not a system+user split like the HTTP APIs.
 fn build_prompt(ctx: &InferContext) -> String {
-    format!(
-        "{SYSTEM_PROMPT}\n\nIn one sentence, state WHY this change was made.\n\n{}",
-        ctx.user_prompt()
-    )
+    // The task-aware system prompt + trailer already live on the
+    // context (WHY vs plain-language WHAT), so we just fold them in.
+    format!("{}\n\n{}", ctx.system_prompt(), ctx.user_prompt())
 }
 
 /// Per-agent non-interactive argv + env. Mirrors the exact one-shot

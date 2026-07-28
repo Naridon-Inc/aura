@@ -104,6 +104,15 @@ pub fn build(app: &App<Wry>) -> tauri::Result<Menu<Wry>> {
         )
         .item(
             &MenuItemBuilder::with_id("toggle_review", "Toggle Review Panel")
+                .accelerator("CmdOrCtrl+Alt+R")
+                .build(h)?,
+        )
+        .separator()
+        // ⌘R reloads the webview — the universally-expected refresh, and the
+        // escape hatch when a broken HMR update wedges the dev UI. Review-panel
+        // toggle keeps the R mnemonic on ⌘⌥R above.
+        .item(
+            &MenuItemBuilder::with_id("reload_app", "Reload App")
                 .accelerator("CmdOrCtrl+R")
                 .build(h)?,
         )

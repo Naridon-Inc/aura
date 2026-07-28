@@ -153,7 +153,7 @@ export function ClipsTray() {
         type="button"
         title={total === 0 ? "Clipboard tray (empty)" : `Clipboard tray — ${total} item${total === 1 ? "" : "s"}`}
         onClick={() => setPanelOpen((v) => !v)}
-        className="absolute inset-0 group rounded-lg hover:bg-bg-2/60 transition-colors"
+        className="absolute inset-0 group rounded-lg hover:bg-bg-2 transition-colors"
         style={{ overflow: "visible" }}
       >
         <FolderArt slots={slots} hover={fanActive} />
@@ -471,10 +471,10 @@ function FanThumb({
             : "var(--color-bg-2)",
         border: empty
           ? "1px dashed color-mix(in srgb, var(--color-text-1) 28%, transparent)"
-          : "1px solid color-mix(in srgb, var(--color-text-1) 35%, transparent)",
+          : "1px solid var(--color-line)",
         boxShadow: empty
           ? "none"
-          : "0 6px 14px -6px rgba(0,0,0,0.55)",
+          : "var(--shadow-card)",
         display: "flex",
         alignItems: "center",
         justifyContent: "center",
@@ -544,7 +544,7 @@ function ClipsPanel({
   return (
     <div
       ref={wrapRef}
-      className="absolute z-30 left-full ml-2 bottom-0 bg-bg-1 border border-line rounded-lg shadow-lg flex flex-col"
+      className="absolute z-30 left-full ml-2 bottom-0 bg-bg-1 border border-line-soft rounded-lg shadow-[var(--shadow-flyout)] flex flex-col"
       style={{ width: 320, maxHeight: 420 }}
     >
       <header className="flex items-center gap-2 px-3 h-8 border-b border-line-soft">
@@ -576,7 +576,7 @@ function ClipsPanel({
                 await clearClips();
               }
             }}
-            className="text-text-4 hover:text-text-2 text-[10.5px] px-2 h-6 rounded transition-colors"
+            className="text-text-4 hover:text-text-1 hover:bg-bg-2 text-[10.5px] px-2 h-6 rounded transition-colors"
           >
             Clear all
           </button>
@@ -589,9 +589,9 @@ function ClipsPanel({
 function EmptyState() {
   return (
     <div className="px-3 py-6 text-[11px] text-text-4 leading-relaxed">
-      No clips yet. Paste a screenshot anywhere in Aura, or drag a file
-      onto the tray icon — it'll be saved with an absolute path agents
-      can read.
+      No clips yet. Paste a screenshot anywhere in Aura, or drag a file onto
+      the tray icon. Anything you drop here is kept somewhere an agent can
+      read, so you can hand it straight to one.
     </div>
   );
 }
@@ -617,8 +617,8 @@ function PickFileButton() {
 
 function PlusGlyph() {
   return (
-    <svg width="10" height="10" viewBox="0 0 10 10" fill="none">
-      <path d="M5 1.5v7M1.5 5h7" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" />
+    <svg width="12" height="12" viewBox="0 0 12 12" fill="none" aria-hidden="true">
+      <path d="M6 2v8M2 6h8" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" />
     </svg>
   );
 }
@@ -654,7 +654,7 @@ function ClipRow({ clip }: { clip: ClipEntry }) {
           e.stopPropagation();
           removeClip(clip.id);
         }}
-        className="text-text-4 hover:text-text-1 p-1 rounded transition-colors"
+        className="h-5 w-5 grid place-items-center flex-shrink-0 rounded text-text-4 hover:text-text-1 hover:bg-bg-2 transition-colors"
       >
         <TimesGlyph />
       </button>
@@ -693,17 +693,18 @@ function RowThumb({ clip }: { clip: ClipEntry }) {
         border: "1px solid var(--color-line-soft)",
         fontSize: 9,
         fontWeight: 600,
+        overflow: "hidden",
       }}
     >
-      {extOf(clip.name).toUpperCase() || "FILE"}
+      {extOf(clip.name).toUpperCase().slice(0, 4) || "FILE"}
     </div>
   );
 }
 
 function TimesGlyph() {
   return (
-    <svg width="10" height="10" viewBox="0 0 10 10" fill="none">
-      <path d="M2 2l6 6M8 2l-6 6" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" />
+    <svg width="12" height="12" viewBox="0 0 12 12" fill="none" aria-hidden="true">
+      <path d="M3 3l6 6M9 3l-6 6" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" />
     </svg>
   );
 }

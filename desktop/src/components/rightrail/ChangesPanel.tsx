@@ -9,15 +9,22 @@ import { api } from "../../lib/api";
 import { useGitChanges, type ChangedFile } from "../../lib/useGitChanges";
 import { isNoisePath } from "../../lib/categorizeChange";
 import { AURA_SYNC_ENABLED, AURA_RADAR_ENABLED } from "../../lib/featureFlags";
+import { useVerticalSplit } from "../../lib/useVerticalSplit";
 import { CategorySection } from "./CategorySection";
 import { CommitInput } from "./CommitInput";
 import { FileRow } from "./FileRow";
 import { Tooltip, TooltipTrigger, TooltipContent } from "../ui/tooltip";
+import { AsciiSpinner } from "../ui/ascii-spinner";
 import { useLiveSync } from "./sync/useLiveSync";
 import { GoLiveControl } from "./sync/GoLiveControl";
 import { IncomingSection } from "./sync/IncomingSection";
 import { ConflictsSection } from "./sync/ConflictsSection";
 import { TeamRadarSection } from "./radar/TeamRadarSection";
+
+// "Go live" (real-time co-editing) is hidden from Changes for now — the
+// feature stays wired behind AURA_SYNC_ENABLED, we just don't surface the
+// control. Flip back to re-expose it.
+const SHOW_GO_LIVE = false;
 
 const SECTIONS_OPEN_KEY = "aura.rightRail.sections";
 
@@ -77,6 +84,18 @@ export function ChangesPanel({ repoRoot, onOpenFile, onBeforeCommit }: Props) {
   const sync = useLiveSync(repoRoot, AURA_SYNC_ENABLED);
   const [liveOpen, setLiveOpen] = useState({ incoming: true, conflicts: true });
   const [resolvingId, setResolvingId] = useState<string | null>(null);
+
+  // Team Radar rides a resizable bottom dock — the same split primitive the
+  // Checks tab uses to dock the PR list. `radarNeedsHeight` (reported by the
+  // band) gates whether the dock claims any of the split: a quiet radar still
+  // draws its one-line "nothing happening here" row, but sizes itself, so the
+  // file list keeps the panel exactly as a solo developer had it.
+  const { ratio, containerRef, onPointerDown } = useVerticalSplit(
+    "aura.changes.split",
+    0.62,
+  );
+  const [radarNeedsHeight, setRadarNeedsHeight] = useState(false);
+  const radarDocked = AURA_RADAR_ENABLED && radarNeedsHeight;
 
   const openLiveFile = useCallback(
     (path: string) => {
@@ -246,6 +265,7 @@ export function ChangesPanel({ repoRoot, onOpenFile, onBeforeCommit }: Props) {
         setSelected(file.path);
         onOpenFile?.(file.path, openModeFor(e));
       },
+      onSelect: () => setSelected(file.path),
       onStage: mode !== "staged" ? () => stagePaths([file.path]) : undefined,
       onUnstage: mode === "staged" ? () => unstagePaths([file.path]) : undefined,
       onDiscard:
@@ -258,7 +278,18 @@ export function ChangesPanel({ repoRoot, onOpenFile, onBeforeCommit }: Props) {
   const totalChanged = changes.changedCount + changes.untracked.length;
 
   return (
-    <div className="h-full flex flex-col overflow-hidden">
+    <div
+      ref={containerRef}
+      className="h-full flex flex-col overflow-hidden min-w-0"
+    >
+      {/* TOP pane — change list + commit box. Fills the panel when the radar
+          is quiet; yields the split ratio to the dock when it's live. */}
+      <div
+        className="min-h-0 flex flex-col overflow-hidden"
+        style={
+          radarDocked ? { flexGrow: ratio, flexBasis: 0 } : { flex: "1 1 0%" }
+        }
+      >
       <header className="flex items-center gap-2 h-8 px-3 border-b border-line-soft shrink-0 bg-bg-1/40 min-w-0">
         <span className="text-text-2 text-[11.5px] font-medium uppercase tracking-wider truncate shrink-0">
           Source Control
@@ -319,7 +350,7 @@ export function ChangesPanel({ repoRoot, onOpenFile, onBeforeCommit }: Props) {
         </div>
       </header>
 
-      {AURA_SYNC_ENABLED && (
+      {AURA_SYNC_ENABLED && SHOW_GO_LIVE && (
         <GoLiveControl
           live={sync.live}
           busy={sync.busy}
@@ -337,13 +368,6 @@ export function ChangesPanel({ repoRoot, onOpenFile, onBeforeCommit }: Props) {
       )}
 
       <div className="flex-1 min-h-0 overflow-y-auto">
-        {/* Team Radar (awareness plane) — quiet by construction: renders
-            nothing unless there are collisions or recent team activity. */}
-        <TeamRadarSection
-          repoRoot={repoRoot}
-          enabled={AURA_RADAR_ENABLED}
-          onOpenFile={openLiveFile}
-        />
         {liveActive && (
           <>
             {/* Inbound first — what's arriving sits over what you're sending.
@@ -369,7 +393,10 @@ export function ChangesPanel({ repoRoot, onOpenFile, onBeforeCommit }: Props) {
           </>
         )}
         {changes.loading && totalChanged === 0 ? (
-          <div className="text-text-4 text-[11px] px-3 py-3">loading…</div>
+          <div className="flex items-center gap-1.5 text-text-4 text-[11px] px-3 py-3">
+            <AsciiSpinner className="text-[10px]" />
+            <span>Looking at what you’ve changed…</span>
+          </div>
         ) : totalChanged === 0 ? (
           <div className="text-text-4 text-[11px] px-3 py-6 text-center">
             {liveActive ? "Your changes are in sync" : "No changes yet — every file matches your last save"}
@@ -514,6 +541,40 @@ export function ChangesPanel({ repoRoot, onOpenFile, onBeforeCommit }: Props) {
         }}
         liveActive={liveActive}
       />
+      </div>
+
+      {/* Draggable divider — shown only while the dock has something to show. */}
+      {radarDocked && (
+        <div
+          role="separator"
+          aria-orientation="horizontal"
+          onPointerDown={onPointerDown}
+          title="Drag to resize"
+          className="group relative h-1.5 shrink-0 cursor-row-resize border-t border-line-soft"
+        >
+          <div
+            className="absolute inset-x-0 top-1/2 -translate-y-1/2 h-0.5 opacity-0 group-hover:opacity-100 transition-opacity"
+            style={{ background: "var(--color-accent)" }}
+          />
+        </div>
+      )}
+
+      {/* BOTTOM dock — Team Radar. Always mounted so its poll keeps running and
+          can report when team activity appears. While it's quiet it draws one
+          fixed row saying so and the wrapper stays shrink-0, so the file list
+          still owns the panel; it takes its share of the split (radarDocked)
+          only once there's a feed, a clash or a zone to scroll. */}
+      <div
+        className={radarDocked ? "min-h-0 overflow-y-auto" : "shrink-0"}
+        style={radarDocked ? { flexGrow: 1 - ratio, flexBasis: 0 } : undefined}
+      >
+        <TeamRadarSection
+          repoRoot={repoRoot}
+          enabled={AURA_RADAR_ENABLED}
+          onOpenFile={openLiveFile}
+          onNeedsHeight={setRadarNeedsHeight}
+        />
+      </div>
     </div>
   );
 }

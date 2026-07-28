@@ -8,7 +8,8 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { AuraWordmark } from "./OnboardingShell";
-import { EmptyRepoIcon, CloneIcon, TemplateIcon, FolderIcon, Spinner } from "./icons";
+import { EmptyRepoIcon, CloneIcon, TemplateIcon, FolderIcon } from "./icons";
+import { AsciiSpinner } from "../ui/ascii-spinner";
 import { Button } from "../ui/button";
 import { Input } from "../ui/input";
 import { api } from "../../lib/api";
@@ -224,7 +225,7 @@ export function NewProjectScreen({
               disabled={!canSubmit}
               onClick={submit}
             >
-              {busy ? <Spinner size={14} /> : null}
+              {busy ? <AsciiSpinner className="text-[12px] leading-none" /> : null}
               {mode === "clone" ? "Clone" : "Create"}
             </Button>
           </div>

@@ -274,7 +274,7 @@ export function IntentSplitMergeDialog({ open, repoRoot, intentTs, onClose }: Pr
             )}
           </>
         )}
-        {err && <div className="text-red text-[11px]">{err}</div>}
+        {err && <div role="alert" className="text-red text-[11px]">{err}</div>}
       </div>
     </Dialog>
   );

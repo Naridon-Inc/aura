@@ -13,7 +13,7 @@
 
 import { useEffect, useMemo, useState } from "react";
 import { Dialog } from "../Dialog";
-import { AsciiSpinner } from "../AsciiSpinner";
+import { AsciiSpinner } from "../ui/ascii-spinner";
 import {
   api,
   type AgentInfo,
@@ -308,7 +308,7 @@ export function ManagerLauncher({
       <div className="p-4 flex flex-col gap-3">
         <div>
           <div className="flex items-center justify-between mb-1">
-            <label className="text-xs text-fg-muted">Objective</label>
+            <label className="text-xs text-text-3">Objective</label>
             <button
               type="button"
               onClick={discover}
@@ -316,14 +316,14 @@ export function ManagerLauncher({
               title="Run `aura plan` to decompose this objective into wave/task DAG"
               className="text-[11px] px-2 h-6 rounded inline-flex items-center gap-1.5 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
               style={{
-                background: "color-mix(in srgb, var(--color-accent-blue) 14%, transparent)",
-                color: "var(--color-accent-blue)",
-                border: "1px solid color-mix(in srgb, var(--color-accent-blue) 32%, transparent)",
+                background: "color-mix(in srgb, var(--color-accent) 14%, transparent)",
+                color: "var(--color-accent)",
+                border: "1px solid color-mix(in srgb, var(--color-accent) 32%, transparent)",
               }}
             >
               {discovering ? (
                 <>
-                  <AsciiSpinner className="text-accent-blue" />
+                  <AsciiSpinner />
                   Aura is planning…
                 </>
               ) : (
@@ -332,7 +332,7 @@ export function ManagerLauncher({
             </button>
           </div>
           <textarea
-            className="w-full bg-bg-elev text-fg-strong text-sm rounded border border-line-soft px-2 py-1.5 outline-none focus:border-line"
+            className="w-full bg-bg-3 text-text-1 text-sm rounded border border-line-soft px-2 py-1.5 outline-none focus:border-line"
             rows={2}
             value={objective}
             onChange={(e) => setObjective(e.target.value)}
@@ -365,9 +365,9 @@ export function ManagerLauncher({
         )}
         <div>
           <div className="flex items-center justify-between mb-1">
-            <span className="text-xs text-fg-muted">Tasks</span>
+            <span className="text-xs text-text-3">Tasks</span>
             <button
-              className="text-xs text-fg-muted hover:text-fg-strong"
+              className="text-xs text-text-3 hover:text-text-1"
               onClick={addTask}
             >
               + Add task
@@ -377,19 +377,19 @@ export function ManagerLauncher({
             {tasks.map((t, idx) => (
               <div
                 key={idx}
-                className="bg-bg-elev rounded border border-line-soft p-2 flex flex-col gap-1.5"
+                className="bg-bg-3 rounded border border-line-soft p-2 flex flex-col gap-1.5"
               >
                 <div className="flex items-center gap-2">
-                  <span className="text-xs text-fg-muted w-6">#{idx + 1}</span>
+                  <span className="text-xs text-text-3 w-6">#{idx + 1}</span>
                   <input
-                    className="flex-1 bg-transparent text-sm text-fg-strong outline-none"
+                    className="flex-1 bg-transparent text-sm text-text-1 outline-none"
                     value={t.description}
                     onChange={(e) => updateTask(idx, { description: e.target.value })}
                     placeholder="Task description"
                   />
                   {tasks.length > 1 && (
                     <button
-                      className="text-xs text-fg-muted hover:text-fg-strong"
+                      className="text-xs text-text-3 hover:text-text-1"
                       onClick={() => removeTask(idx)}
                     >
                       Remove
@@ -435,7 +435,7 @@ export function ManagerLauncher({
             ))}
           </div>
         </div>
-        {error && <div className="text-xs text-rose-400">{error}</div>}
+        {error && <div className="text-xs text-red">{error}</div>}
       </div>
       <footer className="flex justify-end gap-2 px-4 py-2 border-t border-line-soft">
         <Button

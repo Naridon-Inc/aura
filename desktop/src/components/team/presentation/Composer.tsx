@@ -6,11 +6,39 @@
 import {
   useCallback,
   useEffect,
+  useId,
   useLayoutEffect,
   useRef,
   useState,
 } from "react";
-import { FileCode } from "lucide-react";
+import {
+  ALargeSmall,
+  AtSign,
+  Bold,
+  Braces,
+  ChevronRight,
+  Code2,
+  FileText,
+  Italic,
+  Laptop,
+  Layers3,
+  Link,
+  List,
+  ListChecks,
+  ListOrdered,
+  Mic,
+  Pause,
+  Play,
+  Plus,
+  Quote,
+  Smile,
+  SquarePen,
+  Strikethrough,
+  Trash2,
+  Underline,
+  Video,
+  Workflow,
+} from "lucide-react";
 import { api, type TeamMember } from "../../../lib/api";
 import { FileUploadButton } from "../../chat/FileUploadButton";
 import { type ChatAttachment } from "../../chat/FileAttachment";
@@ -223,11 +251,20 @@ export function Composer({
   // as "I pressed send and nothing happened." The draft is kept so they can
   // retry; cleared the moment they edit or a send succeeds.
   const [sendError, setSendError] = useState<string | null>(null);
+  const [uploadError, setUploadError] = useState<string | null>(null);
   const [attachments, setAttachments] = useState<ChatAttachment[]>([]);
   const [repoFiles, setRepoFiles] = useState<RepoFileAttachment[]>([]);
   const [pickerOpen, setPickerOpen] = useState(false);
+  const [addMenuOpen, setAddMenuOpen] = useState(false);
+  const [uploadOpenRequest, setUploadOpenRequest] = useState(0);
+  const [mentionPickerOpen, setMentionPickerOpen] = useState(false);
+  const [emojiPickerOpen, setEmojiPickerOpen] = useState(false);
+  const [emojiPickerPosition, setEmojiPickerPosition] = useState({ left: 0, bottom: 62 });
+  const [recordingVoice, setRecordingVoice] = useState(false);
+  const dropZoneId = useId();
   const taRef = useRef<HTMLTextAreaElement>(null);
   const composerRef = useRef<HTMLDivElement>(null);
+  const emojiButtonRef = useRef<HTMLButtonElement>(null);
   const lastTypingSentRef = useRef<number>(0);
 
   // Throttled typing pulse — fired on every meaningful keystroke at most
@@ -266,6 +303,15 @@ export function Composer({
   // @mention autocomplete — when the caret-preceding token is `@xyz`,
   // suggest matching team handles.
   const mentionState = useMentionState(draft, members, taRef);
+
+  useEffect(() => {
+    if (!addMenuOpen) return;
+    const onPointerDown = (event: PointerEvent) => {
+      if (!composerRef.current?.contains(event.target as Node)) setAddMenuOpen(false);
+    };
+    window.addEventListener("pointerdown", onPointerDown);
+    return () => window.removeEventListener("pointerdown", onPointerDown);
+  }, [addMenuOpen]);
 
   // Auto-grow textarea with content; cap at ~7 lines (140px). The
   // scrollbar is only armed once content actually exceeds the cap —
@@ -316,12 +362,16 @@ export function Composer({
     }
   }
 
-  function accept(handle: string) {
-    const { start, end } = mentionState!;
+  function acceptMention(handle: string) {
+    const ta = taRef.current;
+    const caret = ta?.selectionStart ?? draft.length;
+    const token = draft.slice(0, caret).match(/@[a-zA-Z0-9_.\-]*$/);
+    const start = mentionState?.start ?? (token ? caret - token[0].length : caret);
+    const end = mentionState?.end ?? caret;
     const next = draft.slice(0, start) + `@${handle} ` + draft.slice(end);
     setDraft(next);
+    setMentionPickerOpen(false);
     requestAnimationFrame(() => {
-      const ta = taRef.current;
       if (ta) {
         const pos = start + handle.length + 2;
         ta.focus();
@@ -332,30 +382,131 @@ export function Composer({
 
   const hasPending = attachments.length > 0 || repoFiles.length > 0;
 
+  const insertText = (text: string) => {
+    const ta = taRef.current;
+    const start = ta?.selectionStart ?? draft.length;
+    const end = ta?.selectionEnd ?? start;
+    setDraft((value) => value.slice(0, start) + text + value.slice(end));
+    requestAnimationFrame(() => {
+      ta?.focus();
+      ta?.setSelectionRange(start + text.length, start + text.length);
+    });
+  };
+
+  const formatSelection = () => {
+    const ta = taRef.current;
+    const start = ta?.selectionStart ?? 0;
+    const end = ta?.selectionEnd ?? start;
+    if (start === end) {
+      insertText("**bold**");
+      return;
+    }
+    setDraft((value) => `${value.slice(0, start)}**${value.slice(start, end)}**${value.slice(end)}`);
+  };
+
+  const wrapSelection = (before: string, after = before) => {
+    const ta = taRef.current;
+    const start = ta?.selectionStart ?? draft.length;
+    const end = ta?.selectionEnd ?? start;
+    const selected = draft.slice(start, end) || "text";
+    setDraft((value) =>
+      `${value.slice(0, start)}${before}${selected}${after}${value.slice(end)}`,
+    );
+    requestAnimationFrame(() => {
+      ta?.focus();
+      ta?.setSelectionRange(start + before.length, start + before.length + selected.length);
+    });
+  };
+
+  const insertCodeBlock = () => {
+    const ta = taRef.current;
+    const start = ta?.selectionStart ?? draft.length;
+    const end = ta?.selectionEnd ?? start;
+    const selected = draft.slice(start, end) || "code";
+    const leadingBreak = start > 0 && !draft.slice(0, start).endsWith("\n") ? "\n" : "";
+    const trailingBreak = end < draft.length && !draft.slice(end).startsWith("\n") ? "\n" : "";
+    const before = `${leadingBreak}\`\`\`\n`;
+    const after = `\n\`\`\`${trailingBreak}`;
+    setDraft((value) => `${value.slice(0, start)}${before}${selected}${after}${value.slice(end)}`);
+    requestAnimationFrame(() => {
+      ta?.focus();
+      const selectionStart = start + before.length;
+      ta?.setSelectionRange(selectionStart, selectionStart + selected.length);
+    });
+  };
+
+  const openMentionPicker = () => {
+    setEmojiPickerOpen(false);
+    const ta = taRef.current;
+    const caret = ta?.selectionStart ?? draft.length;
+    const before = draft.slice(0, caret);
+    if (!/@[a-zA-Z0-9_.\-]*$/.test(before)) insertText("@");
+    setMentionPickerOpen(true);
+  };
+
+  const toggleEmojiPicker = () => {
+    setMentionPickerOpen(false);
+    const next = !emojiPickerOpen;
+    if (next) {
+      const composer = composerRef.current?.getBoundingClientRect();
+      const trigger = emojiButtonRef.current?.getBoundingClientRect();
+      if (composer && trigger) {
+        const pickerWidth = 310;
+        const desiredLeft = trigger.left - composer.left - 8;
+        const maxLeft = Math.max(8, composer.width - pickerWidth - 8);
+        setEmojiPickerPosition({
+          left: Math.min(Math.max(8, desiredLeft), maxLeft),
+          bottom: composer.bottom - trigger.top + 8,
+        });
+      }
+    }
+    setEmojiPickerOpen(next);
+  };
+
+  const mentionQuery = mentionState?.query ?? "";
+  const specialMentions = [
+    { handle: "channel", label: "Notify everyone in this channel." },
+    { handle: "everyone", label: "Notify everyone in your workspace." },
+    { handle: "here", label: "Notify every online member in this channel." },
+  ].filter((item) => item.handle.startsWith(mentionQuery));
+  const mentionMembers = (mentionState?.matches ?? members.filter((member) =>
+    !mentionQuery || `${member.handle} ${member.name}`.toLowerCase().includes(mentionQuery),
+  )).slice(0, 8);
+  const showMentionPicker =
+    (mentionPickerOpen || !!mentionState) &&
+    (specialMentions.length > 0 || mentionMembers.length > 0);
+
   return (
     <div
       ref={composerRef}
-      className="flex-shrink-0 border-t border-line-soft p-2 relative bg-bg-content"
+      data-os-drop="composer"
+      data-os-drop-id={dropZoneId}
+      className="slack-composer-wrap flex-shrink-0 relative bg-bg-content"
     >
-      {mentionState && mentionState.matches.length > 0 ? (
-        <div className="absolute bottom-full left-2 mb-1 bg-bg-1 border border-line-soft rounded-md shadow-lg overflow-hidden z-10 min-w-[180px]">
-          {mentionState.matches.slice(0, 6).map((m) => (
+      {showMentionPicker ? (
+        <div className="slack-mention-picker">
+          {specialMentions.map((item) => (
+            <button key={item.handle} type="button" onClick={() => acceptMention(item.handle)}>
+              <span className="slack-mention-special">♧</span>
+              <strong>@{item.handle}</strong>
+              <small>{item.label}</small>
+            </button>
+          ))}
+          {mentionMembers.map((m) => (
             <button
               key={m.handle}
               type="button"
-              onClick={() => accept(m.handle)}
-              className="w-full flex items-center gap-2 px-2 py-1.5 hover:bg-bg-2 text-left"
+              onClick={() => acceptMention(m.handle)}
             >
               <span
-                className="w-5 h-5 rounded-full flex items-center justify-center flex-shrink-0"
+                className="slack-mention-avatar"
                 style={{ background: tintForName(m.handle), fontSize: 11 }}
               >
                 {animalForName(m.handle)}
               </span>
-              <span className="text-text-1 text-[12px] flex-1 truncate">
-                @{m.handle}
-              </span>
-              <span className="text-text-4 text-[10px] truncate">{m.name}</span>
+              <strong>{m.name || m.handle}</strong>
+              <span className="slack-mention-presence" />
+              <small>{m.handle}</small>
             </button>
           ))}
         </div>
@@ -405,17 +556,45 @@ export function Composer({
         <div
           data-slot="composer-send-error"
           role="alert"
-          className="mb-1.5 flex items-center gap-1.5 text-[11.5px] text-rose-300"
+          className="mb-1.5 flex items-center gap-1.5 text-[11.5px] text-red"
         >
           <span aria-hidden>⚠</span>
           <span>{sendError}</span>
+        </div>
+      )}
+      {uploadError && (
+        <div data-slot="composer-upload-error" role="alert" className="mb-1.5 flex items-center justify-between gap-2 text-[11.5px] text-amber">
+          <span>⚠ {uploadError}</span>
+          <button type="button" onClick={() => setUploadError(null)} className="text-text-3 hover:text-text-1" aria-label="Dismiss upload error">×</button>
         </div>
       )}
 
       {/* Unified composer surface — one bordered box holds the textarea and a
           thin toolbar (attach left, send right), matching the app's other
           chat composers instead of three separate side-by-side controls. */}
-      <div className="rounded-lg border border-line-soft bg-bg-1 focus-within:border-line transition-colors">
+      {recordingVoice ? (
+        <VoiceNoteRecorder
+          repoRoot={repoRoot}
+          onCancel={() => setRecordingVoice(false)}
+          onSend={async (attachment) => {
+            await onSend("", [attachment], []);
+            setRecordingVoice(false);
+          }}
+        />
+      ) : (
+      <div className="slack-composer-surface">
+        <div className="slack-composer-formatbar" aria-label="Formatting tools">
+          <button type="button" onMouseDown={(event) => event.preventDefault()} onClick={formatSelection} title="Bold" aria-label="Bold"><Bold size={15} /></button>
+          <button type="button" onMouseDown={(event) => event.preventDefault()} onClick={() => wrapSelection("_")} title="Italic" aria-label="Italic"><Italic size={15} /></button>
+          <button type="button" onMouseDown={(event) => event.preventDefault()} onClick={() => wrapSelection("<u>", "</u>")} title="Underline" aria-label="Underline"><Underline size={15} /></button>
+          <button type="button" onMouseDown={(event) => event.preventDefault()} onClick={() => wrapSelection("~~")} title="Strikethrough" aria-label="Strikethrough"><Strikethrough size={15} /></button>
+          <span />
+          <button type="button" onMouseDown={(event) => event.preventDefault()} onClick={() => wrapSelection("[", "](https://)")} title="Link" aria-label="Link"><Link size={15} /></button>
+          <button type="button" onMouseDown={(event) => event.preventDefault()} onClick={() => insertText("1. ")} title="Numbered list" aria-label="Numbered list"><ListOrdered size={16} /></button>
+          <button type="button" onMouseDown={(event) => event.preventDefault()} onClick={() => insertText("- ")} title="Bulleted list" aria-label="Bulleted list"><List size={16} /></button>
+          <button type="button" onMouseDown={(event) => event.preventDefault()} onClick={() => insertText("> ")} title="Quote" aria-label="Quote"><Quote size={15} /></button>
+          <button type="button" onMouseDown={(event) => event.preventDefault()} onClick={insertCodeBlock} title="Code block" aria-label="Code block"><Code2 size={16} /></button>
+        </div>
         <textarea
           ref={taRef}
           value={draft}
@@ -425,6 +604,22 @@ export function Composer({
             if (e.target.value.trim().length > 0) pulseTyping();
           }}
           onKeyDown={(e) => {
+            if (e.metaKey && e.shiftKey && e.key === "Enter") {
+              e.preventDefault();
+              insertCodeBlock();
+              return;
+            }
+            if (e.metaKey && e.key.toLowerCase() === "o") {
+              e.preventDefault();
+              setUploadOpenRequest((value) => value + 1);
+              return;
+            }
+            if (e.key === "Escape") {
+              setAddMenuOpen(false);
+              setMentionPickerOpen(false);
+              setEmojiPickerOpen(false);
+              return;
+            }
             if (e.key === "Enter" && !e.shiftKey && !mentionState?.matches.length) {
               e.preventDefault();
               send();
@@ -432,7 +627,7 @@ export function Composer({
           }}
           placeholder={placeholder ?? composerHint(conv)}
           rows={1}
-          className="w-full block resize-none bg-transparent text-text-1 text-[12.5px] px-3 pt-2 pb-1 outline-none whitespace-pre-wrap break-words"
+          className="slack-composer-input w-full block resize-none bg-transparent outline-none whitespace-pre-wrap break-words"
           style={{
             lineHeight: "20px",
             maxHeight: 140,
@@ -442,38 +637,133 @@ export function Composer({
             overflowX: "hidden",
           }}
         />
-        <div className="flex items-center gap-0.5 px-1.5 pb-1.5">
-          <FileUploadButton
-            repoRoot={repoRoot}
-            dropTargetRef={composerRef}
-            onUploaded={(a) => setAttachments((xs) => [...xs, a])}
-            onError={(msg) => console.warn("upload failed:", msg)}
-          />
+        <div className="slack-composer-toolbar">
           <button
             type="button"
-            onClick={() => setPickerOpen(true)}
-            className="text-text-3 hover:text-text-1 p-1 rounded hover:bg-bg-2 transition-colors"
-            title="Attach repo file"
-            aria-label="Attach repo file"
+            className={`slack-composer-add ${addMenuOpen ? "is-open" : ""}`}
+            onClick={() => {
+              setEmojiPickerOpen(false);
+              setMentionPickerOpen(false);
+              setAddMenuOpen((open) => !open);
+            }}
+            title="Add attachment or content"
+            aria-label="Add attachment or content"
+            aria-expanded={addMenuOpen}
           >
-            <FileCode size={14} />
+            <Plus size={18} />
+          </button>
+          <FileUploadButton
+            repoRoot={repoRoot}
+            dropZoneId={dropZoneId}
+            dropTargetRef={composerRef}
+            hideTrigger
+            openRequest={uploadOpenRequest}
+            onUploaded={(a) => {
+              setUploadError(null);
+              setAttachments((xs) => [...xs, a]);
+            }}
+            onError={(msg) => setUploadError(msg)}
+          />
+          <span className="slack-composer-divider" />
+          <button
+            ref={emojiButtonRef}
+            type="button"
+            className={`slack-composer-tool ${emojiPickerOpen ? "is-active" : ""}`}
+            onClick={toggleEmojiPicker}
+            title="Add emoji"
+          >
+            <Smile size={17} />
+          </button>
+          <button type="button" className="slack-composer-tool" onClick={openMentionPicker} title="Mention someone">
+            <AtSign size={17} />
+          </button>
+          <button type="button" className="slack-composer-tool" onClick={formatSelection} title="Format message">
+            <ALargeSmall size={18} />
+          </button>
+          <button
+            type="button"
+            className="slack-composer-tool"
+            onClick={() => window.dispatchEvent(new CustomEvent("aura:start-huddle", { detail: { repoRoot, channel: conv.channel ?? "general", channelName: conv.name } }))}
+            title="Record a video clip"
+          >
+            <Video size={17} />
+          </button>
+          <button type="button" className="slack-composer-tool" onClick={() => setRecordingVoice(true)} title="Record audio clip">
+            <Mic size={17} />
+          </button>
+          <button type="button" className="slack-composer-tool" onClick={() => taRef.current?.focus()} title="Open expanded composer">
+            <SquarePen size={16} />
           </button>
           <div className="flex-1" />
           <button
             type="button"
             onClick={send}
             disabled={(!draft.trim() && !hasPending) || sending}
-            className="w-7 h-7 rounded-full flex items-center justify-center disabled:opacity-30 disabled:cursor-not-allowed flex-shrink-0"
-            style={{
-              background: "var(--color-accent)",
-              color: "var(--color-bg-deep)",
-            }}
+            className="slack-composer-send"
             title="Send (Enter)"
           >
             {sending ? "…" : <ArrowUpIcon />}
           </button>
         </div>
       </div>
+      )}
+
+      {addMenuOpen && (
+        <div className="slack-composer-add-menu" role="menu" aria-label="Add to message">
+          <button
+            type="button"
+            role="menuitem"
+            onClick={() => {
+              window.dispatchEvent(new CustomEvent("aura:team-select-tab", { detail: { conversationId: conv.id, tab: "canvas" } }));
+              setAddMenuOpen(false);
+            }}
+          >
+            <FileText size={16} /><span>Canvas</span>
+          </button>
+          <button type="button" role="menuitem" onClick={() => { insertText("- [ ] "); setAddMenuOpen(false); }}>
+            <ListChecks size={16} /><span>List</span>
+          </button>
+          <button type="button" role="menuitem" onClick={() => { setPickerOpen(true); setAddMenuOpen(false); }}>
+            <Layers3 size={16} /><span>Recent file</span><ChevronRight size={14} className="slack-add-menu-end" />
+          </button>
+          <button type="button" role="menuitem" onClick={() => { insertCodeBlock(); setAddMenuOpen(false); }}>
+            <Braces size={16} /><span>Text snippet</span><kbd>⌘⇧Enter</kbd>
+          </button>
+          <button type="button" role="menuitem" onClick={() => { insertText("/workflow "); setAddMenuOpen(false); }}>
+            <Workflow size={16} /><span>Workflow</span>
+          </button>
+          <div className="slack-add-menu-separator" />
+          <button type="button" role="menuitem" onClick={() => { setUploadOpenRequest((value) => value + 1); setAddMenuOpen(false); }}>
+            <Laptop size={16} /><span>Upload from your computer</span><kbd>⌘O</kbd>
+          </button>
+        </div>
+      )}
+
+      {emojiPickerOpen && (
+        <div
+          className="slack-emoji-picker"
+          role="dialog"
+          aria-label="Emoji picker"
+          style={{ left: emojiPickerPosition.left, bottom: emojiPickerPosition.bottom }}
+        >
+          <header><strong>Emoji</strong><button type="button" onClick={() => setEmojiPickerOpen(false)}>×</button></header>
+          <div>
+            {COMPOSER_EMOJIS.map((emoji) => (
+              <button
+                key={emoji}
+                type="button"
+                onClick={() => {
+                  insertText(`${emoji} `);
+                  setEmojiPickerOpen(false);
+                }}
+                aria-label={`Insert ${emoji}`}
+              >
+                {emoji}
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
 
       <RepoFilePicker
         open={pickerOpen}
@@ -487,6 +777,166 @@ export function Composer({
       />
     </div>
   );
+}
+
+const COMPOSER_EMOJIS = [
+  "😀", "😃", "😄", "😁", "😂", "😊", "😍", "🥰",
+  "😎", "🤔", "🫡", "😅", "😭", "😡", "🥳", "🤯",
+  "👍", "👎", "👏", "🙌", "🙏", "🤝", "💪", "✌️",
+  "❤️", "💙", "💚", "💛", "🔥", "✨", "🎉", "💯",
+  "✅", "❌", "⚠️", "🚀", "👀", "💡", "🐛", "📌",
+];
+
+function VoiceNoteRecorder({
+  repoRoot,
+  onCancel,
+  onSend,
+}: {
+  repoRoot: string;
+  onCancel: () => void;
+  onSend: (attachment: ChatAttachment) => Promise<void> | void;
+}) {
+  const recorderRef = useRef<MediaRecorder | null>(null);
+  const streamRef = useRef<MediaStream | null>(null);
+  const chunksRef = useRef<Blob[]>([]);
+  const cancelledRef = useRef(false);
+  const finishRef = useRef(false);
+  const pausedRef = useRef(false);
+  const secondsRef = useRef(0);
+  const [seconds, setSeconds] = useState(0);
+  const [paused, setPaused] = useState(false);
+  const [uploading, setUploading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    let timer: number | null = null;
+    void navigator.mediaDevices
+      .getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true } })
+      .then((stream) => {
+        if (cancelledRef.current) {
+          stream.getTracks().forEach((track) => track.stop());
+          return;
+        }
+        streamRef.current = stream;
+        const mime = MediaRecorder.isTypeSupported("audio/webm;codecs=opus")
+          ? "audio/webm;codecs=opus"
+          : "audio/webm";
+        const recorder = new MediaRecorder(stream, { mimeType: mime });
+        recorderRef.current = recorder;
+        recorder.ondataavailable = (event) => {
+          if (event.data.size > 0) chunksRef.current.push(event.data);
+        };
+        recorder.onstop = () => {
+          stream.getTracks().forEach((track) => track.stop());
+          if (!finishRef.current || cancelledRef.current) return;
+          const blob = new Blob(chunksRef.current, { type: recorder.mimeType || "audio/webm" });
+          void uploadVoiceNote(blob, secondsRef.current);
+        };
+        recorder.start(250);
+        timer = window.setInterval(() => {
+          if (!pausedRef.current) setSeconds((value) => {
+            const next = value + 1;
+            secondsRef.current = next;
+            return next;
+          });
+        }, 1000);
+      })
+      .catch(() => setError("Microphone access is required to record a voice note."));
+
+    return () => {
+      if (timer !== null) window.clearInterval(timer);
+      streamRef.current?.getTracks().forEach((track) => track.stop());
+    };
+  // The recorder owns one immutable recording session.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  const uploadVoiceNote = async (blob: Blob, duration: number) => {
+    setUploading(true);
+    setError(null);
+    try {
+      const bytesBase64 = arrayBufferToBase64(await blob.arrayBuffer());
+      const uploaded = await api.chatUploadVoiceNote(
+        repoRoot,
+        bytesBase64,
+        `voice-note-${Date.now()}.webm`,
+        blob.type || "audio/webm",
+      );
+      await onSend({
+        url: uploaded.url,
+        sha256: uploaded.sha256,
+        size: uploaded.size,
+        mime: uploaded.mime,
+        filename: uploaded.filename || "voice-note.webm",
+        kind: "voice-note",
+        duration,
+      });
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : String(reason));
+      setUploading(false);
+    }
+  };
+
+  const cancel = () => {
+    cancelledRef.current = true;
+    const recorder = recorderRef.current;
+    if (recorder && recorder.state !== "inactive") recorder.stop();
+    onCancel();
+  };
+
+  const finish = () => {
+    const recorder = recorderRef.current;
+    if (!recorder || recorder.state === "inactive") return;
+    finishRef.current = true;
+    setUploading(true);
+    recorder.stop();
+  };
+
+  const togglePause = () => {
+    const recorder = recorderRef.current;
+    if (!recorder || recorder.state === "inactive") return;
+    if (recorder.state === "paused") recorder.resume();
+    else recorder.pause();
+    const next = recorder.state !== "recording";
+    pausedRef.current = next;
+    setPaused(next);
+  };
+
+  return (
+    <div className="slack-voice-recorder" role="group" aria-label="Voice note recorder">
+      <button type="button" onClick={cancel} className="slack-recorder-cancel" aria-label="Discard voice note">
+        <Trash2 size={17} />
+      </button>
+      <span className={`slack-recorder-dot ${paused ? "is-paused" : ""}`} />
+      <span className="slack-recorder-time">{formatRecorderTime(seconds)}</span>
+      <div className={`slack-recorder-wave ${paused ? "is-paused" : ""}`} aria-hidden>
+        {Array.from({ length: 42 }, (_, index) => (
+          <i key={index} style={{ animationDelay: `${-(index % 9) * 70}ms`, height: 8 + ((index * 13) % 20) }} />
+        ))}
+      </div>
+      {error && <span className="slack-recorder-error" title={error}>{error}</span>}
+      <button type="button" onClick={togglePause} disabled={uploading || !!error} className="slack-recorder-round" aria-label={paused ? "Resume recording" : "Pause recording"}>
+        {paused ? <Play size={16} fill="currentColor" /> : <Pause size={16} fill="currentColor" />}
+      </button>
+      <button type="button" onClick={finish} disabled={uploading || !!error || seconds < 1} className="slack-recorder-send">
+        {uploading ? "Uploading…" : "Send"}
+      </button>
+    </div>
+  );
+}
+
+function arrayBufferToBase64(buffer: ArrayBuffer): string {
+  const bytes = new Uint8Array(buffer);
+  let binary = "";
+  const step = 0x8000;
+  for (let offset = 0; offset < bytes.length; offset += step) {
+    binary += String.fromCharCode(...bytes.subarray(offset, offset + step));
+  }
+  return btoa(binary);
+}
+
+function formatRecorderTime(seconds: number): string {
+  return `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, "0")}`;
 }
 
 function useMentionState(
@@ -506,7 +956,9 @@ function useMentionState(
       if (/^[a-zA-Z0-9_.\-]*$/.test(query)) {
         const q = query.toLowerCase();
         const matches = members
-          .filter((m) => m.handle.startsWith(q))
+          .filter((m) =>
+            `${m.handle} ${m.name}`.toLowerCase().includes(q),
+          )
           .slice(0, 8);
         return { start: i, end: caret, query: q, matches };
       }

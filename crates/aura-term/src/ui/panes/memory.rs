@@ -131,9 +131,9 @@ fn resolve_memory_path() -> Option<PathBuf> {
 
 fn encode_project_dir(path: &Path) -> String {
     // Claude Code encodes project dirs by replacing `/` with `-` and
-    // stripping the leading slash, so `/Users/owner/Dev` → `-Users-owner-Dev`.
+    // stripping the leading slash, so `/Users/ashiq/Dev` → `-Users-ashiq-Dev`.
     // We mirror that here. Spaces become literal `-` too based on the
-    // example path in CLAUDE.md (`-Users-you-Documents-New-Git`).
+    // example path in CLAUDE.md (`-Users-muhammed-Documents-New-Git`).
     let s = path.to_string_lossy().into_owned();
     let replaced: String = s
         .chars()
@@ -293,10 +293,10 @@ mod tests {
 
     #[test]
     fn encodes_project_dir_like_claude() {
-        let p = Path::new("/Users/you/Documents/New Git");
+        let p = Path::new("/Users/muhammed/Documents/New Git");
         assert_eq!(
             encode_project_dir(p),
-            "-Users-you-Documents-New-Git".to_string()
+            "-Users-muhammed-Documents-New-Git".to_string()
         );
     }
 }

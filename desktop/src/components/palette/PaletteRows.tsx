@@ -20,9 +20,11 @@ import {
   CornerDownLeft,
   Equal,
   FileText,
+  FolderGit2,
   FunctionSquare,
   Hash,
   History,
+  MessageSquareText,
   Puzzle,
   Zap,
 } from "lucide-react";
@@ -258,6 +260,40 @@ export function PaletteResultRow({
           </span>
           {entry.hint && (
             <span className="ml-auto shrink-0 truncate text-[11px] text-text-4" style={{ maxWidth: 220 }}>
+              {entry.hint}
+            </span>
+          )}
+        </>,
+      );
+
+    case "workspace":
+      return shell(
+        <>
+          <Lead active={active}>
+            <FolderGit2 />
+          </Lead>
+          <span className="truncate text-[13px] text-text-1">
+            <Highlighted text={entry.label} query={query} />
+          </span>
+          {entry.hint && (
+            <span className="ml-auto shrink-0 text-[11px] text-text-4">
+              {entry.hint}
+            </span>
+          )}
+        </>,
+      );
+
+    case "chat":
+      return shell(
+        <>
+          <Lead active={active}>
+            <MessageSquareText />
+          </Lead>
+          <span className="truncate text-[13px] text-text-1">
+            <Highlighted text={entry.label} query={query} />
+          </span>
+          {entry.hint && (
+            <span className="ml-auto shrink-0 truncate text-[11px] text-text-4" style={{ maxWidth: 240 }}>
               {entry.hint}
             </span>
           )}

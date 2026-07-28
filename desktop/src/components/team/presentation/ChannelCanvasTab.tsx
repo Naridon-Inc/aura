@@ -13,7 +13,8 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { api, type NoteDoc } from "../../../lib/api";
-import { ChannelCanvasView } from "../../chat/ChannelCanvasView";
+import { AsciiSpinner } from "../../ui/ascii-spinner";
+import { TiptapEditor } from "../../notes/TiptapEditor";
 
 const AUTOSAVE_DELAY_MS = 600;
 
@@ -25,21 +26,22 @@ function relativeTime(secs: number): string {
   if (delta < 60) return `${delta}s ago`;
   if (delta < 3600) return `${Math.floor(delta / 60)}m ago`;
   if (delta < 86400) return `${Math.floor(delta / 3600)}h ago`;
-  if (delta < 86400 * 7) return `${Math.floor(delta / 86400)}d ago`;
-  return new Date(secs * 1000).toLocaleDateString();
+  const days = Math.floor(delta / 86400);
+  if (days < 30) return `${days}d ago`;
+  const months = Math.floor(days / 30);
+  if (months < 12) return `${months}mo ago`;
+  return `${Math.floor(months / 12)}y ago`;
 }
 
 export function ChannelCanvasTab({
   repoRoot,
   channel,
   channelName,
-  selfHandle,
 }: {
   repoRoot: string;
   /** Channel slug the canvas is scoped to, or null for the team-wide doc. */
   channel: string | null;
   channelName: string;
-  selfHandle: string;
 }) {
   const [body, setBody] = useState("");
   const [updatedAt, setUpdatedAt] = useState(0);
@@ -140,24 +142,30 @@ export function ChannelCanvasTab({
           {isTeam ? "Team canvas" : `#${channelName} canvas`}
         </span>
         <span className="text-text-5">·</span>
-        <span>{loading ? "Loading…" : `Last edited ${relativeTime(updatedAt)}`}</span>
+        {loading ? (
+          <span className="flex items-center gap-1.5">
+            <AsciiSpinner className="text-[10.5px]" />
+            Loading…
+          </span>
+        ) : (
+          <span>Last edited {relativeTime(updatedAt)}</span>
+        )}
         {saving && (
-          <span
-            className="inline-block h-1.5 w-1.5 animate-pulse rounded-full bg-text-4"
-            aria-label="Saving"
-          />
+          <span className="flex items-center" aria-label="Saving">
+            <AsciiSpinner className="text-[10.5px]" />
+          </span>
         )}
         {error && (
-          <span className="truncate text-red-400" title={error}>
-            {error}
+          <span className="ml-auto truncate text-red" title={error}>
+            couldn’t save
           </span>
         )}
       </div>
-      <div className="min-h-0 flex-1 overflow-y-auto">
-        <ChannelCanvasView
+      <div className="min-h-0 flex-1">
+        <TiptapEditor
           value={body}
           onChange={onBodyChange}
-          selfHandle={selfHandle}
+          bare
           placeholder={
             isTeam
               ? "Team-wide canvas — start typing."

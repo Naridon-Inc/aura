@@ -11,10 +11,21 @@
 
 import { useEffect, useState } from "react";
 import { fetchChangeNoteReport } from "../../lib/changeNoteCache";
+import { humanizeIdentifier } from "../../lib/prove";
 import type {
   FileChangeNote,
   ChangedSymbol,
 } from "../../lib/api";
+
+/** A code identifier as a plain, title-cased phrase — `senderFor` → "Sender
+ *  For", `EmailDispatcher` → "Email Dispatcher" — using the SAME humanizer the
+ *  Goals and split-diff surfaces use, so the whole app reads the same. Falls
+ *  back to the raw name if it humanizes to nothing. */
+function humanLabel(id: string): string {
+  const words = humanizeIdentifier(id).trim();
+  if (!words) return id;
+  return words.replace(/\b\w/g, (c) => c.toUpperCase());
+}
 
 const VERB: Record<string, { glyph: string; tone: string; word: string }> = {
   added: { glyph: "+", tone: "text-accent-green", word: "added" },
@@ -32,7 +43,11 @@ function SymbolRow({ s }: { s: ChangedSymbol }) {
       >
         {v.glyph}
       </span>
-      <span className="font-mono text-[12px] text-text-1">{s.identifier}</span>
+      {/* Plain, title-cased name for the reader; the raw identifier stays in
+          the hover for an engineer who wants it. */}
+      <span className="text-[12px] text-text-1" title={s.identifier}>
+        {humanLabel(s.identifier)}
+      </span>
       <span className="shrink-0 text-[10.5px] text-text-4">
         {prettyKind(s.kind)}
       </span>

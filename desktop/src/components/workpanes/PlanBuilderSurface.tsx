@@ -20,6 +20,7 @@ import { focusAmbientManager } from "../../lib/focusManager";
 import { parsePlanXml, type ParsedPlan } from "../../lib/planXml";
 import { AgentIcon } from "../agent/AgentIcon";
 import { Button } from "../ui/button";
+import { AsciiSpinner } from "../ui/ascii-spinner";
 
 type Props = { repoRoot: string; onClose: () => void };
 
@@ -538,7 +539,7 @@ function PlanStep({
   if (planning) {
     return (
       <div className="flex flex-col gap-2 py-4 items-center text-center">
-        <Spinner />
+        <AsciiSpinner className="text-base" />
         <div className="text-text-2 text-[12px]">Aura is decomposing your goal…</div>
         <div className="text-text-4 text-[10.5px]">
           Discover · Gray-area picks · Wave synthesis
@@ -849,29 +850,6 @@ function LaunchStep({
 function basename(p: string): string {
   const i = p.lastIndexOf("/");
   return i >= 0 ? p.slice(i + 1) : p;
-}
-
-function Spinner() {
-  return (
-    <svg width="18" height="18" viewBox="0 0 16 16" fill="none">
-      <circle cx="8" cy="8" r="6" stroke="currentColor" strokeWidth="1.4" opacity="0.2" />
-      <path
-        d="M14 8a6 6 0 00-6-6"
-        stroke="currentColor"
-        strokeWidth="1.4"
-        strokeLinecap="round"
-      >
-        <animateTransform
-          attributeName="transform"
-          type="rotate"
-          from="0 8 8"
-          to="360 8 8"
-          dur="0.8s"
-          repeatCount="indefinite"
-        />
-      </path>
-    </svg>
-  );
 }
 
 function escapeXml(s: string): string {

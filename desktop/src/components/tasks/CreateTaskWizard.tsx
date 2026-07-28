@@ -131,27 +131,32 @@ function Dot({ className }: { className?: string }) {
   );
 }
 
+// Every dot in these three menus sits directly beside its own label, so hue
+// was repeating a word the reader can already see. They now step down the
+// neutral ramp — which keeps the ordering legible in the priority list — and
+// only the two entries that genuinely ask for the reader keep a colour:
+// Urgent (red) and In progress (accent, the one live state).
 const PRIORITY_OPTS: SelectOption[] = [
-  { value: "urgent", label: "Urgent", icon: <Dot className="bg-red-500" /> },
-  { value: "high", label: "High", icon: <Dot className="bg-orange-500" /> },
-  { value: "medium", label: "Medium", icon: <Dot className="bg-yellow-500" /> },
-  { value: "low", label: "Low", icon: <Dot className="bg-sky-500" /> },
+  { value: "urgent", label: "Urgent", icon: <Dot className="bg-red" /> },
+  { value: "high", label: "High", icon: <Dot className="bg-text-2" /> },
+  { value: "medium", label: "Medium", icon: <Dot className="bg-text-3" /> },
+  { value: "low", label: "Low", icon: <Dot className="bg-text-4" /> },
   { value: "none", label: "None", icon: <Dot className="bg-text-5" /> },
 ];
 
 const STATUS_OPTS: SelectOption[] = [
   { value: "backlog", label: "Backlog", icon: <Dot className="bg-text-5" /> },
   { value: "in_progress", label: "In progress", icon: <Dot className="bg-accent" /> },
-  { value: "in_review", label: "In review", icon: <Dot className="bg-amber-400" /> },
-  { value: "done", label: "Done", icon: <Dot className="bg-emerald-400" /> },
+  { value: "in_review", label: "In review", icon: <Dot className="bg-text-3" /> },
+  { value: "done", label: "Done", icon: <Dot className="bg-text-2" /> },
 ];
 
 const AGENT_OPTS: SelectOption[] = [
   { value: "", label: "— none —" },
-  { value: "claude", label: "Claude", icon: <Dot className="bg-[#d97757]" /> },
-  { value: "gemini", label: "Gemini", icon: <Dot className="bg-[#4285f4]" /> },
-  { value: "codex", label: "Codex", icon: <Dot className="bg-[#10a37f]" /> },
-  { value: "opencode", label: "Opencode", icon: <Dot className="bg-violet-400" /> },
+  { value: "claude", label: "Claude", icon: <Dot className="bg-text-3" /> },
+  { value: "gemini", label: "Gemini", icon: <Dot className="bg-text-3" /> },
+  { value: "codex", label: "Codex", icon: <Dot className="bg-text-3" /> },
+  { value: "opencode", label: "Opencode", icon: <Dot className="bg-text-3" /> },
 ];
 
 export function CreateTaskWizard({

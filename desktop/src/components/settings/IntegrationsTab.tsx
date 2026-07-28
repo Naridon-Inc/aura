@@ -1,9 +1,10 @@
 // Settings → Integrations pane.
 //
-// W1 surface: Jira connect / disconnect, identity card, cloud sites
-// list, last-token-expiry indicator, "didn't open?" fallback link.
-// Future providers (Linear in W2) slot in below the Jira card with the
-// same shape.
+// Surface: Jira connect / disconnect (identity card, cloud sites list,
+// mirrors, people-matching) and Linear connect / disconnect (identity
+// card — single workspace, no mirror UI yet). Both share the same
+// connect/cancel/disconnect plumbing and the "didn't open?" fallback
+// link. Additional providers slot in below with the same card shape.
 //
 // Configuration values (client_id, client_secret, callback) live in
 // `~/.aura/integrations.toml` outside the repo — Aura never asks the
@@ -18,7 +19,6 @@ import {
   ExternalLink,
   FolderInput,
   LinkIcon,
-  Loader2,
   Plug,
   RefreshCw,
   Sparkles,
@@ -28,6 +28,7 @@ import {
   Users,
   X,
 } from "lucide-react";
+import { AsciiSpinner } from "../ui/ascii-spinner";
 import {
   integrationsApi,
   type BeadsImportOutcome,
@@ -85,29 +86,35 @@ export function IntegrationsTab({ repoRoot }: Props) {
   }, [refresh]);
 
   // Surface the authorize URL the Rust side emits, so the user can
-  // click it manually if the system browser didn't pop up. Cleared
-  // once the flow resolves or the user cancels.
+  // click it manually if the system browser didn't pop up. Both Jira
+  // and Linear emit their own event; either one sets the same fallback
+  // slot (only one flow is ever open at a time). Cleared once the flow
+  // resolves or the user cancels.
   useEffect(() => {
-    let stop: UnlistenFn | null = null;
-    void listen<string>("aura:integrations:jira:auth_url", (e) => {
-      setFallbackUrl(e.payload);
-    }).then((unlisten) => {
-      stop = unlisten;
-    });
+    const stops: UnlistenFn[] = [];
+    for (const ev of [
+      "aura:integrations:jira:auth_url",
+      "aura:integrations:linear:auth_url",
+    ]) {
+      void listen<string>(ev, (e) => setFallbackUrl(e.payload)).then((u) =>
+        stops.push(u),
+      );
+    }
     return () => {
-      if (stop) stop();
+      for (const s of stops) s();
     };
   }, []);
 
   const connect = useCallback(
-    async (kind: "jira") => {
+    async (kind: "jira" | "linear") => {
       setBusyKind(kind);
       setError(null);
       try {
-        if (kind === "jira") {
-          const next = await integrationsApi.jiraConnect();
-          setStatuses((prev) => upsertStatus(prev, next));
-        }
+        const next =
+          kind === "jira"
+            ? await integrationsApi.jiraConnect()
+            : await integrationsApi.linearConnect();
+        setStatuses((prev) => upsertStatus(prev, next));
         setFallbackUrl(null);
       } catch (e) {
         const msg = String(e);
@@ -126,12 +133,14 @@ export function IntegrationsTab({ repoRoot }: Props) {
   );
 
   const disconnect = useCallback(
-    async (kind: "jira") => {
+    async (kind: "jira" | "linear") => {
       setBusyKind(kind);
       setError(null);
       try {
         if (kind === "jira") {
           await integrationsApi.jiraDisconnect();
+        } else {
+          await integrationsApi.linearDisconnect();
         }
         await refresh();
       } catch (e) {
@@ -147,11 +156,13 @@ export function IntegrationsTab({ repoRoot }: Props) {
   // promise will then reject with "connect cancelled" and that
   // catch-block clears busyKind. We don't await anything here so the
   // button stays clickable even if Rust takes a tick to respond.
-  const cancel = useCallback(async (kind: "jira") => {
+  const cancel = useCallback(async (kind: "jira" | "linear") => {
     setError(null);
     try {
       if (kind === "jira") {
         await integrationsApi.jiraCancel();
+      } else {
+        await integrationsApi.linearCancel();
       }
       setFallbackUrl(null);
     } catch (e) {
@@ -161,6 +172,10 @@ export function IntegrationsTab({ repoRoot }: Props) {
 
   const jira = useMemo(
     () => statuses.find((s) => s.kind === "jira") ?? null,
+    [statuses],
+  );
+  const linear = useMemo(
+    () => statuses.find((s) => s.kind === "linear") ?? null,
     [statuses],
   );
 
@@ -187,7 +202,7 @@ export function IntegrationsTab({ repoRoot }: Props) {
 
       {loading && (
         <div className="text-[12px] text-text-4 flex items-center gap-2">
-          <Loader2 className="w-3.5 h-3.5 animate-spin" />
+          <AsciiSpinner />
           Loading integrations…
         </div>
       )}
@@ -207,11 +222,23 @@ export function IntegrationsTab({ repoRoot }: Props) {
 
       {!loading && (
         <div className="mt-3">
+          <LinearCard
+            status={linear}
+            busy={busyKind === "linear"}
+            onConnect={() => connect("linear")}
+            onCancel={() => cancel("linear")}
+            onDisconnect={() => disconnect("linear")}
+          />
+        </div>
+      )}
+
+      {!loading && (
+        <div className="mt-3">
           <BeadsCard repoRoot={repoRoot} onError={setError} />
         </div>
       )}
 
-      {fallbackUrl && busyKind === "jira" && (
+      {fallbackUrl && (busyKind === "jira" || busyKind === "linear") && (
         <div className="mt-3 text-[12px] text-text-4 flex items-center gap-2">
           <span>Browser didn't open?</span>
           <a
@@ -219,7 +246,7 @@ export function IntegrationsTab({ repoRoot }: Props) {
             target="_blank"
             rel="noopener noreferrer"
             onClick={onExternalAnchorClick}
-            className="text-accent-blue inline-flex items-center gap-1 hover:underline"
+            className="text-text-2 hover:text-text-1 inline-flex items-center gap-1 hover:underline"
           >
             Open authorize URL <ExternalLink className="w-3 h-3" />
           </a>
@@ -229,7 +256,7 @@ export function IntegrationsTab({ repoRoot }: Props) {
       {error && (
         <div
           role="alert"
-          className="mt-4 p-3 rounded-md border border-rose-500/30 bg-rose-500/5 text-[12px] text-rose-200 whitespace-pre-wrap"
+          className="mt-4 p-3 rounded-md border border-red/30 bg-red/5 text-[12px] text-red whitespace-pre-wrap"
         >
           <div className="flex items-start gap-2">
             <TriangleAlert className="w-3.5 h-3.5 mt-0.5 flex-shrink-0" />
@@ -283,7 +310,7 @@ function JiraCard({
           </div>
         </div>
         {connected ? (
-          <span className="inline-flex items-center gap-1 text-[11px] text-emerald-300 bg-emerald-500/10 px-2 py-0.5 rounded-full">
+          <span className="inline-flex items-center gap-1 text-[11px] text-accent-green bg-accent-green/10 px-2 py-0.5 rounded-full">
             <CheckCircle2 className="w-3 h-3" /> Connected
           </span>
         ) : (
@@ -387,7 +414,7 @@ function JiraCard({
               disabled={busy}
             >
               {busy ? (
-                <Loader2 className="w-3 h-3 animate-spin" />
+                <AsciiSpinner className="text-[11px] leading-none" />
               ) : (
                 <Unlink className="w-3 h-3" />
               )}
@@ -402,7 +429,7 @@ function JiraCard({
                 disabled={busy}
               >
                 {busy ? (
-                  <Loader2 className="w-3 h-3 animate-spin" />
+                  <AsciiSpinner className="text-[11px] leading-none" />
                 ) : (
                   <Plug className="w-3 h-3" />
                 )}
@@ -413,6 +440,128 @@ function JiraCard({
                 // the loopback listener so the next attempt can rebind
                 // the port without waiting for the 5-minute server-side
                 // timeout (Atlassian error pages never redirect back).
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  onClick={onCancel}
+                >
+                  <X className="w-3 h-3" />
+                  Cancel
+                </Button>
+              )}
+            </>
+          )}
+        </div>
+      </div>
+    </section>
+  );
+}
+
+// Linear connection card. Simpler than Jira: one workspace per token,
+// no cloud-sites list, no per-project mirror picker (Linear issue import
+// lands in a later wave). W1 shows connection state + the signed-in
+// identity, and lets the user connect / cancel / disconnect. Uses the
+// same one-call OAuth plumbing as Jira via the parent's callbacks.
+function LinearCard({
+  status,
+  busy,
+  onConnect,
+  onCancel,
+  onDisconnect,
+}: {
+  status: ConnectionStatus | null;
+  busy: boolean;
+  onConnect: () => void;
+  onCancel: () => void;
+  onDisconnect: () => void;
+}) {
+  const connected = status?.connected === true;
+  return (
+    <section className="rounded-lg bg-bg-0 shadow-[var(--shadow-card)] overflow-hidden">
+      <header className="flex items-center gap-3 px-3 py-2.5 border-b border-line-soft">
+        <LinearGlyph />
+        <div className="flex-1 min-w-0">
+          <div className="text-[13px] font-medium text-text-1">Linear</div>
+          <div className="text-[11px] text-text-4">
+            Linear workspace · OAuth 2.0 · issue sync
+          </div>
+        </div>
+        {connected ? (
+          <span className="inline-flex items-center gap-1 text-[11px] text-accent-green bg-accent-green/10 px-2 py-0.5 rounded-full">
+            <CheckCircle2 className="w-3 h-3" /> Connected
+          </span>
+        ) : (
+          <span className="text-[11px] text-text-4">Not connected</span>
+        )}
+      </header>
+
+      <div className="p-3 text-[12px] text-text-3 space-y-3">
+        {connected && status?.identity && (
+          <div className="flex items-center gap-3">
+            {status.identity.avatar_url ? (
+              <img
+                src={status.identity.avatar_url}
+                alt=""
+                className="w-7 h-7 rounded-full border border-line-soft"
+              />
+            ) : (
+              <div className="w-7 h-7 rounded-full bg-bg-2 flex items-center justify-center text-[10px] uppercase text-text-3">
+                {initials(status.identity.display_name)}
+              </div>
+            )}
+            <div className="min-w-0">
+              <div className="text-text-1 text-[12px] truncate">
+                {status.identity.display_name}
+              </div>
+              {status.identity.email && (
+                <div className="text-text-4 text-[11px] truncate">
+                  {status.identity.email}
+                </div>
+              )}
+            </div>
+          </div>
+        )}
+
+        {!connected && (
+          <p className="text-text-4 text-[12px]">
+            Connect Aura to your Linear workspace to bring issues into Tasks.
+            You'll approve access once in the browser — Aura never sees your
+            password.
+          </p>
+        )}
+
+        <div className="flex items-center gap-2 pt-1">
+          {connected ? (
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={onDisconnect}
+              disabled={busy}
+            >
+              {busy ? (
+                <AsciiSpinner className="text-[11px] leading-none" />
+              ) : (
+                <Unlink className="w-3 h-3" />
+              )}
+              Disconnect
+            </Button>
+          ) : (
+            <>
+              <Button
+                variant="default"
+                size="sm"
+                onClick={onConnect}
+                disabled={busy}
+              >
+                {busy ? (
+                  <AsciiSpinner className="text-[11px] leading-none" />
+                ) : (
+                  <Plug className="w-3 h-3" />
+                )}
+                {busy ? "Connecting…" : "Connect Linear"}
+              </Button>
+              {busy && (
                 <Button
                   type="button"
                   variant="outline"
@@ -609,7 +758,7 @@ function MirrorsSection({
       <label
         className={`flex items-start gap-2 rounded-md border px-2.5 py-2 text-[12px] cursor-pointer transition-colors ${
           autoOn
-            ? "border-emerald-400/40 bg-emerald-500/5"
+            ? "border-accent-green/40 bg-accent-green/5"
             : "border-line-soft bg-bg-2/30 hover:bg-bg-2/50"
         }`}
         title="When on, every Jira project on every site mirrors into this repo. New projects appear automatically within 5 min."
@@ -641,7 +790,7 @@ function MirrorsSection({
           </div>
         </div>
         {busyOp === "auto-mirror" && (
-          <Loader2 className="w-3.5 h-3.5 animate-spin text-text-3 mt-0.5" />
+          <AsciiSpinner className="text-[12px] leading-none mt-0.5" />
         )}
       </label>
 
@@ -660,7 +809,7 @@ function MirrorsSection({
               title="Clear the incremental cache and re-pull every issue. Use when parent/epic links or other fields look wrong."
             >
               {busyOp === "backfill:all" ? (
-                <Loader2 className="w-3 h-3 animate-spin" />
+                <AsciiSpinner className="text-[11px] leading-none" />
               ) : (
                 <RefreshCw className="w-3 h-3" />
               )}
@@ -675,7 +824,7 @@ function MirrorsSection({
               title={`Sync every mirror targeting ${repoRoot}`}
             >
               {busyOp === "sync:all" ? (
-                <Loader2 className="w-3 h-3 animate-spin" />
+                <AsciiSpinner className="text-[11px] leading-none" />
               ) : (
                 <RefreshCw className="w-3 h-3" />
               )}
@@ -722,7 +871,7 @@ function MirrorsSection({
                   >
                     {created}c · {updated}u
                     {errors > 0 && (
-                      <span className="text-rose-300"> · {errors}e</span>
+                      <span className="text-red"> · {errors}e</span>
                     )}{" "}
                     · {timeAgo(lastSyncedAt)}
                   </span>
@@ -735,11 +884,11 @@ function MirrorsSection({
                   size="icon-sm"
                   onClick={() => handleUnmirror(m)}
                   disabled={isBusy}
-                  className="text-text-4 hover:text-rose-300"
+                  className="text-text-4 hover:text-red"
                   title="Remove mirror"
                 >
                   {isBusy ? (
-                    <Loader2 className="w-3 h-3 animate-spin" />
+                    <AsciiSpinner className="text-[11px] leading-none" />
                   ) : (
                     <Trash2 className="w-3 h-3" />
                   )}
@@ -797,7 +946,7 @@ function MirrorsSection({
                 disabled={!selected || busyOp === opKey}
               >
                 {busyOp === opKey ? (
-                  <Loader2 className="w-3 h-3 animate-spin" />
+                  <AsciiSpinner className="text-[11px] leading-none" />
                 ) : (
                   <Plug className="w-3 h-3" />
                 )}
@@ -952,7 +1101,7 @@ function PeopleSection({
   if (loading) {
     return (
       <div className="pt-2 text-[11px] text-text-4 flex items-center gap-2">
-        <Loader2 className="w-3 h-3 animate-spin" /> Loading people…
+        <AsciiSpinner /> Loading people…
       </div>
     );
   }
@@ -984,11 +1133,11 @@ function PeopleSection({
             type="button"
             onClick={runReconcile}
             disabled={reconciling}
-            className="inline-flex items-center gap-1.5 text-[11px] px-2 py-0.5 rounded border border-accent-blue/40 text-accent-blue hover:bg-accent-blue/10 disabled:opacity-50"
+            className="inline-flex items-center gap-1.5 text-[11px] px-2 py-0.5 rounded border border-line text-text-2 hover:text-text-1 hover:bg-bg-2 disabled:opacity-50"
             title="Let Aura suggest the most likely teammate for each unmatched Jira person. You confirm each one."
           >
             {reconciling ? (
-              <Loader2 className="w-3 h-3 animate-spin" />
+              <AsciiSpinner className="text-[11px] leading-none" />
             ) : (
               <Sparkles className="w-3 h-3" />
             )}
@@ -1052,7 +1201,7 @@ function PeopleSection({
                       disabled={linkBusy}
                     >
                       {linkBusy ? (
-                        <Loader2 className="w-3 h-3 animate-spin" />
+                        <AsciiSpinner className="text-[11px] leading-none" />
                       ) : (
                         <LinkIcon className="w-3 h-3" />
                       )}
@@ -1074,15 +1223,13 @@ function PeopleSection({
                         [l.account_id]: v,
                       }))
                     }
-                    options={[
-                      { value: "", label: "Pick a teammate by hand…" },
-                      ...pickableMembers.map((m) => ({
-                        value: m.handle,
-                        label: `${m.name?.trim() || m.handle}${
-                          m.email ? ` · ${m.email}` : ""
-                        }`,
-                      })),
-                    ]}
+                    placeholder="Pick a teammate by hand…"
+                    options={pickableMembers.map((m) => ({
+                      value: m.handle,
+                      label: `${m.name?.trim() || m.handle}${
+                        m.email ? ` · ${m.email}` : ""
+                      }`,
+                    }))}
                     className="flex-1 text-[12px]"
                   />
                   <Button
@@ -1092,7 +1239,7 @@ function PeopleSection({
                     disabled={!picked || linkBusy}
                   >
                     {linkBusy ? (
-                      <Loader2 className="w-3 h-3 animate-spin" />
+                      <AsciiSpinner className="text-[11px] leading-none" />
                     ) : (
                       <LinkIcon className="w-3 h-3" />
                     )}
@@ -1114,7 +1261,7 @@ function PeopleSection({
                 key={l.account_id}
                 className="flex items-center gap-2 text-[12px] px-2 py-1"
               >
-                <CheckCircle2 className="w-3 h-3 text-emerald-400 flex-shrink-0" />
+                <CheckCircle2 className="w-3 h-3 text-accent-green flex-shrink-0" />
                 <span className="text-text-2 truncate">
                   {l.display_name || l.account_id}
                 </span>
@@ -1135,11 +1282,11 @@ function PeopleSection({
                   size="icon-sm"
                   onClick={() => unlink(l.account_id)}
                   disabled={unlinkBusy}
-                  className="text-text-4 hover:text-rose-300"
+                  className="text-text-4 hover:text-red"
                   title="Unmatch — sends this Jira person back to the list above"
                 >
                   {unlinkBusy ? (
-                    <Loader2 className="w-3 h-3 animate-spin" />
+                    <AsciiSpinner className="text-[11px] leading-none" />
                   ) : (
                     <Unlink className="w-3 h-3" />
                   )}
@@ -1151,7 +1298,7 @@ function PeopleSection({
       )}
 
       {note && (
-        <div className="text-[11px] text-emerald-300 flex items-center gap-1.5">
+        <div className="text-[11px] text-accent-green flex items-center gap-1.5">
           <CheckCircle2 className="w-3 h-3" /> {note}
         </div>
       )}
@@ -1259,7 +1406,7 @@ function BeadsCard({
               disabled={busy !== null}
             >
               {busy === "preview" ? (
-                <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                <AsciiSpinner className="text-[12px] leading-none" />
               ) : (
                 <FolderInput className="w-3.5 h-3.5" />
               )}
@@ -1272,7 +1419,7 @@ function BeadsCard({
                 disabled={busy !== null || preview.total === 0}
               >
                 {busy === "import" ? (
-                  <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                  <AsciiSpinner className="text-[12px] leading-none" />
                 ) : (
                   <LinkIcon className="w-3.5 h-3.5" />
                 )}
@@ -1300,7 +1447,7 @@ function BeadsCard({
           )}
 
           {outcome && (
-            <div className="mt-2 text-[11px] flex items-start gap-1.5 text-emerald-300">
+            <div className="mt-2 text-[11px] flex items-start gap-1.5 text-accent-green">
               <CheckCircle2 className="w-3.5 h-3.5 mt-px flex-shrink-0" />
               <span className="text-text-3">
                 Brought in <span className="text-text-1">{outcome.created}</span>{" "}
@@ -1314,7 +1461,7 @@ function BeadsCard({
           )}
 
           {outcome && outcome.errors.length > 0 && (
-            <ul className="mt-1.5 text-[11px] text-amber-300/90 space-y-0.5">
+            <ul className="mt-1.5 text-[11px] text-amber/90 space-y-0.5">
               {outcome.errors.slice(0, 5).map((e, i) => (
                 <li key={i} className="truncate" title={e}>
                   • {e}
@@ -1337,7 +1484,7 @@ function BeadsCard({
 // string. Kept inline to avoid shipping an asset.
 function BeadsGlyph() {
   return (
-    <div className="w-7 h-7 rounded-md bg-amber-500/10 grid place-items-center text-amber-400">
+    <div className="w-7 h-7 rounded-md bg-amber/10 grid place-items-center text-amber">
       <svg viewBox="0 0 24 24" className="w-4 h-4" fill="currentColor" aria-hidden>
         <path
           d="M3 12h18"
@@ -1365,6 +1512,20 @@ function JiraGlyph() {
         aria-hidden
       >
         <path d="M11.53 2L5.06 8.47a2 2 0 0 0 0 2.83l6.47 6.47a.5.5 0 0 0 .71 0L18.71 11.3a2 2 0 0 0 0-2.83L12.24 2a.5.5 0 0 0-.71 0Zm.36 9.18a3.18 3.18 0 0 1 3.18 3.18V18a3.18 3.18 0 1 1-6.36 0v-3.64a3.18 3.18 0 0 1 3.18-3.18Z" />
+      </svg>
+    </div>
+  );
+}
+
+// Tiny Linear glyph — the signature three-bar mark in Linear's purple.
+// Kept inline (no shipped asset) to match the Jira/Beads glyphs.
+function LinearGlyph() {
+  return (
+    <div className="w-7 h-7 rounded-md bg-[#5e6ad2]/12 grid place-items-center text-[#5e6ad2]">
+      <svg viewBox="0 0 24 24" className="w-4 h-4" fill="currentColor" aria-hidden>
+        <rect x="3" y="5" width="18" height="2.6" rx="1.3" />
+        <rect x="6" y="10.7" width="15" height="2.6" rx="1.3" />
+        <rect x="9" y="16.4" width="12" height="2.6" rx="1.3" />
       </svg>
     </div>
   );

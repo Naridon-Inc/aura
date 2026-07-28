@@ -56,12 +56,31 @@ export type LaunchWorkspaceRequest = {
   /** Cross-agent reasoning effort applied to every spawned agent. Omit → the
    *  agent's own default. Per-agent specs that already set effort win. */
   effort?: ReasoningEffort;
+  /** Don't place the agent tabs here. The caller is about to switch INTO the
+   *  new worktree itself (single launch) and will open them actively post-
+   *  switch — see the note in the body. Default (undefined/false): tabs land
+   *  passively so a background launch surfaces on switch-over. */
+  deferTabPlacement?: boolean;
+};
+
+/** One launched agent, shaped for `openAgent`/`appendAgentTabPassive`. */
+export type LaunchedAgentTab = {
+  sessionId: string;
+  agentId: string;
+  agentLabel: string;
+  agentMonogram: string;
+  repoRoot: string;
 };
 
 export type LaunchWorkspaceResult = {
   manifest: WorkspaceLaunchManifest;
   /** The prompt actually seeded (with context block), if any. */
   seededPrompt: string | null;
+  /** The agent tabs this launch created. Placed passively here unless
+   *  `deferTabPlacement` was set — then the caller opens them actively after
+   *  switching into the worktree, so a single launch lands the user in the
+   *  running chat instead of the empty worktree state. */
+  tabs: LaunchedAgentTab[];
 };
 
 /** How long to wait after the agent's first output before injecting — the
@@ -118,6 +137,7 @@ export async function launchWorkspace(req: LaunchWorkspaceRequest): Promise<Laun
     req.repoRoot,
     req.branch,
     req.agents.map((a) => a.agentId),
+    req.startPoint ?? "HEAD",
   );
 
   // Fold the launch-level model/effort onto each agent spec so a single
@@ -139,16 +159,29 @@ export async function launchWorkspace(req: LaunchWorkspaceRequest): Promise<Laun
 
   markInFlightSpawning(key, manifest.worktree.path);
 
-  // Place tabs. Passive append — a launch must never yank the user out of
-  // the workspace they're standing in; tabs surface when they switch over.
-  for (const session of manifest.sessions) {
-    appendAgentTabPassive({
+  // Author every launched agent's tab spec once (used for placement here or by
+  // the caller post-switch).
+  const tabs: LaunchedAgentTab[] = manifest.sessions.map((session) => {
+    const label = labelForAgent(session.agent_id);
+    return {
       sessionId: session.id,
       agentId: session.agent_id,
-      agentLabel: labelForAgent(session.agent_id),
-      agentMonogram: labelForAgent(session.agent_id).charAt(0),
+      agentLabel: label,
+      agentMonogram: label.charAt(0),
       repoRoot: session.repo_root,
-    });
+    };
+  });
+
+  // Place tabs. Passive append — a background launch must never yank the user
+  // out of the workspace they're standing in; tabs surface when they switch
+  // over. A single launch instead sets `deferTabPlacement`: the caller switches
+  // INTO the worktree and opens these actively there. Placing them passively
+  // here in that case would misfile them — `switchWorkspace` serializes live
+  // state into the OUTGOING workspace's snapshot before hydrating the target,
+  // so the fresh tab would land under the old project and the worktree would
+  // open empty (the "I started an agent but got a blank screen" bug).
+  if (!req.deferTabPlacement) {
+    for (const tab of tabs) appendAgentTabPassive(tab);
   }
 
   // Build the seed prompt once (context block included), then inject into
@@ -181,5 +214,5 @@ export async function launchWorkspace(req: LaunchWorkspaceRequest): Promise<Laun
     markInFlightReady(key, manifest.worktree.path);
   }
 
-  return { manifest, seededPrompt };
+  return { manifest, seededPrompt, tabs };
 }

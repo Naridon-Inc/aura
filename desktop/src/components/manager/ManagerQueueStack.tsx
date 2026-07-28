@@ -18,6 +18,8 @@ export type QueuedMessage = {
   effort: ReasoningEffort | null;
   fast: boolean;
   approval: ApprovalPolicy | null;
+  /** Armed the Goal toggle — this queued turn sends as a goal when it drains. */
+  goal?: boolean;
 };
 
 type Props = {
@@ -89,9 +91,9 @@ export function ManagerQueueStack({
           className="inline-block w-1.5 h-1.5 rounded-full"
           style={{ background: "var(--color-accent)" }}
         />
-        <span className="flex-1">
-          {queue.length} queued ·{" "}
-          {busy ? "sends as the agent finishes each turn" : "draining…"}
+        <span className="min-w-0 flex-1 truncate">
+          <span className="tabular-nums">{queue.length}</span> queued ·{" "}
+          {busy ? "sends as the agent finishes each turn" : "sending them now"}
         </span>
         <button
           type="button"

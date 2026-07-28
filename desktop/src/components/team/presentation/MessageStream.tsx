@@ -4,7 +4,8 @@
  *  Imports are filled in after extraction. */
 
 import { useEffect, useMemo, useRef } from "react";
-import { animalForName, colorForName, tintForName } from "../../../lib/identityColors";
+import { Lock, Mail, UserPlus } from "lucide-react";
+import { animalForName, tintForName } from "../../../lib/identityColors";
 import { type TeamMember } from "../../../lib/api";
 import { sameLocalDay, humanDateLabel } from "./messageHelpers";
 import { type Conversation, type Msg, type ReadCursorEntry, type SelfKeys } from "../domain";
@@ -25,6 +26,7 @@ export function MessageStream({
   myDeviceId,
   myDisplay,
   readCursors,
+  onOpenMembers,
   onOpenReplies,
   onTogglePin,
   onResend,
@@ -53,6 +55,7 @@ export function MessageStream({
    *  Renders as "Seen by …" under the most recent of our own messages
    *  whose `seq` is at or below each peer's `last_read_seq`. */
   readCursors?: ReadCursorEntry[];
+  onOpenMembers: () => void;
   onOpenReplies: (m: Msg) => void;
   onTogglePin: (msgId: string) => void;
   onResend?: (msgId: string) => void;
@@ -116,21 +119,41 @@ export function MessageStream({
     return out;
   }, [msgs, readCursors]);
 
+  // Group thread replies by parent id in a single pass over `allMsgs`.
+  // Previously the render did `allMsgs.filter(x => x.thread_parent === m.id)`
+  // inside the per-message map — O(messages × allMsgs) every render. This
+  // rebuilds the index only when `allMsgs` changes, and (crucially) hands each
+  // Bubble a *stable* array reference so its memo can skip re-rendering when
+  // its own replies are unchanged.
+  const repliesByParent = useMemo(() => {
+    const out = new Map<string, Msg[]>();
+    for (const m of allMsgs) {
+      if (!m.thread_parent) continue;
+      const list = out.get(m.thread_parent);
+      if (list) list.push(m);
+      else out.set(m.thread_parent, [m]);
+    }
+    return out;
+  }, [allMsgs]);
+
   if (msgs.length === 0) {
     return (
-      <div className="flex-1 min-h-0 overflow-y-auto">
-        <EmptyChannel conv={conv} />
+      <div className="slack-message-stream flex-1 min-h-0 overflow-y-auto">
+        <EmptyChannel conv={conv} members={members} onOpenMembers={onOpenMembers} />
       </div>
     );
   }
 
   return (
-    <div ref={ref} className="flex-1 min-h-0 overflow-y-auto overflow-x-hidden pl-3 pr-2 py-2">
+    <div ref={ref} className="slack-message-stream flex-1 min-h-0 overflow-y-auto overflow-x-hidden">
+      {conv.kind === "channel" || conv.kind === "custom" ? (
+        <ChannelWelcome conv={conv} members={members} onOpenMembers={onOpenMembers} />
+      ) : null}
       {msgs.map((m, i) => {
         const prev = msgs[i - 1];
         const showDate = !prev || !sameLocalDay(prev.ts, m.ts);
         const showNew = m.id === newDividerId;
-        const repliesForChip = allMsgs.filter((x) => x.thread_parent === m.id);
+        const repliesForChip = repliesByParent.get(m.id);
         return (
           <div key={m.id} data-msg-id={m.id} className="aura-msg-anchor">
             {showDate && <DateSeparator ts={m.ts} />}
@@ -177,8 +200,8 @@ function DateSeparator({ ts }: { ts: number }) {
 export function NewDivider() {
   return (
     <div className="flex items-center my-2 select-none">
-      <div className="flex-1 h-px bg-red-500" />
-      <span className="ml-2 text-[10px] uppercase tracking-wider text-red-500 font-semibold">
+      <div className="flex-1 h-px bg-accent" />
+      <span className="ml-2 text-[10px] uppercase tracking-wider text-accent font-semibold">
         New
       </span>
     </div>
@@ -210,10 +233,18 @@ export function EmptyNoSelection() {
   );
 }
 
-function EmptyChannel({ conv }: { conv: Conversation }) {
+function EmptyChannel({
+  conv,
+  members,
+  onOpenMembers,
+}: {
+  conv: Conversation;
+  members: TeamMember[];
+  onOpenMembers: () => void;
+}) {
   if (conv.kind === "dm") {
     return (
-      <div className="h-full flex flex-col items-center justify-center text-center px-8">
+      <div className="slack-empty-dm h-full flex flex-col items-center justify-center text-center px-8">
         <span
           className="w-14 h-14 rounded-full flex items-center justify-center mb-3"
           style={{ background: tintForName(conv.name), fontSize: 28 }}
@@ -246,26 +277,57 @@ function EmptyChannel({ conv }: { conv: Conversation }) {
       </div>
     );
   }
-  // channel / custom
+  return <ChannelWelcome conv={conv} members={members} onOpenMembers={onOpenMembers} spacious />;
+}
+
+function ChannelWelcome({
+  conv,
+  members,
+  onOpenMembers,
+  spacious,
+}: {
+  conv: Conversation;
+  members: TeamMember[];
+  onOpenMembers: () => void;
+  spacious?: boolean;
+}) {
+  const channelName = conv.name.replace(/^#/, "");
+  const copyEmail = () => {
+    const alias = `${channelName}@aura.team`;
+    void navigator.clipboard?.writeText(alias);
+  };
   return (
-    <div className="h-full flex flex-col items-center justify-center text-center px-8">
-      <span
-        className="w-14 h-14 rounded-full flex items-center justify-center mb-3 font-medium"
-        style={{
-          background: tintForName(conv.name),
-          color: colorForName(conv.name),
-          fontSize: 22,
-        }}
-      >
-        #
-      </span>
-      <div className="text-text-1 text-[13px] font-medium mb-1">
-        Welcome to #{conv.name}
+    <section className={`slack-channel-welcome ${spacious ? "is-spacious" : ""}`}>
+      <h1>
+        {conv.private ? <Lock size={25} fill="currentColor" /> : <span>#</span>}
+        {channelName}
+      </h1>
+      <p>
+        You created this channel for focused team collaboration. This is the beginning of the
+        {" "}<strong>{conv.private ? <Lock size={11} fill="currentColor" /> : "#"}{channelName}</strong> channel.
+      </p>
+      <p className="slack-channel-description">
+        Description: {conv.hint || "Share decisions, progress, and launch updates with your team."}
+      </p>
+      <div className="slack-channel-welcome-actions">
+        <button type="button" className="is-primary" onClick={onOpenMembers}>
+          <UserPlus size={15} /> Add coworkers
+        </button>
+        <button type="button" onClick={copyEmail}>
+          <Mail size={15} /> Send emails to channel
+        </button>
       </div>
-      <div className="text-text-4 text-[11px] max-w-[280px] leading-snug">
-        Start the conversation in <span className="text-text-2">#{conv.name}</span>.
-        Send the first message below.
+      <div className="slack-channel-tip">
+        <strong>Work with your whole team in one place.</strong>
+        <span>
+          Add collaborators, share updates, and keep every decision connected to the work.
+        </span>
+        <div className="slack-tip-facepile">
+          {members.slice(0, 3).map((member) => (
+            <span key={member.handle} title={member.name}>{animalForName(member.handle)}</span>
+          ))}
+        </div>
       </div>
-    </div>
+    </section>
   );
 }

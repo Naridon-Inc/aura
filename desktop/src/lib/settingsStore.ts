@@ -46,6 +46,7 @@ const LS = {
   provenanceReplay: "aura.flags.provenanceReplay",
   managerWorktrees: "aura.flags.managerWorktrees",
   showTokenSavings: "aura.flags.showTokenSavings",
+  showMessageTokens: "aura.flags.showMessageTokens",
   // The HUD reads these synchronously at mount (shared origin), so they MUST
   // stay mirrored as the boot cache, not just in the TOML.
   hudEnabled: "aura.hud.enabled",
@@ -53,6 +54,7 @@ const LS = {
   hudOpacity: "aura.hud.opacity",
   hudSidebarWidth: "aura.hud.sidebarWidth",
   hudSidebarHeight: "aura.hud.sidebarHeight",
+  hudPet: "aura.hud.pet",
 } as const;
 
 // App defaults — mirror the Rust `Default` impls in cmd_settings_prefs.rs.
@@ -65,6 +67,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
     provenance_replay: false,
     manager_worktrees: false,
     show_token_savings: true,
+    show_message_tokens: false,
   },
   hud: {
     enabled: true,
@@ -72,6 +75,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
     opacity: 1,
     sidebar_width: 320,
     sidebar_height: 520,
+    pet: true,
   },
 };
 
@@ -129,13 +133,19 @@ function readFromLocalStorage(): AppSettings {
       ? rawTheme
       : d.appearance.theme;
   const rawVariant = lsGet(LS.variant);
-  // The ade_v2 master flag forces the ember pack on, matching
-  // themeStore.readVariant().
-  const variant = adeV2
-    ? "ember"
-    : rawVariant === "modal" || rawVariant === "ember"
+  // Mirror themeStore.readVariant() exactly: an explicit style pick wins,
+  // otherwise the ade_v2 master flag defaults the surface to ember. (Forcing
+  // ember over an explicit pick would silently revert conductor/emerald on the
+  // next TOML load.)
+  const variant =
+    rawVariant === "modal" ||
+    rawVariant === "ember" ||
+    rawVariant === "amber" ||
+    rawVariant === "emerald"
       ? rawVariant
-      : d.appearance.variant;
+      : adeV2
+        ? "ember"
+        : d.appearance.variant;
   return {
     appearance: {
       theme,
@@ -159,6 +169,7 @@ function readFromLocalStorage(): AppSettings {
       provenance_replay: lsBool(LS.provenanceReplay, d.flags.provenance_replay),
       manager_worktrees: lsBool(LS.managerWorktrees, d.flags.manager_worktrees),
       show_token_savings: lsBool(LS.showTokenSavings, d.flags.show_token_savings),
+      show_message_tokens: lsBool(LS.showMessageTokens, d.flags.show_message_tokens),
     },
     hud: {
       enabled: lsBool(LS.hudEnabled, d.hud.enabled),
@@ -166,6 +177,7 @@ function readFromLocalStorage(): AppSettings {
       opacity: lsNum(LS.hudOpacity, d.hud.opacity),
       sidebar_width: lsNum(LS.hudSidebarWidth, d.hud.sidebar_width),
       sidebar_height: lsNum(LS.hudSidebarHeight, d.hud.sidebar_height),
+      pet: lsBool(LS.hudPet, d.hud.pet),
     },
   };
 }
@@ -190,11 +202,13 @@ function mirrorToLocalStorage(s: AppSettings) {
   lsSet(LS.provenanceReplay, String(s.flags.provenance_replay));
   lsSet(LS.managerWorktrees, String(s.flags.manager_worktrees));
   lsSet(LS.showTokenSavings, String(s.flags.show_token_savings));
+  lsSet(LS.showMessageTokens, String(s.flags.show_message_tokens));
   lsSet(LS.hudEnabled, String(s.hud.enabled));
   lsSet(LS.hudMode, s.hud.mode);
   lsSet(LS.hudOpacity, String(s.hud.opacity));
   lsSet(LS.hudSidebarWidth, String(s.hud.sidebar_width));
   lsSet(LS.hudSidebarHeight, String(s.hud.sidebar_height));
+  lsSet(LS.hudPet, String(s.hud.pet));
 }
 
 // Fill any missing nested field from defaults so an older or hand-trimmed
@@ -313,11 +327,15 @@ onThemePersist(() => {
         rawTheme === "light" || rawTheme === "system" || rawTheme === "dark"
           ? rawTheme
           : state.appearance.theme,
-      variant: adeV2
-        ? "ember"
-        : rawVariant === "modal" || rawVariant === "ember"
+      variant:
+        rawVariant === "modal" ||
+        rawVariant === "ember" ||
+        rawVariant === "amber" ||
+        rawVariant === "emerald"
           ? rawVariant
-          : state.appearance.variant,
+          : adeV2
+            ? "ember"
+            : state.appearance.variant,
       ade_v2: adeV2,
     },
   };
@@ -382,6 +400,7 @@ const FLAG_LS: Record<keyof AppSettings["flags"], string> = {
   provenance_replay: LS.provenanceReplay,
   manager_worktrees: LS.managerWorktrees,
   show_token_savings: LS.showTokenSavings,
+  show_message_tokens: LS.showMessageTokens,
 };
 
 /** Monaco font size (px). Lives under `appearance` but the AppearanceTab
@@ -431,6 +450,7 @@ const HUD_LS_KEY: Record<keyof AppSettings["hud"], string> = {
   opacity: LS.hudOpacity,
   sidebar_width: LS.hudSidebarWidth,
   sidebar_height: LS.hudSidebarHeight,
+  pet: LS.hudPet,
 };
 
 /** Set a HUD presentation pref (mode / opacity / sidebar dims) and apply it
@@ -455,6 +475,7 @@ export function setHudPref<K extends keyof AppSettings["hud"]>(
     opacity: state.hud.opacity,
     sidebarWidth: state.hud.sidebar_width,
     sidebarHeight: state.hud.sidebar_height,
+    pet: state.hud.pet,
   });
 }
 

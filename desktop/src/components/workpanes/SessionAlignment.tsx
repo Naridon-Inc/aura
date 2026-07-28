@@ -22,6 +22,7 @@
 import { useEffect, useMemo, useState, type ReactNode } from "react";
 import { api, type ClaudeSession } from "../../lib/api";
 import { useEditorStore } from "../../lib/editorStore";
+import { humanizeIdentifier } from "../../lib/prove";
 import { StoryMarkdown } from "../story/StoryMarkdown";
 import { AgentBadge } from "../agent/AgentBadge";
 import { Button } from "../ui/button";
@@ -268,6 +269,17 @@ function ChangedSection({
 
   const fileCount = report.changed_files.length;
 
+  // Capabilities lead — the named things a person can reason about (a function,
+  // a class, a component). Bare values (a local, a constant) are internal
+  // mechanics: kept, but folded under a quiet toggle so the real features read
+  // first. With no capabilities, the values stand alone and open by default.
+  const capabilities = useMemo(() => sorted.filter(isCapabilityNode), [sorted]);
+  const values = useMemo(
+    () => sorted.filter((n) => !isCapabilityNode(n)),
+    [sorted],
+  );
+  const shownCaps = showAll ? capabilities : capabilities.slice(0, NODE_LIMIT);
+
   return (
     <section>
       <div className="mb-2.5 flex items-baseline justify-between gap-3">
@@ -304,16 +316,18 @@ function ChangedSection({
         </p>
       ) : (
         <>
-          <div className="overflow-hidden rounded-lg border border-line-soft bg-bg-1">
-            {(showAll ? sorted : sorted.slice(0, NODE_LIMIT)).map((node, i) => (
-              <NodeRow
-                key={`${node.identifier}-${i}`}
-                node={node}
-                onDismiss={onDismiss}
-              />
-            ))}
-          </div>
-          {sorted.length > NODE_LIMIT ? (
+          {shownCaps.length > 0 ? (
+            <div className="overflow-hidden rounded-lg border border-line-soft bg-bg-1">
+              {shownCaps.map((node, i) => (
+                <NodeRow
+                  key={`${node.identifier}-${i}`}
+                  node={node}
+                  onDismiss={onDismiss}
+                />
+              ))}
+            </div>
+          ) : null}
+          {capabilities.length > NODE_LIMIT ? (
             <Button
               variant="ghost"
               size="xs"
@@ -323,10 +337,15 @@ function ChangedSection({
             >
               {showAll
                 ? "Show fewer"
-                : `Show ${sorted.length - NODE_LIMIT} more change${
-                    sorted.length - NODE_LIMIT === 1 ? "" : "s"
-                  }`}
+                : `Show ${capabilities.length - NODE_LIMIT} more`}
             </Button>
+          ) : null}
+          {values.length > 0 ? (
+            <SupportingChanges
+              nodes={values}
+              onDismiss={onDismiss}
+              defaultOpen={capabilities.length === 0}
+            />
           ) : null}
         </>
       )}
@@ -335,6 +354,44 @@ function ChangedSection({
 }
 
 const NODE_LIMIT = 18;
+
+// A "capability" is a named thing a person can reason about — a function,
+// method, class, component. Bare values (a local, a constant, a type alias) are
+// internal mechanics. Unknown/blank kinds count as capabilities so a change we
+// simply couldn't classify is never hidden.
+const CAPABILITY_KIND =
+  /function|fn|method|class|interface|enum|struct|trait|component|hook|constructor|module/i;
+function isCapabilityNode(n: NodeRef): boolean {
+  const k = (n.kind || "").toLowerCase();
+  return k === "" || CAPABILITY_KIND.test(k);
+}
+
+function capitalize(s: string): string {
+  return s ? s[0].toUpperCase() + s.slice(1) : s;
+}
+
+// A plain noun for the kind — what a person would call this piece of code.
+function kindNoun(kind: string): string {
+  const k = (kind || "").toLowerCase();
+  if (k.includes("class")) return "class";
+  if (k.includes("component")) return "component";
+  if (k.includes("hook")) return "hook";
+  if (k.includes("method")) return "method";
+  if (k.includes("constructor")) return "setup";
+  if (k.includes("function") || k === "fn") return "function";
+  if (k.includes("interface")) return "interface";
+  if (k.includes("enum")) return "enum";
+  if (k.includes("type")) return "type";
+  if (
+    k.includes("variable") ||
+    k.includes("declarator") ||
+    k.includes("const") ||
+    k.includes("field") ||
+    k.includes("property")
+  )
+    return "value";
+  return "code";
+}
 
 function NodeRow({ node, onDismiss }: { node: NodeRef; onDismiss?: () => void }) {
   const editor = useEditorStore();
@@ -356,17 +413,21 @@ function NodeRow({ node, onDismiss }: { node: NodeRef; onDismiss?: () => void })
   };
 
   const sig = node.signature?.trim();
-  const sub = file ? `${file}${line ? `:${line}` : ""}` : sig || null;
+  // Non-coder first: the plain-language name leads. The exact symbol, its kind,
+  // and where it lives are demoted to a small dimmed detail line below.
+  const plain = capitalize(humanizeIdentifier(node.identifier)) || node.identifier;
+  const kindWord = kindNoun(node.kind);
+  const loc = file ? `${file}${line ? `:${line}` : ""}` : sig || null;
 
   return (
     <div className="group border-b border-line-soft px-3.5 py-2.5 last:border-b-0">
       <div className="flex items-center gap-2.5">
         <KindGlyph kind={node.kind} />
         <span
-          className="min-w-0 truncate font-mono text-[12.5px] text-text-1"
+          className="min-w-0 truncate text-[13px] font-medium text-text-1"
           title={node.identifier}
         >
-          {node.identifier}
+          {plain}
         </span>
         <ChangeBadge change={node.change} />
         {node.is_stub ? (
@@ -404,14 +465,71 @@ function NodeRow({ node, onDismiss }: { node: NodeRef; onDismiss?: () => void })
           </Button>
         </div>
       </div>
-      {sub ? (
-        <div className="mt-1 truncate pl-[26px] font-mono text-[10.5px] text-text-4" title={sub}>
-          {sub}
-        </div>
-      ) : null}
+      {/* Coder detail, demoted: kind · the exact symbol · where it lives. */}
+      <div className="mt-1 flex items-center gap-1.5 pl-[26px] text-[10.5px] text-text-4">
+        <span className="shrink-0 capitalize">{kindWord}</span>
+        <span className="text-text-5">·</span>
+        <code
+          className="shrink-0 rounded border border-line-soft bg-bg-2 px-1 py-px font-mono text-[10px] text-text-3"
+          title="The exact name in the code"
+        >
+          {node.identifier}
+        </code>
+        {loc ? (
+          <>
+            <span className="text-text-5">·</span>
+            <span className="min-w-0 truncate font-mono" title={loc}>
+              {loc}
+            </span>
+          </>
+        ) : null}
+      </div>
       {node.rationale ? (
         <div className="mt-1.5 pl-[26px] text-[12px] text-text-2">
           <StoryMarkdown compact>{node.rationale}</StoryMarkdown>
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+// Internal values (locals, constants) that changed — real, but not new
+// features. Folded away by default so capabilities lead; a non-engineer can
+// open them if they want the full picture.
+function SupportingChanges({
+  nodes,
+  onDismiss,
+  defaultOpen,
+}: {
+  nodes: NodeRef[];
+  onDismiss?: () => void;
+  defaultOpen?: boolean;
+}) {
+  const [open, setOpen] = useState(defaultOpen ?? false);
+  return (
+    <div className="mt-2">
+      <button
+        type="button"
+        onClick={() => setOpen((v) => !v)}
+        className="flex items-center gap-1.5 text-[11px] text-text-4 transition-colors hover:text-text-2"
+      >
+        <span className="font-mono text-[9px] leading-none">
+          {open ? "▾" : "▸"}
+        </span>
+        <span className="tabular-nums">
+          {nodes.length} supporting change{nodes.length === 1 ? "" : "s"}
+        </span>
+        <span className="text-text-5">— internal values, not new features</span>
+      </button>
+      {open ? (
+        <div className="mt-1.5 overflow-hidden rounded-lg border border-line-soft bg-bg-1">
+          {nodes.map((node, i) => (
+            <NodeRow
+              key={`${node.identifier}-${i}`}
+              node={node}
+              onDismiss={onDismiss}
+            />
+          ))}
         </div>
       ) : null}
     </div>

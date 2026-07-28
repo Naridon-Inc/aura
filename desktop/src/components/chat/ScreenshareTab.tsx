@@ -35,18 +35,28 @@
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
+  AtSign,
+  Headphones,
   Maximize2,
+  MessageCircle,
   Mic,
   MicOff,
   Minimize2,
   Monitor,
   MonitorOff,
   MonitorX,
-  PhoneOff,
+  Send,
+  Settings,
+  Smile,
+  Sparkles,
   Users,
   Video,
   VideoOff,
 } from "lucide-react";
+import { AsciiSpinner } from "../ui/ascii-spinner";
+import { api, type ChatMessage } from "../../lib/api";
+import { parseAttachments } from "./FileAttachment";
+import { Avatar } from "../team/presentation/Avatar";
 import {
   leaveCall,
   parseScreenshareWorkpaneId,
@@ -106,6 +116,7 @@ export function ScreenshareTab({ huddleKey }: Props) {
   // Fullscreen — request on the stage root, mirror the browser state.
   const rootRef = useRef<HTMLDivElement | null>(null);
   const [isFs, setIsFs] = useState(false);
+  const [threadOpen, setThreadOpen] = useState(true);
   useEffect(() => {
     const onFs = () => setIsFs(document.fullscreenElement === rootRef.current);
     document.addEventListener("fullscreenchange", onFs);
@@ -134,25 +145,21 @@ export function ScreenshareTab({ huddleKey }: Props) {
   return (
     <div
       ref={rootRef}
-      className="relative flex h-full w-full flex-col overflow-hidden bg-[#050507] text-white"
+      className="slack-huddle-stage relative flex h-full w-full flex-col overflow-hidden text-white"
       data-incall-control="true"
     >
       {/* Top bar */}
-      <div className="pointer-events-none absolute inset-x-0 top-0 z-10 flex h-12 items-center gap-2 bg-gradient-to-b from-black/55 to-transparent px-4">
-        <span className="text-sm font-semibold text-white/90">
-          <span className="text-white/40">#</span>
-          {channel}
-        </span>
-        {!ended && (
-          <span className="pointer-events-auto ml-2 flex h-7 items-center gap-1.5 rounded-lg bg-white/[0.08] px-2.5 text-[11.5px] text-white/80">
-            <Users size={13} />
-            {count} connected
-          </span>
-        )}
+      <div className="slack-huddle-topbar flex h-10 shrink-0 items-center justify-center gap-1.5 px-4">
+        <Headphones size={12} />
+        <span>Huddle in <strong>#{channel}</strong></span>
+        <button type="button" onClick={toggleFullscreen} className="slack-huddle-popout" aria-label={isFs ? "Exit fullscreen" : "Fullscreen"}>
+          {isFs ? <Minimize2 size={15} /> : <Maximize2 size={15} />}
+        </button>
       </div>
 
+      <div className="slack-huddle-main flex flex-1 min-h-0 gap-1">
       {/* Stage body */}
-      <div className="flex flex-1 min-h-0 flex-col px-4 pb-24 pt-14">
+      <div className="slack-huddle-video-stage flex flex-1 min-w-0 min-h-0 flex-col px-8 py-8">
         {ended ? (
           <StageEmpty ended />
         ) : share ? (
@@ -165,7 +172,7 @@ export function ScreenshareTab({ huddleKey }: Props) {
                 fit="contain"
               />
               <div className="absolute right-3 top-3 flex h-6 items-center gap-1.5 rounded-md bg-black/55 px-2 text-[10.5px] font-bold tracking-wide backdrop-blur">
-                <span className="h-1.5 w-1.5 rounded-full bg-red-500" />
+                <span className="h-1.5 w-1.5 rounded-full bg-red" />
                 LIVE
               </div>
               {sharers.length >= 2 && (
@@ -195,14 +202,14 @@ export function ScreenshareTab({ huddleKey }: Props) {
                 </div>
               )}
               <div className="absolute bottom-3 left-3 flex h-7 items-center gap-1.5 rounded-lg bg-black/60 px-2.5 text-xs font-semibold backdrop-blur">
-                <Monitor size={13} className="text-[var(--color-accent-green,#4dc1a4)]" />
+                <Monitor size={13} className="text-[var(--color-accent-green)]" />
                 {share.isLocal ? "You" : share.participantName} · screen
               </div>
               {share.isLocal && (
                 <button
                   type="button"
                   onClick={toggleScreen}
-                  className="absolute bottom-3 right-3 flex items-center gap-1.5 rounded-full bg-red-600/90 px-3 py-1.5 text-xs font-medium shadow-lg backdrop-blur transition hover:bg-red-600"
+                  className="absolute bottom-3 right-3 flex items-center gap-1.5 rounded-full bg-red px-3 py-1.5 text-xs font-medium shadow-lg backdrop-blur transition-opacity hover:opacity-90"
                   title="Stop sharing this screen"
                 >
                   <MonitorX size={12} />
@@ -224,9 +231,18 @@ export function ScreenshareTab({ huddleKey }: Props) {
         )}
       </div>
 
-      {/* Floating control bar */}
+      {threadOpen && parsed && (
+        <HuddleThread repoRoot={parsed.repoRoot} channel={parsed.channel} onClose={() => setThreadOpen(false)} />
+      )}
+      </div>
+
+      {/* Full-width Slack huddle control bar */}
       {!ended && (
-        <div className="absolute bottom-5 left-1/2 z-10 flex -translate-x-1/2 items-center gap-2 rounded-2xl border border-white/10 bg-[#16161a]/85 px-2.5 py-2 shadow-[0_14px_36px_-10px_rgba(0,0,0,0.7)] backdrop-blur">
+        <div className="slack-huddle-footer relative flex h-[70px] shrink-0 items-center justify-center gap-3 px-5">
+          <div className="slack-huddle-meta">
+            <Users size={16} /><span>{count}</span><i />
+            <strong>{snap.channelName || `#${channel}`}</strong>
+          </div>
           <CtlButton
             onClick={() => void setMicEnabledPreference(!snap.micEnabled)}
             tone={snap.micEnabled ? "default" : "danger"}
@@ -248,30 +264,133 @@ export function ScreenshareTab({ huddleKey }: Props) {
           >
             <Monitor size={19} />
           </CtlButton>
-          <span className="mx-1 h-7 w-px bg-white/10" />
+          <CtlButton onClick={() => {}} tone="default" title="Reactions">
+            <Smile size={19} />
+          </CtlButton>
+          <CtlButton onClick={() => {}} tone="default" title="Huddle settings">
+            <Settings size={19} />
+          </CtlButton>
           <CtlButton
             onClick={() => leaveCall()}
             tone="hangup"
             title="Disconnect"
           >
-            <PhoneOff size={19} />
+            <span className="px-3 text-sm font-bold">Leave</span>
           </CtlButton>
+          <button type="button" onClick={() => setThreadOpen((value) => !value)} className={`slack-huddle-thread-toggle ${threadOpen ? "is-active" : ""}`} aria-label="Toggle huddle thread">
+            <MessageCircle size={18} />
+          </button>
         </div>
       )}
-
-      {/* Fullscreen toggle */}
-      {!ended && (
-        <button
-          type="button"
-          onClick={toggleFullscreen}
-          className="absolute bottom-7 right-5 z-10 flex h-9 w-9 items-center justify-center rounded-lg bg-white/[0.08] text-white/70 transition hover:bg-white/15 hover:text-white"
-          title={isFs ? "Exit fullscreen" : "Fullscreen"}
-          aria-label={isFs ? "Exit fullscreen" : "Fullscreen"}
-        >
-          {isFs ? <Minimize2 size={16} /> : <Maximize2 size={16} />}
-        </button>
-      )}
     </div>
+  );
+}
+
+function HuddleThread({
+  repoRoot,
+  channel,
+  onClose,
+}: {
+  repoRoot: string;
+  channel: string;
+  onClose: () => void;
+}) {
+  const [messages, setMessages] = useState<ChatMessage[]>([]);
+  const [draft, setDraft] = useState("");
+  const [sending, setSending] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const scrollerRef = useRef<HTMLDivElement | null>(null);
+
+  const refresh = async () => {
+    try {
+      const rows = await api.chatList(repoRoot, channel, undefined, 60);
+      setMessages(rows.filter((message) => !message.thread_parent));
+      setError(null);
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : String(reason));
+    }
+  };
+
+  useEffect(() => {
+    void refresh();
+    const timer = window.setInterval(() => void refresh(), 3000);
+    return () => window.clearInterval(timer);
+  // Channel identity defines the lifetime of this huddle thread.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [repoRoot, channel]);
+
+  useEffect(() => {
+    const node = scrollerRef.current;
+    if (node) node.scrollTop = node.scrollHeight;
+  }, [messages.length]);
+
+  const send = async () => {
+    const body = draft.trim();
+    if (!body || sending) return;
+    setSending(true);
+    try {
+      const message = await api.chatSend({ repoRoot, channel, body });
+      setMessages((rows) => [...rows, message]);
+      setDraft("");
+      setError(null);
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : String(reason));
+    } finally {
+      setSending(false);
+    }
+  };
+
+  return (
+    <aside className="slack-huddle-thread">
+      <header>
+        <strong>Thread</strong>
+        <span className="flex-1" />
+        <Sparkles size={17} />
+        <button type="button" onClick={onClose} aria-label="Close huddle thread">×</button>
+      </header>
+      <div ref={scrollerRef} className="slack-huddle-thread-messages">
+        <div className="slack-huddle-thread-intro">
+          <MessageCircle size={17} />
+          <p><strong>Every huddle has a thread.</strong><br />Send messages, files, and links to everyone in the huddle. They’re saved in <b>#{channel}</b>, so you can access them after the huddle is done.</p>
+        </div>
+        {messages.slice(-18).map((message) => {
+          const body = parseAttachments(message.body).text;
+          return (
+            <div key={message.id} className="slack-huddle-thread-message">
+              <Avatar name={message.from_name || message.from_handle} size={34} />
+              <div>
+                <p><strong>{message.from_name || message.from_handle}</strong><time>{new Date(message.ts * 1000).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}</time></p>
+                <span>{body || "Shared an attachment"}</span>
+              </div>
+            </div>
+          );
+        })}
+      </div>
+      <div className="slack-huddle-external"><b>B</b><span>Huddle notes are shared with everyone in this channel</span></div>
+      <div className="slack-huddle-reply">
+        <textarea
+          value={draft}
+          onChange={(event) => setDraft(event.target.value)}
+          onKeyDown={(event) => {
+            if (event.key === "Enter" && !event.shiftKey) {
+              event.preventDefault();
+              void send();
+            }
+          }}
+          placeholder="Reply…"
+          rows={2}
+        />
+        <div>
+          <button type="button">+</button>
+          <button type="button"><Smile size={16} /></button>
+          <button type="button"><AtSign size={16} /></button>
+          <button type="button">Aa</button>
+          <span className="flex-1" />
+          <button type="button" onClick={() => void send()} disabled={!draft.trim() || sending} className="is-send"><Send size={16} /></button>
+        </div>
+        {error && <small title={error}>Couldn’t sync the huddle thread.</small>}
+      </div>
+    </aside>
   );
 }
 
@@ -302,12 +421,12 @@ function ParticipantTile({ p, big = false }: { p: CallParticipant; big?: boolean
   const initial = (p.name.trim()[0] || "?").toUpperCase();
   return (
     <div
-      className="relative overflow-hidden rounded-2xl border border-white/5"
+      className="slack-huddle-participant relative overflow-hidden border border-white/5"
       style={{
         aspectRatio: "16 / 10",
         background: p.cameraTrack ? "#0d0d11" : gradientFor(p.name),
         boxShadow: p.isSpeaking
-          ? "inset 0 0 0 2px var(--color-accent-green,#4dc1a4)"
+          ? "inset 0 0 0 2px var(--color-accent-green)"
           : undefined,
       }}
     >
@@ -333,7 +452,7 @@ function ParticipantTile({ p, big = false }: { p: CallParticipant; big?: boolean
         </div>
       )}
       <div className="absolute bottom-2 left-2 flex h-6 max-w-[calc(100%-16px)] items-center gap-1.5 rounded-lg bg-black/55 px-2 text-[11.5px] font-semibold backdrop-blur">
-        {!p.micEnabled && <MicOff size={11} className="shrink-0 text-red-400" />}
+        {!p.micEnabled && <MicOff size={11} className="shrink-0 text-red" />}
         <span className="truncate">{p.isLocal ? `${p.name} (you)` : p.name}</span>
       </div>
     </div>
@@ -402,14 +521,14 @@ function CtlButton({
   const styles: Record<typeof tone, { bg: string; color: string }> = {
     default: { bg: "rgba(255,255,255,0.08)", color: "#fff" },
     active: {
-      bg: "color-mix(in srgb, var(--color-accent-green,#4dc1a4) 22%, transparent)",
-      color: "var(--color-accent-green,#4dc1a4)",
+      bg: "#ffffff",
+      color: "var(--color-accent-green)",
     },
     danger: {
-      bg: "color-mix(in srgb, var(--color-red,#ef4444) 20%, transparent)",
-      color: "var(--color-red,#ef4444)",
+      bg: "color-mix(in srgb, var(--color-red) 20%, transparent)",
+      color: "var(--color-red)",
     },
-    hangup: { bg: "var(--color-red,#ef4444)", color: "#fff" },
+    hangup: { bg: "var(--color-red)", color: "#fff" },
   };
   const s = styles[tone];
   return (
@@ -450,7 +569,7 @@ function StageEmpty({ ended }: { ended: boolean }) {
 function StageConnecting() {
   return (
     <div className="flex flex-1 flex-col items-center justify-center gap-2 text-sm text-white/55">
-      <span className="h-5 w-5 animate-spin rounded-full border-2 border-white/20 border-t-white/70" />
+      <AsciiSpinner />
       <div>Connecting…</div>
     </div>
   );

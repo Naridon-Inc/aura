@@ -254,7 +254,7 @@ function BackendRow({
         <span className="text-[10px] text-text-5">· {hint}</span>
       )}
       {active && (
-        <span className="ml-auto text-[10px] uppercase tracking-wider text-accent-blue">
+        <span className="ml-auto text-[10px] uppercase tracking-wider text-accent">
           active
         </span>
       )}

@@ -1,0 +1,92 @@
+{
+  "id": "019f9943-ad3d-7ab1-95f5-8fc015338536",
+  "schema_version": {
+    "major": 1,
+    "minor": 0,
+    "patch": 0
+  },
+  "kind": {
+    "kind": "sentinel_event"
+  },
+  "parent_id": null,
+  "prior_sibling_id": null,
+  "supersedes_id": null,
+  "anchor": {
+    "kind": "none"
+  },
+  "intent": {
+    "summary": "Persist favorites across reloads with localStorage, and drop the throwaway in-memory store.",
+    "detail": "Persist favorites across reloads with localStorage, and drop the throwaway in-memory store.",
+    "parent_intent": null
+  },
+  "declared_impacts": {
+    "writes_paths": [
+      "app.js",
+      "recipes.js"
+    ],
+    "reads_paths": [],
+    "network": [],
+    "touches_zones": [],
+    "installs_packages": [],
+    "mutates_secrets": [],
+    "deploys": []
+  },
+  "actual_impacts": {
+    "writes_paths": [
+      "app.js",
+      "recipes.js"
+    ],
+    "reads_paths": [],
+    "network": [],
+    "touches_zones": [],
+    "installs_packages": [],
+    "mutates_secrets": [],
+    "deploys": []
+  },
+  "payload": {
+    "type": "sentinel",
+    "event_type": "intent",
+    "body": {
+      "agent_id": "claude",
+      "intent": "Persist favorites across reloads with localStorage, and drop the throwaway in-memory store.",
+      "ts_unix": 1784982777
+    }
+  },
+  "state": "completed",
+  "policy": null,
+  "provenance": {
+    "actor": "did:aura:agent/claude",
+    "on_behalf_of": null,
+    "origin_host": "unknown",
+    "signature": {
+      "algo": "ed25519",
+      "key_id": "did:aura:key/MByIG90LiBg",
+      "sig_b64": "+21/19NuPpa7CxZYRGniSt07pOrPM84xHu3WjYGfjSK2UJYdE742D1RLnXDuBZtSM9iObdYLNgOjHtlxF1UdDQ"
+    }
+  },
+  "attestations": {
+    "items": []
+  },
+  "created_at": [
+    2026,
+    206,
+    12,
+    32,
+    57,
+    149049000,
+    0,
+    0,
+    0
+  ],
+  "updated_at": [
+    2026,
+    206,
+    12,
+    32,
+    57,
+    404594000,
+    0,
+    0,
+    0
+  ]
+}

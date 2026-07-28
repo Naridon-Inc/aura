@@ -492,11 +492,27 @@ fn is_declared_impacts_empty(d: &DeclaredImpacts) -> bool {
         && d.deploys.is_empty()
 }
 
-fn impacts_exceed(actual: &DeclaredImpacts, declared: &DeclaredImpacts) -> bool {
+/// The write-scope half of the intent-divergence catch: every path the
+/// execution actually wrote that the agent never declared up-front. Empty
+/// ⇒ the change stayed inside the declared scope; non-empty ⇒ the agent
+/// touched files it didn't say it would (the "did exactly what it said"
+/// violation).
+///
+/// Public so the commit-time reconciler (aura-cli) can render the exact
+/// undeclared files to the user, not just a yes/no. The evaluator's gate
+/// and the CLI's warning then share ONE definition of "exceeded" and can
+/// never drift.
+pub fn undeclared_writes(actual: &DeclaredImpacts, declared: &DeclaredImpacts) -> Vec<String> {
     actual
         .writes_paths
         .iter()
-        .any(|p| !declared.writes_paths.contains(p))
+        .filter(|p| !declared.writes_paths.contains(p))
+        .cloned()
+        .collect()
+}
+
+fn impacts_exceed(actual: &DeclaredImpacts, declared: &DeclaredImpacts) -> bool {
+    !undeclared_writes(actual, declared).is_empty()
         || actual
             .network
             .iter()

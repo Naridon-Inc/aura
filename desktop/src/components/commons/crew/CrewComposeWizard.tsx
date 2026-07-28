@@ -19,7 +19,7 @@
 // cramped popovers fighting for the top-right corner.
 
 import { useEffect, useMemo, useState, type KeyboardEvent } from "react";
-import { ArrowRight, Check, GitMerge, Loader2, Sparkles, Target, Users } from "lucide-react";
+import { ArrowRight, Check, GitMerge, Sparkles, Target, Users } from "lucide-react";
 
 import { api } from "../../../lib/api";
 import type {
@@ -29,6 +29,7 @@ import type {
   TaskPriority,
 } from "../../../lib/api";
 import { FullscreenOverlay } from "../../FullscreenOverlay";
+import { AsciiSpinner } from "../../ui/ascii-spinner";
 import { Button } from "../../ui/button";
 import { Field } from "../../ui/field";
 import { Input } from "../../ui/input";
@@ -43,11 +44,13 @@ function Dot({ className }: { className?: string }) {
   return <span className={`h-2 w-2 shrink-0 rounded-full ${className ?? ""}`} aria-hidden />;
 }
 
+// Same ramp as the task wizard's priority menu so the two read as one system:
+// the label names the level, the ramp orders it, only Urgent takes a colour.
 const PRIORITY_OPTS: SelectOption[] = [
-  { value: "urgent", label: "Urgent", icon: <Dot className="bg-[#d66a6a]" /> },
-  { value: "high", label: "High", icon: <Dot className="bg-[#d99a2b]" /> },
-  { value: "medium", label: "Medium", icon: <Dot className="bg-accent" /> },
-  { value: "low", label: "Low", icon: <Dot className="bg-text-5" /> },
+  { value: "urgent", label: "Urgent", icon: <Dot className="bg-red" /> },
+  { value: "high", label: "High", icon: <Dot className="bg-text-2" /> },
+  { value: "medium", label: "Medium", icon: <Dot className="bg-text-3" /> },
+  { value: "low", label: "Low", icon: <Dot className="bg-text-4" /> },
 ];
 
 const GOAL_STEPS: WizardStepMeta[] = [
@@ -271,7 +274,7 @@ export function CrewComposeWizard({
               disabled={busy || !goal.trim()}
               className="gap-1.5"
             >
-              {busy ? <Loader2 size={14} className="animate-spin" /> : <Sparkles size={14} />}
+              {busy ? <AsciiSpinner className="text-[13px]" /> : <Sparkles size={14} />}
               {busy ? "Planning…" : "Plan it"}
             </Button>
           ) : (
@@ -282,7 +285,7 @@ export function CrewComposeWizard({
               disabled={busy || !title.trim()}
               className="gap-1.5"
             >
-              {busy ? <Loader2 size={14} className="animate-spin" /> : null}
+              {busy ? <AsciiSpinner className="text-[13px]" /> : null}
               {busy ? "Adding…" : "Add to queue"}
             </Button>
           )}
@@ -485,7 +488,7 @@ export function CrewComposeWizard({
           )}
 
           {err ? (
-            <p className="rounded-md border border-line-soft bg-bg-1/60 px-3 py-2 text-[12px] leading-relaxed text-[#c2706f]">
+            <p className="rounded-md border border-line-soft bg-bg-1/60 px-3 py-2 text-[12px] leading-relaxed text-red">
               {err}
             </p>
           ) : null}

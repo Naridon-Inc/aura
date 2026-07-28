@@ -15,6 +15,7 @@
 import { useEffect, useState } from "react";
 import { api, type TelemetryConsent as Consent } from "../lib/api";
 import { Switch } from "./ui/switch";
+import { ToastActionButton, ToastCard, ToastStack } from "./ui/toast";
 
 export function TelemetryConsent() {
   const [show, setShow] = useState(false);
@@ -51,100 +52,50 @@ export function TelemetryConsent() {
   };
 
   return (
-    <div
-      style={{
-        position: "fixed",
-        bottom: 44,
-        right: 16,
-        zIndex: 9999,
-        width: 380,
-        background: "var(--color-bg-elevated, #1a1a1a)",
-        border: "1px solid var(--color-border, #2a2a2a)",
-        borderLeft: "3px solid var(--color-accent, #5aa9e6)",
-        borderRadius: 8,
-        boxShadow: "0 8px 24px rgba(0,0,0,0.35)",
-        color: "var(--color-text, #e5e7eb)",
-        padding: "14px 16px",
-        fontSize: 12,
-        lineHeight: 1.5,
-      }}
-    >
-      <div
-        style={{
-          fontWeight: 600,
-          fontSize: 13,
-          marginBottom: 4,
-          color: "var(--color-text, #e5e7eb)",
-        }}
+    <ToastStack bottom={44} zIndex={9999}>
+      <ToastCard
+        tone="accent"
+        title="Help make Aura better?"
+        message={
+          <>
+            Aura can send anonymous notes about which features get used and when
+            something crashes — so we can see what&rsquo;s working and fix what
+            isn&rsquo;t. It <span className="text-text-1">never</span> sends your code,
+            your files, what you type, or your name. You can change this anytime in
+            Settings.
+          </>
+        }
+        actions={
+          <>
+            <ToastActionButton disabled={saving} onClick={() => void save(false, false)}>
+              No thanks
+            </ToastActionButton>
+            <ToastActionButton
+              variant="primary"
+              disabled={saving}
+              onClick={() => void save(product, crash)}
+            >
+              Allow
+            </ToastActionButton>
+          </>
+        }
       >
-        Help make Aura better?
-      </div>
-      <div style={{ color: "var(--color-text-dim, #9ca3af)" }}>
-        Aura can send anonymous notes about which features get used and when
-        something crashes — so we can see what's working and fix what isn't. It{" "}
-        <span style={{ color: "var(--color-text, #e5e7eb)" }}>never</span> sends
-        your code, your files, what you type, or your name. You can change this
-        anytime in Settings.
-      </div>
-
-      <div style={{ marginTop: 12, display: "grid", gap: 10 }}>
-        <Row
-          on={crash}
-          onToggle={() => setCrash((v) => !v)}
-          title="Crash reports"
-          hint="The most useful — tells us when Aura breaks so we can fix it for you."
-        />
-        <Row
-          on={product}
-          onToggle={() => setProduct((v) => !v)}
-          title="Usage analytics"
-          hint="Anonymous counts of which features people open. No content."
-        />
-      </div>
-
-      <div
-        style={{
-          display: "flex",
-          gap: 8,
-          marginTop: 14,
-          justifyContent: "flex-end",
-          alignItems: "center",
-        }}
-      >
-        <button
-          type="button"
-          disabled={saving}
-          onClick={() => save(false, false)}
-          style={{
-            cursor: saving ? "default" : "pointer",
-            background: "transparent",
-            border: "none",
-            color: "var(--color-text-dim, #9ca3af)",
-            fontSize: 12,
-            padding: "5px 8px",
-          }}
-        >
-          No thanks
-        </button>
-        <button
-          type="button"
-          disabled={saving}
-          onClick={() => save(product, crash)}
-          style={{
-            cursor: saving ? "default" : "pointer",
-            background: "var(--color-accent, #5aa9e6)",
-            border: "1px solid var(--color-accent, #5aa9e6)",
-            borderRadius: 6,
-            color: "#0b1118",
-            fontWeight: 600,
-            fontSize: 12,
-            padding: "5px 14px",
-          }}
-        >
-          Allow
-        </button>
-      </div>
-    </div>
+        <div className="mt-3 grid gap-2.5">
+          <Row
+            on={crash}
+            onToggle={() => setCrash((v) => !v)}
+            title="Crash reports"
+            hint="The most useful — tells us when Aura breaks so we can fix it for you."
+          />
+          <Row
+            on={product}
+            onToggle={() => setProduct((v) => !v)}
+            title="Usage analytics"
+            hint="Anonymous counts of which features people open. No content."
+          />
+        </div>
+      </ToastCard>
+    </ToastStack>
   );
 }
 
@@ -160,19 +111,11 @@ function Row({
   hint: string;
 }) {
   return (
-    <div style={{ display: "flex", gap: 10, alignItems: "flex-start" }}>
-      <Switch
-        checked={on}
-        onCheckedChange={onToggle}
-        style={{ marginTop: 1, flexShrink: 0 }}
-      />
-      <div style={{ minWidth: 0 }}>
-        <div style={{ color: "var(--color-text, #e5e7eb)", fontWeight: 500 }}>
-          {title}
-        </div>
-        <div style={{ color: "var(--color-text-dim, #9ca3af)", fontSize: 11 }}>
-          {hint}
-        </div>
+    <div className="flex items-start gap-2.5">
+      <Switch checked={on} onCheckedChange={onToggle} className="mt-px shrink-0" />
+      <div className="min-w-0">
+        <div className="text-[12px] font-medium text-text-1">{title}</div>
+        <div className="text-[11px] leading-[1.45] text-text-3">{hint}</div>
       </div>
     </div>
   );

@@ -364,7 +364,7 @@ impl Brain for GeminiNativeBrain {
             body["tools"] = json!([{ "functionDeclarations": decls }]);
         }
 
-        let client = reqwest::Client::new();
+        let client = super::http::shared_client();
         let res = client
             .post(&endpoint)
             .header("content-type", "application/json")

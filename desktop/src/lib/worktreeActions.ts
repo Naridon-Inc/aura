@@ -103,11 +103,82 @@ export function createPrPrompt(
   title: string,
   draft = false,
 ): string {
-  return (
-    `Open a${draft ? " draft" : ""} pull request for branch \`${branch}\`` +
-    (title ? ` ("${title}")` : "") +
-    `. Push the branch first if it isn't pushed yet, then create the PR with ` +
-    `\`gh\` — a clear title and a description that summarises what changed and ` +
-    `why. Share the PR link when it's open.`
-  );
+  return [
+    `Open a${draft ? " draft" : ""} pull request for the current branch \`${branch}\`${title ? ` ("${title}")` : ""}.`,
+    ``,
+    `First review the branch properly — don't just list files:`,
+    `1. Find the base branch with \`gh repo view --json defaultBranchRef --jq .defaultBranchRef.name\`.`,
+    `2. Run \`aura pr-review --base <that base> --json\` to get the semantic diff: the changed logic, the blast radius (what depends on what changed), the risk score, and any issues it flags.`,
+    `3. Skim the commits with \`git log <base>..HEAD\` so the description captures the actual intent.`,
+    ``,
+    `Then:`,
+    `- Write a clear title and a plain-language description of WHAT changed and WHY, with a short "Blast radius / risk" note and a reviewer checklist.`,
+    `- If the review surfaced real problems, list them first under "⚠ Issues to resolve" and say whether they should block the PR.`,
+    `- Push the branch if it isn't up to date, then create the PR with \`gh pr create\`${draft ? " --draft" : ""}. Print the PR URL when you're done.`,
+  ].join("\n");
+}
+
+// Refresh an EXISTING pull request after more work landed on its branch. The
+// PR's diff already tracks the branch head on every push — this is about the
+// prose and the review keeping up: re-review the new commits, rewrite the
+// title/description to match what the branch now does, and leave a review note.
+export function updatePrPrompt(branch: string, prNumber: number): string {
+  return [
+    `Update the existing pull request #${prNumber} for branch \`${branch}\` — more work has landed since it was opened.`,
+    ``,
+    `Review what actually changed:`,
+    `1. Find the base branch with \`gh repo view --json defaultBranchRef --jq .defaultBranchRef.name\`.`,
+    `2. Push the branch if it has unpushed commits so the PR diff reflects the latest (the diff auto-tracks the branch head — you only need to push).`,
+    `3. Run \`aura pr-review --base <that base> --json\` for the current semantic diff, blast radius, risk score, and any new issues.`,
+    `4. Read the PR's current title/body with \`gh pr view ${prNumber} --json title,body\` so you refresh rather than clobber it.`,
+    ``,
+    `Then:`,
+    `- Rewrite the title + description to match what the branch does NOW, in plain language (WHAT changed and WHY), refreshing the "Blast radius / risk" note and reviewer checklist.`,
+    `- If the review surfaced real problems, list them first under "⚠ Issues to resolve" and say whether they should block merging.`,
+    `- Apply the update with \`gh pr edit ${prNumber} --title <…> --body <…>\`, then print the PR URL.`,
+  ].join("\n");
+}
+
+// ── Inline-in-chat prompts ────────────────────────────────────────────────
+//
+// These turn what used to open a separate workpane/tab (Safety check, Goals,
+// Attestations, Resolve conflicts) into a prompt Aura runs in the chat the
+// user is already watching. Aura owns the real tools (`aura pr-review`,
+// `aura prove`, `aura attest`, the conflict tools) via MCP, so it does the
+// work and reports the verdict in plain language inline — no page to open.
+
+/** Ask Aura to run a semantic safety check on the current changes, in chat. */
+export function safetyCheckPrompt(): string {
+  return [
+    `Run a safety check on my current changes — use \`aura pr-review\` against the branch's base.`,
+    `Tell me here, in plain language: any bugs, security issues, architecture/layer drift, or anything that doesn't match what I asked for.`,
+    `Do the analysis yourself and report inline — don't open a separate tab.`,
+  ].join("\n");
+}
+
+/** Ask Aura to prove the branch's goals, in chat. */
+export function proveGoalsPrompt(): string {
+  return [
+    `Prove the goals for this branch — run \`aura prove\` (or \`aura goal-trace\`).`,
+    `Tell me here which user-facing behaviors are actually wired up end-to-end and which still have gaps, in plain language.`,
+    `Report inline — don't open a separate tab.`,
+  ].join("\n");
+}
+
+/** Ask Aura to summarize attestations/provenance for recent work, in chat. */
+export function attestPrompt(): string {
+  return [
+    `Show the attestations for my recent work — run \`aura attest\` (list + verify).`,
+    `Summarize here what's signed and verified, and flag anything unsigned or failing verification.`,
+    `Report inline — don't open a separate tab.`,
+  ].join("\n");
+}
+
+/** Ask Aura to resolve the current merge conflicts, in chat. */
+export function resolveConflictsPrompt(): string {
+  return [
+    `Resolve the current merge conflicts on this branch using Aura's conflict tools.`,
+    `Go file by file, choosing ours / theirs / a merged result as appropriate — ask me first if a choice looks risky or loses work.`,
+    `Then continue the merge and walk me through what you did, here in chat.`,
+  ].join("\n");
 }

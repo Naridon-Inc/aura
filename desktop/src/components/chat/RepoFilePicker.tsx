@@ -352,7 +352,7 @@ export function RepoFilePicker({
   return (
     <div
       className="fixed inset-0 flex items-start justify-center pt-[12vh] z-50"
-      style={{ background: "rgba(5,5,5,0.55)", backdropFilter: "blur(4px)" }}
+      style={{ background: "rgba(0,0,0,0.4)", backdropFilter: "blur(4px)" }}
       onMouseDown={onClose}
     >
       <div
@@ -552,10 +552,10 @@ function FlatList({
               style={{
                 color:
                   r.status === "A"
-                    ? "var(--color-green, #4ade80)"
+                    ? "var(--color-green)"
                     : r.status === "D"
-                      ? "var(--color-red, #f87171)"
-                      : "var(--color-amber, #d4a017)",
+                      ? "var(--color-red)"
+                      : "var(--color-amber)",
               }}
             >
               {r.status}

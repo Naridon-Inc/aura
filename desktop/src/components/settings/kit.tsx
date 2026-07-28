@@ -1,62 +1,93 @@
 import * as React from "react";
-import { Button, Container, Heading, Text } from "@medusajs/ui";
+import { Button, Text } from "@medusajs/ui";
 
 import { cn } from "../../lib/utils";
 import { Checkbox } from "../ui/checkbox";
 import { Field as UiField } from "../ui/field";
-import { SegmentedControl } from "../ui/segmented";
+import { Segment } from "../ui/segment";
 import { Select, type SelectOption } from "../ui/select";
 import { StatusChip, type ChipTone } from "../ui/statusChip";
 import { Switch } from "../ui/switch";
 
+// ── Compact settings kit ──────────────────────────────────────────────
+// Flat, card-less rows: a bold label + muted description on the left, the
+// control right-aligned, a hairline divider between rows. No bordered
+// section cards (per the "no bulky cards" house rule) — sections are just
+// a quiet group label over a divided list. One type scale, one rhythm, so
+// every pane reads the same. Signatures stay backward-compatible: existing
+// `<Row label>` / `<Toggle label hint>` callers render unchanged; new
+// `description`/`hint` slots are opt-in.
+
+/** The pane title at the top of each section's content. */
 export function PaneHeader({ title, subtitle }: { title: string; subtitle?: string }) {
   return (
-    <div className="mb-5">
-      <Heading level="h2">{title}</Heading>
+    <div className="mb-4">
+      <h1 className="text-[18px] font-semibold leading-tight tracking-[-0.01em] text-ui-fg-base">
+        {title}
+      </h1>
       {subtitle && (
-        <Text size="small" className="mt-1.5 max-w-[560px] text-ui-fg-subtle">
+        <p className="mt-1 max-w-[540px] text-[12px] leading-snug text-ui-fg-subtle">
           {subtitle}
-        </Text>
+        </p>
       )}
     </div>
   );
 }
 
+/** A flat group of rows under a quiet uppercase label. `title` is now
+ *  optional — omit it for an unlabelled cluster (same as `Card`). */
 export function Section({
   title,
   icon,
   children,
 }: {
-  title: string;
+  title?: string;
   icon?: React.ReactNode;
   children: React.ReactNode;
 }) {
   return (
-    <Container className="mb-3.5 overflow-hidden p-0">
-      <header className="flex h-9 items-center gap-2 border-b border-ui-border-base px-3.5">
-        {icon && <span className="text-ui-fg-muted [&_svg]:size-3.5">{icon}</span>}
-        <Text size="small" weight="plus">{title}</Text>
-      </header>
-      <div className="divide-y divide-ui-border-base px-3.5 py-1.5">{children}</div>
-    </Container>
+    <div className="mt-6 first:mt-0">
+      {title && (
+        <div className="mb-0.5 flex items-center gap-2">
+          {icon && <span className="text-ui-fg-muted [&_svg]:size-3">{icon}</span>}
+          <span className="text-[10px] font-semibold uppercase tracking-[0.09em] text-ui-fg-muted">
+            {title}
+          </span>
+        </div>
+      )}
+      <div className="divide-y divide-ui-border-base/70">{children}</div>
+    </div>
   );
 }
 
 export function Card({ children, className }: { children: React.ReactNode; className?: string }) {
-  return (
-    <Container className={cn("mb-3.5 overflow-hidden p-0", className)}>
-      <div className="divide-y divide-ui-border-base px-3.5 py-1.5">{children}</div>
-    </Container>
-  );
+  return <div className={cn("mt-6 first:mt-0 divide-y divide-ui-border-base/70", className)}>{children}</div>;
 }
 
-export function Row({ label, children }: { label: React.ReactNode; children: React.ReactNode }) {
+/** One setting row: bold label (+ optional description / dim hint) on the
+ *  left, control right-aligned, top-aligned so multi-line labels don't
+ *  shove the control down. */
+export function Row({
+  label,
+  description,
+  hint,
+  children,
+}: {
+  label: React.ReactNode;
+  description?: React.ReactNode;
+  hint?: React.ReactNode;
+  children: React.ReactNode;
+}) {
   return (
-    <div className="flex items-center justify-between gap-4 py-3">
-      <Text size="small" className="flex min-w-0 items-center gap-2 text-ui-fg-base">
-        {label}
-      </Text>
-      <div className="shrink-0">{children}</div>
+    <div className="flex items-start justify-between gap-5 py-2.5">
+      <div className="flex min-w-0 flex-col gap-0.5">
+        <span className="text-[12.5px] font-medium leading-snug text-ui-fg-base">{label}</span>
+        {description && (
+          <span className="text-[11.5px] leading-snug text-ui-fg-subtle">{description}</span>
+        )}
+        {hint && <span className="text-[11px] leading-snug text-ui-fg-muted">{hint}</span>}
+      </div>
+      <div className="shrink-0 pt-0.5">{children}</div>
     </div>
   );
 }
@@ -71,7 +102,7 @@ export function Field({
   children: React.ReactNode;
 }) {
   return (
-    <UiField label={label} description={hint} className="py-3">
+    <UiField label={label} description={hint} className="py-2">
       {children}
     </UiField>
   );
@@ -91,12 +122,12 @@ export function Toggle({
   disabled?: boolean;
 }) {
   return (
-    <div className="flex items-start justify-between gap-4 py-3">
-      <div className="min-w-0">
-        <Text size="small">{label}</Text>
-        {hint && <Text size="xsmall" className="mt-0.5 text-ui-fg-subtle">{hint}</Text>}
+    <div className="flex items-start justify-between gap-5 py-2.5">
+      <div className="flex min-w-0 flex-col gap-0.5">
+        <span className="text-[12.5px] font-medium leading-snug text-ui-fg-base">{label}</span>
+        {hint && <span className="text-[11.5px] leading-snug text-ui-fg-subtle">{hint}</span>}
       </div>
-      <Switch checked={value} onCheckedChange={onChange} disabled={disabled} className="mt-0.5" />
+      <Switch checked={value} onCheckedChange={onChange} disabled={disabled} className="mt-0.5 shrink-0" />
     </div>
   );
 }
@@ -129,8 +160,15 @@ export function SegControl<T extends string>({
   onChange: (v: T) => void;
   disabled?: boolean;
 }) {
-  const control = <SegmentedControl<T> value={value} onChange={onChange} options={options} />;
-  return disabled ? <div className="pointer-events-none opacity-50">{control}</div> : control;
+  return (
+    <Segment<T>
+      value={value}
+      onChange={onChange}
+      options={options}
+      size="sm"
+      disabled={disabled}
+    />
+  );
 }
 
 export function SelectField({

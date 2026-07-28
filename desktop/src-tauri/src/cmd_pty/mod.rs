@@ -28,7 +28,7 @@ mod marks;
 mod shell_integration;
 
 use std::collections::{HashMap, VecDeque};
-use std::io::{Read, Write};
+use std::io::Read;
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -45,6 +45,16 @@ pub use registry::{
 };
 
 use marks::MarkParser;
+
+/// Upper bound on a single coalesced PTY→xterm emit. The reader hands the
+/// consumer many small chunks during a TUI redraw (Claude Code, vim, htop);
+/// we greedily merge whatever is already queued into ONE Tauri event to cut
+/// per-event IPC + JSON overhead — the dominant typing-lag cost on slower
+/// (Intel) machines — WITHOUT adding latency (we only combine bytes already
+/// sitting in the channel). Capped so a sustained flood can't build one
+/// pathologically large payload to serialize in a single hop. 64 KiB ≈ 8 of
+/// the reader's 8 KiB reads.
+const PTY_COALESCE_CAP: usize = 64 * 1024;
 
 /// Milliseconds since the epoch. Matches `cmd_agent_pty::now_ms`.
 pub(crate) fn now_ms() -> u64 {
@@ -300,8 +310,12 @@ pub async fn pty_open(
     let last_byte_ms = Arc::new(Mutex::new(now_ms()));
 
     // Sync reader thread → tokio mpsc → tokio task. Same three-hop shape
-    // the agent path uses; the tokio side runs the vte mark pass.
-    let (tx, mut rx) = mpsc::channel::<Vec<u8>>(64);
+    // the agent path uses; the tokio side runs the vte mark pass. Deeper
+    // queue (was 64) so a redraw flood doesn't fill the channel and block the
+    // reader's `blocking_send` — a stalled reader backs up the PTY and delays
+    // the echo of what you just typed. The consumer coalesces on drain, so the
+    // extra depth is absorbed into few emits, not many.
+    let (tx, mut rx) = mpsc::channel::<Vec<u8>>(256);
     let app_for_thread = app.clone();
     let exit_for_thread = exit_event.clone();
     thread::spawn(move || {
@@ -329,11 +343,24 @@ pub async fn pty_open(
         let mut vte = Parser::new();
         let mut parser = MarkParser::default();
         let mut seq: u64 = 0;
-        while let Some(bytes) = rx.recv().await {
+        while let Some(first) = rx.recv().await {
+            // Coalesce a redraw burst into one emit. Everything already queued
+            // behind `first` is drained and merged (bounded by PTY_COALESCE_CAP),
+            // collapsing dozens of tiny per-read events into a single IPC hop.
+            // This adds no latency — try_recv only takes what's already there —
+            // and an idle single keystroke still flushes immediately as one
+            // chunk. pump_plain's VTE pass is order-preserving over the merge.
+            let mut batch = first;
+            while batch.len() < PTY_COALESCE_CAP {
+                match rx.try_recv() {
+                    Ok(more) => batch.extend_from_slice(&more),
+                    Err(_) => break,
+                }
+            }
             pump_plain(
                 &app_for_task,
                 &id_for_task,
-                &bytes,
+                &batch,
                 &mut vte,
                 &mut parser,
                 &mut seq,
@@ -347,7 +374,7 @@ pub async fn pty_open(
     state.sessions.lock().unwrap().insert(
         id.clone(),
         PtySession {
-            writer: Mutex::new(writer),
+            writer: crate::pty_io::shared_writer(writer),
             master: Mutex::new(pair.master),
             child: Mutex::new(child),
             cwd: cwd.clone(),
@@ -376,15 +403,19 @@ pub async fn pty_write(
             .await
             .map_err(|e| e.to_string());
     }
-    let sessions = state.sessions.lock().unwrap();
-    let s = sessions.get(&id).ok_or_else(|| format!("unknown pty {id}"))?;
-    let res = s
-        .writer
-        .lock()
-        .unwrap()
-        .write_all(&data)
-        .map_err(|e| e.to_string());
-    res
+    // Clone the writer handle and let go of the registry map BEFORE the
+    // write. A PTY write blocks whenever the program in the terminal
+    // stops reading its input; holding the map across it used to freeze
+    // every other terminal too, and burn one runtime worker per
+    // keystroke until the whole app stopped responding.
+    let writer = {
+        let sessions = state.sessions.lock().unwrap();
+        let s = sessions.get(&id).ok_or_else(|| format!("unknown pty {id}"))?;
+        s.writer.clone()
+    };
+    crate::pty_io::write_bytes(&writer, data)
+        .await
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]

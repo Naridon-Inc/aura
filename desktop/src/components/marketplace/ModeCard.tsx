@@ -47,10 +47,12 @@ export function ModeCard({
   const description = e.description;
   const tags = e.tags;
   const author = e.author;
+  // A published mode may declare its own stripe colour; without one it takes
+  // the app's accent rather than a violet that appears nowhere else here.
   const accent =
     isInstalled && state.entry.ui?.accent
       ? state.entry.ui.accent
-      : "#7c3aed";
+      : "var(--color-accent)";
   const badgeText = isInstalled ? state.entry.ui?.badge : undefined;
 
   // Marketplace cards don't know the tool_acl until install — fall
@@ -91,7 +93,7 @@ export function ModeCard({
                 </span>
               )}
               {isInstalled && state.updateAvailable && (
-                <span className="text-[9.5px] text-amber-700 dark:text-amber-300 uppercase tracking-wider">
+                <span className="text-[9.5px] text-amber uppercase tracking-wider">
                   update
                 </span>
               )}
@@ -144,7 +146,7 @@ export function ModeCard({
               )}
               {state.kind === "installed" && !state.updateAvailable && (
                 <span
-                  className="inline-flex items-center text-[10.5px] text-emerald-700 dark:text-emerald-300"
+                  className="inline-flex items-center text-[10.5px] text-text-3"
                   title="Installed"
                 >
                   <Check className="h-3.5 w-3.5 mr-0.5" />

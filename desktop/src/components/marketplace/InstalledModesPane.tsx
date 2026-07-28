@@ -5,7 +5,8 @@
 // thin — the marketplace surface is heavier than a normal tab.
 
 import { useEffect, useState } from "react";
-import { Loader2, RefreshCw, Share2, Sparkles, Store } from "lucide-react";
+import { RefreshCw, Share2, Sparkles, Store } from "lucide-react";
+import { AsciiSpinner } from "../ui/ascii-spinner";
 
 import { Button } from "../ui/button";
 import { Input } from "../ui/input";
@@ -111,7 +112,7 @@ export function InstalledModesPane() {
                 title="Refresh"
               >
                 {store.installedLoading ? (
-                  <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                  <AsciiSpinner className="text-[12px] leading-none" />
                 ) : (
                   <RefreshCw className="h-3.5 w-3.5" />
                 )}
@@ -138,7 +139,7 @@ export function InstalledModesPane() {
 
         {store.activeSlug && (
           <div className="flex items-center gap-2 text-[11.5px] text-text-3 rounded border border-bg-3 bg-bg-1 p-2">
-            <Sparkles className="h-3.5 w-3.5 text-violet-500" />
+            <Sparkles className="h-3.5 w-3.5 text-text-4" />
             Active mode:{" "}
             <span className="font-medium text-text-1">{store.activeSlug}</span>
             <button
@@ -152,13 +153,13 @@ export function InstalledModesPane() {
         )}
 
         {error && (
-          <div className="text-[12px] text-red-700 dark:text-red-300 bg-red-100/30 dark:bg-red-900/20 rounded p-2">
+          <div className="text-[12px] text-red bg-red/10 rounded p-2">
             {error}
           </div>
         )}
 
         {store.installedError && !error && (
-          <div className="text-[12px] text-red-700 dark:text-red-300">
+          <div className="text-[12px] text-red">
             {store.installedError}
           </div>
         )}

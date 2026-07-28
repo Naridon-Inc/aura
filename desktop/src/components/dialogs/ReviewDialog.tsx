@@ -268,7 +268,7 @@ export function ReviewDialog({ open, repoRoot, baseBranch = "main", onClose, inl
     >
       {error ? (
         <div className="flex flex-col gap-3">
-          <div className="text-red text-[11.5px] py-2">{error}</div>
+          <div role="alert" className="text-red text-[11.5px] py-2">{error}</div>
           <Button variant="default" size="xs" onClick={run} disabled={loading} className="self-start">
             {loading ? "Checking…" : "Try again"}
           </Button>
@@ -332,9 +332,9 @@ function SafetyCheckLanding({
     <div className="flex flex-col items-center text-center px-6 py-10">
       <div
         className="w-14 h-14 rounded-2xl flex items-center justify-center mb-4"
-        style={{ background: "color-mix(in oklab, var(--color-accent-blue) 14%, transparent)" }}
+        style={{ background: "color-mix(in oklab, var(--color-accent) 14%, transparent)" }}
       >
-        <svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="var(--color-accent-blue)" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+        <svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="var(--color-accent)" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
           <path d="M12 3 5 5.5v5.2c0 4.4 3 7.3 7 8.8 4-1.5 7-4.4 7-8.8V5.5Z" />
           <path d="m9 11.5 2 2 4-4.2" />
         </svg>
@@ -398,7 +398,7 @@ function CheckedStrip({
 function Verdict({ report, problemCount }: { report: ReviewReport; problemCount: number }) {
   const clean = problemCount === 0;
   // Color rides on the glyph/risk-tag only — never as a full card fill.
-  const fg = clean ? "var(--color-accent-green)" : riskTone(report.risk_label).fg;
+  const fg = clean ? "var(--color-accent-green)" : riskTone(report.risk_label);
   const glyph = clean ? "✓" : "⚠";
   const headline = clean
     ? "Safe to keep"
@@ -432,7 +432,6 @@ function Verdict({ report, problemCount }: { report: ReviewReport; problemCount:
 
 function FindingRow({ finding }: { finding: Finding }) {
   const tone = sevTone(finding.severity);
-  const catTone = categoryTone(finding.category);
   return (
     <li className="flex items-start gap-2 px-2.5 py-2 rounded border bg-bg-1" style={{ borderColor: tone.border }}>
       <span className="shrink-0 mt-0.5" style={{ color: tone.fg }}>
@@ -440,10 +439,10 @@ function FindingRow({ finding }: { finding: Finding }) {
       </span>
       <div className="flex-1 min-w-0">
         <div className="flex items-center gap-1.5 mb-0.5">
-          <span
-            className="text-[9.5px] uppercase tracking-wide px-1.5 py-0.5 rounded"
-            style={{ background: catTone.bg, color: catTone.fg, border: `1px solid ${catTone.border}` }}
-          >
+          {/* The kind of problem is a label, not an alarm — the severity glyph and
+              the row border already carry the "look at me". A third hue per
+              category just made the list noisy. */}
+          <span className="text-[9.5px] uppercase tracking-wide px-1.5 py-0.5 rounded bg-bg-3 text-text-3">
             {categoryLabel(finding.category)}
           </span>
           <span className="text-[10.5px] uppercase tracking-wide text-text-4">{sourceLabel(finding.source)}</span>
@@ -572,26 +571,12 @@ function Section({ title, children }: { title: string; children: React.ReactNode
   );
 }
 
-function riskTone(label: RiskLabel): { fg: string; bg: string } {
-  if (label === "CRITICAL") return { fg: "var(--color-red)", bg: "rgba(220, 50, 50, 0.10)" };
-  if (label === "MODERATE") return { fg: "var(--color-amber)", bg: "rgba(220, 150, 30, 0.10)" };
-  return { fg: "var(--color-accent-green)", bg: "rgba(60, 160, 90, 0.10)" };
-}
-
-function categoryTone(c: Category): { fg: string; bg: string; border: string } {
-  switch (c) {
-    case "security":
-      return { fg: "var(--color-red)", bg: "rgba(220, 50, 50, 0.10)", border: "rgba(220, 50, 50, 0.45)" };
-    case "architecture":
-      return {
-        fg: "var(--color-violet)",
-        bg: "rgba(167, 139, 250, 0.10)",
-        border: "rgba(167, 139, 250, 0.45)",
-      };
-    case "conflict":
-    default:
-      return { fg: "var(--color-pink)", bg: "rgba(196, 164, 232, 0.10)", border: "rgba(196, 164, 232, 0.45)" };
-  }
+// The one ink the verdict line is allowed to spend. Reads through the live
+// tokens so a retuned palette can't leave a stale hex behind.
+function riskTone(label: RiskLabel): string {
+  if (label === "CRITICAL") return "var(--color-red)";
+  if (label === "MODERATE") return "var(--color-amber)";
+  return "var(--color-accent-green)";
 }
 
 // Plain-word labels for the finding chips — non-engineers don't read

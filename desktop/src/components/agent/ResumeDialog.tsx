@@ -14,6 +14,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { api, type ClaudeSession } from "../../lib/api";
 import { setResumedHistory, setResumeSession } from "../../lib/agentStreamStore";
+import { AsciiSpinner } from "../ui/ascii-spinner";
 
 type Props = {
   channel: string;
@@ -171,7 +172,10 @@ export function ResumeDialog({ channel, repoRoot, open, onClose, onResumed }: Pr
 
         <div className="flex-1 min-h-0 overflow-y-auto">
           {sessions === null && !error && (
-            <div className="p-6 text-text-4 text-[12px]">loading sessions…</div>
+            <div className="flex items-center gap-1.5 p-6 text-text-4 text-[12px]">
+              <AsciiSpinner />
+              Finding your past sessions…
+            </div>
           )}
           {error && (
             <div className="p-6 text-red text-[12px] font-mono whitespace-pre-wrap">
@@ -287,7 +291,7 @@ export function ResumeDialog({ channel, repoRoot, open, onClose, onResumed }: Pr
                         });
                       }}
                       title="Hide this session from the picker (keeps the on-disk transcript)"
-                      className="opacity-0 group-hover:opacity-100 transition-opacity text-text-4 hover:text-red text-[10.5px] px-1.5 py-0.5 rounded hover:bg-bg-hover flex-shrink-0 self-center"
+                      className="opacity-0 group-hover:opacity-100 focus-visible:opacity-100 transition-opacity text-text-4 hover:text-red text-[10.5px] px-1.5 py-0.5 rounded hover:bg-bg-hover flex-shrink-0 self-center focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-accent/50"
                     >
                       hide
                     </button>

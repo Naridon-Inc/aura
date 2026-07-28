@@ -145,7 +145,14 @@ export function OnboardingDialog() {
     step === "presets"
   ) {
     return (
-      <div className="fixed inset-0 z-[60] bg-black/75 backdrop-blur-sm flex items-center justify-center p-6">
+      // No Escape binding on purpose: the only exit is "Skip onboarding", and a
+      // stray Escape should never silently skip first-run setup.
+      <div
+        className="fixed inset-0 z-[60] bg-black/55 backdrop-blur-[3px] flex items-center justify-center p-6"
+        role="dialog"
+        aria-modal="true"
+        aria-label="Welcome to Aura"
+      >
         {step === "welcome" ? (
           <div className="w-[760px] max-w-full bg-bg-chrome rounded-lg border border-line-soft shadow-2xl overflow-hidden">
             <WelcomeHero onClose={finish} onContinue={goNext} />
@@ -216,16 +223,19 @@ function WelcomeHero({
   return (
     <div className="flex flex-col">
       <div className="relative aspect-[16/9] overflow-hidden">
-        {/* Solid near-black base */}
+        {/* Solid near-black base. This panel is a fixed piece of artwork, not a
+            themed surface — the black, the white title and the black vignettes
+            below stay literal on purpose so the hero reads identically in every
+            theme. The one thing that DOES follow the theme is the accent, so a
+            retuned accent never contradicts the rest of the app. */}
         <div className="absolute inset-0 bg-[#050505]" />
-        {/* Amber dot halftone, masked by a warm radial so dots only appear
-            where the "light" hits — Superset-style. Dots are warm + bright
-            so contrast against the dark base is high. */}
+        {/* Accent dot halftone, masked by a radial so dots only appear
+            where the "light" hits — Superset-style. */}
         <div
           className="absolute inset-0"
           style={{
             backgroundImage:
-              "radial-gradient(circle at center, #f59e0b 1.1px, transparent 1.35px)",
+              "radial-gradient(circle at center, var(--color-accent) 1.1px, transparent 1.35px)",
             backgroundSize: "5px 5px",
             WebkitMaskImage:
               "radial-gradient(ellipse 75% 65% at 58% 42%, black 0%, rgba(0,0,0,0.65) 38%, transparent 78%)",
@@ -233,12 +243,12 @@ function WelcomeHero({
               "radial-gradient(ellipse 75% 65% at 58% 42%, black 0%, rgba(0,0,0,0.65) 38%, transparent 78%)",
           }}
         />
-        {/* Soft warm glow on top of the dots for depth. */}
+        {/* Soft glow on top of the dots for depth. */}
         <div
           className="absolute inset-0 pointer-events-none"
           style={{
             background:
-              "radial-gradient(ellipse 45% 38% at 60% 38%, rgba(245, 158, 11, 0.22), transparent 65%)",
+              "radial-gradient(ellipse 45% 38% at 60% 38%, color-mix(in srgb, var(--color-accent) 22%, transparent), transparent 65%)",
           }}
         />
         {/* Vignette to keep title legible. */}
@@ -432,13 +442,13 @@ function IntroPanel() {
   return (
     <div className="flex-1 flex flex-col items-center justify-center text-center px-12">
       <h2
+        className="text-text-1"
         style={{
           fontFamily:
             '"SF Pro Display", -apple-system, BlinkMacSystemFont, system-ui, sans-serif',
           fontWeight: 700,
           fontSize: "28px",
           letterSpacing: "-0.01em",
-          color: "#ffffff",
         }}
       >
         Let's get you started
@@ -688,7 +698,12 @@ function FullscreenShell({
 }) {
   const activeIdx = stepperIndex(step);
   return (
-    <div className="fixed inset-0 z-[60] bg-[#0c0c0c] flex flex-col">
+    <div
+      className="fixed inset-0 z-[60] bg-bg-0 flex flex-col"
+      role="dialog"
+      aria-modal="true"
+      aria-label="Set up Aura"
+    >
       {/* Top bar: Back left, stepper centered, Close right */}
       <div className="h-14 px-6 flex items-center border-b border-line-soft/40">
         <div className="w-24 flex items-center">
@@ -720,7 +735,7 @@ function FullscreenShell({
                 >
                   {isDone ? (
                     <svg width="11" height="11" viewBox="0 0 16 16" fill="none">
-                      <path d="M3 8l3.5 3.5L13 4.5" stroke="#7bd88f" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" />
+                      <path d="M3 8l3.5 3.5L13 4.5" stroke="var(--color-accent-green)" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" />
                     </svg>
                   ) : (
                     <span className={`font-mono ${isActive ? "text-text-2" : "text-text-5"}`}>
@@ -1024,7 +1039,7 @@ function ProvidersPanel({
             )}
 
             {stage.kind === "error" && (
-              <p className="text-[11px] text-red-400 text-center mt-3">
+              <p className="text-[11px] text-red text-center mt-3">
                 {stage.message}
               </p>
             )}
@@ -1076,7 +1091,10 @@ function ProvidersCodexPanel({
     try {
       const s = await api.codexAuthStatus();
       setStatus(s);
-      setCliMissing(false);
+      // The backend now reports "broken" (on PATH but won't run) and
+      // "missing" as states rather than throwing, so treat both as
+      // needing the install hint instead of only the legacy throw.
+      setCliMissing(s.state === "broken" || s.state === "missing");
     } catch (e) {
       setCliMissing(String(e).includes("not on PATH"));
       setStatus(null);
@@ -1269,7 +1287,7 @@ function ProvidersCodexPanel({
             )}
 
             {stage.kind === "error" && (
-              <p className="text-[11px] text-red-400 text-center mt-3">
+              <p className="text-[11px] text-red text-center mt-3">
                 {stage.message}
               </p>
             )}
@@ -1305,7 +1323,7 @@ function ConnectedBadge({
         <svg width="14" height="14" viewBox="0 0 16 16" fill="none">
           <path
             d="M3 8.5l3 3 7-7"
-            stroke="#22c55e"
+            stroke="var(--color-accent-green)"
             strokeWidth="2"
             strokeLinecap="round"
             strokeLinejoin="round"
@@ -1372,7 +1390,7 @@ function ProviderRow({
       onClick={onSelect}
       className={`w-full flex items-center gap-3 px-3.5 py-3 rounded-md border text-left transition-colors ${
         selected
-          ? "border-orange-500 bg-orange-500/8"
+          ? "border-accent bg-accent/10"
           : "border-line-soft bg-bg-2/60 hover:bg-bg-2"
       }`}
     >
@@ -1391,7 +1409,7 @@ function ProviderRow({
         <div className="text-[11px] text-text-4 mt-0.5">{subtitle}</div>
       </div>
       {selected && (
-        <div className="w-5 h-5 rounded-full bg-orange-500 flex items-center justify-center shrink-0">
+        <div className="w-5 h-5 rounded-full bg-accent flex items-center justify-center shrink-0">
           <svg width="11" height="11" viewBox="0 0 16 16" fill="none">
             <path d="M3 8l3.5 3.5L13 4.5" stroke="white" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" />
           </svg>
@@ -1403,7 +1421,7 @@ function ProviderRow({
 
 function ClaudeGlyph() {
   return (
-    <div className="w-7 h-7 rounded bg-orange-500 flex items-center justify-center">
+    <div className="w-7 h-7 rounded bg-caret-orange flex items-center justify-center">
       <svg width="16" height="16" viewBox="0 0 24 24" fill="none">
         <path d="M12 2v20M2 12h20M5 5l14 14M19 5L5 19" stroke="white" strokeWidth="2" strokeLinecap="round" />
       </svg>
@@ -1482,7 +1500,7 @@ function GitHubPanel({
             </svg>
           </div>
           {isInstalled && (
-            <div className="absolute -bottom-1 -right-1 w-5 h-5 rounded-full bg-green-500 flex items-center justify-center border-2 border-[#0c0c0c]">
+            <div className="absolute -bottom-1 -right-1 w-5 h-5 rounded-full bg-accent-green flex items-center justify-center border-2 border-bg-1">
               <svg width="11" height="11" viewBox="0 0 16 16" fill="none">
                 <path d="M3 8l3.5 3.5L13 4.5" stroke="white" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" />
               </svg>
@@ -1720,7 +1738,7 @@ function ProjectPanel({
             Skip for now
           </button>
           {error && (
-            <p className="text-[11px] text-red-400 mt-2">{error}</p>
+            <p className="text-[11px] text-red mt-2">{error}</p>
           )}
         </div>
       </div>

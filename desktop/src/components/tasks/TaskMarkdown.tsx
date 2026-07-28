@@ -13,6 +13,8 @@ import { Children, type ReactNode } from "react";
 import { onExternalAnchorClick } from "../../lib/openExternal";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
+import { remarkCallouts } from "../markdown/remarkCallouts";
+import { calloutFromBlockquote } from "../markdown/Callout";
 
 import { MentionedText } from "../Mentions";
 import type { TeamMember } from "../../lib/api";
@@ -32,7 +34,7 @@ export function TaskMarkdown({ source, members = [], className = "" }: Props) {
       className={`task-md text-[12.5px] text-text-2 leading-relaxed break-words ${className}`}
     >
       <ReactMarkdown
-        remarkPlugins={[remarkGfm]}
+        remarkPlugins={[remarkGfm, remarkCallouts]}
         components={mdComponents(members)}
       >
         {source}
@@ -143,14 +145,15 @@ function mdComponents(members: TeamMember[]) {
         {wrap(children)}
       </li>
     ),
-    blockquote: ({ children, ...p }: any) => (
-      <blockquote
-        {...p}
-        className="border-l-2 border-line-soft pl-3 my-2 text-text-3"
-      >
-        {wrap(children)}
-      </blockquote>
-    ),
+    blockquote: ({ children, ...p }: any) =>
+      calloutFromBlockquote(p.className, wrap(children)) ?? (
+        <blockquote
+          {...p}
+          className="border-l-2 border-line-soft pl-3 my-2 text-text-3"
+        >
+          {wrap(children)}
+        </blockquote>
+      ),
     hr: (p: any) => <hr {...p} className="my-4 border-line-soft" />,
     strong: ({ children, ...p }: any) => (
       <strong {...p} className="font-semibold text-text-1">

@@ -4,6 +4,12 @@
 // switcher still owns Build / Team / Plan / Trace. (Automations re-homed to
 // the Plan section, next to Tasks & Pages. "Agents & extensions" re-homed to
 // an icon button at the end of the top header.)
+//
+// The Workspaces row IS the door to the full Workspaces view — clicking the
+// label opens it. It used to only re-select the roster below, with a separate
+// expand arrow beside it for the real view; that split made the fleet look
+// like a side trip off the roster rather than the page it is. One target now,
+// and + New is the row's only trailing affordance.
 
 import { useEffect, useState } from "react";
 
@@ -19,6 +25,11 @@ type BuildNavProps = {
    *  context). Workspaces is always the selected row now that Automations has
    *  moved to Plan. */
   onSelectWorkspaces?: () => void;
+  /** Opens the Workspaces view — every parallel copy across every open
+   *  project, seen three ways (All / Board / Live). This is what the row's
+   *  label does; `onSelectWorkspaces` is only the fallback for a host that
+   *  doesn't wire it. */
+  onOpenWorkspaces?: () => void;
   /** Opens "Mission Control" — the single full-screen command center for the
    *  autonomous work loop: the live Activity overview, the Kanban Board, the
    *  Queue (hand agents a stack of work and they do it in the right order),
@@ -42,6 +53,7 @@ type CrewProgress = {
 export function BuildNav({
   onAddWorkspace,
   onSelectWorkspaces,
+  onOpenWorkspaces,
   onOpenCrew,
   repoRoot,
 }: BuildNavProps) {
@@ -52,9 +64,9 @@ export function BuildNav({
         <button
           type="button"
           className="ade-bnav-rowmain"
-          onClick={onSelectWorkspaces}
+          onClick={onOpenWorkspaces ?? onSelectWorkspaces}
           aria-current="true"
-          title="Workspaces"
+          title="Workspaces — every parallel copy across every open project (⌘⇧W)"
         >
           <LayersGlyph />
           <span className="nm">Workspaces</span>
@@ -132,14 +144,13 @@ function useCrewProgress(repoRoot?: string): CrewProgress | null {
 }
 
 /** The small trailing badge on the Crew row. Hidden until there's a graph
- *  with work in it. Amber dot when something is actively being worked;
- *  otherwise the count rests muted (green-status tint once everything's done). */
+ *  with work in it. A dot marks work actively in flight — the one thing here
+ *  that is happening right now; the count itself stays plain text, including
+ *  when everything is finished (a finished run is not asking for anything). */
 function CrewProgressBadge({ crew }: { crew: CrewProgress | null }) {
   if (!crew || crew.total === 0) return null;
   const allDone = crew.done >= crew.total;
-  const color = allDone
-    ? "var(--color-success, #22c55e)"
-    : "var(--color-text-3)";
+  const color = allDone ? "var(--color-text-2)" : "var(--color-text-3)";
   return (
     <span
       className="ade-bnav-crew-badge"
@@ -166,7 +177,12 @@ function CrewProgressBadge({ crew }: { crew: CrewProgress | null }) {
             width: "5px",
             height: "5px",
             borderRadius: "999px",
-            background: "var(--color-warning, #f59e0b)",
+            // Work actually in flight — amber, the pack's "an agent is on
+            // it" slot, matching CrewCanvas's STATUS_DOT.working and the
+            // Automations run dot. It is not the accent: this row already
+            // takes the accent when it is the section you are standing in,
+            // and one row cannot wear the same paint for two meanings.
+            background: "var(--color-amber)",
           }}
         />
       )}

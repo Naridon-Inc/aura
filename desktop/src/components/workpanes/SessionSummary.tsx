@@ -168,6 +168,85 @@ function GenuineRecordSeal({ row }: { row: IntentRow }) {
   );
 }
 
+function ShieldStop() {
+  return (
+    <svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden className="shrink-0">
+      <path
+        d="M8 1.5l5 1.8v4.1c0 3.1-2.1 5.3-5 6.1-2.9-.8-5-3-5-6.1V3.3z"
+        stroke="currentColor"
+        strokeWidth="1.3"
+        strokeLinejoin="round"
+      />
+      <path d="M5.6 8.1h4.8" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" />
+    </svg>
+  );
+}
+
+/** The detail body for a blocked/halted guard record — an attempt Aura refused
+ *  to let land. It is deliberately NOT the asked→built→prove report: nothing was
+ *  built and there is nothing to prove or resume. It answers three things a
+ *  reader actually wants: it was stopped, what was risked, and that no code
+ *  changed. The one-line "what was attempted" already sits in the header. */
+function BlockedReport({
+  bodyText,
+  whenAbsolute,
+  rel,
+}: {
+  bodyText: string;
+  whenAbsolute: string;
+  rel: string;
+}) {
+  return (
+    <div className="h-full overflow-y-auto">
+      <div className="mx-auto flex max-w-[720px] flex-col gap-5 px-4 py-4">
+        {/* Verdict banner — the whole point, up top and unmistakably red. */}
+        <div
+          className="flex items-start gap-2.5 rounded-lg border border-red px-3.5 py-3"
+          style={{ background: "color-mix(in oklab, var(--color-red) 7%, transparent)" }}
+        >
+          <span className="mt-px text-red">
+            <ShieldStop />
+          </span>
+          <div className="min-w-0 flex-1">
+            <span className="text-[13px] font-medium text-red">
+              Blocked — this change never landed
+            </span>
+            <p className="mt-0.5 text-[12px] leading-relaxed text-text-2">
+              Aura stopped the commit before it reached your history. Your code
+              was left exactly as it was.
+            </p>
+          </div>
+        </div>
+
+        {/* Why it was stopped — the plain-language reason. */}
+        {bodyText ? (
+          <section>
+            <div className="mb-2.5">
+              <SectionLabel>Why Aura stopped it</SectionLabel>
+            </div>
+            <p className="text-[13.5px] leading-relaxed text-text-1">{bodyText}</p>
+          </section>
+        ) : null}
+
+        {/* Details — the facts on demand. */}
+        <section>
+          <div className="mb-2.5">
+            <SectionLabel>Details</SectionLabel>
+          </div>
+          <div className="overflow-hidden rounded-lg border border-line-soft bg-bg-1">
+            <MetaRow label="When">
+              {whenAbsolute} <span className="text-text-3">({rel})</span>
+            </MetaRow>
+            <MetaRow label="Outcome">
+              <span className="text-text-2">Commit halted — no code was changed.</span>
+            </MetaRow>
+          </div>
+        </section>
+      </div>
+    </div>
+  );
+}
+
 export function SessionSummary({
   row,
   repoRoot,
@@ -194,7 +273,19 @@ export function SessionSummary({
   /** Jump to Changes; with a path, open that file directly. */
   onOpenFile: (path?: string) => void;
 }) {
+  // A blocked/halted guard record reads as its own short "here's what was
+  // stopped" report — not the asked→built→prove story (there is no build, no
+  // changeset, nothing to prove or seal).
+  if (row.intent_type === "blocked") {
+    return <BlockedReport bodyText={bodyText} whenAbsolute={whenAbsolute} rel={rel} />;
+  }
+
   const signed = !!row.signed_block_id;
+  // The session's own commit (first changeset file that carries one). Threaded
+  // into the Goals section so it proves against the code THIS run produced, not
+  // the checked-out branch — the merged `files` also covers native-chat rows
+  // that borrow a fetched changeset. Undefined for uncommitted/working-tree runs.
+  const atCommit = files.find((f) => (f.commit ?? "").trim())?.commit?.trim() || undefined;
   return (
     <div className="h-full overflow-y-auto">
       <div className="mx-auto flex max-w-[720px] flex-col gap-5 px-4 py-4">
@@ -246,7 +337,12 @@ export function SessionSummary({
         {/* 3 · Goals — what this run was meant to achieve, proven against the
             code. Bound to the run's key, so the same verdict shows on any task
             this goal is linked to. */}
-        <SessionGoals repoRoot={repoRoot} row={row} hasChanges={files.length > 0} />
+        <SessionGoals
+          repoRoot={repoRoot}
+          row={row}
+          hasChanges={files.length > 0}
+          atCommit={atCommit}
+        />
 
         {/* 4 · Details — facts on demand. */}
         <section>

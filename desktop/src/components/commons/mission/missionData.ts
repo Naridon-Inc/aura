@@ -62,10 +62,10 @@ export const STAGE_HINT: Record<MissionStageId, string> = {
 export const STAGE_TONE: Record<MissionStageId, string> = {
   triage: "var(--color-text-4)",
   planning: "var(--color-accent)",
-  building: "#d99a2b",
-  reviewing: "#d98a4f",
-  done: "#3fa66a",
-  failed: "#d66a6a",
+  building: "var(--color-amber)",
+  reviewing: "var(--color-amber)",
+  done: "var(--color-accent-green)",
+  failed: "var(--color-red)",
 };
 
 /** Which run is in which stage — derived purely from the envelope the backend
@@ -162,10 +162,10 @@ export function harnessLabel(agent: string | null): string {
 // affordances in the views — these are STATUS accents (left-border / glyph),
 // never buttons. Amber = an agent is working; green = landed; red = failed.
 export const MISSION_ACCENT = {
-  working: "#d99a2b",
+  working: "var(--color-amber)",
   queued: "var(--color-accent)",
-  done: "#3fa66a",
-  failed: "#d66a6a",
+  done: "var(--color-accent-green)",
+  failed: "var(--color-red)",
   idle: "var(--color-text-5)",
 } as const;
 

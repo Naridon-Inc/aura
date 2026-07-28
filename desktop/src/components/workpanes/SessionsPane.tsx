@@ -192,6 +192,10 @@ function SessionRow({
   const rel = relTime(nowSecs - row.timestamp);
   const signed = !!row.signed_block_id;
   const title = sessionDisplayTitle(row, sessions);
+  // A halted attempt Aura refused to let land — the honest record of a guard
+  // catch. It reads as an error-class event, so it gets the red marker and a
+  // "Blocked" badge in place of the neutral verdict dot / intent-type chip.
+  const isBlocked = row.intent_type === "blocked";
 
   return (
     <button
@@ -199,10 +203,13 @@ function SessionRow({
       onClick={() => onOpen(row)}
       className="group flex w-full items-start gap-2.5 px-3 py-2 text-left hover:bg-bg-2"
     >
-      {/* status dot — neutral grey when there's no verdict on this run yet */}
+      {/* status dot — red when Aura blocked this change, neutral grey when
+          there's simply no verdict on the run yet */}
       <span
-        className="mt-[5px] h-2 w-2 shrink-0 rounded-full bg-text-4"
-        title="No verdict yet"
+        className={`mt-[5px] h-2 w-2 shrink-0 rounded-full ${
+          isBlocked ? "bg-red" : "bg-text-4"
+        }`}
+        title={isBlocked ? "Blocked — Aura halted this change" : "No verdict yet"}
         aria-hidden="true"
       />
 
@@ -250,7 +257,11 @@ function SessionRow({
               </span>
             </>
           ) : null}
-          {row.intent_type ? (
+          {isBlocked ? (
+            <span className="rounded border border-red px-1.5 py-px text-[10px] font-medium text-red">
+              Blocked
+            </span>
+          ) : row.intent_type ? (
             <span className="rounded border border-line-soft px-1.5 py-px text-[10px] text-text-4">
               {row.intent_type}
             </span>

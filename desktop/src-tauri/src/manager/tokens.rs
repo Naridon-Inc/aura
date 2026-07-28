@@ -32,15 +32,29 @@ pub const DEFAULT_HOT_WINDOW: usize = 24;
 /// headroom for the next response without thrashing.
 pub const DEFAULT_COMPACTION_RATIO: f32 = 0.7;
 
+/// Bucket M2 — the one chars-per-token ratio the whole engine estimates
+/// against. Matches Anthropic's published average for English prose well
+/// enough for budget + accounting decisions; precision-sensitive surfaces
+/// (billing, API limit enforcement) should use a real model-specific
+/// tokeniser instead. Kept as a single const so the chat budgeter and the
+/// orchestrator token ledger never drift apart.
+pub const CHARS_PER_TOKEN: f32 = 3.5;
+
+/// Bucket M2 — heuristic token estimate for a raw string. Cheap enough to
+/// run on every lane summary / transcript without measuring overhead.
+/// Used by the orchestrator token ledger (`dispatcher.rs`) to price what a
+/// fan-out produced vs. what the coordinator actually reads.
+pub fn estimate_str_tokens(text: &str) -> u32 {
+    ((text.len() as f32) / CHARS_PER_TOKEN).ceil() as u32
+}
+
 /// Bucket M2 — heuristic token estimator. Kept deliberately cheap so
-/// it can run on every chat turn without measuring overhead. The 3.5
-/// chars-per-token ratio matches Anthropic's published average for
-/// English prose well enough for budget decisions; precision-sensitive
-/// surfaces (billing, API limit enforcement) should use a real
-/// tokeniser via a model-specific crate.
+/// it can run on every chat turn without measuring overhead. Delegates to
+/// the same ratio as [`estimate_str_tokens`] so budgeting and accounting
+/// stay consistent.
 pub fn estimate_chat_tokens(chat: &[ChatTurn]) -> u32 {
     let chars: usize = chat.iter().map(|t| t.text.len()).sum();
-    ((chars as f32) / 3.5).ceil() as u32
+    ((chars as f32) / CHARS_PER_TOKEN).ceil() as u32
 }
 
 /// Bucket M2 — assembled context the brain feeds into the next API
@@ -210,6 +224,8 @@ mod tests {
             tool_calls: Vec::new(),
             thinking: None,
             saved_tokens: None,
+            input_tokens: None,
+            output_tokens: None,
         }
     }
 
@@ -221,6 +237,15 @@ mod tests {
         ];
         // 19 chars / 3.5 = 5.43 → ceil 6
         assert_eq!(estimate_chat_tokens(&chat), 6);
+    }
+
+    #[test]
+    fn estimate_str_tokens_matches_ratio() {
+        assert_eq!(estimate_str_tokens(""), 0);
+        // 35 chars / 3.5 = 10 exactly.
+        assert_eq!(estimate_str_tokens(&"x".repeat(35)), 10);
+        // 36 chars / 3.5 = 10.28 → ceil 11.
+        assert_eq!(estimate_str_tokens(&"x".repeat(36)), 11);
     }
 
     #[test]

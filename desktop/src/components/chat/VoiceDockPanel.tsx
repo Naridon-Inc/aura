@@ -151,8 +151,8 @@ export function VoiceDockPanel({
   const repoLabel = snap.repoRoot ? shortRepoName(snap.repoRoot) : "";
   const connecting = snap.connecting && !snap.active;
   const accent = connecting
-    ? "var(--color-amber, #d97706)"
-    : "var(--color-accent-green, #4dc1a4)";
+    ? "var(--color-amber)"
+    : "var(--color-accent-green)";
 
   function openCallStage() {
     if (!snap.repoRoot || !snap.channel) return;
@@ -522,7 +522,7 @@ function SoundboardPopover({
           className="px-3 py-1.5 text-[10.5px]"
           style={{
             background: "color-mix(in srgb, var(--color-red) 12%, transparent)",
-            color: "var(--color-red, #ef4444)",
+            color: "var(--color-red)",
             borderTop: "1px solid var(--color-line-soft)",
           }}
         >
@@ -568,7 +568,7 @@ function SoundboardRow({
         {playing && (
           <span
             className="text-[10px]"
-            style={{ color: "var(--color-accent-green, #4dc1a4)" }}
+            style={{ color: "var(--color-accent-green)" }}
           >
             playing…
           </span>
@@ -630,7 +630,7 @@ function BarBtn({
       className={
         "flex h-7 w-7 shrink-0 items-center justify-center rounded-md transition-colors " +
         (danger
-          ? "text-[var(--color-red,#ef4444)] hover:bg-[color-mix(in_srgb,var(--color-red,#ef4444)_16%,transparent)]"
+          ? "text-[var(--color-red)] hover:bg-[color-mix(in_srgb,var(--color-red)_16%,transparent)]"
           : on
             ? ""
             : "text-text-3 hover:bg-bg-3 hover:text-text-1")
@@ -639,8 +639,8 @@ function BarBtn({
         on && !danger
           ? {
               background:
-                "color-mix(in srgb, var(--color-accent-green, #4dc1a4) 16%, transparent)",
-              color: "var(--color-accent-green, #4dc1a4)",
+                "color-mix(in srgb, var(--color-accent-green) 16%, transparent)",
+              color: "var(--color-accent-green)",
             }
           : undefined
       }

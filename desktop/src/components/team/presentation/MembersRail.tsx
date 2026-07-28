@@ -3,8 +3,13 @@
  *  Moved verbatim out of the CommsPanel monolith; logic unchanged. */
 
 import { useEffect, useState } from "react";
-import { api, type TeamMember } from "../../../lib/api";
+import {
+  api,
+  type DuplicateSuggestion,
+  type TeamMember,
+} from "../../../lib/api";
 import { animalForName, tintForName } from "../../../lib/identityColors";
+import { DuplicatesBanner } from "./DuplicatesBanner";
 import { type Conversation } from "../domain";
 import { Button } from "../../ui/button";
 import { Input } from "../../ui/input";
@@ -19,6 +24,9 @@ export function MembersRail({
   isLinkedSelf,
   onLinkSelf,
   onUnlinkSelf,
+  duplicates,
+  onConfirmDuplicate,
+  onRejectDuplicate,
 }: {
   conv: Conversation;
   members: TeamMember[];
@@ -32,6 +40,20 @@ export function MembersRail({
   onLinkSelf?: (m: TeamMember) => void;
   /** Undeclare a previously-linked seat. */
   onUnlinkSelf?: (m: TeamMember) => void;
+  /** Weak-signal "these two rows are probably the same person" hints from the
+   *  backend (name↔login, email-stem↔login). Suggest only — a human confirms
+   *  or rejects each one; nothing merges automatically off these. */
+  duplicates?: DuplicateSuggestion[];
+  /** Human said "yes, same person" — fold the extra emails into the survivor. */
+  onConfirmDuplicate?: (
+    survivorEmail: string,
+    mergedEmails: string[],
+  ) => Promise<void> | void;
+  /** Human said "no, different people" — remember that so it stops asking. */
+  onRejectDuplicate?: (
+    emailA: string,
+    emailB: string,
+  ) => Promise<void> | void;
 }) {
   // Online/offline split derived from the presence beacon's `last_seen`
   // (unix seconds): a teammate seen within the last 90s counts as online
@@ -65,6 +87,13 @@ export function MembersRail({
           </div>
         ) : (
           <>
+            {duplicates && duplicates.length > 0 && (
+              <DuplicatesBanner
+                suggestions={duplicates}
+                onConfirm={onConfirmDuplicate}
+                onReject={onRejectDuplicate}
+              />
+            )}
             <MyStatusEditor />
             <MembersGroup
               label={`Online — ${online.length}`}

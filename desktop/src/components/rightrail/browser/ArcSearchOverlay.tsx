@@ -134,7 +134,7 @@ function SuggestionRow({
         onClick={onBrowse}
         className={`flex-shrink-0 h-7 px-3 rounded-full text-[11px] font-medium transition-colors ${
           primary
-            ? "bg-accent text-white hover:bg-accent/90"
+            ? "bg-accent text-[color:var(--color-accent-foreground)] hover:bg-accent/90"
             : "bg-bg-3 text-text-2 hover:text-text-1 hover:bg-bg-3/80"
         }`}
       >

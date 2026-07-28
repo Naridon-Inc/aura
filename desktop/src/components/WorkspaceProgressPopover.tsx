@@ -10,6 +10,7 @@ import { readPersistedAgents, useEditorStore, type AgentTab } from "../lib/edito
 import { streamChannel, useAgentStream } from "../lib/agentStreamStore";
 import { relAge, relAgeShort, summarizeEvents } from "../lib/streamSummary";
 import { AgentIcon } from "./agent/AgentIcon";
+import { AsciiSpinner } from "./ui/ascii-spinner";
 
 type Props = {
   root: string;
@@ -98,24 +99,21 @@ export function WorkspaceProgressPopover({
     <div
       onMouseEnter={onMouseEnter}
       onMouseLeave={onMouseLeave}
-      className="absolute z-30 left-full ml-2 top-0 bg-bg-1 border border-line rounded-lg shadow-xl"
+      className="absolute z-30 left-full ml-2 top-0 overflow-hidden rounded-lg border border-line-soft bg-bg-1 text-text-1 shadow-[var(--shadow-flyout)]"
       style={{ width: 300 }}
     >
-      <div
-        className="flex items-center gap-2 px-3 py-2 border-b border-line-soft"
-        style={{
-          background: `color-mix(in srgb, ${accent} 10%, transparent)`,
-        }}
-      >
+      {/* No tinted header band — the popover is a quiet card, and the name
+          plus the workspace mark already say which project this is. */}
+      <div className="flex items-center gap-2 px-3 py-2 border-b border-line-soft bg-bg-2">
         <span
           className="inline-flex items-center justify-center text-[12px] font-semibold flex-shrink-0"
           style={{
             width: 24,
             height: 24,
             borderRadius: 6,
-            background: `color-mix(in srgb, ${accent} 32%, transparent)`,
+            background: `color-mix(in srgb, ${accent} 20%, var(--color-bg-1))`,
             color: "var(--color-text-1)",
-            border: `1px solid ${accent}`,
+            border: `1px solid color-mix(in srgb, ${accent} 45%, var(--color-line))`,
           }}
         >
           {letter}
@@ -129,7 +127,7 @@ export function WorkspaceProgressPopover({
           </div>
         </div>
         {isActive && (
-          <span className="text-[9.5px] uppercase tracking-wider text-text-5">
+          <span className="text-[10px] uppercase tracking-wider text-text-5">
             active
           </span>
         )}
@@ -168,8 +166,8 @@ export function WorkspaceProgressPopover({
             value={`$${stats.costUsd < 1 ? stats.costUsd.toFixed(2) : stats.costUsd.toFixed(1)}`}
           />
         )}
-        <span className="ml-auto text-text-5 text-[9.5px]">
-          {stats.loaded ? "live" : "loading…"}
+        <span className="ml-auto flex items-center text-text-5 text-[10.5px]">
+          {stats.loaded ? "live" : <AsciiSpinner className="text-[10.5px]" />}
         </span>
       </div>
     </div>
@@ -192,12 +190,12 @@ function LiveAgentRow({ tab }: { tab: AgentTab }) {
             {tab.agentLabel}
           </span>
           {running ? (
-            <span className="inline-flex items-center gap-1 text-[9.5px] uppercase tracking-wider text-accent-green">
+            <span className="inline-flex items-center gap-1 text-[10px] uppercase tracking-wider text-accent-green">
               <PulseDot color="var(--color-accent-green)" />
               working
             </span>
           ) : (
-            <span className="text-[9.5px] uppercase tracking-wider text-text-5">
+            <span className="text-[10px] uppercase tracking-wider text-text-5">
               idle
             </span>
           )}
@@ -248,7 +246,7 @@ function PersistedAgentRow({
           <span className="text-[11.5px] font-medium text-text-1 truncate">
             {agent.agentLabel}
           </span>
-          <span className="text-[9.5px] uppercase tracking-wider text-text-5">
+          <span className="text-[10px] uppercase tracking-wider text-text-5">
             {agent.mode === "pty" ? "terminal" : "chat"}
           </span>
         </div>
@@ -279,16 +277,18 @@ function Stat({
   muted?: boolean;
   tone?: "warn";
 }) {
+  // Only "warn" earns colour, and it takes the product accent — an unacked
+  // audit is something waiting on you, not a failure.
   const colour =
     tone === "warn"
-      ? "text-amber"
+      ? "text-accent"
       : muted
         ? "text-text-4"
         : "text-text-2";
   return (
     <div className="flex items-baseline gap-1">
       <span className={`tabular-nums font-medium ${colour}`}>{value}</span>
-      <span className="text-text-5 text-[9.5px] uppercase tracking-wider">{label}</span>
+      <span className="text-text-5 text-[10px] uppercase tracking-wider">{label}</span>
     </div>
   );
 }

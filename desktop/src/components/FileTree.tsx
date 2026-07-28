@@ -13,6 +13,7 @@ import {
   ChevronsDownUp,
   Columns2,
   Copy,
+  ExternalLink,
   FilePlus,
   FolderPlus,
   Pencil,
@@ -22,7 +23,8 @@ import {
   Trash2,
   X,
 } from "lucide-react";
-import { api, type DirEntry } from "../lib/api";
+import { api, type DirEntry, type EditorInfo } from "../lib/api";
+import { beginInAppFileDrag, endInAppFileDrag } from "../lib/osFileDrop";
 import { useDebouncedValue } from "../lib/useDebouncedValue";
 import { AsciiSpinner } from "./ui/ascii-spinner";
 import { FileIcon } from "./FileIcon";
@@ -41,6 +43,9 @@ import {
   ContextMenuContent,
   ContextMenuItem,
   ContextMenuSeparator,
+  ContextMenuSub,
+  ContextMenuSubContent,
+  ContextMenuSubTrigger,
   ContextMenuTrigger,
 } from "./ui/context-menu";
 import { Input } from "./ui/input";
@@ -84,6 +89,10 @@ export function FileTree({ root, selected, onSelect, onSelectSplit }: FileTreePr
   const [pendingDelete, setPendingDelete] = useState<PendingDelete>(null);
   const [multiSelected, setMultiSelected] = useState<Set<string>>(new Set());
   const [lastClickedPath, setLastClickedPath] = useState<string | null>(null);
+  // Installed external editors for the "Open in…" submenu. Probed once —
+  // the set changes only when the user installs/removes an editor, which a
+  // reload picks up. Empty until the probe resolves.
+  const [editors, setEditors] = useState<EditorInfo[]>([]);
   // The folder new files/folders land in — tracks the last folder the user
   // opened, or the parent of the file they selected, so the toolbar's New
   // File / New Folder buttons create *where the user is looking* instead of
@@ -134,6 +143,23 @@ export function FileTree({ root, selected, onSelect, onSelectSplit }: FileTreePr
     void reloadAll();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [root]);
+
+  // Probe for installed editors once — the "Open in…" submenu renders only
+  // what actually resolved. A probe failure just leaves the submenu absent.
+  useEffect(() => {
+    let alive = true;
+    api
+      .editorsList()
+      .then((list) => {
+        if (alive) setEditors(list);
+      })
+      .catch(() => {
+        /* no editors surfaced — submenu stays hidden */
+      });
+    return () => {
+      alive = false;
+    };
+  }, []);
 
   async function toggle(node: Node) {
     if (!node.is_dir) {
@@ -300,6 +326,13 @@ export function FileTree({ root, selected, onSelect, onSelectSplit }: FileTreePr
       setError(String(e));
     }
   }
+  async function onOpenInEditor(node: Node, editorId: string) {
+    try {
+      await api.editorOpen(node.path, editorId);
+    } catch (e) {
+      setError(String(e));
+    }
+  }
   function onDelete(node: Node) {
     setPendingDelete({ kind: "one", node });
   }
@@ -421,6 +454,8 @@ export function FileTree({ root, selected, onSelect, onSelectSplit }: FileTreePr
             onCopyPath={onCopyPath}
             onCopyRelative={onCopyRelative}
             onReveal={onReveal}
+            editors={editors}
+            onOpenInEditor={onOpenInEditor}
             onDelete={onDelete}
             onDeleteMany={onDeleteMany}
             onRename={onRename}
@@ -723,6 +758,9 @@ type RowHandlers = {
   onCopyPath: (n: Node) => void;
   onCopyRelative: (n: Node) => void;
   onReveal: (n: Node) => void;
+  /** Installed editors for the "Open in…" submenu (empty ⇒ submenu hidden). */
+  editors: EditorInfo[];
+  onOpenInEditor: (n: Node, editorId: string) => void;
   onDelete: (n: Node) => void;
   onDeleteMany: (paths: string[]) => void;
   onRename: (n: Node) => void;
@@ -824,6 +862,11 @@ function Row(props: {
   const highlighted = selected || multiSelected;
   const inMultiGroup = multiSelected && multiSelectedSet.size > 1;
   const [dragOver, setDragOver] = useState(false);
+  // Press bookkeeping so a drag gesture doesn't also open the file. `pressRef`
+  // holds the mousedown point (to reject a click that turned into a drag);
+  // `draggedRef` flips true the moment a native drag starts.
+  const pressRef = useRef<{ x: number; y: number } | null>(null);
+  const draggedRef = useRef(false);
   // What this row drags: the whole multi-selection if it's part of one,
   // otherwise just itself.
   const dragSet =
@@ -851,16 +894,35 @@ function Row(props: {
         <div
           draggable
           onDragStart={(e) => {
+            draggedRef.current = true;
             handlers.dragPaths.current = dragSet;
-            e.dataTransfer.effectAllowed = "move";
+            // Record the payload for the window-level in-app drop router — it
+            // recovers the paths even when WKWebView strips the dataTransfer
+            // mid-drag, so a drop onto the agent terminal / composer lands.
+            beginInAppFileDrag(dragSet);
+            // copyMove, not move: a folder reparent inside the tree is a
+            // "move", but dropping onto the agent terminal / chat composer is
+            // a "copy" (mention the path — the file isn't relocated). With
+            // plain "move", those targets set dropEffect=copy and the browser
+            // rejects the drop, so the row silently refuses to land there.
+            e.dataTransfer.effectAllowed = "copyMove";
             try {
               e.dataTransfer.setData("text/plain", dragSet.join("\n"));
+              // A single file also rides as a uri-list — the terminal + chat
+              // drop targets read that first to recover the exact path.
+              if (dragSet.length === 1) {
+                e.dataTransfer.setData(
+                  "text/uri-list",
+                  "file://" + encodeURI(dragSet[0]),
+                );
+              }
             } catch {
               /* some platforms restrict setData — the ref carries the truth */
             }
           }}
           onDragEnd={() => {
             handlers.dragPaths.current = [];
+            endInAppFileDrag();
             setDragOver(false);
           }}
           onDragOver={
@@ -885,14 +947,32 @@ function Row(props: {
                 }
               : undefined
           }
-          // macOS WKWebView drops the synthetic `click` on `draggable=true`
-          // elements (drag-tracking starts on mousedown, no click follows), so
-          // a plain onClick here made file rows intermittently un-openable.
-          // Open on mousedown (left button only) — onRowClick reads the same
-          // alt/meta/shift modifiers, which are present on mousedown too, so
-          // split-open and multi-select keep working; native drag is untouched.
+          // Open on mouse*up*, not mousedown. Opening on mousedown re-rendered
+          // the tree the instant a drag began (onSelect → editor.open), which
+          // aborted the native drag before it could carry the path anywhere —
+          // so "drag a file out" just opened it. We arm on mousedown and open
+          // on mouseup only when no drag happened and the pointer barely moved
+          // (a genuine click). onRowClick reads alt/meta/shift off the mouseup
+          // event, which carries the same modifiers, so split-open and
+          // multi-select keep working. (macOS WKWebView suppresses the synthetic
+          // `click` on draggable rows, so we can't rely on onClick — but mouseup
+          // fires for a real click and is replaced by dragend during a drag.)
           onMouseDown={(e) => {
-            if (e.button === 0) handlers.onRowClick(node, e);
+            if (e.button !== 0) return;
+            draggedRef.current = false;
+            pressRef.current = { x: e.clientX, y: e.clientY };
+          }}
+          onMouseUp={(e) => {
+            if (e.button !== 0) return;
+            const start = pressRef.current;
+            pressRef.current = null;
+            if (draggedRef.current) return; // a drag happened — don't open
+            if (
+              start &&
+              Math.hypot(e.clientX - start.x, e.clientY - start.y) > 4
+            )
+              return; // moved too far for a click
+            handlers.onRowClick(node, e);
           }}
           className={`flex items-center h-7 cursor-pointer text-[12.5px] ${
             dragOver
@@ -976,6 +1056,23 @@ function Row(props: {
         <ContextMenuItem onSelect={() => handlers.onReveal(node)}>
           <Search size={12} className="mr-2" /> Reveal in Finder
         </ContextMenuItem>
+        {handlers.editors.length > 0 && (
+          <ContextMenuSub>
+            <ContextMenuSubTrigger>
+              <ExternalLink size={12} className="mr-2" /> Open in
+            </ContextMenuSubTrigger>
+            <ContextMenuSubContent className="min-w-[180px]">
+              {handlers.editors.map((ed) => (
+                <ContextMenuItem
+                  key={ed.id}
+                  onSelect={() => handlers.onOpenInEditor(node, ed.id)}
+                >
+                  {ed.name}
+                </ContextMenuItem>
+              ))}
+            </ContextMenuSubContent>
+          </ContextMenuSub>
+        )}
         <ContextMenuSeparator />
         <ContextMenuItem onSelect={() => handlers.onRename(node)}>
           <Pencil size={12} className="mr-2" /> Rename

@@ -12,7 +12,13 @@
 // Rendered only when the `aura.ade.v2` flag is on (see useAdeV2); the
 // legacy three-column shell stays the untouched default.
 
-import { useEffect, useRef, useState, type ReactNode } from "react";
+import {
+  useEffect,
+  useRef,
+  useState,
+  type CSSProperties,
+  type ReactNode,
+} from "react";
 import {
   CODE_MAP_ENABLED,
   MEMORY_SURFACE_ENABLED,
@@ -21,13 +27,14 @@ import {
   TRACE_V2,
 } from "../lib/featureFlags";
 import { Tooltip, TooltipTrigger, TooltipContent } from "./ui/tooltip";
+import { Segment } from "./ui/segment";
 import {
   readTeamUnread,
   subscribeTeamUnread,
   type TeamUnreadSummary,
 } from "../lib/teamUnread";
 import { WhatsNewCard } from "./WhatsNewCard";
-import type { ReleaseNote } from "../lib/releaseNotes";
+import type { ReleaseCta, ReleaseNote } from "../lib/releaseNotes";
 
 export type AdeSection = "build" | "team" | "plan" | "trace";
 
@@ -36,7 +43,7 @@ const SECTION_KEY = "aura.ade.section";
 const SECTIONS: { id: AdeSection; label: string; glyph: ReactNode }[] = [
   { id: "build", label: "Build", glyph: <LayersGlyph /> },
   { id: "team", label: "Team", glyph: <MessageGlyph /> },
-  { id: "plan", label: "Plan", glyph: <KanbanGlyph /> },
+  { id: "plan", label: "Pages", glyph: <PagesGlyph /> },
   { id: "trace", label: "Trace", glyph: <ShieldGlyph /> },
 ];
 
@@ -67,6 +74,8 @@ type AdeSidebarProps = {
   whatsNew?: ReleaseNote;
   /** Dismiss the what's-new card (marks the version seen). */
   onDismissWhatsNew?: () => void;
+  /** Take the note's offered action (e.g. open the phone-app waitlist). */
+  onWhatsNewCta?: (kind: ReleaseCta) => void;
 };
 
 function readSection(): AdeSection {
@@ -95,6 +104,7 @@ export function AdeSidebar({
   traceCount = 0,
   whatsNew,
   onDismissWhatsNew,
+  onWhatsNewCta,
 }: AdeSidebarProps) {
   const [section, setSection] = useState<AdeSection>(() => readSection());
 
@@ -145,10 +155,15 @@ export function AdeSidebar({
 
   return (
     <div className="ade-side">
+      {/* Account + Settings + Help used to sit here as a top identity row;
+          they were consolidated into the sidebar header strip (account +
+          settings) — Help was dropped — so the sidebar body starts straight
+          at the section content. */}
       {whatsNew ? (
         <WhatsNewCard
           note={whatsNew}
           onDismiss={() => onDismissWhatsNew?.()}
+          onCta={onWhatsNewCta}
         />
       ) : null}
       <div className="ade-side-body">
@@ -174,6 +189,7 @@ export function AdeSidebar({
               <button
                 key={s.id}
                 type="button"
+                data-tour={`section-${s.id}`}
                 className={section === s.id ? "active" : ""}
                 onClick={() => setSection(s.id)}
                 title={s.label}
@@ -194,12 +210,34 @@ export function AdeSidebar({
 
 // Count badge for the section buttons: a plain dot for a single item, a
 // numbered pill (capped 9+) once there's more than one.
+// The switcher's "there's something new here" marker. Amber, not red — new
+// work waiting is an ask, and red has to keep meaning "this broke". Not the
+// accent either: in this rail the accent marks WHERE YOU ARE (the active
+// section, the active row), so filling every count badge with it drowns the
+// one signal it exists to carry and leaves the whole panel reading as a
+// single tinted wash. (The stylesheet still paints `.ade-seg-badge` red; the
+// inline value is what overrides it.)
+const SEG_BADGE_INK: CSSProperties = {
+  background: "var(--color-amber)",
+  color: "var(--color-bg-0)",
+};
+
 function CountBadge({ count }: { count: number }) {
   if (count <= 1) {
-    return <span className="ade-seg-badge ade-seg-badge--dot" aria-hidden />;
+    return (
+      <span
+        className="ade-seg-badge ade-seg-badge--dot"
+        style={SEG_BADGE_INK}
+        aria-hidden
+      />
+    );
   }
   return (
-    <span className="ade-seg-badge" aria-label={`${count} new`}>
+    <span
+      className="ade-seg-badge"
+      style={SEG_BADGE_INK}
+      aria-label={`${count} new`}
+    >
       {count > 9 ? "9+" : count}
     </span>
   );
@@ -228,11 +266,13 @@ function MessageGlyph() {
   );
 }
 
-function KanbanGlyph() {
+// Pages — a document with a folded corner and text lines. The Plan section is
+// Pages-only now (Tasks moved to Team), so it reads as its own thing.
+function PagesGlyph() {
   return (
     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-      <rect x="3" y="3" width="18" height="18" rx="2" />
-      <path d="M8 7v7M12 7v10M16 7v4" strokeLinecap="round" />
+      <path d="M14 3H6a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9Z" strokeLinejoin="round" />
+      <path d="M14 3v6h6M9 13h6M9 17h4" strokeLinecap="round" strokeLinejoin="round" />
     </svg>
   );
 }
@@ -378,40 +418,42 @@ export function PlanSection({
   };
   return (
     <div className="ade-subsec">
-      <div className="ade-subtabs">
-        <button
-          type="button"
-          className={tab === "tasks" ? "active" : ""}
-          onClick={() => pick("tasks")}
-        >
-          Tasks
-        </button>
-        <button
-          type="button"
-          className={tab === "pages" ? "active" : ""}
-          onClick={() => pick("pages")}
-        >
-          Pages
-        </button>
-        {onOpenAutomations && (
-          <button
-            type="button"
-            className="ade-subtab-aux"
-            title="Automations — schedule and orchestrate agent runs"
-            onClick={onOpenAutomations}
-          >
-            Automations
-          </button>
-        )}
-        {onOpenStandup && (
-          <button
-            type="button"
-            className="ade-subtab-aux"
-            title="A quick summary of what everyone got done"
-            onClick={onOpenStandup}
-          >
-            Standup
-          </button>
+      <div className="mb-1 flex items-center gap-1 min-w-0">
+        <Segment<PlanSubtab>
+          size="xs"
+          stretch
+          className="flex-1"
+          ariaLabel="Tasks or Pages"
+          value={tab}
+          onChange={pick}
+          options={[
+            { value: "tasks", label: "Tasks" },
+            { value: "pages", label: "Pages" },
+          ]}
+        />
+        {(onOpenAutomations || onOpenStandup) && (
+          <div className="flex items-center gap-0.5 border-l border-line pl-1">
+            {onOpenAutomations && (
+              <button
+                type="button"
+                title="Automations — schedule and orchestrate agent runs"
+                onClick={onOpenAutomations}
+                className="h-[22px] px-1.5 rounded text-[11px] text-text-4 hover:text-text-1 hover:bg-bg-0 transition-colors"
+              >
+                Automations
+              </button>
+            )}
+            {onOpenStandup && (
+              <button
+                type="button"
+                title="A quick summary of what everyone got done"
+                onClick={onOpenStandup}
+                className="h-[22px] px-1.5 rounded text-[11px] text-text-4 hover:text-text-1 hover:bg-bg-0 transition-colors"
+              >
+                Standup
+              </button>
+            )}
+          </div>
         )}
       </div>
       <div className="ade-sec-fill">
@@ -557,16 +599,18 @@ const GLYPH_USAGE = (
     <path d="M6 9.5v5M18 9.5v5" />
   </>
 );
-// Cross-branch impacts — a git-fork: a left trunk with two nodes and a
-// branch node on the right curving back, hinting "a change on another
-// branch reaches yours".
+// Cross-branch impacts — a horizontal git-fork: one node on the left splitting
+// rightward into two diverged branch nodes, hinting "a change on another
+// branch reaches yours". Deliberately horizontal (no vertical trunk) so it
+// reads unmistakably as a fork.
 const GLYPH_IMPACTS = (
   <>
-    <path d="M6 4v16" />
-    <circle cx="6" cy="5" r="1.9" />
-    <circle cx="6" cy="19" r="1.9" />
-    <circle cx="18" cy="8" r="1.9" />
-    <path d="M18 10a6 6 0 0 1-6 6H6" />
+    <circle cx="5" cy="12" r="2" />
+    <circle cx="19" cy="6" r="2" />
+    <circle cx="19" cy="18" r="2" />
+    <path d="M7 12h5" />
+    <path d="M12 12C14.5 12 14.5 6 17 6" />
+    <path d="M12 12C14.5 12 14.5 18 17 18" />
   </>
 );
 // Safety check — a shield with a check, hinting "a second set of eyes
@@ -620,12 +664,14 @@ function TraceRow({
       <RowGlyph moat={moat}>{glyph}</RowGlyph>
       <span className="nm">{label}</span>
       {count && count > 0 ? (
+        // Same solid count pill the section switcher uses (SEG_BADGE_INK) —
+        // a count that's asking for you should look identical wherever it
+        // appears in this sidebar. Amber, because that is what it is: an
+        // unresolved impact is the dirty/attention state, not a place you
+        // can navigate to, and the accent in this rail means "you are here".
         <span
           className="ml-auto flex-shrink-0 min-w-[18px] text-center rounded-full px-1.5 py-px text-[10px] font-semibold tabular-nums"
-          style={{
-            background: "color-mix(in oklab, var(--color-amber) 18%, transparent)",
-            color: "var(--color-amber)",
-          }}
+          style={SEG_BADGE_INK}
           aria-label={`${count} ${count === 1 ? "impact" : "impacts"}`}
         >
           {count > 9 ? "9+" : count}

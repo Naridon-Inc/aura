@@ -25,6 +25,26 @@ use std::sync::Mutex;
 
 use serde::{Deserialize, Serialize};
 use tauri::webview::{PageLoadEvent, WebviewBuilder};
+
+/// User-agent presented by the in-app browser. A raw embedded WKWebView sends
+/// a UA with NO `Version/… Safari/…` token (e.g. `…AppleWebKit/605.1.15 (KHTML,
+/// like Gecko)`), which sites like Shopify/Google read as an ancient, insecure
+/// browser — they show "update your browser" walls or hard-block login. Since
+/// the engine genuinely IS WebKit, we present an honest, current Safari UA so
+/// those sites accept it and real logged-in state can be exercised. Kept in
+/// sync with a recent macOS Safari; the `605.1.15` build token is what WKWeb
+/// actually ships, so this only adds the missing `Version/… Safari/…` suffix.
+const BROWSER_USER_AGENT: &str = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) \
+AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.5 Safari/605.1.15";
+
+/// Mobile counterpart, presented by the narrow sidebar browser (the rail). An
+/// iPhone Safari UA makes sites serve their mobile layout — which is what fits a
+/// ~320–400px rail — while still carrying the honest `Version/… Mobile/… Safari/…`
+/// tokens so login walls accept it as a real, current Safari (same rationale as
+/// the desktop UA above; `605.1.15` is WKWebView's actual build token). Paired
+/// with the rail's already-narrow viewport, sites render true mobile views.
+const BROWSER_USER_AGENT_MOBILE: &str = "Mozilla/5.0 (iPhone; CPU iPhone OS 18_5 like Mac OS X) \
+AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.5 Mobile/15E148 Safari/604.1";
 use tauri::{
     AppHandle, Emitter, LogicalPosition, LogicalSize, Manager, Position, Rect, Size, State, Url,
     WebviewUrl,
@@ -197,6 +217,7 @@ pub async fn browser_open(
     y: f64,
     width: f64,
     height: f64,
+    mobile: bool,
 ) -> Result<(), String> {
     let target = parse_url(&url)?;
     let label = label_for(&tab_id);
@@ -225,7 +246,13 @@ pub async fn browser_open(
     let load_app = app.clone();
     let load_tab = tab_id.clone();
 
+    let user_agent = if mobile {
+        BROWSER_USER_AGENT_MOBILE
+    } else {
+        BROWSER_USER_AGENT
+    };
     let builder = WebviewBuilder::new(label.clone(), WebviewUrl::External(target))
+        .user_agent(user_agent)
         .on_navigation(move |u| {
             // Every navigation (link click, JS redirect, address-bar go) flips
             // the tab into the loading state with its new URL. Returning true

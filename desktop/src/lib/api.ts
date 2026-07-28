@@ -92,6 +92,15 @@ export type FileContent = {
   status: string;
 };
 
+/** An external code editor Aura can launch a file/folder in. Only installed
+ *  editors are returned by `editorsList`, always including a "System default"
+ *  entry that defers to the OS file association. Mirrors Rust `EditorInfo`. */
+export type EditorInfo = {
+  id: string;
+  name: string;
+  available: boolean;
+};
+
 /** A file's bytes as base64 + a guessed media type — what `readFileBase64`
  *  returns. Used to attach an OS-dropped screenshot to the chat. Mirrors the
  *  Rust `FileBase64`. */
@@ -577,7 +586,7 @@ export type TaskActivity = {
   actor_handle: string;
   /** Event-specific payload. Example shapes:
    *    state_changed → { from: "backlog", to: "started" }
-   *    assigned      → { added: ["owner"] }
+   *    assigned      → { added: ["ashiq"] }
    *    labeled       → { added: ["bug"] }
    *    linked        → { target_id: "task_abc", kind: "blocked_by" }
    *    commented     → { comment_id: "cmt_..." } */
@@ -809,6 +818,19 @@ export type BrainDescriptor = {
 export type BrainProviderConfig = {
   model?: string | null;
   extra?: unknown;
+};
+
+/** Saved config for a cloud singleton brain (Bedrock / Vertex) as read back
+ *  by {@link Api.brainCloudConfigGet}. Mirrors Rust `BrainCloudConfigOut`.
+ *  Never carries the credential itself — `has_secret` only says whether one
+ *  is in the keychain. `extra` holds the non-secret fields (Bedrock:
+ *  `region` / `access_key_id` / `session_token`; Vertex: `project_id` /
+ *  `location`). */
+export type BrainCloudConfig = {
+  provider_id: string;
+  model: string | null;
+  extra: Record<string, string>;
+  has_secret: boolean;
 };
 
 /** One selectable brain for the chat-header BrainPicker (WW-B1). Flatter
@@ -1124,6 +1146,23 @@ export type UnattributedMutation = {
   event_id: string;
 };
 
+/** Result of `aura_ensure_tracked` — whether the just-opened repo is now a
+ *  live Aura repo, wired for intent capture. Drives the quiet "now tracking"
+ *  confirmation and the non-git one-click enable notice. */
+export type AuraTrackStatus = {
+  repo_root: string;
+  /** A git repo at all? Aura can't track without git. */
+  is_git: boolean;
+  /** Capture is on (`.aura/` + hooks) after this call. */
+  tracked: boolean;
+  /** True only when THIS call flipped it on (show the toast once). */
+  newly_enabled: boolean;
+  /** Agent CLIs wired (MCP + hooks) so edits here log intent. */
+  wired: boolean;
+  /** Human line for the non-git / error case; null on success. */
+  detail: string | null;
+};
+
 export const api = {
   auraStatus: () => invoke<AuraStatus>("aura_status"),
   homeDir: () => invoke<string>("home_dir"),
@@ -1148,6 +1187,9 @@ export const api = {
   fsDelete: (path: string) => invoke<void>("fs_delete", { path }),
   fsRevealInFinder: (path: string) =>
     invoke<void>("fs_reveal_in_finder", { path }),
+  editorsList: () => invoke<EditorInfo[]>("editors_list"),
+  editorOpen: (path: string, editorId: string) =>
+    invoke<void>("editor_open", { path, editorId }),
   fsFindFiles: (repoRoot: string) =>
     invoke<string[]>("fs_find_files", { repoRoot }),
   fsGrepContent: (
@@ -1179,6 +1221,45 @@ export const api = {
    *  + uncommitted) instead of just vs HEAD; omitted/false keeps vs-HEAD. */
   gitDiff: (repoRoot: string, file: string, sinceBase?: boolean) =>
     invoke<string>("git_diff", { repoRoot, file, sinceBase: sinceBase ?? null }),
+  /** One-sentence, plain-language "what changed" for a single working-tree
+   *  file — the human-readable half of the file-insight strip. Uses whichever
+   *  model the user has reachable; falls back to a deterministic line when
+   *  none is, and caches by diff content-hash so the model runs at most once
+   *  per distinct edit. Never throws on a missing model. */
+  summarizeFileChange: (repoRoot: string, path: string) =>
+    invoke<ChangeSummary>("summarize_file_change", { repoRoot, path }),
+  /** Plain-language before/what/why for one file's change — the split-diff's
+   *  "what it used to do" (before) + "what changed" (what) columns and the
+   *  reasoning band (why + how it works now). `commit` scopes it to a past
+   *  commit's change; omit for the live working-tree edit. Model-backed with a
+   *  deterministic fallback, cached by (path, diff-hash, angle). Never throws
+   *  on a missing model. */
+  explainChange: (repoRoot: string, path: string, commit?: string) =>
+    invoke<ChangeExplanation>("explain_change", { repoRoot, path, commit: commit ?? null }),
+  /** Same before/what/why explanation for a diff the caller already holds — one
+   *  file's raw unified diff across a PR's base..head range (from `gh pr diff`),
+   *  which has no single commit to point at. Cached by the diff's content-hash. */
+  explainChangeDiff: (repoRoot: string, path: string, diff: string) =>
+    invoke<ChangeExplanation>("explain_change_diff", { repoRoot, path, diff }),
+  /** Per-piece plain-language meaning for each changed symbol in a file — the
+   *  "New is this" / "Previous was this" node blurbs. The file-level
+   *  before/what/why can't speak for each of several pieces, so this describes
+   *  each on its own. Model-backed with a per-piece deterministic fallback
+   *  (mined from that piece's own diff lines), cached by (path, diff-hash,
+   *  symbol). `commit` scopes it to a past commit; omit for the working-tree
+   *  edit. Never throws on a missing model. */
+  explainSymbols: (
+    repoRoot: string,
+    path: string,
+    symbols: ChangedSymbol[],
+    commit?: string,
+  ) =>
+    invoke<SymbolExplanation[]>("explain_symbols", {
+      repoRoot,
+      path,
+      commit: commit ?? null,
+      symbols,
+    }),
   /** Patch a single commit applied to one file (no commit-message header).
    *  Used by Trace Changes to show a committed run's real diff once
    *  `git diff HEAD` reports the file as clean. */
@@ -1266,7 +1347,18 @@ export const api = {
     invoke<number>("claude_auth_login", { method }),
   claudeAuthLogout: () => invoke<void>("claude_auth_logout"),
   codexAuthStatus: () =>
-    invoke<{ logged_in: boolean; method: string | null }>("codex_auth_status"),
+    invoke<{
+      logged_in: boolean;
+      method: string | null;
+      /** "logged_in" | "logged_out" | "broken" | "missing" */
+      state: string;
+      /** Human-readable reason when broken/missing. */
+      detail: string | null;
+      /** Copy-run command that repairs a missing/broken install. */
+      fix_command: string | null;
+      /** Codex/ChatGPT credentials exist on disk even if the CLI is down. */
+      has_credentials: boolean;
+    }>("codex_auth_status"),
   codexAuthLogin: () => invoke<number>("codex_auth_login"),
   codexAuthLoginApiKey: (apiKey: string) =>
     invoke<number>("codex_auth_login_api_key", { apiKey }),
@@ -1298,6 +1390,14 @@ export const api = {
     invoke<NewRepo>("git_init", { parentDir, name }),
   scaffoldTemplate: (parentDir: string, name: string, template: string) =>
     invoke<NewRepo>("scaffold_template", { parentDir, name, template }),
+  // Seed the bundled "Recipe Box" sample project on first launch. Idempotent —
+  // returns the existing root if already seeded. `ambientSessionId` is the live
+  // sample chat to focus so Build opens on a real conversation.
+  seedSampleProject: () => invoke<SeededSample>("seed_sample_project"),
+  // Front the OS emoji / character picker (macOS Character Viewer). The picked
+  // glyph is inserted into whatever text field is focused in the webview — the
+  // caller focuses a capture input first, then reads the inserted character.
+  openSystemEmojiPicker: () => invoke<void>("open_system_emoji_picker"),
   gitAheadBehind: (repoRoot: string) =>
     invoke<AheadBehind>("git_ahead_behind", { repoRoot }),
   gitShowCommit: (repoRoot: string, sha: string) =>
@@ -1890,6 +1990,19 @@ export const api = {
   agentGuardIntentCovers: (repoRoot: string, filePath: string) =>
     invoke<boolean>("agent_guard_intent_covers", { repoRoot, filePath }),
 
+  /** Make an opened repo a live Aura repo — silent + idempotent, safe to
+   *  call on every repo focus. Turns on passive capture (`aura enable`),
+   *  wires the agent CLIs (MCP + hooks) so any agent editing here logs
+   *  intent, and keeps Aura's footprint out of `git status` via
+   *  `.git/info/exclude`. For a non-git folder, returns `is_git:false` +
+   *  a `detail` line the UI turns into a one-click enable notice. */
+  auraEnsureTracked: (repoRoot: string) =>
+    invoke<AuraTrackStatus>("aura_ensure_tracked", { repoRoot }),
+  /** The non-git escape hatch: the user's click IS the consent to create
+   *  git history here. Runs `git init`, then the normal ensure pass. */
+  auraGitInitAndTrack: (repoRoot: string) =>
+    invoke<AuraTrackStatus>("aura_git_init_and_track", { repoRoot }),
+
   // Op log + undo (jj-style). Every mutating engine call writes a
   // record to `.aura/op_log.jsonl` with an opaque `undo_payload`.
   // `aura_undo_last` reverses the most recent un-undone op (or a
@@ -1924,6 +2037,13 @@ export const api = {
   auraChangeNote: (repoRoot: string, sha?: string) =>
     invoke<ChangeNoteReport>("aura_change_note", { repoRoot, sha }),
 
+  /** Blast radius for one symbol — who depends on it + which user-facing
+   *  features ride on it, from `aura impact <symbol> <file> --json`. Powers the
+   *  "N things depend on this" pre-flight before a surgical Rewind. `file` may
+   *  be repo-relative or absolute. Deterministic — no AI tokens. */
+  auraSymbolImpact: (repoRoot: string, symbol: string, file: string) =>
+    invoke<SymbolImpact>("aura_symbol_impact", { repoRoot, symbol, file }),
+
   // ── Slash-command structured backends (/doctor /zones /taste /review) ──
   // Each runs the matching `aura … --json` subcommand (or reads local state)
   // and returns the engine's report verbatim, so the chat slash layer can
@@ -1937,6 +2057,34 @@ export const api = {
   // shadow-checkpoint walk can take a few seconds.
   auraDoctorJson: (repoRoot: string) =>
     invoke<DoctorReport>("aura_doctor_json", { repoRoot }),
+
+  // The staged intent gate — `aura verify-intent --staged --json`. Compares
+  // the approved baseline tree against the git index and returns the same
+  // verdict the pre-commit hook acts on. `null` means this repository has no
+  // approved contract, which is a pass, not a failure.
+  verifyIntentStaged: (repoRoot: string) =>
+    invoke<IntentVerdict | null>("verify_intent_staged", { repoRoot }),
+
+  // What the agent was authorised to change, recorded before it ran.
+  intentContractShow: (repoRoot: string) =>
+    invoke<IntentContract | null>("intent_contract_show", { repoRoot }),
+
+  // Put one deleted symbol back from the approved baseline, stage it, and
+  // re-verify. Leaves every other edit the agent made in place — the point is
+  // that the requested cleanup survives while the unrequested deletion does not.
+  restoreDeletedSymbol: (repoRoot: string, symbol: string) =>
+    invoke<RestoreResult>("restore_deleted_symbol", { repoRoot, symbol }),
+
+  // Widen the contract deliberately. The amendment is recorded next to the
+  // code, which is what makes it different from skipping the hook.
+  approveSymbolRemoval: (repoRoot: string, symbol: string) =>
+    invoke<IntentVerdict>("approve_symbol_removal", { repoRoot, symbol }),
+
+  // A test result somebody recorded, not one we ran. `null` when nobody did,
+  // so the verification screen can stay silent rather than print a number it
+  // never saw.
+  recordedTestSummary: (repoRoot: string) =>
+    invoke<string | null>("recorded_test_summary", { repoRoot }),
 
   // /zones — local sentinel zones/claims for this repo ("who claimed what"),
   // read straight off .aura/sentinel/zones (no network, no cloud session).
@@ -2234,6 +2382,18 @@ export const api = {
     }),
   identityOverrideClear: (repoRoot: string) =>
     invoke<void>("identity_override_clear", { repoRoot }),
+  /** Every self-picked profile photo, keyed by lowercased email → `data:` URL.
+   *  Resolve a member against this first, then their GitHub avatar, then the
+   *  animal monogram. Local to this machine; never in a repo. */
+  identityAvatarsGet: () =>
+    invoke<Record<string, string>>("identity_avatars_get"),
+  /** Attach a photo to `email` from a file the user picked. Returns the stored
+   *  `data:` URL so the caller can show it without re-fetching the whole map. */
+  identityAvatarSetFromPath: (email: string, path: string) =>
+    invoke<string>("identity_avatar_set_from_path", { email, path }),
+  /** Drop a person's photo — they fall back to GitHub avatar / animal again. */
+  identityAvatarClear: (email: string) =>
+    invoke<void>("identity_avatar_clear", { email }),
   teamAliasAdd: (
     repoRoot: string,
     targetHandle: string,
@@ -2264,6 +2424,38 @@ export const api = {
    *  inbound events to the right roster entry. */
   canonicalHandleForEmail: (repoRoot: string, email: string) =>
     invoke<string | null>("canonical_handle_for_email", { repoRoot, email }),
+  /** Propose likely-duplicate member groups (one human enrolled under two+
+   *  emails / a GitHub collaborator seat) for the roster's review banner. The
+   *  auto-merge only fuses on globally-unique links; this weak-signal layer
+   *  surfaces name / email-stem matches for a human to confirm. Read-only. */
+  teamIdentitySuggestDuplicates: (repoRoot: string) =>
+    invoke<DuplicateSuggestion[]>("team_identity_suggest_duplicates", {
+      repoRoot,
+    }),
+  /** Confirm a suggestion — fold every `mergedEmails` row into `survivorEmail`
+   *  via the alias path, then collapse. Admin, or one of the involved people. */
+  teamIdentityConfirmDuplicate: (
+    repoRoot: string,
+    survivorEmail: string,
+    mergedEmails: string[],
+  ) =>
+    invoke<TeamManifest>("team_identity_confirm_duplicate", {
+      repoRoot,
+      survivorEmail,
+      mergedEmails,
+    }),
+  /** Reject a suggestion — record that the two emails are DIFFERENT people so
+   *  the pair is never suggested again. Never merges anything. */
+  teamIdentityRejectDuplicate: (
+    repoRoot: string,
+    emailA: string,
+    emailB: string,
+  ) =>
+    invoke<TeamManifest>("team_identity_reject_duplicate", {
+      repoRoot,
+      emailA,
+      emailB,
+    }),
   teamStatusGet: () => invoke<TeamStatus>("team_status_get"),
   teamStatusSet: (activityText: string | null, statusEmoji: string | null) =>
     invoke<TeamStatus>("team_status_set", {
@@ -2370,6 +2562,30 @@ export const api = {
     invoke<ChatDoctorReport>("chat_doctor", { repoRoot }),
   chatUploadAttachment: (repoRoot: string, filePath: string) =>
     invoke<ChatAttachment>("chat_upload_attachment", { repoRoot, filePath }),
+  chatUploadAttachmentBytes: (
+    repoRoot: string,
+    bytesBase64: string,
+    filename: string,
+    mime: string,
+  ) =>
+    invoke<ChatAttachment>("chat_upload_attachment_bytes", {
+      repoRoot,
+      bytesBase64,
+      filename,
+      mime,
+    }),
+  chatUploadVoiceNote: (
+    repoRoot: string,
+    bytesBase64: string,
+    filename: string,
+    mime: string,
+  ) =>
+    invoke<ChatAttachment>("chat_upload_voice_note", {
+      repoRoot,
+      bytesBase64,
+      filename,
+      mime,
+    }),
 
   // Soundboard — short audio clips played into a live LiveKit huddle.
   // Storage is per-repo under ~/.aura/soundboard/<repo-hash>/.
@@ -2809,6 +3025,11 @@ export const api = {
     baseUrl: string;
     model: string;
     apiKey?: string;
+    /** `"api_key"` for Azure OpenAI (uses the `api-key:` header); omit for
+     *  standard `Authorization: Bearer` endpoints. */
+    authStyle?: "bearer" | "api_key";
+    /** Azure OpenAI `api-version` query param (e.g. `2024-08-01-preview`). */
+    apiVersion?: string;
     setActive?: boolean;
   }) =>
     invoke<{ provider_id: string }>("brain_upsert_provider", {
@@ -2817,6 +3038,8 @@ export const api = {
         base_url: opts.baseUrl,
         model: opts.model,
         api_key: opts.apiKey ?? null,
+        auth_style: opts.authStyle ?? null,
+        api_version: opts.apiVersion ?? null,
         set_active: opts.setActive ?? false,
       },
     }),
@@ -2825,6 +3048,33 @@ export const api = {
     invoke<void>("brain_remove_provider", {
       input: { provider_id: providerId },
     }),
+  /**
+   * Configure a cloud singleton brain — AWS Bedrock or Google Vertex AI —
+   * that needs more than a single API key. Non-secret fields (Bedrock:
+   * `region` / `access_key_id` / `session_token`; Vertex: `project_id` /
+   * `location`) go to `brain_settings.json`; the credential (AWS secret
+   * access key / the service-account JSON) goes to the OS keychain. Pass
+   * `secret: ""` to clear it, omit to leave it in place.
+   */
+  brainConfigureCloud: (opts: {
+    providerId: "bedrock" | "vertex";
+    model?: string;
+    extra: Record<string, string>;
+    secret?: string;
+    setActive?: boolean;
+  }) =>
+    invoke<void>("brain_configure_cloud", {
+      input: {
+        provider_id: opts.providerId,
+        model: opts.model ?? null,
+        extra: opts.extra,
+        secret: opts.secret ?? null,
+        set_active: opts.setActive ?? false,
+      },
+    }),
+  /** Read back a cloud brain's saved config (never the credential itself). */
+  brainCloudConfigGet: (providerId: "bedrock" | "vertex") =>
+    invoke<BrainCloudConfig>("brain_cloud_config_get", { providerId }),
 
   // Aura Pro brain (v0.2.31 task #352) — managed/subscription backend.
   // No keychain row: sign-in state + quota live in cloud-auth land
@@ -2995,6 +3245,45 @@ export const api = {
   sentinelMarkRead: (repoRoot: string, messageId: string, readerSession: string) =>
     invoke<void>("sentinel_mark_read", { repoRoot, messageId, readerSession }),
 
+  // ── cross-worktree control plane (the Workspaces page) ──────────────
+  //
+  // The whole board for a repository: every checkout, the agents standing
+  // in each, what they hold, and where two of them have converged on the
+  // same symbol. `repoRoot` may be ANY checkout — the engine resolves the
+  // shared plane back to the main one itself.
+  //
+  // `withGitStatus: false` skips the per-checkout git work (dirty count,
+  // drift from trunk, HEAD date) and returns in milliseconds; the page
+  // paints that first and swaps in the full board when it lands.
+  worktreePlane: (repoRoot: string, withGitStatus?: boolean) =>
+    invoke<WorktreePlane>("worktree_plane", { repoRoot, withGitStatus }),
+  /** Send a line to one checkout by name (`main` for the main checkout),
+   *  or to every agent holding a claim when `toWorktree` is omitted. */
+  worktreeSay: (repoRoot: string, message: string, toWorktree?: string) =>
+    invoke<WorktreeSayResult>("worktree_say", { repoRoot, message, toWorktree }),
+
+  // ── publishing a plain folder (the no-repo gate) ────────────────────
+  repoState: (dir: string) => invoke<RepoState>("repo_state", { dir }),
+  /** Both hosts, always — one you're signed out of comes back with the
+   *  command that fixes it, rather than silently missing. */
+  repoHosts: (dir: string) => invoke<HostProvider[]>("repo_hosts", { dir }),
+  repoNameFree: (provider: string, owner: string, name: string) =>
+    invoke<boolean>("repo_name_free", { provider, owner, name }),
+  repoPublish: (
+    dir: string,
+    provider: string,
+    owner: string,
+    name: string,
+    isPrivate: boolean,
+  ) =>
+    invoke<PublishResult>("repo_publish", {
+      dir,
+      provider,
+      owner,
+      name,
+      private: isPrivate,
+    }),
+
   // Zone rules — read straight off .aura/sentinel/zones; claim/release
   // shell out to the `aura zones …` CLI so the rules-engine + cloud-sync
   // side effects stay in one place.
@@ -3099,6 +3388,35 @@ export const api = {
    *  node's lifecycle state from the panel. */
   loopSetStatus: (repoRoot: string, nodeId: string, status: string) =>
     invoke<LoopTask>("loop_set_status", { repoRoot, nodeId, status }),
+  /** Cloud roundtrip (P1): pull cloud-worked results home + push finished local
+   *  work up, in one call. `pull`/`push` gate the legs (both false = both). Thin
+   *  desktop face of `aura loop cloud-sync`; returns `{repo, pulled, pushed,
+   *  notes}`. Requires the user to be signed in to cloud (`cloudAuthStatus`). */
+  loopCloudSync: (repoRoot: string, pull = false, push = false) =>
+    invoke<CloudSyncResult>("loop_cloud_sync", { repoRoot, pull, push }),
+  /** Cloud roundtrip (P1): hand a job to the always-on cloud runner — mints a
+   *  submitted task on the shared A2A board (scoped to this repo's origin) that
+   *  a runner drains. `agent` is the bare provider id ("claude"); an optional
+   *  acceptance line makes it provable. Returns the cloud task `{id, status}`. */
+  loopCloudSend: (
+    repoRoot: string,
+    text: string,
+    agent: string,
+    acceptance?: string,
+  ) =>
+    invoke<CloudSendResult>("loop_cloud_send", {
+      repoRoot,
+      text,
+      agent,
+      acceptance: acceptance ?? null,
+    }),
+  /** Connect-a-machine: mint a one-time runner-registry token on the signed-in
+   *  cloud account so a brand-new box can join your board. Shells the bundled
+   *  `aura runner register` (same `recall_cloud_creds` path as sign-in). `repo`
+   *  optionally scopes the runner to one repo; omitted = org-wide (drains every
+   *  project). Requires cloud sign-in. */
+  runnerProvision: (name: string, repo?: string) =>
+    invoke<RunnerProvision>("runner_provision", { name, repo: repo ?? null }),
   /** W-B: park work out of the ready set. One task (`nodeId`) or a whole
    *  `goal`/`crew` subtree. Returns the ids actually paused. */
   loopPause: (
@@ -3177,6 +3495,10 @@ export const api = {
    *  list (e.g. the running-agents status pill). */
   managerList: (repoRoot?: string | null) =>
     invoke<ManagerSummary[]>("manager_list", { repoRoot: repoRoot ?? null }),
+  /** Search message bodies across native Aura conversations in every
+   *  workspace. Used by the global Command Palette conversation lane. */
+  managerSearch: (query: string, limit = 40) =>
+    invoke<ManagerSearchHit[]>("manager_search", { query, limit }),
   /** Replay a native Aura chat session as the same {@link StreamEvent}
    *  stream the Trace transcript renderer consumes for Claude Code JSONL
    *  sessions. Native manager sessions persist to
@@ -3289,20 +3611,21 @@ export const api = {
     answer: string,
   ) =>
     invoke<void>("manager_answer_question", { sessionId, questionId, answer }),
-  /** User clicked Build / Cancel on a PlanCard. `decision` is "build" or
-   *  "cancel"; on "build" the CLI brain wakes up and starts dispatching
-   *  the plan's todos via `aura subagent spawn`. */
+  /** Resolve a PlanCard. Build starts execution, revise returns written
+   *  feedback to the planning brain, and cancel abandons the plan. */
   managerDecidePlan: (
     sessionId: string,
     planId: string,
-    decision: "build" | "cancel",
+    decision: "build" | "revise" | "cancel",
     notifyTeam?: boolean,
     parallelism?: PlanParallelism,
+    feedback?: string,
   ) =>
     invoke<void>("manager_decide_plan", {
       sessionId,
       planId,
       decision,
+      feedback: feedback ?? null,
       notifyTeam: notifyTeam ?? false,
       parallelism: parallelism ?? null,
     }),
@@ -3371,6 +3694,14 @@ export const api = {
     invoke<void>("settings_agents_toml_upsert", { entry }),
   settingsAgentsTomlRemove: (id: string) =>
     invoke<void>("settings_agents_toml_remove", { id }),
+  /** Secret-redacted Claude Code / Codex / Gemini preference sync. Auth
+   *  stores are never read; pull creates adjacent timestamped backups. */
+  settingsAgentConfigsStatus: () =>
+    invoke<AgentConfigSyncStatus>("settings_agent_configs_status"),
+  settingsAgentConfigsPush: () =>
+    invoke<AgentConfigSyncStatus>("settings_agent_configs_push"),
+  settingsAgentConfigsPull: () =>
+    invoke<AgentConfigApplyResult>("settings_agent_configs_pull"),
   settingsTelemetryShow: () =>
     invoke<TelemetryView>("settings_telemetry_show"),
   settingsTelemetryClear: () =>
@@ -3491,6 +3822,28 @@ export const api = {
   // matching .aura/reviews/*.json risk score so the PR card surfaces
   // Aura's verdict next to GitHub's.
   prList: (repoRoot: string) => invoke<PrSummary[]>("pr_list", { repoRoot }),
+  /** Open GitHub issues available as workspace launch context. */
+  githubIssueList: (repoRoot: string) =>
+    invoke<GithubIssue[]>("github_issue_list", { repoRoot }),
+  /** Create a PR from the selected worktree branch. The backend pushes the
+   *  branch first, then returns the concrete PR so Aura can open it. */
+  prCreate: (input: {
+    repoRoot: string;
+    headBranch?: string | null;
+    title: string;
+    body: string;
+    baseBranch?: string | null;
+    draft: boolean;
+  }) => invoke<PrCreated>("pr_create", input),
+  /** Edit title, description, target branch, and draft state natively. */
+  prEdit: (input: {
+    repoRoot: string;
+    prNumber: number;
+    title: string;
+    body: string;
+    baseBranch?: string | null;
+    draft: boolean;
+  }) => invoke<void>("pr_edit", input),
   /** GitHub viewer login (`gh api user --jq .login`). Empty string if
    *  unauthenticated. Cached by caller — Inbox uses this to highlight
    *  PRs authored by the user vs awaiting their review. */
@@ -3503,8 +3856,30 @@ export const api = {
    *  current and shells `gh pr edit --add-label / --remove-label`. */
   prLabelsSet: (repoRoot: string, prNumber: number, names: string[]) =>
     invoke<void>("pr_labels_set", { repoRoot, prNumber, names }),
+  /** Edit a PR's title and/or body (`gh pr edit`). Pass `null` for a field
+   *  to leave it unchanged, so the title and body can be saved independently. */
+  prUpdate: (
+    repoRoot: string,
+    prNumber: number,
+    title: string | null,
+    body: string | null,
+  ) => invoke<void>("pr_update", { repoRoot, prNumber, title, body }),
   prDetail: (repoRoot: string, prNumber: number) =>
     invoke<PrDetail>("pr_detail", { repoRoot, prNumber }),
+  /** Flatten every status check on a PR (`gh pr view --json
+   *  statusCheckRollup`) into one row per check — GitHub Actions runs,
+   *  external CI status contexts, everything. Each row carries a plain
+   *  bucket ("success" | "failure" | "pending") the Checks tab colors by,
+   *  plus a `url` to the run's logs. Same rollup `pr_list` already reads,
+   *  surfaced per-check instead of only summarized to a chip. */
+  prChecks: (repoRoot: string, number: number) =>
+    invoke<PrCheck[]>("pr_checks", { repoRoot, number }),
+  /** Vercel deploy status for a PR's head commit, or null when Vercel isn't
+   *  configured (`[vercel]` in `~/.aura/integrations.toml`) or has no
+   *  deployment for the commit yet. Drives the deploy chip above the checks
+   *  list. Deliberately soft — never blocks the checks view. */
+  prVercelStatus: (repoRoot: string, prNumber: number) =>
+    invoke<VercelDeployment | null>("pr_vercel_status", { repoRoot, prNumber }),
   // Stage 7B: comments
   prCommentsList: (repoRoot: string, prNumber: number) =>
     invoke<PrComment[]>("pr_comments_list", { repoRoot, prNumber }),
@@ -3800,23 +4175,63 @@ export const api = {
     channel: string;
     identity: string;
     displayName: string;
-  }): Promise<CallToken> =>
-    fetch("https://auravcs.com/api/v1/call/token", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        ...(await roomAuthHeaders()),
-      },
-      body: JSON.stringify({
-        room_id: args.roomId,
-        channel: args.channel,
-        identity: args.identity,
-        display_name: args.displayName,
-      }),
-    }).then(async (r) => {
-      if (!r.ok) throw new Error(`callsToken: ${r.status}`);
-      return (await r.json()) as CallToken;
-    }),
+  }): Promise<CallToken> => {
+    // A huddle that won't start is almost always a SERVER-side gap — LiveKit
+    // URL/API-key/secret unset, or the SFU unreachable — not a client bug. The
+    // old code threw `callsToken: 500`, which told the user nothing and read as
+    // a generic "Huddle start failed". Surface the real reason: distinguish a
+    // network failure (can't even reach the server) from an HTTP error, and on
+    // an HTTP error fold in the server's own response body plus a plain-language
+    // hint for the status codes that mean "voice isn't provisioned here".
+    let r: Response;
+    try {
+      r = await fetch("https://auravcs.com/api/v1/call/token", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          ...(await roomAuthHeaders()),
+        },
+        body: JSON.stringify({
+          room_id: args.roomId,
+          channel: args.channel,
+          identity: args.identity,
+          display_name: args.displayName,
+        }),
+      });
+    } catch (e) {
+      throw new Error(
+        `Couldn't reach the voice server${
+          e instanceof Error && e.message ? ` (${e.message})` : ""
+        }. Check your connection and that the huddle service is running.`,
+      );
+    }
+    if (!r.ok) {
+      let detail = "";
+      try {
+        const text = await r.text();
+        if (text) {
+          try {
+            const j = JSON.parse(text) as { error?: string; message?: string };
+            detail = j.error || j.message || text;
+          } catch {
+            detail = text;
+          }
+        }
+      } catch {
+        /* body unreadable — fall back to the status alone */
+      }
+      const provisioningHint =
+        r.status === 404 || r.status === 501 || r.status === 503
+          ? " Voice may not be enabled on this server (LiveKit isn't configured)."
+          : "";
+      throw new Error(
+        `Couldn't start the huddle (${r.status})${
+          detail ? `: ${detail.slice(0, 300)}` : ""
+        }.${provisioningHint}`,
+      );
+    }
+    return (await r.json()) as CallToken;
+  },
 
   // ── Modes + Marketplace (v0.2.32 MM.1) ────────────────────────────
   //
@@ -3940,6 +4355,7 @@ export type RepoWorktreeSettings = {
   archive: string | null;
   base: string | null;
   copyFiles: string[];
+  namedScripts: Array<{ name: string; command: string }>;
 };
 
 /** Read this project's copy-and-scripts settings. Returns all-null /
@@ -4332,6 +4748,24 @@ export type PrSummary = {
   labels: PrLabel[];
 };
 
+export type PrCreated = {
+  number: number;
+  title: string;
+  url: string;
+};
+
+export type GithubIssue = {
+  number: number;
+  title: string;
+  body: string;
+  state: string;
+  author: string;
+  labels: string[];
+  url: string;
+  created_at: string;
+  updated_at: string;
+};
+
 export type PrLabel = {
   name: string;
   /** GitHub colour hex without `#` (e.g. `"a2eeef"`). Empty when
@@ -4444,6 +4878,21 @@ export type PrRelatedIssue = {
   state: string;
 };
 
+/** One status check on a PR, flattened from GitHub's statusCheckRollup.
+ *  `bucket` is the plain traffic-light the Checks tab groups + colors by;
+ *  `raw` is GitHub's own word (SUCCESS / FAILURE / IN_PROGRESS / …) for the
+ *  tooltip. `url` opens the run's logs; empty when GitHub gave no link. */
+export type PrCheck = {
+  name: string;
+  /** "success" | "failure" | "pending" */
+  bucket: string;
+  raw: string;
+  url: string;
+  /** Workflow name for Actions runs; empty for external status contexts. */
+  workflow: string;
+  description: string;
+};
+
 export type PrReviewer = {
   login: string;
   /** "APPROVED" | "CHANGES_REQUESTED" | "COMMENTED" | "PENDING" */
@@ -4503,6 +4952,30 @@ export type PrStackNode = {
   url: string;
   children: number[];
   parent: number | null;
+  /** True when this branch's parent came from Graphite's local stack
+   *  metadata (`refs/branch-metadata/`) rather than the GitHub base ref —
+   *  the branch is part of a `gt`-managed stack. Lets the UI show a
+   *  "Graphite stack" chip only when the stack is genuinely Graphite's. */
+  gt_managed: boolean;
+};
+
+/** A Vercel deployment for a PR's head commit — the deploy chip on the PR
+ *  checks view. Null from `prVercelStatus` when Vercel isn't configured or
+ *  has no deployment for the commit yet. */
+export type VercelDeployment = {
+  /** Deployment id (`dpl_…`). */
+  uid: string;
+  /** Vercel readyState, uppercase: READY | BUILDING | ERROR | QUEUED |
+   *  CANCELED | INITIALIZING | UNKNOWN. The UI maps this to plain language. */
+  state: string;
+  /** Deploy host (no scheme), e.g. `my-app-abc123.vercel.app`. */
+  url: string | null;
+  /** Link into the Vercel dashboard for this deployment's build logs. */
+  inspector_url: string | null;
+  /** `production` | `staging` | null (a preview deploy). */
+  target: string | null;
+  /** Creation time, unix-millis. */
+  created_at_ms: number | null;
 };
 
 export type CrashSummary = {
@@ -4637,6 +5110,21 @@ export type AgentsTomlEntry = {
   supports_resume?: boolean;
   stdout_is_stream_json?: boolean;
   env?: Record<string, string>;
+};
+
+export type AgentConfigSyncStatus = {
+  signedIn: boolean;
+  localFiles: string[];
+  remoteFiles: string[];
+  remoteUpdatedAt: string | null;
+  remoteSourceDevice: string | null;
+  error: string | null;
+};
+
+export type AgentConfigApplyResult = {
+  applied: string[];
+  backups: string[];
+  status: AgentConfigSyncStatus;
 };
 
 export type AgentDescriptor = {
@@ -4848,6 +5336,14 @@ export type ChatTurn = {
    *  reads "Saved ~N". Absent/0 on turns that used no token-saving tool, so the
    *  footer chip simply doesn't render. Mirrors the Rust `ChatTurn.saved_tokens`. */
   saved_tokens?: number | null;
+  /** Per-turn token usage as reported by the brain — `input_tokens` = the
+   *  prompt/context the turn processed, `output_tokens` = what the brain
+   *  generated (the final round's figures). Populated on native-brain turns;
+   *  absent on CLI-wrapper turns and history persisted before the fields, so
+   *  the optional per-message readout simply doesn't render. Mirrors the Rust
+   *  `ChatTurn.input_tokens` / `ChatTurn.output_tokens`. */
+  input_tokens?: number | null;
+  output_tokens?: number | null;
   /** Image attachments the user uploaded with this (user) turn. Persisted
    *  inline as base64 on the Rust `ChatTurn` so the bubble re-renders the
    *  thumbnails on reload — the same bytes the brain receives. Absent on
@@ -5152,6 +5648,25 @@ export type LaneOutcome = {
   error?: string | null;
   started_at: number;
   completed_at?: number | null;
+  /** Estimated tokens the lane's raw transcript produced (~3.5 chars/tok). */
+  transcript_tokens?: number;
+  /** Estimated tokens of the summary the parent manager actually reads. */
+  summary_tokens?: number;
+  /** transcript_tokens − summary_tokens: context summarisation kept out
+   *  of the coordinator's window. */
+  saved_tokens?: number;
+};
+
+/** Wave-level token ledger — the honest "what did the Orchestrator cost
+ *  vs. save" meter. All figures are heuristic ~3.5-chars/token estimates,
+ *  never provider-billed counts, so the UI renders them with a "~". */
+export type TokenLedger = {
+  lane_count: number;
+  done_lanes: number;
+  transcript_tokens: number;
+  summary_tokens: number;
+  saved_tokens: number;
+  overhead_tokens: number;
 };
 
 export type WaveOutcome = {
@@ -5159,6 +5674,7 @@ export type WaveOutcome = {
   lanes: LaneOutcome[];
   conflicts: ZoneConflict[];
   unified_changes: UnifiedChange[];
+  tokens?: TokenLedger;
 };
 
 // ── Aura Scout (Bucket A-C) ────────────────────────────────────────────
@@ -5399,6 +5915,30 @@ export type LoopSyncResult = {
   edges: number;
 };
 
+/** Cloud roundtrip (P1): outcome of one `loopCloudSync` — how many cloud-worked
+ *  nodes came home (`pulled`) and how many finished local nodes reported up
+ *  (`pushed`), plus human-readable `notes` and the `repo` it was scoped to. */
+export type CloudSyncResult = {
+  repo: string | null;
+  pulled: number;
+  pushed: number;
+  notes: string[];
+};
+
+/** Cloud roundtrip (P1): the cloud task minted by `loopCloudSend` — its board
+ *  `id` and lifecycle `status` (typically "submitted" until a runner claims it). */
+export type CloudSendResult = {
+  id: string;
+  status: string;
+};
+
+/** A one-time runner-registry credential minted by `runnerProvision`, ready to
+ *  export on a new box as `AURA_RUNNER_TOKEN`. */
+export type RunnerProvision = {
+  token: string;
+  name: string;
+};
+
 export type LoopDispatchedNode = {
   node_id: string;
   lane_id: string;
@@ -5556,6 +6096,16 @@ export type ManagerSummary = {
   /** First project root this session is bound to, if any. `null` for
    *  workspace-agnostic scratch chats. */
   repo_root: string | null;
+};
+
+export type ManagerSearchHit = {
+  session_id: string;
+  objective: string;
+  repo_root: string | null;
+  role: "title" | "you" | "assistant" | "system";
+  snippet: string;
+  turn_index: number | null;
+  updated_at: number;
 };
 
 export type ManagerTaskSpec = {
@@ -5748,6 +6298,10 @@ export type AppSettings = {
      *  chat, estimating what Aura's code-graph tools saved over grep/whole-file
      *  reads. Default ON; toggled in Settings → Experimental. */
     show_token_savings: boolean;
+    /** Experimental: show a per-message input/output token readout in the Aura
+     *  chat (the provider's real counts for that turn). Default OFF; toggled in
+     *  Settings → Experimental. */
+    show_message_tokens: boolean;
   };
   /** Floating HUD (⌘⇧A) presentation prefs — fully frontend-owned. */
   hud: {
@@ -5762,6 +6316,8 @@ export type AppSettings = {
     sidebar_width: number;
     /** Sidebar panel content height in px (320–900). */
     sidebar_height: number;
+    /** Whether the desk-pet perches on the HUD pill and mirrors agent status. */
+    pet: boolean;
   };
 };
 
@@ -5941,6 +6497,12 @@ export type IntentChangesetFile = {
   status?: string;
   additions?: number | null;
   deletions?: number | null;
+  /** Changed symbols carried directly on the changeset, for moments with no
+   *  per-change commit sha to resolve them from (e.g. the bundled sample,
+   *  whose history is squashed to one commit). Lets the Time machine render
+   *  "Bring this back" without a `change-note` sha. Mirrors `ChangesetSymbol`
+   *  in `cmd_aura.rs`; absent on the normal git-backed path. */
+  symbols?: ChangedSymbol[];
   /** Commit sha that contributed this file when the changeset was back-filled
    *  from git history. Present → the run is committed, so the diff view fetches
    *  `git show <commit> -- <path>` instead of the (empty) working-tree diff. */
@@ -6019,6 +6581,72 @@ export type FileChangeNote = {
   truncated: boolean;
 };
 
+/** Blast-radius verdict for a single symbol — mirrors the engine's
+ *  `DeleteImpact` (aura-cli `impact.rs`, serialized camelCase), produced by
+ *  `aura impact <symbol> <file> --json` and bridged through `aura_symbol_impact`.
+ *  The same reverse call-graph the delete-guard uses, framed as a pre-flight:
+ *  what breaks if you revert / change this symbol. No AI tokens. */
+export type SymbolImpact = {
+  /** One plain-language sentence for the pre-flight card. */
+  summary: string;
+  /** "leaf_safe" | "callers_only" | "feature_loss" | "unknown". */
+  severity: string;
+  /** True when nothing calls it (and its definition was known). */
+  leaf: boolean;
+  /** Callers one hop away — the "re-check these first" list. */
+  directCallers: ChangeNoteCaller[];
+  /** Total distinct callers reached at any depth (a floor). */
+  transitiveCallerCount: number;
+  /** User-facing features reached, closest first. */
+  features: ChangeNoteFeature[];
+  /** "high" | "medium" | "low". */
+  confidence: string;
+  /** Always-present caveat about static-analysis blind spots. */
+  hedge: string;
+  /** "checkpoint" | "worktree" | "none" — provenance of the graph. */
+  graphSource: string;
+  /** Seconds since the source checkpoint (checkpoint source only). */
+  graphStalenessSecs?: number;
+  /** True if a graph-walk budget tripped, so counts are a floor. */
+  truncated: boolean;
+};
+
+/** Plain-language "what changed" for one working-tree file (see
+ *  `summarizeFileChange`). `source` records provenance: `model` (a real
+ *  backend), `fallback` (deterministic — no model reachable), `cache` (reused
+ *  for this exact diff), or `none` (no diff to describe). */
+export type ChangeSummary = {
+  summary: string;
+  source: "model" | "fallback" | "cache" | "none";
+  diff_hash: string;
+};
+
+/** Plain-language before/what/why for one file's change (see `explainChange`).
+ *  `before` is what it used to do (empty for a pure addition), `what` is what
+ *  the change does now, `why` is why it was made and how it now works.
+ *  `source` is the rolled-up provenance across the three angles. */
+export type ChangeExplanation = {
+  before: string;
+  what: string;
+  why: string;
+  source: "model" | "fallback" | "cache" | "mixed" | "none";
+  diff_hash: string;
+};
+
+/** Per-piece plain-language meaning for one changed symbol (see
+ *  `explainSymbols`), one plain sentence per side and always model-written —
+ *  never a mined variable name. `now` = what this piece does now (the "New is
+ *  this" side; empty for a pure removal). `before` = what it used to do (the
+ *  "Previous was this" side; empty for a pure addition). Either is empty until
+ *  the model has written it, and the caller keeps its plain placeholder until
+ *  then. `source` is `cache` (at least one side already stored) or `none`. */
+export type SymbolExplanation = {
+  identifier: string;
+  now: string;
+  before: string;
+  source: "cache" | "none";
+};
+
 /** The full change-note for a commit: header facts + a card per changed file. */
 export type ChangeNoteReport = {
   commit_sha: string;
@@ -6091,6 +6719,72 @@ export type ReplayOrphan = {
 
 /** The full read-only doctor report. `signing` and `cloud_rotation` are the
  *  engine's raw probe JSON (status + details) passed through verbatim. */
+// --- the staged intent gate ------------------------------------------------
+// Mirrors `aura verify-intent --staged --json`. The engine owns these shapes;
+// the app renders them and adds no judgement of its own.
+
+/** One symbol the gate objected to. Only `protected_export_removed` blocks a
+ *  commit — everything else is named so a person can read it and move on. */
+export type IntentViolation = {
+  finding: string;
+  severity: string;
+  symbol: string;
+  file: string;
+  kind: string;
+  exported: boolean;
+  reason: string;
+};
+
+/** A caller of a removed symbol. `certain` is false when the edge was matched
+ *  on name alone, which is worth saying out loud rather than rounding up. */
+export type IntentDependent = {
+  symbol: string;
+  file: string;
+  depth: number;
+  certain: boolean;
+};
+
+export type IntentVerdict = {
+  goal: string;
+  agent: string;
+  session: string;
+  worktree: string;
+  baseline: string;
+  requested_changed: string[];
+  unexpected_changed: string[];
+  protected_removed: string[];
+  violations: IntentViolation[];
+  passed: boolean;
+  dependents: Record<
+    string,
+    { defined_in: string; dependents: IntentDependent[] }
+  >;
+};
+
+/** What the agent was authorised to change, recorded before it ran. */
+export type IntentContract = {
+  goal: string;
+  allowed_symbols: string[];
+  protected_symbols: string[];
+  allowed_paths: string[];
+  approved_removals: string[];
+  baseline: string;
+  agent: string;
+  session: string;
+  worktree: string;
+  approved_at: string;
+};
+
+/** The restore, plus the verdict it produced — one answer, one document. */
+export type RestoreResult = {
+  restored: string;
+  file: string;
+  line: number;
+  anchoredAfter: string | null;
+  importsRestored: string[];
+  verdict: IntentVerdict;
+};
+
 export type DoctorReport = {
   stuck_sessions: StuckSession[];
   snapshots: SnapshotHealth;
@@ -6394,6 +7088,14 @@ export type NewRepo = {
   name: string;
 };
 
+/** The seeded sample project — its root to open, plus the live sample chat to
+ *  focus so the Build surface opens on a real conversation. */
+export type SeededSample = {
+  root: string;
+  name: string;
+  ambientSessionId: string;
+};
+
 export type DaemonBlock = {
   id: string;
   kind: string;
@@ -6622,8 +7324,8 @@ export type TeamMember = {
   // hold edit rights on the GitHub repo (populated by teamSyncCollaborators).
   source?: TeamMemberSource;
   /** Additional git emails that resolve to this member. Lets one person
-   *  be enrolled as `teammate@example.com` while their local git uses
-   *  `alias@example.com`. Populated via `teamAliasAdd` (admin or
+   *  be enrolled as `mck@naridon.com` while their local git uses
+   *  `mubasheer.ck@hotmail.com`. Populated via `teamAliasAdd` (admin or
    *  self-owner). Empty / undefined when no aliases are configured. */
   also_emails?: string[];
   /** GitHub login this member maps to, when known. Set by
@@ -6640,6 +7342,25 @@ export type TeamMember = {
 export type TeamStatus = {
   activity_text?: string | null;
   status_emoji?: string | null;
+};
+
+/** One proposed "these rows look like the same person" group for the roster's
+ *  review banner. Advisory — nothing merges until a human confirms. Returned by
+ *  `teamIdentitySuggestDuplicates`. Arrays are parallel and survivor-first. */
+export type DuplicateSuggestion = {
+  /** Canonical emails of the rows in this group (2+), survivor first. */
+  emails: string[];
+  /** Display handles, parallel to `emails`. */
+  handles: string[];
+  /** Display names, parallel to `emails`. */
+  names: string[];
+  /** Recommended survivor email (same ranking as the auto-merge). */
+  survivor_email: string;
+  /** "high" (a name that equals a login / an email stem that prefixes one) or
+   *  "medium" (softer shared-name overlap). */
+  confidence: "high" | "medium" | string;
+  /** Plain-language why-these-look-the-same. */
+  reason: string;
 };
 
 /** Structured per-channel metadata, additive over the flat `channels`
@@ -6719,6 +7440,12 @@ export type ChatMessage = {
   is_agent: boolean;
   delivery_status?: "pending" | "delivered" | "failed";
   seq?: number;
+  /** The sending install's device id (per-machine UUID), carried from the
+   *  cloud/WS row. Lets self-attribution tell a colleague who shares our git
+   *  `user.email` local-part apart from us — identity on the wire is derived,
+   *  not verified, so the device id is the tiebreaker. Absent on purely local
+   *  echoes (self by construction) and on legacy rows. */
+  from_device_id?: string | null;
 };
 
 export type OutboxEntry = {
@@ -6859,6 +7586,142 @@ export type AtlasHover = {
 // One sentinel inbox message. Mirrors the JSON the CLI's SentinelManager
 // writes under .aura/sentinel/messages/. `id` may be backfilled from the
 // filename for older messages whose body forgot to carry it.
+// ── cross-worktree control plane ──────────────────────────────────────
+//
+// Mirrors `aura-cli/src/worktree/overview.rs`. One repository, many
+// checkouts: the shared plane (claims, zones, messages, awareness) lives
+// once at the repository root, while each checkout keeps its own sessions
+// and transcripts. That is what makes "who else is on this symbol?"
+// answerable at all.
+
+/** One agent standing in a checkout, and what it is holding. */
+export type PlaneAgent = {
+  session_id: string;
+  agent_id: string;
+  pid: number;
+  /** Its process is still running. A dead session with live claims is how
+   *  a symbol ends up looking held by nobody. */
+  alive: boolean;
+  /** Unix seconds. */
+  last_heartbeat: number;
+  /** Checkout name; `null` in the main checkout. */
+  worktree: string | null;
+  branch: string | null;
+  claims: { file_path: string; function_name: string; node_id: string; claimed_at: number }[];
+  zones: { pattern: string; owner: string; mode: string }[];
+};
+
+/** A signed "someone is doing something here" event from the awareness feed. */
+export type PlaneEvent = {
+  id: string;
+  actor: string;
+  is_agent: boolean;
+  kind: string;
+  repo: string;
+  branch: string | null;
+  file: string | null;
+  /** Unix MILLIseconds (the awareness feed's own unit). */
+  ts: number;
+  worktree?: string | null;
+};
+
+/** One checkout of the repository. */
+export type WorktreeCard = {
+  /** `null` for the main checkout. */
+  name: string | null;
+  path: string;
+  head: string;
+  branch: string | null;
+  is_main: boolean;
+  /** git still lists it, but the directory is gone from disk. */
+  missing: boolean;
+  locked: boolean;
+  dirty_files: number;
+  ahead: number;
+  behind: number;
+  /** Unix SECONDS of this checkout's HEAD commit; null when it has none. */
+  last_commit_at: number | null;
+  /** Stable address for messaging — `main`, or the checkout name. */
+  token: string;
+  agents: PlaneAgent[];
+  events: PlaneEvent[];
+  /** Unread messages addressed to this checkout. */
+  inbox: number;
+  /** The checkout the app itself is open on. */
+  is_here: boolean;
+};
+
+/** One symbol two or more sessions are holding at once. */
+export type PlaneContention = {
+  file: string;
+  function: string;
+  holders: { worktree: string; agent: string; session: string; alive: boolean }[];
+  /** The dangerous kind: the holders are in DIFFERENT checkouts, so neither
+   *  one's git status can reveal the other. */
+  cross_worktree: boolean;
+};
+
+export type WorktreePlane = {
+  root: string;
+  /** Branch every checkout's ahead/behind is measured against. */
+  trunk: string;
+  /** Token of the checkout the app is open on. */
+  here: string;
+  worktrees: WorktreeCard[];
+  contention: PlaneContention[];
+  /** Sessions holding claims whose checkout no longer exists. */
+  stranded: PlaneAgent[];
+  messages: SentinelMessage[];
+  /** Present only when the folder isn't a git repository. */
+  error?: string;
+};
+
+export type WorktreeSayResult = {
+  sent: unknown;
+  from_worktree: string;
+  /** How many sessions can actually receive it — 0 means stored, unheard. */
+  recipients: number;
+  note: string;
+};
+
+// ── publishing a plain folder ─────────────────────────────────────────
+
+export type RepoState = {
+  is_repo: boolean;
+  has_commits: boolean;
+  has_origin: boolean;
+  origin_url: string | null;
+  branch: string;
+  /** Folder basename, already legal as a repository name. */
+  suggested_name: string;
+};
+
+export type HostOwner = {
+  login: string;
+  /** `user` | `org` (GitHub) | `group` (GitLab). */
+  kind: string;
+};
+
+export type HostProvider = {
+  /** `github` | `gitlab`. */
+  id: string;
+  label: string;
+  installed: boolean;
+  signed_in: boolean;
+  account: string | null;
+  owners: HostOwner[];
+  /** Why it can't be used, written as the thing to do about it. */
+  hint: string | null;
+};
+
+export type PublishResult = {
+  initialized: boolean;
+  committed: boolean;
+  remote_url: string;
+  pushed: boolean;
+  branch: string;
+};
+
 export type SentinelMessage = {
   id: string;
   from_session: string;
@@ -6934,6 +7797,10 @@ export type ClaudeSession = {
   last_prompt: string;
   /** Approximate user-turn count. */
   turn_count: number;
+  /** Agent steps — assistant messages in the transcript. A one-prompt
+   *  session can still carry dozens (read → edit → run, turn after turn),
+   *  so this is the honest depth signal the header shows. */
+  step_count: number;
   /** Absolute path to the JSONL file. */
   file_path: string;
   /** Working directory the session was launched from, relative to the
@@ -7135,6 +8002,10 @@ export type RadarEvent = {
   ts: number;
   key_id: string | null;
   sig: string | null;
+  /** Computed by the CLI on read: the event's embedded pubkey re-derives its
+   *  key_id AND validates the signature. Undefined on older bundled CLIs (fall
+   *  back to `!!sig` for a weaker "signed" signal). */
+  verified?: boolean;
 };
 
 /** A reasoned collision between my in-flight work and another actor's. */

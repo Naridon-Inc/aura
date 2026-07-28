@@ -1644,7 +1644,7 @@ async fn run_cli(
     // thread (the doctrine in `mod.rs::chat_to_messages` requires ANY brain,
     // native or CLI, to receive the full transcript on a mid-conversation swap).
     let (last_user_text, cli_session_id, fresh_messages) = {
-        let s = state.lock().unwrap();
+        let mut s = state.lock().unwrap();
         let last_user = s
             .chat
             .iter()
@@ -1653,14 +1653,40 @@ async fn run_cli(
             .map(|t| t.text.clone())
             .unwrap_or_default();
         let sid = s.cli_session_id.clone();
-        let current_brain = s.brain_backend.as_ref().map(|b| b.id());
         let fresh = if sid.is_none() {
+            // A fresh CLI session (first turn, or the turn right after a brain
+            // swap dropped the resume id) replays the ENTIRE visible transcript
+            // flattened into one prompt. Unlike the native and Anthropic paths,
+            // this path never compacted — so handing a long thread to a fresh
+            // CLI both blew a smaller-context model's window (Kimi hit its
+            // limit in a single message) AND made the new agent take forever to
+            // START, because it had to ingest the whole blob before responding.
+            //
+            // Compact first, aggressively: a fresh CLI target has no provider
+            // prompt-cache to preserve and a swap invalidated any resume
+            // context, so there's nothing to lose by distilling early. This
+            // reuses Aura's existing episode-digest distillation (heuristic, no
+            // extra LLM call — cheap + simple): older turns collapse into one
+            // anchored digest while the hot window + load-bearing turns (plan
+            // decisions, user answers, semantic alerts) stay verbatim. The
+            // result is a compact, intelligent hand-off instead of a raw dump.
+            maybe_compact_session_inner(
+                &mut s,
+                AGGRESSIVE_BUDGET_TOKENS,
+                AGGRESSIVE_HOT_WINDOW,
+            );
+            let current_brain = s.brain_backend.as_ref().map(|b| b.id());
             Some(super::chat_to_messages(&s.chat, current_brain.as_deref()))
         } else {
             None
         };
         (last_user, sid, fresh)
     };
+    // Persist the compaction (archived turns + inserted digest) so the app's
+    // transcript and the next replay both reflect the distilled history.
+    if fresh_messages.is_some() {
+        persist_now(&state);
+    }
 
     let full_prompt = match fresh_messages {
         Some(messages) => super::cli_wrapper::flatten_messages_to_prompt(
@@ -1680,7 +1706,12 @@ async fn run_cli(
         model: None,
         approval: None,
     }) {
-        Ok(i) => i,
+        Ok(mut i) => {
+            // Enforce the fleet agent-CLI config policy (e.g. codex service_tier
+            // repair) before this manager-brain turn spawns.
+            crate::agent_policy::apply_to_invocation(&provider_id, &mut i);
+            i
+        }
         Err(e) => {
             let msg = format!("Build {provider_id} invocation failed: {e}");
             append_assistant(&state, msg.clone());
@@ -1855,15 +1886,30 @@ async fn run_cli(
         return Box::pin(run_cli(app, session_id, state, provider_id)).await;
     }
 
-    if exit != 0 && assistant_text.trim().is_empty() {
-        // Never paste raw CLI stderr into the chat: those traces embed the full
-        // Manager system prompt (echoed inside `spawnargs` on a failed spawn)
-        // and read as a wall of stack frames to a non-engineer. Map the failure
-        // to one plain-language sentence instead.
-        let msg = super::engine_errors::humanize_cli_failure(&invocation.bin, exit, &stderr_buf);
+    if assistant_text.trim().is_empty() {
+        // The engine finished without producing any visible answer. Never leave
+        // the turn blank — that reads as "thought for a while, then nothing"
+        // (the Antigravity symptom). Two shapes, both surfaced as one plain
+        // sentence (raw stderr must NOT reach chat: it embeds the Manager
+        // preamble via `spawnargs` and reads as a stack-trace wall to a
+        // non-engineer — the developer log below is where we actually debug):
+        //   * non-zero exit → a real failure; map stderr to a reason.
+        //   * clean exit, empty stdout → the CLI ran but said nothing (e.g. agy
+        //     needing a one-time interactive sign-in `--print` can't do).
+        tracing::warn!(
+            engine = %super::engine_errors::engine_label(&invocation.bin),
+            exit,
+            stderr = %truncate(&stderr_buf, 2000),
+            "engine CLI turn produced no assistant text"
+        );
+        let msg = if exit != 0 {
+            super::engine_errors::humanize_cli_failure(&invocation.bin, exit, &stderr_buf)
+        } else {
+            super::engine_errors::humanize_empty_output(&invocation.bin, &stderr_buf)
+        };
         append_assistant(&state, msg.clone());
         emit(&app, &event_name, &StreamDelta::Error { message: msg });
-    } else if !assistant_text.trim().is_empty() {
+    } else {
         append_assistant(&state, assistant_text);
     }
 

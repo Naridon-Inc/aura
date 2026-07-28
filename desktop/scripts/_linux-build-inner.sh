@@ -103,6 +103,12 @@ cargo build --release --manifest-path /work/aura-cli/Cargo.toml
 echo "── building portable CLI-complete AppImage (inner-ELF linuxdeploy, $ARCH)"
 ARCH="$ARCH" bash /work/aura-shell/scripts/_linux-appimage-bundle-cli.sh
 
+# The .deb needs the same treatment for the same reason — tauri wrote it without
+# the CLI. It is already sealed by now, so the injection has to unpack and
+# re-seal it rather than adding to a staging dir.
+echo "── injecting the aura CLI into the deb ($ARCH)"
+ARCH="$ARCH" bash /work/aura-shell/scripts/_linux-deb-bundle-cli.sh
+
 echo "── bundle artifacts:"
 find /build/target -path '*release/bundle/appimage/*.AppImage' -o -path '*release/bundle/deb/*.deb' 2>/dev/null | sort
 echo "✓ FULL linux/$ARCH bundle built"

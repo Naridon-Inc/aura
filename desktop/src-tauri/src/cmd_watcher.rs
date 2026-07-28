@@ -95,6 +95,14 @@ pub async fn watch_repo(
                             continue;
                         }
                     }
+                    // Bound the debounce table: a long-lived session over a
+                    // churny tree would otherwise accumulate one entry per
+                    // unique path forever. When it grows large, drop entries
+                    // older than the debounce horizon — they can no longer
+                    // suppress any future event anyway.
+                    if map.len() > 8192 {
+                        map.retain(|_, t| now.duration_since(*t) < Duration::from_secs(5));
+                    }
                     map.insert(raw.clone(), now);
                 }
                 let payload = FsChanged {
@@ -139,15 +147,23 @@ fn classify(kind: &EventKind) -> &'static str {
     }
 }
 
-// Filter out the noise: VCS internals, OS metadata, editor temps, and
-// our own .aura/sentinel writes that fire constantly via the heartbeat
-// loop. Keep this list deliberately tight — over-filtering makes the
-// UI feel stale.
+// Filter out the noise: VCS internals, OS metadata, editor temps, our own
+// .aura/sentinel writes, and high-churn *generated* / *data* trees that no
+// one edits in the editor but that fire events continuously. A live
+// `pgdata/` (Postgres data dir) is the worst offender — its constant WAL/stat
+// writes hit unique rotating paths, so the per-path debounce can't collapse
+// them, and the resulting `fs:changed` flood starves the webview main thread
+// (the editor never gets a frame to mount → stuck on "Loading…"). Keep the
+// list tight otherwise — over-filtering makes the UI feel stale.
 fn is_ignored(path: &PathBuf) -> bool {
     let s = path.to_string_lossy();
     s.contains("/.git/")
         || s.contains("/node_modules/")
         || s.contains("/target/")
+        || s.contains("/pgdata/")
+        || s.contains("/.turbo/")
+        || s.contains("/.next/")
+        || s.contains("/.cache/")
         || s.contains("/.aura/sentinel/")
         || s.contains("/.aura/intent_log.jsonl")
         || s.ends_with(".swp")

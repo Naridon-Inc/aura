@@ -20,7 +20,8 @@ import {
   type ChatDoctorReport,
   type ChatMessage,
   type CommitEntry,
-  type IntentEntry,
+  type DuplicateSuggestion,
+  type IntentRow,
   type SentinelMessage,
   type TeamIdentity,
   type TeamManifest,
@@ -45,6 +46,7 @@ import {
 } from "../../chat/CreateChannelWizard";
 import { useCallSnapshot } from "../../../lib/callStore";
 import { loadCachedAllForRepo, saveCachedMsgs } from "../../../lib/chatCache";
+import { peekCache, writeCache } from "../../../lib/resourceCache";
 import { publishTeamUnread } from "../../../lib/teamUnread";
 // Team (chat) domain layer — pure types + helpers + channel identity +
 // local persistence. Lifted out of this monolith into the bounded
@@ -59,10 +61,11 @@ import {
   byRecency,
   countThreads,
   chatToMsg,
+  auraRosterFromStream,
   convIdForMessage,
   norm,
   commitToMsg,
-  intentToMsg,
+  intentRowsToSessionMsgs,
   sentinelToMsg,
   loadLastRead,
   persistLastRead,
@@ -70,6 +73,7 @@ import {
   persistPinned,
   buildSelfKeys,
   senderHandle,
+  isSelfSender,
   readSelfLinks,
   addSelfLink,
   removeSelfLink,
@@ -99,6 +103,24 @@ function rememberNotified(set: Set<string>, id: string) {
   }
 }
 
+// Shared empty fallbacks. `x ?? []` reads harmlessly but mints a fresh array on
+// every render, which is enough on its own to bust every memo downstream of it
+// (and, through them, the model object this hook returns).
+const NO_MEMBERS: TeamMember[] = [];
+const NO_MSGS: Msg[] = [];
+
+// Cheap "did this poll actually change anything" test for the read-only
+// activity feeds (project + sentinel). Both are rebuilt from scratch on every
+// tick, so without it an unchanged feed still produces a new array identity and
+// re-renders the whole Team tree. Id + body + ts is enough: these rows are
+// derived, never mutated in place.
+function sameFeed(prev: Msg[] | undefined, next: Msg[]): boolean {
+  if (!prev || prev.length !== next.length) return false;
+  return next.every(
+    (m, i) => m.id === prev[i].id && m.ts === prev[i].ts && m.body === prev[i].body,
+  );
+}
+
 export function useTeamChat(repoRoot: string, projectName: string) {
   // Routing state.
   const [activeId, setActiveId] = useState<string | null>(null);
@@ -112,8 +134,21 @@ export function useTeamChat(repoRoot: string, projectName: string) {
   const [msgs, setMsgs] = useState<Record<string, Msg[]>>(() =>
     loadCachedAllForRepo<Msg>(repoRoot),
   );
-  const [identity, setIdentity] = useState<TeamIdentity | null>(null);
-  const [manifest, setManifest] = useState<TeamManifest | null>(null);
+  // Seed identity + roster from the process-lifetime SWR cache so re-entering
+  // Team (or switching back to a repo visited earlier this session) paints the
+  // last-known roster on the first frame instead of blanking to empty while
+  // `loadTeam` round-trips. `loadTeam` revalidates underneath.
+  const [identity, setIdentity] = useState<TeamIdentity | null>(
+    () => peekCache<TeamIdentity>(`team:identity:${repoRoot}`) ?? null,
+  );
+  const [manifest, setManifest] = useState<TeamManifest | null>(
+    () => peekCache<TeamManifest>(`team:manifest:${repoRoot}`) ?? null,
+  );
+  // Weak-signal "these rows look like the same person" proposals for the roster
+  // review banner. Loaded alongside the roster; a confirm/reject re-fetches.
+  const [dupSuggestions, setDupSuggestions] = useState<DuplicateSuggestion[]>(
+    [],
+  );
   // Stable device identity used for reactions attribution. Loaded once
   // on mount; cheap because deviceIdentity is cached in the Tauri side.
   const [myDevice, setMyDevice] = useState<{
@@ -356,7 +391,7 @@ export function useTeamChat(repoRoot: string, projectName: string) {
       alsoLinks,
     ],
   );
-  const members = manifest?.members ?? [];
+  const members = manifest?.members ?? NO_MEMBERS;
 
   // Always-on voice rooms: derive a `channel slug -> members` index from
   // `members[].voice_channel`, which the presence beacon already carries.
@@ -457,24 +492,67 @@ export function useTeamChat(repoRoot: string, projectName: string) {
     setReadCursors({});
     setPinnedByConv({});
     setChannelTab({});
-    setManifest(null);
-    setIdentity(null);
+    // Seed from the target repo's cached roster rather than blanking — a repo
+    // switch should paint that repo's last-known members immediately, not an
+    // empty rail that fills a round-trip later. loadTeam (below) revalidates.
+    setManifest(peekCache<TeamManifest>(`team:manifest:${repoRoot}`) ?? null);
+    setIdentity(peekCache<TeamIdentity>(`team:identity:${repoRoot}`) ?? null);
     notifiedMsgIds.current = new Set();
     firstChatPoll.current = true;
     emittedCursorRef.current = {};
   }, [repoRoot]);
 
+  // ── manifest commit helpers (stale-while-revalidate, never-blank) ──
+  // Every roster update funnels through here so (a) a null / failed read can
+  // never blank the members list, (b) a transient EMPTY roster can't wipe a
+  // populated one — the two causes of the "members load and disappear all the
+  // time" flicker — and (c) the process-lifetime cache stays warm for instant
+  // repaints on remount / repo-switch.
+  const applyManifest = useCallback(
+    (next: TeamManifest | null | undefined) => {
+      if (!next) return; // a failed poll must keep the last-known roster
+      setManifest((prev) => {
+        // Don't let a momentarily-empty roster replace a populated one — that
+        // intermediate empty frame is the flicker. A genuinely empty team
+        // (prev also empty) still applies normally.
+        if ((next.members?.length ?? 0) === 0 && (prev?.members?.length ?? 0) > 0) {
+          return prev;
+        }
+        try {
+          writeCache(`team:manifest:${repoRoot}`, next);
+        } catch {
+          /* cache is best-effort */
+        }
+        return next;
+      });
+    },
+    [repoRoot],
+  );
+  const applyIdentity = useCallback(
+    (next: TeamIdentity | null | undefined) => {
+      if (!next) return;
+      try {
+        writeCache(`team:identity:${repoRoot}`, next);
+      } catch {
+        /* cache is best-effort */
+      }
+      setIdentity(next);
+    },
+    [repoRoot],
+  );
+
   // ── identity + manifest load ──────────────────────────────────────
   const loadTeam = useCallback(async () => {
+    let base: TeamManifest;
     try {
       const [id, man] = await Promise.all([
         api.teamIdentity(repoRoot),
         api.teamLoad(repoRoot),
       ]);
-      setIdentity(id);
-      setManifest(man);
+      applyIdentity(id);
+      base = man;
     } catch {
-      /* repo without git — leave empty */
+      /* repo without git — keep the last-known roster, never blank */
       return;
     }
     // Best-effort: fold in GitHub collaborators with edit rights so people
@@ -483,13 +561,64 @@ export function useTeamChat(repoRoot: string, projectName: string) {
     // returns the full manifest — including the synthetic collaborator
     // rows and any alias it learned for the local user — which supersedes
     // the team_load result. Degrades silently off GitHub / without `gh`.
+    //
+    // Crucially this resolves to a SINGLE manifest commit per poll. The old
+    // code set the git-only roster first and then the enriched roster a
+    // round-trip later, so every 15s tick the members list visibly shrank
+    // (git roster) then grew (with collaborators) — the reported flicker.
+    let full = base;
     try {
-      const full = await api.teamSyncCollaborators(repoRoot);
-      setManifest(full);
+      full = await api.teamSyncCollaborators(repoRoot);
     } catch {
       /* not a GitHub repo or gh unavailable — keep the git roster */
     }
-  }, [repoRoot]);
+    applyManifest(full);
+    // Recompute duplicate suggestions off the freshest roster. Best-effort —
+    // an empty list just hides the banner.
+    try {
+      setDupSuggestions(await api.teamIdentitySuggestDuplicates(repoRoot));
+    } catch {
+      setDupSuggestions([]);
+    }
+  }, [repoRoot, applyManifest, applyIdentity]);
+
+  // Confirm a duplicate suggestion: merge the group into the survivor, then
+  // refresh the roster + suggestions so the banner reflects the collapse.
+  const confirmDuplicate = useCallback(
+    async (survivorEmail: string, mergedEmails: string[]) => {
+      const next = await api.teamIdentityConfirmDuplicate(
+        repoRoot,
+        survivorEmail,
+        mergedEmails,
+      );
+      applyManifest(next);
+      try {
+        setDupSuggestions(await api.teamIdentitySuggestDuplicates(repoRoot));
+      } catch {
+        setDupSuggestions([]);
+      }
+    },
+    [repoRoot],
+  );
+
+  // Reject a duplicate suggestion: record the pair as different people so it is
+  // never suggested again, then refresh the banner.
+  const rejectDuplicate = useCallback(
+    async (emailA: string, emailB: string) => {
+      const next = await api.teamIdentityRejectDuplicate(
+        repoRoot,
+        emailA,
+        emailB,
+      );
+      applyManifest(next);
+      try {
+        setDupSuggestions(await api.teamIdentitySuggestDuplicates(repoRoot));
+      } catch {
+        setDupSuggestions([]);
+      }
+    },
+    [repoRoot],
+  );
 
   useEffect(() => {
     loadTeam();
@@ -766,20 +895,40 @@ export function useTeamChat(repoRoot: string, projectName: string) {
   }, [members, selfHandle, selfLinks]);
 
   // ── project feed (intents + commits) ──────────────────────────────
-  // Snapshots are file-mtime noise — they're aura's internal backup
-  // bookkeeping, not work signals. Intents already reference the files
-  // they touched via their bound changeset, so the snapshot rows just
-  // duplicated path information without adding meaning.
+  // Intents are read via `auraIntentRecent` (not the raw log): it carries the
+  // session ids + developer attribution the grouper needs, and already drops
+  // auto-capture/tool-noise rows. `intentRowsToSessionMsgs` clusters them into
+  // one readable message per session, with each session's later intents hung
+  // off it as thread replies — so the channel reads as a team's live story,
+  // not an "aura INTENT" firehose. Commits stay as their own activity rows.
   const loadProjectFeed = useCallback(() => {
+    // A failed read resolves to `[]` so the other source still renders — but
+    // that empty must never reach state, or the 10s tick would blank a
+    // populated feed the moment the intent log or `git log` hiccups. Same
+    // never-blank rule the roster helpers follow.
+    let failed = false;
     Promise.all([
-      api.auraReadIntentLog(repoRoot).catch(() => [] as IntentEntry[]),
-      api.gitRecentCommits(repoRoot, 50).catch(() => [] as CommitEntry[]),
+      api.auraIntentRecent(repoRoot, 200).catch(() => {
+        failed = true;
+        return [] as IntentRow[];
+      }),
+      api.gitRecentCommits(repoRoot, 50).catch(() => {
+        failed = true;
+        return [] as CommitEntry[];
+      }),
     ]).then(([intents, commits]) => {
+      if (failed) return;
       const merged: Msg[] = [
-        ...intents.map(intentToMsg),
+        ...intentRowsToSessionMsgs(intents),
         ...commits.map(commitToMsg),
       ].sort((a, b) => (a.ts || 0) - (b.ts || 0));
-      setMsgs((prev) => ({ ...prev, project: merged }));
+      setMsgs((prev) => {
+        // Nothing new since the last tick is the common case, and handing back
+        // a fresh array for identical rows re-renders the whole Team tree every
+        // 10s for no reason.
+        if (sameFeed(prev.project, merged)) return prev;
+        return { ...prev, project: merged };
+      });
     });
   }, [repoRoot]);
 
@@ -798,10 +947,16 @@ export function useTeamChat(repoRoot: string, projectName: string) {
         const sorted = [...items].sort(
           (a, b) => (a.timestamp || 0) - (b.timestamp || 0),
         );
-        setMsgs((prev) => ({ ...prev, sentinel: sorted.map(sentinelToMsg) }));
+        const next = sorted.map(sentinelToMsg);
+        // Agent inboxes are quiet for long stretches; without this the 5s tick
+        // hands back a new array of identical rows and cascades a re-render
+        // through every consumer of the model.
+        setMsgs((prev) =>
+          sameFeed(prev.sentinel, next) ? prev : { ...prev, sentinel: next },
+        );
       })
       .catch(() => {
-        /* sentinel dir not yet created */
+        /* sentinel dir not yet created — keep the last-known feed */
       });
   }, [repoRoot]);
 
@@ -844,7 +999,7 @@ export function useTeamChat(repoRoot: string, projectName: string) {
         // own bucket and never pollute this conversation. See convIdForMessage.
         const byConv = new Map<string, Msg[]>();
         for (const cm of list) {
-          const m = chatToMsg(cm, selfKeys);
+          const m = chatToMsg(cm, selfKeys, myDevice?.device_id ?? null);
           const cid = convIdForMessage(channel, m, selfHandle);
           const bucket = byConv.get(cid);
           if (bucket) bucket.push(m);
@@ -860,19 +1015,26 @@ export function useTeamChat(repoRoot: string, projectName: string) {
           const existing = prev[convId] ?? [];
           const byId = new Map<string, Msg>();
           for (const m of fetched) byId.set(m.id, m);
-          // Body-window index of the cloud rows I sent, so an optimistic
-          // self row whose cloud-id twin already landed here (WS echo not
-          // yet reconciled, server-side self-collapse missed) is recognised
-          // as the SAME message and not re-added under its local id. This is
-          // the poll-path guard against the "my last message shows twice"
-          // duplicate — the WS path dedups separately on arrival.
-          const fetchedSelf = fetched.filter((m) => m.fromMe);
-          const mineAlreadyFetched = (row: Msg) =>
-            fetchedSelf.some(
+          // Stale-twin guard. A cached row whose id the fresh fetch no longer
+          // carries, but whose (body, ts±window) still matches a fetched row,
+          // is the SAME logical message under a now-defunct id — an optimistic
+          // self row the cloud re-id'd, or a foreign row whose id changed
+          // underneath the cache (a cloud re-id, or a local re-write of the
+          // channel file). Left in, it renders a second bubble beside its
+          // current-id self — the "teammate's message shows twice" duplicate.
+          // Self rows match on `fromMe` (the sender label can differ across
+          // handle layers); everyone else must ALSO match the sender label, so
+          // two different people sending identical text within the window are
+          // never collapsed into one. A genuinely current message is always in
+          // the fetch by id, so this only ever removes true orphans — never a
+          // live row, and never a pending optimistic send that has no twin yet.
+          const twinInFetch = (row: Msg): boolean =>
+            fetched.some(
               (f) =>
                 f.id !== row.id &&
                 f.body.trim() === row.body.trim() &&
-                Math.abs(f.ts - row.ts) <= 300,
+                Math.abs(f.ts - row.ts) <= 300 &&
+                (row.fromMe ? f.fromMe : f.sender === row.sender),
             );
           // Keep optimistic-pending entries that the server snapshot
           // hasn't yet acknowledged (id present locally, absent server-side).
@@ -883,9 +1045,10 @@ export function useTeamChat(repoRoot: string, projectName: string) {
             // bleed visibly clears without a restart.
             if (convIdForMessage(channel, m, selfHandle) !== convId) continue;
             if (!byId.has(m.id)) {
-              // Drop an optimistic self row the cloud already represents
-              // under a different id; keep everything else verbatim.
-              if (m.fromMe && mineAlreadyFetched(m)) continue;
+              // Drop a stale-id twin the fetch already represents under its
+              // canonical id; keep everything else (pending sends, local-only
+              // rows) verbatim.
+              if (twinInFetch(m)) continue;
               byId.set(m.id, m);
             } else if (m.delivery_status === "pending") {
               // Server has the row; let the outbox poll flip it.
@@ -964,12 +1127,17 @@ export function useTeamChat(repoRoot: string, projectName: string) {
   useEffect(() => {
     if (chatBackgroundChannels.length === 0) return;
     let cancelled = false;
+    // Fan the round out instead of walking it. These reads are independent
+    // per channel, so serialising them made the whole safety-net poll cost the
+    // SUM of every channel's round-trip — on a team with a DM per member that
+    // is dozens of sequential hops, and the last channel in the list stayed
+    // stale for the length of all the ones before it.
     const tick = async () => {
-      for (const ch of chatBackgroundChannels) {
-        if (cancelled) return;
-        await loadChatChannel(ch);
-      }
-      firstChatPoll.current = false;
+      if (cancelled) return;
+      await Promise.all(chatBackgroundChannels.map((ch) => loadChatChannel(ch)));
+      // Only arm mention toasts if this round actually finished for us — a
+      // repo switch mid-flight leaves the flag for the next effect to own.
+      if (!cancelled) firstChatPoll.current = false;
     };
     tick();
     if (!visible) return () => { cancelled = true; };
@@ -984,7 +1152,7 @@ export function useTeamChat(repoRoot: string, projectName: string) {
   const wsHandlerRef = useRef<((msg: ChatMessage, channel: string) => void) | null>(null);
   useEffect(() => {
     wsHandlerRef.current = (m: ChatMessage, channel: string) => {
-      const incoming = chatToMsg(m, selfKeys);
+      const incoming = chatToMsg(m, selfKeys, myDevice?.device_id ?? null);
       // Route by the real sender, not the channel slug — a DM from person X
       // belongs in the DM with person X even if the slug is malformed or
       // collides (the "third party shows up inside my 1:1" bug). See
@@ -1012,28 +1180,46 @@ export function useTeamChat(repoRoot: string, projectName: string) {
         // because the cloud broadcast carries whichever handle layer
         // `resolve_handle` stamped (email-local-part vs roster alias vs
         // override) — those diverge from `selfHandle` and from each other.
-        // So we test self-ness against the full `selfKeys` set on BOTH the
-        // incoming row and the candidate local row, and only collapse when
-        // both are ours with a matching body and ts within ±300s. This is
-        // what stops the "last message I sent appears twice" duplicate:
-        // the optimistic row (forced `fromMe`) reliably absorbs the cloud
-        // broadcast even when its stamped handle differs. The cloud id is
-        // patched into the local row so reactions / read-cursors keyed off
-        // it still resolve. Window is 5min so a slow broadcast or a brief
-        // socket bounce that re-delivers history still matches.
-        const incomingIsMine = incoming.fromMe;
-        const echoIdx = incomingIsMine
-          ? existing.findIndex(
-              (x) =>
-                x.fromMe &&
-                x.body.trim() === incoming.body.trim() &&
-                Math.abs(x.ts - incoming.ts) <= 300 &&
-                // Don't collapse into a row we've already reconciled to a
-                // cloud id, so two identical messages sent in quick
-                // succession each keep their own bubble.
-                x.id !== incoming.id,
-            )
-          : -1;
+        //
+        // Worse, that stamped handle is often my email-local-part, which —
+        // during the brief window before `identity` (and thus `selfKeys`)
+        // hydrates — isn't yet a confirmed self-key, so `incoming.fromMe`
+        // reads FALSE at receive time and the echo slips through as a SECOND
+        // bubble beside my optimistic row. Later, once identity loads, Bubble
+        // re-derives `fromMe` and BOTH rows render as "me" → the "my message
+        // shows twice, both tagged you" bug.
+        //
+        // Fix: don't depend on the echo being classified mine at receive time.
+        // Also collapse when the incoming row lines up (body + ts) with a
+        // still-PENDING optimistic row I authored — that row is unconditionally
+        // mine regardless of hydration. A FOREIGN device id on the incoming row
+        // vetoes this path, so a teammate who happens to send identical text is
+        // never swallowed into my outgoing bubble. The cloud id is patched into
+        // the local row so reactions / read-cursors keyed off it still resolve.
+        // Window is 5min so a slow broadcast or a brief socket bounce that
+        // re-delivers history still matches.
+        const incomingForeignDevice =
+          !!incoming.senderDeviceId &&
+          !!myDevice?.device_id &&
+          norm(incoming.senderDeviceId) !== norm(myDevice.device_id);
+        const echoIdx =
+          incoming.fromMe || !incomingForeignDevice
+            ? existing.findIndex(
+                (x) =>
+                  x.fromMe &&
+                  x.body.trim() === incoming.body.trim() &&
+                  Math.abs(x.ts - incoming.ts) <= 300 &&
+                  // Don't collapse into a row we've already reconciled to a
+                  // cloud id, so two identical messages sent in quick
+                  // succession each keep their own bubble.
+                  x.id !== incoming.id &&
+                  // When identity hasn't yet classified the echo as mine, only
+                  // a genuinely pending optimistic row may absorb it — never a
+                  // settled historical row — so identical texts sent long apart
+                  // don't retro-collapse.
+                  (incoming.fromMe || x.delivery_status === "pending"),
+              )
+            : -1;
         if (echoIdx >= 0) {
           const next = [...existing];
           next[echoIdx] = {
@@ -1066,7 +1252,7 @@ export function useTeamChat(repoRoot: string, projectName: string) {
         }
       }
     };
-  }, [selfHandle, selfKeys]);
+  }, [selfHandle, selfKeys, myDevice?.device_id]);
 
   useEffect(() => {
     if (!repoRoot) return;
@@ -1189,7 +1375,7 @@ export function useTeamChat(repoRoot: string, projectName: string) {
           };
           const ts = Math.floor(new Date(m.created_at).getTime() / 1000) || 0;
           // Never collapse onto the display NAME: two seats sharing a name
-          // ("Owner" on two accounts) must not merge into one handle/bucket.
+          // ("Ashiq" on two accounts) must not merge into one handle/bucket.
           // senderHandle falls back to a device-scoped token instead. The
           // reader still sees `from_name` (sender_display) below.
           const handle = senderHandle(m.sender_email, m.sender_device_id, m.sender_display);
@@ -1204,6 +1390,7 @@ export function useTeamChat(repoRoot: string, projectName: string) {
             thread_parent: m.thread_parent ?? undefined,
             is_agent: !!m.is_agent,
             seq: typeof m.seq === "number" ? m.seq : undefined,
+            from_device_id: m.sender_device_id || null,
           };
           wsHandlerRef.current?.(synthetic, m.channel);
         } catch {
@@ -1327,7 +1514,7 @@ export function useTeamChat(repoRoot: string, projectName: string) {
             ? Math.floor(new Date(m.created_at).getTime() / 1000)
             : Math.floor(Date.now() / 1000);
           // Never collapse onto the display NAME: two seats sharing a name
-          // ("Owner" on two accounts) must not merge into one handle/bucket.
+          // ("Ashiq" on two accounts) must not merge into one handle/bucket.
           // senderHandle falls back to a device-scoped token instead. The
           // reader still sees `from_name` (sender_display) below.
           const handle = senderHandle(m.sender_email, m.sender_device_id, m.sender_display);
@@ -1342,6 +1529,7 @@ export function useTeamChat(repoRoot: string, projectName: string) {
             thread_parent: m.thread_parent ?? undefined,
             is_agent: !!m.is_agent,
             seq: typeof m.seq === "number" ? m.seq : undefined,
+            from_device_id: m.sender_device_id || null,
           };
           wsHandlerRef.current?.(synthetic, AURA_GLOBAL_CHANNEL);
         } catch {
@@ -1401,9 +1589,21 @@ export function useTeamChat(repoRoot: string, projectName: string) {
     return () => window.removeEventListener("aura:chat-typing", onTyping);
   }, [selfHandle]);
 
-  // Reap expired typing entries every second.
+  // Reap expired typing entries every second, but only while there is
+  // something to reap and the window is on screen. This ran unconditionally
+  // for the lifetime of the surface — a 1Hz wake-up that spent virtually all
+  // of its time proving an empty map is still empty, and kept firing behind a
+  // Cmd-Tab. Nobody is typing at you while you're in another app, and the
+  // effect re-runs on the way back so a beacon that expired in the background
+  // is dropped on the first tick after the tab returns rather than lingering.
+  //
+  // The cadence stays 1s: a peer's beacon carries a ~5s `expires_at`, so a
+  // slower sweep would leave "… is typing" on screen visibly after they
+  // stopped. Gating the timer's existence is the win, not stretching it.
+  const hasTypingPeers = Object.keys(typingPeers).length > 0;
   useEffect(() => {
-    const id = window.setInterval(() => {
+    if (!hasTypingPeers || !visible) return;
+    const reap = () => {
       const now = Math.floor(Date.now() / 1000);
       setTypingPeers((prev) => {
         let changed = false;
@@ -1414,9 +1614,11 @@ export function useTeamChat(repoRoot: string, projectName: string) {
         }
         return changed ? next : prev;
       });
-    }, 1000);
+    };
+    reap();
+    const id = window.setInterval(reap, 1000);
     return () => window.clearInterval(id);
-  }, []);
+  }, [hasTypingPeers, visible]);
 
   // ── focus-from-event (ShareCodeDialog routes here after sending) ──
   useEffect(() => {
@@ -1754,7 +1956,7 @@ export function useTeamChat(repoRoot: string, projectName: string) {
       setMsgs((prev) => {
         const list = prev[convId] ?? [];
         const optimistic: Msg = {
-          ...chatToMsg(msg, selfKeys),
+          ...chatToMsg(msg, selfKeys, myDevice?.device_id ?? null),
           // The optimistic row is always ours regardless of which handle
           // layer `chat_send` stamped — force it so the self-echo dedup
           // below reliably collapses the cloud broadcast into it.
@@ -1762,11 +1964,25 @@ export function useTeamChat(repoRoot: string, projectName: string) {
           delivery_status: "pending",
         };
         // The WS room broadcast (server-side fan-out) can land BEFORE
-        // `api.chatSend()` resolves — in which case the row is already
-        // in `list` under the same id, and a blind append duplicates
-        // the bubble. Dedup by id; if the WS already inserted, leave
-        // it alone so the outbox poll still flips its delivery_status.
-        if (list.some((m) => m.id === optimistic.id)) {
+        // `api.chatSend()` resolves. It may arrive under the SAME id (skip by
+        // id) OR — because the cloud re-stamps the sender handle and mints its
+        // own id — under a DIFFERENT id, in which case a body/ts match against
+        // an already-received row is the echo of THIS send. Appending then
+        // would duplicate the bubble (symmetric to the WS-receiver dedup
+        // above). A foreign device id on the existing row vetoes the body
+        // match so we never fold our send into a teammate's identical text.
+        const already = list.some(
+          (m) =>
+            m.id === optimistic.id ||
+            (m.body.trim() === optimistic.body.trim() &&
+              Math.abs(m.ts - optimistic.ts) <= 300 &&
+              !(
+                m.senderDeviceId &&
+                myDevice?.device_id &&
+                norm(m.senderDeviceId) !== norm(myDevice.device_id)
+              )),
+        );
+        if (already) {
           return prev;
         }
         return { ...prev, [convId]: [...list, optimistic] };
@@ -1800,9 +2016,9 @@ export function useTeamChat(repoRoot: string, projectName: string) {
   const claim = useCallback(async () => {
     try {
       const m = await api.teamClaim(repoRoot);
-      setManifest(m);
+      applyManifest(m);
       const id = await api.teamIdentity(repoRoot);
-      setIdentity(id);
+      applyIdentity(id);
     } catch (e) {
       console.warn("claim failed", e);
     }
@@ -1851,7 +2067,7 @@ export function useTeamChat(repoRoot: string, projectName: string) {
   const addChannelTab = useCallback(
     async (slug: string, label: string, url: string) => {
       const m = await api.teamChannelTabAdd(repoRoot, slug, label, url);
-      setManifest(m);
+      applyManifest(m);
     },
     [repoRoot],
   );
@@ -1859,32 +2075,89 @@ export function useTeamChat(repoRoot: string, projectName: string) {
   const removeChannelTab = useCallback(
     async (slug: string, tabId: string) => {
       const m = await api.teamChannelTabRemove(repoRoot, slug, tabId);
-      setManifest(m);
+      applyManifest(m);
     },
     [repoRoot],
   );
 
   // ── derived: active members + thread/replies state ───────────────
   const activePinnedSet = active ? pinnedByConv[active.id] : undefined;
-  const activeMsgsRaw = active ? msgs[active.id] ?? [] : [];
+  const activeMsgsRaw = active ? msgs[active.id] ?? NO_MSGS : NO_MSGS;
   const activeMsgs = useMemo(() => {
     if (!activePinnedSet || activePinnedSet.size === 0) return activeMsgsRaw;
     return activeMsgsRaw.map((m) =>
       activePinnedSet.has(m.id) ? { ...m, pinned: true } : m,
     );
   }, [activeMsgsRaw, activePinnedSet]);
-  const topLevel = activeMsgs.filter((m) => !m.thread_parent);
+  // Roster for the active conversation. Per-repo channels use the git-team
+  // manifest as before. The worldwide `#aura` channel has no per-repo
+  // membership — it's "everyone on Aura, anywhere" — so its roster is the
+  // set of people this device has actually seen post there (seeded with
+  // yourself). Without this the header/rail counted only the local repo
+  // team, which read as just "1". Identical to `members` for every other
+  // conversation, so nothing else changes.
+  const activeRoster = useMemo<TeamMember[]>(() => {
+    const base =
+      active?.channel !== AURA_GLOBAL_CHANNEL
+        ? members
+        : auraRosterFromStream(
+            activeMsgs,
+            members,
+            selfHandle,
+            myDevice?.display ?? selfHandle,
+          );
+    // Collapse the LOCAL user's own duplicate seats into a single row. One
+    // person routinely holds two roster seats — their GitHub login (`ashiq`,
+    // a strong self-key) and their git-email local-part (`ashiqwayanad007`, a
+    // weak one) — and both resolve to "me", so the rail would otherwise show
+    // the user to themselves twice ("two of my account"). We only ever fold
+    // OUR OWN seats: a member is self when its handle/email matches our
+    // selfKeys or it's an explicitly-linked seat. Teammates' distinct seats
+    // are untouched. Prefer the seat whose handle is our current selfHandle as
+    // the survivor, else the most-committed one.
+    const isMemberSelf = (m: TeamMember) =>
+      m.handle === selfHandle ||
+      isSelfSender(m.handle, selfKeys) ||
+      (!!m.email && isSelfSender(m.email, selfKeys)) ||
+      isMemberLinkedSelf(m);
+    const selves = base.filter(isMemberSelf);
+    if (selves.length <= 1) return base;
+    const survivor =
+      selves.find((m) => m.handle === selfHandle) ??
+      [...selves].sort((a, b) => (b.commits ?? 0) - (a.commits ?? 0))[0];
+    return base.filter((m) => m === survivor || !isMemberSelf(m));
+  }, [
+    active?.channel,
+    activeMsgs,
+    members,
+    selfHandle,
+    myDevice?.display,
+    selfKeys,
+    isMemberLinkedSelf,
+  ]);
+
+  // Memoised, like every other derived collection here: these three are read
+  // straight out of the returned model, so a fresh array/map each render would
+  // keep that model unstable no matter what the memo below does.
+  const topLevel = useMemo(
+    () => activeMsgs.filter((m) => !m.thread_parent),
+    [activeMsgs],
+  );
   // In-channel search filters the visible top-level stream by body or
   // sender (case-insensitive). Empty query → the full stream.
   const msgQ = msgQuery.trim().toLowerCase();
-  const shownTopLevel = msgQ
-    ? topLevel.filter(
-        (m) =>
-          m.body.toLowerCase().includes(msgQ) ||
-          m.sender.toLowerCase().includes(msgQ),
-      )
-    : topLevel;
-  const threadCounts = countThreads(activeMsgs);
+  const shownTopLevel = useMemo(
+    () =>
+      msgQ
+        ? topLevel.filter(
+            (m) =>
+              m.body.toLowerCase().includes(msgQ) ||
+              m.sender.toLowerCase().includes(msgQ),
+          )
+        : topLevel,
+    [msgQ, topLevel],
+  );
+  const threadCounts = useMemo(() => countThreads(activeMsgs), [activeMsgs]);
   const lastReadActive = active ? lastRead[active.id] ?? 0 : 0;
 
   // Peer read cursors filtered to the active channel and excluding our
@@ -1919,112 +2192,238 @@ export function useTeamChat(repoRoot: string, projectName: string) {
     active.kind !== "project" &&
     active.kind !== "system";
 
-  return {
-    activeId,
-    setActiveId,
-    activeThread,
-    setActiveThread,
-    channelTab,
-    setChannelTab,
-    cloudConnected,
-    setCloudConnected,
-    creatingChannel,
-    setCreatingChannel,
-    doctorReport,
-    setDoctorReport,
-    identity,
-    setIdentity,
-    identityPickerOpen,
-    setIdentityPickerOpen,
-    lastRead,
-    setLastRead,
-    manifest,
-    setManifest,
-    membersOpen,
-    setMembersOpen,
-    msgQuery,
-    setMsgQuery,
-    msgs,
-    setMsgs,
-    msgSearchOpen,
-    setMsgSearchOpen,
-    myDevice,
-    setMyDevice,
-    panelW,
-    setPanelW,
-    pinnedByConv,
-    setPinnedByConv,
-    pinsOpen,
-    setPinsOpen,
-    railFilter,
-    setRailFilter,
-    readCursors,
-    setReadCursors,
-    search,
-    setSearch,
-    typingPeers,
-    setTypingPeers,
-    active,
-    activeChannelCursors,
-    activeMsgs,
-    activeMsgsRaw,
-    activePinnedSet,
-    addChannelTab,
-    allConvs,
-    builtins,
-    callSnap,
-    channelRows,
-    chatBackgroundChannels,
-    claim,
-    createChannel,
-    customRows,
-    customs,
-    dmRows,
-    emittedCursorRef,
-    fetchActive,
-    firstChatPoll,
-    identityBannerVisible,
-    lastReadActive,
-    loadChatChannel,
-    loadProjectFeed,
-    loadSentinelFeed,
-    loadTeam,
-    members,
-    msgQ,
-    myVoiceChannel,
-    notifiedMsgIds,
-    passesFilter,
-    peers,
-    prevRepoRef,
-    projectConv,
-    promptCreateChannel,
-    promptedReposRef,
-    railWidth,
-    refreshDoctor,
-    removeChannelTab,
-    resendMessage,
-    rootRef,
-    selfHandle,
-    selfKeys,
-    selfLinks,
-    linkSelf,
-    unlinkSelf,
-    isMemberLinkedSelf,
-    sendMessage,
-    showCenter,
-    showMembersRail,
-    shownTopLevel,
-    showRail,
-    threadCounts,
-    togglePin,
-    topLevel,
-    totalMentions,
-    totalUnread,
-    visible,
-    voiceByChannel,
-    wide,
-    wsHandlerRef,
-  };
+  // ── the model ─────────────────────────────────────────────────────
+  // Memoised because TeamChatProvider hands this straight to a context that
+  // wraps the entire Team shell: a fresh literal here re-renders every pane
+  // below it on every tick of every poll in this file, even when not one field
+  // moved. Everything listed is a state value, a setter, a ref, or an already-
+  // memoised callback/derivation, so the identity only turns over when the
+  // model genuinely changes.
+  return useMemo(
+    () => ({
+      activeId,
+      setActiveId,
+      activeThread,
+      setActiveThread,
+      channelTab,
+      setChannelTab,
+      cloudConnected,
+      setCloudConnected,
+      creatingChannel,
+      setCreatingChannel,
+      doctorReport,
+      setDoctorReport,
+      identity,
+      setIdentity,
+      identityPickerOpen,
+      setIdentityPickerOpen,
+      lastRead,
+      setLastRead,
+      manifest,
+      setManifest,
+      dupSuggestions,
+      confirmDuplicate,
+      rejectDuplicate,
+      membersOpen,
+      setMembersOpen,
+      msgQuery,
+      setMsgQuery,
+      msgs,
+      setMsgs,
+      msgSearchOpen,
+      setMsgSearchOpen,
+      myDevice,
+      setMyDevice,
+      panelW,
+      setPanelW,
+      pinnedByConv,
+      setPinnedByConv,
+      pinsOpen,
+      setPinsOpen,
+      railFilter,
+      setRailFilter,
+      readCursors,
+      setReadCursors,
+      search,
+      setSearch,
+      typingPeers,
+      setTypingPeers,
+      active,
+      activeChannelCursors,
+      activeMsgs,
+      activeMsgsRaw,
+      activeRoster,
+      activePinnedSet,
+      addChannelTab,
+      allConvs,
+      builtins,
+      callSnap,
+      channelRows,
+      chatBackgroundChannels,
+      claim,
+      createChannel,
+      customRows,
+      customs,
+      dmRows,
+      emittedCursorRef,
+      fetchActive,
+      firstChatPoll,
+      identityBannerVisible,
+      lastReadActive,
+      loadChatChannel,
+      loadProjectFeed,
+      loadSentinelFeed,
+      loadTeam,
+      members,
+      msgQ,
+      myVoiceChannel,
+      notifiedMsgIds,
+      passesFilter,
+      peers,
+      prevRepoRef,
+      projectConv,
+      promptCreateChannel,
+      promptedReposRef,
+      railWidth,
+      refreshDoctor,
+      removeChannelTab,
+      resendMessage,
+      rootRef,
+      selfHandle,
+      selfKeys,
+      selfLinks,
+      linkSelf,
+      unlinkSelf,
+      isMemberLinkedSelf,
+      sendMessage,
+      showCenter,
+      showMembersRail,
+      shownTopLevel,
+      showRail,
+      threadCounts,
+      togglePin,
+      topLevel,
+      totalMentions,
+      totalUnread,
+      visible,
+      voiceByChannel,
+      wide,
+      wsHandlerRef,
+    }),
+    // Every field above, so nothing can go stale behind the memo. There is no
+    // exhaustive-deps lint in this package to catch a drifting pair, so a new
+    // key on the object needs a matching entry here by hand.
+    [
+      activeId,
+      setActiveId,
+      activeThread,
+      setActiveThread,
+      channelTab,
+      setChannelTab,
+      cloudConnected,
+      setCloudConnected,
+      creatingChannel,
+      setCreatingChannel,
+      doctorReport,
+      setDoctorReport,
+      identity,
+      setIdentity,
+      identityPickerOpen,
+      setIdentityPickerOpen,
+      lastRead,
+      setLastRead,
+      manifest,
+      setManifest,
+      dupSuggestions,
+      confirmDuplicate,
+      rejectDuplicate,
+      membersOpen,
+      setMembersOpen,
+      msgQuery,
+      setMsgQuery,
+      msgs,
+      setMsgs,
+      msgSearchOpen,
+      setMsgSearchOpen,
+      myDevice,
+      setMyDevice,
+      panelW,
+      setPanelW,
+      pinnedByConv,
+      setPinnedByConv,
+      pinsOpen,
+      setPinsOpen,
+      railFilter,
+      setRailFilter,
+      readCursors,
+      setReadCursors,
+      search,
+      setSearch,
+      typingPeers,
+      setTypingPeers,
+      active,
+      activeChannelCursors,
+      activeMsgs,
+      activeMsgsRaw,
+      activeRoster,
+      activePinnedSet,
+      addChannelTab,
+      allConvs,
+      builtins,
+      callSnap,
+      channelRows,
+      chatBackgroundChannels,
+      claim,
+      createChannel,
+      customRows,
+      customs,
+      dmRows,
+      emittedCursorRef,
+      fetchActive,
+      firstChatPoll,
+      identityBannerVisible,
+      lastReadActive,
+      loadChatChannel,
+      loadProjectFeed,
+      loadSentinelFeed,
+      loadTeam,
+      members,
+      msgQ,
+      myVoiceChannel,
+      notifiedMsgIds,
+      passesFilter,
+      peers,
+      prevRepoRef,
+      projectConv,
+      promptCreateChannel,
+      promptedReposRef,
+      railWidth,
+      refreshDoctor,
+      removeChannelTab,
+      resendMessage,
+      rootRef,
+      selfHandle,
+      selfKeys,
+      selfLinks,
+      linkSelf,
+      unlinkSelf,
+      isMemberLinkedSelf,
+      sendMessage,
+      showCenter,
+      showMembersRail,
+      shownTopLevel,
+      showRail,
+      threadCounts,
+      togglePin,
+      topLevel,
+      totalMentions,
+      totalUnread,
+      visible,
+      voiceByChannel,
+      wide,
+      wsHandlerRef,
+    ],
+  );
 }
 
 /** The full team-chat application model: everything `useTeamChat` exposes.

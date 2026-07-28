@@ -1,6 +1,6 @@
 [package]
 name        = "aura-attestation"
-version     = "0.19.21"
+version     = "0.1.0"
 edition     = "2024"
 license     = "Apache-2.0 OR MIT"
 description = "ed25519 signing + verification + per-actor identity + keyfile management for Aura block provenance."

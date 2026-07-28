@@ -84,14 +84,30 @@ export function brandFor(agentId: string): AgentBrand {
       ring: "color-mix(in srgb, #6366f1 55%, transparent)",
     };
   }
+  if (id.includes("aider")) {
+    // Aider — warm amber, matching its terminal-first brand.
+    return {
+      fg: "#eab308",
+      bg: "color-mix(in srgb, #eab308 16%, transparent)",
+      ring: "color-mix(in srgb, #eab308 55%, transparent)",
+    };
+  }
+  if (id.includes("amp")) {
+    // Sourcegraph Amp — coral/rose.
+    return {
+      fg: "#f43f5e",
+      bg: "color-mix(in srgb, #f43f5e 16%, transparent)",
+      ring: "color-mix(in srgb, #f43f5e 55%, transparent)",
+    };
+  }
   // openai-compat = the generic local-models / HF / Ollama / vLLM
   // adapter. Picks a neutral teal so it visually separates from the
   // first-party agent kinds without claiming any vendor's color.
   if (id === "openai-compat" || id.startsWith("openai-compat")) {
     return {
-      fg: "var(--color-teal, #5eead4)",
-      bg: "color-mix(in srgb, var(--color-teal, #5eead4) 14%, transparent)",
-      ring: "color-mix(in srgb, var(--color-teal, #5eead4) 50%, transparent)",
+      fg: "var(--color-text-2)",
+      bg: "var(--color-bg-card)",
+      ring: "var(--color-line)",
     };
   }
   return {

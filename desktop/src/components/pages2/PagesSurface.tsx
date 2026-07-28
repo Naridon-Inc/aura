@@ -27,11 +27,17 @@ import {
   deviceIdentity,
   pageKey,
   parsePageKey,
+  cachedNote,
+  cachedList,
+  lastOpenPageKey,
+  setLastOpenPageKey,
   type Note,
   type NoteSummary,
 } from "./pagesApi";
 import {
   loadMentionSources,
+  cachedMentionSources,
+  EMPTY_MENTION_SOURCES,
   type MentionSources,
   type MentionItem,
 } from "./mentionSources";
@@ -52,18 +58,39 @@ const SYNC_INTERVAL_MS = 6000;
 const SAVE_DEBOUNCE_MS = 700;
 
 export function PagesSurface({ repoRoot, authorHandle }: Props) {
-  const [summaries, setSummaries] = useState<NoteSummary[]>([]);
-  const [activeKey, setActiveKey] = useState<string | null>(null);
-  const [activeNote, setActiveNote] = useState<Note | null>(null);
-  const [body, setBody] = useState("");
-  const [title, setTitle] = useState("");
+  // Seed from the module cache so returning to Pages shows the last-known list
+  // immediately instead of an empty tree that re-lists from zero.
+  const [summaries, setSummaries] = useState<NoteSummary[]>(
+    () => cachedList(repoRoot) ?? [],
+  );
+  // Reopen where the reader left off: the last-open page for this repo, painted
+  // from the (disk-backed) note cache on the very first frame so re-entering
+  // Pages — or relaunching the app — lands back on that page instantly instead
+  // of a blank "No page open". The mount effect below revalidates it. Each
+  // initializer runs once on mount; cachedNote promotes disk→memory on first
+  // hit, so the repeated lookups are memory-fast.
+  const seedNote = (): Note | null => {
+    const key = lastOpenPageKey(repoRoot);
+    if (!key) return null;
+    const p = parsePageKey(key);
+    return (p && cachedNote(repoRoot, p.scope, p.bucket, p.id)) || null;
+  };
+  const [activeKey, setActiveKey] = useState<string | null>(() =>
+    lastOpenPageKey(repoRoot),
+  );
+  const [activeNote, setActiveNote] = useState<Note | null>(seedNote);
+  const [body, setBody] = useState(() => seedNote()?.body ?? "");
+  const [title, setTitle] = useState(() => seedNote()?.frontmatter.title ?? "");
   const [pageView, setPageView] = useState<PageView>("blocks");
   const [saveState, setSaveState] = useState<SaveState>("saved");
   // Outline/context rail is hidden by default — the editor takes full width
   // until the reader opts into the rail from the header kebab.
   const [railOpen, setRailOpen] = useState(false);
+  // Seed from the module catalog cache so a remount paints @-mention results
+  // (people / PRs / tasks / pages) instantly instead of waiting on four Tauri
+  // round-trips; the effect below revalidates in the background.
   const [mentionSources, setMentionSources] = useState<MentionSources | undefined>(
-    undefined,
+    () => cachedMentionSources(repoRoot),
   );
   const editorRef = useRef<Editor | null>(null);
   const saveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -72,6 +99,10 @@ export function PagesSurface({ repoRoot, authorHandle }: Props) {
   const pendingRef = useRef<{ title: string; body: string } | null>(null);
   const activeNoteRef = useRef<Note | null>(null);
   activeNoteRef.current = activeNote;
+  // Latest active key, read inside async restores to bail if the reader has
+  // since opened a different page (avoids a late revalidate clobbering it).
+  const activeKeyRef = useRef<string | null>(activeKey);
+  activeKeyRef.current = activeKey;
 
   // ── Live collab provider (render-time mint) ──────────────────────────────
   // The provider MUST exist on the editor's very first render of a page, or the
@@ -92,6 +123,14 @@ export function PagesSurface({ repoRoot, authorHandle }: Props) {
     noteId && noteScope != null && noteBucket != null
       ? `${noteScope}|${noteBucket}|${noteId}|${authorHandle ?? ""}`
       : null;
+  // Author-independent page identity — the local instant-open cache key. Same
+  // page = same key whoever opens it, so the doc rehydrates from disk on every
+  // re-open. (pageCollabKey carries the author too, only to remount on identity
+  // change; the on-disk content is shared across authors.)
+  const pagePersistKey =
+    noteId && noteScope != null && noteBucket != null
+      ? `${noteScope}|${noteBucket}|${noteId}`
+      : null;
   const collabCacheRef = useRef<{ key: string; provider: PagesProvider } | null>(
     null,
   );
@@ -106,6 +145,7 @@ export function PagesSurface({ repoRoot, authorHandle }: Props) {
         provider: createPagesProvider({
           authorHandle: handle,
           authorColor: hashHandleToColor(handle),
+          persistKey: pagePersistKey ?? undefined,
         }),
       };
     } else {
@@ -173,10 +213,53 @@ export function PagesSurface({ repoRoot, authorHandle }: Props) {
 
   useEffect(() => {
     void refreshList();
+    // Paint the last-known catalog for THIS repo immediately (covers a repo
+    // switch, where the initial state still holds the previous repo's catalog),
+    // then revalidate. Only fall back to empty when we have nothing cached.
+    const seed = cachedMentionSources(repoRoot);
+    if (seed) setMentionSources(seed);
     loadMentionSources(repoRoot)
       .then(setMentionSources)
-      .catch(() => setMentionSources({ people: [], tasks: [], pages: [] }));
+      .catch(() => setMentionSources((prev) => prev ?? EMPTY_MENTION_SOURCES));
   }, [repoRoot, refreshList]);
+
+  // Restore + revalidate the last-open page on mount and on repo switch. The
+  // initializers already painted it from cache for the first frame; here we
+  // (re)seed on a repo change and fetch the current body underneath, so the
+  // editor shows fresh content even if only a stale/body-less copy was cached.
+  // The async read bails if the reader has since opened a different page.
+  useEffect(() => {
+    const key = lastOpenPageKey(repoRoot);
+    if (!key) return;
+    const parsed = parsePageKey(key);
+    if (!parsed) return;
+    let cancelled = false;
+    const cached = cachedNote(repoRoot, parsed.scope, parsed.bucket, parsed.id);
+    if (cached) {
+      setActiveKey(key);
+      setActiveNote(cached);
+      setBody(cached.body);
+      setTitle(cached.frontmatter.title ?? "");
+      setSaveState("saved");
+    }
+    void notesRead(repoRoot, parsed.scope, parsed.bucket, parsed.id)
+      .then((note) => {
+        // Skip if we were torn down, or the reader opened another page while
+        // this read was in flight.
+        if (cancelled || activeKeyRef.current !== key) return;
+        setActiveNote(note);
+        setBody(note.body);
+        setTitle(note.frontmatter.title ?? "");
+        setSaveState("saved");
+      })
+      .catch(() => {
+        /* keep the cached/empty view; the tree still lets them pick a page */
+      });
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [repoRoot]);
 
   // Periodic sync poll — pull shared-page mutations + refetch when changed.
   useEffect(() => {
@@ -203,6 +286,17 @@ export function PagesSurface({ repoRoot, authorHandle }: Props) {
       await flushSave();
       const key = pageKey(s);
       setActiveKey(key);
+      setLastOpenPageKey(repoRoot, key); // reopen here next time
+      // Paint the last-known copy instantly (SWR) so a re-open never blinks
+      // through an empty editor while the read is in flight.
+      const cached = cachedNote(repoRoot, s.scope, s.bucket, s.id);
+      if (cached) {
+        setActiveNote(cached);
+        setBody(cached.body);
+        setTitle(cached.frontmatter.title ?? "");
+        setSaveState("saved");
+        pendingRef.current = null;
+      }
       try {
         const note = await notesRead(repoRoot, s.scope, s.bucket, s.id);
         setActiveNote(note);
@@ -211,7 +305,9 @@ export function PagesSurface({ repoRoot, authorHandle }: Props) {
         setSaveState("saved");
         pendingRef.current = null;
       } catch {
-        setActiveNote(null);
+        // Keep the cached copy on a failed revalidate; only blank if we had
+        // nothing to show.
+        if (!cached) setActiveNote(null);
       }
     },
     // flushSave is stable (defined below with refs); listing repoRoot only.
@@ -385,6 +481,7 @@ export function PagesSurface({ repoRoot, authorHandle }: Props) {
         await refreshList();
         const key = pageKey(created);
         setActiveKey(key);
+        setLastOpenPageKey(repoRoot, key); // a new page becomes the last-open one
         setActiveNote(created);
         setBody(created.body);
         setTitle(created.frontmatter.title ?? "");
@@ -404,6 +501,7 @@ export function PagesSurface({ repoRoot, authorHandle }: Props) {
         if (archived && pageKey(s) === activeKey) {
           setActiveKey(null);
           setActiveNote(null);
+          setLastOpenPageKey(repoRoot, null); // archived page shouldn't reopen
         }
       } catch {
         /* no-op */
@@ -430,6 +528,21 @@ export function PagesSurface({ repoRoot, authorHandle }: Props) {
       void (async () => {
         try {
           await flushSave();
+          // Paint from cache first (SWR) so a rail click opens instantly.
+          const cached = cachedNote(
+            repoRoot,
+            parsed.scope,
+            parsed.bucket,
+            parsed.id,
+          );
+          if (cached) {
+            setActiveKey(pageKey(cached));
+            setActiveNote(cached);
+            setBody(cached.body);
+            setTitle(cached.frontmatter.title ?? "");
+            setSaveState("saved");
+            pendingRef.current = null;
+          }
           const note = await notesRead(
             repoRoot,
             parsed.scope,
@@ -437,6 +550,7 @@ export function PagesSurface({ repoRoot, authorHandle }: Props) {
             parsed.id,
           );
           setActiveKey(pageKey(note));
+          setLastOpenPageKey(repoRoot, pageKey(note));
           setActiveNote(note);
           setBody(note.body);
           setTitle(note.frontmatter.title ?? "");
@@ -451,6 +565,7 @@ export function PagesSurface({ repoRoot, authorHandle }: Props) {
     const onClose = () => {
       setActiveKey(null);
       setActiveNote(null);
+      setLastOpenPageKey(repoRoot, null); // don't reopen a page they closed
     };
     window.addEventListener("aura:pages:open", onOpen as EventListener);
     window.addEventListener("aura:pages:refresh", onRefresh);

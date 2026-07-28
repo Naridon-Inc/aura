@@ -21,6 +21,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { onExternalAnchorClick } from "../../lib/openExternal";
 import { SquareArrowOutUpRight } from "lucide-react";
+import { AsciiSpinner } from "../ui/ascii-spinner";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import {
@@ -49,6 +50,7 @@ import { useEditorStore } from "../../lib/editorStore";
 import { PrApprovalBar } from "../pr/PrApprovalBar";
 import { PrStackView } from "../pr/PrStackView";
 import { PrOverviewTab } from "../pr/PrOverviewTab";
+import { PrChecksTab } from "../pr/PrChecksTab";
 import { PrDiffBody, groupThreads } from "../pr/PrDiffBody";
 import {
   PrThreadColumn,
@@ -57,11 +59,13 @@ import {
 } from "../pr/PrThreadColumn";
 import { FullscreenOverlay } from "../FullscreenOverlay";
 import { WizardStepTabs, type WizardStepMeta } from "../ui/wizard";
+import { Segment } from "../ui/segment";
 import { Button } from "../ui/button";
 import { Textarea } from "../ui/textarea";
 import { StatusChip, type ChipTone } from "../ui/statusChip";
 import { MARKDOWN_COMPONENTS } from "../pr/PrDescriptionCard";
 import { GhErrorNotice } from "../github/GhErrorNotice";
+import { requestPrAuthoring } from "../dialogs/PrAuthoringDialog";
 import { Churn } from "../diff/Churn";
 import { detectLanguage } from "../../lib/fileLang";
 
@@ -78,7 +82,7 @@ type Props = {
 };
 
 type RightTab = "threads" | "stack" | "findings";
-type TopTab = "overview" | "files" | "conversation";
+type TopTab = "overview" | "files" | "checks" | "conversation";
 
 // Main header tabs — driven through the shared WizardStepTabs (variant="tabs")
 // so the PR detail header reads identically to the create-task wizard. The
@@ -87,6 +91,7 @@ type TopTab = "overview" | "files" | "conversation";
 const TOP_TABS: WizardStepMeta[] = [
   { id: "overview", label: "Overview", icon: <OverviewIcon /> },
   { id: "files", label: "Files", icon: <FilesIcon /> },
+  { id: "checks", label: "Checks", icon: <ChecksIcon /> },
   { id: "conversation", label: "Conversation", icon: <ChatIcon /> },
 ];
 const TOP_TAB_IDS = TOP_TABS.map((t) => t.id) as TopTab[];
@@ -139,6 +144,25 @@ export function PRDetailPane({ onClose, selOverride, embedded = false, onDetach 
     },
     [viewedKey],
   );
+
+  // Land on the sub-tab a caller requested via openPrDetail(..., initialTab) —
+  // e.g. clicking a review comment in the Checks rail jumps straight here to
+  // Conversation. A cold mount consumes the stashed value; an already-open tab
+  // re-targeted live reacts to the event. (Mirrors the tasks edit handoff.)
+  useEffect(() => {
+    if (!sel) return;
+    const tabId = `${sel.repoRoot}#${sel.number}`;
+    const pending = editor.consumePendingPrDetailTab(tabId);
+    if (pending) setTopTab(pending);
+    const onTargetTab = (e: Event) => {
+      const d = (e as CustomEvent<{ tabId: string; tab: TopTab }>).detail;
+      if (d && d.tabId === tabId) setTopTab(d.tab);
+    };
+    window.addEventListener("aura:pr-detail-tab", onTargetTab as EventListener);
+    return () =>
+      window.removeEventListener("aura:pr-detail-tab", onTargetTab as EventListener);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sel?.repoRoot, sel?.number]);
 
   const refresh = useCallback(
     async (force = false) => {
@@ -388,11 +412,15 @@ export function PRDetailPane({ onClose, selOverride, embedded = false, onDetach 
       tabs={
         <WizardStepTabs
           variant="tabs"
-          steps={TOP_TABS.map((t) =>
-            t.id === "conversation" && comments.length > 0
-              ? { ...t, label: `Conversation (${comments.length})` }
-              : t,
-          )}
+          steps={TOP_TABS.map((t) => {
+            if (t.id === "conversation" && comments.length > 0)
+              return { ...t, label: `Conversation (${comments.length})` };
+            if (t.id === "checks" && checks && checks.failing > 0)
+              return { ...t, label: `Checks (${checks.failing} failing)` };
+            if (t.id === "checks" && checks && checks.total > 0)
+              return { ...t, label: `Checks (${checks.total})` };
+            return t;
+          })}
           index={Math.max(0, TOP_TAB_IDS.indexOf(topTab))}
           onJump={(i) => setTopTab(TOP_TAB_IDS[i])}
         />
@@ -405,13 +433,7 @@ export function PRDetailPane({ onClose, selOverride, embedded = false, onDetach 
             <ReviewerPips reviewers={data.reviewers} />
           )}
           {refreshing && (
-            <span
-              title="Refreshing PR…"
-              className="text-text-4 text-[12px] animate-spin"
-              aria-label="refreshing"
-            >
-              ⟳
-            </span>
+            <AsciiSpinner className="text-[12px]" />
           )}
           {onDetach && (
             <Button
@@ -422,6 +444,26 @@ export function PRDetailPane({ onClose, selOverride, embedded = false, onDetach 
             >
               <SquareArrowOutUpRight strokeWidth={1.75} aria-hidden />
               Detach
+            </Button>
+          )}
+          {data && sel && data.state === "OPEN" && (
+            <Button
+              variant="subtle"
+              size="xs"
+              onClick={() =>
+                requestPrAuthoring({
+                  mode: "edit",
+                  repoRoot: sel.repoRoot,
+                  number: sel.number,
+                  title: data.title,
+                  body: data.body,
+                  baseBranch: data.base_ref,
+                  draft: data.is_draft,
+                })
+              }
+              title="Edit title, description, target branch, or draft state"
+            >
+              Edit
             </Button>
           )}
           <Button
@@ -461,6 +503,8 @@ export function PRDetailPane({ onClose, selOverride, embedded = false, onDetach 
               isDraft={data.is_draft}
               reviewDecision={data.review_decision}
               onMutated={refreshAll}
+              failingChecks={checks?.failing ?? 0}
+              pendingChecks={checks?.pending ?? 0}
             />
           </>
         ) : null
@@ -515,6 +559,8 @@ export function PRDetailPane({ onClose, selOverride, embedded = false, onDetach 
             checks={checks}
           />
         </div>
+      ) : topTab === "checks" ? (
+        <PrChecksTab repoRoot={sel.repoRoot} prNumber={sel.number} />
       ) : topTab === "conversation" ? (
         <PrConversation
           repoRoot={sel.repoRoot}
@@ -614,37 +660,37 @@ function RightTabs({
   setTab: (t: RightTab) => void;
   commentCount: number;
 }) {
-  const TabBtn = ({
-    id,
-    label,
-    badge,
-  }: {
-    id: RightTab;
-    label: string;
-    badge?: string;
-  }) => (
-    <button
-      type="button"
-      onClick={() => setTab(id)}
-      className={`flex-1 h-7 text-[11px] uppercase tracking-wider flex items-center justify-center gap-1 ${
-        tab === id
-          ? "text-text-1 border-b-2 border-accent-violet"
-          : "text-text-4 hover:text-text-2 border-b border-line-soft"
-      }`}
-    >
-      {label}
-      {badge && <span className="text-[10.5px] tabular-nums">{badge}</span>}
-    </button>
-  );
+  // The shared Segment control — one connected-cell pill track, same as the
+  // right rail and everywhere else, instead of a bespoke underline strip. It
+  // stretches to fill the narrow column; the Threads count folds into its label.
   return (
-    <div className="flex flex-shrink-0">
-      <TabBtn
-        id="threads"
-        label="Threads"
-        badge={commentCount > 0 ? String(commentCount) : undefined}
+    <div className="flex-shrink-0 px-2 py-1.5">
+      <Segment
+        stretch
+        size="sm"
+        value={tab}
+        onChange={setTab}
+        ariaLabel="PR side panel"
+        className="w-full"
+        options={[
+          {
+            value: "threads",
+            label:
+              commentCount > 0 ? (
+                <>
+                  Threads
+                  <span className="text-[10.5px] tabular-nums text-ui-fg-subtle">
+                    {commentCount}
+                  </span>
+                </>
+              ) : (
+                "Threads"
+              ),
+          },
+          { value: "stack", label: "Stack" },
+          { value: "findings", label: "Findings" },
+        ]}
       />
-      <TabBtn id="stack" label="Stack" />
-      <TabBtn id="findings" label="Findings" />
     </div>
   );
 }
@@ -1720,6 +1766,21 @@ function ChatIcon() {
         d="M2.5 4.5a2 2 0 012-2h7a2 2 0 012 2v4a2 2 0 01-2 2H6l-3 2.5V10.5H4.5a2 2 0 01-2-2z"
         stroke="currentColor"
         strokeWidth="1.3"
+        strokeLinejoin="round"
+      />
+    </svg>
+  );
+}
+
+function ChecksIcon() {
+  return (
+    <svg width="14" height="14" viewBox="0 0 16 16" fill="none" aria-hidden>
+      <circle cx="8" cy="8" r="6" stroke="currentColor" strokeWidth="1.3" />
+      <path
+        d="M5.5 8.2l1.7 1.7 3.3-3.6"
+        stroke="currentColor"
+        strokeWidth="1.4"
+        strokeLinecap="round"
         strokeLinejoin="round"
       />
     </svg>

@@ -17,6 +17,7 @@ import { Check, Cloud, GitBranch, Plus, Search } from "lucide-react";
 
 import { api, type GitBranchRich, type RadarEvent } from "../../lib/api";
 import { Button } from "../ui/button";
+import { AsciiSpinner } from "../ui/ascii-spinner";
 import { useBranches } from "./branches";
 
 type Props = {
@@ -237,7 +238,7 @@ export function BranchSwitcherModal({ repoRoot, onClose }: Props) {
         {br.error && (
           <div
             className="border-b border-line-soft px-3.5 py-2 text-[11.5px]"
-            style={{ color: "var(--color-red)", background: "rgba(239,68,68,0.08)" }}
+            style={{ color: "var(--color-red)", background: "color-mix(in oklab, var(--color-red) 8%, transparent)" }}
           >
             {br.error}
           </div>
@@ -246,7 +247,10 @@ export function BranchSwitcherModal({ repoRoot, onClose }: Props) {
         {/* Rich rows */}
         <div ref={listRef} className="max-h-[52vh] overflow-y-auto py-1">
           {loading ? (
-            <div className="px-3.5 py-3 text-[12px] text-text-4">Loading branches…</div>
+            <div className="flex items-center gap-1.5 px-3.5 py-3 text-[12px] text-text-4">
+              <AsciiSpinner className="text-[10px]" />
+              <span>Reading this project's branches…</span>
+            </div>
           ) : filtered.length === 0 ? (
             <div className="px-3.5 py-3 text-[12px] text-text-4">No branches match.</div>
           ) : (
@@ -425,7 +429,7 @@ function PresencePips({ actors }: { actors: string[] }) {
 }
 
 function initials(actor: string): string {
-  // Strip an "@host" suffix (radar actors look like "owner@cursor"), then take
+  // Strip an "@host" suffix (radar actors look like "ashiq@cursor"), then take
   // up to two leading letters.
   const name = actor.split("@")[0].replace(/[^A-Za-z0-9]/g, " ").trim();
   if (!name) return "·";

@@ -83,8 +83,14 @@ export function ThreadReplies({
     [replies, lastRead],
   );
 
+  // The project feed is the team's activity story, not a chat channel — it
+  // has no room to post into (`sendMessage` no-ops without a `conv.channel`).
+  // So an intent thread is read-only: you read the play-by-play, which fills
+  // in live as the agent keeps working. Swap the composer for a quiet hint.
+  const readOnly = conv.kind === "project";
+
   return (
-    <div className="h-full flex flex-col">
+    <div className="slack-thread-view h-full flex flex-col">
       <header className="flex-shrink-0 flex items-center gap-2 px-2 h-11 border-b border-line-soft bg-bg-content">
         {onBackToRail && (
           <button
@@ -137,8 +143,8 @@ export function ThreadReplies({
       <div className="flex-1 min-h-0 overflow-y-auto px-3 py-3">
         {/* Parent — wrapped in a soft-yellow card when pinned. */}
         {parent.pinned ? (
-          <div className="rounded-md bg-yellow-500/10 border-l-2 border-yellow-500/40 p-2 mb-2">
-            <div className="flex items-center gap-1 mb-1 text-[10px] text-yellow-500 font-medium">
+          <div className="rounded-md bg-bg-2 border-l-2 border-line p-2 mb-2">
+            <div className="flex items-center gap-1 mb-1 text-[10px] text-text-4 font-medium">
               <PinLucide size={10} />
               <span>Pinned</span>
             </div>
@@ -195,7 +201,7 @@ export function ThreadReplies({
       </div>
 
       {/* Mark-as-read / Reply pills — Slack pattern, only on unread. */}
-      {hasUnread && (
+      {!readOnly && hasUnread && (
         <div className="flex-shrink-0 px-3 pt-2 flex items-center gap-2">
           <button
             type="button"
@@ -224,14 +230,20 @@ export function ThreadReplies({
         className="flex-shrink-0 px-3 text-[10.5px] text-text-4 leading-[18px] truncate"
         style={{ height: 18 }}
       />
-      <Composer
-        conv={conv}
-        repoRoot={repoRoot}
-        members={members}
-        onSend={onSend}
-        placeholder="Reply to thread…"
-        textareaRef={composerFocusRef}
-      />
+      {readOnly ? (
+        <div className="flex-shrink-0 px-3 py-2.5 border-t border-line-soft text-[10.5px] text-text-5 text-center leading-snug">
+          This thread updates live as the session continues.
+        </div>
+      ) : (
+        <Composer
+          conv={conv}
+          repoRoot={repoRoot}
+          members={members}
+          onSend={onSend}
+          placeholder="Reply to thread…"
+          textareaRef={composerFocusRef}
+        />
+      )}
     </div>
   );
 }

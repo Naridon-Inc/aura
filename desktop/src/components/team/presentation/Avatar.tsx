@@ -7,6 +7,8 @@
  *  animal come from the shared `identityColors` hash so the same person
  *  reads identically here, in the sidebar, and in message bubbles. */
 
+import { useEffect, useState } from "react";
+
 import {
   animalForName,
   colorForName,
@@ -24,6 +26,8 @@ type AvatarProps = {
   /** When set, draws a presence dot at the bottom-right corner. */
   presence?: Presence | null;
   title?: string;
+  /** Optional profile photo. The deterministic animal remains the fallback. */
+  src?: string | null;
 };
 
 const PRESENCE_COLOR: Record<Presence, string> = {
@@ -38,9 +42,18 @@ export function Avatar({
   shape = "circle",
   presence = null,
   title,
+  src,
 }: AvatarProps) {
   const radius = shape === "circle" ? 9999 : Math.round(size * 0.28);
   const dot = Math.max(8, Math.round(size * 0.3));
+  // A photo can 404 (a GitHub login with no picture, offline, a stale URL).
+  // When it does, fall back to the deterministic animal so nobody ever shows
+  // a broken-image glyph. Reset the flag when the src changes to a new photo.
+  const [broken, setBroken] = useState(false);
+  useEffect(() => {
+    setBroken(false);
+  }, [src]);
+  const showPhoto = !!src && !broken;
   return (
     <span
       className="relative inline-flex flex-shrink-0 select-none"
@@ -56,7 +69,18 @@ export function Avatar({
           fontSize: Math.round(size * 0.46),
         }}
       >
-        {animalForName(name)}
+        {showPhoto ? (
+          <img
+            src={src ?? undefined}
+            alt=""
+            className="h-full w-full object-cover"
+            style={{ borderRadius: radius }}
+            draggable={false}
+            onError={() => setBroken(true)}
+          />
+        ) : (
+          animalForName(name)
+        )}
       </span>
       {presence && (
         <span

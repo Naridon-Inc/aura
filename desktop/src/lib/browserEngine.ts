@@ -10,9 +10,49 @@
 
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
+import { getCurrentWindow } from "@tauri-apps/api/window";
 
 /** Logical-pixel rect for positioning the native webview over the hole. */
 export type BrowserRect = { x: number; y: number; width: number; height: number };
+
+// ── Page-zoom correction ─────────────────────────────────────────────────────
+//
+// The hole is measured with getBoundingClientRect, which returns CSS pixels —
+// i.e. *page* logical pixels. Tauri positions a child webview from a
+// LogicalPosition by multiplying by the WINDOW's OS scale factor
+// (`scaleFactor()`), which knows nothing about the webview's page zoom. When the
+// two differ (e.g. the UI is at 110% zoom on a 1× display: devicePixelRatio 1.1,
+// scaleFactor 1), a raw CSS-px rect lands the webview at 1/zoom of where the
+// hole visually is — shifted up-left and shrunk. Pre-scaling the rect by
+// `devicePixelRatio / scaleFactor` (the page-zoom ratio) cancels the mismatch:
+// Tauri then multiplies back by scaleFactor, yielding physical = CSS × dpr =
+// the hole's true on-screen box. The ratio is 1 when there's no zoom (retina or
+// not), so this is a no-op on the common path.
+let cachedScaleFactor = 1;
+void getCurrentWindow()
+  .scaleFactor()
+  .then((sf) => {
+    if (sf > 0) cachedScaleFactor = sf;
+  })
+  .catch(() => {});
+void getCurrentWindow()
+  .onScaleChanged(({ payload }) => {
+    if (payload.scaleFactor > 0) cachedScaleFactor = payload.scaleFactor;
+  })
+  .catch(() => {});
+
+/** Convert a CSS-px hole rect into the window-logical rect Tauri expects, so
+ *  the native webview lands exactly over the hole regardless of page zoom. */
+function toWindowRect(rect: BrowserRect): BrowserRect {
+  const zoom = window.devicePixelRatio / cachedScaleFactor;
+  if (!Number.isFinite(zoom) || zoom <= 0 || zoom === 1) return rect;
+  return {
+    x: rect.x * zoom,
+    y: rect.y * zoom,
+    width: rect.width * zoom,
+    height: rect.height * zoom,
+  };
+}
 
 /** Page read used by the agentic loop (title + url + rendered innerText). */
 export type PageSnapshot = { title: string; url: string; text: string };
@@ -26,14 +66,24 @@ export type BrowserStateEvent = {
   loading: boolean;
 };
 
-export function browserOpen(tabId: string, url: string, rect: BrowserRect): Promise<void> {
+/** `mobile` presents an iPhone Safari UA so sites serve their mobile layout —
+ *  used by the narrow sidebar (rail) browser. Full-pane browser tabs omit it
+ *  and get the desktop UA. */
+export function browserOpen(
+  tabId: string,
+  url: string,
+  rect: BrowserRect,
+  mobile = false,
+): Promise<void> {
+  const r = toWindowRect(rect);
   return invoke("browser_open", {
     tabId,
     url,
-    x: rect.x,
-    y: rect.y,
-    width: rect.width,
-    height: rect.height,
+    x: r.x,
+    y: r.y,
+    width: r.width,
+    height: r.height,
+    mobile,
   });
 }
 
@@ -42,12 +92,13 @@ export function browserNavigate(tabId: string, url: string): Promise<void> {
 }
 
 export function browserSetBounds(tabId: string, rect: BrowserRect): Promise<void> {
+  const r = toWindowRect(rect);
   return invoke("browser_set_bounds", {
     tabId,
-    x: rect.x,
-    y: rect.y,
-    width: rect.width,
-    height: rect.height,
+    x: r.x,
+    y: r.y,
+    width: r.width,
+    height: r.height,
   });
 }
 
@@ -91,13 +142,14 @@ export function browserReparent(
   windowLabel: string,
   rect: BrowserRect,
 ): Promise<void> {
+  const r = toWindowRect(rect);
   return invoke("browser_reparent", {
     tabId,
     windowLabel,
-    x: rect.x,
-    y: rect.y,
-    width: rect.width,
-    height: rect.height,
+    x: r.x,
+    y: r.y,
+    width: r.width,
+    height: r.height,
   });
 }
 

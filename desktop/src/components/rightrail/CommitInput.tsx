@@ -318,7 +318,7 @@ export function CommitInput({
   }, [primary.action, doCommit, doPush, doPull, doSync]);
 
   return (
-    <div className="border-t border-line-soft bg-bg-1/30 shrink-0">
+    <div className="border-t border-line-soft bg-bg-1/30 shrink-0 min-w-0 overflow-hidden">
       {liveActive && (
         <div className="px-3 py-1.5 flex items-center gap-1.5 text-[10px] text-text-4 border-b border-line-soft">
           <span
@@ -331,9 +331,9 @@ export function CommitInput({
         </div>
       )}
       {/* Branch chip + ahead/behind glyphs */}
-      <div className="px-3 py-1.5 flex items-center gap-2 text-[10.5px] text-text-3">
+      <div className="px-3 py-1.5 flex items-center gap-2 text-[10.5px] text-text-3 min-w-0">
         <BranchGlyph />
-        <span className="font-mono text-text-2 truncate max-w-[160px]">
+        <span className="font-mono text-text-2 truncate min-w-0">
           {ahead.branch ?? "no branch"}
         </span>
         {ahead.has_upstream ? (
@@ -362,7 +362,7 @@ export function CommitInput({
             unpublished
           </span>
         )}
-        <div className="ml-auto flex items-center gap-2.5">
+        <div className="ml-auto flex items-center gap-2.5 shrink-0">
           {/* Ambient ship-readiness — live fast-gate status right where you
               commit. Click opens the full detail (ChecksPane). */}
           <ShipReadyPill repoRoot={repoRoot} />
@@ -380,7 +380,8 @@ export function CommitInput({
 
       {(info || error) && (
         <div
-          className={`px-3 py-1 text-[10.5px] border-t border-line-soft ${
+          title={error ?? info ?? undefined}
+          className={`px-3 py-1 text-[10.5px] border-t border-line-soft truncate ${
             error ? "bg-red/10 text-red" : "bg-green/10 text-green"
           }`}
         >
@@ -482,16 +483,16 @@ export function CommitInput({
           }}
         />
 
-        <div className="flex items-stretch gap-px">
+        <div className="flex items-stretch gap-px min-w-0">
           <button
             type="button"
             onClick={handlePrimary}
             disabled={primary.disabled}
             title={primary.tooltip}
-            className="flex-1 h-7 rounded-l bg-bg-2 hover:bg-bg-1 active:bg-bg-2 disabled:opacity-50 disabled:cursor-not-allowed text-text-1 text-[11px] font-medium flex items-center justify-center gap-1.5 transition-colors border border-line-soft border-r-0"
+            className="flex-1 min-w-0 h-7 rounded-l bg-bg-2 hover:bg-bg-1 active:bg-bg-2 disabled:opacity-50 disabled:cursor-not-allowed text-text-1 text-[11px] font-medium flex items-center justify-center gap-1.5 transition-colors border border-line-soft border-r-0"
           >
             <ActionGlyph action={primary.action} />
-            <span>{primary.label}</span>
+            <span className="truncate">{primary.label}</span>
             {primary.action !== "commit" && primary.action !== "publish" && (
               <span className="text-[10px] text-text-3 tabular-nums">
                 {primary.action === "push"
@@ -508,7 +509,7 @@ export function CommitInput({
               <button
                 type="button"
                 disabled={isPending}
-                className="h-7 px-2 rounded-r bg-bg-2 hover:bg-bg-1 disabled:opacity-50 text-text-2 border border-line-soft transition-colors"
+                className="h-7 px-2 shrink-0 rounded-r bg-bg-2 hover:bg-bg-1 disabled:opacity-50 text-text-2 border border-line-soft transition-colors"
                 aria-label="More commit actions"
               >
                 <ChevronDownGlyph />

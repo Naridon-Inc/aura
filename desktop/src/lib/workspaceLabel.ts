@@ -15,6 +15,17 @@
 // Captures the parent path (group 1) + the worktree leaf (group 2).
 const WORKTREE_PATH_RE = /^(.*?)\/\.(?:claude|gemini|aura)\/worktrees\/([^/]+)\/?$/;
 
+// The bundled sample ("Recipe Box") is seeded at ~/AuraProjects/recipe-box and
+// surfaced as the always-present "Get Started" project (Conductor's Quickstart
+// idea) the app boots onto on first run — so its switcher/roster label reads
+// "Get Started", not the raw folder name.
+const SAMPLE_ROOT_SUFFIX = "/AuraProjects/recipe-box";
+
+/** True when `root` is the bundled Get Started (Recipe Box) sample project. */
+export function isSampleRoot(root: string): boolean {
+  return root.replace(/\/+$/, "").endsWith(SAMPLE_ROOT_SUFFIX);
+}
+
 // A worktree leaf or branch segment with no human meaning: `agent-<hex>`,
 // `worktree-agent-<hex>`, `lane-<hex>`, `work-<hex>`, `p-<hex>`, or a bare hash.
 const MACHINE_LEAF_RE = /^(?:worktree-)?(?:agent|lane|work|p)[-_]?[0-9a-f]{6,}$|^[0-9a-f]{8,}$/i;
@@ -78,6 +89,7 @@ export function worktreeParentName(root: string): string | null {
  *  "<project> · <name>" when the copy was given a real name); everything else
  *  keeps the name it was opened with, or falls back to its folder name. */
 export function humanizeWorkspaceName(root: string, fallbackName?: string): string {
+  if (isSampleRoot(root)) return "Get Started";
   const m = root.match(WORKTREE_PATH_RE);
   if (m) {
     const parent = m[1].split("/").filter(Boolean).pop() ?? "project";

@@ -83,6 +83,11 @@ export function ChatIconsSprite() {
           <path d="M9 4v14" />
           <path d="M15 6v14" />
         </symbol>
+        <symbol id="i-target" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" strokeLinejoin="round">
+          <circle cx="12" cy="12" r="9" />
+          <circle cx="12" cy="12" r="5" />
+          <circle cx="12" cy="12" r="1" />
+        </symbol>
         <symbol id="i-stop" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" strokeLinejoin="round">
           <rect x="6" y="6" width="12" height="12" rx="1" />
         </symbol>

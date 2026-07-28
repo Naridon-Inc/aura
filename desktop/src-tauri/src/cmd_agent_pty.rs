@@ -31,7 +31,7 @@
 //!     deltas; the AgentBlocksView store applies them in order.
 
 use std::collections::{HashMap, VecDeque};
-use std::io::{Read, Write};
+use std::io::Read;
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -174,7 +174,11 @@ pub struct CliAgentEventEnvelope {
 const AURA_CLI_AGENT_PROTOCOL_VERSION: u32 = 1;
 
 pub struct AgentPtySession {
-    writer: Mutex<Box<dyn Write + Send>>,
+    /// Shared so the write commands can clone it and release the
+    /// registry lock before the (blocking) write — see `crate::pty_io`.
+    /// Holding `sessions` across that write let one wedged agent freeze
+    /// every terminal in the app.
+    writer: crate::pty_io::SharedPtyWriter,
     master: Mutex<Box<dyn MasterPty + Send>>,
     child: Mutex<Box<dyn portable_pty::Child + Send + Sync>>,
     blocks: Mutex<Vec<BlockEnvelope>>,
@@ -263,9 +267,58 @@ pub struct AgentPtyRegistry {
     pub history: Arc<Mutex<HashMap<String, VecDeque<u8>>>>,
 }
 
+/// Minimal per-session info the cloud session-sync heartbeat needs to
+/// publish a live agent session to the phone's Workspaces feed.
+pub struct AgentSyncInfo {
+    pub session_id: String,
+    pub agent_id: String,
+    pub repo_root: String,
+}
+
 impl AgentPtyRegistry {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Snapshot of every *live* agent session (in-process + daemon-backed)
+    /// for `cloud_session_sync::spawn_session_heartbeat`. In-process sessions
+    /// whose child has exited, and daemon sessions whose subscribe loop has
+    /// ended, are skipped so the heartbeat never publishes a corpse.
+    pub fn live_sessions_for_sync(&self) -> Vec<AgentSyncInfo> {
+        let mut out = Vec::new();
+        {
+            let sessions = self.sessions.lock().unwrap();
+            for (sid, s) in sessions.iter() {
+                let alive = s
+                    .child
+                    .lock()
+                    .unwrap()
+                    .try_wait()
+                    .ok()
+                    .flatten()
+                    .is_none();
+                if alive {
+                    out.push(AgentSyncInfo {
+                        session_id: sid.clone(),
+                        agent_id: s.agent_id.clone(),
+                        repo_root: s.repo_root.clone(),
+                    });
+                }
+            }
+        }
+        {
+            let daemon = self.daemon_sessions.lock().unwrap();
+            for (sid, s) in daemon.iter() {
+                if !s.subscribe_handle.is_finished() {
+                    out.push(AgentSyncInfo {
+                        session_id: sid.clone(),
+                        agent_id: s.agent_id.clone(),
+                        repo_root: s.repo_root.clone(),
+                    });
+                }
+            }
+        }
+        out
     }
 
     /// Kill every PTY child this registry owns. Called from the app's
@@ -565,7 +618,7 @@ pub async fn agent_pty_open(
         Some("max") => Some(aura_agents::ReasoningEffort::Max),
         _ => None,
     };
-    let inv = provider
+    let mut inv = provider
         .build_invocation(&aura_agents::InvokeRequest {
             prompt: "",
             mode: aura_agents::InvokeMode::PtyRepl,
@@ -577,6 +630,10 @@ pub async fn agent_pty_open(
             approval,
         })
         .map_err(|e| format!("build invocation for {agent_id}: {e}"))?;
+    // Enforce the fleet agent-CLI config policy on the just-built invocation
+    // (e.g. repair codex `service_tier` for this spawn). No-op for agents with
+    // no rules or no wired channel.
+    crate::agent_policy::apply_to_invocation(&agent_id, &mut inv);
     let bin = inv.bin;
 
     // T3.1 opt-in path: when AURA_USE_PTY_DAEMON=1, the PTY child
@@ -731,7 +788,7 @@ pub async fn agent_pty_open(
     let exit_event = format!("agent-pty-exit:{id}");
 
     let session = AgentPtySession {
-        writer: Mutex::new(writer),
+        writer: crate::pty_io::shared_writer(writer),
         master: Mutex::new(pair.master),
         child: Mutex::new(child),
         blocks: Mutex::new(Vec::new()),
@@ -825,7 +882,9 @@ pub async fn agent_pty_open(
                 let registry = app_for_emit.state::<AgentPtyRegistry>();
                 let mut should_emit = false;
                 let mut should_notify = false;
+                let mut attention_repo_root = None;
                 if let Some(sess) = registry.sessions.lock().unwrap().get(&id_for_task) {
+                    attention_repo_root = Some(sess.repo_root.clone());
                     let mut last_att = sess.last_attention_ms.lock().unwrap();
                     // saturating_sub: `now` falls back to 0 when SystemTime
                     // fails, and a clock step can leave `t > now` — a raw
@@ -847,6 +906,7 @@ pub async fn agent_pty_open(
                         serde_json::json!({
                             "session_id": id_for_task,
                             "agent_id": agent_id_for_task,
+                            "repo_root": attention_repo_root,
                         }),
                     );
                 }
@@ -1128,74 +1188,82 @@ pub async fn agent_pty_send_prompt(
             .await
             .map_err(|e| e.to_string());
     }
-    let sessions = state.sessions.lock().unwrap();
-    let sess = sessions
-        .get(&session_id)
-        .ok_or_else(|| format!("unknown session: {session_id}"))?;
     let block_event = format!("agent-block:{session_id}");
 
-    // Close any currently-open Output block so the UI never shows two
-    // open answers stacked. Exit code unknown — leave `exit_code: None`
-    // so the UI can render "ended" rather than "exit 0".
-    {
-        let mut cur = sess.current_block_id.lock().unwrap();
-        if let Some(bid) = cur.take() {
-            let mut blocks = sess.blocks.lock().unwrap();
-            if let Some(b) = blocks.iter_mut().find(|b| b.id == bid) {
-                b.finished_at = Some(now_ms());
-                let snap = b.clone();
-                drop(blocks);
-                let _ = app.emit(&block_event, BlockUpdate::Close { block: snap });
+    // Synthesize the blocks under the registry lock, then hand back just
+    // the writer handle so the lock is released before the PTY write
+    // below. That write can park for as long as the agent takes to read
+    // its input, and no other terminal may wait on the map for that.
+    let writer = {
+        let sessions = state.sessions.lock().unwrap();
+        let sess = sessions
+            .get(&session_id)
+            .ok_or_else(|| format!("unknown session: {session_id}"))?;
+
+        // Close any currently-open Output block so the UI never shows two
+        // open answers stacked. Exit code unknown — leave `exit_code: None`
+        // so the UI can render "ended" rather than "exit 0".
+        {
+            let mut cur = sess.current_block_id.lock().unwrap();
+            if let Some(bid) = cur.take() {
+                let mut blocks = sess.blocks.lock().unwrap();
+                if let Some(b) = blocks.iter_mut().find(|b| b.id == bid) {
+                    b.finished_at = Some(now_ms());
+                    let snap = b.clone();
+                    drop(blocks);
+                    let _ = app.emit(&block_event, BlockUpdate::Close { block: snap });
+                }
             }
         }
-    }
 
-    // Synthetic Prompt block: opens and closes immediately because the
-    // user already typed the whole thing — there's no streaming half.
-    let now = now_ms();
-    let prompt_block = BlockEnvelope {
-        id: Uuid::new_v4().to_string(),
-        kind: BlockKind::Prompt,
-        session_id: session_id.clone(),
-        agent_id: sess.agent_id.clone(),
-        started_at: now,
-        finished_at: Some(now),
-        text: prompt.clone(),
-        exit_code: None,
-    };
-    sess.blocks.lock().unwrap().push(prompt_block.clone());
-    let _ = app.emit(
-        &block_event,
-        BlockUpdate::Open {
-            block: prompt_block.clone(),
-        },
-    );
-    let _ = app.emit(
-        &block_event,
-        BlockUpdate::Close {
-            block: prompt_block,
-        },
-    );
+        // Synthetic Prompt block: opens and closes immediately because the
+        // user already typed the whole thing — there's no streaming half.
+        let now = now_ms();
+        let prompt_block = BlockEnvelope {
+            id: Uuid::new_v4().to_string(),
+            kind: BlockKind::Prompt,
+            session_id: session_id.clone(),
+            agent_id: sess.agent_id.clone(),
+            started_at: now,
+            finished_at: Some(now),
+            text: prompt.clone(),
+            exit_code: None,
+        };
+        sess.blocks.lock().unwrap().push(prompt_block.clone());
+        let _ = app.emit(
+            &block_event,
+            BlockUpdate::Open {
+                block: prompt_block.clone(),
+            },
+        );
+        let _ = app.emit(
+            &block_event,
+            BlockUpdate::Close {
+                block: prompt_block,
+            },
+        );
 
-    // Open the Output block; the read loop fills it as the agent replies.
-    let output_block = BlockEnvelope {
-        id: Uuid::new_v4().to_string(),
-        kind: BlockKind::Output,
-        session_id: session_id.clone(),
-        agent_id: sess.agent_id.clone(),
-        started_at: now,
-        finished_at: None,
-        text: String::new(),
-        exit_code: None,
+        // Open the Output block; the read loop fills it as the agent replies.
+        let output_block = BlockEnvelope {
+            id: Uuid::new_v4().to_string(),
+            kind: BlockKind::Output,
+            session_id: session_id.clone(),
+            agent_id: sess.agent_id.clone(),
+            started_at: now,
+            finished_at: None,
+            text: String::new(),
+            exit_code: None,
+        };
+        sess.blocks.lock().unwrap().push(output_block.clone());
+        *sess.current_block_id.lock().unwrap() = Some(output_block.id.clone());
+        let _ = app.emit(
+            &block_event,
+            BlockUpdate::Open {
+                block: output_block,
+            },
+        );
+        sess.writer.clone()
     };
-    sess.blocks.lock().unwrap().push(output_block.clone());
-    *sess.current_block_id.lock().unwrap() = Some(output_block.id.clone());
-    let _ = app.emit(
-        &block_event,
-        BlockUpdate::Open {
-            block: output_block,
-        },
-    );
 
     // Push the prompt into the PTY using bracketed-paste semantics
     // (DEC mode 2004). All four agent CLIs we ship — claude, gemini,
@@ -1208,7 +1276,9 @@ pub async fn agent_pty_send_prompt(
     // Chunked at 4KB to play nice with line-discipline buffers; the
     // PTY reader on the child side coalesces these back into one paste
     // event because of the wrapping markers.
-    write_prompt_bracketed(&sess.writer, &prompt).map_err(|e| e.to_string())?;
+    write_prompt_bracketed(&writer, &prompt)
+        .await
+        .map_err(|e| e.to_string())?;
     Ok(())
 }
 
@@ -1402,24 +1472,28 @@ const PASTE_END: &[u8] = b"\x1b[201~";
 /// so the agent reassembles them as one paste, regardless of chunking.
 const PROMPT_CHUNK: usize = 1024;
 
-fn write_prompt_bracketed(
-    writer: &Mutex<Box<dyn Write + Send>>,
+async fn write_prompt_bracketed(
+    writer: &crate::pty_io::SharedPtyWriter,
     prompt: &str,
-) -> std::io::Result<()> {
-    let bytes = prompt.as_bytes();
-    let mut w = writer.lock().unwrap();
-    w.write_all(PASTE_START)?;
-    let mut off = 0;
-    while off < bytes.len() {
-        let end = (off + PROMPT_CHUNK).min(bytes.len());
-        w.write_all(&bytes[off..end])?;
-        off = end;
-    }
-    w.write_all(PASTE_END)?;
-    // \r mirrors what pressing Enter at the REPL would do; the agent
-    // sees: paste-start, body, paste-end, then submit.
-    w.write_all(b"\r")?;
-    Ok(())
+) -> Result<(), crate::pty_io::PtyWriteError> {
+    let bytes = prompt.as_bytes().to_vec();
+    // Runs on the blocking pool under a deadline (see `crate::pty_io`):
+    // a whole prompt is far more likely than a keystroke to fill the
+    // agent's input buffer and park in the kernel.
+    crate::pty_io::write_with(writer, move |w| {
+        w.write_all(PASTE_START)?;
+        let mut off = 0;
+        while off < bytes.len() {
+            let end = (off + PROMPT_CHUNK).min(bytes.len());
+            w.write_all(&bytes[off..end])?;
+            off = end;
+        }
+        w.write_all(PASTE_END)?;
+        // \r mirrors what pressing Enter at the REPL would do; the agent
+        // sees: paste-start, body, paste-end, then submit.
+        w.write_all(b"\r")
+    })
+    .await
 }
 
 /// Same envelope as `write_prompt_bracketed` but returns the bytes
@@ -1453,17 +1527,19 @@ pub async fn agent_pty_write(
             .await
             .map_err(|e| e.to_string());
     }
-    let sessions = state.sessions.lock().unwrap();
-    let sess = sessions
-        .get(&session_id)
-        .ok_or_else(|| format!("unknown session: {session_id}"))?;
-    let res = sess
-        .writer
-        .lock()
-        .unwrap()
-        .write_all(&data)
-        .map_err(|e| e.to_string());
-    res
+    // Clone the writer handle and let go of the registry map BEFORE the
+    // write — see the note on `AgentPtySession::writer`. A wedged agent
+    // must not take the other terminals (or the runtime) down with it.
+    let writer = {
+        let sessions = state.sessions.lock().unwrap();
+        let sess = sessions
+            .get(&session_id)
+            .ok_or_else(|| format!("unknown session: {session_id}"))?;
+        sess.writer.clone()
+    };
+    crate::pty_io::write_bytes(&writer, data)
+        .await
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -2161,6 +2237,62 @@ fn which_aura() -> Option<String> {
     } else {
         Some(trimmed.to_string())
     }
+}
+
+/// Ensure the repo's `.mcp.json` declares the aura MCP server so ANY claude
+/// session opened in this repo — including one launched from a plain
+/// terminal rather than our in-app PTY — loads aura's tools
+/// (`aura_log_intent`, `aura_snapshot`, …). Merge-safe: preserves any
+/// servers the user already declared, only adds/refreshes the `aura` entry.
+/// The file is kept out of `git status` via `.git/info/exclude` (written by
+/// cmd_aura_track on the same repo-open pass).
+fn ensure_repo_mcp_json(repo_root: &str) -> bool {
+    let path = std::path::Path::new(repo_root).join(".mcp.json");
+    let aura_bin = which_aura().unwrap_or_else(|| "aura".to_string());
+
+    let mut root = std::fs::read_to_string(&path)
+        .ok()
+        .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
+        .and_then(|v| match v {
+            serde_json::Value::Object(m) => Some(m),
+            _ => None,
+        })
+        .unwrap_or_default();
+
+    let servers = root
+        .entry("mcpServers".to_string())
+        .or_insert_with(|| serde_json::Value::Object(serde_json::Map::new()));
+    let serde_json::Value::Object(servers_map) = servers else {
+        // Existing `mcpServers` is a non-object — refuse to corrupt a file
+        // the user hand-wrote.
+        return false;
+    };
+    servers_map.insert(
+        "aura".to_string(),
+        serde_json::json!({ "command": aura_bin, "args": ["mcp"] }),
+    );
+
+    match serde_json::to_string_pretty(&serde_json::Value::Object(root)) {
+        Ok(s) => std::fs::write(&path, s).is_ok(),
+        Err(_) => false,
+    }
+}
+
+/// Wire every agent CLI so edits in this repo log intent through Aura,
+/// regardless of which agent — or how it was launched. Idempotent; called
+/// on repo-open (see `cmd_aura_track::aura_ensure_tracked`) as well as at
+/// in-app PTY spawn. Returns whether the core wiring landed.
+pub(crate) fn wire_agents_for_repo(repo_root: &str) -> bool {
+    // (a) Global MCP config claude reads via `--mcp-config` for in-app PTYs.
+    let mcp_cfg = ensure_aura_mcp_config().is_some();
+    // (b) Repo-level `.mcp.json` so external claude sessions here also get
+    //     aura's tools.
+    let repo_mcp = ensure_repo_mcp_json(repo_root);
+    // (c) Claude's per-repo hook scripts (PreToolUse → live intent capture).
+    let claude_hooks = ensure_aura_claude_hooks_stamped(repo_root).is_some();
+    // (d) Gemini extension (user-global; harmless if gemini isn't installed).
+    let _ = ensure_aura_gemini_extension_stamped();
+    mcp_cfg || repo_mcp || claude_hooks
 }
 
 /// vte Performer that strips ANSI/CSI down to printable text and

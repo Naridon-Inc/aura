@@ -30,9 +30,11 @@ export { pseudonymFor, randomHandle } from "./handle";
 export {
   countThreads,
   chatToMsg,
+  auraRosterFromStream,
   convIdForMessage,
   commitToMsg,
   intentToMsg,
+  intentRowsToSessionMsgs,
   sentinelToMsg,
   cleanIntentBody,
   hasMoreThanFirstLine,

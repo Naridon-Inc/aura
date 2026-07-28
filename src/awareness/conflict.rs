@@ -162,7 +162,28 @@ fn glob_matches(glob: &str, file: &str) -> bool {
 /// any symbols/files you've recently announced yourself. This is the
 /// "humanly realistic" part — collisions are judged against what you are
 /// *actually* touching, not against the whole repo.
+///
+/// This is the hot path — every `aura radar` run, every desktop poll, every
+/// `aura_team_radar` MCP call — so it deliberately does NOT build the callgraph
+/// ripple edges. Use [`focus_from_repo_opts`] when you actually want the weak
+/// [`Severity::Possible`] tier.
 pub fn focus_from_repo(as_actor: Option<&str>) -> Focus {
+    focus_from_repo_opts(as_actor, false)
+}
+
+/// As [`focus_from_repo`], but `with_dep_edges` also builds the forward call
+/// edges that power the [`Severity::Possible`] ripple tier.
+///
+/// Building those edges is **expensive**: [`dep_edges_for_focus`] deserializes
+/// every checkpoint note in the repository just to reach the newest one. On a
+/// long-lived repo that is gigabytes of JSON per call. It used to run
+/// unconditionally, including on the default paths that then *discard* every
+/// Possible collision — so the ambient feed paid multi-GB, multi-minute cost for
+/// a tier it never showed. Behind the desktop's 6-second radar poll that meant
+/// `aura radar show --json` processes piling up, none ever returning, and a feed
+/// frozen on whatever it last managed to read. The ripple tier is now opt-in,
+/// taken only by `radar conflicts --all` / `include_possible`.
+pub fn focus_from_repo_opts(as_actor: Option<&str>, with_dep_edges: bool) -> Focus {
     let mut me: Vec<String> = vec![live_events::git_user().to_ascii_lowercase()];
     if let Some(a) = as_actor {
         me.push(a.to_ascii_lowercase());
@@ -191,7 +212,11 @@ pub fn focus_from_repo(as_actor: Option<&str>) -> Focus {
         }
     }
 
-    let dep_edges = dep_edges_for_focus(&files, &symbols);
+    let dep_edges = if with_dep_edges {
+        dep_edges_for_focus(&files, &symbols)
+    } else {
+        Vec::new()
+    };
     Focus { files, symbols, me, dep_edges }
 }
 
@@ -473,6 +498,8 @@ mod tests {
             ts,
             key_id: None,
             sig: None,
+            pubkey: None,
+            worktree: None,
         }
     }
 
@@ -480,7 +507,7 @@ mod tests {
         Focus {
             files: files.iter().map(|s| s.to_string()).collect(),
             symbols: symbols.iter().map(|s| s.to_string()).collect(),
-            me: vec!["owner".into()],
+            me: vec!["ashiq".into()],
             dep_edges: Vec::new(),
         }
     }
@@ -514,7 +541,7 @@ mod tests {
     #[test]
     fn own_events_never_collide() {
         let f = focus(&["src/payments.rs"], &["charge_card"]);
-        let evs = vec![ev("Owner", AwarenessKind::Editing, Some("src/payments.rs"), Some("charge_card"), 100)];
+        let evs = vec![ev("Ashiq", AwarenessKind::Editing, Some("src/payments.rs"), Some("charge_card"), 100)];
         assert!(detect(&f, &evs, 200, DEFAULT_WINDOW_MS).is_empty());
     }
 

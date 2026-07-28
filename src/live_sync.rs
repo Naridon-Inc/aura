@@ -1519,11 +1519,17 @@ mod intent_tests {
         tmp
     }
 
+    /// Run `f` with the process cwd inside `dir`.
+    ///
+    /// The cwd is process-global, so this holds the one shared lock for the
+    /// duration — without it, a test in another module runs its git/store
+    /// calls from this tempdir, and fails once the tempdir is reaped.
+    /// `CwdGuard` restores the directory even if `f` panics.
     fn run_in<P: AsRef<std::path::Path>, F: FnOnce()>(dir: P, f: F) {
-        let prev = std::env::current_dir().unwrap();
+        let _lk = crate::TEST_CWD_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _cwd = crate::worktree::testing::CwdGuard::enter();
         std::env::set_current_dir(dir.as_ref()).unwrap();
         f();
-        std::env::set_current_dir(prev).unwrap();
     }
 
     #[test]

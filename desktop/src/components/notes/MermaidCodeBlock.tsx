@@ -1,8 +1,11 @@
-// MermaidCodeBlock — Tiptap NodeView wrapper for the StarterKit
-// codeBlock node. When the block's `language` attr is "mermaid", the
-// view flips between an editable source pane and a live SVG preview.
-// Non-mermaid code blocks fall through to the normal <pre><code>
-// rendering with no diagram chrome.
+// MermaidCodeBlock — Tiptap NodeView wrapper for the code block node.
+//
+// • language === "mermaid"  → flips between an editable source pane and a
+//   live SVG preview.
+// • any other language      → a single clean code surface with a slim header
+//   (language picker + copy). Syntax colours are painted separately by the
+//   CodeHighlight decoration plugin (see tiptap/codeHighlight.ts), so the
+//   text here stays fully editable.
 
 import { useState } from "react";
 import {
@@ -10,11 +13,41 @@ import {
   NodeViewWrapper,
   type ReactNodeViewProps,
 } from "@tiptap/react";
-import { Code as CodeIcon, Eye, Pencil } from "lucide-react";
+import { Code as CodeIcon, Eye, Pencil, Copy, Check } from "lucide-react";
 import CodeBlock from "@tiptap/extension-code-block";
 import { ReactNodeViewRenderer } from "@tiptap/react";
 import { MermaidDiagram } from "./MermaidDiagram";
+import {
+  resolvePrismLanguage,
+  LANGUAGE_OPTIONS,
+} from "./tiptap/codeHighlight";
 import { cn } from "../../lib/utils";
+
+// Copy-to-clipboard affordance for the code header bar.
+function CopyButton({ getText }: { getText: () => string }) {
+  const [copied, setCopied] = useState(false);
+  return (
+    <button
+      type="button"
+      onMouseDown={(e) => e.preventDefault()}
+      onClick={() => {
+        void navigator.clipboard.writeText(getText()).then(() => {
+          setCopied(true);
+          window.setTimeout(() => setCopied(false), 1200);
+        });
+      }}
+      className="tiptap-codeblock__btn"
+      title={copied ? "Copied" : "Copy code"}
+      aria-label="Copy code"
+    >
+      {copied ? (
+        <Check className="w-3 h-3" strokeWidth={2} />
+      ) : (
+        <Copy className="w-3 h-3" strokeWidth={1.75} />
+      )}
+    </button>
+  );
+}
 
 function CodeBlockView({ node, updateAttributes }: ReactNodeViewProps) {
   const language: string | undefined =
@@ -25,12 +58,46 @@ function CodeBlockView({ node, updateAttributes }: ReactNodeViewProps) {
   );
 
   if (!isMermaid) {
+    const code = node.textContent;
+    const resolved = resolvePrismLanguage(language, code);
+    // The picker reflects the explicit fence; a detected language shows as a
+    // hint on the "Plain text" row rather than silently rewriting the fence.
+    const selectValue = (language ?? "").toLowerCase();
+    const plainLabel = resolved.detected
+      ? `Plain text · looks like ${resolved.label}`
+      : "Plain text";
     return (
       <NodeViewWrapper
         as="div"
-        className="tiptap-codeblock my-2 rounded-md bg-bg-2 overflow-hidden"
+        className="tiptap-codeblock"
+        data-language={resolved.id ?? "text"}
       >
-        <pre className="p-3 m-0 text-[12.5px] leading-5">
+        <div className="tiptap-codeblock__bar" contentEditable={false}>
+          <div className="tiptap-codeblock__lang-wrap">
+            <span className="tiptap-codeblock__lang-label">
+              {resolved.id ? resolved.label : "Plain text"}
+              {resolved.detected && (
+                <span className="tiptap-codeblock__auto">auto</span>
+              )}
+            </span>
+            <select
+              className="tiptap-codeblock__lang-select"
+              value={selectValue}
+              aria-label="Code language"
+              onChange={(e) =>
+                updateAttributes({ language: e.target.value || null })
+              }
+            >
+              {LANGUAGE_OPTIONS.map((opt) => (
+                <option key={opt.value} value={opt.value}>
+                  {opt.value === "" ? plainLabel : opt.label}
+                </option>
+              ))}
+            </select>
+          </div>
+          <CopyButton getText={() => node.textContent} />
+        </div>
+        <pre className="tiptap-codeblock__pre">
           <NodeViewContent<"code"> as="code" />
         </pre>
       </NodeViewWrapper>
@@ -40,14 +107,8 @@ function CodeBlockView({ node, updateAttributes }: ReactNodeViewProps) {
   const source = node.textContent;
 
   return (
-    <NodeViewWrapper
-      as="div"
-      className="tiptap-mermaid my-2 rounded-md border border-line-soft overflow-hidden bg-bg-card"
-    >
-      <div
-        className="flex items-center justify-between px-2 py-1 border-b border-line-soft bg-bg-2/60"
-        contentEditable={false}
-      >
+    <NodeViewWrapper as="div" className="tiptap-mermaid">
+      <div className="tiptap-codeblock__bar" contentEditable={false}>
         <div className="flex items-center gap-1.5 text-text-4">
           <CodeIcon className="w-3 h-3" strokeWidth={1.5} />
           <span className="t-2xs t-ui uppercase tracking-wider">mermaid</span>
@@ -100,7 +161,7 @@ function CodeBlockView({ node, updateAttributes }: ReactNodeViewProps) {
       </div>
 
       {mode === "edit" ? (
-        <pre className="p-3 m-0 text-[12.5px] leading-5 bg-bg-2">
+        <pre className="tiptap-codeblock__pre">
           <NodeViewContent<"code"> as="code" />
         </pre>
       ) : (

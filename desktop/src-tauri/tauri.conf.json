@@ -1,7 +1,7 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "Aura",
-  "version": "0.19.21",
+  "version": "0.19.33",
   "identifier": "sh.aura.shell",
   "build": {
     "beforeDevCommand": "bun run dev",
@@ -18,7 +18,7 @@
         "height": 780,
         "titleBarStyle": "Overlay",
         "hiddenTitle": true,
-        "trafficLightPosition": { "x": 14, "y": 16 },
+        "trafficLightPosition": { "x": 14, "y": 21 },
         "dragDropEnabled": true,
         "transparent": true
       }
@@ -33,7 +33,9 @@
     "createUpdaterArtifacts": true,
     "resources": [
       "resources/shell-integration/*",
-      "resources/ext-host/*"
+      "resources/ext-host/*",
+      "resources/sample-project/**/*",
+      "resources/sample-sessions/*"
     ],
     "icon": [
       "icons/32x32.png",

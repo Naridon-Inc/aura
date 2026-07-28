@@ -345,7 +345,7 @@ export function SubTasksPanel({
           )}
 
           {error && (
-            <div className="mt-2 text-[11px] text-rose-400 leading-snug">
+            <div className="mt-2 text-[11px] text-red leading-snug">
               {error}
             </div>
           )}

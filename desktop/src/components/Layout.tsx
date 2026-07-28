@@ -31,6 +31,11 @@ type LayoutProps = {
   body: ReactNode;
   composer: ReactNode;
   reviewPanel?: ReactNode;
+  /** Header strip for the review rail (ADE v2 only). The review column runs
+   *  full-height to y=0 with its OWN header — the primary rail action
+   *  (Create PR) lives here, aligned with the work-surface topbar. The main
+   *  header therefore stops before the review rail. */
+  reviewHeader?: ReactNode;
   bottomPane?: ReactNode;
   bottomPaneOpen?: boolean;
   /** When true the bottom pane fills the whole work-surface height (the
@@ -70,8 +75,8 @@ export function Layout(props: LayoutProps) {
   useEffect(() => {
     function move(e: MouseEvent) {
       if (dragging.current === "sidebar") {
-        // Sidebar starts after the workspace rail (optional 64px) + the
-        // nav rail (optional 52px) + one chrome gap.
+        // Sidebar starts after the workspace rail (optional 56px) + the
+        // nav rail (optional `--nav-rail-w`, 48px) + one chrome gap.
         setSidebarW(clamp(e.clientX - workspaceRailW - railW - 6, 200, 480));
       } else if (dragging.current === "review") {
         setReviewW(clamp(window.innerWidth - e.clientX - 6, 240, 560));
@@ -196,7 +201,10 @@ export function Layout(props: LayoutProps) {
         )}
 
         <div className="ade-shell-main flex flex-col flex-1 min-w-0 bg-bg-1">
-          {/* Top header — chrome strip spanning only the work surface. */}
+          {/* Top header — chrome strip spanning ONLY the work surface. It
+              stops before the review rail, which owns its own header (below)
+              running to y=0, so the window reads as three full-height
+              columns (sidebar · work · review) each with its own header. */}
           <div
             className="flex-shrink-0 flex items-center bg-bg-1 border-b border-line"
             style={{ height: "var(--topbar-h)" }}
@@ -206,11 +214,41 @@ export function Layout(props: LayoutProps) {
 
           <div className="ade-shell-mid flex flex-1 min-h-0 bg-bg-0 overflow-hidden">
             {workSurface}
-            {reviewSection}
           </div>
 
           {statusBarRow}
         </div>
+
+        {/* Review rail — a full-height column to y=0 (Conductor pattern),
+            with its OWN header strip carrying the rail's primary action
+            (Create PR). Aligned with the work-surface topbar so the two
+            headers read as one continuous strip broken only by the column
+            divider. */}
+        {reviewVisible && (
+          <>
+            <DragHandle
+              orientation="vertical"
+              onStart={() => {
+                dragging.current = "review";
+                document.body.style.cursor = "col-resize";
+              }}
+            />
+            <div
+              className="ade-shell-review flex flex-col flex-shrink-0 border-l border-line-soft bg-bg-1"
+              style={{ width: reviewW }}
+            >
+              <div
+                className="flex-shrink-0 flex items-center bg-bg-1 border-b border-line"
+                style={{ height: "var(--topbar-h)" }}
+              >
+                {props.reviewHeader}
+              </div>
+              <div className="flex-1 min-h-0 overflow-hidden">
+                {props.reviewPanel}
+              </div>
+            </div>
+          </>
+        )}
       </div>
     );
   }

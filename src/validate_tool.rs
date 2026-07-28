@@ -950,7 +950,7 @@ fn command_terms(cmd: &str) -> Vec<String> {
 
 /// Resolve the repo root: prefer the payload `cwd`, walk up for a `.git` /
 /// `.aura` marker, else fall back to the process cwd.
-fn resolve_repo_root(cwd: Option<&str>) -> PathBuf {
+pub(crate) fn resolve_repo_root(cwd: Option<&str>) -> PathBuf {
     let start = cwd
         .map(PathBuf::from)
         .filter(|p| p.exists())

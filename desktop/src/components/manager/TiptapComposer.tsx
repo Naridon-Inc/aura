@@ -43,7 +43,9 @@ import {
   primeClaudeCommands,
   type ClaudeCommand,
 } from "../../lib/claudeCommands";
-import { api } from "../../lib/api";
+import type { DirEntry } from "../../lib/api";
+import { loadDirList, peekDirList, warmDirList } from "../../lib/dirListCache";
+import { onIdle } from "../../lib/idle";
 
 /** One row in the slash menu — either a native Aura verb (`source: "aura"`) or
  *  one of Claude Code's own custom commands (`source: "claude"`, which run on
@@ -74,9 +76,15 @@ export type TiptapComposerHandle = {
   setMarkdown: (markdown: string, caret?: "start" | "end") => void;
 };
 
-/** One `@file` candidate surfaced in the mention popup. `isDir` rows descend
- *  into the directory instead of inserting a chip. */
-type FileEntry = { name: string; path: string; isDir: boolean };
+/** One context candidate surfaced in the mention popup. `isDir` rows descend
+ *  into the directory instead of inserting a chip; `terminal` is a virtual
+ *  row whose token is expanded to live output at send time. */
+type FileEntry = {
+  name: string;
+  path: string;
+  isDir: boolean;
+  kind?: "file" | "terminal";
+};
 
 type Props = {
   /** Working directory — the root the `@file` mention popup lists from. */
@@ -88,9 +96,11 @@ type Props = {
   /** Lifts the live markdown on every edit so the parent can persist the
    *  per-session draft + know when there's content to send. */
   onChange: (markdown: string) => void;
-  /** Enter with no modifier (and no open popup) — the parent reads the
-   *  current markdown off its own `onChange` mirror and submits. */
-  onSubmit: () => void;
+  /** Enter (no open popup) — the parent reads the current markdown off its own
+   *  `onChange` mirror and submits. `steer` is true when the user held ⌘/Ctrl
+   *  (⌘↵), the explicit "redirect the running turn now" shortcut; plain ↵
+   *  leaves it false and the parent falls back to its follow-up-behavior pref. */
+  onSubmit: (opts?: { steer?: boolean }) => void;
   /** Esc while busy — the parent maps this to Stop. */
   onEscapeWhileBusy?: () => void;
   /** Image files pulled out of a clipboard paste *inside* the editor.
@@ -192,8 +202,23 @@ export const TiptapComposer = forwardRef<TiptapComposerHandle, Props>(
       if (mentionQuery === null) return [];
       const lastSlash = mentionQuery.lastIndexOf("/");
       const frag = (lastSlash >= 0 ? mentionQuery.slice(lastSlash + 1) : mentionQuery).toLowerCase();
-      return fileEntries
+      const special: FileEntry[] =
+        lastSlash < 0 && "terminal".includes(frag)
+          ? [
+              {
+                name: "terminal",
+                path: "terminal",
+                isDir: false,
+                kind: "terminal",
+              },
+            ]
+          : [];
+      return [...special, ...fileEntries]
         .filter((e) => e.name.toLowerCase().includes(frag))
+        .filter(
+          (e, i, rows) =>
+            rows.findIndex((candidate) => candidate.path === e.path) === i,
+        )
         .slice(0, 8);
     }, [mentionQuery, fileEntries]);
     const mentionOpen = mentionQuery !== null && mentionMatches.length > 0;
@@ -336,10 +361,13 @@ export const TiptapComposer = forwardRef<TiptapComposerHandle, Props>(
             return true;
           }
           // Enter (no shift, no popup) submits; Shift+Enter falls through to
-          // ProseMirror's hard-break.
+          // ProseMirror's hard-break. ⌘↵ / Ctrl+↵ submits with the steer flag
+          // so the parent can redirect a running turn instead of queueing.
           if (event.key === "Enter" && !event.shiftKey && !open) {
             event.preventDefault();
-            handlersRef.current.onSubmit();
+            handlersRef.current.onSubmit({
+              steer: event.metaKey || event.ctrlKey,
+            });
             return true;
           }
           return false;
@@ -451,29 +479,43 @@ export const TiptapComposer = forwardRef<TiptapComposerHandle, Props>(
       }
       let alive = true;
       const dirPath = mentionDir ? `${repoRoot}/${mentionDir}` : repoRoot;
-      void api
-        .listDir(dirPath)
+      const toEntries = (entries: DirEntry[]): FileEntry[] =>
+        entries
+          // Hide VCS/dependency noise that would drown real files.
+          .filter((e) => e.name !== ".git" && e.name !== "node_modules" && e.name !== "target")
+          .map((e) => ({
+            name: e.name,
+            // Re-root the path to be repo-relative for the chip / `@token`.
+            path: mentionDir ? `${mentionDir}/${e.name}` : e.name,
+            isDir: e.is_dir,
+          }));
+      // Instant paint from the idle-warmed cache (the root is pre-fetched on
+      // mount), then always revalidate so a file added mid-session still shows
+      // — same freshness as the old fetch-every-time path, just faster to first
+      // paint.
+      const cached = peekDirList(dirPath);
+      if (cached) setFileEntries(toEntries(cached));
+      void loadDirList(dirPath)
         .then((entries) => {
-          if (!alive) return;
-          setFileEntries(
-            entries
-              // Hide VCS/dependency noise that would drown real files.
-              .filter((e) => e.name !== ".git" && e.name !== "node_modules" && e.name !== "target")
-              .map((e) => ({
-                name: e.name,
-                // Re-root the path to be repo-relative for the chip / `@token`.
-                path: mentionDir ? `${mentionDir}/${e.name}` : e.name,
-                isDir: e.is_dir,
-              })),
-          );
+          if (alive) setFileEntries(toEntries(entries));
         })
         .catch(() => {
-          if (alive) setFileEntries([]);
+          // Keep the last-known listing on a transient error if we have one;
+          // otherwise clear, exactly as before.
+          if (alive && !cached) setFileEntries([]);
         });
       return () => {
         alive = false;
       };
     }, [mentionDir, repoRoot]);
+
+    // Pre-warm the workspace-root listing on idle so the very first `@` (empty
+    // query → root dir) paints from cache instead of paying a fresh round-trip.
+    // Best-effort: warmDirList swallows errors and no-ops if already cached.
+    useEffect(() => {
+      if (!repoRoot) return;
+      return onIdle(() => warmDirList(repoRoot));
+    }, [repoRoot]);
 
     // ── Insertion ────────────────────────────────────────────────────────
     // Replace the active `/verb` token with a slashCommand chip + trailing
@@ -607,7 +649,7 @@ export const TiptapComposer = forwardRef<TiptapComposerHandle, Props>(
         )}
 
         {mentionOpen && (
-          <PopupShell heading="Files" footer="↑↓ to move · ⏎ to pick · esc to dismiss">
+          <PopupShell heading="Context" footer="↑↓ to move · ⏎ to pick · esc to dismiss">
             {mentionMatches.map((entry, i) => (
               <button
                 key={entry.path}
@@ -625,11 +667,11 @@ export const TiptapComposer = forwardRef<TiptapComposerHandle, Props>(
                   <use href={entry.isDir ? "#i-folder" : "#i-file"} />
                 </svg>
                 <span className="font-mono text-[12px] text-text-1 truncate">
-                  {entry.name}
+                  {entry.kind === "terminal" ? "@terminal" : entry.name}
                   {entry.isDir ? "/" : ""}
                 </span>
                 <span className="flex-1 truncate text-[10.5px] text-text-4 text-right">
-                  {entry.path}
+                  {entry.kind === "terminal" ? "recent terminal output" : entry.path}
                 </span>
               </button>
             ))}

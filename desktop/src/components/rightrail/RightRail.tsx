@@ -11,12 +11,15 @@ import { type ReactNode } from "react";
 import { AgentIcon } from "../agent/AgentIcon";
 import { AURA_MANAGER_ENABLED } from "../../lib/featureFlags";
 import { PluginSandboxFrame } from "../plugins/PluginSandboxFrame";
+import { type SegmentOption } from "../ui/segment";
 
 export type BuiltinRightRailTab =
   | "files"
   | "changes"
+  | "checks"
   | "prs"
   | "commons"
+  | "scribble"
   | "aura"
   | "chat"
   | "story"
@@ -47,21 +50,26 @@ type Props = {
    *  unchanged when these are omitted. */
   filesView?: ReactNode;
   changesView?: ReactNode;
-  /** ADE redesign — the in-rail browser (far-end globe tab). A compact
-   *  "mobile browser" that lives inside the rail rather than floating over
-   *  the work area. Rendered only when supplied. */
+  /** ADE redesign — the Checks tab: a readable PR document (title +
+   *  description + Git-status + Aura's semantic checks) over the full PR
+   *  list. Checks and PRs are one surface — the list lives at the bottom of
+   *  this view, not a separate tab. Rendered only when supplied, so the
+   *  legacy rail is unaffected. */
+  checksView?: ReactNode;
+  /** ADE redesign — the in-rail browser. Rendered only when supplied. Note:
+   *  no visible entry point right now (the globe was removed); the body stays
+   *  wired so re-enabling it is a one-liner. */
   browserView?: ReactNode;
-  /** ADE redesign — the PR triage Inbox, re-homed from the center into
-   *  the rail (its own filter chips + list). PRs live here in one place;
-   *  the Trace section no longer carries a Pull Requests row. Rendered
-   *  only when supplied, so the legacy rail is unaffected. */
-  prsView?: ReactNode;
   /** Commons — the Lounge (presence + ship log) and Plugin Exchange, homed
-   *  in the rail next to PRs. Rendered only when supplied, so the legacy
+   *  in the rail next to Checks. Rendered only when supplied, so the legacy
    *  rail is unaffected. */
   commonsView?: ReactNode;
+  /** Scribble — a common markdown place to write: a shared team canvas + a
+   *  private personal one, with a pinned strip on top. A lightweight markdown
+   *  task manager. Rendered only when supplied. */
+  scribbleView?: ReactNode;
   /** ADE mode collapses the rail to the workspace-context tabs
-   *  (Files · Changes · PRs). The legacy Aura / Chat / Story / Tasks tabs
+   *  (Files · Changes · Checks). The legacy Aura / Chat / Story / Tasks tabs
    *  are re-homed elsewhere in the IA (Chat→Team, Aura/Tasks→manager
    *  center panes, Story→Trace), and the earlier Trust/Review tabs folded
    *  into the Trace section — so they're hidden here rather than stacked
@@ -81,6 +89,78 @@ type Props = {
   pluginPanels?: PluginRightRailPanelDescriptor[];
 };
 
+// Segment icons — small stroked glyphs matching the old pill tabs.
+const ICON = {
+  scribble: (
+    <svg width="11" height="11" viewBox="0 0 16 16" fill="none">
+      <path
+        d="M3 3.5A1.5 1.5 0 0 1 4.5 2h5L13 5.5v7A1.5 1.5 0 0 1 11.5 14h-7A1.5 1.5 0 0 1 3 12.5v-9z"
+        stroke="currentColor"
+        strokeWidth="1.2"
+        strokeLinejoin="round"
+      />
+      <path
+        d="M5.5 7.5h5M5.5 10h3"
+        stroke="currentColor"
+        strokeWidth="1.2"
+        strokeLinecap="round"
+      />
+    </svg>
+  ),
+  chat: (
+    <svg width="11" height="11" viewBox="0 0 16 16" fill="none">
+      <path
+        d="M2 4a1 1 0 0 1 1-1h10a1 1 0 0 1 1 1v6a1 1 0 0 1-1 1H6l-3 3v-3H3a1 1 0 0 1-1-1V4z"
+        stroke="currentColor"
+        strokeWidth="1.3"
+        strokeLinejoin="round"
+      />
+    </svg>
+  ),
+  story: (
+    <svg width="11" height="11" viewBox="0 0 16 16" fill="none">
+      <path d="M4 3h8M4 8h8M4 13h5" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" />
+      <path
+        d="M11 11.5 13.5 9l1.5 1.5-2.5 2.5H11v-1.5z"
+        stroke="currentColor"
+        strokeWidth="1.2"
+        strokeLinejoin="round"
+      />
+    </svg>
+  ),
+  tasks: (
+    <svg width="11" height="11" viewBox="0 0 16 16" fill="none">
+      <path d="M3 4h2M3 8h2M3 12h2" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" />
+      <path d="M7 4h6M7 8h6M7 12h6" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" />
+    </svg>
+  ),
+  // Pull-request glyph — two branch nodes joined on the left, the right branch
+  // curving back with an arrowhead (a change merging into the base). Marks the
+  // Checks tab as the PR surface.
+  checks: (
+    <svg width="11" height="11" viewBox="0 0 16 16" fill="none">
+      <circle cx="4" cy="4" r="1.6" stroke="currentColor" strokeWidth="1.2" />
+      <circle cx="4" cy="12" r="1.6" stroke="currentColor" strokeWidth="1.2" />
+      <circle cx="12" cy="12" r="1.6" stroke="currentColor" strokeWidth="1.2" />
+      <path d="M4 5.6v4.8" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" />
+      <path
+        d="M12 10.4V7.2A2.2 2.2 0 0 0 9.8 5H7"
+        stroke="currentColor"
+        strokeWidth="1.2"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+      <path
+        d="M8.4 3.4 6.8 5l1.6 1.6"
+        stroke="currentColor"
+        strokeWidth="1.2"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+    </svg>
+  ),
+} as const;
+
 export function RightRail({
   activeTab,
   onChangeTab,
@@ -90,8 +170,9 @@ export function RightRail({
   tasksView,
   filesView,
   changesView,
-  prsView,
+  checksView,
   commonsView,
+  scribbleView,
   browserView,
   adeMode = false,
   changesCount = 0,
@@ -100,203 +181,75 @@ export function RightRail({
   tasksCount = 0,
   pluginPanels = [],
 }: Props) {
+  // The rail's sections render through the one shared Segment control (the
+  // connected-cell pill track used across the app's chrome), so build its
+  // options in declaration order. Conditional surfaces only appear when their
+  // view prop is supplied; ADE mode drops the legacy Aura/Chat/Story/Tasks
+  // cluster (re-homed elsewhere in the IA).
+  const tabOptions: SegmentOption<RightRailTab>[] = [];
+  if (scribbleView != null)
+    tabOptions.push({ value: "scribble", label: "Scribble", icon: ICON.scribble });
+  if (filesView != null) tabOptions.push({ value: "files", label: "Files" });
+  if (changesView != null)
+    tabOptions.push({ value: "changes", label: withCount("Changes", changesCount) });
+  if (checksView != null)
+    tabOptions.push({ value: "checks", label: "Checks", icon: ICON.checks });
+  if (commonsView != null) tabOptions.push({ value: "commons", label: "Commons" });
+  if (!adeMode) {
+    if (AURA_MANAGER_ENABLED)
+      tabOptions.push({
+        value: "aura",
+        label: "Aura",
+        icon: <AgentIcon agentId="aura-manager" size={11} />,
+      });
+    tabOptions.push({ value: "chat", label: withCount("Chat", commsCount), icon: ICON.chat });
+    tabOptions.push({ value: "story", label: withCount("Story", storyCount), icon: ICON.story });
+    tabOptions.push({ value: "tasks", label: withCount("Tasks", tasksCount), icon: ICON.tasks });
+  }
+  for (const p of pluginPanels) {
+    tabOptions.push({
+      value: p.id,
+      label: p.title,
+      icon: (
+        <span
+          className="inline-block w-1.5 h-1.5 rounded-full"
+          // "This tab came from a plugin, not from us." Neither
+          // `--color-accent-purple` nor `--color-accent-blue` is defined by any
+          // pack, so this dot rendered as nothing at all. `--color-violet` is
+          // the palette's real third-party mark and it is already what the
+          // plugin surfaces use elsewhere.
+          style={{ background: "var(--color-violet)" }}
+          aria-hidden
+        />
+      ),
+    });
+  }
+
   return (
     <div className="h-full flex flex-col overflow-hidden bg-bg-1">
-      <div className="flex items-center h-9 border-b border-line-soft shrink-0 overflow-x-auto bg-bg-1">
-        {filesView != null && (
-          <TabButton
-            active={activeTab === "files"}
-            onClick={() => onChangeTab("files")}
-          >
-            <svg width="11" height="11" viewBox="0 0 16 16" fill="none">
-              <path
-                d="M2 4.5A1.5 1.5 0 0 1 3.5 3H6l1.5 1.5h5A1.5 1.5 0 0 1 14 6v5.5A1.5 1.5 0 0 1 12.5 13h-9A1.5 1.5 0 0 1 2 11.5v-7z"
-                stroke="currentColor"
-                strokeWidth="1.3"
-                strokeLinejoin="round"
-              />
-            </svg>
-            Files
-          </TabButton>
-        )}
-        {changesView != null && (
-          <TabButton
-            active={activeTab === "changes"}
-            onClick={() => onChangeTab("changes")}
-            count={changesCount}
-          >
-            <svg width="11" height="11" viewBox="0 0 16 16" fill="none">
-              <path
-                d="M5 2v8M5 14a2 2 0 1 0 0-4 2 2 0 0 0 0 4zM5 4a2 2 0 1 0 0-4 2 2 0 0 0 0 4zM11 6v4M11 16a2 2 0 1 0 0-4 2 2 0 0 0 0 4zM11 6a3 3 0 0 0-3-3H6"
-                stroke="currentColor"
-                strokeWidth="1.3"
-                strokeLinecap="round"
-                strokeLinejoin="round"
-              />
-            </svg>
-            Changes
-          </TabButton>
-        )}
-        {prsView != null && (
-          <TabButton
-            active={activeTab === "prs"}
-            onClick={() => onChangeTab("prs")}
-          >
-            <svg width="11" height="11" viewBox="0 0 16 16" fill="none">
-              <circle cx="4" cy="4" r="1.6" stroke="currentColor" strokeWidth="1.3" />
-              <circle cx="4" cy="12" r="1.6" stroke="currentColor" strokeWidth="1.3" />
-              <circle cx="12" cy="11" r="1.6" stroke="currentColor" strokeWidth="1.3" />
-              <path
-                d="M4 5.6v4.8M12 9.4V8a3 3 0 0 0-3-3H6.5"
-                stroke="currentColor"
-                strokeWidth="1.3"
-                strokeLinecap="round"
-                strokeLinejoin="round"
-              />
-            </svg>
-            PRs
-          </TabButton>
-        )}
-        {commonsView != null && (
-          <TabButton
-            active={activeTab === "commons"}
-            onClick={() => onChangeTab("commons")}
-          >
-            <svg width="11" height="11" viewBox="0 0 24 24" fill="none">
-              <path
-                d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"
-                stroke="currentColor"
-                strokeWidth="1.6"
-                strokeLinecap="round"
-                strokeLinejoin="round"
-              />
-              <circle cx="9" cy="7" r="3.2" stroke="currentColor" strokeWidth="1.6" />
-              <path
-                d="M22.5 21v-2a4 4 0 0 0-3-3.87M16 3.13a4 4 0 0 1 0 7.75"
-                stroke="currentColor"
-                strokeWidth="1.6"
-                strokeLinecap="round"
-                strokeLinejoin="round"
-              />
-            </svg>
-            Commons
-          </TabButton>
-        )}
-        {!adeMode && (
-          <>
-            {AURA_MANAGER_ENABLED && (
-              <TabButton
-                active={activeTab === "aura"}
-                onClick={() => onChangeTab("aura")}
-              >
-                <AgentIcon agentId="aura-manager" size={11} />
-                Aura
-              </TabButton>
-            )}
-            <TabButton
-              active={activeTab === "chat"}
-              onClick={() => onChangeTab("chat")}
-              count={commsCount}
-            >
-              <svg width="11" height="11" viewBox="0 0 16 16" fill="none">
-                <path
-                  d="M2 4a1 1 0 0 1 1-1h10a1 1 0 0 1 1 1v6a1 1 0 0 1-1 1H6l-3 3v-3H3a1 1 0 0 1-1-1V4z"
-                  stroke="currentColor"
-                  strokeWidth="1.3"
-                  strokeLinejoin="round"
-                />
-              </svg>
-              Chat
-            </TabButton>
-            <TabButton
-              active={activeTab === "story"}
-              onClick={() => onChangeTab("story")}
-              count={storyCount}
-            >
-              <svg width="11" height="11" viewBox="0 0 16 16" fill="none">
-                <path
-                  d="M4 3h8M4 8h8M4 13h5"
-                  stroke="currentColor"
-                  strokeWidth="1.4"
-                  strokeLinecap="round"
-                />
-                <path
-                  d="M11 11.5 13.5 9l1.5 1.5-2.5 2.5H11v-1.5z"
-                  stroke="currentColor"
-                  strokeWidth="1.2"
-                  strokeLinejoin="round"
-                />
-              </svg>
-              Story
-            </TabButton>
-            <TabButton
-              active={activeTab === "tasks"}
-              onClick={() => onChangeTab("tasks")}
-              count={tasksCount}
-            >
-              <svg width="11" height="11" viewBox="0 0 16 16" fill="none">
-                <path
-                  d="M3 4h2M3 8h2M3 12h2"
-                  stroke="currentColor"
-                  strokeWidth="1.4"
-                  strokeLinecap="round"
-                />
-                <path
-                  d="M7 4h6M7 8h6M7 12h6"
-                  stroke="currentColor"
-                  strokeWidth="1.4"
-                  strokeLinecap="round"
-                />
-              </svg>
-              Tasks
-            </TabButton>
-          </>
-        )}
-        {pluginPanels.map((p) => (
-          <TabButton
-            key={p.id}
-            active={activeTab === p.id}
-            onClick={() => onChangeTab(p.id)}
-          >
-            <span
-              className="inline-block w-1.5 h-1.5 rounded-full"
-              style={{ background: "var(--color-accent-purple, var(--color-accent-blue))" }}
-              aria-hidden
-            />
-            {p.title}
-          </TabButton>
-        ))}
-        {browserView != null && (
-          // Standalone globe — deliberately NOT one of the context tabs. A
-          // divider + an icon-only square button (no label, no tab underline)
-          // floats it to the far end and sets it apart from the Files /
-          // Changes / PRs menu tabs.
-          <div className="ml-auto flex items-center h-full px-1.5">
-            <span className="w-px h-4 bg-line-soft mr-1.5" aria-hidden />
+      {/* The rail's own subtle tab segment — the same flat, accent-tint
+          control the primary sidebar's section switcher uses (`.ade-seg`),
+          NOT the bordered Medusa button-group. `--row` lays the cells out
+          horizontally (glyph beside label). Scribble leads as the rail's home
+          surface; the in-app browser has no tab entry for now (its body stays
+          wired below). */}
+      <div className="flex items-center h-9 px-2 border-b border-line-soft shrink-0 overflow-x-auto bg-bg-1">
+        <div className="ade-seg ade-seg--row" role="tablist" aria-label="Rail sections">
+          {tabOptions.map((opt) => (
             <button
+              key={opt.value}
               type="button"
-              onClick={() => onChangeTab("browser")}
-              title="Browser"
-              aria-label="Browser"
-              aria-pressed={activeTab === "browser"}
-              className={`flex items-center justify-center w-7 h-7 rounded-md transition-colors ${
-                activeTab === "browser"
-                  ? "bg-bg-3 text-accent"
-                  : "text-text-3 hover:text-text-1 hover:bg-bg-3"
-              }`}
+              role="tab"
+              aria-selected={activeTab === opt.value}
+              className={activeTab === opt.value ? "active" : ""}
+              onClick={() => onChangeTab(opt.value)}
+              title={opt.title ?? (typeof opt.label === "string" ? opt.label : undefined)}
             >
-              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" aria-hidden>
-                <circle cx="12" cy="12" r="9.5" stroke="currentColor" strokeWidth="1.6" />
-                <path
-                  d="M2.5 12h19M12 2.5c2.6 2.6 4 6 4 9.5s-1.4 6.9-4 9.5c-2.6-2.6-4-6-4-9.5s1.4-6.9 4-9.5z"
-                  stroke="currentColor"
-                  strokeWidth="1.6"
-                  strokeLinejoin="round"
-                />
-              </svg>
+              {opt.icon}
+              {opt.label}
             </button>
-          </div>
-        )}
+          ))}
+        </div>
       </div>
       {filesView != null && (
         <div className={activeTab === "files" ? "flex-1 min-h-0 flex flex-col overflow-hidden" : "hidden"}>
@@ -308,14 +261,19 @@ export function RightRail({
           {changesView}
         </div>
       )}
-      {prsView != null && (
-        <div className={activeTab === "prs" ? "flex-1 min-h-0 flex flex-col overflow-hidden" : "hidden"}>
-          {prsView}
+      {checksView != null && (
+        <div className={activeTab === "checks" ? "flex-1 min-h-0 flex flex-col overflow-hidden" : "hidden"}>
+          {checksView}
         </div>
       )}
       {commonsView != null && (
         <div className={activeTab === "commons" ? "flex-1 min-h-0 flex flex-col overflow-hidden" : "hidden"}>
           {commonsView}
+        </div>
+      )}
+      {scribbleView != null && (
+        <div className={activeTab === "scribble" ? "flex-1 min-h-0 flex flex-col overflow-hidden" : "hidden"}>
+          {scribbleView}
         </div>
       )}
       {!adeMode && (
@@ -386,37 +344,17 @@ function PluginPanelFrame({
   );
 }
 
-function TabButton({
-  active,
-  onClick,
-  children,
-  count,
-}: {
-  active: boolean;
-  onClick: () => void;
-  children: React.ReactNode;
-  count?: number;
-}) {
+// Fold an optional count badge into a segment label. The shared Segment has no
+// count slot, so the badge rides inside the cell's label next to the text; it
+// stays quiet in both active and inactive cells.
+function withCount(label: string, count?: number): ReactNode {
+  if (count == null || count <= 0) return label;
   return (
-    <button
-      type="button"
-      onClick={onClick}
-      className={`h-full px-3 flex items-center gap-1.5 text-[11px] border-b-2 transition-colors whitespace-nowrap ${
-        active
-          ? "text-text-1 border-accent"
-          : "text-text-3 border-transparent hover:text-text-1 hover:bg-bg-2"
-      }`}
-    >
-      {children}
-      {count != null && count > 0 && (
-        <span
-          className={`text-[10px] tabular-nums px-1 rounded ${
-            active ? "text-text-2 bg-bg-2" : "text-text-4"
-          }`}
-        >
-          {count}
-        </span>
-      )}
-    </button>
+    <>
+      {label}
+      <span className="text-[10px] tabular-nums rounded px-1 bg-ui-bg-base-hover text-ui-fg-subtle">
+        {count}
+      </span>
+    </>
   );
 }

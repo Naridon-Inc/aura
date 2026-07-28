@@ -29,9 +29,9 @@ function stripTrailingSlash(p: string): string {
 /** Mirror Claude Code's `~/.claude/projects` dir encoding: every character that
  *  isn't ASCII-alphanumeric collapses to a single `-`, one-for-one (NOT run-
  *  collapsed, so `/.aura` → `--aura`). Verified against live dirs:
- *  `/Users/you/.aura/worktrees/…/zagreb`
- *  → `-Users-you--aura-worktrees-…-zagreb`, and
- *  `/Users/you/Documents/New Git` → `-Users-you-Documents-New-Git`.
+ *  `/Users/muhammed/.aura/worktrees/…/zagreb`
+ *  → `-Users-muhammed--aura-worktrees-…-zagreb`, and
+ *  `/Users/muhammed/Documents/New Git` → `-Users-muhammed-Documents-New-Git`.
  *  NB the Rust `encode_path` (cmd_claude_sessions.rs) only maps `/` and ` ` and
  *  so does NOT match on-disk for dotted paths — we can't reuse it here. */
 function encodeProjectDir(p: string): string {

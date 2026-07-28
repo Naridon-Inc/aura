@@ -10,7 +10,17 @@ import { useSyncExternalStore } from "react";
 
 const KEY = "aura.workspace.customization.v1";
 
-type CustomizationMap = Record<string, { emoji?: string }>;
+// Per-root UI state. `emoji` is the tile glyph; `pinned` floats a workspace to
+// the top of the roster; `archived` (a timestamp, ms) hides it from the roster
+// without touching the branch or files on disk — Restore clears it. All three
+// are per-device UI preferences, never synced, and any absent key means "off".
+type CustomizationEntry = {
+  emoji?: string;
+  pinned?: boolean;
+  archived?: number;
+};
+
+type CustomizationMap = Record<string, CustomizationEntry>;
 
 function read(): CustomizationMap {
   try {
@@ -38,16 +48,16 @@ function persist() {
   }
 }
 
-export function getWorkspaceEmoji(root: string): string | undefined {
-  return cache[root]?.emoji;
-}
-
-export function setWorkspaceEmoji(root: string, emoji: string | undefined) {
-  const entry = { ...(cache[root] ?? {}) };
-  if (emoji && emoji.trim()) {
-    entry.emoji = emoji.trim();
-  } else {
-    delete entry.emoji;
+// One place to merge a patch into a root's entry and prune it if it goes empty,
+// so every field-setter stays a one-liner and the map never accumulates `{}`s.
+function patchEntry(root: string, patch: Partial<CustomizationEntry>) {
+  const entry: CustomizationEntry = { ...(cache[root] ?? {}) };
+  for (const [k, v] of Object.entries(patch)) {
+    if (v === undefined || v === false) {
+      delete (entry as Record<string, unknown>)[k];
+    } else {
+      (entry as Record<string, unknown>)[k] = v;
+    }
   }
   if (Object.keys(entry).length === 0) {
     const next = { ...cache };
@@ -58,6 +68,42 @@ export function setWorkspaceEmoji(root: string, emoji: string | undefined) {
   }
   persist();
   emit();
+}
+
+export function getWorkspaceEmoji(root: string): string | undefined {
+  return cache[root]?.emoji;
+}
+
+export function setWorkspaceEmoji(root: string, emoji: string | undefined) {
+  patchEntry(root, { emoji: emoji && emoji.trim() ? emoji.trim() : undefined });
+}
+
+/** Whether a workspace is pinned to the top of the roster. */
+export function isWorkspacePinned(root: string): boolean {
+  return !!cache[root]?.pinned;
+}
+
+export function setWorkspacePinned(root: string, pinned: boolean) {
+  patchEntry(root, { pinned: pinned || undefined });
+}
+
+/** When the workspace was archived (ms), or undefined if it's active. */
+export function getWorkspaceArchivedAt(root: string): number | undefined {
+  return cache[root]?.archived;
+}
+
+export function isWorkspaceArchived(root: string): boolean {
+  return typeof cache[root]?.archived === "number";
+}
+
+/** Archive hides a workspace from the roster; the branch + files stay on disk.
+ *  Pass `false` (or restore) to bring it back. Archiving also clears any pin. */
+export function setWorkspaceArchived(root: string, archived: boolean, atMs?: number) {
+  if (archived) {
+    patchEntry(root, { archived: atMs ?? Date.now(), pinned: undefined });
+  } else {
+    patchEntry(root, { archived: undefined });
+  }
 }
 
 export function useWorkspaceCustomization(): CustomizationMap {

@@ -248,7 +248,14 @@ export type WorkPaneRef =
   | { kind: "inspector"; id: string }
   | { kind: "replay"; id: string }
   | { kind: "prove"; id: string }
-  | { kind: "graph"; id: string };
+  | { kind: "graph"; id: string }
+  /** In-app browser as a workpane tab (superset-style desktop browser pane).
+   *  `id` is unique per tab so you can open MANY browser tabs; `url` is the
+   *  optional initial address. The page is a native WebKit webview keyed by
+   *  `id` (lib/browserEngine.ts), rendered by BrowserTab. Session-only — the
+   *  native webview doesn't survive a reload, so the persister strips it
+   *  (see sanitizeRefForPersist), same as terminals. */
+  | { kind: "browser"; id: string; url?: string };
 
 // Plan-as-markdown is rendered through the standard `kind: "file"`
 // pane, with the file living at `<repoRoot>/.aura/plans/<planId>.md`.
@@ -279,6 +286,14 @@ export function planMarkdownPath(repoRoot: string, planId: string): string {
 
 export type WorkSplitDirection = "row" | "column";
 
+/** Which side of `source` a freshly-split pane lands on. "after" is the
+ *  historical behaviour (new pane to the right / below); "before" mirrors
+ *  it (new pane to the left / above), so the four visual directions
+ *  left/right/up/down map to (row,before)/(row,after)/(column,before)/
+ *  (column,after). Defaulting to "after" keeps every existing caller
+ *  unchanged. */
+export type SplitInsert = "before" | "after";
+
 /** Recursive split tree. A split layout is either a leaf pane (one
  *  group with its own tab list) or a split node holding 2+ children,
  *  each of which is itself a tree. Each split node carries its own
@@ -298,7 +313,16 @@ export type WorkSplitLeaf = {
 
 export type WorkSplitTree =
   | WorkSplitLeaf
-  | { kind: "split"; direction: WorkSplitDirection; children: WorkSplitTree[] };
+  | {
+      kind: "split";
+      direction: WorkSplitDirection;
+      children: WorkSplitTree[];
+      /** Optional flex-grow weight per child (same length as `children`).
+       *  Absent → every child shares the axis equally. Set only by a divider
+       *  drag; any structural mutation (split / close / reorder) drops it so
+       *  the layout falls back to equal until the user resizes again. */
+      sizes?: number[];
+    };
 
 /** Compatibility alias — older callers used `WorkSplitLayout` for the
  *  flat 2..N pane shape. The store now stores `WorkSplitTree` instead;
@@ -350,6 +374,28 @@ export function treeAllRefs(t: WorkSplitTree): WorkPaneRef[] {
 /** Total leaf (pane) count (used for MAX_SPLIT_PANES cap). */
 export function treePaneCount(t: WorkSplitTree | null): number {
   return t ? treeLeafNodes(t).length : 0;
+}
+
+/** Return a copy of the tree with explicit flex-grow `weights` set on the
+ *  split node addressed by `path` (a list of child indices from the root).
+ *  No-op (returns the input) if the path doesn't resolve to a split node, or
+ *  the weight count doesn't match that node's child count. Used by the
+ *  divider-drag resize to persist a pane's new proportions. */
+export function treeSetSizes(
+  t: WorkSplitTree,
+  path: number[],
+  weights: number[],
+): WorkSplitTree {
+  if (path.length === 0) {
+    if (t.kind !== "split" || weights.length !== t.children.length) return t;
+    return { ...t, sizes: weights.slice() };
+  }
+  if (t.kind !== "split") return t;
+  const [head, ...rest] = path;
+  if (head < 0 || head >= t.children.length) return t;
+  const children = t.children.slice();
+  children[head] = treeSetSizes(children[head], rest, weights);
+  return { ...t, children };
 }
 
 /** Does any leaf in the tree carry this ref in its tab list? */
@@ -447,7 +493,18 @@ export function treeSplitAt(
   source: WorkPaneRef,
   empty: WorkPaneRef,
   direction: WorkSplitDirection,
+  position: SplitInsert = "after",
 ): WorkSplitTree {
+  // The source pane and the new (empty) pane, ordered so the new pane sits
+  // on the requested side of the source — "before" (left/up) puts it first,
+  // "after" (right/down) puts it second. Every branch below reuses this so
+  // the four directions share one code path.
+  const orderedPair = (): WorkSplitTree[] => {
+    const sourceLeaf = makeLeaf([source], 0);
+    const newPane = makeLeaf([empty], 0);
+    return position === "before" ? [newPane, sourceLeaf] : [sourceLeaf, newPane];
+  };
+
   if (t.kind === "leaf") {
     const idx = t.tabs.findIndex((r) => samePaneRef(r, source));
     if (idx < 0) return t;
@@ -455,21 +512,14 @@ export function treeSplitAt(
     // own pane and leave the others behind so the user's other open
     // tabs in that pane stay untouched.
     const remainingTabs = t.tabs.filter((_, i) => i !== idx);
-    const sourceLeaf = makeLeaf([source], 0);
-    const emptyLeaf = makeLeaf([empty], 0);
-    const split = {
-      kind: "split" as const,
-      direction,
-      children: [sourceLeaf, emptyLeaf] as WorkSplitTree[],
-    };
     if (remainingTabs.length === 0) {
       // Source was the only tab in the leaf — replace the whole leaf
       // with the new split.
-      return split;
+      return { kind: "split", direction, children: orderedPair() };
     }
     // Remaining tabs stay in the original leaf alongside the new
-    // split. Wrap both in a row split so the new pane lands next to
-    // the original. The outer split direction is `direction`.
+    // split. Wrap both in a split so the new pane lands next to the
+    // original. The outer split direction is `direction`.
     const remainderLeaf: WorkSplitLeaf = {
       ...t,
       tabs: remainingTabs,
@@ -484,7 +534,7 @@ export function treeSplitAt(
     return {
       kind: "split",
       direction,
-      children: [remainderLeaf, makeLeaf([source], 0), makeLeaf([empty], 0)],
+      children: [remainderLeaf, ...orderedPair()],
     };
   }
   // Find which child contains source (by leaf-tab inclusion).
@@ -495,25 +545,23 @@ export function treeSplitAt(
     const child = t.children[childIdx] as WorkSplitLeaf;
     const idx = child.tabs.findIndex((r) => samePaneRef(r, source));
     const remainingTabs = child.tabs.filter((_, i) => i !== idx);
-    const newPane = makeLeaf([empty], 0);
     if (remainingTabs.length === 0) {
       // Whole child is the source — replace it directly.
-      const sourceLeaf = makeLeaf([source], 0);
       if (t.direction === direction) {
         const children = [...t.children];
-        children.splice(childIdx, 1, sourceLeaf, newPane);
+        children.splice(childIdx, 1, ...orderedPair());
         return { ...t, children };
       }
       const children = [...t.children];
       children[childIdx] = {
         kind: "split",
         direction,
-        children: [sourceLeaf, newPane],
+        children: orderedPair(),
       };
       return { ...t, children };
     }
     // Source had siblings inside its leaf — extract just the source
-    // tab into its own pane, then place a new sibling after it.
+    // tab into its own pane, then place a new sibling on its chosen side.
     const remainderLeaf: WorkSplitLeaf = {
       ...child,
       tabs: remainingTabs,
@@ -525,24 +573,25 @@ export function treeSplitAt(
         ),
       ),
     };
-    const sourceLeaf = makeLeaf([source], 0);
     if (t.direction === direction) {
       const children = [...t.children];
-      children.splice(childIdx, 1, remainderLeaf, sourceLeaf, newPane);
+      children.splice(childIdx, 1, remainderLeaf, ...orderedPair());
       return { ...t, children };
     }
     const children = [...t.children];
     children[childIdx] = {
       kind: "split",
       direction,
-      children: [remainderLeaf, sourceLeaf, newPane],
+      children: [remainderLeaf, ...orderedPair()],
     };
     return { ...t, children };
   }
   // Not at this level — recurse.
   return {
     ...t,
-    children: t.children.map((c) => treeSplitAt(c, source, empty, direction)),
+    children: t.children.map((c) =>
+      treeSplitAt(c, source, empty, direction, position),
+    ),
   };
 }
 
@@ -648,6 +697,10 @@ export type PrTab = {
    *  button + closePrDetail's pop-back-to-inbox behaviour. */
   fromInbox: boolean;
 };
+
+/** Sub-tabs of the PR detail pane. Mirrors PRDetailPane's own TopTab union;
+ *  kept here so callers can request a landing tab without importing the pane. */
+export type PrDetailTab = "overview" | "files" | "checks" | "conversation";
 
 /** Plan tab — opened from a Manager `PendingPlan`. We snapshot the
  *  plan's contents into the editor store so the tab keeps rendering
@@ -1255,8 +1308,9 @@ const SPLIT_LAYOUT_KEY = "aura.splitLayout";
 // a different version drops the blob (see `readPersistedSplitLayout`) — this
 // is the one-shot escape hatch that clears every stale layout from before a
 // shell update, so a cache from an old build can never re-mount tabs that no
-// longer exist. v2 introduced the {v,root} envelope below.
-const SPLIT_LAYOUT_VERSION = 2;
+// longer exist. v2 introduced the {v,root} envelope below; v3 added optional
+// per-split `sizes` (divider-drag proportions).
+const SPLIT_LAYOUT_VERSION = 3;
 
 /** The workspace this shell is bound to right now — the same value App.tsx
  *  writes as it loads a project (`aura.lastWorkspace`). The global split
@@ -1326,6 +1380,7 @@ function sanitizeRefForPersist(ref: WorkPaneRef): WorkPaneRef | null {
   if (ref.kind === "terminal") return null; // termId is runtime-only
   if (ref.kind === "plan") return null; // plan tabs are session-only
   if (ref.kind === "screenshare") return null; // SFU track is session-only
+  if (ref.kind === "browser") return null; // native webview is session-only
   // Open-on-demand nav destinations never persist — see EPHEMERAL_SURFACE_KINDS.
   if (EPHEMERAL_SURFACE_KINDS.has(ref.kind)) return null;
   return ref;
@@ -1349,7 +1404,13 @@ function sanitizeTreeForPersist(t: WorkSplitTree): WorkSplitTree | null {
   }
   if (kids.length === 0) return null;
   if (kids.length === 1) return kids[0];
-  return { kind: "split", direction: t.direction, children: kids };
+  // Keep the sizes only when no child was dropped — a mismatched length would
+  // mis-map weights to panes, so a partial collapse falls back to equal.
+  const sizes =
+    t.sizes && t.sizes.length === kids.length ? t.sizes.slice() : undefined;
+  return sizes
+    ? { kind: "split", direction: t.direction, children: kids, sizes }
+    : { kind: "split", direction: t.direction, children: kids };
 }
 
 function persistSplitLayout(tree: WorkSplitTree | null) {
@@ -1486,7 +1547,19 @@ function validateTree(v: unknown): WorkSplitTree | null {
     }
     if (children.length === 0) return null;
     if (children.length === 1) return children[0];
-    return { kind: "split", direction: split.direction, children };
+    // Restore explicit sizes only when the stored array is all-positive and
+    // its length still matches the surviving children (a dropped child voids
+    // it → equal split). Defensive against hand-edited localStorage.
+    const rawSizes = (v as { sizes?: unknown }).sizes;
+    const sizes =
+      Array.isArray(rawSizes) &&
+      rawSizes.length === children.length &&
+      rawSizes.every((n) => typeof n === "number" && isFinite(n) && n > 0)
+        ? (rawSizes as number[])
+        : undefined;
+    return sizes
+      ? { kind: "split", direction: split.direction, children, sizes }
+      : { kind: "split", direction: split.direction, children };
   }
   return null;
 }
@@ -1595,7 +1668,7 @@ export function useEditorStore(): State & {
   setAgentView: (sessionId: string, view: "ui" | "terminal") => void;
   /** Flip the per-tab attention flag on (BEL detected, permission
    *  prompt). Auto-cleared when the user focuses the tab. */
-  markAgentAttention: (sessionId: string) => void;
+  markAgentAttention: (sessionId: string, repoRoot?: string) => void;
   clearAgentAttention: (sessionId: string) => void;
   openTerminal: (
     cwd: string,
@@ -1653,7 +1726,11 @@ export function useEditorStore(): State & {
   /** Begin a split by spawning an empty sibling next to `source`. The
    *  caller passes the source pane ref (the one the user clicked Split
    *  on). Returns the empty pane's id. */
-  splitWithEmpty: (source: WorkPaneRef, direction: WorkSplitDirection) => string;
+  splitWithEmpty: (
+    source: WorkPaneRef,
+    direction: WorkSplitDirection,
+    position?: SplitInsert,
+  ) => string;
   /** Replace the pane at `index` with a new ref. Used by EmptyPanePicker
    *  to drop a chosen tab into the empty slot without recreating the
    *  layout. */
@@ -1661,6 +1738,9 @@ export function useEditorStore(): State & {
   /** Reorder split panes — drag handle moves pane from `srcIndex` to
    *  `dstIndex`. */
   reorderSplitPanes: (srcIndex: number, dstIndex: number) => void;
+  /** Persist the flex-grow proportions of one split node (addressed by a
+   *  path of child indices from the root) after a divider drag. */
+  setSplitSizes: (path: number[], weights: number[]) => void;
   /** Reorder tab strips by drag (Stage 9H). */
   reorderAgentTabs: (srcIndex: number, dstIndex: number) => void;
   reorderTerminalTabs: (srcIndex: number, dstIndex: number) => void;
@@ -1676,6 +1756,9 @@ export function useEditorStore(): State & {
   addTabToPane: (paneId: string, ref: WorkPaneRef) => void;
   setActiveTabInPane: (paneId: string, index: number) => void;
   closeTabInPane: (paneId: string, index: number) => void;
+  /** Close every OTHER tab in a pane, keeping the one at `keepIndex`. Each
+   *  closed tab tears down its PTY/agent exactly like closeTabInPane. */
+  closeOtherTabsInPane: (paneId: string, keepIndex: number) => void;
   /** Reopen the most-recently-closed reopenable tab (⌘⇧T). No-op when the
    *  reopen stack is empty. Files reload their buffer; view tabs re-query. */
   reopenClosedTab: () => void;
@@ -1746,11 +1829,21 @@ export function useEditorStore(): State & {
   openGraph: () => void;
   closeGraph: () => void;
   setActiveGraph: () => void;
-  openPrDetail: (repoRoot: string, number: number, title: string) => void;
+  /** Open (or focus) a PR as a full detail tab. `initialTab` lands the pane on
+   *  a specific sub-tab — e.g. a review comment jumps straight to Conversation. */
+  openPrDetail: (
+    repoRoot: string,
+    number: number,
+    title: string,
+    initialTab?: PrDetailTab,
+  ) => void;
   closePrDetail: () => void;
   setActivePrDetail: () => void;
   closePrTab: (tabId: string) => void;
   setActivePrTab: (tabId: string) => void;
+  /** Consumed by PRDetailPane on mount/focus to land on the sub-tab a caller
+   *  requested via openPrDetail(..., initialTab). One-shot; clears on read. */
+  consumePendingPrDetailTab: (tabId: string) => PrDetailTab | null;
   /** Stage 8N derived shims — kept so legacy callers using
    *  `editor.selectedPr / .activePrDetail / .prDetailOpen /
    *  .prDetailFromInbox` keep working without the migration touching
@@ -1862,6 +1955,7 @@ export function useEditorStore(): State & {
     demoteTerminalToPanel,
     setSplitLayout,
     setSplitLayoutTree,
+    setSplitSizes,
     addSplitPane,
     addEmptySplitPane,
     splitWithEmpty,
@@ -1876,6 +1970,7 @@ export function useEditorStore(): State & {
     addTabToPane,
     setActiveTabInPane,
     closeTabInPane,
+    closeOtherTabsInPane,
     reopenClosedTab,
     moveTabBetweenPanes,
     removeSplitPane,
@@ -1908,6 +2003,7 @@ export function useEditorStore(): State & {
     setActivePrDetail,
     closePrTab,
     setActivePrTab,
+    consumePendingPrDetailTab,
     // Stage 8N derived shims — see type comment above.
     selectedPr:
       state.prTabs.find((t) => t.tabId === state.activePrTabId) ?? null,
@@ -2213,7 +2309,31 @@ function restorePanelGroups(snap: WorkspaceSnapshot): {
   return { terminalGroups: groups, panelActiveGroupId, panelActiveTermId };
 }
 
+/** Which "surface" the user is currently looking at, for the project-switch
+ *  carry-over below. Pages/Tasks are docked, repo-keyed workpanes the user
+ *  lives in — when they switch projects from the header while reading one, they
+ *  expect to stay on that surface in the next project, not get dumped back to
+ *  Build. Returns the surface if ANY leaf's active tab is that kind (matching
+ *  App.tsx's `inPagesSurface` / `inTasksSurface`); Pages wins a tie. */
+export function activeWorkSurface(
+  layout: WorkSplitTree | null,
+): "pages" | "tasks" | null {
+  if (!layout) return null;
+  let sawTasks = false;
+  for (const leaf of treeLeafNodes(layout)) {
+    const active = leaf.tabs[leaf.activeIndex];
+    if (!active) continue;
+    if (active.kind === "pages") return "pages";
+    if (active.kind === "tasks") sawTasks = true;
+  }
+  return sawTasks ? "tasks" : null;
+}
+
 function switchWorkspace(prev: string | null, next: string) {
+  // Capture the surface the user is leaving BEFORE we wipe, so a header
+  // project switch made while reading Pages/Tasks lands them on the SAME
+  // surface in the next project (carried forward after the hydrate below).
+  const outgoingSurface = activeWorkSurface(state.splitLayout);
   // 1) Persist outgoing workspace's tab state, if any.
   if (prev) {
     saveSnapshot(prev, buildSnapshotFromState(state));
@@ -2313,6 +2433,21 @@ function switchWorkspace(prev: string | null, next: string) {
     state = wiped;
   }
   emit();
+
+  // Carry the Pages/Tasks surface across the switch. If the user was reading
+  // one and the incoming workspace didn't already restore to it, open that
+  // surface pointed at the new root and focus it — so "switch project while on
+  // Pages" stays on Pages instead of resetting to Build. Build (null) never
+  // carries, so an ordinary switch restores the target's own tabs untouched.
+  // focusOrAppendRef is hoisted (function declaration), so calling it here —
+  // before its lexical definition — is fine.
+  if (outgoingSurface && activeWorkSurface(state.splitLayout) !== outgoingSurface) {
+    focusOrAppendRef(
+      outgoingSurface === "pages"
+        ? { kind: "pages", id: next }
+        : { kind: "tasks", id: next },
+    );
+  }
 }
 
 /** File paths the active workspace's snapshot wants re-opened. App
@@ -2837,7 +2972,7 @@ function setActiveAgent(sessionId: string) {
   setState({ ...state, agentTabs, splitLayout: state.splitLayout ? focusRefInLayout(state.splitLayout, { kind: "agent", id: sessionId }) : state.splitLayout, activeAgentId: sessionId, activePath: null, activeTermId: null, activeManagerId: null, activeInspector: false, activeReplay: false, activePlanBuilder: false, activeProve: false, activeGraph: false, activeDashboard: false, activePlanId: null, activePrTabId: null, activeInbox: false, activeSessions: false, traceTool: null });
 }
 
-function markAgentAttention(sessionId: string) {
+function markAgentAttention(sessionId: string, repoRoot?: string) {
   // No-op if the tab is already active — user can already see it.
   if (state.activeAgentId === sessionId) return;
   let touched = false;
@@ -2848,7 +2983,35 @@ function markAgentAttention(sessionId: string) {
     }
     return t;
   });
-  if (touched) setState({ ...state, agentTabs });
+  if (touched) {
+    setState({ ...state, agentTabs });
+    return;
+  }
+
+  // The agent can be running in a background workspace whose tabs are parked
+  // in that workspace's snapshot. Persist attention there too, then nudge the
+  // store so the workspace rail recomputes its unread badge immediately.
+  if (!repoRoot) return;
+  const snapshot = loadSnapshot(repoRoot);
+  if (!snapshot) return;
+  let snapshotTouched = false;
+  snapshot.agentTabs = snapshot.agentTabs.map((tab) => {
+    if (tab.sessionId === sessionId && !tab.attention) {
+      snapshotTouched = true;
+      return { ...tab, attention: true };
+    }
+    return tab;
+  });
+  if (snapshotTouched) {
+    saveSnapshot(repoRoot, snapshot);
+    setState({ ...state });
+  }
+}
+
+/** Count agents waiting in an inactive workspace's persisted tab snapshot. */
+export function workspaceUnreadCount(repoRoot: string): number {
+  const snapshot = loadSnapshot(repoRoot);
+  return snapshot?.agentTabs.filter((tab) => tab.attention).length ?? 0;
 }
 
 function clearAgentAttention(sessionId: string) {
@@ -3442,24 +3605,31 @@ function addEmptySplitPane(): string | null {
  *  pane joins as a sibling; otherwise it nests inside the source leaf
  *  so the rest of the layout keeps its orientation. Returns the empty
  *  pane's id. */
-function splitWithEmpty(source: WorkPaneRef, direction: WorkSplitDirection): string {
+function splitWithEmpty(
+  source: WorkPaneRef,
+  direction: WorkSplitDirection,
+  position: SplitInsert = "after",
+): string {
   const id = generateEmptyPaneId();
   const empty: WorkPaneRef = { kind: "empty", id };
   const tree = state.splitLayout;
   if (tree && treeContains(tree, source)) {
     if (treePaneCount(tree) >= MAX_SPLIT_PANES) return id;
-    setState({ ...state, splitLayout: treeSplitAt(tree, source, empty, direction) });
+    setState({
+      ...state,
+      splitLayout: treeSplitAt(tree, source, empty, direction, position),
+    });
     return id;
   }
-  // Fresh layout — wrap source in a single-tab leaf and put new pane
-  // alongside it.
+  // Fresh layout — wrap source in a single-tab leaf and put the new pane
+  // on its chosen side ("before" = left/up, "after" = right/down).
+  const pair: WorkSplitTree[] =
+    position === "before"
+      ? [makeLeaf([empty], 0), makeLeaf([source], 0)]
+      : [makeLeaf([source], 0), makeLeaf([empty], 0)];
   setState({
     ...state,
-    splitLayout: {
-      kind: "split",
-      direction,
-      children: [makeLeaf([source], 0), makeLeaf([empty], 0)],
-    },
+    splitLayout: { kind: "split", direction, children: pair },
   });
   return id;
 }
@@ -3581,10 +3751,26 @@ function replaceSplitPaneAt(index: number, ref: WorkPaneRef) {
   if (!tree) return;
   const targetRef = activeRefAtIndex(tree, index);
   if (!targetRef) return;
-  // Already somewhere in the layout — remove the empty slot rather
-  // than duplicating the same content across two panes.
+  // `ref` is already somewhere in the layout — almost always because
+  // opening it (openAgent auto-focuses a fresh agent into pane 0 a beat
+  // before we place it here). Don't abandon the slot the user explicitly
+  // picked: pull the ref out of its current home and drop it into THIS
+  // pane, replacing the empty slot. Every caller is the empty-pane picker
+  // asking to fill one specific pane, so "move it here" is always the
+  // intent — never a silent duplicate, and never dropping the chosen slot
+  // while leaving the content stranded in pane 0 (the old bug: split a
+  // file, pick Claude in the new pane → Claude opened in pane 1 and the
+  // new pane vanished).
   if (!samePaneRef(targetRef, ref) && treeContains(tree, ref)) {
-    setState({ ...state, splitLayout: treeRemove(tree, targetRef) });
+    const pulled = treeRemove(tree, ref) ?? tree;
+    setState({
+      ...state,
+      splitLayout: treeReplace(pulled, targetRef, ref),
+      activePath: ref.kind === "file" ? ref.path : null,
+      activeAgentId: ref.kind === "agent" ? ref.id : null,
+      activeTermId: ref.kind === "terminal" ? ref.id : null,
+      activeManagerId: ref.kind === "manager" ? ref.id : null,
+    });
     return;
   }
   setState({
@@ -3608,6 +3794,14 @@ function reorderSplitPanes(srcIndex: number, dstIndex: number) {
   const dst = leafNodeAtIndex(tree, dstIndex);
   if (!src || !dst) return;
   setState({ ...state, splitLayout: treeReorder(tree, src.paneId, dst.paneId) });
+}
+
+function setSplitSizes(path: number[], weights: number[]) {
+  const tree = state.splitLayout;
+  if (!tree) return;
+  const next = treeSetSizes(tree, path, weights);
+  if (next === tree) return;
+  setState({ ...state, splitLayout: next });
 }
 
 /** Append a tab to a specific pane (by paneId). Used by the per-pane
@@ -3714,20 +3908,20 @@ function moveTabBetweenPanes(
   const ref = srcLeaf.tabs[srcIndex];
   if (!ref) return;
   if (srcPaneId === dstPaneId) return;
-  if (srcLeaf.tabs.length <= 1) return;
   const dstLeaf = treeLeafNodes(tree).find((l) => l.paneId === dstPaneId);
   if (!dstLeaf) return;
   // Remove from source, then add to destination. `treeRemove` handles
   // the active-index reseat on the source side; `treeAddTab` appends and
   // makes the new tab active on the destination.
+  //
+  // Moving the ONLY tab out of a pane is allowed: `treeRemove` prunes the
+  // now-empty source leaf and collapses the split — when just the
+  // destination survives, `afterRemove` is that bare leaf and `treeAddTab`
+  // (which matches by paneId) still lands the tab in it. Only bail if the
+  // whole layout emptied out, which can't happen while a distinct
+  // destination pane exists.
   const afterRemove = treeRemove(tree, ref);
   if (!afterRemove) return;
-  if (afterRemove.kind === "leaf") {
-    // The split collapsed because the source was the second pane and
-    // also held only this tab. Skip — the invariant above should have
-    // prevented this but belt-and-braces.
-    return;
-  }
   setState({
     ...state,
     splitLayout: treeAddTab(afterRemove, dstPaneId, ref),
@@ -3881,6 +4075,30 @@ function closeTabInPane(paneId: string, index: number): void {
     splitLayout: next,
     ...traceFieldsForRef(touched?.tabs[touched.activeIndex]),
   });
+}
+
+/** Close every tab in a pane except the one at `keepIndex`. Reuses
+ *  closeTabInPane per victim (so each PTY/agent is torn down and each
+ *  reopenable tab is recorded), re-finding the pane every pass because the
+ *  earlier closes shift indices. `setState` reassigns `state` synchronously,
+ *  so each iteration sees the freshly-pruned tree; the bounded loop is a
+ *  belt-and-braces guard against an unexpected non-shrinking pass. */
+function closeOtherTabsInPane(paneId: string, keepIndex: number): void {
+  const tree0 = state.splitLayout;
+  if (!tree0) return;
+  const leaf0 = treeLeafNodes(tree0).find((l) => l.paneId === paneId);
+  if (!leaf0) return;
+  const keepRef = leaf0.tabs[keepIndex];
+  if (!keepRef) return;
+  for (let guard = 0; guard < 128; guard++) {
+    const tree = state.splitLayout;
+    if (!tree) return;
+    const leaf = treeLeafNodes(tree).find((l) => l.paneId === paneId);
+    if (!leaf || leaf.tabs.length <= 1) return;
+    const victim = leaf.tabs.findIndex((r) => !samePaneRef(r, keepRef));
+    if (victim < 0) return;
+    closeTabInPane(paneId, victim);
+  }
 }
 
 // ── Stage 9H — reorder tab strips by drag ─────────────────────────
@@ -4739,6 +4957,28 @@ function removeRefFromLayout(ref: WorkPaneRef): void {
   setState({ ...state, splitLayout: layout });
 }
 
+/** Mint a fresh, unique browser-tab id. Each in-app browser tab is its own
+ *  webview, so — unlike the deduped repo-keyed workpanes — every id is new. */
+export function newBrowserTabId(): string {
+  return `browser-${
+    typeof crypto !== "undefined" && crypto.randomUUID
+      ? crypto.randomUUID()
+      : Math.random().toString(36).slice(2)
+  }`;
+}
+
+/** Open a NEW in-app browser tab (superset ⌘⇧B). `url` is an optional initial
+ *  address; omit it for a blank start page with the address bar focused.
+ *  Always appends a distinct tab — never dedupes — since each browser tab is
+ *  an independent webview. */
+export function openBrowserTab(url?: string): void {
+  focusOrAppendRef({
+    kind: "browser",
+    id: newBrowserTabId(),
+    url: url && url.trim() ? url.trim() : undefined,
+  });
+}
+
 function openTasks(repoRoot: string) {
   focusOrAppendRef({ kind: "tasks", id: repoRoot });
 }
@@ -4880,8 +5120,38 @@ function tabIdForPr(repoRoot: string, number: number): string {
   return `${repoRoot}#${number}`;
 }
 
-function openPrDetail(repoRoot: string, number: number, title: string) {
+// When a caller wants the PR to open on a specific sub-tab (e.g. clicking a
+// review comment jumps straight to its Conversation), it stashes the desired
+// tab here; PRDetailPane consumes it on mount/focus. Mirrors pendingTaskEdit.
+let pendingPrDetailTab: { tabId: string; tab: PrDetailTab } | null = null;
+
+function consumePendingPrDetailTab(tabId: string): PrDetailTab | null {
+  if (pendingPrDetailTab && pendingPrDetailTab.tabId === tabId) {
+    const t = pendingPrDetailTab.tab;
+    pendingPrDetailTab = null;
+    return t;
+  }
+  return null;
+}
+
+function openPrDetail(
+  repoRoot: string,
+  number: number,
+  title: string,
+  initialTab?: PrDetailTab,
+) {
   const tabId = tabIdForPr(repoRoot, number);
+  if (initialTab) {
+    // Stash for a fresh mount to consume, AND fire an event so an already-open
+    // PR tab re-focused with a new target tab switches live (mirrors the task
+    // edit handoff: pending value for cold mount + event for warm one).
+    pendingPrDetailTab = { tabId, tab: initialTab };
+    if (typeof window !== "undefined") {
+      window.dispatchEvent(
+        new CustomEvent("aura:pr-detail-tab", { detail: { tabId, tab: initialTab } }),
+      );
+    }
+  }
   const existing = state.prTabs.find((t) => t.tabId === tabId);
   const fromInbox = state.activeInbox || existing?.fromInbox || false;
   const nextTabs: PrTab[] = existing

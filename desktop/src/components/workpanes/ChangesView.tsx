@@ -18,7 +18,15 @@
 // — the run's actual change — instead of an empty working-tree diff. The
 // tree's +/− come straight from the changeset row's recorded counts.
 
-import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import {
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+  type ReactNode,
+} from "react";
+import { Churn } from "../diff/Churn";
 import { type FileChangeNote, type IntentChangesetFile } from "../../lib/api";
 import { loadFileDiff } from "../../lib/sessionDataCache";
 import { fetchChangeNoteReport } from "../../lib/changeNoteCache";
@@ -210,18 +218,6 @@ function flatten(
   return out;
 }
 
-/** Signed churn fragment — "+12 −3" with only the non-zero halves shown. */
-function Churn({ adds, dels }: { adds: number; dels: number }) {
-  if (adds <= 0 && dels <= 0) return null;
-  return (
-    <span className="shrink-0 font-mono text-[10.5px] tabular-nums">
-      {adds > 0 ? <span className="text-accent-green">+{adds}</span> : null}
-      {adds > 0 && dels > 0 ? <span className="text-text-5"> </span> : null}
-      {dels > 0 ? <span className="text-text-3">−{dels}</span> : null}
-    </span>
-  );
-}
-
 function Chevron({ open }: { open: boolean }) {
   return (
     <svg
@@ -346,17 +342,19 @@ function ChangeTree({
       <div className="flex shrink-0 items-center justify-between gap-2 border-b border-line-soft px-3 py-2">
         <span className="text-[11px] uppercase tracking-wide text-text-4">
           {fileOrder.length} {fileOrder.length === 1 ? "file" : "files"}
-          {totals.adds > 0 || totals.dels > 0 ? (
-            <span className="ml-1.5 font-mono normal-case tracking-normal">
-              {totals.adds > 0 ? (
-                <span className="text-accent-green">+{totals.adds}</span>
-              ) : null}
-              {totals.adds > 0 && totals.dels > 0 ? " " : ""}
-              {totals.dels > 0 ? (
-                <span className="text-text-3">−{totals.dels}</span>
-              ) : null}
-            </span>
-          ) : null}
+          {/* The headline figure for the change being read: one on screen, not
+              a repeating row, and it counts exactly the diff this pane holds —
+              so it takes the same green/red as the file rows below it. Off the
+              shared badge, which also puts it on the diff-add/diff-remove
+              tokens; the old hand-rolled pair used the success-green (the
+              "verified / passing" colour), which meant the wrong thing and
+              didn't match the greens beneath it. */}
+          <Churn
+            additions={totals.adds}
+            deletions={totals.dels}
+            tone="diff"
+            className="ml-1.5 normal-case tracking-normal"
+          />
         </span>
         <button
           type="button"
@@ -390,7 +388,11 @@ function ChangeTree({
                 <span className="min-w-0 flex-1 truncate text-[12px] text-text-2">
                   {r.node.name}
                 </span>
-                <Churn adds={r.node.adds} dels={r.node.dels} />
+                {/* A folder is not a change — this number is a roll-up of the
+                    files under it, and those files each show their own. Left
+                    neutral so the colour in this tree marks exactly one thing:
+                    a file that actually changed. */}
+                <Churn additions={r.node.adds} deletions={r.node.dels} />
               </button>
             );
           }
@@ -422,12 +424,70 @@ function ChangeTree({
               >
                 {r.node.name}
               </span>
-              <Churn adds={r.node.adds} dels={r.node.dels} />
+              {/* Diff surface, not a nav list: every row here is one file of
+                  the ONE changeset being read, and the number is that file's
+                  actual added/removed lines — the change itself. Green/red. */}
+              <Churn
+                additions={r.node.adds}
+                deletions={r.node.dels}
+                tone="diff"
+              />
             </button>
           );
         })}
       </div>
     </div>
+  );
+}
+
+// ── demoted raw code ─────────────────────────────────────────────────
+// The syntax-highlighted diff is the ENGINEER's view. It sits BELOW the
+// plain-language meaning and stays collapsed by default, so a non-engineer
+// meets "what changed and why" first — not a wall of source. The reveal is
+// deliberately quiet (muted text, never the arctic-blue primary accent): the
+// meaning is the headline; the exact lines are one calm click away for whoever
+// wants them. `adds`/`dels` give a sense of scale on the closed toggle without
+// showing a single line of code.
+function CodeReveal({
+  show,
+  onToggle,
+  adds,
+  dels,
+  children,
+}: {
+  show: boolean;
+  onToggle: () => void;
+  adds: number;
+  dels: number;
+  children: ReactNode;
+}) {
+  return (
+    <>
+      <button
+        type="button"
+        onClick={onToggle}
+        aria-expanded={show}
+        className="flex shrink-0 items-center gap-1.5 border-t border-line-soft px-3 py-1.5 text-left text-[11px] text-text-4 hover:bg-bg-2/40 hover:text-text-2"
+        title={
+          show
+            ? "Hide the exact code lines"
+            : "Show the exact code lines that changed — the engineer's view"
+        }
+      >
+        <Chevron open={show} />
+        <span>{show ? "Hide the code" : "See the actual code"}</span>
+        {!show && (adds > 0 || dels > 0) ? (
+          <span className="font-mono text-[10px] tabular-nums text-text-5">
+            {adds > 0 ? <span className="text-accent-green">+{adds}</span> : null}
+            {adds > 0 && dels > 0 ? " " : null}
+            {dels > 0 ? <span className="text-text-3">−{dels}</span> : null}
+          </span>
+        ) : null}
+      </button>
+      {show ? (
+        <div className="min-h-0 flex-1 overflow-hidden">{children}</div>
+      ) : null}
+    </>
   );
 }
 
@@ -474,11 +534,23 @@ function DiffPane({
   // columns). Same shared (repo, commit) cache the unified path's
   // ChangeNoteCard reads, so it costs no extra engine round-trip.
   const [note, setNote] = useState<FileChangeNote | null>(null);
-  const [reason, setReason] = useState<string | null>(null);
+  // The commit's real when/who, carried from the same change-note report so the
+  // split header can show "the reality" (when it landed, who made it) in plain
+  // words. Null until the report resolves, or when there's no commit sha.
+  const [when, setWhen] = useState<number | null>(null);
+  const [author, setAuthor] = useState<string | null>(null);
   // Track the diff body width: below SPLIT_INLINE_PX Monaco folds its split
   // into one inline column, so the side-headers must stack to stay honest.
   const bodyRef = useRef<HTMLDivElement | null>(null);
   const [bodyNarrow, setBodyNarrow] = useState(false);
+  // The plain-words summary leads, but the actual code is shown by default so
+  // it's right there to read — the "Hide the code" toggle demotes it for anyone
+  // who wants only the meaning. Reset on every file switch so each file starts
+  // open, not on the previous file's manual choice.
+  const [showCode, setShowCode] = useState(true);
+  useEffect(() => {
+    setShowCode(true);
+  }, [file.path, file.commit]);
 
   useLayoutEffect(() => {
     const el = bodyRef.current;
@@ -496,18 +568,16 @@ function DiffPane({
   // data. A live/manual change has no commit sha → no note (header is skipped).
   useEffect(() => {
     setNote(null);
-    setReason(null);
+    setWhen(null);
+    setAuthor(null);
     if (!repoRoot || !file.commit) return;
     let alive = true;
     fetchChangeNoteReport(repoRoot, file.commit)
       .then((report) => {
         if (!alive) return;
         setNote(report.files.find((f) => f.file === file.path) ?? null);
-        const first = (report.commit_message ?? "")
-          .split("\n")
-          .map((l) => l.trim())
-          .find((l) => l.length > 0);
-        setReason(first ?? null);
+        setWhen(report.commit_time ?? null);
+        setAuthor(report.author?.trim() || null);
       })
       .catch(() => {
         /* header stays hidden on a miss — the diff is still the star */
@@ -556,16 +626,6 @@ function DiffPane({
   );
   const splitDisabled = narrow || (sidesPreview?.oneSided ?? false);
   const effectiveMode: DiffView = splitDisabled ? "unified" : mode;
-  // The change note scrolls with the patch only in the unified path, where a
-  // real scroll container exists below; loading/error/empty/split keep it
-  // pinned above (collapsed, so it's a single unobtrusive line).
-  const noteRidesScroll =
-    effectiveMode === "unified" && hasDiff && !loading && !error;
-  // In the split path the three-block SplitDiffHeader takes over the note's job
-  // (merged summary + previous/new side columns aligned to the panes), so the
-  // pinned collapsed ChangeNoteCard must NOT also render above it.
-  const splitHeaderShows =
-    effectiveMode === "split" && hasDiff && !loading && !error && !!note;
 
   return (
     <div className="flex h-full min-h-0 flex-col bg-bg-content">
@@ -594,112 +654,122 @@ function DiffPane({
         >
           {file.path}
         </span>
-        <Churn adds={adds} dels={dels} />
-        {!splitDisabled ? (
-          <span className="ml-1 inline-flex shrink-0 items-center overflow-hidden rounded border border-line-soft">
+        {/* Sits directly above the lines it counts — the number IS what's on
+            screen, so it carries the same green/red as the diff below it. */}
+        <Churn additions={adds} deletions={dels} tone="diff" />
+        {/* Code-display controls (side-by-side vs inline, hide-whitespace) only
+            matter when the raw code is actually revealed — keep them out of the
+            way while the plain-language view is the star. */}
+        {showCode ? (
+          <>
+            {!splitDisabled ? (
+              <span className="ml-1 inline-flex shrink-0 items-center overflow-hidden rounded border border-line-soft">
+                <button
+                  type="button"
+                  onClick={() => setDiffView("split")}
+                  className={
+                    "h-5 px-1.5 text-[10.5px] " +
+                    (effectiveMode === "split"
+                      ? "bg-bg-2 text-text-1"
+                      : "text-text-3 hover:text-text-1")
+                  }
+                  title="Side-by-side diff"
+                >
+                  Split
+                </button>
+                <span className="h-3 w-px bg-line-soft" />
+                <button
+                  type="button"
+                  onClick={() => setDiffView("unified")}
+                  className={
+                    "h-5 px-1.5 text-[10.5px] " +
+                    (effectiveMode === "unified"
+                      ? "bg-bg-2 text-text-1"
+                      : "text-text-3 hover:text-text-1")
+                  }
+                  title="Unified (inline) diff"
+                >
+                  Unified
+                </button>
+              </span>
+            ) : null}
             <button
               type="button"
-              onClick={() => setDiffView("split")}
+              onClick={() => setIgnoreWhitespace(!ignoreWs)}
+              aria-pressed={ignoreWs}
+              title={ignoreWs ? "Whitespace-only changes hidden" : "Hide whitespace-only changes"}
               className={
-                "h-5 px-1.5 text-[10.5px] " +
-                (effectiveMode === "split"
-                  ? "bg-bg-2 text-text-1"
-                  : "text-text-3 hover:text-text-1")
+                "ml-1 h-5 shrink-0 rounded border px-1.5 text-[10.5px] " +
+                (ignoreWs
+                  ? "border-[var(--color-accent)] bg-bg-2 text-[var(--color-accent)]"
+                  : "border-line-soft text-text-3 hover:text-text-1")
               }
-              title="Side-by-side diff"
             >
-              Split
+              WS
             </button>
-            <span className="h-3 w-px bg-line-soft" />
-            <button
-              type="button"
-              onClick={() => setDiffView("unified")}
-              className={
-                "h-5 px-1.5 text-[10.5px] " +
-                (effectiveMode === "unified"
-                  ? "bg-bg-2 text-text-1"
-                  : "text-text-3 hover:text-text-1")
-              }
-              title="Unified (inline) diff"
-            >
-              Unified
-            </button>
-          </span>
+          </>
         ) : null}
-        <button
-          type="button"
-          onClick={() => setIgnoreWhitespace(!ignoreWs)}
-          aria-pressed={ignoreWs}
-          title={ignoreWs ? "Whitespace-only changes hidden" : "Hide whitespace-only changes"}
-          className={
-            "ml-1 h-5 shrink-0 rounded border px-1.5 text-[10.5px] " +
-            (ignoreWs
-              ? "border-[var(--color-accent)] bg-bg-2 text-[var(--color-accent)]"
-              : "border-line-soft text-text-3 hover:text-text-1")
-          }
-        >
-          WS
-        </button>
       </div>
 
-      {/* per-file change note — what / why / where it affects (committed files
-          only; a working-tree change has no commit to derive the note from).
-          For the unified patch the note rides INSIDE the scroll region below,
-          so it scrolls away with the diff instead of pinning fixed height; the
-          Monaco split owns its own viewport, so there the note stays pinned (it
-          opens collapsed, a single line, so it costs almost nothing). */}
-      {file.commit && !noteRidesScroll && !splitHeaderShows ? (
-        <ChangeNoteCard repoRoot={repoRoot} commit={file.commit} path={file.path} />
-      ) : null}
+      {/* MEANING FIRST, code second. The plain-language "what changed & why"
+          leads; the syntax-highlighted diff is demoted below it, collapsed by
+          default (see CodeReveal). A non-engineer meets the value of the change,
+          not a wall of source. */}
+      <div ref={bodyRef} className="flex min-h-0 flex-1 flex-col overflow-hidden">
+        {/* PRIMARY — the meaning, shown the instant it's known and independent
+            of the code diff's own load state. SplitDiffHeader is the richest
+            plain-words before/after (from the recorded change-note); the
+            commit's ChangeNoteCard is the fallback lead. A live working-tree
+            edit has no recorded note, so it leads straight to the code below. */}
+        {note ? (
+          <SplitDiffHeader
+            note={note}
+            when={when}
+            author={author}
+            repoRoot={repoRoot}
+            commit={file.commit}
+            stacked={bodyNarrow}
+            onBringBack={onBringBack}
+            busySymbol={busySymbol}
+          />
+        ) : file.commit ? (
+          <ChangeNoteCard repoRoot={repoRoot} commit={file.commit} path={file.path} />
+        ) : null}
 
-      {/* diff body */}
-      <div ref={bodyRef} className="min-h-0 flex-1 overflow-hidden">
+        {/* SECONDARY — the raw code. Its own load / empty state lives here so
+            the meaning above never waits on it. */}
         {loading ? (
-          <div className="px-3 py-2 text-[11px] text-text-4">Loading diff…</div>
+          <div className="shrink-0 px-3 py-2 text-[11px] text-text-4">
+            Loading the code…
+          </div>
         ) : error ? (
-          <div className="px-3 py-2 text-[11px] text-text-3">
-            Couldn&rsquo;t load this diff.
+          <div className="shrink-0 px-3 py-2 text-[11px] text-text-3">
+            Couldn&rsquo;t load the code.
             <span className="mt-1 block font-mono text-[10.5px] text-text-4">
               {error}
             </span>
           </div>
         ) : !hasDiff ? (
-          <div className="px-3 py-2 text-[11px] text-text-4">
+          <div className="shrink-0 px-3 py-2 text-[11px] text-text-4">
             {file.commit
-              ? "This commit recorded no textual change for this file (mode-only or binary change)."
-              : "No pending changes for this file — it matches the last commit (already committed or undone)."}
-          </div>
-        ) : effectiveMode === "split" ? (
-          // Three-block header (merged summary + previous/new) above the Monaco
-          // split, then the editor fills the remaining height. The header only
-          // shows once the change-note is in; until then the split renders on
-          // its own (the diff is the star, never blocked on the note).
-          <div className="flex h-full min-h-0 flex-col">
-            {splitHeaderShows && note ? (
-              <SplitDiffHeader
-                note={note}
-                reason={reason}
-                repoRoot={repoRoot}
-                stacked={bodyNarrow}
-                onBringBack={onBringBack}
-                busySymbol={busySymbol}
-              />
-            ) : null}
-            <div className="min-h-0 flex-1">
-              <SplitDiff diff={diff as string} path={file.path} />
-            </div>
+              ? "This change didn't alter any text in this file — it was a rename, or a settings-only change."
+              : "Nothing to show here — this file already matches the last saved version."}
           </div>
         ) : (
-          <div className="h-full overflow-y-auto">
-            {file.commit ? (
-              <ChangeNoteCard
-                repoRoot={repoRoot}
-                commit={file.commit}
-                path={file.path}
-              />
-            ) : null}
-            <UnifiedDiff diff={diff as string} />
-          </div>
+          <CodeReveal
+            show={showCode}
+            onToggle={() => setShowCode((v) => !v)}
+            adds={adds}
+            dels={dels}
+          >
+            {effectiveMode === "split" ? (
+              <SplitDiff diff={diff as string} path={file.path} />
+            ) : (
+              <div className="h-full overflow-y-auto">
+                <UnifiedDiff diff={diff as string} />
+              </div>
+            )}
+          </CodeReveal>
         )}
       </div>
     </div>

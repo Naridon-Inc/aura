@@ -137,3 +137,13 @@ export function useIntentMatch(
 export function invalidateIntentMatch(sha: string) {
   cache.delete(sha);
 }
+
+/** Imperative single-sha fetch (cached + inflight-deduped, same as the hook
+ *  uses). For callers that need to score several commits at once — e.g. a
+ *  feature's Drift across all its commits — where a per-sha hook can't run in a
+ *  loop. Resolves to the slim {banner, score} record; never throws. */
+export function fetchIntentMatch(repoRoot: string, sha: string): Promise<IntentMatch> {
+  const hit = cache.get(sha);
+  if (hit) return Promise.resolve(hit);
+  return fetchOne(repoRoot, sha);
+}

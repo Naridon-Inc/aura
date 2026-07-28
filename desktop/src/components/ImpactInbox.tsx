@@ -111,7 +111,7 @@ export function ImpactInbox({ repoRoot, onOpenFile, onOpenAll }: Props) {
             style={{
               background: topTone?.dot ?? "var(--color-red)",
               color: "white",
-              border: "1.5px solid var(--color-bg-0, #0c0d10)",
+              border: "1.5px solid var(--color-bg-0)",
             }}
           >
             {count > 9 ? "9+" : count}
@@ -296,12 +296,14 @@ function severityTone(s: string): { dot: string; text: string } {
     return { dot: "var(--color-red)", text: "var(--color-red)" };
   if (s === "medium")
     return {
-      dot: "var(--color-amber, #d4a017)",
-      text: "var(--color-amber, #d4a017)",
+      dot: "var(--color-amber)",
+      text: "var(--color-amber)",
     };
+  // Same rule as the banner: low severity is informational, so it reads on
+  // the neutral ramp and lets the red/amber rows carry the eye.
   return {
-    dot: "var(--color-blue, #4a8cff)",
-    text: "var(--color-blue, #4a8cff)",
+    dot: "var(--color-text-4)",
+    text: "var(--color-text-3)",
   };
 }
 

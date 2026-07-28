@@ -9,7 +9,8 @@
 
 import { useState } from "react";
 import { onExternalAnchorClick } from "../../lib/openExternal";
-import { ExternalLink, Loader2 } from "lucide-react";
+import { ExternalLink } from "lucide-react";
+import { AsciiSpinner } from "../ui/ascii-spinner";
 
 import { Button } from "../ui/button";
 import { Input } from "../ui/input";
@@ -89,16 +90,17 @@ export function PublishModeDialog({ open, slug, onClose }: Props) {
               />
             </div>
             <DialogFooter>
-              <Button variant="ghost" onClick={handleClose}>
+              <Button variant="ghost" size="xs" onClick={handleClose}>
                 Cancel
               </Button>
               <Button
+                size="xs"
                 onClick={handlePublish}
                 disabled={!slug || phase.kind === "publishing"}
               >
                 {phase.kind === "publishing" ? (
                   <>
-                    <Loader2 className="h-3.5 w-3.5 animate-spin mr-1" />
+                    <AsciiSpinner className="text-[12px] leading-none mr-1" />
                     Publishing…
                   </>
                 ) : (
@@ -110,9 +112,7 @@ export function PublishModeDialog({ open, slug, onClose }: Props) {
         ) : phase.kind === "done" ? (
           <>
             <div className="space-y-3 text-[12px]">
-              <div className="text-emerald-700 dark:text-emerald-300">
-                Published successfully.
-              </div>
+              <div className="text-text-1">Published.</div>
               <div>
                 <div className="text-text-3 text-[11px] mb-1">Gist URL</div>
                 <div className="flex items-center gap-2">
@@ -140,19 +140,19 @@ export function PublishModeDialog({ open, slug, onClose }: Props) {
               </div>
             </div>
             <DialogFooter>
-              <Button onClick={handleClose}>Done</Button>
+              <Button size="xs" onClick={handleClose}>Done</Button>
             </DialogFooter>
           </>
         ) : (
           <>
-            <div className="text-[12px] text-red-700 dark:text-red-300 bg-red-100/30 dark:bg-red-900/20 rounded p-2">
+            <div className="text-[12px] text-red bg-red/10 rounded p-2">
               {phase.message}
             </div>
             <DialogFooter>
-              <Button variant="ghost" onClick={reset}>
+              <Button variant="ghost" size="xs" onClick={reset}>
                 Try again
               </Button>
-              <Button onClick={handleClose}>Close</Button>
+              <Button size="xs" onClick={handleClose}>Close</Button>
             </DialogFooter>
           </>
         )}

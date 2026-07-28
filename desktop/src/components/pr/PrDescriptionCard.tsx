@@ -10,6 +10,8 @@ import { useState } from "react";
 import { onExternalAnchorClick } from "../../lib/openExternal";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
+import { remarkCallouts } from "../markdown/remarkCallouts";
+import { calloutFromBlockquote } from "../markdown/Callout";
 import { Button } from "../ui/button";
 
 type Props = {
@@ -60,9 +62,9 @@ export function PrDescriptionCard({ body, onEdit }: Props) {
           {empty ? (
             <DescriptionPlaceholder />
           ) : (
-            <div className="text-[13px] text-text-2 leading-[1.65]">
+            <div className="text-[12px] text-text-2 leading-[1.55]">
               <ReactMarkdown
-                remarkPlugins={[remarkGfm]}
+                remarkPlugins={[remarkGfm, remarkCallouts]}
                 components={MARKDOWN_COMPONENTS}
               >
                 {body}
@@ -134,7 +136,11 @@ export const MARKDOWN_COMPONENTS = {
     const isBlock = (p.className ?? "").startsWith("language-");
     if (isBlock) return <code className={p.className}>{p.children}</code>;
     return (
-      <code className="px-1.5 py-0.5 rounded bg-bg-2 text-text-1 font-mono text-[12px]">
+      // Boxless inline code — tinted monospace, no fill/padding/border — so a
+      // path or command flows inside prose like a word. A boxed chip staircases
+      // when a token wraps (the padded fill splits across lines into an ugly
+      // stack); with no box there is nothing to split.
+      <code className="text-text-2 font-mono text-[0.9em] leading-[inherit] align-baseline break-words">
         {p.children}
       </code>
     );
@@ -144,11 +150,12 @@ export const MARKDOWN_COMPONENTS = {
       {p.children}
     </pre>
   ),
-  blockquote: (p: { children?: React.ReactNode }) => (
-    <blockquote className="my-3 pl-3 border-l-2 border-line text-text-3 italic">
-      {p.children}
-    </blockquote>
-  ),
+  blockquote: (p: { children?: React.ReactNode; className?: string }) =>
+    calloutFromBlockquote(p.className, p.children) ?? (
+      <blockquote className="my-3 pl-3 border-l-2 border-line text-text-3 italic">
+        {p.children}
+      </blockquote>
+    ),
   a: (p: { children?: React.ReactNode; href?: string }) => (
     <a
       href={p.href}

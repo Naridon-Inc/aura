@@ -12,6 +12,7 @@
  *  sub-panes (`MembersRail`, `PinnedPanel`, `ThreadReplies`) to it. */
 
 import { useMemo } from "react";
+import { FileText, X } from "lucide-react";
 
 import { COMMONS_ENABLED } from "../../../lib/featureFlags";
 import { SegmentedControl } from "../../ui/segmented";
@@ -23,6 +24,8 @@ import { PinnedPanel } from "./PinnedPanel";
 import { PluginBrowser } from "./PluginBrowser";
 import { ThreadReplies } from "./ThreadReplies";
 import { ExpandToPaneIcon, MembersIcon, PinIcon } from "./icons";
+import { ChannelCanvasTab } from "./ChannelCanvasTab";
+import { Avatar } from "./Avatar";
 
 export type ContextTab =
   | "members"
@@ -30,6 +33,7 @@ export type ContextTab =
   | "pinned"
   | "lounge"
   | "plugins"
+  | "canvas"
   | "thread";
 
 export function ContextPanel({
@@ -39,6 +43,8 @@ export function ContextPanel({
   onTabChange,
   collapsed = false,
   onToggleCollapse,
+  fixedTab,
+  onClose,
 }: {
   chat: TeamChatModel;
   repoRoot: string;
@@ -50,6 +56,10 @@ export function ContextPanel({
    *  user collapse). The 3-pane shell owns the actual width. */
   collapsed?: boolean;
   onToggleCollapse?: () => void;
+  /** A fixed split pane has one purpose and a Slack-style title + close
+   *  button instead of a nested tab strip. Multiple fixed panes may be open. */
+  fixedTab?: ContextTab;
+  onClose?: () => void;
 }) {
   const {
     active,
@@ -58,12 +68,19 @@ export function ContextPanel({
     activeMsgs,
     activePinnedSet,
     members,
+    // Roster scoped to the active conversation: the worldwide participant
+    // set for #aura, the per-repo team otherwise (identical to `members`).
+    // The Lounge stays on the raw team roster, so keep both.
+    activeRoster,
     peers,
     selfHandle,
     selfKeys,
     isMemberLinkedSelf,
     linkSelf,
     unlinkSelf,
+    dupSuggestions,
+    confirmDuplicate,
+    rejectDuplicate,
     setActiveId,
     topLevel,
     togglePin,
@@ -186,36 +203,44 @@ export function ContextPanel({
   // exists in this conversation's option set (e.g. you were on a channel's
   // "About" then switched to a DM, where "About" is gone), fall back to the
   // first/default pane so the segmented control always shows a live segment.
-  const viewTab: ContextTab = options.some((o) => o.value === tab)
+  const viewTab: ContextTab = fixedTab ?? (options.some((o) => o.value === tab)
     ? tab
-    : "members";
+    : "members");
 
   return (
     <aside className="flex flex-col border-l border-line-soft bg-bg-1 h-full min-w-0">
-      <div className="flex-shrink-0 flex items-center gap-2 px-2 h-10 border-b border-line-soft">
-        <SegmentedControl<ContextTab>
-          value={viewTab}
-          onChange={onTabChange}
-          options={options}
-          ariaLabel="Context panel section"
-          className="flex-1 overflow-x-auto"
-        />
-        {onToggleCollapse && (
+      <div className="slack-context-header flex-shrink-0 flex items-center gap-2 px-3 h-12 border-b border-line-soft">
+        {fixedTab ? (
+          <>
+            {fixedTab === "canvas" && <FileText size={16} />}
+            <strong className="flex-1 truncate">
+              {contextTitle(fixedTab, active?.kind === "dm")}
+            </strong>
+            {active && fixedTab !== "thread" && (
+              <span className="slack-context-subtitle truncate">
+                {active.private ? "▣ " : active.kind === "channel" ? "#" : ""}
+                {prettyName(active).replace(/^#/, "")}
+              </span>
+            )}
+          </>
+        ) : (
+          <SegmentedControl<ContextTab>
+            value={viewTab}
+            onChange={onTabChange}
+            options={options}
+            ariaLabel="Context panel section"
+            className="flex-1 overflow-x-auto"
+          />
+        )}
+        {(onClose || onToggleCollapse) && (
           <button
             type="button"
-            onClick={onToggleCollapse}
-            title="Hide context"
-            aria-label="Hide context"
+            onClick={onClose ?? onToggleCollapse}
+            title="Close pane"
+            aria-label="Close pane"
             className="w-7 h-7 rounded flex items-center justify-center text-text-4 hover:text-text-1 hover:bg-bg-2 flex-shrink-0"
           >
-            <svg width="14" height="14" viewBox="0 0 16 16" fill="none">
-              <path
-                d="M6 3.5L10.5 8 6 12.5"
-                stroke="currentColor"
-                strokeWidth="1.6"
-                strokeLinecap="round"
-              />
-            </svg>
+            <X size={18} />
           </button>
         )}
       </div>
@@ -247,7 +272,7 @@ export function ContextPanel({
                 : activeThread
             }
             replies={activeMsgs.filter((m) => m.thread_parent === activeThread.id)}
-            members={members}
+            members={activeRoster}
             selfHandle={selfHandle}
             selfKeys={selfKeys}
             lastRead={lastReadActive}
@@ -272,10 +297,16 @@ export function ContextPanel({
               persistLastRead(active.id, max);
             }}
           />
+        ) : viewTab === "canvas" ? (
+          <ChannelCanvasTab
+            repoRoot={repoRoot}
+            channel={active?.channel ?? null}
+            channelName={active?.name ?? "Team"}
+          />
         ) : viewTab === "pinned" ? (
           <PinnedPanel
             pins={pins}
-            members={members}
+            members={activeRoster}
             selfHandle={selfHandle}
             onJump={(msgId) => {
               window.dispatchEvent(
@@ -286,15 +317,18 @@ export function ContextPanel({
             onClose={() => onTabChange("members")}
           />
         ) : viewTab === "details" ? (
-          <ChannelDetails conv={active} memberCount={members.length} />
+          <ConversationDetails conv={active} memberCount={members.length} />
         ) : (
           <MembersRail
             conv={active}
-            members={members}
+            members={activeRoster}
             selfHandle={selfHandle}
             isLinkedSelf={isMemberLinkedSelf}
             onLinkSelf={(m) => linkSelf(m.email || m.handle)}
             onUnlinkSelf={(m) => unlinkSelf(m.email || m.handle)}
+            duplicates={dupSuggestions}
+            onConfirmDuplicate={confirmDuplicate}
+            onRejectDuplicate={rejectDuplicate}
             onDM={(handle) => {
               const row = peers.find((p) => p.name === handle);
               if (row) {
@@ -361,7 +395,7 @@ function ContextEmpty() {
   );
 }
 
-function ChannelDetails({
+function ConversationDetails({
   conv,
   memberCount,
 }: {
@@ -369,25 +403,56 @@ function ChannelDetails({
   memberCount: number;
 }) {
   const isDm = conv.kind === "dm";
+  const displayName = prettyName(conv).replace(/^#/, "");
   return (
-    <div className="flex-1 overflow-y-auto px-3 py-3 flex flex-col gap-3">
-      <div>
-        <div className="text-text-1 text-[13px] font-medium">
-          {prettyName(conv)}
-        </div>
-        {conv.hint && (
-          <div className="text-text-4 text-[11.5px] mt-0.5 leading-snug">
-            {conv.hint}
+    <div className="slack-details-view flex-1 overflow-y-auto">
+      <div className="slack-details-hero">
+        {isDm ? (
+          <Avatar name={displayName} size={72} presence="online" />
+        ) : (
+          <div className={`slack-details-channel-icon ${conv.private ? "is-private" : ""}`}>
+            {conv.private ? "▣" : "#"}
           </div>
         )}
+        <h2>{displayName}</h2>
+        <p>{isDm ? "Active" : detailKind(conv.kind, conv.private)}</p>
       </div>
-      <DetailRow label="Type" value={detailKind(conv.kind, conv.private)} />
-      {!isDm && conv.kind !== "project" && (
-        <DetailRow label="Members" value={String(memberCount)} />
+      {isDm && (
+        <div className="slack-details-actions">
+          <button type="button">Message</button>
+          <button type="button">Huddle</button>
+          <button type="button">More</button>
+        </div>
       )}
-      {conv.channel && <DetailRow label="Channel" value={`#${conv.channel}`} />}
+      <div className="slack-details-card">
+        <DetailRow label="Type" value={detailKind(conv.kind, conv.private)} />
+        {!isDm && conv.kind !== "project" && (
+          <DetailRow label="Members" value={String(memberCount)} />
+        )}
+        {conv.channel && <DetailRow label="Channel" value={`${conv.private ? "▣" : "#"}${conv.channel}`} />}
+        {conv.hint && <DetailRow label={isDm ? "About" : "Description"} value={conv.hint} />}
+      </div>
     </div>
   );
+}
+
+function contextTitle(tab: ContextTab, isDm: boolean): string {
+  switch (tab) {
+    case "canvas":
+      return "Canvas";
+    case "details":
+      return isDm ? "Details" : "Channel details";
+    case "members":
+      return isDm ? "Profile" : "Members";
+    case "pinned":
+      return "Pinned messages";
+    case "thread":
+      return "Thread";
+    case "lounge":
+      return "Activity";
+    case "plugins":
+      return "Plugins";
+  }
 }
 
 function DetailRow({ label, value }: { label: string; value: string }) {

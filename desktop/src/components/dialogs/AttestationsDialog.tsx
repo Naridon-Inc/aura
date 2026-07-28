@@ -18,6 +18,7 @@
 import { useEffect, useState } from "react";
 import { Dialog } from "../Dialog";
 import { Button } from "../ui/button";
+import { LoadingState } from "../ui/state";
 import { api, type IntentRow } from "../../lib/api";
 import { splitIntent } from "../workpanes/IntentProse";
 import { SessionDetailPane } from "../workpanes/SessionDetailPane";
@@ -29,16 +30,11 @@ import {
   humanizeIntentType,
   shortBlockId,
 } from "../workpanes/SessionAttestation";
+import { ProvenanceChain, type SealedRecord } from "../provenance/ProvenanceChain";
 
-type AttestRow = {
-  id: string;
-  kind: string;
-  created_at?: string | number | null;
-  signature: boolean;
-  rekor: boolean;
-  human_id?: string | null;
-  intent_type?: string | null;
-};
+type AttestRow = SealedRecord;
+
+type LedgerView = "chain" | "list";
 
 type AttestationsDialogProps = {
   open: boolean;
@@ -56,6 +52,9 @@ export function AttestationsDialog({ open, repoRoot, onClose, inline }: Attestat
   const [error, setError] = useState<string | null>(null);
   // The run whose session detail is layered over the ledger (null = closed).
   const [openRow, setOpenRow] = useState<IntentRow | null>(null);
+  // Default to the chain — the records *are* a chain, and seeing the links is
+  // the point. The flat list stays a click away for scanning.
+  const [view, setView] = useState<LedgerView>("chain");
 
   const run = async () => {
     setLoading(true);
@@ -108,6 +107,18 @@ export function AttestationsDialog({ open, repoRoot, onClose, inline }: Attestat
   const signed = rows.filter((r) => r.signature).length;
   const logged = rows.filter((r) => r.rekor).length;
 
+  // A ledger row's human title + drill-through come from the run that minted the
+  // block (cross-referenced above); both the chain and the flat list share them.
+  const resolveTitle = (r: SealedRecord): string | undefined => {
+    const intent = byBlock[r.id];
+    if (!intent) return undefined;
+    return splitIntent(intent.intent).headline || intent.intent;
+  };
+  const openRecord = (r: SealedRecord) => {
+    const intent = byBlock[r.id];
+    if (intent) setOpenRow(intent);
+  };
+
   return (
     <>
       <Dialog
@@ -119,7 +130,7 @@ export function AttestationsDialog({ open, repoRoot, onClose, inline }: Attestat
         footer={
           <>
             <Button variant="ghost" size="xs" onClick={run} disabled={loading}>
-              {loading ? "Loading…" : "Refresh"}
+              {loading ? "Refreshing…" : "Refresh"}
             </Button>
             <Button variant="default" size="xs" onClick={onClose}>
               Close
@@ -128,9 +139,9 @@ export function AttestationsDialog({ open, repoRoot, onClose, inline }: Attestat
         }
       >
         {error ? (
-          <div className="text-red text-[11.5px] py-2 font-mono break-words">{error}</div>
+          <div role="alert" className="text-red text-[11.5px] py-2 font-mono break-words">{error}</div>
         ) : loading && rows.length === 0 ? (
-          <div className="text-text-4 text-[11.5px] py-8 text-center">reading sealed records…</div>
+          <LoadingState label="Reading sealed records…" className="justify-center py-8" />
         ) : rows.length === 0 ? (
           <EmptyState />
         ) : (
@@ -145,17 +156,24 @@ export function AttestationsDialog({ open, repoRoot, onClose, inline }: Attestat
                 <span className="text-text-1 font-medium tabular-nums">{logged}</span> with a public
                 copy
               </span>
+              <ViewToggle view={view} onChange={setView} />
             </div>
-            <ul className="flex flex-col gap-1.5 overflow-auto pr-1">
-              {rows.map((r) => (
-                <AttestRowItem
-                  key={r.id}
-                  row={r}
-                  intent={byBlock[r.id] ?? null}
-                  onOpen={byBlock[r.id] ? () => setOpenRow(byBlock[r.id]) : undefined}
-                />
-              ))}
-            </ul>
+            <div className="overflow-auto pr-1">
+              {view === "chain" ? (
+                <ProvenanceChain records={rows} resolveTitle={resolveTitle} onOpen={openRecord} />
+              ) : (
+                <ul className="flex flex-col gap-1.5">
+                  {rows.map((r) => (
+                    <AttestRowItem
+                      key={r.id}
+                      row={r}
+                      intent={byBlock[r.id] ?? null}
+                      onOpen={byBlock[r.id] ? () => setOpenRow(byBlock[r.id]) : undefined}
+                    />
+                  ))}
+                </ul>
+              )}
+            </div>
           </div>
         )}
       </Dialog>
@@ -246,6 +264,31 @@ function AttestRowItem({
     <li className="flex items-start gap-2.5 px-2.5 py-2 rounded border border-line-soft bg-bg-1">
       {body}
     </li>
+  );
+}
+
+function ViewToggle({
+  view,
+  onChange,
+}: {
+  view: LedgerView;
+  onChange: (v: LedgerView) => void;
+}) {
+  return (
+    <div className="ml-auto flex items-center gap-0.5 rounded-md border border-line-soft p-0.5">
+      {(["chain", "list"] as const).map((v) => (
+        <button
+          key={v}
+          type="button"
+          onClick={() => onChange(v)}
+          className={`rounded px-2 py-0.5 text-[10.5px] capitalize transition-colors ${
+            view === v ? "bg-bg-2 text-text-1" : "text-text-4 hover:text-text-2"
+          }`}
+        >
+          {v}
+        </button>
+      ))}
+    </div>
   );
 }
 

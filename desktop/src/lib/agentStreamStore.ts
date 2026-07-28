@@ -95,7 +95,7 @@ const entries = new Map<string, Entry>();
 export function streamChannel(agentId: string, repoRoot: string): string {
   // Must match cmd_agent_stream.rs::sanitize_channel — Tauri's event-
   // name validator rejects anything outside [A-Za-z0-9/_:-], so a raw
-  // path like "/Users/you/Documents/New Git/..." would silently
+  // path like "/Users/muhammed/Documents/New Git/..." would silently
   // no-op every emit. Normalize to alphanumeric + `_` + `-` on both
   // sides so the Rust topic string and the JS listen() string agree.
   return `${agentId}@${repoRoot}`.replace(/[^A-Za-z0-9_-]/g, "_");

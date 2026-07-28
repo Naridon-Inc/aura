@@ -381,6 +381,8 @@ pub fn apply_compaction(session: &mut ManagerSession, plan: &CompactionPlan) -> 
         tool_calls: Vec::new(),
         thinking: None,
         saved_tokens: None,
+        input_tokens: None,
+        output_tokens: None,
     };
     let insert_index = insert_at.min(kept.len());
     kept.insert(insert_index, digest_turn);
@@ -406,6 +408,8 @@ mod tests {
             tool_calls: Vec::new(),
             thinking: None,
             saved_tokens: None,
+            input_tokens: None,
+            output_tokens: None,
         }
     }
 

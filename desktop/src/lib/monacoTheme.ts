@@ -48,11 +48,17 @@ const DARK = {
   // composites them over the #0d1117 canvas. The peripheral overview-ruler
   // markers are calmed off their old neon 0.60 so the surface reads welcoming.
   addLine: "#2ea04326", // additionLine — rgba(46,160,67,.15)
-  addWord: "#2ea04366", // additionWord — rgba(46,160,67,.40)
+  // Word-level highlight pulled down from Primer's .40 to .24, and the number
+  // gutter from .30 to .22. Monaco is the split-diff viewer, so these sit
+  // directly beside the hand-rolled inline diffs, which desaturate their
+  // markers to ~58%; at Primer's stock alpha the same change read hotter on
+  // one side of the screen than the other. Line washes are untouched — they
+  // were already the restrained part.
+  addWord: "#2ea0433d", // additionWord — rgba(46,160,67,.24)
   delLine: "#f851491a", // deletionLine — rgba(248,81,73,.10)
-  delWord: "#f8514966", // deletionWord — rgba(248,81,73,.40)
-  addGutter: "#3fb9504d", // additionNum — rgba(63,185,80,.30)
-  delGutter: "#f851494d", // deletionNum — rgba(248,81,73,.30)
+  delWord: "#f851493d", // deletionWord — rgba(248,81,73,.24)
+  addGutter: "#3fb95038", // additionNum — rgba(63,185,80,.22)
+  delGutter: "#f8514938", // deletionNum — rgba(248,81,73,.22)
   addOverview: "#3fb95080",
   delOverview: "#f8514980",
   diagonal: "#6e768114",

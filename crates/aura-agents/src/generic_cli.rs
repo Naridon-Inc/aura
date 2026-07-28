@@ -131,11 +131,27 @@ impl AgentProvider for GenericCliProvider {
 
     fn build_invocation(&self, req: &InvokeRequest) -> Result<Invocation, String> {
         let template = self.pick_template(req.mode);
+        // An empty template is meaningful for the interactive REPL: many CLIs
+        // (Aider, Amp…) take the prompt in their own TUI, so `<bin>` with no
+        // args is the correct launch. For the headless modes
+        // an empty template means we have no verified way to pass the prompt —
+        // surface that as a plain, user-facing hint rather than spawning a bin
+        // that would silently ignore it.
         if template.is_empty() {
-            return Err(format!(
-                "agent '{}' has no args template for mode {:?}",
-                self.cfg.id, req.mode
-            ));
+            let env: Vec<(String, String)> =
+                self.cfg.env.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+            return match req.mode {
+                InvokeMode::PtyRepl => Ok(Invocation {
+                    bin: self.cfg.bin.clone(),
+                    args: vec![],
+                    env,
+                    stdout_is_stream_json: false,
+                }),
+                InvokeMode::OneShot | InvokeMode::StreamJson => Err(format!(
+                    "{} is an interactive CLI — open it in a terminal tab instead of the chat stream.",
+                    self.cfg.label
+                )),
+            };
         }
         let mut args: Vec<String> = Vec::with_capacity(template.len());
         for tok in template {

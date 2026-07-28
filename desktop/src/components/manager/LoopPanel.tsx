@@ -14,6 +14,7 @@
 
 import { useCallback, useEffect, useState } from "react";
 import { ListChecks, Loader2, Play, RefreshCw } from "lucide-react";
+import { AsciiSpinner } from "../ui/ascii-spinner";
 import { api } from "../../lib/api";
 import type { LoopTask, ReadyViewDto } from "../../lib/api";
 import { Button } from "../ui/button";
@@ -195,7 +196,7 @@ export function LoopPanel({ repoRoot }: Props) {
           <div className="text-text-3 text-xs">Open a project to use the loop.</div>
         ) : loading && !view ? (
           <div className="text-text-3 text-xs flex items-center gap-2">
-            <Loader2 size={12} className="animate-spin" /> Reading loop graph…
+            <AsciiSpinner /> Reading loop graph…
           </div>
         ) : empty ? (
           <div className="text-text-3 text-xs leading-relaxed">

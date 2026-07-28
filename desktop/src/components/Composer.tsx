@@ -39,6 +39,7 @@ import {
 import { api, type ImageAttachment, type SavedPrompt } from "../lib/api";
 import { AgentIcon, brandFor } from "./agent/AgentIcon";
 import { Input } from "./ui/input";
+import { AsciiSpinner } from "./ui/ascii-spinner";
 
 export type ComposerAttachment = ImageAttachment & {
   /** Stable id for keying the thumbnail strip + remove handler. */
@@ -748,7 +749,10 @@ function ShortcutPills({
             <span style={{ opacity: 0.55 }}>▾</span>
           </>
         ) : agentsLoading ? (
-          <span>discovering…</span>
+          <>
+            <AsciiSpinner />
+            <span>Finding agents…</span>
+          </>
         ) : (
           <span>install agent</span>
         )}
@@ -1116,7 +1120,7 @@ function AttachmentThumb({
         type="button"
         onClick={onRemove}
         title="Remove"
-        className="absolute top-0.5 right-0.5 w-4 h-4 rounded-full bg-bg-deep/80 text-text-1 text-[10px] leading-none flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity"
+        className="absolute top-0.5 right-0.5 w-4 h-4 rounded-full bg-bg-deep/80 text-text-1 text-[10px] leading-none flex items-center justify-center opacity-0 group-hover:opacity-100 focus-visible:opacity-100 transition-opacity focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-accent/50"
       >
         ×
       </button>

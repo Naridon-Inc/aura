@@ -65,6 +65,11 @@ export type Msg = {
    *  comparisons ("seen by Alice up to seq=N"). Absent on locally-only
    *  rows that haven't been ack'd by the cloud yet. */
   seq?: number;
+  /** The sending install's device id, carried from the cloud/WS row. Lets the
+   *  render layer re-check `fromMe` device-aware, so a colleague sharing our
+   *  git-email local-part isn't badged "you". Absent on local echoes and
+   *  legacy rows. */
+  senderDeviceId?: string | null;
   /** Structured payload for kind === "activity" rows (intent/snapshot/commit/sentinel). */
   activity?: ActivityPayload;
 };

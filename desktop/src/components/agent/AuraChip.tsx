@@ -103,7 +103,7 @@ export function AuraChip({
   }, [open]);
 
   const dirty = counts.audit > 0;
-  const tone = dirty ? "text-red-400" : "text-text-5";
+  const tone = dirty ? "text-red" : "text-text-5";
   const title =
     `Aura activity (today): ${counts.intents} intents · ${counts.snapshots} snapshots` +
     (dirty ? ` · ${counts.audit} unacked audit` : "");
@@ -117,13 +117,13 @@ export function AuraChip({
         className={`inline-flex items-center gap-1 h-6 px-2 rounded font-mono text-[10.5px] border border-line-soft bg-bg-1 hover:bg-bg-2 transition-colors ${tone}`}
       >
         <span>◐</span>
-        <span>{counts.intents}</span>
+        <span className="tabular-nums">{counts.intents}</span>
         <span className="text-text-5">·</span>
-        <span>{counts.snapshots}</span>
+        <span className="tabular-nums">{counts.snapshots}</span>
         {dirty && (
           <>
             <span className="text-text-5">·</span>
-            <span className="text-red-400">!{counts.audit}</span>
+            <span className="tabular-nums text-red">!{counts.audit}</span>
           </>
         )}
       </button>

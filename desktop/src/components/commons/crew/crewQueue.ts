@@ -27,8 +27,8 @@ export const PRIORITY_META: Record<
   PriorityKey,
   { label: string; color: string; rank: number }
 > = {
-  critical: { label: "Critical", color: "#d66a6a", rank: 0 },
-  high: { label: "High", color: "#d99a2b", rank: 1 },
+  critical: { label: "Critical", color: "var(--color-red)", rank: 0 },
+  high: { label: "High", color: "var(--color-amber)", rank: 1 },
   medium: { label: "Medium", color: "var(--color-accent)", rank: 2 },
   low: { label: "Low", color: "var(--color-text-5)", rank: 3 },
 };

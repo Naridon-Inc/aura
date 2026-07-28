@@ -7,6 +7,7 @@
 // No taskId is sent: this is a fix, not a task claim.
 
 import { ChevronDown, Wrench } from "lucide-react";
+import { AsciiSpinner } from "../ui/ascii-spinner";
 
 import { Button } from "../ui/button";
 import {
@@ -61,7 +62,7 @@ export function FixWithAgentButton({
             type="button"
             title={label}
             aria-label={label}
-            className="w-6 h-6 rounded flex items-center justify-center text-text-4 hover:text-text-1 hover:bg-bg-2 transition-colors"
+            className="w-6 h-6 rounded flex items-center justify-center text-text-4 hover:text-text-1 hover:bg-bg-2 transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-accent/50"
           >
             <Wrench className="h-3.5 w-3.5" />
           </button>
@@ -91,7 +92,8 @@ export function FixWithAgentButton({
           </DropdownMenuItem>
         ))}
         {loading && agents.length <= 1 && (
-          <DropdownMenuItem disabled className="text-text-4">
+          <DropdownMenuItem disabled className="gap-1.5 text-text-4">
+            <AsciiSpinner />
             Finding agents…
           </DropdownMenuItem>
         )}

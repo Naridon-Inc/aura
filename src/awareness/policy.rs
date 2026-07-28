@@ -193,6 +193,8 @@ mod tests {
             ts: 42,
             key_id: Some("did:aura:key/zz".into()),
             sig: Some("deadbeef".into()),
+            pubkey: None,
+            worktree: None,
         }
     }
 

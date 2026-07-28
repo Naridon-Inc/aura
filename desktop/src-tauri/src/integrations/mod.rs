@@ -15,11 +15,14 @@
 
 pub mod beads;
 pub mod config;
+pub mod graphite;
 pub mod jira;
 pub mod jira_sync;
 pub mod jira_users;
+pub mod linear;
 pub mod tokens;
 pub mod types;
+pub mod vercel;
 
 // Public re-exports — kept even when intra-crate consumers reach in
 // via the long path, so external callers (binaries, tests) have a

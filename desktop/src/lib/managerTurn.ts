@@ -21,7 +21,11 @@
 import { api, type ApprovalPolicy, type ReasoningEffort } from "./api";
 import { handleChatSlash } from "./chatSlashHandler";
 import { focusAmbientManager } from "./focusManager";
-import { clearManagerTurnInFlight, markManagerTurnInFlight } from "./managerStore";
+import {
+  clearManagerTurnInFlight,
+  markManagerTurnInFlight,
+  setManagerTurnStartedAt,
+} from "./managerStore";
 import { buildSteeringText, type SteeringMode } from "./managerSteering";
 
 /** Per-turn composer config the HUD carries alongside the text. Mirrors the
@@ -143,6 +147,11 @@ export async function sendAmbientManagerTurn(
 
   if (useBrainTrait) {
     markManagerTurnInFlight(sid);
+    // Stamp the durable start now (not when a mounted view first paints) so the
+    // "Working… 12s" elapsed timer reflects the real send time even for a turn
+    // injected from the HUD/sidebar into a chat that isn't open yet. Idempotent
+    // — a later observer reuses this stamp rather than restarting at 0.
+    setManagerTurnStartedAt(sid, Date.now());
     // Flatten the persisted chat into the brain's message array (the new user
     // turn is appended server-side from `userMessage`, so we don't add it here).
     let priorMessages: { role: "user" | "assistant"; content: string }[] = [];

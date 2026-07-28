@@ -114,10 +114,7 @@ export function ActivityRow({
         <span className="text-[11px] text-text-3 font-medium truncate">
           {msg.sender}
         </span>
-        <span
-          className="text-[9.5px] uppercase tracking-wider font-medium"
-          style={{ color: meta.color }}
-        >
+        <span className="text-[9.5px] uppercase tracking-wider font-medium text-text-4">
           {meta.label}
         </span>
         <span className="text-[10px] text-text-5 ml-auto tabular-nums flex-shrink-0">
@@ -133,12 +130,13 @@ export function ActivityRow({
           {activity.badges.map((b, i) => (
             <span
               key={`${b.label}-${i}`}
-              className={`px-1.5 py-[1px] rounded text-[9.5px] font-mono ${
-                b.tone === "good"
-                  ? "bg-accent-green/15 text-accent-green"
-                  : b.tone === "warn"
-                    ? "bg-red-500/15 text-red-400"
-                    : "bg-bg-2 text-text-4 border border-line-soft"
+              // Only a failed/rejected badge earns colour — it's the one that
+              // needs the reader. "ok"/"applied" is settled history, so it
+              // reads on the neutral ramp like every other informational chip.
+              className={`px-1.5 py-[1px] rounded text-[9.5px] font-mono border ${
+                b.tone === "warn"
+                  ? "border-red/30 bg-red/10 text-red"
+                  : "border-line-soft bg-bg-2 text-text-4"
               }`}
             >
               {b.label}
@@ -186,15 +184,14 @@ export function ActivityRow({
                         {f.status}
                       </span>
                     )}
+                    {/* Line counts are a measurement, not an alarm — they read
+                        on the neutral ramp. Green/red is reserved for the
+                        worktree the user is actually standing in. */}
                     {(f.additions != null || f.deletions != null) && (
-                      <span className="text-[10px] font-mono tabular-nums flex-shrink-0">
-                        {f.additions != null && (
-                          <span className="text-accent-green">+{f.additions}</span>
-                        )}
+                      <span className="text-[10px] font-mono tabular-nums text-text-3 flex-shrink-0">
+                        {f.additions != null && <span>+{f.additions}</span>}
                         {f.additions != null && f.deletions != null && " "}
-                        {f.deletions != null && (
-                          <span className="text-red-400">−{f.deletions}</span>
-                        )}
+                        {f.deletions != null && <span>−{f.deletions}</span>}
                       </span>
                     )}
                   </li>
@@ -246,14 +243,13 @@ export function ActivityRow({
   );
 }
 
-function activityMeta(t: ActivityPayload["type"]): {
-  label: string;
-  color: string;
-} {
+// The kind label is already a word — hue on top of it was decoration, not
+// signal, so both kinds read on the neutral ramp and the text does the work.
+function activityMeta(t: ActivityPayload["type"]): { label: string } {
   switch (t) {
     case "intent":
-      return { label: "intent", color: "var(--color-accent)" };
+      return { label: "intent" };
     case "commit":
-      return { label: "commit", color: "var(--color-accent-green)" };
+      return { label: "commit" };
   }
 }

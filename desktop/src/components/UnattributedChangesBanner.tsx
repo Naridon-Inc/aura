@@ -285,19 +285,24 @@ export function UnattributedChangesBanner({ repoRoot }: Props) {
       {pendingTop && (
         <div
           className="flex items-center gap-2 h-6 px-3 text-[11px] border-b"
+          // "A change landed that nobody has explained yet" is the attention
+          // state, which is the amber slot. `--color-yellow` is defined by no
+          // pack, so every one of these `color-mix()` calls was invalid at
+          // computed-value time — the strip rendered with no wash, no edge and
+          // inherited ink, i.e. invisible as a warning.
           style={{
             background:
-              "color-mix(in oklab, var(--color-yellow) 10%, transparent)",
+              "color-mix(in oklab, var(--color-amber) 10%, transparent)",
             borderColor:
-              "color-mix(in oklab, var(--color-yellow) 32%, transparent)",
-            color: "var(--color-yellow)",
+              "color-mix(in oklab, var(--color-amber) 32%, transparent)",
+            color: "var(--color-amber)",
           }}
           role="status"
           title="Aura is asking the AI to explain this change before flagging it to you"
         >
           <span
             className="inline-block w-1.5 h-1.5 rounded-full animate-pulse"
-            style={{ background: "var(--color-yellow)" }}
+            style={{ background: "var(--color-amber)" }}
           />
           <span className="font-medium uppercase tracking-wide text-[9.5px]">
             Checking

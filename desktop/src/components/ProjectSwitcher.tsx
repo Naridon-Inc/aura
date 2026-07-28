@@ -19,7 +19,9 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { PictureInPicture2 } from "lucide-react";
 import { api } from "../lib/api";
 import type { WorktreeRef } from "./WorkspaceRail";
+import { RepoAvatar } from "./RepoAvatar";
 import { openPopout } from "../lib/popout";
+import { MENU_PANEL } from "./ui/menuSurface";
 
 export type ProjectSwitcherWorkspace = {
   root: string;
@@ -94,6 +96,19 @@ export function ProjectSwitcher({
     return bare || undefined;
   }, [worktreesByRoot, activeRoot]);
 
+  // The parent PROJECT the open checkout belongs to — that's the FIRST crumb,
+  // fronted by the real repo avatar (its GitHub owner icon), not a letter. A
+  // worktree's own branch is the SECOND crumb (the worktree chip below), so
+  // `granada` stops masquerading as its own project: it reads `New Git ›
+  // granada`. Falls back to the active props when the parent isn't in the list.
+  const activeProject = useMemo(
+    () => workspaces.find((w) => w.root === activeWorkspaceRoot),
+    [workspaces, activeWorkspaceRoot],
+  );
+  const projectRoot = activeProject?.root ?? activeWorkspaceRoot;
+  const projectName = activeProject?.name ?? activeName;
+  const projectEmoji = activeProject?.emoji ?? activeEmoji;
+
   useEffect(() => {
     if (!menu) return;
     const onDoc = (e: MouseEvent) => {
@@ -131,7 +146,11 @@ export function ProjectSwitcher({
   }, [projectsOpen]);
 
   return (
-    <div ref={wrapRef} className="relative flex items-center gap-0.5 min-w-0">
+    <div
+      ref={wrapRef}
+      data-tour="workspace"
+      className="relative flex items-center gap-0.5 min-w-0"
+    >
       {/* Repo chip — its own element. Opens the projects menu. */}
       <div className="relative flex-shrink-0">
         <button
@@ -144,18 +163,23 @@ export function ProjectSwitcher({
               : "text-text-2 hover:bg-bg-2 hover:text-text-1"
           }`}
         >
-          <WorkspaceMark emoji={activeEmoji} name={activeName} />
+          <RepoAvatar
+            repoRoot={projectRoot}
+            emoji={projectEmoji}
+            size={18}
+            fallback={<WorkspaceMark emoji={projectEmoji} name={projectName} />}
+          />
           <span className="min-w-0 truncate font-medium text-text-1">
-            {activeName}
+            {projectName}
           </span>
         </button>
 
         {menu === "projects" && (
           <div
-            className="absolute left-0 top-full mt-1 z-50 bg-bg-1 border border-line-soft rounded-lg shadow-[var(--shadow-flyout)] p-1"
+            className={`${MENU_PANEL} absolute left-0 top-full mt-1`}
             style={{ minWidth: 248, maxWidth: 340 }}
           >
-            <div className="px-2 py-1 text-[10px] font-semibold uppercase tracking-[0.06em] text-text-4">
+            <div className="px-2 py-1 text-[10px] font-semibold uppercase tracking-wider text-text-4">
               Projects
             </div>
             <div className="max-h-[60vh] overflow-y-auto">
@@ -226,10 +250,10 @@ export function ProjectSwitcher({
 
             {menu === "worktrees" && (
               <div
-                className="absolute left-0 top-full mt-1 z-50 bg-bg-1 border border-line-soft rounded-lg shadow-[var(--shadow-flyout)] p-1"
+                className={`${MENU_PANEL} absolute left-0 top-full mt-1`}
                 style={{ minWidth: 220, maxWidth: 320 }}
               >
-                <div className="px-2 py-1 text-[10px] font-semibold uppercase tracking-[0.06em] text-text-4">
+                <div className="px-2 py-1 text-[10px] font-semibold uppercase tracking-wider text-text-4">
                   Worktrees
                 </div>
                 <div className="max-h-[60vh] overflow-y-auto">
@@ -316,7 +340,12 @@ function WorkspaceRow({
         onClick={onSwitch}
         className="flex-1 min-w-0 flex items-center gap-2 text-left"
       >
-        <WorkspaceMark emoji={ws.emoji} name={ws.name} />
+        <RepoAvatar
+          repoRoot={ws.root}
+          emoji={ws.emoji}
+          size={18}
+          fallback={<WorkspaceMark emoji={ws.emoji} name={ws.name} />}
+        />
         <span className="flex-1 min-w-0 truncate text-[12px] font-medium">
           {ws.name}
         </span>
@@ -390,21 +419,47 @@ function Sep() {
   );
 }
 
+// Branch/worktree mark — the horizontal git-fork used everywhere else (see
+// StatusBar / CreatePrButton): one node splitting into two. Deliberately not a
+// vertical trunk, so it reads as distinct from the rooted-base MainGlyph and
+// stays in the same family as the footer branch chip.
 function BranchGlyph() {
   return (
-    <svg width="12" height="12" viewBox="0 0 16 16" fill="none">
-      <circle cx="4" cy="4" r="1.6" stroke="currentColor" strokeWidth="1.2" />
-      <circle cx="4" cy="12" r="1.6" stroke="currentColor" strokeWidth="1.2" />
-      <circle cx="12" cy="6" r="1.6" stroke="currentColor" strokeWidth="1.2" />
-      <path d="M4 5.6v4.8M4 8h4a2 2 0 0 0 2-2" stroke="currentColor" strokeWidth="1.2" fill="none" />
+    <svg
+      width="12"
+      height="12"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth={2}
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden
+    >
+      <circle cx="5" cy="12" r="2" />
+      <circle cx="19" cy="6" r="2" />
+      <circle cx="19" cy="18" r="2" />
+      <path d="M7 12h5" />
+      <path d="M12 12C14.5 12 14.5 6 17 6" />
+      <path d="M12 12C14.5 12 14.5 18 17 18" />
     </svg>
   );
 }
 
+// Main-checkout mark — the repo's rooted base branch (same rooted-trunk mark as
+// WorkspaceRoster's MainBranchGlyph): a bold trunk rising from a base line up to
+// a solid head commit, a prior commit on the spine for history. The base line is
+// the tell — this is the *root* every worktree forks off, not a checkout.
 function MainDot() {
   return (
-    <svg width="12" height="12" viewBox="0 0 16 16" fill="none">
-      <circle cx="8" cy="8" r="3" stroke="currentColor" strokeWidth="1.4" />
+    <svg width="12" height="12" viewBox="0 0 16 16" fill="none" aria-hidden>
+      {/* the base the trunk is rooted in */}
+      <path d="M4.4 13h7.2" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" />
+      {/* the trunk rising from the base */}
+      <path d="M8 12.7V5" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round" />
+      {/* head commit (solid) + a prior commit on the spine (history) */}
+      <circle cx="8" cy="3.4" r="2.1" fill="currentColor" />
+      <circle cx="8" cy="8.4" r="1.15" fill="currentColor" />
     </svg>
   );
 }

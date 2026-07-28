@@ -119,9 +119,12 @@ export function NavRail({
   const tileOrder = RAIL_TILES;
 
   return (
+    // Width comes from `--nav-rail-w`, the same token Layout sizes the rail's
+    // column with. A hardcoded 52 here ran 4px wider than its own 48px column,
+    // so every tile sat a couple of pixels off the column's centre line.
     <div
       className="flex flex-col items-center h-full pt-3 pb-2"
-      style={{ width: 52, gap: 4 }}
+      style={{ width: "var(--nav-rail-w)", gap: 4 }}
     >
       {tileOrder.map((id) => (
         <PaneTile
@@ -366,8 +369,13 @@ function BadgeDot({ badge }: { badge: Badge }) {
         height: 14,
         padding: "0 4px",
         borderRadius: 7,
-        background: "var(--color-red)",
-        color: "#fff",
+        // A count of things waiting on you, not a failure — amber, the
+        // pack's attention slot, same as every other count pill in the
+        // chrome (AdeSidebar's SEG_BADGE_INK, `.ade-row .unread`). The
+        // accent stays reserved for the active-tab marker beside it, so
+        // "where I am" and "what wants me" never wear the same paint.
+        background: "var(--color-amber)",
+        color: "var(--color-bg-0)",
         fontSize: 9,
         fontWeight: 600,
         lineHeight: "14px",
@@ -418,31 +426,38 @@ export function NavTabs({
         const active = sidebarOpen && activeTab === id;
         const badge = b(id);
         return (
-          <button
-            key={id}
-            type="button"
-            onClick={() => {
-              if (!sidebarOpen) {
-                onSelectTab(id);
-                onToggleSidebar?.();
-                return;
-              }
-              if (activeTab === id) {
-                onToggleSidebar?.();
-                return;
-              }
-              onSelectTab(id);
-            }}
-            title={allTiles[id].label}
-            className={`relative flex items-center justify-center w-7 h-7 rounded transition-colors ${
-              active
-                ? "bg-bg-2 text-text-1"
-                : "text-text-3 hover:text-text-1 hover:bg-bg-2"
-            }`}
-          >
-            {allTiles[id].icon}
-            <BadgeDot badge={badge} />
-          </button>
+          // Same styled tooltip the vertical rail's tiles use. These buttons
+          // were on a native `title=` — a different delay, a different look
+          // and an OS-drawn box, for the very same control.
+          <Tooltip key={id}>
+            <TooltipTrigger asChild>
+              <button
+                type="button"
+                onClick={() => {
+                  if (!sidebarOpen) {
+                    onSelectTab(id);
+                    onToggleSidebar?.();
+                    return;
+                  }
+                  if (activeTab === id) {
+                    onToggleSidebar?.();
+                    return;
+                  }
+                  onSelectTab(id);
+                }}
+                aria-label={allTiles[id].label}
+                className={`relative flex items-center justify-center w-7 h-7 rounded transition-colors ${
+                  active
+                    ? "bg-bg-2 text-text-1"
+                    : "text-text-3 hover:text-text-1 hover:bg-bg-2"
+                }`}
+              >
+                {allTiles[id].icon}
+                <BadgeDot badge={badge} />
+              </button>
+            </TooltipTrigger>
+            <TooltipContent side="bottom">{allTiles[id].label}</TooltipContent>
+          </Tooltip>
         );
       })}
     </div>

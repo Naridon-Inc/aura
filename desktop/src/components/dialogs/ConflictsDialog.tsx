@@ -6,6 +6,7 @@
 
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { Dialog } from "../Dialog";
+import { AsciiSpinner } from "../ui/ascii-spinner";
 import { Button } from "../ui/button";
 import { api, type ConflictedNode } from "../../lib/api";
 
@@ -127,9 +128,11 @@ export function ConflictsDialog({ open, repoRoot, onClose }: ConflictsDialogProp
       }
     >
       <div className="space-y-2 text-[11.5px]">
-        {err && <div className="text-red text-[11px]">{err}</div>}
+        {err && <div role="alert" className="text-red text-[11px]">{err}</div>}
         {loading && rows.length === 0 && (
-          <div className="text-text-4 text-[11px]">Loading…</div>
+          <div className="flex items-center gap-1.5 text-text-4 text-[11px]">
+            <AsciiSpinner className="text-[11px] leading-none" /> Looking for clashes…
+          </div>
         )}
         {!loading && visibleRows.length === 0 && (
           <div className="text-text-4 text-[11px]">
@@ -156,7 +159,7 @@ export function ConflictsDialog({ open, repoRoot, onClose }: ConflictsDialogProp
                       {row.identifier}
                     </span>
                     {resolved && (
-                      <span className="text-emerald-400 text-[10px] uppercase">
+                      <span className="text-accent-green text-[10px] uppercase">
                         ✓
                       </span>
                     )}

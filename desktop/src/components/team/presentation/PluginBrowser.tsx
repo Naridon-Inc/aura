@@ -12,6 +12,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { api } from "../../../lib/api";
 import type { ExchangeRow, PluginRow } from "../../../lib/api";
 import { refreshPluginContributes } from "../../../lib/pluginContributesStore";
+import { AsciiSpinner } from "../../ui/ascii-spinner";
 import { Button } from "../../ui/button";
 
 export function PluginBrowser({ repoRoot }: { repoRoot: string }) {
@@ -140,7 +141,7 @@ export function PluginBrowser({ repoRoot }: { repoRoot: string }) {
   return (
     <div className="h-full overflow-y-auto px-3 py-3 flex flex-col gap-3">
       {error && (
-        <div className="text-[11px] text-red-400 bg-red-500/10 border border-red-500/20 rounded px-2 py-1.5 leading-snug break-words">
+        <div className="text-[11px] text-red bg-red/10 border border-red/20 rounded px-2 py-1.5 leading-snug break-words">
           {error}
         </div>
       )}
@@ -166,11 +167,14 @@ export function PluginBrowser({ repoRoot }: { repoRoot: string }) {
           </Button>
         </header>
         {rows === null ? (
-          <div className="text-text-5 text-[11.5px] py-2">Loading…</div>
+          <div className="flex items-center gap-1.5 text-text-4 text-[11.5px] py-2">
+            <AsciiSpinner />
+            Loading…
+          </div>
         ) : rows.length === 0 ? (
-          <div className="text-text-5 text-[11.5px] leading-snug py-1">
-            Nothing shared yet. Publish a signed plugin below and your
-            teammates see it here instantly.
+          <div className="text-text-4 text-[11.5px] leading-snug py-1">
+            Nothing shared yet. Publish a plugin below and your teammates see
+            it here instantly.
           </div>
         ) : (
           <ul className="flex flex-col gap-2">
@@ -273,7 +277,7 @@ export function PluginBrowser({ repoRoot }: { repoRoot: string }) {
                         size="xs"
                         disabled={busy === `un:${row.publish_id}`}
                         onClick={() => void unpublish(row)}
-                        className="text-[10.5px] text-text-4 hover:text-red-400 hover:bg-red-500/10"
+                        className="text-[10.5px] text-text-4 hover:text-red hover:bg-red/10"
                         title="Withdraw this listing for the whole team"
                       >
                         {busy === `un:${row.publish_id}`

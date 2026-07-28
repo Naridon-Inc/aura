@@ -13,6 +13,8 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { DiffEditor, type DiffOnMount, type Monaco } from "@monaco-editor/react";
 import type { editor } from "monaco-editor";
 
+import { Churn } from "./diff/Churn";
+import { AsciiSpinner } from "./ui/ascii-spinner";
 import { installMonacoEnvironment } from "../lib/monacoEnv";
 import { languageSlugForPath } from "../lib/monacoLanguage";
 import { configureMonacoDiagnostics } from "../lib/monacoDiagnostics";
@@ -101,9 +103,9 @@ export function DiffView({
     modified.setValue(current);
   }, [current]);
 
-  // Push original (HEAD) updates into the left model. Path change forces
-  // a full remount via React's key, but a same-path original re-fetch
-  // (rare) should also flow through.
+  // Push original (HEAD) updates into the left model. The editor is reused
+  // across files (no `key`-forced remount below), so both a path switch and a
+  // same-path original re-fetch flow through here via setValue.
   useEffect(() => {
     const ed = editorRef.current;
     if (!ed || original == null) return;
@@ -113,6 +115,21 @@ export function DiffView({
     orig.setValue(original);
   }, [original]);
 
+  // Reset both sides to the top when the file changes. A `key`-forced remount
+  // used to give this for free, but its model dispose fired the "TextModel got
+  // disposed before DiffEditorWidget model got reset" teardown race on every
+  // file switch — so we reuse the editor and just scroll it home instead.
+  useEffect(() => {
+    const ed = editorRef.current;
+    if (!ed) return;
+    try {
+      ed.getOriginalEditor()?.setScrollTop(0);
+      ed.getModifiedEditor()?.setScrollTop(0);
+    } catch {
+      /* editor mid-teardown — nothing to reset */
+    }
+  }, [path]);
+
   const stats = useMemo(
     () => quickLineDelta(original ?? baseline, current),
     [original, baseline, current],
@@ -120,8 +137,9 @@ export function DiffView({
 
   if (original == null) {
     return (
-      <div className="h-full w-full bg-bg-content flex items-center justify-center text-[12px] text-text-4">
-        Loading diff…
+      <div className="h-full w-full bg-bg-content flex items-center justify-center gap-1.5 text-[12px] text-text-4">
+        <AsciiSpinner className="text-[10px]" />
+        <span>Reading this change…</span>
       </div>
     );
   }
@@ -130,8 +148,7 @@ export function DiffView({
     <div className="h-full w-full overflow-hidden bg-bg-content flex flex-col">
       <div className="h-8 px-3 flex items-center gap-3 border-b border-line-soft bg-bg-1 text-[11px]">
         <span className="text-text-3 font-mono truncate">{path}</span>
-        <span className="text-accent-green">+{stats.added}</span>
-        <span className="text-red">−{stats.removed}</span>
+        <Churn additions={stats.added} deletions={stats.removed} />
         <button
           type="button"
           onClick={() => setIgnoreWhitespace(!ignoreWs)}
@@ -149,9 +166,9 @@ export function DiffView({
       </div>
       <div className="flex-1 min-h-0 w-full">
         <DiffEditor
-          // Path-keyed so switching files rebuilds the models cleanly —
-          // matches the previous MergeView behaviour.
-          key={path}
+          // Intentionally NOT `key`-remounted per file: reusing the editor and
+          // updating the models in place (see effects above) avoids the Monaco
+          // diff teardown race that a per-file dispose triggers.
           original={original}
           modified={current}
           language={language}

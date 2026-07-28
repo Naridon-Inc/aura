@@ -1,9 +1,15 @@
 // Workspaces — the full-screen "cool view" for the whole fleet of parallel
-// copies, so the Build sidebar stays a curated few. Two ways to look at the
-// same real data: a time-grouped list ("All") and a status board ("Board").
-// Opened from the roster's "…other parallel copies" disclosure and from the
-// Workspaces nav. Read-only over data App already has (worktrees + diff/PR
-// badges + live agent tabs) — no new backend beyond the HEAD commit time.
+// copies, so the Build sidebar stays a curated few. Three ways to look at the
+// same fleet: a time-grouped list ("All"), a status board ("Board"), and the
+// control plane ("Live"). Opened from the roster's "…other parallel copies"
+// disclosure and from the Workspaces nav.
+//
+// "All" and "Board" are read-only over data App already has (worktrees +
+// diff/PR badges + live agent tabs). "Live" is the one that costs a backend
+// call, because it answers what none of that data can: which agent is standing
+// in each copy right now, whether two copies have taken hold of the same
+// function, and what messages are waiting unread between them. It is scoped to
+// the active project, since that record is kept per repository.
 
 import { useEffect, useMemo, useState } from "react";
 
@@ -19,6 +25,7 @@ import {
 } from "./workspacesModel";
 import { WorkspacesAllTab } from "./WorkspacesAllTab";
 import { WorkspacesBoardTab } from "./WorkspacesBoardTab";
+import { WorkspacesPane } from "../workpanes/workspaces/WorkspacesPane";
 
 export type WorkspacesSurfaceProps = {
   onClose: () => void;
@@ -46,7 +53,7 @@ export function WorkspacesSurface({
   onAddWorkspace,
 }: WorkspacesSurfaceProps) {
   const editor = useEditorStore();
-  const [tab, setTab] = useState(0); // 0 = All, 1 = Board
+  const [tab, setTab] = useState(0); // 0 = All, 1 = Board, 2 = Live
   const [query, setQuery] = useState("");
   const [projectFilter, setProjectFilter] = useState<string | null>(
     initialProjectId,
@@ -136,6 +143,7 @@ export function WorkspacesSurface({
           steps={[
             { id: "all", label: "All" },
             { id: "board", label: "Board" },
+            { id: "live", label: "Live" },
           ]}
           index={tab}
           onJump={setTab}
@@ -184,15 +192,28 @@ export function WorkspacesSurface({
         </div>
       }
     >
-      {tab === 0 ? (
+      {tab === 0 && (
         <WorkspacesAllTab
           copies={copies}
           nowMs={nowMs}
           activePath={activePath}
           onOpen={open}
         />
-      ) : (
+      )}
+      {tab === 1 && (
         <WorkspacesBoardTab copies={copies} nowMs={nowMs} onOpen={open} />
+      )}
+      {/* Scoped to the active project: the shared record that knows who is
+          standing where, and which functions two copies are both holding, is
+          kept per repository — there is no cross-project version of it to
+          show, and inventing one would be a lie. */}
+      {tab === 2 && (
+        <WorkspacesPane
+          repoRoot={activePath}
+          query={query}
+          embedded
+          onOpenWorktree={open}
+        />
       )}
     </FullscreenOverlay>
   );

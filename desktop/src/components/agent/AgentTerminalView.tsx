@@ -10,7 +10,7 @@ import { WebLinksAddon } from "@xterm/addon-web-links";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { Play } from "lucide-react";
 import { api } from "../../lib/api";
-import { mapKeyEvent } from "../../lib/terminalKeymap";
+import { handleClipboardKey, mapKeyEvent } from "../../lib/terminalKeymap";
 import { registerFilePathLinks } from "../../lib/terminalLinks";
 import { getSettings } from "../../lib/settingsStore";
 import { playTerminalBell } from "../../lib/terminalBell";
@@ -147,6 +147,17 @@ export function AgentTerminalView({
     })();
 
     term.attachCustomKeyEventHandler((e) => {
+      if (
+        handleClipboardKey(e, {
+          getSelection: () => term.getSelection(),
+          writeBytes: (bytes) => {
+            api.agentPtyWrite(sessionId, bytes).catch(() => {});
+          },
+        })
+      ) {
+        e.preventDefault();
+        return false;
+      }
       const bytes = mapKeyEvent(e);
       if (!bytes) return true;
       api.agentPtyWrite(sessionId, Array.from(bytes)).catch(() => {});
@@ -269,19 +280,20 @@ export function AgentTerminalView({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sessionId]);
 
-  const onDragOver = (e: React.DragEvent) => {
-    if (
-      e.dataTransfer.types.includes("text/uri-list") ||
-      e.dataTransfer.types.includes("text/plain") ||
-      e.dataTransfer.types.includes("Files")
-    ) {
-      e.preventDefault();
-      e.dataTransfer.dropEffect = "copy";
-    }
-  };
-  const onDrop = (e: React.DragEvent) => {
-    e.preventDefault();
-    const auraClipRaw = e.dataTransfer.getData("application/x-aura-clip");
+  // A dropped file/clip becomes input at the agent's prompt. External OS drops
+  // (from Finder) are routed by osFileDrop.ts through Tauri's native channel;
+  // THIS path handles in-app HTML5 drags — a file dragged out of the Files
+  // sidebar, or an image clip from the tray.
+  const acceptsDrag = (dt: DataTransfer | null) =>
+    !!dt &&
+    (dt.types.includes("text/uri-list") ||
+      dt.types.includes("text/plain") ||
+      dt.types.includes("Files") ||
+      dt.types.includes("application/x-aura-clip"));
+
+  const applyDrop = (dt: DataTransfer | null) => {
+    if (!dt) return;
+    const auraClipRaw = dt.getData("application/x-aura-clip");
     if (auraClipRaw) {
       try {
         const meta = JSON.parse(auraClipRaw) as { id: string; kind: string };
@@ -303,28 +315,78 @@ export function AgentTerminalView({
         /* malformed payload */
       }
     }
-    const uri = e.dataTransfer.getData("text/uri-list");
-    const plain = e.dataTransfer.getData("text/plain");
-    let path = "";
+    const uri = dt.getData("text/uri-list");
+    const plain = dt.getData("text/plain");
+    const paths: string[] = [];
     if (uri && uri.length > 0) {
-      const line = uri.split(/\r?\n/).find((l) => l && !l.startsWith("#"));
-      if (line) {
-        path = line.startsWith("file://")
-          ? decodeURIComponent(line.slice("file://".length))
-          : line;
+      for (const line of uri.split(/\r?\n/)) {
+        if (!line || line.startsWith("#")) continue;
+        paths.push(
+          line.startsWith("file://")
+            ? decodeURIComponent(line.slice("file://".length))
+            : line,
+        );
       }
     } else if (plain && plain.length > 0) {
-      path = plain;
-    } else if (e.dataTransfer.files && e.dataTransfer.files.length > 0) {
-      const f = e.dataTransfer.files[0] as unknown as { path?: string };
-      if (f.path) path = f.path;
+      // The Files sidebar joins a multi-selection with newlines — split so
+      // each becomes its own quoted argument rather than one bogus glob.
+      for (const line of plain.split(/\r?\n/)) {
+        const p = line.trim();
+        if (p) paths.push(p);
+      }
+    } else if (dt.files && dt.files.length > 0) {
+      for (const f of Array.from(dt.files) as unknown as { path?: string }[]) {
+        if (f.path) paths.push(f.path);
+      }
     }
-    if (!path) return;
-    const needsQuotes = /\s/.test(path);
-    const text = needsQuotes ? `"${path}"` : path;
-    const bytes = Array.from(new TextEncoder().encode(text + " "));
+    if (paths.length === 0) return;
+    const joined = paths
+      .map((p) => (/\s/.test(p) ? `"${p}"` : p))
+      .join(" ");
+    const bytes = Array.from(new TextEncoder().encode(joined + " "));
     api.agentPtyWrite(sessionId, bytes).catch(() => {});
   };
+
+  const onDragOver = (e: React.DragEvent) => {
+    if (acceptsDrag(e.dataTransfer)) {
+      e.preventDefault();
+      e.dataTransfer.dropEffect = "copy";
+    }
+  };
+  const onDrop = (e: React.DragEvent) => {
+    if (!acceptsDrag(e.dataTransfer)) return;
+    e.preventDefault();
+    applyDrop(e.dataTransfer);
+  };
+
+  // In-app HTML5 drags (Files sidebar → terminal) get swallowed by xterm's own
+  // viewport drag listeners before React's synthetic onDrop can fire — and if
+  // the dragover is never preventDefault'd the browser rejects the drop outright
+  // and the drag just snaps back ("disappears"). Bind native CAPTURE-phase
+  // listeners on the host: capture runs host→descendant, so we intercept
+  // dragover/drop before xterm can, which is what makes the drop actually land.
+  useEffect(() => {
+    const host = liveHostRef.current;
+    if (!host) return;
+    const over = (e: DragEvent) => {
+      if (!acceptsDrag(e.dataTransfer)) return;
+      e.preventDefault();
+      if (e.dataTransfer) e.dataTransfer.dropEffect = "copy";
+    };
+    const drop = (e: DragEvent) => {
+      if (!acceptsDrag(e.dataTransfer)) return;
+      e.preventDefault();
+      e.stopImmediatePropagation();
+      applyDrop(e.dataTransfer);
+    };
+    host.addEventListener("dragover", over, true);
+    host.addEventListener("drop", drop, true);
+    return () => {
+      host.removeEventListener("dragover", over, true);
+      host.removeEventListener("drop", drop, true);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sessionId]);
 
   const handleStart = async () => {
     if (!onAutoRespawn || starting || startingAll) return;
@@ -356,6 +418,8 @@ export function AgentTerminalView({
       <div
         ref={liveHostRef}
         className="absolute inset-0 bg-bg-content"
+        data-os-drop="terminal"
+        data-agent-session={sessionId}
         onDragOver={onDragOver}
         onDrop={onDrop}
       />

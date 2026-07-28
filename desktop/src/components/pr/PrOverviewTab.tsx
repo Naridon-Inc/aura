@@ -23,6 +23,7 @@ import { PrRightRail, type ChecksSummary, type ThreadCounts } from "./PrRightRai
 import { LabelChip } from "./PrLabelsCard";
 import { PrFilesSection } from "./PrFilesSection";
 import { PrThreadColumn, PrThreadProvider } from "./PrThreadColumn";
+import { PrFeatureRollup } from "./PrFeatureRollup";
 import { Churn } from "../diff/Churn";
 
 type Props = {
@@ -168,6 +169,14 @@ export function PrOverviewTab({
               viewer={viewer}
             />
             <PrDescriptionCard body={detail.body ?? ""} />
+            {/* The feature thread rolled up to this PR — is the thing this branch
+                set out to build actually finished? Scoped to the PR's own commits;
+                renders nothing until a proven goal is threaded to them. */}
+            <PrFeatureRollup
+              repoRoot={repoRoot}
+              headRef={detail.head_ref}
+              baseRef={detail.base_ref}
+            />
             <PrDiscussionCard comments={comments} />
             <PrFilesSection
               repoRoot={repoRoot}
@@ -247,11 +256,7 @@ function PrTitleHeader({
           <span>
             {detail.files.length} file{detail.files.length === 1 ? "" : "s"}
           </span>
-          <Churn
-            additions={detail.additions}
-            deletions={detail.deletions}
-            className="inline-flex items-center gap-2 tabular-nums"
-          />
+          <Churn additions={detail.additions} deletions={detail.deletions} />
           <span>Updated {formatAge(detail.updated_at)} ago</span>
         </span>
       </div>

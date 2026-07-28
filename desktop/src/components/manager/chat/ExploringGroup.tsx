@@ -74,8 +74,12 @@ export function ExploringGroup({ tools }: { tools: ToolBlock[] }) {
           {running ? "Exploring…" : "Explored"}
         </span>
         <span
-          className="shrink-0 tabular-nums t-2xs"
-          style={{ color: "var(--color-text-4)", fontFamily: "var(--font-mono)" }}
+          className="shrink-0 text-right tabular-nums t-2xs"
+          style={{
+            color: "var(--color-text-4)",
+            fontFamily: "var(--font-mono)",
+            minWidth: "2ch",
+          }}
         >
           {tools.length}
         </span>

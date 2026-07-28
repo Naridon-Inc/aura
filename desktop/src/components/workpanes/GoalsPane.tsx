@@ -16,8 +16,10 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Button } from "../ui/button";
+import { AsciiSpinner } from "../ui/ascii-spinner";
 import { useEditorStore } from "../../lib/editorStore";
 import { runProveStructured, type ProveOutcome } from "../../lib/prove";
+import { ProofGroup, MissingList, HowYouKnow } from "../goals/ProofBreakdown";
 import { isTaskDone, taskStatusLabel, type TaskGoal } from "../../lib/taskGoals";
 import {
   useTaskGoalGroups,
@@ -61,7 +63,7 @@ const STATUS: Record<
     label: "Not yet",
     glyph: "○",
     color: "var(--color-red)",
-    hint: "None of what this task needs is built yet.",
+    hint: "None of what this task needs is working yet — parts may be built, but nothing's wired up.",
   },
   unknown: {
     label: "Not checked",
@@ -501,9 +503,13 @@ function GoalRow({
       </button>
       {showError ? (
         <span
-          className="shrink-0 text-[10.5px] px-1.5 py-0.5 rounded text-rose-300"
+          className="shrink-0 text-[10.5px] px-1.5 py-0.5 rounded"
+          // The checker broke — that is the failure slot. Was a raw
+          // `text-rose-300` over `--color-rose`, a token no pack defines, so
+          // both the ink and the wash came from outside the palette.
           style={{
-            background: "color-mix(in oklab, var(--color-rose, #f43f5e) 12%, transparent)",
+            color: "var(--color-red)",
+            background: "color-mix(in oklab, var(--color-red) 12%, transparent)",
           }}
           title="The checker couldn't run — check your setup and try again."
         >
@@ -722,7 +728,7 @@ function GoalDetail({
               still missing.
             </div>
           )}
-          {missing.length > 0 && <ProofGroup title="Still missing" tone="bad" checks={missing} />}
+          {outcome && missing.length > 0 && <MissingList outcome={outcome} />}
           {built.length > 0 && <ProofGroup title="In place" tone="good" checks={built} />}
 
           {/* AST detail on demand */}
@@ -744,39 +750,8 @@ function GoalDetail({
   );
 }
 
-// A plain-language group of proof lines (the reasons, not the AST names).
-function ProofGroup({
-  title,
-  tone,
-  checks,
-}: {
-  title: string;
-  tone: "good" | "bad";
-  checks: ProveOutcome["checks"];
-}) {
-  const color = tone === "good" ? "var(--color-accent-green)" : "var(--color-red)";
-  return (
-    <section>
-      <div className="text-[10.5px] uppercase tracking-wider text-text-4 font-medium">
-        {title}
-        <span className="ml-1.5 tabular-nums normal-case tracking-normal">{checks.length}</span>
-      </div>
-      <ul className="mt-2 space-y-1">
-        {checks.map((c, i) => (
-          <li
-            key={i}
-            className="flex items-start gap-2.5 text-[12px] px-2.5 py-1.5 rounded border border-line-soft bg-bg-1"
-          >
-            <span className="shrink-0 mt-px text-[11px]" style={{ color }} aria-hidden>
-              {tone === "good" ? "✓" : "✗"}
-            </span>
-            <span className="flex-1 min-w-0 text-text-1">{c.reason}</span>
-          </li>
-        ))}
-      </ul>
-    </section>
-  );
-}
+// ProofGroup + HowYouKnow moved to ../goals/ProofBreakdown (imported above) so
+// this workbench and the session Summary render proof identically.
 
 // "Delivered by" — the reverse code↔goal link, in plain words. The newest run
 // in the ledger knows which commit last checked this goal and which files its
@@ -818,51 +793,12 @@ function DeliveredBy({ run }: { run: GoalRun }) {
   );
 }
 
-// The mechanism, on demand only — the AST node names behind each plain reason.
-function HowYouKnow({ outcome }: { outcome: ProveOutcome }) {
-  const [open, setOpen] = useState(false);
-  return (
-    <section className="border-t border-line-soft pt-3">
-      <button
-        type="button"
-        onClick={() => setOpen((v) => !v)}
-        className="flex items-center gap-2 text-[11px] text-text-3 hover:text-text-1 transition-colors"
-      >
-        <Caret open={open} />
-        <span>Show how you know ({outcome.checks.length} checks)</span>
-      </button>
-      {open && (
-        <ul className="mt-2.5 space-y-0.5">
-          {outcome.checks.map((c, i) => (
-            <li
-              key={i}
-              className={`flex items-start gap-2 px-2 py-1 rounded text-[11.5px] font-mono ${
-                i % 2 === 0 ? "bg-bg-1/30" : ""
-              }`}
-            >
-              <span className={`shrink-0 mt-0.5 text-[11px] ${c.passed ? "text-green" : "text-red"}`}>
-                {c.passed ? "✓" : "✗"}
-              </span>
-              <span className="flex-1 min-w-0 truncate" title={c.reason}>
-                <span className="text-text-4">{c.node_type}</span>{" "}
-                <span className="text-text-1">{c.node_name}</span>
-                {c.must_call ? <span className="text-text-4"> → calls {c.must_call}</span> : null}
-                {c.is_stub ? <span className="text-amber"> · placeholder</span> : null}
-              </span>
-            </li>
-          ))}
-        </ul>
-      )}
-    </section>
-  );
-}
-
 // ── Empty / filling states ───────────────────────────────────────────────────
 
 function FillingHint() {
   return (
     <div className="text-text-4 text-[12px] py-10 text-center flex flex-col items-center gap-2">
-      <Spinner />
+      <AsciiSpinner />
       <span>Reading your task board…</span>
     </div>
   );

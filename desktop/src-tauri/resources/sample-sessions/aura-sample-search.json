@@ -1,0 +1,63 @@
+{
+  "id": "aura-sample-search",
+  "objective": "Add a search box that filters recipes by name and tag",
+  "status": "running",
+  "projects": [{ "root": "{{PROJECT_ROOT}}", "label": "Recipe Box" }],
+  "tasks": [],
+  "ribbon": [{ "at": {{T_MINUS_3H}}, "event": { "kind": "plan_ready" } }],
+  "chat": [
+    {
+      "role": "user",
+      "text": "Add a search box to the header that filters the recipes as I type — match on the name and the tag.",
+      "at": {{T_MINUS_3H}}
+    },
+    {
+      "role": "manager",
+      "text": "On it. Here's the plan:\n1. A search field in the header.\n2. Filter the recipe grid on every keystroke, matching name + tag.\n3. A friendly empty state when nothing matches.\n\nStarting on the filter now.",
+      "at": {{T_MINUS_3H}},
+      "brain": "codex"
+    },
+    {
+      "role": "manager",
+      "text": "Field's in and the grid re-renders on every keystroke. Here's the filter + wiring.",
+      "at": {{T_MINUS_2H}},
+      "brain": "codex",
+      "tool_calls": [
+        {
+          "tool_use_id": "toolu_se_read_html",
+          "name": "read",
+          "input": { "file_path": "index.html" },
+          "result": { "is_error": false, "content": "Read index.html — header has the title only." }
+        },
+        {
+          "tool_use_id": "toolu_se_edit_html",
+          "name": "edit",
+          "input": {
+            "file_path": "index.html",
+            "old_string": "    <h1>Recipe Box</h1>",
+            "new_string": "    <h1>Recipe Box</h1>\n    <input id=\"search\" type=\"search\" placeholder=\"Search recipes…\" />"
+          },
+          "result": { "is_error": false, "content": "Edited index.html (+1)" }
+        },
+        {
+          "tool_use_id": "toolu_se_edit_app",
+          "name": "edit",
+          "input": {
+            "file_path": "app.js",
+            "old_string": "renderRecipes(RECIPES);",
+            "new_string": "function filterRecipes(query) {\n  const q = query.trim().toLowerCase();\n  return RECIPES.filter(\n    (r) => r.name.toLowerCase().includes(q) || r.tag.toLowerCase().includes(q)\n  );\n}\n\nfunction setupSearch() {\n  const box = document.getElementById(\"search\");\n  box.addEventListener(\"input\", () => renderRecipes(filterRecipes(box.value)));\n}\n\nrenderRecipes(RECIPES);\nsetupSearch();"
+          },
+          "result": { "is_error": false, "content": "Edited app.js (+11 -1)" }
+        }
+      ]
+    },
+    {
+      "role": "manager",
+      "text": "Search field is in and the grid re-renders as you type. Just tidying the empty-state message — “No recipes match that yet” — then I'll hand it back for a look.",
+      "at": {{T_MINUS_20M}},
+      "brain": "codex"
+    }
+  ],
+  "created_at": {{T_MINUS_3H}},
+  "updated_at": {{T_MINUS_20M}}
+}

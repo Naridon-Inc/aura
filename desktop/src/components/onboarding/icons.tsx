@@ -125,15 +125,6 @@ export function BackArrow(props: IconProps) {
   );
 }
 
-export function Spinner({ size = 15, ...props }: IconProps) {
-  return (
-    <svg width={size} height={size} viewBox="0 0 16 16" aria-hidden className="animate-spin" {...props}>
-      <circle cx="8" cy="8" r="6" stroke="currentColor" strokeWidth="1.6" opacity="0.25" />
-      <path d="M14 8a6 6 0 00-6-6" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" />
-    </svg>
-  );
-}
-
 export function CheckIcon(props: IconProps) {
   return (
     <svg {...base({ size: 14, ...props })}>

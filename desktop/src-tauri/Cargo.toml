@@ -1,6 +1,6 @@
 [package]
 name = "aura-shell"
-version = "0.19.21"
+version = "0.19.33"
 description = "Aura desktop shell — Tauri 2 binary backed by every aura-* Rust crate."
 authors = ["Aura"]
 edition = "2021"
@@ -172,6 +172,14 @@ tokio-tungstenite = { version = "0.24", features = ["rustls-tls-native-roots"] }
 url        = "2"
 sha2       = "0.10"
 hex        = "0.4"
+# HMAC-SHA256 for AWS SigV4 request signing (Bedrock brain). sha2/hex are
+# already present; hmac completes the SigV4 primitive set. No AWS SDK — we
+# sign the single `/invoke` POST ourselves and keep the dep tree lean.
+hmac       = "0.12"
+# RS256 JWT signing for the Google service-account → OAuth2 token exchange
+# (Vertex brain). Pinned to "9", the version already resolved in the
+# workspace lock via aura-cli, so aura-shell adds nothing new to download.
+jsonwebtoken = "9"
 # Gzip for terminal scrollback persistence — cold-restore history is
 # written to ~/.aura/terminal-sessions/<repo>/<tab>.scrollback.gz so a
 # relaunched terminal replays its screen as inert text when the live
@@ -226,7 +234,7 @@ glib   = "0.18"
 # CLI wrapper. v0.2.31 will flip the gemini/openai stubs default-on
 # once their streaming is real.
 [features]
-default = ["brain_anthropic_native", "brain_cli_wrapper", "brain_openai_compat", "brain_aura_pro"]
+default = ["brain_anthropic_native", "brain_cli_wrapper", "brain_openai_compat", "brain_aura_pro", "brain_bedrock", "brain_vertex"]
 brain_anthropic_native = []
 brain_cli_wrapper      = []
 brain_gemini_native    = []
@@ -236,3 +244,10 @@ brain_openai_compat    = []
 # aura-cloud using the user's existing cloud auth token. Default-on
 # alongside the other production brains.
 brain_aura_pro         = []
+# Cloud-hosted Claude via the hyperscaler control planes. Bedrock signs a
+# single `/invoke` POST with SigV4; Vertex mints a GCP OAuth2 token from a
+# service-account JSON and streams Anthropic-native SSE. Both are default-on
+# so a non-engineer can point Aura at their org's AWS/GCP Claude from
+# Settings → Brains without a rebuild.
+brain_bedrock          = []
+brain_vertex           = []

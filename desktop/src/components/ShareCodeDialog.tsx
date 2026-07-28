@@ -12,6 +12,13 @@
 
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { Button } from "./ui/button";
+import {
+  MODAL_FOOTER,
+  MODAL_HEADER,
+  MODAL_PANEL,
+  MODAL_TITLE,
+} from "./ui/modalSurface";
+import { cn } from "../lib/utils";
 import { api, type TeamMember } from "../lib/api";
 
 type Payload = {
@@ -142,12 +149,17 @@ export function ShareCodeDialog({ repoRoot }: Props) {
   if (!payload) return null;
 
   return (
-    <div className="absolute inset-0 z-50 bg-black/50 flex items-center justify-center p-6">
-      <div className="w-[560px] max-w-full bg-bg-chrome rounded-md border border-line-soft shadow-xl flex flex-col max-h-[80vh]">
-        <div className="h-10 px-3 border-b border-line-soft flex items-center">
-          <span className="text-[12px] font-medium text-text-1">
-            Share to chat
-          </span>
+    // Scoped to the pane it opens over (absolute, not fixed), but the scrim,
+    // panel and header match every other dialog in the app.
+    <div
+      className="absolute inset-0 z-50 bg-black/55 backdrop-blur-[3px] flex items-center justify-center p-6"
+      role="dialog"
+      aria-modal="true"
+      aria-label="Share to chat"
+    >
+      <div className={cn(MODAL_PANEL, "w-[560px] max-w-full flex flex-col max-h-[80vh]")}>
+        <div className={MODAL_HEADER}>
+          <span className={MODAL_TITLE}>Share to chat</span>
           {payload.filePath && (
             <span className="ml-2 text-[10.5px] text-text-5 font-mono truncate">
               {shortPath(payload.filePath)}
@@ -162,13 +174,14 @@ export function ShareCodeDialog({ repoRoot }: Props) {
           <button
             type="button"
             onClick={close}
-            className="text-[14px] text-text-4 hover:text-text-1 px-1.5 py-0.5 rounded hover:bg-bg-2"
+            aria-label="Close"
+            className="text-[14px] text-text-4 hover:text-text-1 px-1.5 py-0.5 rounded hover:bg-bg-2 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
           >
             ×
           </button>
         </div>
 
-        <div className="p-3 flex-1 min-h-0 overflow-y-auto space-y-3">
+        <div className="px-4 py-3 flex-1 min-h-0 overflow-y-auto space-y-3">
           {/* Snippet preview */}
           <div className="border border-line-soft rounded bg-bg-content overflow-hidden">
             <div className="px-3 py-1 text-[10px] uppercase tracking-wider text-text-5 border-b border-line-soft flex items-center gap-2">
@@ -242,19 +255,19 @@ export function ShareCodeDialog({ repoRoot }: Props) {
           </div>
 
           {error && (
-            <div className="text-[11.5px] text-red-400 bg-red-500/10 border border-red-500/20 rounded px-2 py-1.5">
+            <div className="text-[11.5px] text-red bg-red/10 border border-red/20 rounded px-2 py-1.5">
               {error}
             </div>
           )}
         </div>
 
-        <div className="h-11 px-3 border-t border-line-soft flex items-center justify-end gap-2">
-          <Button variant="ghost" size="sm" onClick={close}>
+        <div className={MODAL_FOOTER}>
+          <Button variant="ghost" size="xs" onClick={close}>
             Cancel
           </Button>
           <Button
             variant="default"
-            size="sm"
+            size="xs"
             disabled={!selectedKey || sending}
             onClick={send}
           >

@@ -15,8 +15,10 @@
 // permanently closed.
 //
 // xterm.css is imported once globally in main.tsx — bringing it in here
-// would re-inject every mount. The xterm Theme matches our design
-// tokens (deep bg, soft text-2 ramps).
+// would re-inject every mount. The engine is tuned for VSCode parity: its
+// exact default integrated-terminal theme + font metrics (see THEME and the
+// XTerm options in createSession), a WebGL renderer, and unicode-11 width
+// handling — so this reads as the terminal people already know from VSCode.
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Terminal as XTerm } from "@xterm/xterm";
@@ -24,9 +26,15 @@ import { FitAddon } from "@xterm/addon-fit";
 import { WebLinksAddon } from "@xterm/addon-web-links";
 import { SerializeAddon } from "@xterm/addon-serialize";
 import { SearchAddon } from "@xterm/addon-search";
+import { WebglAddon } from "@xterm/addon-webgl";
+import { Unicode11Addon } from "@xterm/addon-unicode11";
+import {
+  registerShellIntegration,
+  type ShellIntegration,
+} from "../lib/terminalShellIntegration";
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
-import { mapKeyEvent } from "../lib/terminalKeymap";
+import { handleClipboardKey, mapKeyEvent } from "../lib/terminalKeymap";
 import { api } from "../lib/api";
 import { registerFilePathLinks } from "../lib/terminalLinks";
 import { getSettings } from "../lib/settingsStore";
@@ -72,30 +80,42 @@ type TerminalProps = {
    *  uuid that simply won't match a survivor, so persisting it is safe
    *  either way. The panel stores it on the tab as `daemonSessionId`. */
   onOpened?: (ptyId: string, reconnected: boolean) => void;
+  /** Optional background override for the xterm canvas + host. Set ONLY by a
+   *  terminal that lives inside a split pane, so a split terminal reads as a
+   *  distinct surface from the editor panes beside it. Omitted everywhere
+   *  else (bottom panel, single-pane) so those keep the exact VSCode
+   *  `#1e1e1e` parity. A hex string like `#1a1a1f`. */
+  bgTint?: string;
 };
 
+// VSCode's default integrated-terminal palette. The 16 ANSI colors are the
+// exact values from VSCode's terminalColorRegistry; background/foreground/
+// cursor/selection are the Dark+ (Dark Modern) theme values. Kept verbatim so
+// the terminal matches VSCode pixel-for-pixel rather than Aura's black tokens.
+const VSCODE_TERMINAL_BG = "#1e1e1e";
 const THEME = {
-  background: "#0a0a0a",
-  foreground: "#e8e8e8",
-  cursor: "#e8e8e8",
-  cursorAccent: "#0a0a0a",
-  selectionBackground: "#1f1f1f",
-  black: "#0a0a0a",
-  red: "#ff6b6b",
-  green: "#7ee787",
-  yellow: "#f0883e",
-  blue: "#58a6ff",
-  magenta: "#c678dd",
-  cyan: "#56b6c2",
-  white: "#e8e8e8",
-  brightBlack: "#3a3a3a",
-  brightRed: "#ff8a8a",
-  brightGreen: "#9eef9e",
-  brightYellow: "#ffaa66",
-  brightBlue: "#7ab7ff",
-  brightMagenta: "#daa3eb",
-  brightCyan: "#7fd3da",
-  brightWhite: "#ffffff",
+  background: VSCODE_TERMINAL_BG,
+  foreground: "#cccccc",
+  cursor: "#ffffff",
+  cursorAccent: VSCODE_TERMINAL_BG,
+  selectionBackground: "#264f78",
+  selectionInactiveBackground: "#3a3d41",
+  black: "#000000",
+  red: "#cd3131",
+  green: "#0dbc79",
+  yellow: "#e5e510",
+  blue: "#2472c8",
+  magenta: "#bc3fbc",
+  cyan: "#11a8cd",
+  white: "#e5e5e5",
+  brightBlack: "#666666",
+  brightRed: "#f14c4c",
+  brightGreen: "#23d18b",
+  brightYellow: "#f5f543",
+  brightBlue: "#3b8eea",
+  brightMagenta: "#d670d6",
+  brightCyan: "#29b8db",
+  brightWhite: "#e5e5e5",
 };
 
 type PersistentSession = {
@@ -103,6 +123,8 @@ type PersistentSession = {
   fit: FitAddon;
   serialize: SerializeAddon;
   search: SearchAddon;
+  /** OSC 133 parser + command decorations (VSCode-style gutter marks). */
+  shellIntegration: ShellIntegration;
   ptyId: string;
   unlistenData: UnlistenFn;
   unlistenExit: UnlistenFn;
@@ -172,6 +194,11 @@ export function releaseTerminalSession(instanceId: string): void {
   }
   invoke("pty_close", { id: s.ptyId }).catch(() => {});
   try {
+    s.shellIntegration.dispose();
+  } catch {
+    /* noop */
+  }
+  try {
     s.term.dispose();
   } catch {
     /* noop */
@@ -200,6 +227,53 @@ function flushScrollback(s: PersistentSession): void {
 export function snapshotTerminalScrollback(instanceId: string): void {
   const s = sessions.get(instanceId);
   if (s) flushScrollback(s);
+}
+
+/** Read recent plain-text output from a terminal for chat context.
+ *
+ * xterm-backed sessions expose their full live scrollback in-process. Native
+ * GPU terminals own the grid in Rust, so they use a small command that reads
+ * the same grid currently being rendered. Unknown/closed ids resolve to an
+ * empty string; asking for terminal context must never block a chat send. */
+export async function readTerminalContext(
+  instanceId: string,
+  maxLines = 200,
+): Promise<string> {
+  const lineLimit = Math.max(1, Math.min(maxLines, 1000));
+  const s = sessions.get(instanceId);
+  let text = "";
+
+  if (s) {
+    const buffer = s.term.buffer.active;
+    const start = Math.max(0, buffer.length - lineLimit);
+    const logicalLines: string[] = [];
+    for (let i = start; i < buffer.length; i += 1) {
+      const line = buffer.getLine(i);
+      if (!line) continue;
+      const value = line.translateToString(true);
+      if (line.isWrapped && logicalLines.length > 0) {
+        logicalLines[logicalLines.length - 1] += value;
+      } else {
+        logicalLines.push(value);
+      }
+    }
+    text = logicalLines.join("\n").trimEnd();
+  } else {
+    text = await invoke<string>("native_term_context", {
+      termId: instanceId,
+      maxLines: lineLimit,
+    }).catch(() => "");
+    text = text.trimEnd();
+  }
+
+  // Keep a single mention from overwhelming the model context window. Retain
+  // the newest output because it contains the command result/prompt the user
+  // is most likely referring to.
+  const maxChars = 32_000;
+  if (text.length > maxChars) {
+    return `[earlier terminal output omitted]\n${text.slice(-maxChars)}`;
+  }
+  return text;
 }
 
 /** Clear the visible buffer + scrollback for a live terminal (the `...`
@@ -247,13 +321,15 @@ export type TerminalFindOptions = {
   regex?: boolean;
 };
 
+// VSCode's find colors: other matches use the translucent findMatchHighlight,
+// the active match the solid findMatch, both marked on the overview ruler.
 const FIND_DECORATIONS = {
-  matchBackground: "#3a3a3a",
-  matchBorder: "#58a6ff",
-  matchOverviewRuler: "#58a6ff",
-  activeMatchBackground: "#58a6ff",
-  activeMatchBorder: "#7ab7ff",
-  activeMatchColorOverviewRuler: "#7ab7ff",
+  matchBackground: "#ea5c0055",
+  matchBorder: "#ea5c00",
+  matchOverviewRuler: "#d18616",
+  activeMatchBackground: "#515c6a",
+  activeMatchBorder: "#f9a825",
+  activeMatchColorOverviewRuler: "#d18616",
 };
 
 /** Search forward from the current selection. Returns false when the
@@ -347,6 +423,7 @@ function XtermTerminal({
   reconnectId,
   scrollbackKey,
   onOpened,
+  bgTint,
 }: TerminalProps) {
   const hostRef = useRef<HTMLDivElement>(null);
   // ptyId for the active session — surfaced to onDrop without going
@@ -423,13 +500,39 @@ function XtermTerminal({
       // Terminal prefs apply to new terminal tabs (settingsStore →
       // ~/.aura/settings.toml). Read once at construction; not reactive.
       const tprefs = getSettings().terminal;
+      // VSCode splits its default terminal font size by platform (its editor
+      // default: 12 on macOS, 14 elsewhere) and uses Menlo on mac.
+      const isMac =
+        typeof navigator !== "undefined" && /Mac/i.test(navigator.platform);
       const term = new XTerm({
-        theme: THEME,
-        fontFamily: "ui-monospace, SF Mono, Menlo, monospace",
-        fontSize: 12.5,
+        // A split-pane terminal overrides just the background (+ its cursor
+        // accent so the block cursor's inner fill still matches) to read as a
+        // distinct surface; every other terminal keeps THEME verbatim for
+        // exact VSCode parity.
+        theme: bgTint
+          ? { ...THEME, background: bgTint, cursorAccent: bgTint }
+          : THEME,
+        // Exact VSCode defaults — Menlo on mac, platform monospace elsewhere.
+        fontFamily: "Menlo, Monaco, 'Courier New', monospace",
+        fontSize: isMac ? 12 : 14,
+        fontWeight: "normal",
+        fontWeightBold: "bold",
         letterSpacing: 0,
-        lineHeight: 1.25,
+        lineHeight: 1.0,
+        cursorStyle: "block",
+        cursorInactiveStyle: "outline",
         cursorBlink: tprefs.cursor_blink,
+        // VSCode enforces a 4.5:1 minimum contrast so dim ANSI colors stay
+        // readable — a defining part of how its terminal looks.
+        minimumContrastRatio: 4.5,
+        drawBoldTextInBrightColors: true,
+        // Fast-scroll (Alt+wheel) sensitivity — VSCode's default is 5. The
+        // modifier itself is already Alt in xterm.
+        fastScrollSensitivity: 5,
+        scrollSensitivity: 1,
+        macOptionIsMeta: false,
+        macOptionClickForcesSelection: false,
+        rescaleOverlappingGlyphs: true,
         allowProposedApi: true,
         scrollback: tprefs.scrollback,
       });
@@ -443,6 +546,10 @@ function XtermTerminal({
       term.loadAddon(serialize);
       term.loadAddon(search);
       term.loadAddon(new WebLinksAddon());
+      // Unicode 11 width tables — VSCode loads this so wide glyphs/emoji take
+      // the right cell count (allowProposedApi is required for it).
+      term.loadAddon(new Unicode11Addon());
+      term.unicode.activeVersion = "11";
       // VSCode-parity: file paths in terminal output become clickable.
       // Helper resolves relative paths against the latest cwd captured
       // by cwdRef and dispatches `aura:scroll-to-line` for the matched
@@ -450,6 +557,50 @@ function XtermTerminal({
       registerFilePathLinks(term, () => cwdRef.current);
 
       term.open(hostEl);
+      // GPU (WebGL) renderer — VSCode's default and far faster than xterm's
+      // DOM renderer. The DOM renderer is the fallback, and it's the prime
+      // suspect for sluggish redraws on Intel/older GPUs. Crucially, WebGL
+      // contexts on dual-GPU Intel Macs get *lost* on a GPU switch or under
+      // memory pressure; the old code disposed the addon on loss and then ran
+      // on the slow DOM renderer for the REST of the session. Now we reload a
+      // fresh WebGL addon after a loss (a few bounded retries) so GPU
+      // rendering is restored instead of degrading permanently — which is what
+      // made redraw-heavy CLIs (Claude Code, vim, htop) feel laggy.
+      let webglRetries = 0;
+      const loadWebgl = () => {
+        // Bail if the terminal was disposed (unmount) before a retry fired.
+        if (term.element == null) return;
+        let addon: WebglAddon;
+        try {
+          addon = new WebglAddon();
+        } catch {
+          return; /* no WebGL2 in this webview — DOM renderer stays */
+        }
+        addon.onContextLoss(() => {
+          try {
+            addon.dispose();
+          } catch {
+            /* already gone */
+          }
+          // Transient loss — try to restore GPU rendering rather than living
+          // on the DOM renderer forever. Bounded so a webview that genuinely
+          // can't hold a context settles on DOM instead of thrashing.
+          if (webglRetries < 3) {
+            webglRetries += 1;
+            window.setTimeout(loadWebgl, 500);
+          }
+        });
+        try {
+          term.loadAddon(addon);
+        } catch {
+          /* late context-creation failure — DOM renderer stays */
+        }
+      };
+      loadWebgl();
+      // VSCode-style shell-integration command decorations. Parses the OSC 133
+      // marks the backend already injects and renders a pass/fail dot per
+      // command in the gutter + overview ruler. Must run after open().
+      const shellIntegration = registerShellIntegration(term);
       try {
         fit.fit();
       } catch {
@@ -491,9 +642,9 @@ function XtermTerminal({
             : err instanceof Error
               ? err.message
               : String(err);
-        term.write("\r\n\x1b[31m⚠  Couldn't start this terminal.\x1b[0m\r\n");
+        term.write("\r\n\x1b[31m⚠ Couldn't start this terminal.\x1b[0m\r\n");
         term.write(
-          "\x1b[2mThe shell may be missing or the profile misconfigured. Check Settings → Terminal, then open a new terminal.\x1b[0m\r\n",
+          "\x1b[2mThe shell it tried to run may be missing or misnamed. Open Settings → Terminal, pick a different shell, then open a new terminal.\x1b[0m\r\n",
         );
         if (reason && reason.trim()) {
           term.write(`\x1b[2m${reason.replace(/[\r\n]+/g, " ").slice(0, 300)}\x1b[0m\r\n`);
@@ -526,7 +677,7 @@ function XtermTerminal({
         term.write(new Uint8Array(e.payload));
       });
       const unlistenExit = await listen(`pty-exit:${ptyId}`, () => {
-        term.write("\r\n\x1b[2m[process exited]\x1b[0m\r\n");
+        term.write("\r\n\x1b[2m── this terminal has closed ──\x1b[0m\r\n");
       });
 
       // Keystrokes → PTY. Bound once; the closure captures the stable
@@ -539,6 +690,17 @@ function XtermTerminal({
       // macOS-style key shortcuts. Same as onData, the handler captures
       // ptyId stably.
       term.attachCustomKeyEventHandler((e) => {
+        if (
+          handleClipboardKey(e, {
+            getSelection: () => term.getSelection(),
+            writeBytes: (bytes) => {
+              invoke("pty_write", { id: ptyId, data: bytes }).catch(() => {});
+            },
+          })
+        ) {
+          e.preventDefault();
+          return false;
+        }
         const bytes = mapKeyEvent(e);
         if (!bytes) return true;
         invoke("pty_write", { id: ptyId, data: Array.from(bytes) }).catch(() => {});
@@ -551,6 +713,7 @@ function XtermTerminal({
         fit,
         serialize,
         search,
+        shellIntegration,
         ptyId,
         unlistenData,
         unlistenExit,
@@ -737,7 +900,8 @@ function XtermTerminal({
     <div
       ref={hostRef}
       data-os-drop="terminal"
-      className="h-full w-full bg-bg-content"
+      className="h-full w-full"
+      style={{ backgroundColor: bgTint ?? VSCODE_TERMINAL_BG }}
       onDragOver={onDragOver}
       onDrop={onDrop}
     />
@@ -762,6 +926,11 @@ function releaseEphemeral(session: PersistentSession): void {
     /* noop */
   }
   invoke("pty_close", { id: session.ptyId }).catch(() => {});
+  try {
+    session.shellIntegration.dispose();
+  } catch {
+    /* noop */
+  }
   try {
     session.term.dispose();
   } catch {

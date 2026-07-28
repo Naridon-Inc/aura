@@ -190,9 +190,13 @@ export const TIMELINE_V2 = true;
  *  Gating this flag hides the panel + its right-rail entry and skips the poll
  *  entirely, so the rail is byte-for-byte unchanged when off.
  *
- *  Flip to `true` to surface the Team Radar. Off until visually verified
- *  against a live multi-agent session (deferred while the screen is locked). */
-export const AURA_RADAR_ENABLED = false;
+ *  Surfaced as a resizable bottom dock in the Source Control (Changes) panel —
+ *  mirrors the Checks→PR split via `useVerticalSplit`. Quiet by construction:
+ *  the dock only takes its share of the split when there's live team activity,
+ *  a clash, or a zone. With none of those it shrinks to one fixed row that says
+ *  so in plain words — an idle radar shouldn't read as a broken one — and the
+ *  file list keeps the rest of the panel. */
+export const AURA_RADAR_ENABLED = true;
 
 /** Crew cross-project — see your autonomous crews across EVERY open project,
  *  not just the one in focus (like Conductor's "All projects" + per-project

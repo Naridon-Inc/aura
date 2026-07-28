@@ -14,7 +14,7 @@
 // so it works for the native Aura brains and any CLI agent. Stars favorite
 // a model (persisted); number keys 1-9 pick while the menu is open.
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { api, type BrainChoice, type ModelCatalog } from "../../lib/api";
 import {
   catalogFor,
@@ -29,6 +29,7 @@ import {
 import { AgentIcon } from "../agent/AgentIcon";
 import { BrainSwitcherModal } from "./BrainSwitcherModal";
 import { ChipButton } from "../ui/chip";
+import { AsciiSpinner } from "../ui/ascii-spinner";
 
 type Props = {
   /** Session whose next turn the chosen model runs through. */
@@ -47,6 +48,14 @@ type Props = {
    *  - "modal": a Cmd-K-style centred switcher (BrainSwitcherModal) — the
    *    same rich treatment the branch dropdown got, used in the composer. */
   variant?: "inline" | "modal";
+  /** Config block folded into the bottom of the modal switcher (defaults +
+   *  auto-routing). Lets the composer carry a single model chip instead of a
+   *  second look-alike "Auto" chip beside this one. Modal variant only. */
+  modalFooter?: ReactNode;
+  /** Per-turn controls (Fast + Effort) pinned above the model list in the
+   *  modal switcher (#17). Folding them here keeps the composer bar to one
+   *  model chip instead of three look-alike per-turn chips. Modal only. */
+  turnControls?: ReactNode;
 };
 
 const FAVORITES_KEY = "aura.manager.modelFavorites";
@@ -89,6 +98,8 @@ export function BrainPicker({
   onModelChange,
   disabled,
   variant = "inline",
+  modalFooter,
+  turnControls,
 }: Props) {
   const [open, setOpen] = useState(false);
   const [brains, setBrains] = useState<BrainChoice[]>([]);
@@ -256,7 +267,7 @@ export function BrainPicker({
   const chipLabel = value ? value.label : "Auto";
 
   return (
-    <div className="relative" ref={rootRef}>
+    <div className="relative" ref={rootRef} data-tour="brain">
       <ChipButton
         disabled={disabled}
         onClick={() => setOpen((v) => !v)}
@@ -265,7 +276,11 @@ export function BrainPicker({
             ? `Next turn: ${value.label}`
             : `Next turn runs through the active brain${activeChoice ? ` (${activeChoice.label})` : ""} on its default model`
         }
-        active={!!value}
+        // A picked model lights up with the app accent (chip-on), same as the
+        // Effort / Approvals / Mode chips beside it — one selected-state
+        // language across the whole composer bar. Auto (no override) stays a
+        // quiet, unhighlighted chip.
+        className={value ? "chip-on" : undefined}
       >
         {value ? (
           // Brand by the model's vendor, not the routing brain — an Opus
@@ -290,6 +305,8 @@ export function BrainPicker({
           onPickAuto={() => void pick(null, null)}
           onToggleFav={toggleFavorite}
           onClose={() => setOpen(false)}
+          footer={modalFooter}
+          turnControls={turnControls}
         />
       )}
       {open && variant === "inline" && (
@@ -317,10 +334,13 @@ export function BrainPicker({
           </button>
 
           {loading && brains.length === 0 && (
-            <div className="px-2.5 py-1.5 text-[11px] text-text-4">Loading models…</div>
+            <div className="flex items-center gap-1.5 px-2.5 py-1.5 text-[11px] text-text-4">
+              <AsciiSpinner />
+              Loading models…
+            </div>
           )}
           {loadError && (
-            <div className="px-2.5 py-1.5 text-[11px] text-rose-400">{loadError}</div>
+            <div className="px-2.5 py-1.5 text-[11px] text-red">{loadError}</div>
           )}
 
           {/* Favorites — pinned across agents. Stars persist; a row whose
@@ -447,7 +467,7 @@ function GroupHeader({
       {requiresKey && (
         <span
           className={`h-1.5 w-1.5 shrink-0 rounded-full ${
-            hasKey ? "bg-emerald-400" : "bg-amber-400"
+            hasKey ? "bg-accent-green" : "bg-text-5"
           }`}
           title={hasKey ? "API key connected" : "API key missing"}
           aria-hidden
@@ -464,7 +484,7 @@ function GroupHeader({
       {missingKey ? (
         <button
           type="button"
-          className="ml-auto text-[9.5px] font-medium text-amber-400 hover:text-amber-300 transition-colors"
+          className="ml-auto text-[9.5px] font-medium text-accent transition-opacity hover:opacity-80"
           title={`${label} needs an API key to run — add one in Settings → Brains`}
           onClick={(e) => {
             e.stopPropagation();
@@ -553,7 +573,7 @@ function ModelRow({
       <button
         type="button"
         className={`ml-auto transition-opacity ${
-          favorited ? "opacity-100 text-accent" : "opacity-0 group-hover/row:opacity-60 text-text-3 hover:!opacity-100"
+          favorited ? "opacity-100 text-accent" : "opacity-0 group-hover/row:opacity-60 focus-visible:opacity-100 text-text-3 hover:!opacity-100"
         }`}
         title={favorited ? "Unfavorite" : "Favorite"}
         onClick={(e) => {

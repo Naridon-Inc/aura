@@ -12,12 +12,15 @@ export type AppActionId =
   | "toggle_sidebar"
   | "toggle_terminal"
   | "toggle_review"
+  | "reload_app"
   | "save"
   | "close_tab"
   | "settings"
+  | "shortcuts"
   | "extensions"
   | "time_machine"
   | "project_timeline"
+  | "workspaces"
   | "new_file"
   | "open_file"
   | "zoom_in"
@@ -38,7 +41,8 @@ export type AppActionId =
   | "orchestrate"
   | "tasks_board"
   | "notes"
-  | "open_prs";
+  | "open_prs"
+  | "mobile_waitlist";
 
 export type Dispatch = (id: AppActionId) => void;
 
@@ -51,6 +55,7 @@ export function useAppActions(dispatch: Dispatch) {
       "toggle_sidebar",
       "toggle_terminal",
       "toggle_review",
+      "reload_app",
       "save",
       "close_tab",
       "settings",
@@ -112,13 +117,19 @@ export function useAppActions(dispatch: Dispatch) {
           dispatch("toggle_terminal");
           break;
         case "r":
-          if (e.shiftKey) return; // leave native reload alone in dev
+          if (e.shiftKey) return; // ⌘⇧R = browser hard-reload, leave native alone
           e.preventDefault();
-          dispatch("toggle_review");
+          // Plain ⌘R reloads the app (the refresh people reach for when HMR
+          // wedges the UI); ⌘⌥R keeps the old Review-panel toggle.
+          dispatch(e.altKey ? "toggle_review" : "reload_app");
           break;
+        // ⌘W closes the tab; ⌘⇧W opens Workspaces — the full view of every
+        // parallel copy. Shift has to branch here rather than get its own
+        // handler elsewhere, because this case fired on ⌘⇧W too and silently
+        // closed the user's tab.
         case "w":
           e.preventDefault();
-          dispatch("close_tab");
+          dispatch(e.shiftKey ? "workspaces" : "close_tab");
           break;
         // ⌘+ / ⌘= zoom in. Most US keyboards send "=" without shift and
         // "+" with shift; accept both so the user doesn't have to think.
@@ -173,17 +184,30 @@ export function useAppActions(dispatch: Dispatch) {
   }, [dispatch]);
 }
 
-// Treats input / textarea / contenteditable / CodeMirror / xterm
+// Treats input / textarea / contenteditable / CodeMirror / Monaco / xterm
 // surfaces as "editor focus" so ⌘Z stays out of the way of native
 // text undo. Walks the parent chain because the actual focus target
 // may be an inner span.
+//
+// Monaco needs explicit handling: on WKWebView it drives input through an
+// EditContext surface (`div.native-edit-context`) — not an INPUT/TEXTAREA and
+// not contentEditable — so without these class checks the global ⌘Z would
+// hijack the file editor's undo and open the engine OpLog instead.
+const EDITOR_SURFACE_CLASSES = [
+  "cm-editor", // CodeMirror
+  "xterm", // terminal
+  "monaco-editor", // Monaco file editor
+  "native-edit-context", // Monaco EditContext input node
+  "inputarea", // Monaco legacy textarea fallback
+];
+
 function isEditableTarget(target: EventTarget | null): boolean {
   let el = target as HTMLElement | null;
   while (el) {
     const tag = el.tagName;
     if (tag === "INPUT" || tag === "TEXTAREA") return true;
     if (el.isContentEditable) return true;
-    if (el.classList && (el.classList.contains("cm-editor") || el.classList.contains("xterm"))) {
+    if (el.classList && EDITOR_SURFACE_CLASSES.some((c) => el!.classList.contains(c))) {
       return true;
     }
     el = el.parentElement;

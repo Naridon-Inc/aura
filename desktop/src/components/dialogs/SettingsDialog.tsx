@@ -22,21 +22,26 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   Beaker,
+  ArrowLeft,
   BookOpen,
   Boxes,
   Brain,
   Bug,
   Check,
+  ChevronDown,
+  Cloud,
   Cpu,
+  Download,
   ExternalLink,
   Eye,
   EyeOff,
+  FileCode2,
+  FolderGit2,
   Gauge,
   Key,
   Keyboard,
   LayoutDashboard,
   LifeBuoy,
-  Loader2,
   MessageCircle,
   Paintbrush,
   Palette,
@@ -44,6 +49,7 @@ import {
   Puzzle,
   Search,
   ShieldCheck,
+  Smartphone,
   Sparkles,
   Terminal,
   Trash2,
@@ -52,17 +58,27 @@ import {
   X,
 } from "lucide-react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
+import { AsciiSpinner } from "../ui/ascii-spinner";
 import { Button } from "../ui/button";
 import { Input } from "../ui/input";
 import { Select } from "../ui/select";
 import { Textarea } from "../ui/textarea";
 import { Field as FormField } from "../ui/field";
 import { Kbd } from "../ui/kbd";
+import { EmptyState, ErrorState, LoadingState } from "../ui/state";
+import {
+  MODAL_BACKDROP,
+  MODAL_FOOTER,
+  MODAL_HEADER,
+  MODAL_PANEL,
+  MODAL_TITLE,
+} from "../ui/modalSurface";
 import { FullscreenOverlay } from "../FullscreenOverlay";
-import { ChromeBtn } from "../TopBar";
+import { cn } from "../../lib/utils";
 import { useIsFullscreen } from "../../lib/useIsFullscreen";
 import {
   api,
+  type AgentConfigSyncStatus,
   type AgentDescriptor,
   type AgentProfile,
   type AgentsTomlEntry,
@@ -84,14 +100,21 @@ import {
   type TeamManifest,
   type TeamMember,
   type TeamIdentity,
+  type DuplicateSuggestion,
   type ChannelMeta,
   type TelemetryView,
   type TelemetryConsent,
   type WorkspaceBinding,
 } from "../../lib/api";
+import { peekCache, writeCache } from "../../lib/resourceCache";
+import { DuplicatesBanner } from "../team/presentation/DuplicatesBanner";
+import { Avatar } from "../team/presentation/Avatar";
+import { avatarSrcForMember } from "../../lib/memberAvatar";
+import { pickPath } from "../../lib/nativeDialog";
 import { refreshPluginContributes } from "../../lib/pluginContributesStore";
 import { refreshMcpTools } from "../../lib/mcpToolsStore";
 import { setCaptureOptOut } from "../../lib/autoCapture";
+import { HELP_SHORTCUTS } from "../../lib/shortcuts";
 import {
   setSidebarGlass,
   sidebarGlassAvailable,
@@ -102,9 +125,13 @@ import {
   setCompletionSoundEnabled,
   playCompletionChime,
 } from "../../lib/completionChime";
+import { isChimeMuted, setChimeMuted, playChime } from "../../lib/chime";
+import { AgentIcon } from "../agent/AgentIcon";
 import { InstalledModesPane } from "../marketplace/InstalledModesPane";
 import { AuraWatchPanel } from "./AuraWatchSettingsDialog";
 import { IntegrationsTab } from "../settings/IntegrationsTab";
+import { MobileWaitlistTab } from "../mobile/MobileWaitlistTab";
+import { CloudRunnerPanel } from "../commons/crew/CloudRunnerPanel";
 import { IdentityPanel } from "../identity/IdentityPanel";
 import { RepoWorktreeSettingsPane } from "../settings/RepoWorktreeSettingsPane";
 import { StandupView } from "../standup/StandupView";
@@ -148,6 +175,11 @@ import {
 } from "../../lib/settingsStore";
 import type { HudPresentationMode } from "../../lib/hud";
 import {
+  readFollowUpBehavior,
+  writeFollowUpBehavior,
+  type FollowUpBehavior,
+} from "../../lib/followUpBehavior";
+import {
   Card,
   Field,
   PaneHeader,
@@ -176,6 +208,8 @@ type PaneKey =
   | "plugins"
   | "mcp"
   | "integrations"
+  | "cloud"
+  | "mobile"
   | "policy"
   | "profiles"
   | "identity"
@@ -229,7 +263,7 @@ const PANE_GROUPS: PaneGroup[] = [
   {
     label: "Building",
     items: [
-      { id: "behavior", label: "Editor behavior", icon: <Sparkles className="h-4 w-4" />, keywords: ["vim", "minimap", "sticky", "indent", "editor", "keybindings", "sound"] },
+      { id: "behavior", label: "Editor behavior", icon: <Sparkles className="h-4 w-4" />, keywords: ["vim", "minimap", "sticky", "indent", "editor", "keybindings", "sound", "chat", "follow-up", "followup", "steer", "queue", "interrupt", "redirect", "composer"] },
       { id: "brain", label: "Brain & models", icon: <Brain className="h-4 w-4" />, keywords: ["brain", "model", "provider", "anthropic", "openai", "gemini", "claude", "byok", "api key", "subscription", "aura pro"] },
       { id: "modes", label: "Modes", icon: <Sparkles className="h-4 w-4" />, keywords: ["modes", "mode", "marketplace", "architect", "code", "debug", "persona", "specialist", "system prompt"] },
       { id: "agents", label: "Coding agents", icon: <Cpu className="h-4 w-4" />, keywords: ["claude", "gemini", "codex", "cursor", "kimi", "providers", "agent", "cli"] },
@@ -250,6 +284,8 @@ const PANE_GROUPS: PaneGroup[] = [
     label: "Connections",
     items: [
       { id: "integrations", label: "Integrations", icon: <Plug className="h-4 w-4" />, keywords: ["jira", "linear", "atlassian", "sync", "tasks", "issues", "oauth", "tracker"] },
+      { id: "cloud", label: "Cloud machine", icon: <Cloud className="h-4 w-4" />, keywords: ["cloud", "always-on", "always on", "machine", "runner", "connect", "remote", "vm", "box", "send", "offload", "background"] },
+      { id: "mobile", label: "Aura on your phone", icon: <Smartphone className="h-4 w-4" />, keywords: ["mobile", "phone", "iphone", "ios", "android", "app", "waitlist", "invite", "testflight", "beta", "notify"] },
       { id: "mcp", label: "MCP servers", icon: <Plug className="h-4 w-4" />, keywords: ["mcp", "atlassian", "linear", "github", "sentry", "model context protocol", "tools"] },
       { id: "plugins", label: "Plugins", icon: <Puzzle className="h-4 w-4" />, keywords: ["plugin", "skill", "mcp", "marketplace", "extension"] },
       { id: "keys", label: "API keys", icon: <Key className="h-4 w-4" />, keywords: ["anthropic", "openai", "gemini", "mercury", "secret", "key"] },
@@ -265,6 +301,37 @@ const PANE_GROUPS: PaneGroup[] = [
     ],
   },
 ];
+
+/** Panes that act on the open repository rather than the user's global
+ *  `~/.aura/settings.toml`. The header's Personal / Organization / Repository
+ *  tabs scope the sidebar to one of the three — every pane stays reachable,
+ *  just under the tab that matches what it configures. Change this set to
+ *  re-file a pane. */
+const REPO_SCOPED_PANES: ReadonlySet<PaneKey> = new Set<PaneKey>([
+  "capture",
+  "aurawatch",
+  "policy",
+  "integrations",
+  "cloud",
+  "mcp",
+  "copies",
+]);
+
+/** Panes that configure the cloud organization / team you belong to
+ *  (members, usage, billing, channels) rather than your personal setup or a
+ *  single repository. Filed under the Organization tab. */
+const ORG_SCOPED_PANES: ReadonlySet<PaneKey> = new Set<PaneKey>(["team"]);
+
+type SettingsScope = "user" | "org" | "repo";
+
+function paneScope(id: PaneKey): SettingsScope {
+  if (ORG_SCOPED_PANES.has(id)) return "org";
+  return REPO_SCOPED_PANES.has(id) ? "repo" : "user";
+}
+
+function scopeLabel(s: SettingsScope): string {
+  return s === "user" ? "Personal" : s === "org" ? "Organization" : "Repository";
+}
 
 function flattenPanes(): PaneItem[] {
   return PANE_GROUPS.flatMap((g) => g.items);
@@ -317,10 +384,51 @@ export function SettingsDialog({
     return out;
   }, [repoRoot, openRoots]);
   const [query, setQuery] = useState("");
+  // User vs. Repo scope. The header tabs flip this; it filters the sidebar
+  // to the panes that write the user's global `~/.aura/settings.toml`
+  // (You / Building / your keys & plugins) versus the ones that configure
+  // *this project* (capture hooks, policy, MCP, integrations, team). Repo
+  // scope only means something with a repo open — falls back to User.
+  const [scope, setScope] = useState<SettingsScope>("user");
+  // Repo scope acts on one project. Defaults to the current repo; the header
+  // picker lets you point the Repo panes at any other open project.
+  const [repoPick, setRepoPick] = useState<string | null>(null);
+  const activeRepoRoot =
+    repoPick && identityRoots.includes(repoPick) ? repoPick : repoRoot;
+  // Split-button flyout: choose which settings.toml to reveal.
+  const [tomlMenu, setTomlMenu] = useState(false);
   const [view, setView] = useState<SettingsView | null>(null);
   const [error, setError] = useState<string | null>(null);
   const fullscreen = useIsFullscreen();
   const searchRef = useRef<HTMLInputElement>(null);
+
+  // No repo open → the Repo tab has nothing to configure; pin to User.
+  useEffect(() => {
+    if (!repoRoot && scope === "repo") setScope("user");
+  }, [repoRoot, scope]);
+
+  // "Open settings.toml" — reveal the file backing a scope in Finder
+  // (the user's global one, or a repo's). Defaults to the active scope.
+  // Falls back to the .aura folder if the file hasn't been written yet.
+  const openSettingsToml = useCallback(
+    async (which: SettingsScope = scope) => {
+      try {
+        const base =
+          which === "repo" && activeRepoRoot
+            ? activeRepoRoot
+            : await api.homeDir();
+        const auraDir = `${base}/.aura`;
+        try {
+          await api.fsRevealInFinder(`${auraDir}/settings.toml`);
+        } catch {
+          await api.fsRevealInFinder(auraDir);
+        }
+      } catch (e) {
+        setError(String(e));
+      }
+    },
+    [scope, activeRepoRoot],
+  );
 
   // Let callers deep-link to a pane: `aura:open-settings` may carry a
   // `{ pane }` detail (e.g. the topbar avatar opens Settings → Identity).
@@ -328,7 +436,12 @@ export function SettingsDialog({
   useEffect(() => {
     function onOpen(e: Event) {
       const detail = (e as CustomEvent).detail as { pane?: PaneKey } | undefined;
-      if (detail?.pane) setPane(detail.pane);
+      if (detail?.pane) {
+        // Switch to the tab that owns the target pane, else the scope
+        // filter would immediately bounce the deep-link elsewhere.
+        setScope(paneScope(detail.pane));
+        setPane(detail.pane);
+      }
     }
     window.addEventListener("aura:open-settings", onOpen as EventListener);
     return () =>
@@ -349,30 +462,32 @@ export function SettingsDialog({
     reload();
   }, [open]);
 
-  // Filter sidebar groups against the search query. Match against label
-  // + keyword bag so "vim" surfaces Behavior even though the visible
-  // label doesn't contain it.
+  // Filter sidebar groups by the active scope, then the search query.
+  // Scope keeps User panes and Repo panes on separate tabs; query matches
+  // label + keyword bag so "vim" surfaces Behavior even though the visible
+  // label doesn't contain it. Empty groups drop out.
   const filteredGroups = useMemo(() => {
     const q = query.trim().toLowerCase();
-    if (!q) return PANE_GROUPS;
     return PANE_GROUPS.map((g) => ({
       ...g,
-      items: g.items.filter(
-        (it) =>
+      items: g.items.filter((it) => {
+        if (paneScope(it.id) !== scope) return false;
+        if (!q) return true;
+        return (
           it.label.toLowerCase().includes(q) ||
-          it.keywords.some((k) => k.includes(q)),
-      ),
+          it.keywords.some((k) => k.includes(q))
+        );
+      }),
     })).filter((g) => g.items.length > 0);
-  }, [query]);
+  }, [query, scope]);
 
-  // When a search hides the active pane, jump to the first visible
+  // When scope or search hides the active pane, jump to the first visible
   // match so the content area never goes blank.
   useEffect(() => {
-    if (!query.trim()) return;
     const visible = filteredGroups.flatMap((g) => g.items.map((it) => it.id));
     if (visible.length === 0) return;
     if (!visible.includes(pane)) setPane(visible[0]!);
-  }, [filteredGroups, pane, query]);
+  }, [filteredGroups, pane]);
 
   // Esc returns to the previous surface; ⌘K (⌃K) jumps to the search box.
   // Matches the dialog era's keyboard model so muscle memory is preserved.
@@ -389,12 +504,6 @@ export function SettingsDialog({
     return () => document.removeEventListener("keydown", onKey);
   }, [open, onClose]);
 
-  // Active group + pane drive the breadcrumb in the top bar.
-  const activeGroup = PANE_GROUPS.find((g) =>
-    g.items.some((it) => it.id === pane),
-  );
-  const activeItem = activeGroup?.items.find((it) => it.id === pane);
-
   if (!open) return null;
 
   return (
@@ -402,76 +511,157 @@ export function SettingsDialog({
       className="fixed inset-0 z-40 flex flex-col"
       style={{ background: "var(--color-bg-content)" }}
     >
-      {/* Top bar — no title (the breadcrumb + nav carry context, per the
+      {/* Top bar — no title (the tabs + nav carry context, per the
           full-screen wizard doctrine). Traffic-light inset on the left
-          (collapses in fullscreen), a search box with a ⌘K affordance,
-          a drag region so the window still moves, and a close button. */}
+          (collapses in fullscreen), a Back affordance, the Personal /
+          Organization / Repository scope tabs, and a shortcut to the raw
+          settings.toml. Search lives at the top of the sidebar. */}
       <header
         data-tauri-drag-region
         onMouseDown={handleHeaderDrag}
-        className="flex-shrink-0 flex items-center gap-3 border-b text-text-3"
+        className="flex-shrink-0 flex items-center gap-4 border-b"
         style={{
-          height: 52,
+          height: 48,
           paddingLeft: fullscreen ? 16 : 78,
           paddingRight: 12,
           background: "var(--color-bg-1)",
           borderColor: "var(--color-line-soft)",
         }}
       >
-        <span className="text-[12.5px] text-text-4 whitespace-nowrap">
-          Settings
-          {activeGroup && (
-            <>
-              {" · "}
-              <span className="text-text-2 font-medium">
-                {activeGroup.label}
-              </span>
-            </>
-          )}
-          {activeItem && (
-            <>
-              {" · "}
-              <span className="text-text-2 font-medium">
-                {activeItem.label}
-              </span>
-            </>
-          )}
-        </span>
-        <div className="relative ml-2 flex-1 max-w-[420px]">
-          <Search
-            className="absolute left-3 top-1/2 -translate-y-1/2 text-text-4 z-10 pointer-events-none"
-            size={13}
-          />
-          <Input
-            ref={searchRef}
-            value={query}
-            onChange={(e) => setQuery(e.target.value)}
-            placeholder="Search settings…"
-            className="h-8 pl-8 pr-12 text-[12.5px]"
-          />
-          {query ? (
+        <button
+          type="button"
+          onClick={onClose}
+          className="flex items-center gap-1.5 text-[12px] text-text-3 hover:text-text-1 transition-colors"
+          title="Back (Esc)"
+        >
+          <ArrowLeft size={14} />
+          <span>Back</span>
+        </button>
+
+        {/* Personal / Organization / Repository scope — underline tabs sitting
+            on the header rule. The Repository scope's project picker lives in
+            the sidebar (a repo list), not here, so the header stays a clean
+            three-tab strip. */}
+        <nav className="flex items-stretch gap-1 h-full">
+          {(["user", "org", "repo"] as SettingsScope[]).map((s) => {
+            const active = scope === s;
+            const disabled = s === "repo" && !repoRoot;
+            return (
+              <button
+                key={s}
+                type="button"
+                disabled={disabled}
+                onClick={() => setScope(s)}
+                title={disabled ? "Open a project to configure it" : undefined}
+                className={`relative flex items-center px-1.5 text-[12px] transition-colors ${
+                  disabled
+                    ? "text-text-5 cursor-default"
+                    : active
+                      ? "text-text-1 font-medium"
+                      : "text-text-3 hover:text-text-1"
+                }`}
+              >
+                {scopeLabel(s)}
+                {active && (
+                  <span className="absolute inset-x-0 -bottom-px h-[2px] rounded-full bg-accent" />
+                )}
+              </button>
+            );
+          })}
+        </nav>
+
+        {/* Open settings.toml — split button (Medusa button-group): the label
+            reveals the active scope's file, the caret picks which one. */}
+        <div className="ml-auto relative">
+          <div
+            className="inline-flex items-center overflow-hidden rounded-md border"
+            style={{
+              borderColor: "var(--color-line-soft)",
+              background: "var(--color-bg-2)",
+            }}
+          >
             <button
               type="button"
-              onClick={() => setQuery("")}
-              className="absolute right-3 top-1/2 -translate-y-1/2 text-text-4 hover:text-text-1"
-              title="Clear"
+              onClick={() => openSettingsToml()}
+              className="inline-flex items-center gap-1.5 h-7 pl-2.5 pr-2 text-[11.5px] text-text-2 hover:bg-white/[0.06] hover:text-text-1 transition-colors"
+              style={{ borderColor: "var(--color-line-soft)" }}
+              title={`Reveal ${scope === "repo" ? "this project's" : "your"} settings.toml in Finder`}
             >
-              <X size={12} />
+              <FileCode2 size={13} />
+              <span>
+                Open{" "}
+                <span className="font-mono text-[11px]">
+                  {scope === "repo" ? "settings.local.toml" : "settings.toml"}
+                </span>
+              </span>
             </button>
-          ) : (
-            <span className="absolute right-3 top-1/2 -translate-y-1/2 text-[10.5px] text-text-5 border border-line rounded px-1.5 py-px pointer-events-none">
-              ⌘K
-            </span>
+            <button
+              type="button"
+              onClick={() => setTomlMenu((v) => !v)}
+              className="flex h-7 w-6 items-center justify-center text-text-3 hover:bg-white/[0.06] hover:text-text-1 transition-colors"
+              style={{ borderLeft: "1px solid var(--color-line-soft)" }}
+              aria-label="Choose settings file"
+              aria-haspopup="menu"
+              aria-expanded={tomlMenu}
+            >
+              <ChevronDown size={13} />
+            </button>
+          </div>
+          {tomlMenu && (
+            <>
+              <div
+                className="fixed inset-0 z-40"
+                onClick={() => setTomlMenu(false)}
+              />
+              <div
+                className="absolute right-0 z-50 mt-1.5 min-w-[220px] rounded-md border py-1 shadow-lg"
+                style={{
+                  background: "var(--color-bg-1)",
+                  borderColor: "var(--color-line-soft)",
+                }}
+                role="menu"
+              >
+                <button
+                  type="button"
+                  role="menuitem"
+                  onClick={() => {
+                    openSettingsToml("user");
+                    setTomlMenu(false);
+                  }}
+                  className="flex h-7 w-full items-center gap-2 px-3 text-left text-[12px] text-text-2 hover:bg-bg-2 hover:text-text-1 transition-colors"
+                >
+                  <FileCode2 size={13} className="text-text-4" />
+                  <span>
+                    Your <span className="font-mono text-[11px]">settings.toml</span>
+                  </span>
+                </button>
+                {repoRoot && (
+                  <button
+                    type="button"
+                    role="menuitem"
+                    onClick={() => {
+                      openSettingsToml("repo");
+                      setTomlMenu(false);
+                    }}
+                    className="flex h-7 w-full items-center gap-2 px-3 text-left text-[12px] text-text-2 hover:bg-bg-2 hover:text-text-1 transition-colors"
+                  >
+                    <FolderGit2 size={13} className="text-text-4" />
+                    <span>
+                      This project&rsquo;s{" "}
+                      <span className="font-mono text-[11px]">settings.toml</span>
+                    </span>
+                  </button>
+                )}
+              </div>
+            </>
           )}
-        </div>
-        <div className="ml-auto flex items-center">
-          <ChromeBtn title="Close (Esc)" onClick={onClose}>
-            <X size={15} />
-          </ChromeBtn>
         </div>
       </header>
       <div className="flex flex-1 min-h-0">
-        {/* Sidebar — grouped nav with an accent left-rail on the active item. */}
+        {/* Sidebar — search on top, then grouped nav. Flat rows: quiet
+            neutral rounded fill on the active row, arctic-tinted active
+            icon (Aura's accent for the primary affordance), muted uppercase
+            group labels. 32-px rows. */}
         <aside
           className="w-[248px] shrink-0 flex flex-col border-r"
           style={{
@@ -479,15 +669,80 @@ export function SettingsDialog({
             borderColor: "var(--color-line-soft)",
           }}
         >
-          <div className="flex-1 overflow-y-auto px-2.5 py-3.5">
+          <div className="px-3 pt-3 pb-2">
+            <div className="relative">
+              <Search
+                className="absolute left-2.5 top-1/2 -translate-y-1/2 text-text-4 pointer-events-none z-10"
+                size={13}
+              />
+              <Input
+                ref={searchRef}
+                value={query}
+                onChange={(e) => setQuery(e.target.value)}
+                placeholder="Search…"
+                className="h-7 pl-7 pr-7 text-[12px]"
+              />
+              {query && (
+                <button
+                  type="button"
+                  onClick={() => setQuery("")}
+                  className="absolute right-2 top-1/2 -translate-y-1/2 text-text-4 hover:text-text-1"
+                  title="Clear"
+                >
+                  <X size={12} />
+                </button>
+              )}
+            </div>
+          </div>
+          <div className="flex-1 overflow-y-auto px-2.5 pb-3">
+            {/* Repository picker — lives in the sidebar (Conductor-parity: the
+                repos you can configure are listed here, not tucked in a header
+                dropdown). Repository scope only; the highlighted row is the
+                project the Repository panes act on. One project → a one-row
+                list that names what you're editing. */}
+            {scope === "repo" && activeRepoRoot && identityRoots.length > 0 && (
+              <div className="mt-1 mb-1">
+                <div className="text-[10px] font-semibold text-text-5 uppercase tracking-[0.1em] px-2 mb-1.5">
+                  Repositories
+                </div>
+                <nav className="flex flex-col gap-0.5">
+                  {identityRoots.map((r) => {
+                    const active = r === activeRepoRoot;
+                    const name = r.split("/").filter(Boolean).pop() || r;
+                    return (
+                      <button
+                        key={r}
+                        type="button"
+                        onClick={() => setRepoPick(r)}
+                        title={r}
+                        className={`group flex items-center gap-2 px-2 h-[30px] text-[12px] rounded-md text-left transition-colors ${
+                          active
+                            ? "bg-bg-2 text-text-1 font-medium"
+                            : "text-text-3 hover:text-text-1 hover:bg-bg-2/60"
+                        }`}
+                      >
+                        <span
+                          className={`flex-shrink-0 transition-colors [&_svg]:h-[15px] [&_svg]:w-[15px] ${
+                            active ? "text-accent" : "text-text-4 group-hover:text-text-2"
+                          }`}
+                        >
+                          <FolderGit2 />
+                        </span>
+                        <span className="flex-1 truncate">{name}</span>
+                      </button>
+                    );
+                  })}
+                </nav>
+              </div>
+            )}
             {filteredGroups.length === 0 ? (
-              <div className="text-[11.5px] text-text-4 px-3 py-4">
+              <div className="text-[11.5px] text-text-4 px-2 py-4">
                 No settings match “{query}”.
               </div>
             ) : (
               filteredGroups.map((group, gi) => (
-                <div key={group.label} className={gi > 0 ? "mt-4" : ""}>
-                  <div className="text-[10px] font-bold text-text-5 uppercase tracking-[0.11em] px-2.5 mb-1.5">
+                <div key={group.label} className={gi > 0 ? "mt-4" : "mt-1"}>
+                  <div className="text-[10px] font-semibold text-text-5 uppercase tracking-[0.1em] px-2 mb-1.5">
                     {group.label}
                   </div>
                   <nav className="flex flex-col gap-0.5">
@@ -498,16 +753,17 @@ export function SettingsDialog({
                           key={it.id}
                           type="button"
                           onClick={() => setPane(it.id)}
-                          className={`relative flex items-center gap-2.5 px-2.5 h-8 text-[13px] rounded-lg text-left transition-colors ${
+                          className={`group flex items-center gap-2 px-2 h-[30px] text-[12px] rounded-md text-left transition-colors ${
                             active
-                              ? "bg-accent/10 text-text-1 font-medium"
+                              ? "bg-bg-2 text-text-1 font-medium"
                               : "text-text-3 hover:text-text-1 hover:bg-bg-2/60"
                           }`}
                         >
-                          {active && (
-                            <span className="absolute -left-2.5 top-1.5 bottom-1.5 w-[3px] rounded-full bg-accent" />
-                          )}
-                          <span className="flex-shrink-0 [&_svg]:h-[15px] [&_svg]:w-[15px]">
+                          <span
+                            className={`flex-shrink-0 transition-colors [&_svg]:h-[15px] [&_svg]:w-[15px] ${
+                              active ? "text-accent" : "text-text-4 group-hover:text-text-2"
+                            }`}
+                          >
                             {it.icon}
                           </span>
                           <span className="flex-1 truncate">{it.label}</span>
@@ -529,41 +785,50 @@ export function SettingsDialog({
               {error}
             </div>
           )}
-          <div className="max-w-[680px] mx-auto px-8 py-7">
+          <div className="max-w-[720px] px-8 py-6">
             {pane === "appearance" && <AppearanceTab />}
             {pane === "themes" && <EditorThemesTab />}
             {pane === "hud" && <HudTab />}
-            {pane === "capture" && <CaptureTab repoRoot={repoRoot} />}
+            {pane === "capture" && <CaptureTab repoRoot={activeRepoRoot} />}
             {pane === "behavior" && <BehaviorTab />}
             {pane === "brain" && <BrainTab />}
             {pane === "modes" && <InstalledModesPane />}
-            {pane === "aurawatch" && <AuraWatchPanel repoRoot={repoRoot} />}
+            {pane === "aurawatch" && <AuraWatchPanel repoRoot={activeRepoRoot} />}
             {pane === "keys" && view && (
               <KeysTab view={view} onChanged={reload} />
             )}
             {pane === "policy" && view && (
-              <PolicyTab view={view} repoRoot={repoRoot} onChanged={reload} />
+              <PolicyTab view={view} repoRoot={activeRepoRoot} onChanged={reload} />
             )}
             {pane === "agents" && <AgentsTab />}
             {pane === "local-models" && <LocalModelsTab />}
             {pane === "terminal" && <TerminalTab />}
             {pane === "copies" &&
-              (repoRoot ? (
-                <RepoWorktreeSettingsPane repoRoot={repoRoot} />
+              (activeRepoRoot ? (
+                <RepoWorktreeSettingsPane repoRoot={activeRepoRoot} />
               ) : (
                 <div className="py-6 text-[12px] text-text-3">
                   Open a project to configure its copies.
                 </div>
               ))}
             {pane === "plugins" && <PluginsTab />}
-            {pane === "mcp" && <McpServersTab repoRoot={repoRoot} />}
-            {pane === "integrations" && <IntegrationsTab repoRoot={repoRoot} />}
+            {pane === "mcp" && <McpServersTab repoRoot={activeRepoRoot} />}
+            {pane === "integrations" && <IntegrationsTab repoRoot={activeRepoRoot} />}
+            {pane === "mobile" && <MobileWaitlistTab />}
+            {pane === "cloud" && <CloudRunnerPanel repoRoot={activeRepoRoot} />}
             {pane === "profiles" && <ProfilesTab repoRoot={repoRoot} />}
             {pane === "identity" && <IdentityTab repoRoots={identityRoots} />}
-            {pane === "team" && <TeamTab repoRoot={repoRoot} />}
+            {pane === "team" &&
+              (activeRepoRoot ? (
+                <TeamTab repoRoot={activeRepoRoot} />
+              ) : (
+                <div className="py-6 text-[12px] text-text-3">
+                  Open a project to see its team.
+                </div>
+              ))}
             {pane === "telemetry" && <TelemetryTab />}
             {pane === "experimental" && <ExperimentalTab />}
-            {pane === "help" && <HelpTab />}
+            {pane === "help" && <HelpTab onClose={onClose} />}
           </div>
         </div>
       </div>
@@ -581,7 +846,10 @@ function AppearanceTab() {
   // be a silent no-op (useResolvedTheme pins them to dark), so disable the
   // color-scheme picker and say why instead of letting it lie.
   const schemeDisabled =
-    variant === "modal" || variant === "ember" || variant === "conductor";
+    variant === "modal" ||
+    variant === "ember" ||
+    variant === "amber" ||
+    variant === "emerald";
   return (
     <>
       <PaneHeader
@@ -594,8 +862,9 @@ function AppearanceTab() {
             value={variant}
             options={[
               { value: "default", label: "Default" },
+              { value: "emerald", label: "Aura emerald" },
               { value: "modal", label: "Modal" },
-              { value: "conductor", label: "Conductor" },
+              { value: "amber", label: "Amber" },
             ]}
             onChange={setThemeVariant}
           />
@@ -665,6 +934,12 @@ function HudTab() {
           hint="When off, ⌘⇧A and the menu-bar icon do nothing and the HUD stays hidden. This sticks across restarts."
           value={hud.enabled}
           onChange={(v) => setHudPref("enabled", v)}
+        />
+        <Toggle
+          label="Desk pet"
+          hint="A little companion perches on the HUD and reacts to what your agents are doing — reading while they think, working while they edit, a hop when a task finishes."
+          value={hud.pet}
+          onChange={(v) => setHudPref("pet", v)}
         />
       </Section>
       <Section title="Shape">
@@ -1273,7 +1548,7 @@ function CaptureTab({ repoRoot }: { repoRoot: string }) {
               onClick={() => toggle(!on)}
             >
               {busy ? (
-                <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                <AsciiSpinner className="text-[12px] leading-none" />
               ) : on ? (
                 "Disable"
               ) : (
@@ -1325,7 +1600,7 @@ function CaptureTab({ repoRoot }: { repoRoot: string }) {
               onClick={() => setMergeInstalled(!(merge?.installed ?? false))}
             >
               {mergeBusy ? (
-                <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                <AsciiSpinner className="text-[12px] leading-none" />
               ) : merge?.installed ? (
                 "Uninstall"
               ) : (
@@ -1386,11 +1661,18 @@ function BehaviorTab() {
   // stored value is "on"/"off", distinct from settingsStore's prefs), so
   // the chime and this toggle always read the same flag.
   const [chime, setChime] = useState(completionSoundEnabled());
+  // Message & huddle sounds share one mute flag (chime.ts), which also gates
+  // the OS notification's system sound so "off" is silent on every path.
+  const [msgSound, setMsgSound] = useState(!isChimeMuted());
+  // Follow-up behavior lives in its own localStorage pref (composer UX, not a
+  // durable TOML setting) — read once here and write through the helper, which
+  // also live-notifies any open composer.
+  const [followUp, setFollowUp] = useState<FollowUpBehavior>(readFollowUpBehavior);
   return (
     <>
       <PaneHeader
         title="Behavior"
-        subtitle="How the code editor behaves."
+        subtitle="How the editor and chat behave."
       />
       <Section title="Editor">
         <Toggle
@@ -1418,6 +1700,29 @@ function BehaviorTab() {
           onChange={(v) => setEditorPref("indent_guides", v)}
         />
       </Section>
+      <Section title="Chat">
+        <Row
+          label="Follow-up behavior"
+          description={
+            followUp === "steer"
+              ? "Sending while the agent is working interrupts it and redirects the turn with your new message — it keeps everything it's done so far."
+              : "Sending while the agent is working queues your message and it runs when the current turn finishes."
+          }
+          hint="Tip: ⌘↵ always steers, whichever option is set here."
+        >
+          <SegControl<FollowUpBehavior>
+            value={followUp}
+            options={[
+              { value: "queue", label: "Queue" },
+              { value: "steer", label: "Steer" },
+            ]}
+            onChange={(v) => {
+              setFollowUp(v);
+              writeFollowUpBehavior(v);
+            }}
+          />
+        </Row>
+      </Section>
       <Section title="Notifications">
         <Toggle
           label="Completion sound"
@@ -1427,6 +1732,16 @@ function BehaviorTab() {
             setCompletionSoundEnabled(v);
             setChime(v);
             if (v) playCompletionChime();
+          }}
+        />
+        <Toggle
+          label="Message & huddle sounds"
+          hint="Play a soft chime for new team messages and huddles — the in-app tone while Aura is focused, the OS notification sound when it isn't. Off mutes both."
+          value={msgSound}
+          onChange={(v) => {
+            setChimeMuted(!v);
+            setMsgSound(v);
+            if (v) playChime("message");
           }}
         />
       </Section>
@@ -1441,6 +1756,22 @@ function BehaviorTab() {
 // radio selector + an API-key field (when required). Keys land in the
 // OS keychain via `brain_keychain_set` — they never round-trip to the
 // frontend after the first save.
+
+// Map a brain `provider_id` (e.g. `brain_anthropic_native`,
+// `openai_compat:groq`) onto the slug AgentIcon knows so the row shows
+// the vendor's real colored mark. Order matters: `openai_compat` must
+// win before the bare `openai` test.
+function brainBrandSlug(providerId: string): string {
+  const id = providerId.toLowerCase();
+  if (id.includes("anthropic") || id.includes("claude")) return "claude";
+  if (id.includes("gemini") || id.includes("google")) return "gemini";
+  if (id.includes("openai_compat") || id.includes("openai-compat")) return "openai-compat";
+  if (id.includes("openai") || id.includes("codex")) return "codex";
+  if (id.includes("cursor")) return "cursor";
+  if (id.includes("kimi") || id.includes("moonshot")) return "kimi";
+  if (id.includes("aura")) return "aura-manager";
+  return providerId;
+}
 
 function BrainTab() {
   const [descriptors, setDescriptors] = useState<BrainDescriptor[]>([]);
@@ -1517,6 +1848,25 @@ function BrainTab() {
     }
   }
 
+  // Custom `openai_compat:<slug>` endpoints (Azure, OpenRouter, a local
+  // vLLM, …) are the only removable brains — the compiled-in ones stay.
+  async function removeProvider(providerId: string) {
+    if (!confirm(`Remove ${providerId}? Forgets its endpoint config and key.`))
+      return;
+    setBusy(providerId);
+    setMsg(null);
+    setErr(null);
+    try {
+      await api.brainRemoveProvider(providerId);
+      setMsg(`Removed ${providerId}`);
+      await load();
+    } catch (e) {
+      setErr(String(e));
+    } finally {
+      setBusy(null);
+    }
+  }
+
   return (
     <>
       <PaneHeader
@@ -1564,6 +1914,13 @@ function BrainTab() {
                       disabled={busy === d.provider_id}
                       className="mt-0.5"
                     />
+                    <span className="mt-px shrink-0">
+                      <AgentIcon
+                        agentId={brainBrandSlug(d.provider_id)}
+                        label={d.display_name}
+                        size={18}
+                      />
+                    </span>
                     <div className="flex-1 min-w-0">
                       <div className="flex items-baseline gap-2">
                         <div className="text-[12.5px] font-medium text-text-1">
@@ -1576,6 +1933,21 @@ function BrainTab() {
                           <span className="text-[10.5px] text-green">
                             ✓ key set
                           </span>
+                        )}
+                        {d.provider_id.startsWith("openai_compat:") && (
+                          <button
+                            type="button"
+                            onClick={(e) => {
+                              e.preventDefault();
+                              e.stopPropagation();
+                              void removeProvider(d.provider_id);
+                            }}
+                            disabled={busy === d.provider_id}
+                            className="ml-auto text-text-4 hover:text-red disabled:opacity-40"
+                            title="Remove this provider"
+                          >
+                            <Trash2 size={12} />
+                          </button>
                         )}
                       </div>
                       <div className="text-[11px] text-text-3 mt-0.5">
@@ -1629,7 +2001,549 @@ function BrainTab() {
           </div>
         )}
       </Section>
+      <CloudBrainForm descriptors={descriptors} onSaved={() => void load()} />
+      <CustomProviderForm onAdded={() => void load()} />
     </>
+  );
+}
+
+// ── Cloud & custom providers (openai_compat:<slug>) ───────────────────
+//
+// Adds any OpenAI-compatible endpoint as a first-class brain via
+// `brain_upsert_provider`. Presets cover the common hosted routers plus
+// Azure OpenAI, which needs the `api-key:` header + an `api-version`
+// query param — both carried by the openai_compat AuthStyle/query plumbing
+// so the form just flips two knobs. New providers land in the "Available
+// brains" list above (radio-select + key field), and carry a Remove
+// affordance since — unlike the compiled-in brains — they're user state.
+
+const AZURE_API_VERSION_DEFAULT = "2024-08-01-preview";
+
+type CustomProviderPreset = {
+  id: string;
+  label: string;
+  base_url: string;
+  default_model: string;
+  needs_key: boolean;
+  /** Azure authenticates with `api-key:` rather than Bearer. */
+  auth_style?: "api_key";
+  /** Azure requires an `api-version` query param on every request. */
+  needs_api_version?: boolean;
+  hint: string;
+};
+
+const CUSTOM_PROVIDER_PRESETS: CustomProviderPreset[] = [
+  {
+    id: "azure",
+    label: "Azure OpenAI",
+    base_url:
+      "https://YOUR-RESOURCE.openai.azure.com/openai/deployments/YOUR-DEPLOYMENT",
+    default_model: "gpt-4o",
+    needs_key: true,
+    auth_style: "api_key",
+    needs_api_version: true,
+    hint: "Swap YOUR-RESOURCE and YOUR-DEPLOYMENT into the URL. Uses the api-key header + api-version query — no /chat/completions on the end.",
+  },
+  {
+    id: "openrouter",
+    label: "OpenRouter",
+    base_url: "https://openrouter.ai/api/v1",
+    default_model: "anthropic/claude-3.5-sonnet",
+    needs_key: true,
+    hint: "Multi-vendor router — paste your OpenRouter key.",
+  },
+  {
+    id: "xai",
+    label: "xAI",
+    base_url: "https://api.x.ai/v1",
+    default_model: "grok-4.5",
+    needs_key: true,
+    hint: "Grok models through xAI's OpenAI-compatible API.",
+  },
+  {
+    id: "groq",
+    label: "Groq",
+    base_url: "https://api.groq.com/openai/v1",
+    default_model: "llama-3.3-70b-versatile",
+    needs_key: true,
+    hint: "Fastest token throughput — paste your Groq key.",
+  },
+  {
+    id: "together",
+    label: "Together.ai",
+    base_url: "https://api.together.xyz/v1",
+    default_model: "meta-llama/Llama-3.3-70B-Instruct-Turbo",
+    needs_key: true,
+    hint: "Hosted open models — paste your Together key.",
+  },
+  {
+    id: "ollama",
+    label: "Ollama (local)",
+    base_url: "http://localhost:11434/v1",
+    default_model: "llama3.2",
+    needs_key: false,
+    hint: "Runs on your machine — no API key.",
+  },
+  {
+    id: "custom",
+    label: "Custom endpoint",
+    base_url: "",
+    default_model: "",
+    needs_key: true,
+    hint: "Any server that speaks /v1/chat/completions.",
+  },
+];
+
+function slugifyProvider(raw: string): string {
+  return raw
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 48);
+}
+
+function CustomProviderForm({ onAdded }: { onAdded: () => void }) {
+  const [presetId, setPresetId] = useState<string>(
+    CUSTOM_PROVIDER_PRESETS[0]!.id,
+  );
+  const preset =
+    CUSTOM_PROVIDER_PRESETS.find((p) => p.id === presetId) ??
+    CUSTOM_PROVIDER_PRESETS[0]!;
+  const [name, setName] = useState("");
+  const [baseUrl, setBaseUrl] = useState(preset.base_url);
+  const [model, setModel] = useState(preset.default_model);
+  const [apiKey, setApiKey] = useState("");
+  const [apiVersion, setApiVersion] = useState(AZURE_API_VERSION_DEFAULT);
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+  const [ok, setOk] = useState<string | null>(null);
+
+  function choosePreset(id: string) {
+    const p = CUSTOM_PROVIDER_PRESETS.find((x) => x.id === id);
+    if (!p) return;
+    setPresetId(id);
+    setBaseUrl(p.base_url);
+    setModel(p.default_model);
+    setErr(null);
+    setOk(null);
+    // Prefill the name with the preset label unless the user already
+    // typed one, so the slug is never empty for the common case.
+    if (!name.trim() && p.id !== "custom") setName(p.label);
+  }
+
+  const slug = slugifyProvider(name.trim() || preset.id);
+  const disabled =
+    busy ||
+    !name.trim() ||
+    !baseUrl.trim() ||
+    !model.trim() ||
+    (preset.needs_key && !apiKey.trim());
+
+  async function submit() {
+    setBusy(true);
+    setErr(null);
+    setOk(null);
+    try {
+      const res = await api.brainUpsertProvider({
+        slug,
+        baseUrl: baseUrl.trim(),
+        model: model.trim(),
+        apiKey: apiKey.trim() || undefined,
+        authStyle: preset.auth_style,
+        apiVersion: preset.needs_api_version
+          ? apiVersion.trim() || AZURE_API_VERSION_DEFAULT
+          : undefined,
+        setActive: false,
+      });
+      setOk(`Added ${res.provider_id}. Select it above to make it active.`);
+      setName("");
+      setApiKey("");
+      onAdded();
+    } catch (e) {
+      setErr(String(e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <Section title="Cloud & custom providers">
+      <div className="py-1">
+        <div className="text-[11px] text-text-3 mb-3">
+          Add any OpenAI-compatible endpoint — Azure OpenAI, OpenRouter,
+          Groq, a local vLLM — as a selectable brain above.
+        </div>
+        {err && (
+          <div className="text-[11.5px] text-red mb-2" role="alert">
+            {err}
+          </div>
+        )}
+        {ok && <div className="text-[11.5px] text-green mb-2">{ok}</div>}
+        <div className="flex flex-col gap-2.5">
+          <label className="flex flex-col gap-1">
+            <span className="text-[11px] text-text-3">Provider</span>
+            <Select
+              value={presetId}
+              onChange={choosePreset}
+              options={CUSTOM_PROVIDER_PRESETS.map((p) => ({
+                value: p.id,
+                label: p.label,
+              }))}
+            />
+          </label>
+          <div className="text-[10.5px] text-text-4 -mt-1">{preset.hint}</div>
+          <label className="flex flex-col gap-1">
+            <span className="text-[11px] text-text-3">
+              Name{" "}
+              <code className="text-text-5">openai_compat:{slug || "…"}</code>
+            </span>
+            <Input
+              value={name}
+              onChange={(e) => setName(e.target.value)}
+              placeholder="My Azure GPT-4o"
+              className="h-7 text-[12px]"
+            />
+          </label>
+          <label className="flex flex-col gap-1">
+            <span className="text-[11px] text-text-3">Base URL</span>
+            <Input
+              value={baseUrl}
+              onChange={(e) => setBaseUrl(e.target.value)}
+              placeholder="https://api.example.com/v1"
+              className="h-7 text-[12px] font-mono"
+            />
+          </label>
+          <label className="flex flex-col gap-1">
+            <span className="text-[11px] text-text-3">Model</span>
+            <Input
+              value={model}
+              onChange={(e) => setModel(e.target.value)}
+              placeholder="gpt-4o"
+              className="h-7 text-[12px] font-mono"
+            />
+          </label>
+          {preset.needs_api_version && (
+            <label className="flex flex-col gap-1">
+              <span className="text-[11px] text-text-3">API version</span>
+              <Input
+                value={apiVersion}
+                onChange={(e) => setApiVersion(e.target.value)}
+                placeholder={AZURE_API_VERSION_DEFAULT}
+                className="h-7 text-[12px] font-mono"
+              />
+            </label>
+          )}
+          <label className="flex flex-col gap-1">
+            <span className="text-[11px] text-text-3">
+              API key{" "}
+              {!preset.needs_key && (
+                <span className="text-text-5">(optional)</span>
+              )}
+            </span>
+            <Input
+              type="password"
+              value={apiKey}
+              onChange={(e) => setApiKey(e.target.value)}
+              placeholder={preset.needs_key ? "sk-…" : "leave blank for local"}
+              className="h-7 text-[12px]"
+            />
+          </label>
+          <div className="flex items-center gap-2 pt-1">
+            <Button
+              size="sm"
+              variant="default"
+              disabled={disabled}
+              onClick={() => void submit()}
+            >
+              {busy ? "Adding…" : "Add provider"}
+            </Button>
+            <span className="text-[10.5px] text-text-4">
+              Keys go straight to your OS keychain — never to settings.
+            </span>
+          </div>
+        </div>
+      </div>
+    </Section>
+  );
+}
+
+// ── Cloud singletons (Bedrock / Vertex) ──────────────────────────────
+//
+// AWS Bedrock and Google Vertex AI both run Anthropic's Claude, but neither
+// authenticates with a single API key: Bedrock needs an access-key pair +
+// region and SigV4-signs each call; Vertex needs a project + location + a
+// service-account JSON it exchanges for an OAuth token. They're compiled-in
+// singletons (not openai_compat:<slug>), so instead of the one-key field in
+// the "Available brains" list, they get this multi-field form. Non-secret
+// fields land in brain_settings.json; the credential (AWS secret key / the
+// SA-JSON) goes straight to the OS keychain via `brain_configure_cloud`.
+
+type CloudField = {
+  key: string;
+  label: string;
+  placeholder: string;
+  mono?: boolean;
+  optional?: boolean;
+};
+
+type CloudBrainPreset = {
+  id: "bedrock" | "vertex";
+  label: string;
+  defaultModel: string;
+  fields: CloudField[];
+  secretLabel: string;
+  secretPlaceholder: string;
+  secretMultiline?: boolean;
+  hint: string;
+};
+
+const CLOUD_BRAIN_PRESETS: CloudBrainPreset[] = [
+  {
+    id: "bedrock",
+    label: "AWS Bedrock",
+    defaultModel: "anthropic.claude-3-5-sonnet-20241022-v2:0",
+    fields: [
+      { key: "region", label: "Region", placeholder: "us-east-1", mono: true },
+      {
+        key: "access_key_id",
+        label: "Access key ID",
+        placeholder: "AKIA…",
+        mono: true,
+      },
+      {
+        key: "session_token",
+        label: "Session token",
+        placeholder: "only for temporary STS credentials",
+        mono: true,
+        optional: true,
+      },
+    ],
+    secretLabel: "Secret access key",
+    secretPlaceholder: "AWS secret access key",
+    hint: "Runs Claude on your AWS account. Needs an IAM key pair with bedrock:InvokeModel and the model enabled in the region.",
+  },
+  {
+    id: "vertex",
+    label: "Google Vertex AI",
+    defaultModel: "claude-sonnet-4-5@20250929",
+    fields: [
+      {
+        key: "project_id",
+        label: "Project ID",
+        placeholder: "my-gcp-project",
+        mono: true,
+      },
+      {
+        key: "location",
+        label: "Location",
+        placeholder: "us-east5",
+        mono: true,
+      },
+    ],
+    secretLabel: "Service-account JSON",
+    secretPlaceholder:
+      '{ "type": "service_account", "client_email": "…", "private_key": "-----BEGIN PRIVATE KEY-----\\n…" }',
+    secretMultiline: true,
+    hint: "Runs Claude on your GCP project. Paste the JSON key for a service account that has the Vertex AI User role.",
+  },
+];
+
+function CloudBrainForm({
+  descriptors,
+  onSaved,
+}: {
+  descriptors: BrainDescriptor[];
+  onSaved: () => void;
+}) {
+  // Only offer the cloud singletons that were actually compiled into this
+  // build (feature-gated) — no point showing a form that can't resolve.
+  const presets = useMemo(
+    () =>
+      CLOUD_BRAIN_PRESETS.filter((p) =>
+        descriptors.some((d) => d.provider_id === p.id),
+      ),
+    [descriptors],
+  );
+  const [presetId, setPresetId] = useState<"bedrock" | "vertex">(
+    presets[0]?.id ?? "bedrock",
+  );
+  const preset =
+    presets.find((p) => p.id === presetId) ?? presets[0] ?? null;
+
+  const [model, setModel] = useState("");
+  const [extra, setExtra] = useState<Record<string, string>>({});
+  const [secret, setSecret] = useState("");
+  const [hasSecret, setHasSecret] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+  const [ok, setOk] = useState<string | null>(null);
+
+  // Prefill from the saved config whenever the selected cloud brain changes.
+  // The credential itself never comes back — only whether one is stored.
+  const loadConfig = useCallback(async (id: "bedrock" | "vertex") => {
+    setErr(null);
+    setOk(null);
+    setSecret("");
+    try {
+      const cfg = await api.brainCloudConfigGet(id);
+      setModel(cfg.model ?? "");
+      setExtra(cfg.extra ?? {});
+      setHasSecret(cfg.has_secret);
+    } catch (e) {
+      setErr(String(e));
+    }
+  }, []);
+
+  useEffect(() => {
+    if (preset) void loadConfig(preset.id);
+  }, [preset, loadConfig]);
+
+  if (!preset) return null;
+
+  function choose(id: string) {
+    if (id === "bedrock" || id === "vertex") setPresetId(id);
+  }
+
+  const missingField = preset.fields.some(
+    (f) => !f.optional && !(extra[f.key] ?? "").trim(),
+  );
+  const disabled =
+    busy ||
+    !model.trim() ||
+    missingField ||
+    // Credential is required the first time; on re-save it may be left blank
+    // to keep the stored one.
+    (!hasSecret && !secret.trim());
+
+  async function submit() {
+    if (!preset) return;
+    setBusy(true);
+    setErr(null);
+    setOk(null);
+    try {
+      const cleanExtra: Record<string, string> = {};
+      for (const f of preset.fields) {
+        const v = (extra[f.key] ?? "").trim();
+        if (v) cleanExtra[f.key] = v;
+      }
+      await api.brainConfigureCloud({
+        providerId: preset.id,
+        model: model.trim(),
+        extra: cleanExtra,
+        // Omit → keep the stored credential; non-empty → replace it.
+        secret: secret.trim() ? secret.trim() : undefined,
+        setActive: false,
+      });
+      setSecret("");
+      setOk(`Saved ${preset.label}. Select it above to make it active.`);
+      await loadConfig(preset.id);
+      onSaved();
+    } catch (e) {
+      setErr(String(e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <Section title="Claude on your own cloud">
+      <div className="py-1">
+        <div className="text-[11px] text-text-3 mb-3">
+          Run Anthropic&apos;s Claude through your own AWS Bedrock or Google
+          Vertex account — billed on your cloud, no Anthropic key needed.
+        </div>
+        {err && (
+          <div className="text-[11.5px] text-red mb-2" role="alert">
+            {err}
+          </div>
+        )}
+        {ok && <div className="text-[11.5px] text-green mb-2">{ok}</div>}
+        <div className="flex flex-col gap-2.5">
+          <label className="flex flex-col gap-1">
+            <span className="text-[11px] text-text-3">Provider</span>
+            <Select
+              value={presetId}
+              onChange={choose}
+              options={presets.map((p) => ({ value: p.id, label: p.label }))}
+            />
+          </label>
+          <div className="text-[10.5px] text-text-4 -mt-1">{preset.hint}</div>
+          {preset.fields.map((f) => (
+            <label key={f.key} className="flex flex-col gap-1">
+              <span className="text-[11px] text-text-3">
+                {f.label}{" "}
+                {f.optional && (
+                  <span className="text-text-5">(optional)</span>
+                )}
+              </span>
+              <Input
+                value={extra[f.key] ?? ""}
+                onChange={(e) =>
+                  setExtra((s) => ({ ...s, [f.key]: e.target.value }))
+                }
+                placeholder={f.placeholder}
+                className={`h-7 text-[12px] ${f.mono ? "font-mono" : ""}`}
+              />
+            </label>
+          ))}
+          <label className="flex flex-col gap-1">
+            <span className="text-[11px] text-text-3">Model</span>
+            <Input
+              value={model}
+              onChange={(e) => setModel(e.target.value)}
+              placeholder={preset.defaultModel}
+              className="h-7 text-[12px] font-mono"
+            />
+          </label>
+          <label className="flex flex-col gap-1">
+            <span className="text-[11px] text-text-3">
+              {preset.secretLabel}{" "}
+              {hasSecret && (
+                <span className="text-green">
+                  ✓ stored — leave blank to keep
+                </span>
+              )}
+            </span>
+            {preset.secretMultiline ? (
+              <Textarea
+                value={secret}
+                onChange={(e) => setSecret(e.target.value)}
+                placeholder={
+                  hasSecret
+                    ? "Paste a new service-account JSON to replace…"
+                    : preset.secretPlaceholder
+                }
+                className="text-[11px] font-mono min-h-[96px]"
+              />
+            ) : (
+              <Input
+                type="password"
+                value={secret}
+                onChange={(e) => setSecret(e.target.value)}
+                placeholder={
+                  hasSecret ? "Replace stored secret…" : preset.secretPlaceholder
+                }
+                className="h-7 text-[12px]"
+              />
+            )}
+          </label>
+          <div className="flex items-center gap-2 pt-1">
+            <Button
+              size="sm"
+              variant="default"
+              disabled={disabled}
+              onClick={() => void submit()}
+            >
+              {busy ? "Saving…" : "Save"}
+            </Button>
+            <span className="text-[10.5px] text-text-4">
+              The credential goes straight to your OS keychain — never to
+              settings.
+            </span>
+          </div>
+        </div>
+      </div>
+    </Section>
   );
 }
 
@@ -1697,7 +2611,10 @@ function AuraProRow() {
 
   if (loading && !signIn) {
     return (
-      <div className="mt-2 text-[11px] text-text-4 italic">Checking sign-in…</div>
+      <div className="mt-2 flex items-center gap-1.5 text-[11px] text-text-4" role="status">
+        <AsciiSpinner className="text-[11px] leading-none" />
+        Checking whether you're signed in…
+      </div>
     );
   }
 
@@ -1943,24 +2860,29 @@ function PluginsTab() {
         </div>
       )}
       <div className="flex items-center justify-between mb-3">
-        <div className="text-[12px] text-text-3">
-          {rows === null
-            ? "Loading…"
-            : `${rows.length} installed (${groups.plugin.length} plugin · ${groups.skill.length} skill · ${groups.mcp.length} mcp)`}
+        <div className="flex items-center gap-1.5 text-[12px] text-text-3">
+          {rows === null ? (
+            <>
+              <AsciiSpinner className="text-[12px] leading-none" />
+              Looking for installed plugins…
+            </>
+          ) : (
+            `${rows.length} installed (${groups.plugin.length} plugin · ${groups.skill.length} skill · ${groups.mcp.length} mcp)`
+          )}
         </div>
         <Button size="sm" variant="ghost" onClick={rescan}>
           Rescan
         </Button>
       </div>
       {rows !== null && rows.length === 0 ? (
-        <div className="text-[12px] text-text-4 px-3 py-6 text-center border border-dashed border-line-soft rounded">
+        <EmptyState>
           No plugins installed. Drop a manifest under
           {" "}
           <code className="text-text-3">
             ~/.aura/plugins/&lt;scope&gt;/&lt;name&gt;/
           </code>
           {" "}and click Rescan.
-        </div>
+        </EmptyState>
       ) : (
         <>
           <PluginGroup
@@ -2053,7 +2975,7 @@ function SignatureBadge({ row }: { row: PluginRow }) {
   if (row.signature === "verified") {
     return (
       <span
-        className="text-[10px] px-1.5 py-0.5 rounded bg-emerald-500/10 text-emerald-400 whitespace-nowrap"
+        className="text-[10px] px-1.5 py-0.5 rounded bg-accent-green/10 text-accent-green whitespace-nowrap"
         title={`Signed by ${row.signed_by ?? "unknown"} — bundle contents verified`}
       >
         ✓ {row.signed_by}
@@ -2556,10 +3478,15 @@ function McpServersTab({ repoRoot }: { repoRoot: string }) {
       )}
 
       <div className="flex items-center justify-between mb-3 gap-3">
-        <div className="text-[12px] text-text-3">
-          {rows === null
-            ? "Loading…"
-            : `${rows.length} configured · ${rows.filter((r) => r.enabled).length} enabled`}
+        <div className="flex items-center gap-1.5 text-[12px] text-text-3">
+          {rows === null ? (
+            <>
+              <AsciiSpinner className="text-[12px] leading-none" />
+              Looking for connected servers…
+            </>
+          ) : (
+            `${rows.length} configured · ${rows.filter((r) => r.enabled).length} enabled`
+          )}
         </div>
         <div className="flex items-center gap-2">
           <Button
@@ -2604,12 +3531,12 @@ function McpServersTab({ repoRoot }: { repoRoot: string }) {
             </div>
           )}
           {discovered !== null && discovered.length === 0 && !discovering && (
-            <div className="text-[12px] text-text-4 px-3 py-4 text-center border border-dashed border-line-soft rounded">
+            <EmptyState className="py-4">
               Nothing new found. Aura scans Claude Code, Claude Desktop,
               Cursor, Windsurf, Cline, Roo Cline, Zed, opencode, Gemini CLI,
               Codex, and repo-local <code>.mcp.json</code>. Configure a server
               in any of those and re-run.
-            </div>
+            </EmptyState>
           )}
           {discovered !== null && discovered.length > 0 && (
             <div className="space-y-2">
@@ -2678,7 +3605,7 @@ function McpServersTab({ repoRoot }: { repoRoot: string }) {
                             {d.source}
                           </span>
                           {disabled && (
-                            <span className="text-[10px] text-emerald-500 px-1.5 py-0.5 rounded border border-emerald-500/40">
+                            <span className="text-[10px] text-accent-green px-1.5 py-0.5 rounded border border-accent-green/40">
                               already imported
                             </span>
                           )}
@@ -2726,9 +3653,9 @@ function McpServersTab({ repoRoot }: { repoRoot: string }) {
       )}
 
       {rows !== null && rows.length === 0 && !adding && (
-        <div className="text-[12px] text-text-4 px-3 py-6 text-center border border-dashed border-line-soft rounded">
+        <EmptyState>
           No MCP servers configured yet. Pick a template below to get started.
-        </div>
+        </EmptyState>
       )}
 
       <Section title="Pre-configured templates">
@@ -2955,7 +3882,7 @@ function McpServerRow({
           )}
           {row.server_url && (
             <span
-              className="text-[10.5px] px-[3px] py-[1.5px] rounded bg-sky-500/15 text-sky-200 border border-sky-500/30"
+              className="text-[10.5px] px-[3px] py-[1.5px] rounded bg-bg-1 text-text-3 border border-line-soft"
               title={`Remote transport — uses HTTP/SSE to ${row.server_url}`}
             >
               remote
@@ -2963,7 +3890,7 @@ function McpServerRow({
           )}
           {row.has_oauth_token && (
             <span
-              className="text-[10.5px] px-[3px] py-[1.5px] rounded bg-emerald-500/15 text-emerald-200 border border-emerald-500/30"
+              className="text-[10.5px] px-[3px] py-[1.5px] rounded bg-accent-green/15 text-accent-green border border-accent-green/30"
               title="OAuth tokens stored in OS keychain"
             >
               authenticated
@@ -3004,7 +3931,7 @@ function McpServerRow({
                 onClick={onAuth}
                 disabled={disabled}
                 title="A browser window will open for authentication"
-                className="px-2 py-0.5 rounded text-[10.5px] font-medium border transition-colors text-sky-200 border-sky-500/40 hover:bg-sky-500/10 disabled:opacity-40"
+                className="px-2 py-0.5 rounded text-[10.5px] font-medium border transition-colors text-text-2 border-line hover:bg-bg-2 disabled:opacity-40"
               >
                 Authenticate
               </button>
@@ -3017,7 +3944,7 @@ function McpServerRow({
                 onClick={onAuth}
                 disabled={disabled}
                 title="Tokens rejected — refresh required"
-                className="px-2 py-0.5 rounded text-[10.5px] font-medium border transition-colors text-amber-200 border-amber-500/40 hover:bg-amber-500/10 disabled:opacity-40"
+                className="px-2 py-0.5 rounded text-[10.5px] font-medium border transition-colors text-amber border-amber/40 hover:bg-amber/10 disabled:opacity-40"
               >
                 Re-authenticate
               </button>
@@ -3032,7 +3959,7 @@ function McpServerRow({
                 title="Set up auth — env or browser flow"
                 className={`px-2 py-0.5 rounded text-[10.5px] font-medium border transition-colors ${
                   probeOk === false
-                    ? "text-amber-300 border-amber-500/40 hover:bg-amber-500/10"
+                    ? "text-amber border-amber/40 hover:bg-amber/10"
                     : "text-text-3 border-line-soft hover:text-text-1 hover:border-text-4"
                 } disabled:opacity-40`}
               >
@@ -3281,19 +4208,26 @@ function AuthSetupModal({
 
   return (
     <div
-      className="fixed inset-0 z-[10000] flex items-center justify-center bg-black/60"
+      className={cn(MODAL_BACKDROP, "z-[10000] flex items-center justify-center")}
       onClick={onClose}
+      onKeyDown={(e) => {
+        if (e.key === "Escape") {
+          e.stopPropagation();
+          onClose();
+        }
+      }}
+      role="dialog"
+      aria-modal="true"
+      aria-label={server.name}
     >
       <div
-        className="bg-bg-content border border-line-soft rounded-lg shadow-sm w-full max-w-lg max-h-[80vh] flex flex-col"
+        className={cn(MODAL_PANEL, "max-w-lg max-h-[80vh] flex flex-col")}
         onClick={(e) => e.stopPropagation()}
       >
         {/* Header */}
-        <div className="flex items-start justify-between gap-3 px-4 py-3 border-b border-line-soft">
+        <div className={cn(MODAL_HEADER, "items-start justify-between gap-3")}>
           <div className="min-w-0">
-            <div className="text-text-1 text-[14px] font-semibold">
-              {server.name}
-            </div>
+            <div className={MODAL_TITLE}>{server.name}</div>
             {server.server_url ? (
               <div className="text-text-4 text-[11.5px] mt-0.5 truncate font-mono">
                 {server.server_url}
@@ -3337,22 +4271,20 @@ function AuthSetupModal({
                 : "Authenticate";
             return (
               <div className="space-y-3">
-                <button
+                <Button
                   type="button"
+                  size="lg"
                   onClick={() => void onAuth()}
                   disabled={busy}
-                  className="w-full inline-flex items-center justify-center gap-2 px-3 py-2 rounded-md text-[13px] font-medium bg-accent-violet text-white hover:bg-accent-violet/90 disabled:opacity-60"
+                  className="w-full"
                 >
                   {busy ? (
-                    <Loader2
-                      className="w-4 h-4 animate-spin"
-                      aria-hidden
-                    />
+                    <AsciiSpinner className="text-[12px] leading-none" />
                   ) : (
-                    <ExternalLink className="w-4 h-4" aria-hidden />
+                    <ExternalLink aria-hidden />
                   )}
                   {label}
-                </button>
+                </Button>
                 <div className="text-text-3 text-[12px] leading-relaxed">
                   {busy ? (
                     <>
@@ -3372,7 +4304,7 @@ function AuthSetupModal({
                   <button
                     type="button"
                     onClick={() => void clearOAuthTokens()}
-                    className="inline-flex items-center gap-1.5 text-[11.5px] text-text-4 hover:text-rose-300"
+                    className="inline-flex items-center gap-1.5 text-[11.5px] text-text-4 hover:text-red"
                     title="Delete stored tokens from the OS keychain"
                   >
                     Disconnect
@@ -3391,8 +4323,8 @@ function AuthSetupModal({
                   <div
                     className={
                       result.ok
-                        ? "text-emerald-300 text-[11.5px]"
-                        : "text-amber-300 text-[11.5px]"
+                        ? "text-accent-green text-[11.5px]"
+                        : "text-amber text-[11.5px]"
                     }
                   >
                     {result.text}
@@ -3411,7 +4343,7 @@ function AuthSetupModal({
                 <button
                   type="button"
                   onClick={() => void openTokenPage()}
-                  className="inline-flex items-center gap-1.5 text-[11.5px] text-accent-violet hover:underline"
+                  className="inline-flex items-center gap-1.5 text-[11.5px] text-text-2 hover:text-text-1 hover:underline"
                 >
                   <ExternalLink className="w-3.5 h-3.5" aria-hidden />
                   Open token page
@@ -3492,16 +4424,16 @@ function AuthSetupModal({
           ) : null}
 
           {error && (
-            <div className="text-rose-300 text-[11.5px]" role="alert">
+            <div className="text-red text-[11.5px]" role="alert">
               {error}
             </div>
           )}
         </div>
 
         {/* Footer */}
-        <div className="flex items-center justify-end gap-2 px-5 py-3 border-t border-line-soft">
+        <div className={MODAL_FOOTER}>
           <Button
-            size="sm"
+            size="xs"
             variant="ghost"
             onClick={onClose}
             disabled={busy}
@@ -3512,12 +4444,12 @@ function AuthSetupModal({
             template &&
             template.envKeys.length > 0 && (
               <Button
-                size="sm"
+                size="xs"
                 onClick={() => void submit()}
                 disabled={busy}
               >
                 {busy && (
-                  <Loader2 className="w-3.5 h-3.5 animate-spin mr-1.5" aria-hidden />
+                  <AsciiSpinner className="text-[12px] leading-none mr-1.5" />
                 )}
                 Save & retry
               </Button>
@@ -3525,12 +4457,12 @@ function AuthSetupModal({
           {!(server.server_url || remote.kind !== "none") &&
             !template && (
               <Button
-                size="sm"
+                size="xs"
                 onClick={() => void submit()}
                 disabled={busy}
               >
                 {busy && (
-                  <Loader2 className="w-3.5 h-3.5 animate-spin mr-1.5" aria-hidden />
+                  <AsciiSpinner className="text-[12px] leading-none mr-1.5" />
                 )}
                 Save & retry
               </Button>
@@ -3652,28 +4584,91 @@ function SubTabButton({
 // can *promote* others or *transfer* the role and step down. Harder,
 // cloud-enforced "super controls" are a later opt-in (Aura-account login)
 // — this is the honour-system default any team can use as-is.
+// The roster + identity + duplicate hunches, cached per repo so reopening
+// Settings → Team paints instantly instead of flashing "Loading…". SWR-style:
+// seed from the cache, refetch in the background, write the fresh bundle back.
+type CachedTeam = {
+  members: TeamMember[];
+  identity: TeamIdentity | null;
+  dups: DuplicateSuggestion[];
+  /** Self-picked profile photos, email→data-URL. Resolved ahead of the GitHub
+   *  avatar and the animal monogram. */
+  avatars: Record<string, string>;
+};
+
 function TeamMembersPane({ repoRoot }: { repoRoot: string }) {
-  const [members, setMembers] = useState<TeamMember[] | null>(null);
-  const [identity, setIdentity] = useState<TeamIdentity | null>(null);
+  const cacheKey = `settings-team-members:${repoRoot}`;
+  const [members, setMembers] = useState<TeamMember[] | null>(
+    () => peekCache<CachedTeam>(cacheKey)?.members ?? null,
+  );
+  const [identity, setIdentity] = useState<TeamIdentity | null>(
+    () => peekCache<CachedTeam>(cacheKey)?.identity ?? null,
+  );
+  const [dups, setDups] = useState<DuplicateSuggestion[]>(
+    () => peekCache<CachedTeam>(cacheKey)?.dups ?? [],
+  );
+  const [avatars, setAvatars] = useState<Record<string, string>>(
+    () => peekCache<CachedTeam>(cacheKey)?.avatars ?? {},
+  );
   const [err, setErr] = useState<string | null>(null);
   const [actionErr, setActionErr] = useState<string | null>(null);
   // Email currently mid-mutation — disables that row's buttons.
   const [busyEmail, setBusyEmail] = useState<string | null>(null);
+  // Row whose "Merge…" picker is open (by primary email), or null.
+  const [mergePickFor, setMergePickFor] = useState<string | null>(null);
+
+  // Dismiss the merge picker on an outside click or Escape. All rows share one
+  // open-state, so we key off a `data-merge-pick` marker rather than a per-row
+  // ref: a mousedown inside any picker is ignored, anything else closes it.
+  useEffect(() => {
+    if (!mergePickFor) return;
+    const onDown = (e: MouseEvent) => {
+      const t = e.target as HTMLElement | null;
+      if (t && t.closest("[data-merge-pick]")) return;
+      setMergePickFor(null);
+    };
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setMergePickFor(null);
+    };
+    window.addEventListener("mousedown", onDown);
+    window.addEventListener("keydown", onKey);
+    return () => {
+      window.removeEventListener("mousedown", onDown);
+      window.removeEventListener("keydown", onKey);
+    };
+  }, [mergePickFor]);
 
   const load = useCallback(async () => {
     setErr(null);
-    const [t, id] = await Promise.all([
+    const [t, id, d, av] = await Promise.all([
       api.teamLoad(repoRoot),
       api.teamIdentity(repoRoot).catch(() => null),
+      api.teamIdentitySuggestDuplicates(repoRoot).catch(() => []),
+      api.identityAvatarsGet().catch(() => ({}) as Record<string, string>),
     ]);
-    setMembers(t?.members ?? []);
+    const nextMembers = t?.members ?? [];
+    setMembers(nextMembers);
     setIdentity(id);
-  }, [repoRoot]);
+    setDups(d);
+    setAvatars(av);
+    writeCache<CachedTeam>(cacheKey, {
+      members: nextMembers,
+      identity: id,
+      dups: d,
+      avatars: av,
+    });
+  }, [repoRoot, cacheKey]);
 
   useEffect(() => {
     let cancelled = false;
-    setMembers(null);
-    setIdentity(null);
+    // Paint instantly from the last load for this repo (no null flash), then
+    // refresh in the background. On a cold cache these seed to the empty
+    // defaults and the spinner shows once, as before.
+    const cached = peekCache<CachedTeam>(cacheKey);
+    setMembers(cached?.members ?? null);
+    setIdentity(cached?.identity ?? null);
+    setDups(cached?.dups ?? []);
+    setAvatars(cached?.avatars ?? {});
     setActionErr(null);
     load().catch((e) => {
       if (!cancelled) setErr(String(e));
@@ -3681,7 +4676,7 @@ function TeamMembersPane({ repoRoot }: { repoRoot: string }) {
     return () => {
       cancelled = true;
     };
-  }, [repoRoot, load]);
+  }, [repoRoot, load, cacheKey]);
 
   const run = useCallback(
     async (email: string, fn: () => Promise<TeamManifest>) => {
@@ -3703,8 +4698,118 @@ function TeamMembersPane({ repoRoot }: { repoRoot: string }) {
     [repoRoot],
   );
 
-  if (err) return <div className="text-[11.5px] text-red">{err}</div>;
-  if (!members) return <div className="text-[11.5px] text-text-3">Loading…</div>;
+  // Merge / keep-separate for the duplicate hunches — the same review the team
+  // chat roster offers, now here in Settings. Both fold aliases through the
+  // shared identity backend; a full reload after picks up the new roster.
+  const confirmDup = useCallback(
+    async (survivorEmail: string, mergedEmails: string[]) => {
+      await api.teamIdentityConfirmDuplicate(repoRoot, survivorEmail, mergedEmails);
+      await load();
+    },
+    [repoRoot, load],
+  );
+  const rejectDup = useCallback(
+    async (emailA: string, emailB: string) => {
+      await api.teamIdentityRejectDuplicate(repoRoot, emailA, emailB);
+      await load();
+    },
+    [repoRoot, load],
+  );
+
+  // Split a folded-in identity back out into its own person. This is the
+  // inverse of "Same person": a member that ended up with several git emails
+  // (auto-linked, or a merge that grabbed one email too many) can be pulled
+  // apart here. We drop the alias off this member; the email re-derives as its
+  // own row from git log on reload. Only offered on your own card or, for an
+  // admin, on anyone's — the backend enforces the same rule.
+  const separateAlias = useCallback(
+    async (targetHandle: string, aliasEmail: string) => {
+      setBusyEmail(aliasEmail);
+      setActionErr(null);
+      try {
+        const m = await api.teamAliasRemove(repoRoot, targetHandle, aliasEmail);
+        setMembers(m?.members ?? []);
+        await load();
+      } catch (e) {
+        setActionErr(humanizeErr(e));
+      } finally {
+        setBusyEmail(null);
+      }
+    },
+    [repoRoot, load],
+  );
+
+  // Manually declare two people the same — the escape hatch for when the auto
+  // suggester never proposed the pair (e.g. a GitHub-handle committer and a
+  // personal Gmail with nothing textually in common: "droidnoob" ↔ their real
+  // name). Folds the picked member into this row through the same confirm path
+  // the suggestions use; `identity_merges` on the backend makes the decision
+  // stick across every git re-derive so it can't "come back".
+  const mergeWith = useCallback(
+    async (survivorEmail: string, mergedEmail: string) => {
+      setMergePickFor(null);
+      setBusyEmail(survivorEmail);
+      setActionErr(null);
+      try {
+        const mani = await api.teamIdentityConfirmDuplicate(repoRoot, survivorEmail, [
+          mergedEmail,
+        ]);
+        setMembers(mani?.members ?? []);
+        await load();
+      } catch (e) {
+        setActionErr(humanizeErr(e));
+      } finally {
+        setBusyEmail(null);
+      }
+    },
+    [repoRoot, load],
+  );
+
+  // Pick a profile photo for a person and store it locally (email-keyed). We
+  // update the map in place so the new face shows the instant the picker
+  // returns, without waiting on a full roster reload.
+  const pickPhoto = useCallback(async (email: string) => {
+    setActionErr(null);
+    let path: string | string[] | null;
+    try {
+      path = await pickPath({
+        title: "Choose a profile photo",
+      });
+    } catch (e) {
+      setActionErr(humanizeErr(e));
+      return;
+    }
+    if (!path || Array.isArray(path)) return; // cancelled
+    setBusyEmail(email);
+    try {
+      const dataUrl = await api.identityAvatarSetFromPath(email, path);
+      setAvatars((prev) => ({ ...prev, [email.toLowerCase()]: dataUrl }));
+    } catch (e) {
+      setActionErr(humanizeErr(e));
+    } finally {
+      setBusyEmail(null);
+    }
+  }, []);
+
+  const clearPhoto = useCallback(async (email: string) => {
+    setBusyEmail(email);
+    setActionErr(null);
+    try {
+      await api.identityAvatarClear(email);
+      setAvatars((prev) => {
+        const next = { ...prev };
+        delete next[email.toLowerCase()];
+        return next;
+      });
+    } catch (e) {
+      setActionErr(humanizeErr(e));
+    } finally {
+      setBusyEmail(null);
+    }
+  }, []);
+
+  if (err) return <ErrorState>{err}</ErrorState>;
+  if (!members) return <LoadingState label="Loading your team…" />;
   if (members.length === 0) {
     return (
       <div className="text-[11.5px] text-text-3">
@@ -3764,6 +4869,16 @@ function TeamMembersPane({ repoRoot }: { repoRoot: string }) {
         </div>
       )}
 
+      {/* Possible-duplicate review — the same "same person / different people"
+          merge the team chat roster offers, surfaced here so people management
+          and de-duping live in one place. Renders nothing when there's nothing
+          to review. */}
+      <DuplicatesBanner
+        suggestions={dups}
+        onConfirm={confirmDup}
+        onReject={rejectDup}
+      />
+
       {members.map((m) => {
         const isMe = m.email.toLowerCase() === myEmail;
         const rowBusy = busyEmail === m.email;
@@ -3772,6 +4887,12 @@ function TeamMembersPane({ repoRoot }: { repoRoot: string }) {
             key={m.email}
             className="flex items-center gap-3 px-2 py-1.5 rounded hover:bg-bg-2/60"
           >
+            <Avatar
+              name={m.name || m.handle || m.email}
+              size={30}
+              src={avatarSrcForMember(m, avatars)}
+              title={m.name || m.handle}
+            />
             <div className="flex-1 min-w-0">
               <div className="flex items-center gap-2">
                 <span className="text-[12px] text-text-1 font-medium truncate">
@@ -3804,7 +4925,97 @@ function TeamMembersPane({ repoRoot }: { repoRoot: string }) {
                 {m.email}
                 {m.activity_text ? ` · ${m.activity_text}` : ""}
               </div>
+
+              {/* Folded-in identities — the other git emails treated as this
+                  same person. Each can be pulled back out into its own row.
+                  Only actionable on your own card or by an admin (the backend
+                  enforces the same); otherwise it's shown read-only so people
+                  can still see who's grouped together. */}
+              {m.also_emails && m.also_emails.length > 0 && (
+                <div className="mt-1 flex flex-col gap-0.5">
+                  {m.also_emails.map((alias) => {
+                    const aliasBusy = busyEmail === alias;
+                    const canSeparate = isMe || iAmAdmin;
+                    return (
+                      <div
+                        key={alias}
+                        className="flex items-center gap-1.5 text-[10px] text-text-4"
+                      >
+                        <Avatar name={alias} size={16} title={alias} />
+                        <span className="truncate">
+                          <span className="text-text-5">also </span>
+                          {alias}
+                        </span>
+                        {canSeparate && (
+                          <button
+                            type="button"
+                            disabled={aliasBusy}
+                            onClick={() => separateAlias(m.handle, alias)}
+                            title={`Pull ${alias} out into its own person`}
+                            className="ml-1 flex-shrink-0 rounded border border-line-soft px-1 py-0.5 text-[9.5px] leading-none text-text-4 hover:text-text-1 hover:bg-bg-2 disabled:opacity-50"
+                          >
+                            {aliasBusy ? "…" : "Not the same person"}
+                          </button>
+                        )}
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
             </div>
+
+            {/* Manual "these two are the same person" — the escape hatch when
+                the auto-suggester never proposed the pair. Offered to an admin
+                (on anyone) and to you (on your own card); the backend enforces
+                the same rule. Picks a target from the rest of the roster and
+                folds it in durably. */}
+            {(iAmAdmin || isMe) && members.length > 1 && (
+              <div className="relative flex-shrink-0" data-merge-pick>
+                <RoleBtn
+                  label="Merge…"
+                  busy={rowBusy}
+                  title="Mark another member as the same person and fold them in"
+                  onClick={() =>
+                    setMergePickFor((cur) => (cur === m.email ? null : m.email))
+                  }
+                />
+                {mergePickFor === m.email && (
+                  <div className="absolute right-0 top-full mt-1 z-20 w-60 max-h-64 overflow-y-auto rounded-md border border-line-soft bg-bg-1 shadow-lg py-1">
+                    <div className="px-2 py-1 text-[9.5px] uppercase tracking-wider text-text-5">
+                      Same person as {m.name || m.handle}?
+                    </div>
+                    {members
+                      .filter(
+                        (o) => o.email.toLowerCase() !== m.email.toLowerCase(),
+                      )
+                      .map((o) => (
+                        <button
+                          key={o.email}
+                          type="button"
+                          disabled={busyEmail !== null}
+                          onClick={() => mergeWith(m.email, o.email)}
+                          className="w-full flex items-center gap-2 px-2 py-1 text-left hover:bg-bg-2 disabled:opacity-50"
+                        >
+                          <Avatar
+                            name={o.name || o.handle || o.email}
+                            size={18}
+                            src={avatarSrcForMember(o, avatars)}
+                            title={o.name || o.handle}
+                          />
+                          <span className="flex-1 min-w-0">
+                            <span className="block text-[11px] text-text-1 truncate">
+                              {o.name || o.handle}
+                            </span>
+                            <span className="block text-[9.5px] text-text-4 truncate">
+                              {o.email}
+                            </span>
+                          </span>
+                        </button>
+                      ))}
+                  </div>
+                )}
+              </div>
+            )}
 
             {iAmAdmin && !isMe ? (
               <div className="flex items-center gap-1 flex-shrink-0">
@@ -3851,6 +5062,31 @@ function TeamMembersPane({ repoRoot }: { repoRoot: string }) {
               </div>
             ) : (
               <>
+                {/* Your own card gets the photo control — pick a picture, or
+                    drop back to your GitHub avatar / animal monogram. Set for
+                    yourself only; everyone else falls back automatically. */}
+                {isMe && (
+                  <div className="flex items-center gap-1 flex-shrink-0">
+                    <RoleBtn
+                      label={
+                        avatars[m.email.toLowerCase()] ? "Change photo" : "Set photo"
+                      }
+                      busy={rowBusy}
+                      onClick={() => pickPhoto(m.email)}
+                    />
+                    {avatars[m.email.toLowerCase()] && (
+                      <button
+                        type="button"
+                        disabled={rowBusy}
+                        onClick={() => clearPhoto(m.email)}
+                        title="Remove your photo"
+                        className="rounded border border-line-soft px-1 py-0.5 text-[10.5px] leading-none text-text-4 hover:text-text-1 hover:bg-bg-2 disabled:opacity-50"
+                      >
+                        {rowBusy ? "…" : "Remove"}
+                      </button>
+                    )}
+                  </div>
+                )}
                 <div className="text-[10.5px] text-text-4 tabular-nums">
                   {m.commits} commit{m.commits === 1 ? "" : "s"}
                 </div>
@@ -3916,8 +5152,15 @@ function humanizeErr(e: unknown): string {
 const CORE_CHANNEL_SLUGS = ["general", "agents", "sentinel", "pull-requests"];
 
 function TeamChannelsPane({ repoRoot }: { repoRoot: string }) {
-  const [manifest, setManifest] = useState<TeamManifest | null>(null);
-  const [identity, setIdentity] = useState<TeamIdentity | null>(null);
+  // Cached per repo (SWR) so reopening Settings → Team → Channels paints from
+  // the last load instead of blanking to "Loading…" every time.
+  const cacheKey = `settings-team-channels:${repoRoot}`;
+  const [manifest, setManifest] = useState<TeamManifest | null>(
+    () => peekCache<{ manifest: TeamManifest | null; identity: TeamIdentity | null }>(cacheKey)?.manifest ?? null,
+  );
+  const [identity, setIdentity] = useState<TeamIdentity | null>(
+    () => peekCache<{ manifest: TeamManifest | null; identity: TeamIdentity | null }>(cacheKey)?.identity ?? null,
+  );
   const [err, setErr] = useState<string | null>(null);
   const [actionErr, setActionErr] = useState<string | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
@@ -3933,12 +5176,14 @@ function TeamChannelsPane({ repoRoot }: { repoRoot: string }) {
     ]);
     setManifest(t);
     setIdentity(id);
-  }, [repoRoot]);
+    writeCache(cacheKey, { manifest: t, identity: id });
+  }, [repoRoot, cacheKey]);
 
   useEffect(() => {
     let cancelled = false;
-    setManifest(null);
-    setIdentity(null);
+    const cached = peekCache<{ manifest: TeamManifest | null; identity: TeamIdentity | null }>(cacheKey);
+    setManifest(cached?.manifest ?? null);
+    setIdentity(cached?.identity ?? null);
     setActionErr(null);
     load().catch((e) => {
       if (!cancelled) setErr(String(e));
@@ -3946,7 +5191,7 @@ function TeamChannelsPane({ repoRoot }: { repoRoot: string }) {
     return () => {
       cancelled = true;
     };
-  }, [repoRoot, load]);
+  }, [repoRoot, load, cacheKey]);
 
   const run = useCallback(
     async (key: string, fn: () => Promise<TeamManifest>) => {
@@ -3966,9 +5211,8 @@ function TeamChannelsPane({ repoRoot }: { repoRoot: string }) {
     [repoRoot],
   );
 
-  if (err) return <div className="text-[11.5px] text-red">{err}</div>;
-  if (!manifest)
-    return <div className="text-[11.5px] text-text-3">Loading…</div>;
+  if (err) return <ErrorState>{err}</ErrorState>;
+  if (!manifest) return <LoadingState label="Loading your team settings…" />;
 
   const iAmAdmin = identity?.admin ?? false;
   const myEmail = (identity?.email ?? "").toLowerCase();
@@ -4357,7 +5601,7 @@ function TeamUsagePane({ repoRoot: _repoRoot }: { repoRoot: string }) {
     return (
       <div className="space-y-2 text-[11.5px] text-text-3 leading-relaxed">
         <div className="text-[12px] text-text-1 font-medium">Token spend</div>
-        <div className="rounded border border-yellow-700/40 bg-yellow-900/15 px-2 py-1.5 text-yellow-200">
+        <div className="rounded border border-amber/40 bg-amber/15 px-2 py-1.5 text-amber">
           Couldn't load token usage:{" "}
           <span className="font-mono break-all">{error}</span>
         </div>
@@ -4504,6 +5748,12 @@ function ExperimentalTab() {
           hint="Show a small estimate of the tokens Aura saved on each reply by using its code map and Q&A instead of reading whole files. It's an estimate, not an exact count."
           value={flags.show_token_savings}
           onChange={(v) => setFlag("show_token_savings", v)}
+        />
+        <Toggle
+          label="Show token usage per message"
+          hint="Under each reply, show the input and output tokens that message actually used, straight from the model. Off by default."
+          value={flags.show_message_tokens}
+          onChange={(v) => setFlag("show_message_tokens", v)}
         />
       </Section>
     </>
@@ -4727,8 +5977,15 @@ function PolicyTab({
           label={
             <>
               Status{" "}
+              {/* Colour tracks how protected the repo is, not how loud the
+                  state sounds. On-and-locked is the safest this can be, so it
+                  is green; it used to be red, which is the colour everything
+                  else in the app uses for failure and read as an alarm about
+                  the one setting that means nothing can get past the guard.
+                  On-but-unlocked is amber — the protection is real but a
+                  machine can still switch it off. Off is the actual risk. */}
               <StatusPill
-                tone={strict ? (locked ? "red" : "amber") : "muted"}
+                tone={strict ? (locked ? "green" : "amber") : "red"}
                 text={locked ? "on · locked" : strict ? "on" : "off"}
               />
             </>
@@ -4924,10 +6181,13 @@ function TemplatesSection({ repoRoot }: { repoRoot: string }) {
         <code className="text-text-2">production.aura.json</code> at the repo
         root. Layered packs additively — install several to compose.
       </p>
-      {error && <div className="text-[11.5px] text-red mb-2">{error}</div>}
+      {error && <div role="alert" className="text-[11.5px] text-red mb-2">{error}</div>}
       {toast && <div className="text-[11.5px] text-accent-green mb-2">✓ {toast}</div>}
       {packs === null ? (
-        <div className="text-[11.5px] text-text-4 py-2">loading packs…</div>
+        <div className="flex items-center gap-1.5 text-[11.5px] text-text-4 py-2" role="status">
+          <AsciiSpinner className="text-[11.5px] leading-none" />
+          Loading rule packs…
+        </div>
       ) : (
         <ul className="flex flex-col gap-1.5">
           {packs.map((p) => (
@@ -4979,6 +6239,10 @@ function AgentsTab() {
   const [tomlEntries, setTomlEntries] = useState<AgentsTomlEntry[]>([]);
   const [editing, setEditing] = useState<AgentsTomlEntry | null>(null);
   const [busy, setBusy] = useState(false);
+  const [syncStatus, setSyncStatus] = useState<AgentConfigSyncStatus | null>(null);
+  const [syncBusy, setSyncBusy] = useState<"push" | "pull" | null>(null);
+  const [syncMessage, setSyncMessage] = useState<string | null>(null);
+  const [syncError, setSyncError] = useState<string | null>(null);
   const reload = async () => {
     setBusy(true);
     try {
@@ -4994,7 +6258,68 @@ function AgentsTab() {
   };
   useEffect(() => {
     reload();
+    void refreshSyncStatus();
   }, []);
+
+  async function refreshSyncStatus() {
+    try {
+      const status = await api.settingsAgentConfigsStatus();
+      setSyncStatus(status);
+      setSyncError(status.error);
+    } catch (e) {
+      setSyncError(String(e));
+    }
+  }
+
+  async function pushAgentConfigs() {
+    setSyncBusy("push");
+    setSyncError(null);
+    setSyncMessage(null);
+    try {
+      const status = await api.settingsAgentConfigsPush();
+      setSyncStatus(status);
+      const suffix = status.remoteFiles.length === 1 ? "" : "s";
+      setSyncMessage(
+        status.remoteFiles.length > 0
+          ? `Uploaded ${status.remoteFiles.length} redacted configuration file${suffix}.`
+          : "Uploaded an empty configuration bundle; no supported local files were found.",
+      );
+    } catch (e) {
+      setSyncError(String(e));
+    } finally {
+      setSyncBusy(null);
+    }
+  }
+
+  async function pullAgentConfigs() {
+    if (
+      !window.confirm(
+        "Apply the cloud copy on this machine? Aura will back up every existing file beside the original before replacing it.",
+      )
+    ) {
+      return;
+    }
+    setSyncBusy("pull");
+    setSyncError(null);
+    setSyncMessage(null);
+    try {
+      const result = await api.settingsAgentConfigsPull();
+      setSyncStatus(result.status);
+      const fileSuffix = result.applied.length === 1 ? "" : "s";
+      const backupSuffix = result.backups.length === 1 ? "" : "s";
+      setSyncMessage(
+        `Applied ${result.applied.length} configuration file${fileSuffix}${
+          result.backups.length > 0
+            ? ` and created ${result.backups.length} backup${backupSuffix}`
+            : ""
+        }.`,
+      );
+    } catch (e) {
+      setSyncError(String(e));
+    } finally {
+      setSyncBusy(null);
+    }
+  }
 
   const reloadProviders = async () => {
     setBusy(true);
@@ -5073,6 +6398,78 @@ function AgentsTab() {
             </div>
           ))}
       </Card>
+      <Section title="Cross-machine configuration">
+        <div className="text-[11px] leading-relaxed text-text-3">
+          Carry Claude Code, Codex, and Gemini CLI preferences through your
+          Aura account. Only <code>settings.json</code> and{" "}
+          <code>config.toml</code> are eligible; API keys, tokens, passwords,
+          OAuth state, and authentication files are stripped or never read.
+        </div>
+        <div className="mt-3 rounded-md border border-line-soft bg-bg-1/40 px-3 py-2.5">
+          <div className="flex items-center justify-between gap-3 text-[11px]">
+            <span className="text-text-3">This machine</span>
+            <span className="font-mono text-right text-text-2">
+              {syncStatus?.localFiles.length
+                ? syncStatus.localFiles.join(" · ")
+                : "No supported config files found"}
+            </span>
+          </div>
+          <div className="mt-2 flex items-center justify-between gap-3 border-t border-line-soft pt-2 text-[11px]">
+            <span className="text-text-3">Cloud copy</span>
+            <span className="text-right text-text-2">
+              {!syncStatus?.signedIn
+                ? "Sign in to Aura Cloud to sync"
+                : syncStatus.remoteUpdatedAt
+                  ? `${syncStatus.remoteFiles.length} file${
+                      syncStatus.remoteFiles.length === 1 ? "" : "s"
+                    } · ${syncStatus.remoteSourceDevice ?? "unknown device"} · ${new Date(
+                      syncStatus.remoteUpdatedAt,
+                    ).toLocaleString()}`
+                  : "Not uploaded yet"}
+            </span>
+          </div>
+        </div>
+        {syncError && (
+          <div className="mt-2 text-[11px] text-red" role="alert">
+            {syncError}
+          </div>
+        )}
+        {syncMessage && (
+          <div className="mt-2 text-[11px] text-green">{syncMessage}</div>
+        )}
+        <div className="mt-3 flex items-center gap-2">
+          <Button
+            variant="secondary"
+            size="xs"
+            disabled={!syncStatus?.signedIn || syncBusy !== null}
+            onClick={() => void pushAgentConfigs()}
+          >
+            {syncBusy === "push" ? (
+              <AsciiSpinner className="text-[11px] leading-none" />
+            ) : (
+              <Upload size={12} />
+            )}
+            Upload this machine
+          </Button>
+          <Button
+            variant="secondary"
+            size="xs"
+            disabled={
+              !syncStatus?.signedIn ||
+              !syncStatus.remoteUpdatedAt ||
+              syncBusy !== null
+            }
+            onClick={() => void pullAgentConfigs()}
+          >
+            {syncBusy === "pull" ? (
+              <AsciiSpinner className="text-[11px] leading-none" />
+            ) : (
+              <Download size={12} />
+            )}
+            Apply cloud copy
+          </Button>
+        </div>
+      </Section>
       {editing && (
         <AgentEditor
           entry={editing}
@@ -5110,14 +6507,15 @@ function AgentRow({
   return (
     <div className="flex items-center gap-2.5 py-3">
       <span
-        className={`grid h-5 w-5 shrink-0 place-items-center rounded-full text-[11px] ${
-          descriptor.available
-            ? "bg-accent-green/12 text-accent-green"
-            : "bg-bg-2 text-text-4"
-        }`}
+        className="relative grid h-[22px] w-[22px] shrink-0 place-items-center"
         title={descriptor.available ? "Available on this machine" : "Not found on PATH"}
       >
-        {descriptor.available ? "✓" : "✕"}
+        <AgentIcon agentId={descriptor.id} label={descriptor.label} size={22} />
+        <span
+          className={`absolute -bottom-0.5 -right-0.5 h-2 w-2 rounded-full ring-2 ring-[var(--color-bg-content)] ${
+            descriptor.available ? "bg-accent-green" : "bg-text-4"
+          }`}
+        />
       </span>
       <div className="flex-1 min-w-0">
         <div className="flex items-center gap-2">
@@ -5475,10 +6873,9 @@ function LocalModelsTab() {
             const status = testResults[p.name];
             return (
               <div key={p.name} className="flex items-center gap-2.5 py-3">
-                <span
-                  className="mt-0.5 h-1.5 w-1.5 shrink-0 self-start rounded-full bg-text-5"
-                  aria-hidden
-                />
+                <span className="mt-px shrink-0 self-start">
+                  <AgentIcon agentId="openai-compat" label={p.name} size={18} />
+                </span>
                 <div className="flex-1 min-w-0">
                   <div className="flex items-center gap-2">
                     <span className="text-[12.5px] text-text-1">{p.name}</span>
@@ -5504,8 +6901,8 @@ function LocalModelsTab() {
                       className="mt-0.5 text-[10.5px]"
                       style={{
                         color: status.result.ok
-                          ? "var(--color-accent-green, #4ade80)"
-                          : "var(--color-red, #fca5a5)",
+                          ? "var(--color-accent-green)"
+                          : "var(--color-red)",
                       }}
                     >
                       {status.result.message}
@@ -5920,7 +7317,7 @@ function TelemetryLocalCounts({
   }, [view]);
   return (
     <Section title="Anonymous usage">
-      {error && <div className="text-[11.5px] text-red mb-2">{error}</div>}
+      {error && <div role="alert" className="text-[11.5px] text-red mb-2">{error}</div>}
       {view ? (
         view.enabled ? (
           <>
@@ -5972,7 +7369,10 @@ function TelemetryLocalCounts({
           </p>
         )
       ) : (
-        <p className="text-[11.5px] text-text-4">loading…</p>
+        <div className="flex items-center gap-1.5 text-[11.5px] text-text-4" role="status">
+          <AsciiSpinner className="text-[11.5px] leading-none" />
+          Loading what Aura has sent…
+        </div>
       )}
     </Section>
   );
@@ -5982,24 +7382,8 @@ function TelemetryLocalCounts({
 //
 // One calm place for the things people hunt for when they're stuck:
 // the keyboard map, the docs/repo/issue links, and which build they're
-// running. Shortcuts mirror the Command Palette's canonical hints
-// (CommandPalette.tsx APP_ACTIONS) so there's a single source of truth —
-// if a binding changes there, update the row here too.
-
-const HELP_SHORTCUTS: Array<{ label: string; keys: string }> = [
-  { label: "Command palette", keys: "⌘K" },
-  { label: "Toggle sidebar", keys: "⌘B" },
-  { label: "Toggle terminal", keys: "⌘J" },
-  { label: "Toggle review panel", keys: "⌘R" },
-  { label: "Search across files", keys: "⌘⇧F" },
-  { label: "Save file", keys: "⌘S" },
-  { label: "Close tab", keys: "⌘W" },
-  { label: "New chat", keys: "⌘N" },
-  { label: "Open tasks board", keys: "⌘T" },
-  { label: "Open team notes", keys: "⌘⇧N" },
-  { label: "Log task intent", keys: "⌘⇧I" },
-  { label: "Open settings", keys: "⌘," },
-];
+// running. The shortcut rows come from the shared `lib/shortcuts` map —
+// the same source the ⌘/ cheat-sheet reads — so the two never drift.
 
 const HELP_LINKS: Array<{
   label: string;
@@ -6054,7 +7438,7 @@ function KbdCombo({ combo }: { combo: string }) {
   );
 }
 
-function HelpTab() {
+function HelpTab({ onClose }: { onClose: () => void }) {
   const [version, setVersion] = useState<string | null>(null);
 
   useEffect(() => {
@@ -6075,6 +7459,29 @@ function HelpTab() {
 
   return (
     <div>
+      <Section title="Getting started">
+        <button
+          type="button"
+          onClick={() => {
+            onClose();
+            window.dispatchEvent(new Event("aura:start-tour"));
+          }}
+          className="group flex w-full items-center gap-3 rounded-md px-2 py-2 text-left hover:bg-bg-2 transition-colors"
+        >
+          <span className="shrink-0 text-accent">
+            <Sparkles className="h-4 w-4" aria-hidden />
+          </span>
+          <span className="flex-1 min-w-0">
+            <span className="block text-[12.5px] text-text-1">
+              Take the tour
+            </span>
+            <span className="block text-[11px] text-text-4 truncate">
+              A 60-second walkthrough of what Aura does and where things live.
+            </span>
+          </span>
+        </button>
+      </Section>
+
       <Section title="Keyboard shortcuts">
         <div className="grid grid-cols-1 sm:grid-cols-2 gap-x-6">
           {HELP_SHORTCUTS.map((s) => (
@@ -6273,7 +7680,7 @@ function ProfilesTab({ repoRoot }: { repoRoot: string }) {
         subtitle="Isolated agent logins and per-workspace git identities."
       />
       {error && (
-        <div className="text-rose-400 text-xs px-3 py-2 bg-rose-500/10 rounded border border-rose-500/30">
+        <div className="text-red text-xs px-3 py-2 bg-red/10 rounded border border-red/30">
           {error}
         </div>
       )}
@@ -6289,15 +7696,15 @@ function ProfilesTab({ repoRoot }: { repoRoot: string }) {
           <div className="flex flex-col gap-3">
             <LabeledRow label="Git identity">
               <Select
-                value={binding.git_profile_id ?? ""}
+                value={binding.git_profile_id ?? "__none__"}
                 onChange={(v) =>
                   void saveBinding({
                     ...binding,
-                    git_profile_id: v || null,
+                    git_profile_id: v === "__none__" ? null : v,
                   })
                 }
                 options={[
-                  { value: "", label: "(none — use system default)" },
+                  { value: "__none__", label: "(none — use system default)" },
                   ...gitProfiles.map((p) => ({
                     value: p.id,
                     label: `${p.label} — ${p.user_email}`,
@@ -6309,15 +7716,15 @@ function ProfilesTab({ repoRoot }: { repoRoot: string }) {
             </LabeledRow>
             <LabeledRow label="Default agent profile">
               <Select
-                value={binding.agent_profile_name ?? ""}
+                value={binding.agent_profile_name ?? "__none__"}
                 onChange={(v) =>
                   void saveBinding({
                     ...binding,
-                    agent_profile_name: v || null,
+                    agent_profile_name: v === "__none__" ? null : v,
                   })
                 }
                 options={[
-                  { value: "", label: "(none — inherit system HOME)" },
+                  { value: "__none__", label: "(none — inherit system HOME)" },
                   ...agentProfiles.map((p) => ({
                     value: p.name,
                     label: p.label ?? p.name,
@@ -6378,7 +7785,7 @@ function ProfilesTab({ repoRoot }: { repoRoot: string }) {
                 type="button"
                 onClick={() => void deleteAgentProfile(p.name)}
                 disabled={busy}
-                className="ml-auto h-6 px-2 rounded text-[11px] text-rose-400 hover:bg-rose-500/10 transition-colors"
+                className="ml-auto h-6 px-2 rounded text-[11px] text-red hover:bg-red/10 transition-colors"
               >
                 Delete
               </button>
@@ -6438,7 +7845,7 @@ function ProfilesTab({ repoRoot }: { repoRoot: string }) {
                   type="button"
                   onClick={() => void deleteGitProfile(p.id)}
                   disabled={busy}
-                  className="h-6 px-2 rounded text-[11px] text-rose-400 hover:bg-rose-500/10"
+                  className="h-6 px-2 rounded text-[11px] text-red hover:bg-red/10"
                 >
                   Delete
                 </button>
@@ -6485,7 +7892,7 @@ function shortRepoLabel(repoRoot: string): string {
 //
 // Surfaces the per-repo identity override map + the alias-augmented
 // roster for the current repo. Two concerns intentionally co-located so
-// a user fixing "messages don't appear under @teammate" doesn't have to
+// a user fixing "messages don't appear under @mck" doesn't have to
 // bounce between two panes:
 //   1. Per-repo override map — list every repo on this device that has
 //      a stored override, with a "Set as default for this repo" button
@@ -6559,7 +7966,7 @@ function GitProfileEditor({
           className="max-w-[260px]"
         />
         {idCollision && (
-          <span className="text-rose-400 text-[11px] ml-2">
+          <span className="text-red text-[11px] ml-2">
             id already in use
           </span>
         )}

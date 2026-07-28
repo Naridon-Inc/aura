@@ -199,6 +199,17 @@ pub struct BrainUpsertProviderInput {
     /// existing key.
     #[serde(default)]
     pub api_key: Option<String>,
+    /// Key header scheme. `"api_key"` (or `"azure"`) uses the `api-key:`
+    /// header that Azure OpenAI requires; anything else (or omitted) uses
+    /// the standard `Authorization: Bearer` scheme. Persisted to
+    /// `extra.auth_style` so the registry can rebuild the brain.
+    #[serde(default)]
+    pub auth_style: Option<String>,
+    /// Azure OpenAI `api-version` query param (e.g.
+    /// `"2024-08-01-preview"`). Persisted to `extra.api_version`; the
+    /// registry appends it to every request. Omit for non-Azure endpoints.
+    #[serde(default)]
+    pub api_version: Option<String>,
     /// Make this provider the active brain immediately after upsert.
     #[serde(default)]
     pub set_active: bool,
@@ -256,6 +267,34 @@ pub async fn brain_upsert_provider(
             "base_url".to_string(),
             serde_json::Value::String(base_url),
         );
+        // Azure knobs — only written when supplied, so a plain endpoint's
+        // `extra` never accumulates Azure fields. Passing an empty string
+        // clears a previously-set value (e.g. switching a slug back to a
+        // standard Bearer endpoint).
+        match input.auth_style.as_deref().map(str::trim) {
+            Some("") => {
+                obj.remove("auth_style");
+            }
+            Some(style) => {
+                obj.insert(
+                    "auth_style".to_string(),
+                    serde_json::Value::String(style.to_ascii_lowercase()),
+                );
+            }
+            None => {}
+        }
+        match input.api_version.as_deref().map(str::trim) {
+            Some("") => {
+                obj.remove("api_version");
+            }
+            Some(ver) => {
+                obj.insert(
+                    "api_version".to_string(),
+                    serde_json::Value::String(ver.to_string()),
+                );
+            }
+            None => {}
+        }
     }
     if input.set_active {
         s.active_provider_id = Some(provider_id.clone());
@@ -299,6 +338,126 @@ pub async fn brain_remove_provider(input: BrainRemoveProviderInput) -> Result<()
     settings::save(&s).map_err(|e| e.to_string())?;
     keychain::delete_api_key(&input.provider_id).map_err(|e| e.to_string())?;
     Ok(())
+}
+
+// ─── Cloud singleton brains — Bedrock / Vertex config ────────────────
+//
+// Bedrock and Vertex are singleton providers (not the openai_compat:<slug>
+// family), but they need more than a single API key: Bedrock wants an AWS
+// region + access key id, Vertex a GCP project + location. Those non-secret
+// fields live in `ProviderConfig.extra`; the credential (AWS secret access
+// key / the service-account JSON) goes to the OS keychain under the provider
+// id. `brain_configure_cloud` writes both from one BrainTab form.
+
+/// Non-secret config keys we accept per cloud provider. Anything else in the
+/// incoming `extra` is ignored, so the settings file can't accumulate junk.
+fn cloud_extra_keys(provider_id: &str) -> &'static [&'static str] {
+    match provider_id {
+        "bedrock" => &["region", "access_key_id", "session_token"],
+        "vertex" => &["project_id", "location"],
+        _ => &[],
+    }
+}
+
+#[derive(Debug, Deserialize)]
+pub struct BrainConfigureCloudInput {
+    /// `"bedrock"` or `"vertex"`.
+    pub provider_id: String,
+    /// Model id (Bedrock model/inference-profile id, or Vertex `model@version`).
+    #[serde(default)]
+    pub model: Option<String>,
+    /// Non-secret fields — see [`cloud_extra_keys`]. An empty-string value
+    /// clears that key; an absent key is left untouched.
+    #[serde(default)]
+    pub extra: serde_json::Value,
+    /// The credential: AWS secret access key (Bedrock) or the full
+    /// service-account JSON (Vertex). Empty string clears it; omitted leaves
+    /// the stored credential in place.
+    #[serde(default)]
+    pub secret: Option<String>,
+    /// Make this the active brain immediately.
+    #[serde(default)]
+    pub set_active: bool,
+}
+
+#[tauri::command]
+pub async fn brain_configure_cloud(input: BrainConfigureCloudInput) -> Result<(), String> {
+    let provider_id = input.provider_id.trim();
+    let allowed = cloud_extra_keys(provider_id);
+    if allowed.is_empty() {
+        return Err(format!(
+            "unknown cloud provider '{provider_id}' — expected 'bedrock' or 'vertex'"
+        ));
+    }
+
+    let mut s = settings::load();
+    let entry = s.providers.entry(provider_id.to_string()).or_default();
+    if let Some(model) = input.model.as_deref().map(str::trim) {
+        entry.model = if model.is_empty() {
+            None
+        } else {
+            Some(model.to_string())
+        };
+    }
+    if !entry.extra.is_object() {
+        entry.extra = serde_json::json!({});
+    }
+    if let Some(obj) = entry.extra.as_object_mut() {
+        for key in allowed {
+            let Some(val) = input.extra.get(*key).and_then(|v| v.as_str()) else {
+                continue; // key absent → leave existing value untouched
+            };
+            let val = val.trim();
+            if val.is_empty() {
+                obj.remove(*key);
+            } else {
+                obj.insert((*key).to_string(), serde_json::Value::String(val.to_string()));
+            }
+        }
+    }
+    if input.set_active {
+        s.active_provider_id = Some(provider_id.to_string());
+    }
+    settings::save(&s).map_err(|e| e.to_string())?;
+
+    // Credential → keychain. Empty clears; None leaves it in place.
+    if let Some(secret) = input.secret {
+        if secret.trim().is_empty() {
+            keychain::delete_api_key(provider_id).map_err(|e| e.to_string())?;
+        } else {
+            keychain::set_api_key(provider_id, secret.trim()).map_err(|e| e.to_string())?;
+        }
+    }
+    Ok(())
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct BrainCloudConfigOut {
+    pub provider_id: String,
+    pub model: Option<String>,
+    /// The non-secret `extra` map (region/project/etc.) — never the credential.
+    pub extra: serde_json::Value,
+    /// Whether a credential is stored in the keychain for this provider.
+    pub has_secret: bool,
+}
+
+/// Read back a cloud provider's saved config so the BrainTab form can
+/// prefill. Never returns the stored credential — only whether one is set.
+#[tauri::command]
+pub async fn brain_cloud_config_get(provider_id: String) -> Result<BrainCloudConfigOut, String> {
+    let id = provider_id.trim().to_string();
+    let s = settings::load();
+    let (model, extra) = match s.providers.get(&id) {
+        Some(cfg) => (cfg.model.clone(), cfg.extra.clone()),
+        None => (None, serde_json::json!({})),
+    };
+    let has_secret = keychain::has_api_key(&id);
+    Ok(BrainCloudConfigOut {
+        provider_id: id,
+        model,
+        extra,
+        has_secret,
+    })
 }
 
 // ─── Aura Pro brain — sign-in state + quota ──────────────────────────

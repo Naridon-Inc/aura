@@ -106,6 +106,32 @@ pub fn descriptors() -> Vec<BrainDescriptor> {
         });
     }
 
+    // Cloud-hosted Claude via the hyperscaler control planes. The "API key"
+    // column carries the AWS secret access key / the service-account JSON —
+    // the BrainTab config forms collect the extra fields (region / project)
+    // these need before the credential is stored.
+    #[cfg(feature = "brain_bedrock")]
+    {
+        out.push(BrainDescriptor {
+            provider_id: "bedrock".to_string(),
+            display_name: "Claude (AWS Bedrock)".to_string(),
+            blurb: "Anthropic Claude through your AWS account — SigV4-signed Bedrock runtime."
+                .to_string(),
+            requires_api_key: true,
+        });
+    }
+
+    #[cfg(feature = "brain_vertex")]
+    {
+        out.push(BrainDescriptor {
+            provider_id: "vertex".to_string(),
+            display_name: "Claude (Google Vertex AI)".to_string(),
+            blurb: "Anthropic Claude through your GCP project — service-account auth on Vertex AI."
+                .to_string(),
+            requires_api_key: true,
+        });
+    }
+
     // Dynamic descriptors: one per user-configured openai_compat endpoint.
     #[cfg(feature = "brain_openai_compat")]
     {
@@ -357,10 +383,103 @@ pub fn build(provider_id: &str) -> Result<Arc<dyn Brain>, BrainError> {
                 api_key,
             )))
         }
+        #[cfg(feature = "brain_bedrock")]
+        "bedrock" => build_bedrock(),
+        #[cfg(feature = "brain_vertex")]
+        "vertex" => build_vertex(),
         _ => Err(BrainError::UnknownProvider {
             provider_id: provider_id.to_string(),
         }),
     }
+}
+
+/// Build the Bedrock brain from settings (`extra.region`, `extra.access_key_id`,
+/// optional `extra.session_token`, `model`/`extra.model`) + the secret access
+/// key from the keychain. Errors name the exact missing field so the config
+/// form can point the user at it.
+#[cfg(feature = "brain_bedrock")]
+fn build_bedrock() -> Result<Arc<dyn Brain>, BrainError> {
+    let settings = settings::load();
+    let cfg = settings
+        .providers
+        .get("bedrock")
+        .ok_or_else(|| BrainError::Other {
+            message: "Bedrock isn't configured yet — open Settings → Brains → Claude (AWS Bedrock)"
+                .into(),
+        })?;
+    let extra_str = |key: &str| {
+        cfg.extra
+            .get(key)
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string())
+            .filter(|s| !s.is_empty())
+    };
+    let region = extra_str("region").ok_or_else(|| BrainError::Other {
+        message: "Bedrock: AWS region is required (e.g. us-east-1)".into(),
+    })?;
+    let access_key_id = extra_str("access_key_id").ok_or_else(|| BrainError::Other {
+        message: "Bedrock: AWS access key id is required".into(),
+    })?;
+    let model = cfg
+        .model
+        .clone()
+        .filter(|s| !s.is_empty())
+        .or_else(|| extra_str("model"))
+        .ok_or_else(|| BrainError::Other {
+            message: "Bedrock: a model id is required (e.g. anthropic.claude-3-5-sonnet-20241022-v2:0)"
+                .into(),
+        })?;
+    let secret = super::keychain::get_api_key("bedrock")?.ok_or_else(|| BrainError::Keychain {
+        message: "Bedrock: no AWS secret access key stored — open Settings → Brains to add one"
+            .into(),
+    })?;
+    let brain = super::bedrock::BedrockBrain::new(access_key_id, secret, region, model)
+        .with_session_token(extra_str("session_token"));
+    Ok(Arc::new(brain))
+}
+
+/// Build the Vertex brain from settings (`extra.project_id`, `extra.location`,
+/// `model`/`extra.model`) + the service-account JSON from the keychain.
+#[cfg(feature = "brain_vertex")]
+fn build_vertex() -> Result<Arc<dyn Brain>, BrainError> {
+    let settings = settings::load();
+    let cfg = settings
+        .providers
+        .get("vertex")
+        .ok_or_else(|| BrainError::Other {
+            message:
+                "Vertex isn't configured yet — open Settings → Brains → Claude (Google Vertex AI)"
+                    .into(),
+        })?;
+    let extra_str = |key: &str| {
+        cfg.extra
+            .get(key)
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string())
+            .filter(|s| !s.is_empty())
+    };
+    let project_id = extra_str("project_id").ok_or_else(|| BrainError::Other {
+        message: "Vertex: GCP project id is required".into(),
+    })?;
+    let location = extra_str("location").ok_or_else(|| BrainError::Other {
+        message: "Vertex: region/location is required (e.g. us-east5)".into(),
+    })?;
+    let model = cfg
+        .model
+        .clone()
+        .filter(|s| !s.is_empty())
+        .or_else(|| extra_str("model"))
+        .ok_or_else(|| BrainError::Other {
+            message: "Vertex: a model id is required (e.g. claude-sonnet-4-5@20250929)".into(),
+        })?;
+    let sa_json = super::keychain::get_api_key("vertex")?.ok_or_else(|| BrainError::Keychain {
+        message: "Vertex: no service-account JSON stored — open Settings → Brains to add one"
+            .into(),
+    })?;
+    let sa = super::gcp_oauth::ServiceAccount::from_json(&sa_json)?;
+    Ok(Arc::new(super::vertex::VertexBrain::new(
+        sa, project_id, location, model,
+    )))
 }
 
 /// Build an `OpenAICompatBrain` from the persisted settings + keychain.
@@ -405,7 +524,39 @@ fn build_openai_compat(
     // as "blank key, skip Authorization".
     let api_key = super::keychain::get_api_key(provider_id)?.unwrap_or_default();
 
-    Ok(Arc::new(super::openai_compat::OpenAICompatBrain::new(
-        slug, base_url, api_key, model,
-    )))
+    // Azure OpenAI presents itself as an openai_compat endpoint with two
+    // twists: `api-key:` auth instead of Bearer, and a mandatory
+    // `api-version` query param. Both are opt-in via `extra` so standard
+    // endpoints are unaffected:
+    //   extra.auth_style = "api_key"          → header scheme
+    //   extra.api_version = "2024-08-01-preview" → query param
+    //   extra.query = { "k": "v", … }         → arbitrary extra params
+    let auth_style = match cfg.extra.get("auth_style").and_then(|v| v.as_str()) {
+        Some("api_key") | Some("api-key") | Some("azure") => {
+            super::openai_compat::AuthStyle::ApiKey
+        }
+        _ => super::openai_compat::AuthStyle::Bearer,
+    };
+    let mut query: Vec<(String, String)> = Vec::new();
+    if let Some(ver) = cfg
+        .extra
+        .get("api_version")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+    {
+        query.push(("api-version".to_string(), ver.to_string()));
+    }
+    if let Some(obj) = cfg.extra.get("query").and_then(|v| v.as_object()) {
+        for (k, v) in obj {
+            if let Some(s) = v.as_str() {
+                query.push((k.clone(), s.to_string()));
+            }
+        }
+    }
+
+    Ok(Arc::new(
+        super::openai_compat::OpenAICompatBrain::new(slug, base_url, api_key, model)
+            .with_auth_style(auth_style)
+            .with_query(query),
+    ))
 }

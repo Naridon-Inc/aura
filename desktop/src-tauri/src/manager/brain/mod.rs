@@ -25,6 +25,7 @@
 //! from this module's root so callers like `cmd_manager.rs` and
 //! `manager/mod.rs` continue to use `brain::Foo` paths unchanged.
 
+pub(crate) mod http;
 pub(crate) mod legacy;
 pub mod keychain;
 pub(crate) mod limits;
@@ -55,6 +56,27 @@ pub mod openai_compat;
 #[cfg(feature = "brain_aura_pro")]
 pub mod aura_pro;
 
+/// Shared Anthropic Messages SSE decoder — used by both the direct
+/// `anthropic_native` brain and Vertex (Anthropic-on-Vertex emits the same
+/// event stream).
+#[cfg(any(feature = "brain_anthropic_native", feature = "brain_vertex"))]
+pub mod anthropic_sse;
+
+// AWS Bedrock (Claude) — SigV4-signed `/invoke`. `aws_sigv4` is the standalone
+// signing primitive; `bedrock` is the Brain impl.
+#[cfg(feature = "brain_bedrock")]
+pub mod aws_sigv4;
+#[cfg(feature = "brain_bedrock")]
+pub mod bedrock;
+
+// Google Vertex AI (Claude) — GCP OAuth2 Bearer + Anthropic-native SSE.
+// `gcp_oauth` mints the token from a service-account JSON; `vertex` is the
+// Brain impl.
+#[cfg(feature = "brain_vertex")]
+pub mod gcp_oauth;
+#[cfg(feature = "brain_vertex")]
+pub mod vertex;
+
 pub use legacy::*;
 pub use types::{
     BrainCapabilities, BrainError, ChatChunk, ChatMessage, ChatRequest, cap_keys,
@@ -78,7 +100,8 @@ pub(crate) fn engine_family(provider_id: &str) -> &'static str {
         .or_else(|| provider_id.strip_prefix("cli:"))
         .unwrap_or(provider_id);
     match core {
-        "anthropic" | "anthropic_native" | "aura_pro" | "claude" | "claude_code" => "claude",
+        "anthropic" | "anthropic_native" | "aura_pro" | "claude" | "claude_code" | "bedrock"
+        | "vertex" => "claude",
         "gemini" | "gemini_native" => "gemini",
         "codex" | "openai" | "openai_native" => "codex",
         "cursor" => "cursor",
@@ -99,6 +122,8 @@ pub(crate) fn engine_label(provider_id: &str) -> String {
     match core {
         "anthropic" | "anthropic_native" => "Claude".to_string(),
         "aura_pro" => "Aura Pro".to_string(),
+        "bedrock" => "Claude (Bedrock)".to_string(),
+        "vertex" => "Claude (Vertex)".to_string(),
         "claude" | "claude_code" => "Claude Code".to_string(),
         "gemini" | "gemini_native" => "Gemini".to_string(),
         "codex" => "Codex".to_string(),
@@ -322,6 +347,8 @@ mod tests {
             tool_calls: Vec::new(),
             thinking: None,
             saved_tokens: None,
+            input_tokens: None,
+            output_tokens: None,
         }
     }
 

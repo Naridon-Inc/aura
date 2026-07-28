@@ -16,6 +16,7 @@ import { fetchPrList } from "../../lib/prsCache";
 import { useEditorStore } from "../../lib/editorStore";
 import { StatusChip, type ChipTone } from "../ui/statusChip";
 import { Churn } from "../diff/Churn";
+import { AsciiSpinner } from "../ui/ascii-spinner";
 
 type Props = {
   repoRoot: string;
@@ -56,7 +57,10 @@ export function PrStackRail({ repoRoot, prNumber, viewer }: Props) {
 
   if (loading) {
     return (
-      <div className="text-text-4 text-[12px] py-3">loading stack…</div>
+      <div className="flex items-center gap-1.5 text-text-4 text-[12px] py-3">
+        <AsciiSpinner className="text-[10px]" />
+        <span>Looking for related pull requests…</span>
+      </div>
     );
   }
   if (stack.length === 0) {
@@ -201,12 +205,8 @@ function Row({
           {pill.label}
         </StatusChip>
       )}
-      {/* +/- chip */}
-      <Churn
-        additions={additions}
-        deletions={deletions}
-        className="text-[11px] tabular-nums inline-flex items-center gap-1.5"
-      />
+      {/* +/− chip */}
+      <Churn additions={additions} deletions={deletions} />
       {/* age */}
       <span className="text-[11px] tabular-nums text-text-4 w-10 text-right">
         {formatAge(updated)}

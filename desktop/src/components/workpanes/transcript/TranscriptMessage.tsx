@@ -13,7 +13,7 @@
 // embedded code) is detected and drawn as its own collapsible, code-aware card
 // — kept, not dropped, since it's the substrate for agent-to-agent handover.
 
-import { useMemo, useState } from "react";
+import { memo, useMemo, useState } from "react";
 import { MarkdownInline } from "../../MarkdownView";
 import { Button } from "../../ui/button";
 import { AgentIcon } from "../../agent/AgentIcon";
@@ -33,7 +33,14 @@ import {
 
 const RESULT_CAP = 4000;
 
-export function TranscriptMessage({
+// Memoized: a session transcript can hold hundreds of items, and the parent
+// (SessionTranscript) re-renders on scroll, filter, and expand-all toggles.
+// Every prop here is stable per item — `item` is a parsed transcript object,
+// `now` is a mount-time constant (useMemo(Date.now, [])), `agentId` a string —
+// so shallow memo keeps an unchanged row from re-rendering (and re-parsing its
+// markdown) when something unrelated in the pane updates. `expandAll` flipping
+// intentionally re-renders every row, which is the one case we want.
+export const TranscriptMessage = memo(function TranscriptMessage({
   item,
   agentId,
   expandAll,
@@ -133,7 +140,7 @@ export function TranscriptMessage({
       );
     }
   }
-}
+});
 
 /** Avatar-gutter layout: fixed left column for the author mark, content to the
  *  right. The optional header (author · time) is the first line of the content

@@ -3,8 +3,8 @@
 //! Claude Code stores each conversation as a JSONL file under
 //! `~/.claude/projects/<encoded-cwd>/<session-uuid>.jsonl`. The encoded
 //! cwd is the absolute path with `/` replaced by `-` (so
-//! `/Users/you/Documents/New Git/aura-shell/src-tauri` becomes
-//! `-Users-you-Documents-New-Git-aura-shell-src-tauri`).
+//! `/Users/muhammed/Documents/New Git/aura-shell/src-tauri` becomes
+//! `-Users-muhammed-Documents-New-Git-aura-shell-src-tauri`).
 //!
 //! For each file we surface enough metadata for a picker UI:
 //!   - session id (the stem)
@@ -50,6 +50,12 @@ pub struct ClaudeSession {
     pub last_prompt: String,
     /// Approximate number of user turns in the file.
     pub turn_count: usize,
+    /// Number of agent *steps* — assistant messages in the transcript. A
+    /// session driven by one typed prompt can still carry dozens of these
+    /// (the model reading, editing, running commands turn after turn), so
+    /// this is the honest depth signal the header shows instead of letting a
+    /// deep run read as "1 turn".
+    pub step_count: usize,
     /// Path to the JSONL file — useful for a future "delete session"
     /// affordance.
     pub file_path: String,
@@ -138,6 +144,7 @@ pub async fn claude_list_sessions(repo_root: String) -> Result<Vec<ClaudeSession
                 first_prompt: scan.first_prompt,
                 last_prompt: scan.last_prompt,
                 turn_count: scan.turn_count,
+                step_count: scan.step_count,
                 file_path: path.to_string_lossy().into_owned(),
                 cwd_rel,
                 cwd,
@@ -159,8 +166,8 @@ pub(crate) fn projects_root_dir() -> Option<PathBuf> {
 
 /// Mirror Claude Code's project-dir encoding. Empirically Claude
 /// replaces `/` and ` ` with `-` (extend the table if a workspace ever
-/// turns up missing). e.g. `/Users/you/Documents/New Git`
-/// → `-Users-you-Documents-New-Git`.
+/// turns up missing). e.g. `/Users/muhammed/Documents/New Git`
+/// → `-Users-muhammed-Documents-New-Git`.
 pub(crate) fn encode_path(repo_root: &str) -> String {
     repo_root
         .chars()
@@ -425,11 +432,58 @@ pub fn newest_session_id_for_repo(repo_root: &str) -> Option<String> {
     best.map(|(_, s)| s)
 }
 
+/// Resolve the newest user-typed prompt for a specific Claude Code session
+/// (its jsonl stem) under `repo_root`. Reuses the same worktree-aware
+/// project-dir matching as [`newest_session_id_for_repo`], then returns that
+/// transcript's last user prompt (falling back to its first). `None` when the
+/// session file isn't found or carries no readable prompt yet — callers treat
+/// that as "no reason available" and keep their own fallback.
+///
+/// This is the "why" behind an edit an external CLI made: the guard fires while
+/// the agent is actively editing, so this session's prompt is the request that
+/// produced the change — captured at edit time, no commit required.
+pub fn latest_prompt_for_session(repo_root: &str, session_id: &str) -> Option<String> {
+    let projects_root = projects_root_dir()?;
+    if !projects_root.exists() {
+        return None;
+    }
+    let roots = sibling_worktree_roots(repo_root);
+    let recovery = recovery_prefix_for(repo_root);
+    for (dir_path, _owning_root) in
+        matching_project_dirs(&projects_root, &roots, recovery.as_deref(), repo_root)
+    {
+        let candidate = dir_path.join(format!("{session_id}.jsonl"));
+        if !candidate.is_file() {
+            continue;
+        }
+        let mtime = fs::metadata(&candidate)
+            .ok()
+            .and_then(|m| m.modified().ok())
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0);
+        let scan = scan_session_cached(&candidate, mtime);
+        let prompt = if scan.last_prompt.trim().is_empty() {
+            scan.first_prompt
+        } else {
+            scan.last_prompt
+        };
+        let prompt = prompt.trim();
+        return if prompt.is_empty() {
+            None
+        } else {
+            Some(prompt.to_string())
+        };
+    }
+    None
+}
+
 #[derive(Clone)]
 struct SessionScan {
     first_prompt: String,
     last_prompt: String,
     turn_count: usize,
+    step_count: usize,
     cwd: String,
 }
 
@@ -475,6 +529,7 @@ fn scan_session(path: &Path) -> SessionScan {
         first_prompt: String::new(),
         last_prompt: String::new(),
         turn_count: 0,
+        step_count: 0,
         cwd: String::new(),
     };
     let file = match fs::File::open(path) {
@@ -506,6 +561,12 @@ fn scan_session(path: &Path) -> SessionScan {
         // result wrapping noise), so prefer it. We only count turns on
         // queue-operation to avoid double-counting the same prompt.
         let kind = v.get("type").and_then(Value::as_str).unwrap_or("");
+        // Agent steps: every assistant message is one step the model took
+        // (a thought, an edit, a command). Counting these is what lets a
+        // one-prompt session honestly read "21 steps" instead of "1 turn".
+        if kind == "assistant" {
+            out.step_count += 1;
+        }
         if kind == "queue-operation"
             && v.get("operation").and_then(Value::as_str) == Some("enqueue")
         {

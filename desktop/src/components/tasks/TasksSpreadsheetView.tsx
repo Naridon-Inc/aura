@@ -67,13 +67,6 @@ const ALL_DISPLAY_PROPS: TaskViewDisplayProp[] = [
 const ROW_HEIGHT = 32;
 const OVERSCAN = 8;
 
-const AGENT_TINT: Record<string, string> = {
-  claude: "rgb(217, 119, 87)",
-  gemini: "rgb(96, 165, 250)",
-  codex: "rgb(132, 204, 168)",
-  opencode: "rgb(192, 132, 252)",
-};
-
 type ColumnId = "title" | TaskViewDisplayProp;
 
 type Props = {
@@ -511,8 +504,11 @@ function renderCell(
         <span
           className="inline-flex items-center gap-1 text-[10px] px-1 rounded uppercase tracking-wider"
           style={{
-            background: `${AGENT_TINT[task.agent_assignee] ?? "rgb(160,160,160)"}25`,
-            color: AGENT_TINT[task.agent_assignee] ?? "rgb(200,200,200)",
+            // Single agent colour — see TaskDetailSidePanel. The chip's own
+            // text names the agent, so a per-vendor palette added no signal.
+            background:
+              "color-mix(in oklab, var(--color-caret-orange) 15%, transparent)",
+            color: "var(--color-caret-orange)",
           }}
         >
           <Bot className="w-3 h-3" strokeWidth={1.5} aria-hidden />

@@ -83,28 +83,32 @@ function tooltipFor(s: CliAgentStatus, pluginVersion?: string): string {
 function paletteFor(s: CliAgentStatus) {
   switch (s.kind) {
     case "in_progress":
-      // sky — work in flight
+      // Work in flight. The chip itself stays quiet; only the dot carries the
+      // accent, so a running agent reads as live without shouting.
       return {
-        bg: "rgba(56,189,248,0.10)",
-        fg: "#7dd3fc",
-        border: "rgba(56,189,248,0.35)",
-        dot: "#38bdf8",
+        bg: "var(--color-pill-bg)",
+        fg: "var(--color-text-2)",
+        border: "var(--color-composer-border)",
+        dot: "var(--color-accent)",
       };
     case "blocked":
-      // amber — needs the user
+      // The one state that needs the user — it gets the full amber chip.
+      // Amber is the pack's attention slot; using the accent here made a
+      // blocked agent look identical to a running one (the dot above) and
+      // to every selected row on screen.
       return {
-        bg: "rgba(251,191,36,0.12)",
-        fg: "#fcd34d",
-        border: "rgba(251,191,36,0.40)",
-        dot: "#fbbf24",
+        bg: "color-mix(in srgb, var(--color-amber) 12%, transparent)",
+        fg: "var(--color-amber)",
+        border: "color-mix(in srgb, var(--color-amber) 40%, transparent)",
+        dot: "var(--color-amber)",
       };
     case "success":
-      // emerald — turn complete
+      // Finished, nothing to do — off the colour ramp entirely.
       return {
-        bg: "rgba(52,211,153,0.10)",
-        fg: "#6ee7b7",
-        border: "rgba(52,211,153,0.30)",
-        dot: "#34d399",
+        bg: "var(--color-pill-bg)",
+        fg: "var(--color-text-3)",
+        border: "var(--color-composer-border)",
+        dot: "var(--color-accent-green)",
       };
     default:
       return {

@@ -21,7 +21,7 @@ use tauri_plugin_opener::OpenerExt;
 use tokio::sync::{oneshot, Mutex as TokioMutex};
 
 use crate::integrations::{
-    config, jira, jira_sync, tokens, CloudSite, ConnectionStatus, ExternalIdentity,
+    config, jira, jira_sync, linear, tokens, CloudSite, ConnectionStatus, ExternalIdentity,
     IntegrationKind, MirrorSummary, ProviderTokens,
 };
 use crate::integrations::jira_sync::{JiraProject, SyncOutcome};
@@ -48,6 +48,22 @@ async fn cancel_pending_jira() {
     if let Some(tx) = slot.take() {
         // Ignore the result — receiver may already be gone (e.g. the
         // flow resolved on its own a microsecond before we got here).
+        let _ = tx.send(());
+    }
+}
+
+/// Same one-at-a-time slot for the Linear OAuth flow. Kept separate from
+/// the Jira slot so connecting Linear never cancels an in-flight Jira
+/// connect (and vice-versa) — the two loopback ports are distinct.
+fn pending_linear_flow() -> &'static TokioMutex<Option<oneshot::Sender<()>>> {
+    static S: OnceLock<TokioMutex<Option<oneshot::Sender<()>>>> = OnceLock::new();
+    S.get_or_init(|| TokioMutex::new(None))
+}
+
+/// Fire any in-flight Linear flow's cancel sender. Idempotent.
+async fn cancel_pending_linear() {
+    let mut slot = pending_linear_flow().lock().await;
+    if let Some(tx) = slot.take() {
         let _ = tx.send(());
     }
 }
@@ -769,6 +785,114 @@ pub fn integrations_jira_auto_mirror_disable() -> Result<ConnectionStatus, Strin
     Ok(status_from_state(IntegrationKind::Jira, &st))
 }
 
+// ── Linear commands ──────────────────────────────────────────────────
+
+/// Begin Linear OAuth. Same one-shot shape as the Jira connect: opens the
+/// system browser, awaits the loopback callback, exchanges the code,
+/// probes the workspace identity, persists tokens, and returns the full
+/// connection status. Emits `aura:integrations:linear:auth_url` so the
+/// renderer can offer a "didn't open?" fallback link.
+#[tauri::command]
+pub async fn integrations_linear_connect(app: AppHandle) -> Result<ConnectionStatus, String> {
+    // Evict any stale flow first (a previous attempt that landed on a
+    // Linear error page never redirects back, leaving the loopback
+    // listener holding the port until its 5-min timeout).
+    cancel_pending_linear().await;
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    let cfg = config::linear().map_err(|e| e.into_string())?;
+    let flow = linear::start_auth(&cfg).await.map_err(|e| e.into_string())?;
+
+    *pending_linear_flow().lock().await = Some(flow.cancel);
+
+    let _ = app.emit("aura:integrations:linear:auth_url", &flow.authorize_url);
+    if let Err(e) = app.opener().open_url(&flow.authorize_url, None::<String>) {
+        tracing::warn!(?e, "open browser failed; URL emitted to renderer");
+    }
+
+    let outcome_result = flow
+        .completion
+        .await
+        .map_err(|e| format!("oauth flow task panicked: {e}"))?;
+
+    {
+        let mut slot = pending_linear_flow().lock().await;
+        *slot = None;
+    }
+
+    let outcome = outcome_result.map_err(|e| e.into_string())?;
+
+    // Linear is single-workspace per token — no `sites`. Reuse the shared
+    // persist helper with an empty site list.
+    persist_provider_state(
+        IntegrationKind::Linear,
+        Some(outcome.identity.clone()),
+        Vec::new(),
+        &outcome.tokens,
+    )?;
+
+    Ok(ConnectionStatus {
+        kind: IntegrationKind::Linear,
+        connected: true,
+        identity: Some(outcome.identity),
+        sites: Vec::new(),
+        scopes: outcome.tokens.scope.clone(),
+        expires_at: outcome.tokens.expires_at,
+        mirrors: Vec::new(),
+        auto_mirror_repo_root: None,
+    })
+}
+
+/// Cancel an in-flight Linear OAuth flow. The `_connect` future resolves
+/// with "connect cancelled" and the loopback port is released.
+#[tauri::command]
+pub async fn integrations_linear_cancel() -> Result<(), String> {
+    cancel_pending_linear().await;
+    Ok(())
+}
+
+/// Return the current Linear connection status. Linear tokens are
+/// long-lived and carry no refresh token, so there's no refresh step —
+/// a lapsed token simply reports disconnected so the UI prompts a
+/// reconnect. Identity comes from the local state file, not the network.
+#[tauri::command]
+pub async fn integrations_linear_status() -> Result<ConnectionStatus, String> {
+    let stored = tokens::load(IntegrationKind::Linear).map_err(|e| e.into_string())?;
+    let Some(blob) = stored else {
+        return Ok(ConnectionStatus::disconnected(IntegrationKind::Linear));
+    };
+
+    // No refresh path (Linear issues no refresh token). If the token has
+    // genuinely expired, surface disconnected so the user reconnects.
+    if is_expired(&blob) {
+        return Ok(ConnectionStatus::disconnected(IntegrationKind::Linear));
+    }
+
+    let state = read_state()?;
+    if let Some(entry) = state.providers.get(IntegrationKind::Linear.slug()) {
+        return Ok(status_from_state(IntegrationKind::Linear, entry));
+    }
+    // Tokens present, state file missing — minimal connected status.
+    Ok(ConnectionStatus {
+        kind: IntegrationKind::Linear,
+        connected: true,
+        identity: None,
+        sites: Vec::new(),
+        scopes: blob.scope,
+        expires_at: blob.expires_at,
+        mirrors: Vec::new(),
+        auto_mirror_repo_root: None,
+    })
+}
+
+/// Forget Linear: wipe local tokens + cached state. Idempotent.
+#[tauri::command]
+pub fn integrations_linear_disconnect() -> Result<(), String> {
+    tokens::delete(IntegrationKind::Linear).map_err(|e| e.into_string())?;
+    forget_provider_state(IntegrationKind::Linear)?;
+    Ok(())
+}
+
 /// Snapshot all integrations the renderer should display in Settings.
 /// Hits keychain + state file only — no network. For the live token
 /// expiry view the caller follows up with `*_status` on individual
@@ -799,6 +923,28 @@ pub fn integrations_list() -> Result<Vec<ConnectionStatus>, String> {
         }
     } else {
         out.push(ConnectionStatus::disconnected(IntegrationKind::Jira));
+    }
+
+    // Linear — single-workspace, no sites/mirrors.
+    let linear_token = tokens::load(IntegrationKind::Linear).map_err(|e| e.into_string())?;
+    if linear_token.is_some() {
+        if let Some(entry) = state.providers.get(IntegrationKind::Linear.slug()) {
+            out.push(status_from_state(IntegrationKind::Linear, entry));
+        } else {
+            let t = linear_token.unwrap();
+            out.push(ConnectionStatus {
+                kind: IntegrationKind::Linear,
+                connected: true,
+                identity: None,
+                sites: Vec::new(),
+                scopes: t.scope,
+                expires_at: t.expires_at,
+                mirrors: Vec::new(),
+                auto_mirror_repo_root: None,
+            });
+        }
+    } else {
+        out.push(ConnectionStatus::disconnected(IntegrationKind::Linear));
     }
 
     Ok(out)

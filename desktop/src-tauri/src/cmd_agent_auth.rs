@@ -116,15 +116,97 @@ pub struct CodexAuthStatus {
     /// "ChatGPT" or "API key" or unknown — whatever `codex login status`
     /// reports as the trailing identifier on its single text line.
     pub method: Option<String>,
+    /// Coarse health of the Codex CLI, so the UI can tell apart a working
+    /// install that's simply signed-out from one that can't run at all:
+    ///   - "logged_in"  — CLI works, an account is authenticated
+    ///   - "logged_out" — CLI works, no account yet (offer sign-in)
+    ///   - "broken"     — `codex` is on PATH but won't run (typically a
+    ///                    half-installed npm package missing its native
+    ///                    binary); sign-in can't work until it's reinstalled
+    ///   - "missing"    — `codex` isn't installed / not on PATH
+    pub state: String,
+    /// Human-readable explanation shown to the user when `state` is
+    /// "broken" or "missing" (e.g. the CLI's own reinstall hint).
+    pub detail: Option<String>,
+    /// A shell command that repairs a missing/broken install, surfaced so
+    /// the user can copy-run it. `None` when nothing needs fixing.
+    pub fix_command: Option<String>,
+    /// True when Codex credentials exist on disk (`$CODEX_HOME/auth.json`,
+    /// default `~/.codex/auth.json`) — the user has signed in to Codex or
+    /// ChatGPT (via the CLI or the ChatGPT/Codex app), even if the CLI
+    /// binary itself is currently unavailable.
+    pub has_credentials: bool,
+}
+
+/// Whether Codex credentials exist on disk. Codex (and the ChatGPT/Codex
+/// app that shares the same store) writes its OAuth/API tokens to
+/// `$CODEX_HOME/auth.json`, defaulting to `~/.codex/auth.json`. Presence
+/// lets us tell an already-signed-in user "you're connected — reinstall
+/// the CLI to use it" instead of dead-ending them at a sign-in button.
+fn codex_credentials_exist() -> bool {
+    let base = std::env::var_os("CODEX_HOME")
+        .map(std::path::PathBuf::from)
+        .or_else(|| {
+            std::env::var_os("HOME")
+                .or_else(|| std::env::var_os("USERPROFILE"))
+                .map(|h| std::path::PathBuf::from(h).join(".codex"))
+        });
+    base.map(|b| b.join("auth.json").exists()).unwrap_or(false)
+}
+
+/// Pull the CLI's own "Reinstall Codex: <cmd>" hint out of its stderr, if
+/// present — the npm wrapper prints an exact repair command when its
+/// native binary is missing. Falls back to the canonical install command.
+fn codex_reinstall_command(stderr: &str) -> String {
+    stderr
+        .lines()
+        .find_map(|l| l.split_once("Reinstall Codex:").map(|(_, cmd)| cmd.trim().to_string()))
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "npm install -g @openai/codex@latest".to_string())
 }
 
 #[tauri::command]
 pub async fn codex_auth_status() -> Result<CodexAuthStatus, String> {
+    let has_credentials = codex_credentials_exist();
+
+    // Health gate first. `codex login status` alone can't distinguish a
+    // signed-out install from a broken one — a half-installed npm package
+    // (wrapper present, native binary absent) exits non-zero with an empty
+    // stdout, which the old code read as "not logged in". `codex --version`
+    // is a cheap probe that only succeeds on a runnable binary.
+    match Command::new("codex").arg("--version").output().await {
+        Err(_) => {
+            // `codex` isn't on PATH at all.
+            return Ok(CodexAuthStatus {
+                state: "missing".into(),
+                detail: Some("The Codex CLI isn't installed.".into()),
+                fix_command: Some("npm install -g @openai/codex".into()),
+                has_credentials,
+                ..Default::default()
+            });
+        }
+        Ok(o) if !o.status.success() => {
+            // On PATH but won't run — surface the CLI's own reinstall hint.
+            let stderr = String::from_utf8_lossy(&o.stderr);
+            return Ok(CodexAuthStatus {
+                state: "broken".into(),
+                detail: Some(
+                    "Codex is installed but won't run — it needs reinstalling.".into(),
+                ),
+                fix_command: Some(codex_reinstall_command(&stderr)),
+                has_credentials,
+                ..Default::default()
+            });
+        }
+        Ok(_) => { /* runnable — fall through to the auth check */ }
+    }
+
+    // Binary is healthy — read the signed-in state.
     let out = Command::new("codex")
         .args(["login", "status"])
         .output()
         .await
-        .map_err(|e| format!("codex CLI not on PATH: {e}"))?;
+        .map_err(|e| format!("codex login status failed: {e}"))?;
     // codex prints plain text e.g. "Logged in using ChatGPT" or
     // "Not logged in". Exit code mirrors that — 0 when logged in.
     let text = String::from_utf8_lossy(&out.stdout).trim().to_string();
@@ -138,23 +220,52 @@ pub async fn codex_auth_status() -> Result<CodexAuthStatus, String> {
         Ok(CodexAuthStatus {
             logged_in: true,
             method,
+            state: "logged_in".into(),
+            has_credentials: true,
+            ..Default::default()
         })
     } else {
-        Ok(CodexAuthStatus::default())
+        Ok(CodexAuthStatus {
+            state: "logged_out".into(),
+            has_credentials,
+            ..Default::default()
+        })
     }
 }
 
 #[tauri::command]
 pub async fn codex_auth_login() -> Result<i32, String> {
-    let status = Command::new("codex")
+    // `codex login` opens the ChatGPT OAuth flow in the browser and blocks
+    // until the callback lands, then exits. We capture stderr (rather than
+    // discarding it) so a failure — a broken install, a cancelled flow —
+    // surfaces a real reason to the UI instead of a silent no-op.
+    let out = Command::new("codex")
         .arg("login")
         .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
+        .output()
         .await
         .map_err(|e| format!("codex login failed to start: {e}"))?;
-    Ok(status.code().unwrap_or(-1))
+    if !out.status.success() {
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        if stderr.contains("Reinstall Codex:") || stderr.contains("Missing optional dependency") {
+            return Err(format!(
+                "Codex needs reinstalling before you can sign in. Run: {}",
+                codex_reinstall_command(&stderr)
+            ));
+        }
+        let msg = stderr
+            .lines()
+            .rev()
+            .find(|l| !l.trim().is_empty())
+            .map(|l| l.trim().to_string())
+            .unwrap_or_default();
+        return Err(if msg.is_empty() {
+            "Codex sign-in didn't complete.".into()
+        } else {
+            msg
+        });
+    }
+    Ok(out.status.code().unwrap_or(0))
 }
 
 /// Open a macOS System Settings pane via the `x-apple.systempreferences:`
@@ -187,8 +298,8 @@ pub async fn codex_auth_login_api_key(api_key: String) -> Result<i32, String> {
     let mut child = Command::new("codex")
         .args(["login", "--with-api-key"])
         .stdin(Stdio::piped())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
         .spawn()
         .map_err(|e| format!("codex login --with-api-key failed to start: {e}"))?;
     if let Some(mut stdin) = child.stdin.take() {
@@ -199,10 +310,32 @@ pub async fn codex_auth_login_api_key(api_key: String) -> Result<i32, String> {
         // Close stdin so codex stops reading.
         drop(stdin);
     }
-    let status = child
-        .wait()
+    // Capture output so a rejected key / broken install returns a reason.
+    // The key itself is only ever written to stdin — never logged.
+    let out = child
+        .wait_with_output()
         .await
         .map_err(|e| format!("codex login wait: {e}"))?;
-    Ok(status.code().unwrap_or(-1))
+    if !out.status.success() {
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        if stderr.contains("Reinstall Codex:") || stderr.contains("Missing optional dependency") {
+            return Err(format!(
+                "Codex needs reinstalling before you can sign in. Run: {}",
+                codex_reinstall_command(&stderr)
+            ));
+        }
+        let msg = stderr
+            .lines()
+            .rev()
+            .find(|l| !l.trim().is_empty())
+            .map(|l| l.trim().to_string())
+            .unwrap_or_default();
+        return Err(if msg.is_empty() {
+            "Codex didn't accept the API key.".into()
+        } else {
+            msg
+        });
+    }
+    Ok(out.status.code().unwrap_or(0))
 }
 

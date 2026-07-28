@@ -14,6 +14,8 @@ import { api } from "../../lib/api";
 import { Button } from "../ui/button";
 import { UnifiedDiff } from "../diff/UnifiedDiff";
 import { SplitDiff, materializeSides } from "../diff/SplitDiff";
+import { Churn } from "../diff/Churn";
+import { AsciiSpinner } from "../ui/ascii-spinner";
 import {
   getDiffView,
   setDiffView,
@@ -99,12 +101,7 @@ export function WorkingDiffPane({
             </div>
           )}
         </div>
-        {(stats.add > 0 || stats.del > 0) && (
-          <span className="shrink-0 text-[11px] tabular-nums">
-            <span style={{ color: "var(--color-green)" }}>+{stats.add}</span>{" "}
-            <span style={{ color: "var(--color-red)" }}>−{stats.del}</span>
-          </span>
-        )}
+        <Churn additions={stats.add} deletions={stats.del} />
         {hasDiff && !splitDisabled && (
           <span className="inline-flex shrink-0 items-center overflow-hidden rounded border border-line-soft">
             <button
@@ -160,7 +157,10 @@ export function WorkingDiffPane({
 
       <div className="flex-1 min-h-0 overflow-hidden">
         {state === "loading" ? (
-          <div className="px-4 py-4 text-[12px] text-text-4">Reading this change…</div>
+          <div className="flex items-center gap-1.5 px-4 py-4 text-[12px] text-text-4">
+            <AsciiSpinner className="text-[10px]" />
+            <span>Reading this change…</span>
+          </div>
         ) : state === "error" ? (
           <div className="px-4 py-4 text-[12px] text-text-4">
             Couldn’t read this file’s changes.

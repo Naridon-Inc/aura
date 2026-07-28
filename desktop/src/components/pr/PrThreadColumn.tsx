@@ -294,7 +294,7 @@ export function PrThreadColumn() {
             }}
             className={`pointer-events-auto absolute left-2 right-2 transition-shadow rounded-lg ${
               active
-                ? "z-10 ring-1 ring-accent/70 shadow-[0_0_0_4px_rgba(106,165,255,0.10),0_10px_28px_rgba(0,0,0,0.45)]"
+                ? "z-10 ring-1 ring-accent/70 shadow-[0_0_0_4px_var(--color-accent-soft),0_10px_28px_rgba(0,0,0,0.45)]"
                 : "opacity-80 hover:opacity-100"
             }`}
             style={{ top: Math.max(top, 0) }}

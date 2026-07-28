@@ -48,17 +48,61 @@ function isBenignRuntimeNoise(message: string): boolean {
   if (message.includes("ResizeObserver loop")) return true;
   if (message.includes("handlerId") || message.includes("unregisterListener"))
     return true;
+  //  • Monaco / VS Code cancellation — a `CancellationError` (name === message
+  //    === "Canceled") is thrown routinely when an editor or model is disposed
+  //    while an async op (tokenization, hover, diff compute, the loader's init)
+  //    is still in flight. The work was simply abandoned; nothing failed. But
+  //    Monaco surfaces it as an unhandled promise rejection, so without this
+  //    guard a user closing a file mid-highlight gets blanked into the snag
+  //    screen. VS Code's own global handler ignores CancellationError for the
+  //    same reason. Match the bare message and the "Canceled: Canceled"
+  //    name:message form, both US and UK spelling.
+  const t = message.trim();
+  if (t === "Canceled" || t === "Cancelled") return true;
+  if (t.includes("Canceled: Canceled") || t.includes("Cancelled: Cancelled"))
+    return true;
+  //  • Monaco diff-editor teardown race — `@monaco-editor/react`'s DiffEditor
+  //    frees the original/modified TextModels BEFORE the DiffEditorWidget that
+  //    still references them (its unmount cleanup disposes the models first, the
+  //    widget last), so newer Monaco's "reset the model before you dispose it"
+  //    invariant fires "TextModel got disposed before DiffEditorWidget model got
+  //    reset". It's a pure ordering assertion while the pane is already
+  //    unmounting — the models get disposed either way, nothing failed — but
+  //    React surfaces it from the passive unmount effect straight to this
+  //    boundary, so without this guard closing a diff (or switching the file it
+  //    shows) would blank the app into the snag screen.
+  if (t.includes("DiffEditorWidget model got reset")) return true;
   return false;
+}
+
+// A thrown value is a Monaco/VS Code cancellation if its name marks it so —
+// checked separately because some cancellations carry an empty message.
+function isCancellation(reason: unknown): boolean {
+  const name = reason instanceof Error ? reason.name : "";
+  return name === "Canceled" || name === "Cancelled" || name === "CancellationError";
 }
 
 export class AppErrorBoundary extends Component<Props, State> {
   state: State = { error: null, info: null, showDetails: false, copied: false };
 
-  static getDerivedStateFromError(error: Error): Partial<State> {
+  static getDerivedStateFromError(error: Error): Partial<State> | null {
+    // Commit-phase throws land here, NOT in the global error/rejection handlers
+    // below — so the benign-teardown guard has to run here too. A Monaco model
+    // disposal race or a cancellation from an unmounting pane must not blank the
+    // app; returning null leaves the boundary rendering its children untouched.
+    if (isBenignRuntimeNoise(error?.message ?? "") || isCancellation(error)) {
+      return null;
+    }
     return { error };
   }
 
   componentDidCatch(error: Error, info: ErrorInfo) {
+    // Same ignore as getDerivedStateFromError — a disposed-model / cancellation
+    // race while a pane tears down. Nothing failed; don't paint the snag screen
+    // and don't shout in the console (it's expected teardown noise).
+    if (isBenignRuntimeNoise(error?.message ?? "") || isCancellation(error)) {
+      return;
+    }
     this.setState({ info: info.componentStack ?? null });
     // Keep the raw error in the console for anyone who opens devtools.
     console.error("[AppErrorBoundary] caught a render error:", error, info);
@@ -81,7 +125,7 @@ export class AppErrorBoundary extends Component<Props, State> {
     // Ignore benign ResizeObserver noise + already-shown errors.
     if (this.state.error) return;
     const msg = e.message || "";
-    if (isBenignRuntimeNoise(msg)) return;
+    if (isBenignRuntimeNoise(msg) || isCancellation(e.error)) return;
     if (e.error instanceof Error) this.setState({ error: e.error });
   };
 
@@ -89,10 +133,12 @@ export class AppErrorBoundary extends Component<Props, State> {
     if (this.state.error) return;
     const reason = e.reason;
     const msg = reason instanceof Error ? reason.message : String(reason ?? "");
-    // A failed teardown-time unlisten must NEVER blank the app — see
-    // isBenignRuntimeNoise. Tauri's async `unlisten()` rejects (not throws),
-    // so without this guard a harmless double-unlisten trips the snag screen.
-    if (isBenignRuntimeNoise(msg)) return;
+    // A failed teardown-time unlisten, or a Monaco cancellation, must NEVER
+    // blank the app — see isBenignRuntimeNoise / isCancellation. Tauri's async
+    // `unlisten()` rejects (not throws), and Monaco rejects with a bare
+    // CancellationError, so without these guards a harmless double-unlisten or
+    // a file closed mid-highlight trips the snag screen.
+    if (isBenignRuntimeNoise(msg) || isCancellation(reason)) return;
     if (reason instanceof Error) this.setState({ error: reason });
   };
 
@@ -204,12 +250,13 @@ export class AppErrorBoundary extends Component<Props, State> {
 // a broken theme is the very thing that blanked the screen. Keep in sync with
 // the ember block in styles.css if those tokens ever move.
 //
-// Aura's accent is GREEN (#7ef0a0) — that's the look the app ships with, not
-// the blue of the default `:root` block. The radii here are deliberately small
-// (4–6px) to match the app's tight corners, not the soft rounding of a
-// generic dialog.
-const ACCENT = "#7ef0a0"; // --color-accent (ember green) — primary affordance
-const ACCENT_INK = "#05140b"; // dark ink that stays legible ON the green accent
+// The accent reads through the live token so this screen never contradicts the
+// rest of the app when the accent is retuned — but it carries a literal
+// fallback, so if the stylesheet is the thing that failed, the button is still
+// visible. Radii here are deliberately small (4-6px) to match the app's tight
+// corners, not the soft rounding of a generic dialog.
+const ACCENT = "var(--color-accent, #7ef0a0)"; // primary affordance
+const ACCENT_INK = "var(--color-bg-0, #05140b)"; // ink that stays legible ON the accent
 const BG_CANVAS = "#0a0a0a"; // --color-bg-0 (content canvas)
 const BG_DEEP = "#050505"; // --color-bg-1 (chrome / inset wells)
 const BG_HOVER = "#161616"; // --color-bg-2 (hover / secondary fill)
@@ -250,7 +297,7 @@ const S: Record<string, React.CSSProperties> = {
     height: 8,
     borderRadius: 999,
     background: ACCENT,
-    boxShadow: `0 0 0 4px rgba(126,240,160,0.16)`,
+    boxShadow: "0 0 0 4px color-mix(in srgb, var(--color-accent, #7ef0a0) 16%, transparent)",
   },
   kicker: {
     fontSize: 11,

@@ -28,7 +28,7 @@ type Props = {
   /** `scope|bucket|id` — drives the deep link + is the page identity. */
   pageKey: string;
   pageTitle: string;
-  /** Human scope label, e.g. "Team note", "#design", "@owner". */
+  /** Human scope label, e.g. "Team note", "#design", "@ashiq". */
   scopeLabel: string;
   /** True when frontmatter.visibility === "shared" (Published). */
   published: boolean;
@@ -61,7 +61,7 @@ function useCollaborators(
         next.push({
           id,
           name: u.name,
-          color: u.color ?? "#7c8a82",
+          color: u.color ?? "var(--color-text-4)",
           self: id === selfId,
         });
       });

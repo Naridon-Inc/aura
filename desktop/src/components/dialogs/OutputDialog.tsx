@@ -41,7 +41,7 @@ export function OutputDialog({ open, title, body, loading, error, onClose }: Out
       }
     >
       {error ? (
-        <div className="text-red text-[11.5px]">{error}</div>
+        <div role="alert" className="text-red text-[11.5px]">{error}</div>
       ) : body ? (
         // Render the body even while still loading so streamed agent
         // output appears live. The "running…" pill drops in next to the

@@ -8,6 +8,7 @@ import { sidebarGlassEnabled } from "./lib/sidebarGlass";
 import { installContextMenuGuard } from "./lib/suppressContextMenu";
 import { TooltipProvider } from "./components/ui/tooltip";
 import "./styles.css";
+import "katex/dist/katex.min.css";
 import "@xterm/xterm/css/xterm.css";
 
 // Kill the native webview right-click menu (Reload / Inspect Element) so the

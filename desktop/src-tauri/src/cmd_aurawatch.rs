@@ -321,6 +321,7 @@ async fn close_window_if_quiet(
         files: files_vec.clone(),
         diff_excerpt,
         assistant_tail: String::new(),
+        task: aurawatch_inference::InferTask::Why,
     };
 
     let text = match aurawatch_inference::infer(&backend, &ctx).await {

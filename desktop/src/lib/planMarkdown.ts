@@ -11,7 +11,7 @@
 //
 //   # Plan title
 //
-//   > status: working · assignee: owner@…
+//   > status: working · assignee: ashiq@…
 //
 //   ## Wave 1 — Wave title
 //

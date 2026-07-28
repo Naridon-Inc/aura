@@ -68,7 +68,7 @@ export function VoiceRoster({
             : `${n} in voice: ${members.map((m) => m.name || m.handle).join(", ")}`
         }
       >
-        <Mic size={10} className="text-emerald-400" />
+        <Mic size={10} className="text-accent-green" />
         <div className="flex -space-x-1">
           {visible.map((m) => (
             <span
@@ -95,7 +95,7 @@ export function VoiceRoster({
           type="button"
           onClick={onLeave}
           title="Leave voice room"
-          className="rounded-md border border-red-500/40 bg-red-500/15 px-2 py-1 text-[10.5px] font-medium text-red-200 hover:bg-red-500/25"
+          className="rounded-md border border-red/40 bg-red/10 px-2 py-1 text-[10.5px] font-medium text-red transition-colors hover:bg-red/20"
         >
           Leave
         </button>
@@ -104,7 +104,7 @@ export function VoiceRoster({
           type="button"
           onClick={onJoin}
           title="Join voice room"
-          className="flex items-center gap-1 rounded-md border border-line-soft bg-emerald-500/10 px-2 py-1 text-[10.5px] font-medium text-emerald-300 hover:bg-emerald-500/20"
+          className="flex items-center gap-1 rounded-md border border-line-soft bg-accent-green/10 px-2 py-1 text-[10.5px] font-medium text-accent-green transition-colors hover:bg-accent-green/15"
         >
           <Headphones size={11} />
           <span>Join</span>
@@ -122,7 +122,7 @@ export function VoiceCountChip({ count }: { count: number }) {
   if (count <= 0) return null;
   return (
     <span
-      className="ml-1 inline-flex items-center gap-0.5 rounded bg-emerald-500/15 px-1 py-0 text-[9.5px] font-semibold tabular-nums text-emerald-300"
+      className="ml-1 inline-flex items-center gap-0.5 rounded bg-accent-green/15 px-1 py-0 text-[9.5px] font-semibold tabular-nums text-accent-green"
       title={`${count} in voice`}
       aria-label={`${count} in voice`}
     >

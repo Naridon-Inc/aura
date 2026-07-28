@@ -80,11 +80,13 @@ type Props = {
   onCreateChild?: (parentId: string, title: string) => Promise<void>;
 };
 
+// Same rule as the create wizard's priority menu: the word is right there, so
+// the ramp carries the ordering and only Urgent keeps a colour.
 const PRIORITY_OPTIONS: { id: TaskPriority; label: string; tone: string }[] = [
-  { id: "urgent", label: "Urgent", tone: "text-red-300" },
-  { id: "high", label: "High", tone: "text-red-300" },
-  { id: "medium", label: "Medium", tone: "text-amber-300" },
-  { id: "low", label: "Low", tone: "text-sky-300" },
+  { id: "urgent", label: "Urgent", tone: "text-red" },
+  { id: "high", label: "High", tone: "text-text-2" },
+  { id: "medium", label: "Medium", tone: "text-text-3" },
+  { id: "low", label: "Low", tone: "text-text-4" },
   { id: "none", label: "None", tone: "text-text-4" },
 ];
 
@@ -373,7 +375,7 @@ function ParentPropBtn({
           <span className="inline-flex items-center gap-1.5 min-w-0">
             {current.is_epic && (
               <Crown
-                className="w-3 h-3 text-amber-300 flex-shrink-0"
+                className="w-3 h-3 text-text-3 flex-shrink-0"
                 strokeWidth={2}
                 aria-hidden
               />
@@ -434,7 +436,7 @@ function ParentPropBtn({
                   >
                     {t.is_epic ? (
                       <Crown
-                        className="w-3 h-3 text-amber-300 flex-shrink-0"
+                        className="w-3 h-3 text-text-3 flex-shrink-0"
                         strokeWidth={2}
                         aria-hidden
                       />
@@ -472,7 +474,7 @@ function EpicTogglePropBtn({
       onClick={() => void onPatch({ id: task.id, is_epic: !on })}
       className={`inline-flex items-center gap-1.5 px-2 py-1 rounded text-[12px] transition min-h-[26px] ${
         on
-          ? "bg-amber-500/15 text-amber-200 hover:bg-amber-500/20"
+          ? "bg-bg-3 text-text-1 hover:bg-bg-2"
           : "text-text-5 hover:text-text-1 hover:bg-bg-2"
       }`}
       title={on ? "Click to demote — this task will no longer be an epic" : "Click to promote — this task will become an epic"}

@@ -215,6 +215,68 @@ export function rollup(goal: GoalRecord): { verdict: GoalVerdict; ok: number; to
   return { verdict: latest.verdict, ok: latest.ok, total: latest.total, at: latest.at };
 }
 
+/** A plain one-line reason a goal isn't reached yet — from its latest verdict
+ *  and part counts. Pass the live prove `outcome` when the card holds one: it
+ *  carries which parts actually exist in code, so a "built but not wired" state
+ *  reads honestly instead of claiming nothing was built. Null when the goal is
+ *  reached (nothing to explain) or has never been checked (the card already
+ *  says "Not checked"). */
+export function reachedSummary(goal: GoalRecord, outcome?: ProveOutcome | null): string | null {
+  const r = rollup(goal);
+  if (r.at == null || r.verdict === "verified") return null;
+  if (r.verdict === "unknown")
+    return "Aura couldn't check this yet — there's no saved snapshot of the code to compare against.";
+  if (r.total === 0) return "Aura couldn't work out what this goal needs yet.";
+  const missing = Math.max(0, r.total - r.ok);
+  if (r.ok === 0) {
+    // How many parts exist in the code — 0 pass, but "built and not wired up" is
+    // a different (and honest) story from "nothing built at all".
+    const built = outcome
+      ? Math.min(r.total, outcome.checks.filter((c) => c.exists).length)
+      : 0;
+    if (built > 0)
+      return built === r.total
+        ? `All ${r.total} parts are built — but none are wired up yet, so it isn't finished.`
+        : `${built} of ${r.total} parts are built — but none are wired up yet, so it isn't finished.`;
+    return `None of the ${r.total} parts this needs are built yet — so it isn't finished.`;
+  }
+  return `${r.ok} of ${r.total} parts are in place; the other ${missing} ${
+    missing === 1 ? "isn't" : "aren't"
+  } finished yet.`;
+}
+
+/** Did the agent treat this goal as done, and does the code back that up?
+ *  Grounded in real signals only — a build-triggered run (the agent committed
+ *  the work, so a "done" was implied) or an ask-born goal (what you told it to
+ *  build) — so it never invents a claim. `tone`: "gap" = committed as done but
+ *  the code check disagrees (the catch), "agree" = committed and confirmed,
+ *  "context" = you asked for it, here's where it actually stands. Null when
+ *  there's no honest claim signal (e.g. a hand-typed goal never checked). */
+export function doneClaim(
+  goal: GoalRecord,
+): { text: string; tone: "gap" | "agree" | "context" } | null {
+  const r = rollup(goal);
+  const committed = goal.runs.find((run) => run.trigger === "build");
+  if (committed) {
+    if (r.verdict === "verified")
+      return {
+        text: "Your agent committed this as done — and Aura's check of the code agrees.",
+        tone: "agree",
+      };
+    if (r.verdict !== "unknown")
+      return {
+        text: "Your agent committed this as finished — but Aura's check of the code says it isn't there yet.",
+        tone: "gap",
+      };
+  }
+  if (goal.source === "ask" && r.at != null && r.verdict !== "verified" && r.verdict !== "unknown")
+    return {
+      text: "This is what you asked your agent to build — the check below is where it actually stands.",
+      tone: "context",
+    };
+  return null;
+}
+
 // ── Reads ─────────────────────────────────────────────────────────────────
 
 export function listGoals(repo: string): GoalRecord[] {
@@ -254,6 +316,57 @@ export function upsertGoalByText(repo: string, text: string): GoalRecord {
     taskId: null,
     taskSeq: null,
     runs: [],
+    createdAt: now(),
+    updatedAt: now(),
+  };
+  write(repo, [rec, ...goals]);
+  return rec;
+}
+
+/** Attach a hand-typed goal to a live chat session. Find-or-create the record
+ *  (same identity as `upsertGoalByText`) and stamp its `origin` with the
+ *  session it was launched from, so the chat can show a durable "pursuing this
+ *  goal" pill and jump back to the run that owns it. An existing record keeps
+ *  its earliest origin (a goal re-sent from a second session doesn't lose the
+ *  first); a brand-new one records this session as its origin. Source is
+ *  `"manual"` — it was typed, not auto-derived from an opening ask. */
+export function attachSessionGoal(
+  repo: string,
+  text: string,
+  sessionId: string,
+  agentId?: string,
+): GoalRecord {
+  const goals = snapshot(repo).slice();
+  const id = idForText(text);
+  const existing = goals.find(
+    (g) => g.id === id || normalize(g.text) === normalize(text),
+  );
+  const origin: GoalOrigin = {
+    sessionId,
+    agentId,
+    askText: text.trim(),
+    firstSeen: now(),
+  };
+  if (existing) {
+    const next: GoalRecord = {
+      ...existing,
+      text: text.trim(),
+      source: existing.source ?? "manual",
+      // Keep the first session this goal was born in; only adopt one if none.
+      origin: existing.origin ?? origin,
+      updatedAt: now(),
+    };
+    write(repo, goals.map((g) => (g.id === existing.id ? next : g)));
+    return next;
+  }
+  const rec: GoalRecord = {
+    id,
+    text: text.trim(),
+    taskId: null,
+    taskSeq: null,
+    runs: [],
+    source: "manual",
+    origin,
     createdAt: now(),
     updatedAt: now(),
   };
@@ -357,4 +470,19 @@ export function useGoalsForTask(repo: string, taskId: string | null): GoalRecord
 export function useGoalsForRun(repo: string, runKey: string | null): GoalRecord[] {
   const all = useGoals(repo);
   return runKey ? all.filter((g) => g.runs.some((r) => r.runKey === runKey)) : [];
+}
+
+/** The goals a chat session launched (via `attachSessionGoal`), newest-first.
+ *  Drives the composer's "pursuing goal" pill. `filter` returns a fresh array,
+ *  so sorting it never mutates the shared snapshot. */
+export function useSessionGoals(
+  repo: string,
+  sessionId: string | null,
+): GoalRecord[] {
+  const all = useGoals(repo);
+  return sessionId
+    ? all
+        .filter((g) => g.origin?.sessionId === sessionId)
+        .sort((a, b) => b.updatedAt - a.updatedAt)
+    : [];
 }

@@ -83,49 +83,84 @@ export function ManagerDashboardSurface({ repoRoot, projectName }: Props) {
   const [sid, setSid] = useState<string | null>(null);
   const [ready, setReady] = useState(false);
 
-  // Resolve the workspace's ambient ManagerSession on mount. Mirrors
-  // AuraRailPanel: read the persisted pointer, confirm the server still knows
-  // the session AND that it belongs to this repoRoot, else drop the stale
-  // pointer and fall through to the launcher.
+  // Resolve which chat to land on when the workspace opens. Two-step, so a
+  // workspace that HAS chats never dumps you at the empty launcher:
+  //
+  //   1. Prefer the explicit ambient pointer (localStorage[`aura.ambient.<root>`],
+  //      the same one AuraRailPanel writes) when it still resolves to a live
+  //      session bound to THIS repoRoot. Validated via `manager_status` so a
+  //      stale or cross-workspace sid is dropped.
+  //   2. No usable pointer → resume the workspace's most-recent chat. The
+  //      pointer is only ever written when a surface explicitly focuses a
+  //      session (boot restore, the rail, a launch), so a returning user who
+  //      opens a workspace they never explicitly focused — including the
+  //      bundled Get Started sample, whose seeded conversation lives under its
+  //      root but whose pointer was only written on a genuine first run — would
+  //      otherwise always land on the empty splash even though a real chat
+  //      exists. We adopt the latest and persist the pointer so the rail and
+  //      center stay in sync.
+  //
+  // A workspace with no chats at all falls through to the launcher splash,
+  // which is the chat's own empty home (the first send converts it in place) —
+  // so "open a workspace → land in the chat" holds without ever minting an
+  // empty thread.
   useEffect(() => {
     let alive = true;
     setReady(false);
     setSid(null);
-    let persisted: string | null = null;
-    try {
-      persisted = localStorage.getItem(ambientKey(repoRoot));
-    } catch {
-      persisted = null;
-    }
-    if (!persisted) {
-      setReady(true);
-      return;
-    }
-    api
-      .managerStatus(persisted)
-      .then((s) => {
-        if (!alive) return;
-        const belongs =
-          !!s && !!s.id && s.projects.some((p) => sameRoot(p.root, repoRoot));
-        if (belongs) setSid(s.id);
-        else
-          try {
-            localStorage.removeItem(ambientKey(repoRoot));
-          } catch {
-            /* ignore */
+
+    (async () => {
+      // 1) Explicit ambient pointer, if it still resolves for this workspace.
+      let persisted: string | null = null;
+      try {
+        persisted = localStorage.getItem(ambientKey(repoRoot));
+      } catch {
+        persisted = null;
+      }
+      if (persisted) {
+        try {
+          const s = await api.managerStatus(persisted);
+          const belongs =
+            !!s && !!s.id && s.projects.some((p) => sameRoot(p.root, repoRoot));
+          if (belongs) {
+            if (alive) {
+              setSid(s.id);
+              setReady(true);
+            }
+            return;
           }
-      })
-      .catch(() => {
-        if (!alive) return;
+        } catch {
+          /* stale/unknown sid — fall through to the per-workspace resume */
+        }
+        // Pointer no longer resolves for this workspace — drop it so we don't
+        // keep re-checking a dead sid on every open.
         try {
           localStorage.removeItem(ambientKey(repoRoot));
         } catch {
           /* ignore */
         }
-      })
-      .finally(() => {
-        if (alive) setReady(true);
-      });
+      }
+
+      // 2) Resume the workspace's most-recent chat instead of the empty splash.
+      try {
+        const list = await api.managerList(repoRoot);
+        const latest = list
+          .filter((m) => !!m.repo_root && sameRoot(m.repo_root, repoRoot))
+          .sort((a, b) => b.updated_at - a.updated_at)[0];
+        if (latest && alive) {
+          setSid(latest.id);
+          try {
+            localStorage.setItem(ambientKey(repoRoot), latest.id);
+          } catch {
+            /* quota — non-fatal, the sid still drives this session */
+          }
+        }
+      } catch {
+        /* no list available — show the launcher splash */
+      }
+      if (alive) setReady(true);
+    })();
+
     return () => {
       alive = false;
     };

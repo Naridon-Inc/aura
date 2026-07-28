@@ -3,7 +3,8 @@
 //   1. unified diff hunks (which lines moved)
 //   2. semantic outline (which symbols exist) → cross-reference with
 //      hunks to flag which functions/classes were touched
-//   3. recent intent-log entries that mention this file by name → the
+//   3. recent intent-log entries whose bound changeset touched this file
+//      (or, for legacy rows without a changeset, whose text names it) → the
 //      "why" behind the changes, in the user's own words
 //   4. snapshot count for this file → how many times Aura has saved
 //      a recoverable copy
@@ -13,7 +14,7 @@
 // CLI bridge.
 
 import { useEffect, useMemo, useState } from "react";
-import { api, type IntentEntry, type OutlineNode } from "./api";
+import { api, type ChangeSummary, type IntentEntry, type OutlineNode } from "./api";
 import { useDocumentVisibility } from "./useDocumentVisibility";
 
 const POLL_MS = 8000;
@@ -25,12 +26,23 @@ export type FileInsight = {
   /** +/- line counts vs HEAD for the whole file. */
   additions: number;
   deletions: number;
+  /** Plain-language, one-sentence "what changed" — AI-written when a model
+   *  is reachable, deterministic otherwise. This is what leads the panel;
+   *  `symbols` is demoted to a technical-detail toggle. null until loaded or
+   *  when the file has no diff. */
+  whatSummary: ChangeSummary | null;
   /** Outline nodes; ones whose start line falls inside a diff hunk
    *  (or are the closest enclosing symbol above one) are flagged. */
   symbols: TouchedSymbol[];
-  /** Up to 5 recent intent entries that mention the file by basename
-   *  or relative path. Most recent first. */
+  /** Up to 5 recent intent entries attributed to this file — by their bound
+   *  changeset's touched paths, or (legacy rows only) by name in the intent
+   *  text. Most recent first. */
   relatedIntents: IntentEntry[];
+  /** The single most-recent intent-log entry across the whole repo — the
+   *  current session's stated reason, regardless of which file it touched.
+   *  Used as the session-context fallback for "why it changed" when no note
+   *  is bound to this specific file, so the panel is never a dead-end. */
+  sessionIntent: IntentEntry | null;
   /** Total snapshot count for this file (file column equality on
    *  the current snapshot list). */
   snapshotCount: number;
@@ -41,8 +53,10 @@ const EMPTY: FileInsight = {
   loading: false,
   additions: 0,
   deletions: 0,
+  whatSummary: null,
   symbols: [],
   relatedIntents: [],
+  sessionIntent: null,
   snapshotCount: 0,
   refresh: () => {},
 };
@@ -55,7 +69,9 @@ export function useFileInsight(
   const [diffText, setDiffText] = useState<string>("");
   const [outline, setOutline] = useState<OutlineNode[]>([]);
   const [intents, setIntents] = useState<IntentEntry[]>([]);
+  const [sessionIntent, setSessionIntent] = useState<IntentEntry | null>(null);
   const [snapshotCount, setSnapshotCount] = useState<number>(0);
+  const [whatSummary, setWhatSummary] = useState<ChangeSummary | null>(null);
   const visible = useDocumentVisibility();
 
   const relPath = useMemo(() => {
@@ -85,10 +101,30 @@ export function useFileInsight(
         setDiffText(diff);
         setOutline(out);
         if (page) {
-          const matches = page.entries.filter((e) =>
-            e.intent.includes(basename!) || e.intent.includes(relPath!),
-          );
+          // Attribute a note to this file by its BOUND CHANGESET first: every
+          // note records the exact paths it touched in `changeset.files[].path`,
+          // so "why did this file change" no longer hinges on the free-text
+          // intent happening to spell the filename (which was the norm, leaving
+          // most files with "no notes mention this file"). When a changeset is
+          // present it is authoritative — a note that touched this file shows
+          // even if its prose never names it, and one that merely mentions the
+          // name without touching it does not. Legacy rows written before
+          // changeset binding shipped have no `changeset`; fall back to the old
+          // text-substring match for those alone.
+          const matches = page.entries.filter((e) => {
+            const files = e.changeset?.files;
+            if (files && files.length > 0) {
+              return files.some(
+                (f) => f.path === relPath || f.path.endsWith("/" + relPath!),
+              );
+            }
+            return e.intent.includes(basename!) || e.intent.includes(relPath!);
+          });
           setIntents(matches.slice(0, 5));
+          // Session context: the newest entry overall (entries are
+          // most-recent-first), used when nothing binds to this file so the
+          // "why" panel can still show the session's stated reason.
+          setSessionIntent(page.entries[0] ?? null);
         }
         // Snapshots don't always store an absolute path — match by
         // suffix so both `~/.aura/snapshots/<sha>/<rel>` and bare
@@ -111,6 +147,32 @@ export function useFileInsight(
       window.clearInterval(id);
     };
   }, [repoRoot, absPath, relPath, basename, visible]);
+
+  // Plain-language "what changed", computed from the diff by whichever model
+  // the user has (deterministic fallback otherwise). Keyed on `diffText`, so
+  // it only refires when the diff actually changes — an unchanged poll leaves
+  // `diffText` string-equal and React skips the effect. The backend also
+  // caches by diff content-hash, so repeats never hit a model twice.
+  useEffect(() => {
+    if (!repoRoot || !absPath || !diffText.trim()) {
+      setWhatSummary(null);
+      return;
+    }
+    let cancelled = false;
+    api
+      .summarizeFileChange(repoRoot, absPath)
+      .then((s) => {
+        if (!cancelled) setWhatSummary(s);
+      })
+      .catch(() => {
+        // Never let a summary failure blank the panel — the deterministic
+        // line-count copy in the strip covers this case.
+        if (!cancelled) setWhatSummary(null);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [repoRoot, absPath, diffText]);
 
   // Parse diff into per-hunk new-side ranges. Header looks like:
   //   @@ -<oldStart>,<oldLen> +<newStart>,<newLen> @@ <ctx>
@@ -159,8 +221,10 @@ export function useFileInsight(
     loading,
     additions,
     deletions,
+    whatSummary,
     symbols,
     relatedIntents: intents,
+    sessionIntent,
     snapshotCount,
     refresh: () => {
       // Toggling absPath via a state key is overkill — consumers

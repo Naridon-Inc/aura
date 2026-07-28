@@ -21,6 +21,9 @@ export type InFlightEntry = {
   key: string;
   repoRoot: string;
   branch: string;
+  /** The ref the new branch was cut from (e.g. `origin/main`, `HEAD`) — shown
+   *  in the setup feed's "Branched … from …" line. */
+  startPoint?: string;
   /** Agent ids requested, in launch order. */
   agents: string[];
   startedAt: number;
@@ -53,11 +56,24 @@ function patch(key: string, changes: Partial<InFlightEntry>) {
 }
 
 /** Register a launch the moment the request fires. Returns the entry key. */
-export function beginInFlight(repoRoot: string, branch: string, agents: string[]): string {
+export function beginInFlight(
+  repoRoot: string,
+  branch: string,
+  agents: string[],
+  startPoint?: string,
+): string {
   const key = `launch-${nextKey++}`;
   entries = [
     ...entries,
-    { key, repoRoot, branch, agents, startedAt: Date.now(), status: "creating" },
+    {
+      key,
+      repoRoot,
+      branch,
+      startPoint,
+      agents,
+      startedAt: Date.now(),
+      status: "creating",
+    },
   ];
   emit();
   return key;

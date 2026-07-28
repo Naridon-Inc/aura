@@ -1,0 +1,73 @@
+{
+  "id": "aura-sample-darkmode",
+  "objective": "Add a dark-mode toggle to Recipe Box",
+  "status": "completed",
+  "projects": [{ "root": "{{PROJECT_ROOT}}", "label": "Recipe Box" }],
+  "tasks": [],
+  "ribbon": [{ "at": {{T_MINUS_46H}}, "event": { "kind": "plan_ready" } }],
+  "chat": [
+    {
+      "role": "user",
+      "text": "Can you add a dark mode? A moon button in the header that flips the whole page — and remember my choice for next time.",
+      "at": {{T_MINUS_46H}}
+    },
+    {
+      "role": "manager",
+      "text": "On it — reading how the page is put together first, then I'll add the toggle and a warm dark palette.",
+      "at": {{T_MINUS_46H}},
+      "brain": "claude",
+      "tool_calls": [
+        {
+          "tool_use_id": "toolu_dm_read_app",
+          "name": "read",
+          "input": { "file_path": "app.js" },
+          "result": { "is_error": false, "content": "Read app.js — render + card helpers, no theme code yet." }
+        },
+        {
+          "tool_use_id": "toolu_dm_read_css",
+          "name": "read",
+          "input": { "file_path": "styles.css" },
+          "result": { "is_error": false, "content": "Read styles.css — light palette on :root only." }
+        },
+        {
+          "tool_use_id": "toolu_dm_edit_css",
+          "name": "edit",
+          "input": {
+            "file_path": "styles.css",
+            "old_string": ".tag { display:inline-block; margin-top:.4rem; padding:.1rem .5rem; border-radius:999px; background:var(--accent); color:#fff; font-size:.75rem; }",
+            "new_string": ".tag { display:inline-block; margin-top:.4rem; padding:.1rem .5rem; border-radius:999px; background:var(--accent); color:#fff; font-size:.75rem; }\n\n/* Dark theme keeps the warm kitchen feel instead of a flat invert. */\nbody.dark { --bg:#211d1a; --card:#2c2723; --ink:#efe7dc; --accent:#e0895c; }\n#theme-toggle { border:0; background:transparent; font-size:1.2rem; cursor:pointer; }"
+          },
+          "result": { "is_error": false, "content": "Edited styles.css (+3 -1)" }
+        },
+        {
+          "tool_use_id": "toolu_dm_edit_app",
+          "name": "edit",
+          "input": {
+            "file_path": "app.js",
+            "old_string": "renderRecipes(RECIPES);",
+            "new_string": "function applyTheme(mode) {\n  document.body.classList.toggle(\"dark\", mode === \"dark\");\n}\n\nfunction toggleTheme() {\n  const next = document.body.classList.contains(\"dark\") ? \"light\" : \"dark\";\n  applyTheme(next);\n  localStorage.setItem(\"recipe-theme\", next);\n}\n\nfunction setupThemeToggle() {\n  applyTheme(localStorage.getItem(\"recipe-theme\") || \"light\");\n  document.getElementById(\"theme-toggle\").addEventListener(\"click\", toggleTheme);\n}\n\nrenderRecipes(RECIPES);\nsetupThemeToggle();"
+          },
+          "result": { "is_error": false, "content": "Edited app.js (+13 -1)" }
+        },
+        {
+          "tool_use_id": "toolu_dm_edit_html",
+          "name": "edit",
+          "input": {
+            "file_path": "index.html",
+            "old_string": "    <h1>Recipe Box</h1>",
+            "new_string": "    <h1>Recipe Box</h1>\n    <button id=\"theme-toggle\" aria-label=\"Toggle dark mode\">🌙</button>"
+          },
+          "result": { "is_error": false, "content": "Edited index.html (+1)" }
+        }
+      ]
+    },
+    {
+      "role": "manager",
+      "text": "Done. There's now a moon button in the top-right that switches Recipe Box to a warm dark theme, and it remembers the choice so it stays dark next time you open it.\n\nWhat I changed:\n- **app.js** — a small `setupThemeToggle()` that flips the page's theme and saves it.\n- **styles.css** — a full dark palette. I gave it its own warm colours instead of just inverting the light theme, so it still feels like a kitchen rather than a code editor.\n- **index.html** — the 🌙 button itself.\n\nTry the moon button, then reload — it stays where you left it. Open the Trace tab to see the reasoning behind each change.",
+      "at": {{T_MINUS_45H}},
+      "brain": "claude"
+    }
+  ],
+  "created_at": {{T_MINUS_46H}},
+  "updated_at": {{T_MINUS_45H}}
+}

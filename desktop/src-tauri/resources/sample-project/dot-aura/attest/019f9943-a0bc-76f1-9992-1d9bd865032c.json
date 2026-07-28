@@ -1,0 +1,100 @@
+{
+  "id": "019f9943-a0bc-76f1-9992-1d9bd865032c",
+  "schema_version": {
+    "major": 1,
+    "minor": 0,
+    "patch": 0
+  },
+  "kind": {
+    "kind": "sentinel_event"
+  },
+  "parent_id": null,
+  "prior_sibling_id": null,
+  "supersedes_id": null,
+  "anchor": {
+    "kind": "none"
+  },
+  "intent": {
+    "summary": "Scaffold Recipe Box: a header, a responsive card grid, and six starter recipes to cook from.",
+    "detail": "Scaffold Recipe Box: a header, a responsive card grid, and six starter recipes to cook from.",
+    "parent_intent": null
+  },
+  "declared_impacts": {
+    "writes_paths": [
+      ".gitignore",
+      "index.html",
+      "styles.css",
+      "recipes.js",
+      "app.js",
+      "README.md"
+    ],
+    "reads_paths": [],
+    "network": [],
+    "touches_zones": [],
+    "installs_packages": [],
+    "mutates_secrets": [],
+    "deploys": []
+  },
+  "actual_impacts": {
+    "writes_paths": [
+      ".gitignore",
+      "app.js",
+      "index.html",
+      "README.md",
+      "recipes.js",
+      "styles.css"
+    ],
+    "reads_paths": [],
+    "network": [],
+    "touches_zones": [],
+    "installs_packages": [],
+    "mutates_secrets": [],
+    "deploys": []
+  },
+  "payload": {
+    "type": "sentinel",
+    "event_type": "intent",
+    "body": {
+      "agent_id": "claude",
+      "intent": "Scaffold Recipe Box: a header, a responsive card grid, and six starter recipes to cook from.",
+      "ts_unix": 1784982773
+    }
+  },
+  "state": "completed",
+  "policy": null,
+  "provenance": {
+    "actor": "did:aura:agent/claude",
+    "on_behalf_of": null,
+    "origin_host": "unknown",
+    "signature": {
+      "algo": "ed25519",
+      "key_id": "did:aura:key/MByIG90LiBg",
+      "sig_b64": "bLWMu1AhTIe2amEdiLEB2KTZ+50KFZm3qAfwFEatwTWqzFAE52pvl4BKWBz0ywRcF2T+zXvaNUXuhyyHkLIgDQ"
+    }
+  },
+  "attestations": {
+    "items": []
+  },
+  "created_at": [
+    2026,
+    206,
+    12,
+    32,
+    53,
+    946711000,
+    0,
+    0,
+    0
+  ],
+  "updated_at": [
+    2026,
+    206,
+    12,
+    32,
+    54,
+    298464000,
+    0,
+    0,
+    0
+  ]
+}

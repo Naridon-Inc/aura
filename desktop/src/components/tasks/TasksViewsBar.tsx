@@ -31,8 +31,12 @@ import {
 } from "../ui/context-menu";
 import { Button } from "../ui/button";
 import { Input } from "../ui/input";
-import { cn } from "../../lib/utils";
+import { Segment } from "../ui/segment";
 import type { TaskView } from "../../lib/api";
+
+// Sentinel value for the implicit "All issues" cell — kept out of the
+// view-id namespace (slugs are kebab-case, so no underscores collide).
+const ALL_VIEWS = "__all__";
 
 type Props = {
   views: TaskView[];
@@ -61,48 +65,67 @@ export function TasksViewsBar({
   const [namingOpen, setNamingOpen] = useState(false);
   const [renameTarget, setRenameTarget] = useState<TaskView | null>(null);
   const [confirmDelete, setConfirmDelete] = useState<TaskView | null>(null);
+  // The saved view under the cursor when the Segment was right-clicked —
+  // drives which view rename/delete act on. Null for the "All issues"
+  // cell (which has nothing to rename or delete).
+  const [ctxView, setCtxView] = useState<TaskView | null>(null);
+
+  const options = [
+    { value: ALL_VIEWS, label: "All issues" },
+    ...views.map((v) => ({ value: v.id, label: v.name })),
+  ];
 
   return (
     <div className="border-b-[0.5px] border-line-soft bg-bg-content">
-      {/* Non-scrolling border wrapper + inner horizontal scroller. The
-          border lives on the wrapper so the scroller can overflow-x
-          without `overflow-y: auto` clipping each active tab's underline
-          (the old `-mb-[1px]` trick got cropped on the bottom edge). */}
-      <div className="px-4 sm:px-6 h-9 flex items-center gap-0.5 overflow-x-auto no-scrollbar">
-        <ViewPill
-          label="All issues"
-          active={activeId === null}
-          onClick={() => onSelect(null)}
-        />
-        {views.map((v) => (
-          <ContextMenu key={v.id}>
-            <ContextMenuTrigger asChild>
-              <div className="shrink-0">
-                <ViewPill
-                  label={v.name}
-                  active={v.id === activeId}
-                  onClick={() => onSelect(v.id)}
-                />
-              </div>
-            </ContextMenuTrigger>
-            <ContextMenuContent className="min-w-[160px]">
-              <ContextMenuItem
-                className="text-[11.5px]"
-                onSelect={() => setRenameTarget(v)}
-              >
-                <Pencil className="w-3 h-3 mr-2" strokeWidth={1.5} aria-hidden />
-                Rename
-              </ContextMenuItem>
-              <ContextMenuItem
-                className="text-[11.5px] text-rose-300 focus:text-rose-200"
-                onSelect={() => setConfirmDelete(v)}
-              >
-                <Trash2 className="w-3 h-3 mr-2" strokeWidth={1.5} aria-hidden />
-                Delete
-              </ContextMenuItem>
-            </ContextMenuContent>
-          </ContextMenu>
-        ))}
+      {/* The view switcher uses the shared Segment control; a right-click
+          on a saved cell resolves back to its view (via data-segment-value)
+          to keep the rename/delete menu. The scroller lets a long set of
+          views overflow-x without clipping the Segment's rounded track. */}
+      <div className="px-4 sm:px-6 h-9 flex items-center gap-1.5 overflow-x-auto no-scrollbar">
+        <ContextMenu onOpenChange={(open) => !open && setCtxView(null)}>
+          <ContextMenuTrigger asChild>
+            <div
+              className="shrink-0"
+              onContextMenuCapture={(e) => {
+                const cell = (e.target as HTMLElement).closest(
+                  "[data-segment-value]",
+                );
+                const val = cell?.getAttribute("data-segment-value") ?? null;
+                const v = val ? views.find((x) => x.id === val) ?? null : null;
+                setCtxView(v);
+                // No real view under the cursor ("All issues" or the gap) →
+                // suppress the menu entirely rather than open an empty one.
+                if (!v) {
+                  e.preventDefault();
+                  e.stopPropagation();
+                }
+              }}
+            >
+              <Segment
+                ariaLabel="Task views"
+                value={activeId ?? ALL_VIEWS}
+                onChange={(val) => onSelect(val === ALL_VIEWS ? null : val)}
+                options={options}
+              />
+            </div>
+          </ContextMenuTrigger>
+          <ContextMenuContent className="min-w-[160px]">
+            <ContextMenuItem
+              className="text-[11.5px]"
+              onSelect={() => ctxView && setRenameTarget(ctxView)}
+            >
+              <Pencil className="w-3 h-3 mr-2" strokeWidth={1.5} aria-hidden />
+              Rename
+            </ContextMenuItem>
+            <ContextMenuItem
+              className="text-[11.5px] text-red focus:text-red"
+              onSelect={() => ctxView && setConfirmDelete(ctxView)}
+            >
+              <Trash2 className="w-3 h-3 mr-2" strokeWidth={1.5} aria-hidden />
+              Delete
+            </ContextMenuItem>
+          </ContextMenuContent>
+        </ContextMenu>
 
         {/* Save-active button — only visible when a view is selected AND its
             state has drifted from disk. Mirrors VSCode's "*" dirty marker. */}
@@ -111,7 +134,7 @@ export function TasksViewsBar({
             type="button"
             onClick={() => void onSaveActive()}
             title="Save changes to this view"
-            className="shrink-0 text-[10.5px] px-1.5 h-[22px] rounded bg-amber-500/15 border border-amber-500/30 text-amber-200 hover:bg-amber-500/25 ml-1"
+            className="shrink-0 text-[10.5px] px-1.5 h-[22px] rounded bg-accent/15 border border-accent/30 text-accent hover:bg-accent/25"
           >
             Save view
           </button>
@@ -122,7 +145,7 @@ export function TasksViewsBar({
           size="sm"
           onClick={() => setNamingOpen(true)}
           title="New view from current filters"
-          className="shrink-0 ml-1 gap-0.5 text-[11px] text-text-4 hover:text-text-1 hover:bg-bg-2"
+          className="shrink-0 gap-0.5 text-[11px] text-text-4 hover:text-text-1 hover:bg-bg-2"
         >
           <Plus className="w-3 h-3" strokeWidth={1.5} aria-hidden />
           <span>New view</span>
@@ -159,35 +182,6 @@ export function TasksViewsBar({
         }}
       />
     </div>
-  );
-}
-
-function ViewPill({
-  label,
-  active,
-  onClick,
-}: {
-  label: string;
-  active: boolean;
-  onClick: () => void;
-}) {
-  return (
-    <button
-      type="button"
-      onClick={onClick}
-      className={cn(
-        "relative shrink-0 inline-flex items-center h-9 px-2.5 text-[12px] whitespace-nowrap transition-colors",
-        active ? "text-text-1 font-medium" : "text-text-4 hover:text-text-2",
-      )}
-    >
-      {label}
-      {active && (
-        <span
-          aria-hidden
-          className="absolute inset-x-1.5 bottom-0 h-[2px] rounded-full bg-accent"
-        />
-      )}
-    </button>
   );
 }
 

@@ -304,6 +304,11 @@ fn python_different_defs_merge_clean() {
 // result in the ours file (markers present, exit 1) — never a corrupted file.
 #[test]
 fn driver_fallback_writes_git_merge_file_result() {
+    // This one doesn't move the cwd — it shells out to `git merge-file`, which
+    // refuses to start at all if the directory it inherits has been removed.
+    // Taking the same lock as the cwd-movers is what keeps that from happening
+    // underneath it.
+    let _lk = crate::TEST_CWD_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let dir = tempfile::tempdir().expect("tempdir");
     let write = |name: &str, content: &str| {
         let p = dir.path().join(name);

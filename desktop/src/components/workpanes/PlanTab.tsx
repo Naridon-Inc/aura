@@ -30,6 +30,8 @@ import {
 import { FileText, ListChecks } from "lucide-react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
+import remarkMath from "remark-math";
+import rehypeKatex from "rehype-katex";
 import { type PlanTabData, useEditorStore } from "../../lib/editorStore";
 import { focusAmbientManager } from "../../lib/focusManager";
 import { useManagerSession } from "../../lib/managerStore";
@@ -204,7 +206,10 @@ export function PlanDocumentBody({
       {hasBaseline && (
         <PlanSection title="Current baseline">
           <div className="plan-prose">
-            <ReactMarkdown remarkPlugins={[remarkGfm]}>
+            <ReactMarkdown
+              remarkPlugins={[remarkGfm, remarkMath]}
+              rehypePlugins={[rehypeKatex]}
+            >
               {plan.baseline as string}
             </ReactMarkdown>
           </div>
@@ -229,7 +234,10 @@ export function PlanDocumentBody({
                   </div>
                   {phase.body && (
                     <div className="plan-prose" style={{ color: "var(--color-text-2)" }}>
-                      <ReactMarkdown remarkPlugins={[remarkGfm]}>
+                      <ReactMarkdown
+                        remarkPlugins={[remarkGfm, remarkMath]}
+                        rehypePlugins={[rehypeKatex]}
+                      >
                         {phase.body}
                       </ReactMarkdown>
                     </div>
@@ -401,7 +409,10 @@ export function PlanTasksBody({
                   {todo.subtasks && todo.subtasks.length > 0 && (
                     <ul
                       className="flex flex-col gap-1.5 mt-1 pl-2.5 border-l"
-                      style={{ borderColor: "var(--color-border-1)" }}
+                      // `--color-border-1` exists in no pack, so this nesting
+                      // rule drew the browser default (currentColor) instead of
+                      // a hairline. `--color-line` is the real divider token.
+                      style={{ borderColor: "var(--color-line)" }}
                     >
                       {todo.subtasks.map((sub, si) => (
                         <li
@@ -907,9 +918,11 @@ export function PlanDecisionControls({
   planId: string;
   initialParallelism: PlanParallelism;
 }) {
-  const [submitting, setSubmitting] = useState<"build" | "cancel" | null>(null);
+  const [submitting, setSubmitting] = useState<"build" | "revise" | "cancel" | null>(null);
   const [notifyTeam, setNotifyTeam] = useState(false);
   const [parallelism, setParallelism] = useState<PlanParallelism>(initialParallelism);
+  const [revisionOpen, setRevisionOpen] = useState(false);
+  const [revisionFeedback, setRevisionFeedback] = useState("");
   const [err, setErr] = useState<string | null>(null);
   const [menuOpen, setMenuOpen] = useState(false);
   const menuRef = useRef<HTMLDivElement>(null);
@@ -926,8 +939,10 @@ export function PlanDecisionControls({
   }, [menuOpen]);
 
   const decide = useCallback(
-    async (decision: "build" | "cancel") => {
+    async (decision: "build" | "revise" | "cancel") => {
       if (submitting) return;
+      const feedback = revisionFeedback.trim();
+      if (decision === "revise" && !feedback) return;
       setSubmitting(decision);
       setErr(null);
       setMenuOpen(false);
@@ -938,6 +953,7 @@ export function PlanDecisionControls({
           decision,
           decision === "build" ? notifyTeam : false,
           decision === "build" ? parallelism : undefined,
+          decision === "revise" ? feedback : undefined,
         );
       } catch (e) {
         setErr(e instanceof Error ? e.message : String(e));
@@ -946,7 +962,7 @@ export function PlanDecisionControls({
       // Success path: the cluster unmounts when the live session's
       // pending_plan clears, so no setSubmitting(null) needed here.
     },
-    [submitting, sessionId, planId, notifyTeam, parallelism],
+    [submitting, sessionId, planId, notifyTeam, parallelism, revisionFeedback],
   );
 
   return (
@@ -1028,6 +1044,52 @@ export function PlanDecisionControls({
             />
             Notify team
           </label>
+          <button
+            type="button"
+            disabled={submitting !== null}
+            onClick={() => setRevisionOpen((value) => !value)}
+            className="t-xs t-ui px-2 py-1.5 border text-left disabled:opacity-50 transition-colors hover:bg-[var(--color-bg-2)]"
+            style={{
+              background: "transparent",
+              borderColor: "var(--color-line)",
+              borderRadius: "var(--radius-sm)",
+              color: "var(--color-text-2)",
+            }}
+          >
+            Request changes
+          </button>
+          {revisionOpen && (
+            <div className="flex flex-col gap-1.5">
+              <textarea
+                autoFocus
+                value={revisionFeedback}
+                onChange={(event) => setRevisionFeedback(event.target.value)}
+                rows={3}
+                maxLength={8000}
+                placeholder="What should the plan change?"
+                className="w-full resize-y t-xs px-2 py-1.5 outline-none"
+                style={{
+                  color: "var(--color-text-1)",
+                  background: "var(--color-bg-2)",
+                  border: "1px solid var(--color-line)",
+                  borderRadius: "var(--radius-sm)",
+                }}
+              />
+              <button
+                type="button"
+                disabled={submitting !== null || !revisionFeedback.trim()}
+                onClick={() => void decide("revise")}
+                className="self-end t-xs t-ui px-2 py-1 disabled:opacity-50"
+                style={{
+                  color: "var(--color-bg-0)",
+                  background: "var(--color-accent)",
+                  borderRadius: "var(--radius-sm)",
+                }}
+              >
+                {submitting === "revise" ? "Sending…" : "Send feedback"}
+              </button>
+            </div>
+          )}
           <button
             type="button"
             disabled={submitting !== null}

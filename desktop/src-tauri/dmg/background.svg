@@ -5,10 +5,6 @@
       <stop offset="0.5" stop-color="#161618"/>
       <stop offset="1" stop-color="#161618"/>
     </linearGradient>
-    <linearGradient id="petal" x1="0" y1="0" x2="1" y2="1">
-      <stop offset="0" stop-color="#cfd4dc"/>
-      <stop offset="1" stop-color="#aeb6c2"/>
-    </linearGradient>
     <filter id="soft" x="-60%" y="-60%" width="220%" height="220%">
       <feGaussianBlur stdDeviation="46"/>
     </filter>
@@ -27,14 +23,20 @@
   <!-- subtle lockup, lower-left: mark badge + wordmark -->
   <g transform="translate(40,182)">
     <rect x="0" y="0" width="25" height="25" rx="7.5" fill="#ffffff" fill-opacity="0.07" stroke="#ffffff" stroke-opacity="0.10"/>
-    <g transform="translate(3.7,3.7) scale(0.0197)" fill="url(#petal)">
-      <path d="M319 148C302.145 252.5 393 333.5 440.5 371C466.5 292.2 524.333 240.667 550 227C556.667 209.833 564.6 164.6 555 117C545.4 69.4 475.667 20.8333 440.5 0C414.5 11 335 48.8 319 148Z"/>
-      <path d="M557.452 726C574.307 621.5 483.452 540.5 435.952 503C409.952 581.8 352.118 633.333 326.452 647C319.785 664.167 311.852 709.4 321.452 757C331.052 804.6 400.785 853.167 435.952 874C461.952 863 541.452 825.2 557.452 726Z"/>
-      <path d="M232.071 690.276C333.252 659.183 365.37 539.686 378 480.5C325 480.5 244.5 471.5 201 453.5C182.655 455.112 147.448 470.341 109 500C58.5 538.956 61.635 615.746 58.5 656.5C79.8633 674.956 141 718.262 232.071 690.276Z"/>
-      <path d="M649.486 194.045C548.305 225.138 516.187 344.635 503.557 403.821C556.557 403.821 637.057 412.821 680.557 430.821C698.902 429.21 734.109 413.98 772.557 384.321C823.057 345.365 819.922 268.575 823.057 227.821C801.694 209.366 740.557 166.059 649.486 194.045Z"/>
-      <path d="M745.997 477.928C696 438.5 555.438 451.489 501 477.928C553.5 538 571.369 615.444 572.5 644.5C585.053 657.975 629.466 688.832 676.498 700.91C723.53 712.989 786.936 680.591 821 658C822.415 629.804 820.904 537 745.997 477.928Z"/>
-      <path d="M132.099 405.373C182.095 444.801 322.657 431.812 377.095 405.374C324.595 345.301 306.726 267.858 305.595 238.801C293.043 225.326 248.629 194.469 201.597 182.391C154.565 170.312 91.1597 202.71 57.0953 225.301C55.6801 253.497 57.1912 346.301 132.099 405.373Z"/>
-      <circle cx="438" cy="436" r="52"/>
+    <!-- The binary-box mark, same geometry the app icon and the in-app
+         topbar use (src/components/AuraMark.tsx is the source of truth
+         for the glyph). The desktop component punches the two eyes with
+         a <mask>; here they are even-odd subpaths of the body and the
+         "0" is a stroked path, so the mark is three plain <path>s with
+         no mask and no <defs> — cairosvg drops the mask silently and
+         would ship a blank box with no eyes at all. Natural extent is
+         102 x 76.4, scaled to ~17.5px and centred in the 25px badge. -->
+    <g transform="translate(3.58,5.81) scale(0.1716)" fill="#e7eaf0">
+      <path fill-rule="evenodd" d="M 10 11 C 5 12 1 16 1 21 L 1 55 C 1 57 2 58 4 59 L 39 76 C 42 77.2 46 77 49 75 C 59 72 78 66 90 62 C 96 60 101 56 103 48 L 103 25 C 103 22 102 19 98 17 C 85 13 69 7 53 2 C 50 1.1 47 0.8 44 1 L 10 11 Z M 64.317 52.536 C 61.897 62.29 54.235 68.782 47.202 67.038 C 40.169 65.293 36.429 55.972 38.849 46.218 C 41.269 36.464 48.931 29.972 55.964 31.716 C 62.997 33.461 66.737 42.782 64.317 52.536 Z M 98.767 40.769 C 97.277 49.764 90.944 56.206 84.621 55.159 C 78.299 54.112 74.381 45.971 75.871 36.977 C 77.361 27.982 83.694 21.54 90.017 22.587 C 96.339 23.634 100.257 31.775 98.767 40.769 Z"/>
+      <!-- the "1" -->
+      <path d="M 48.4 46 L 52.7 41.4 H 55.6 V 58.8 H 51.1 V 47.2 L 48.4 49.2 Z"/>
+      <!-- the "0" — a ring, so the hole reads as a zero -->
+      <path fill="none" stroke="#e7eaf0" stroke-width="3.6" d="M 94.405 40.02 C 93.466 45.687 89.569 49.761 85.701 49.12 C 81.832 48.479 79.457 43.366 80.395 37.7 C 81.334 32.033 85.231 27.959 89.099 28.6 C 92.968 29.241 95.343 34.354 94.405 40.02 Z"/>
     </g>
     <text x="34" y="18" font-family="-apple-system, 'Helvetica Neue', Helvetica, Arial, sans-serif"
           font-size="16.5" font-weight="600" letter-spacing="0.2" fill="#f0f1f4">Aura</text>
@@ -49,6 +51,9 @@
   <!-- footer: copyright + version -->
   <text x="40" y="398" font-family="-apple-system, 'Helvetica Neue', Helvetica, Arial, sans-serif"
         font-size="10" font-weight="400" fill="#565b63">© 2026 Naridon, Inc</text>
-  <text x="620" y="398" text-anchor="end" font-family="-apple-system, 'Helvetica Neue', Helvetica, Arial, sans-serif"
-        font-size="10" font-weight="500" fill="#565b63">v0.19.0</text>
+  <!-- Stamped by scripts/build-dmg-background.sh from package.json. Do not
+       hand-edit: it read v0.19.0 for twelve releases because nothing kept
+       it honest. -->
+  <text id="dmg-version" x="620" y="398" text-anchor="end" font-family="-apple-system, 'Helvetica Neue', Helvetica, Arial, sans-serif"
+        font-size="10" font-weight="500" fill="#565b63">v0.19.32</text>
 </svg>

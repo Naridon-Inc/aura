@@ -1,14 +1,14 @@
-// The in-app browser shell — an Arc-Search-style mobile experience that lives
-// entirely inside the rail (no detach-to-window: a separate OS window can't
-// host the rail's native webview cleanly and broke "inside the sidebar area").
+// The in-app browser shell — a simple, app-native browser that lives entirely
+// inside the rail (no detach-to-window: a separate OS window can't host the
+// rail's native webview cleanly and broke "inside the sidebar area").
 //
-// Two faces:
-//   • Search face (ArcSearchOverlay) — shown for a fresh tab or when the user
-//     taps the address pill: a search field over a list of "Browse for me"
-//     suggestions. The native webview is hidden here (no hole rendered).
-//   • Page face — a slim top address pill, the native webview hole, and a
-//     docked mobile control bar (BrowserBottomBar) with the card-stack tab
-//     switcher, new-tab, expand controls, and the Aura⇄Google engine toggle.
+// One conventional toolbar sits on top — back · forward · reload · address ·
+// tabs · new-tab — matching the rest of the app's compact chrome. Below it is
+// the native webview. Two overlays cover the page when needed:
+//   • Search face (ArcSearchOverlay) — a fresh tab, or tapping the address:
+//     a search field + suggestions (with "Browse for me" to hand a query to
+//     the agent). The native webview is hidden while it's up.
+//   • Tab switcher (BrowserTabSwitcher) — the open tabs.
 //
 // The native WebKit webview (owned by Rust, see lib/browserEngine.ts) floats
 // ABOVE the React DOM, so this component pins it to the hole and HIDES it
@@ -16,11 +16,18 @@
 // `display:none` parent). `reconcile()` is the single place that drives it.
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import { Globe, RotateCw, Search } from "lucide-react";
+import {
+  ArrowLeft,
+  ArrowRight,
+  Globe,
+  Plus,
+  RotateCw,
+  Search,
+  SquareStack,
+} from "lucide-react";
 
 import { RailBrowserAgent } from "./RailBrowserAgent";
 import { ArcSearchOverlay } from "./browser/ArcSearchOverlay";
-import { BrowserBottomBar } from "./browser/BrowserBottomBar";
 import { BrowserTabSwitcher } from "./browser/BrowserTabSwitcher";
 import {
   browserHide,
@@ -28,14 +35,10 @@ import {
   browserOpen,
   browserSetBounds,
   browserShow,
-  clearAnnotator,
   hostOf,
-  installAnnotator,
   onBrowserState,
-  readAnnotations,
   type BrowserRect,
 } from "../../lib/browserEngine";
-import { insertIntoComposer } from "../../lib/composerBridge";
 import {
   applyBrowserState,
   back,
@@ -76,6 +79,39 @@ function visibleRect(el: HTMLDivElement | null): BrowserRect | null {
   return { x: r.left, y: r.top, width: r.width, height: r.height };
 }
 
+/** Compact, app-native toolbar icon button (matches the editor's ToolButton). */
+function IconBtn({
+  label,
+  onClick,
+  disabled,
+  active,
+  children,
+}: {
+  label: string;
+  onClick: () => void;
+  disabled?: boolean;
+  active?: boolean;
+  children: React.ReactNode;
+}) {
+  return (
+    <button
+      type="button"
+      title={label}
+      aria-label={label}
+      aria-pressed={active}
+      onClick={onClick}
+      disabled={disabled}
+      className={`flex items-center justify-center w-7 h-7 flex-shrink-0 rounded transition-colors disabled:opacity-30 disabled:pointer-events-none ${
+        active
+          ? "bg-bg-2 text-text-1"
+          : "text-text-3 hover:bg-bg-2 hover:text-text-1"
+      }`}
+    >
+      {children}
+    </button>
+  );
+}
+
 export function RailBrowser() {
   const { tabs, activeId } = useBrowserStore();
   const active = tabs.find((t) => t.id === activeId) ?? null;
@@ -86,27 +122,24 @@ export function RailBrowser() {
   // url without bumping navSeq) is never echoed back as a fresh navigation.
   const lastNav = useRef<Map<string, number>>(new Map());
 
-  const [engine, setEngineState] = useState<Engine>(readEngine);
+  // The search face's engine is remembered from last use; there's no visible
+  // toggle in the simplified chrome (the search overlay can still switch it).
+  const [engine] = useState<Engine>(readEngine);
   const [searchOpen, setSearchOpen] = useState(false);
   const [tabSwitcherOpen, setTabSwitcherOpen] = useState(false);
   const [agentOpen, setAgentOpen] = useState(false);
   // Non-null = "Browse for me" was launched with this goal (auto-runs). null =
   // the agent panel was opened manually for the user to type a goal.
   const [agentGoal, setAgentGoal] = useState<string | null>(null);
-  // Agentation: click-to-annotate mode + the live pin count (polled from the
-  // page while on). The annotations themselves live in the page; we read them
-  // on demand at attach time.
-  const [annotating, setAnnotating] = useState(false);
-  const [annCount, setAnnCount] = useState(0);
 
-  const setEngine = (e: Engine) => {
-    setEngineState(e);
-    try {
-      localStorage.setItem(ENGINE_KEY, e);
-    } catch {
-      /* ignore */
-    }
-  };
+  // ── Faces ────────────────────────────────────────────────────────────────
+  // A fresh tab (no URL) shows the search face; the agent face wins over it so
+  // "Browse for me" from the start page swaps straight to the trace. When an
+  // overlay is up the hole is hidden so the native webview (which floats above
+  // React) doesn't paint over it.
+  const onStartPage = active != null && !active.url;
+  const showSearch = (onStartPage || searchOpen) && !agentOpen;
+  const showHole = !showSearch && !tabSwitcherOpen;
 
   // Always keep one tab open while the panel is mounted.
   useEffect(() => {
@@ -131,7 +164,8 @@ export function RailBrowser() {
       // can't open a second native layer for the same tab.
       markCreated(tab.id);
       lastNav.current.set(tab.id, tab.navSeq);
-      void browserOpen(tab.id, tab.url, rect).catch(() => {
+      // Rail browser is narrow → request mobile views (iPhone Safari UA).
+      void browserOpen(tab.id, tab.url, rect, true).catch(() => {
         unmarkCreated(tab.id);
         lastNav.current.delete(tab.id);
       });
@@ -152,10 +186,13 @@ export function RailBrowser() {
 
   const tabsKey = tabs.map((t) => `${t.id}:${t.navSeq}:${t.url}`).join("|");
 
-  // Drive the webview whenever tab state changes.
+  // Drive the webview whenever tab state — or whether the hole is covered by an
+  // overlay — changes. When the hole is hidden its rect goes zero-size, so
+  // reconcile hides the native layer (it floats above React and would
+  // otherwise paint over the search face / tab switcher).
   useEffect(() => {
     reconcile();
-  }, [reconcile, activeId, tabsKey]);
+  }, [reconcile, activeId, tabsKey, showHole]);
 
   // Keep the webview pinned through layout changes the store doesn't see.
   useEffect(() => {
@@ -189,13 +226,6 @@ export function RailBrowser() {
     return () => un?.();
   }, []);
 
-  // ── Faces ──────────────────────────────────────────────────────────────────
-  // A fresh tab (no URL) shows the search face; the agent face wins over it so
-  // "Browse for me" from the start page swaps straight to the trace.
-  const onStartPage = active != null && !active.url;
-  const showSearch = (onStartPage || searchOpen) && !agentOpen;
-  const showHole = !showSearch && !tabSwitcherOpen;
-
   // ── Actions ──────────────────────────────────────────────────────────────
   const doSearch = (query: string) => {
     if (!active) return;
@@ -212,11 +242,6 @@ export function RailBrowser() {
     setSearchOpen(false);
   };
 
-  const openManualAgent = () => {
-    setAgentGoal(null);
-    setAgentOpen(true);
-  };
-
   const createTab = () => {
     newTab();
     setSearchOpen(false);
@@ -224,113 +249,81 @@ export function RailBrowser() {
     setTabSwitcherOpen(false);
   };
 
-  // ── Agentation ─────────────────────────────────────────────────────────────
-  const activeId2 = active?.id ?? null;
-  const activeUrl = active?.url ?? "";
-  const activeNav = active?.navSeq ?? 0;
-
-  const toggleAnnotate = useCallback(() => {
-    if (!activeId2) return;
-    setAnnotating((on) => {
-      if (on) {
-        void clearAnnotator(activeId2);
-      } else {
-        void installAnnotator(activeId2);
-      }
-      setAnnCount(0);
-      return !on;
-    });
-  }, [activeId2]);
-
-  const attachAnnotations = useCallback(async () => {
-    if (!activeId2) return;
-    const anns = await readAnnotations(activeId2);
-    if (anns.length === 0) return;
-    const lines = anns.map(
-      (a) =>
-        `${a.n}. <${a.tag}> ${a.selector}${a.text ? ` — "${a.text}"` : ""}`,
-    );
-    const block = [
-      `Page elements I marked on ${activeUrl || "the in-app browser"}:`,
-      ...lines,
-    ].join("\n");
-    insertIntoComposer(block);
-    void clearAnnotator(activeId2);
-    setAnnotating(false);
-    setAnnCount(0);
-  }, [activeId2, activeUrl]);
-
-  // Poll the page for the live pin count while annotating, so the Attach badge
-  // tracks clicks without a page→app IPC channel (untrusted pages have none).
-  useEffect(() => {
-    if (!annotating || !activeId2) return;
-    let alive = true;
-    const iv = setInterval(() => {
-      void readAnnotations(activeId2).then((a) => {
-        if (alive) setAnnCount(a.length);
-      });
-    }, 800);
-    return () => {
-      alive = false;
-      clearInterval(iv);
-    };
-  }, [annotating, activeId2]);
-
-  // A fresh document (back / forward / reload / address-bar nav) drops the
-  // injected script, so re-install it after the new page settles.
-  useEffect(() => {
-    if (!annotating || !activeId2 || !activeUrl) return;
-    const t = setTimeout(() => void installAnnotator(activeId2), 400);
-    return () => clearTimeout(t);
-  }, [annotating, activeId2, activeUrl, activeNav]);
-
-  // Leave annotate mode whenever the page isn't actually on screen (search face,
-  // tab switcher, agent panel, or a start-page tab) — the user can't click what
-  // they can't see, and the stale script shouldn't linger.
-  useEffect(() => {
-    if (annotating && (!showHole || !activeUrl)) {
-      if (activeId2) void clearAnnotator(activeId2);
-      setAnnotating(false);
-      setAnnCount(0);
-    }
-  }, [annotating, showHole, activeUrl, activeId2]);
-
   const tab = active;
   const created = tab != null && isCreated(tab.id);
 
   return (
     <div className="relative h-full flex flex-col bg-bg-1 overflow-hidden">
-      {/* Slim address pill — tap to open the search face. */}
-      <button
-        type="button"
-        onClick={() => setSearchOpen(true)}
-        className="flex items-center gap-2 h-9 mx-2 mt-2 mb-1 px-3 rounded-full bg-bg-2 border border-line-soft text-left hover:bg-bg-3/60 transition-colors flex-shrink-0"
-      >
-        {tab?.loading ? (
-          <RotateCw className="h-3.5 w-3.5 flex-shrink-0 text-text-3 animate-spin" />
-        ) : tab?.url ? (
-          <Globe className="h-3.5 w-3.5 flex-shrink-0 text-text-3" />
-        ) : (
-          <Search className="h-3.5 w-3.5 flex-shrink-0 text-text-4" />
-        )}
-        <span
-          className={`flex-1 min-w-0 truncate text-[12.5px] ${
-            tab?.url ? "text-text-1" : "text-text-4"
-          }`}
+      {/* Toolbar — back · forward · reload · address · tabs · new-tab. */}
+      <div className="flex items-center gap-0.5 h-10 px-1.5 border-b border-line-soft flex-shrink-0 bg-bg-1">
+        <IconBtn
+          label="Back"
+          onClick={() => active && back(active.id)}
+          disabled={!created}
         >
-          {tab?.url ? hostOf(tab.url) : "Search or enter address"}
-        </span>
-      </button>
+          <ArrowLeft className="h-4 w-4" />
+        </IconBtn>
+        <IconBtn
+          label="Forward"
+          onClick={() => active && forward(active.id)}
+          disabled={!created}
+        >
+          <ArrowRight className="h-4 w-4" />
+        </IconBtn>
+        <IconBtn
+          label={tab?.loading ? "Stop" : "Reload"}
+          onClick={() => active && reload(active.id)}
+          disabled={!tab?.url}
+        >
+          <RotateCw
+            className={`h-4 w-4${tab?.loading ? " animate-spin" : ""}`}
+          />
+        </IconBtn>
+
+        {/* Address — tap to open the search face to type a query or URL. */}
+        <button
+          type="button"
+          onClick={() => setSearchOpen(true)}
+          className="flex-1 min-w-0 flex items-center gap-2 h-7 px-2.5 rounded-md bg-bg-2 border border-line-soft text-left hover:bg-bg-3/50 transition-colors"
+        >
+          {tab?.url ? (
+            <Globe className="h-3.5 w-3.5 flex-shrink-0 text-text-4" />
+          ) : (
+            <Search className="h-3.5 w-3.5 flex-shrink-0 text-text-4" />
+          )}
+          <span
+            className={`flex-1 min-w-0 truncate text-[12px] ${
+              tab?.url ? "text-text-1" : "text-text-4"
+            }`}
+          >
+            {tab?.url ? hostOf(tab.url) : "Search or enter address"}
+          </span>
+        </button>
+
+        <IconBtn label="Tabs" onClick={() => setTabSwitcherOpen(true)}>
+          <span className="relative flex items-center justify-center">
+            <SquareStack className="h-4 w-4" />
+            {tabs.length > 1 && (
+              <span className="absolute -top-2 -right-2.5 min-w-[14px] h-[14px] px-1 flex items-center justify-center rounded-full bg-accent text-[color:var(--color-accent-foreground)] text-[9px] font-semibold leading-none">
+                {tabs.length}
+              </span>
+            )}
+          </span>
+        </IconBtn>
+        <IconBtn label="New tab" onClick={createTab}>
+          <Plus className="h-4 w-4" />
+        </IconBtn>
+      </div>
 
       {/* Page body — native webview hole above, agent panel below. The hole is a
           flex child, so opening the agent panel shrinks it and reconcile()
           repositions the native webview into the smaller region above. */}
       <div className="flex-1 min-h-0 flex flex-col bg-bg-content">
-        {showHole ? (
-          <div ref={holeRef} className="flex-1 min-h-0" />
-        ) : (
-          <div className="flex-1 min-h-0" />
-        )}
+        <div
+          ref={holeRef}
+          className="flex-1 min-h-0"
+          style={showHole ? undefined : { display: "none" }}
+        />
         {agentOpen && (
           <RailBrowserAgent
             key={agentGoal ?? "manual"}
@@ -340,28 +333,6 @@ export function RailBrowser() {
           />
         )}
       </div>
-
-      {/* Docked mobile controls. */}
-      <BrowserBottomBar
-        tabCount={tabs.length}
-        engine={engine}
-        loading={Boolean(tab?.loading)}
-        canBack={created}
-        canForward={created}
-        canReload={Boolean(tab?.url)}
-        onToggleTabs={() => setTabSwitcherOpen(true)}
-        onNewTab={createTab}
-        onSetEngine={setEngine}
-        onBack={() => active && back(active.id)}
-        onForward={() => active && forward(active.id)}
-        onReload={() => active && reload(active.id)}
-        onBrowseForMe={openManualAgent}
-        annotating={annotating}
-        annotationCount={annCount}
-        canAnnotate={Boolean(tab?.url) && showHole}
-        onToggleAnnotate={toggleAnnotate}
-        onAttachAnnotations={() => void attachAnnotations()}
-      />
 
       {/* Search face — covers the page chrome above. */}
       {showSearch && (
@@ -375,7 +346,7 @@ export function RailBrowser() {
         />
       )}
 
-      {/* Card-stack tab switcher — covers everything. */}
+      {/* Tab switcher — covers everything. */}
       {tabSwitcherOpen && (
         <BrowserTabSwitcher
           tabs={tabs}

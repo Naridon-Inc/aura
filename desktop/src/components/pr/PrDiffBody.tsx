@@ -81,6 +81,7 @@ import {
   type ReactionContent,
 } from "../../lib/api";
 import { usePrThreadActive } from "./PrThreadColumn";
+import { AsciiSpinner } from "../ui/ascii-spinner";
 import { Button } from "../ui/button";
 import { FixWithAgentButton } from "../agent/FixWithAgentButton";
 
@@ -627,9 +628,10 @@ export function PrDiffBody({
     return (
       <div
         ref={placeholderRef}
-        className="w-full h-[240px] flex items-center justify-center bg-bg-content text-[11.5px] text-text-4"
+        className="w-full h-[240px] flex items-center justify-center gap-1.5 bg-bg-content text-[11.5px] text-text-4"
       >
-        <span>Loading diff…</span>
+        <AsciiSpinner className="text-[10px]" />
+        <span>Reading this change…</span>
       </div>
     );
   }
@@ -906,7 +908,7 @@ function ComposerBody({
             void submit();
           }
         }}
-        className="w-full bg-bg-content border border-line-soft rounded-md p-2 text-[12px] text-text-1 placeholder:text-text-4 outline-none focus:ring-1 focus:ring-accent-violet font-mono resize-y"
+        className="w-full bg-bg-content border border-line-soft rounded-md p-2 text-[12px] text-text-1 placeholder:text-text-4 outline-none focus:ring-1 focus:ring-accent font-mono resize-y"
       />
       <div className="flex items-center gap-2 text-[10.5px] text-text-4">
         <span>⌘ + Enter to submit · markdown supported</span>
@@ -1301,7 +1303,7 @@ export function FloatingThreadCard({
                 void submitReply();
               }
             }}
-            className="w-full bg-bg-content border border-line-soft rounded p-2 text-[12px] text-text-1 placeholder:text-text-4 outline-none focus:ring-1 focus:ring-accent-violet resize-y"
+            className="w-full bg-bg-content border border-line-soft rounded p-2 text-[12px] text-text-1 placeholder:text-text-4 outline-none focus:ring-1 focus:ring-accent resize-y"
           />
           <div className="flex items-center justify-end gap-2">
             <Button

@@ -258,17 +258,29 @@ export function compactCount(n: number): string {
 }
 
 // Status → the calm swatch + plain label used on chips.
+// Every tint here named a token no theme defines (`--color-warning`,
+// `--color-success`) or paired a real one with a stale hex, so the chips were
+// painted by their fallbacks — a blue/amber/green trio from outside the
+// palette. On the pack's own slots: amber for the two states that involve
+// waiting, the accent for the copy you are actually standing in, and the text
+// ramp for the rest. The two amber states are one family on purpose — both
+// mean "in flight" — but "needs you" is the full-strength value and "agent on
+// it" is pulled back toward the surface, because only one of them is asking
+// you to do something.
 export function statusMeta(status: CopyStatus): {
   label: string;
   tint: string;
 } {
   switch (status) {
     case "attn":
-      return { label: "Needs you", tint: "var(--color-warning, #f59e0b)" };
+      return { label: "Needs you", tint: "var(--color-amber)" };
     case "working":
-      return { label: "Agent on it", tint: "var(--color-accent, #3b82f6)" };
+      return {
+        label: "Agent on it",
+        tint: "color-mix(in srgb, var(--color-amber) 62%, var(--color-text-3))",
+      };
     case "active":
-      return { label: "Open now", tint: "var(--color-success, #22c55e)" };
+      return { label: "Open now", tint: "var(--color-accent)" };
     case "dirty":
       return { label: "Unsaved", tint: "var(--color-text-3)" };
     case "idle":

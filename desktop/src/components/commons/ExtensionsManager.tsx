@@ -22,6 +22,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 
 import { api } from "../../lib/api";
 import { pickPath } from "../../lib/nativeDialog";
+import { AsciiSpinner } from "../ui/ascii-spinner";
 import { Button } from "../ui/button";
 import { Input } from "../ui/input";
 import { Switch } from "../ui/switch";
@@ -177,7 +178,7 @@ export function ExtensionsManager({ view }: { view: ExtensionsView }) {
         {(error || notice) && (
           <div className="flex flex-col gap-2">
             {error && (
-              <div className="text-[12px] text-red-400 bg-red-500/10 border border-red-500/20 rounded px-2.5 py-1.5 leading-snug break-words">
+              <div className="text-[12px] text-red bg-red/10 border border-red/30 rounded px-2.5 py-1.5 leading-snug break-words">
                 {error}
               </div>
             )}
@@ -397,7 +398,8 @@ function DiscoverView({
       )}
 
       {loading && (
-        <div className="text-text-4 text-[12px] py-1">
+        <div className="flex items-center gap-1.5 text-text-4 text-[12px] py-1">
+          <AsciiSpinner />
           {isSearching ? "Searching…" : "Loading…"}
         </div>
       )}
@@ -526,7 +528,12 @@ function CapabilityChip({ hit }: { hit: OpenVsxHit }) {
   }, [id]);
 
   if (state === "loading") {
-    return <div className="text-text-4 text-[10.5px] mt-1 italic">Checking…</div>;
+    return (
+      <div className="mt-1 flex items-center gap-1.5 text-text-4 text-[10.5px]">
+        <AsciiSpinner />
+        Checking…
+      </div>
+    );
   }
   if (state === "error" || !summary) return null;
 
@@ -668,7 +675,7 @@ function InstalledView({
                         e.stopPropagation();
                         onRemove(ext);
                       }}
-                      className="text-text-4 hover:text-red-400"
+                      className="text-text-4 hover:text-red"
                       title="Remove"
                     >
                       {busy === `rm:${ext.id}` ? "Removing…" : "Remove"}

@@ -51,8 +51,8 @@ fn agent_id_for_suffix(suffix: &str) -> &str {
 /// UI surfaces it next to the provider name.
 fn default_model_for(suffix: &str) -> &'static str {
     match suffix {
-        "claude_code" => "claude-sonnet-4-5-20250929",
-        "gemini" => "gemini-2.5-pro",
+        "claude_code" => "claude-sonnet-4-6",
+        "gemini" => "gemini-3-pro-preview",
         "codex" => "gpt-5-codex",
         "cursor" => "cursor-default",
         "kimi" => "kimi-k2",
@@ -66,12 +66,17 @@ fn default_model_for(suffix: &str) -> &'static str {
 fn supported_models_for(suffix: &str) -> Value {
     match suffix {
         "claude_code" => json!([
-            "claude-sonnet-4-5-20250929",
-            "claude-opus-4-7",
+            "claude-opus-4-8",
+            "claude-sonnet-4-6",
             "claude-haiku-4-5-20251001",
         ]),
-        "gemini" => json!(["gemini-2.5-pro", "gemini-2.5-flash"]),
-        "codex" => json!(["gpt-5-codex", "gpt-5"]),
+        "gemini" => json!([
+            "gemini-3-pro-preview",
+            "gemini-3-flash-preview",
+            "gemini-2.5-pro",
+            "gemini-2.5-flash",
+        ]),
+        "codex" => json!(["gpt-5-codex", "gpt-5.5"]),
         "cursor" => json!(["cursor-default"]),
         "kimi" => json!(["kimi-k2"]),
         "opencode" => json!(["opencode-default"]),
@@ -307,7 +312,7 @@ impl Brain for CliWrapperBrain {
 
         let prompt = Self::build_prompt(&request);
 
-        let invocation = provider
+        let mut invocation = provider
             .build_invocation(&InvokeRequest {
                 prompt: &prompt,
                 mode: InvokeMode::StreamJson,
@@ -327,6 +332,9 @@ impl Brain for CliWrapperBrain {
             .map_err(|e| BrainError::Process {
                 message: format!("build_invocation({agent_id}): {e}"),
             })?;
+        // Enforce the fleet agent-CLI config policy (e.g. codex service_tier
+        // repair) on this manager-brain turn's invocation.
+        crate::agent_policy::apply_to_invocation(&agent_id, &mut invocation);
 
         let mut cmd = tokio::process::Command::new(&invocation.bin);
         cmd.args(&invocation.args)
@@ -441,6 +449,15 @@ impl Brain for CliWrapperBrain {
             })?;
 
             if !status.success() {
+                let exit = status.code().unwrap_or(-1);
+                // Developer-facing log so an exit-N is diagnosable without ever
+                // leaking the raw stderr (embeds the Manager preamble) to chat.
+                tracing::warn!(
+                    engine = %super::engine_errors::engine_label(&invocation.bin),
+                    exit,
+                    stderr = %stderr_buf.chars().take(2000).collect::<String>(),
+                    "engine CLI turn failed"
+                );
                 // Don't clobber a clean End that the CLI already emitted
                 // — only surface the error path when we got nothing.
                 if !any_text {
@@ -449,7 +466,7 @@ impl Brain for CliWrapperBrain {
                     Err(BrainError::Process {
                         message: super::engine_errors::humanize_cli_failure(
                             &invocation.bin,
-                            status.code().unwrap_or(-1),
+                            exit,
                             &stderr_buf,
                         ),
                     })?;

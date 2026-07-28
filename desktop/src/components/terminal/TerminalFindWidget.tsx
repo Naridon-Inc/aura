@@ -4,9 +4,10 @@
 // case-sensitive / regex / whole-word. Esc closes it.
 //
 // It drives the live xterm SearchAddon through the exported helpers in
-// `Terminal.tsx`, keyed by the active terminal's `termId`. Highlight +
-// active-match colors come from the SearchAddon decorations set in
-// `Terminal.tsx`, so they track the design tokens.
+// `Terminal.tsx`, keyed by the active terminal's `termId`. The highlight and
+// active-match colors are the SearchAddon decorations declared in
+// `Terminal.tsx` — those live inside the terminal canvas and are part of its
+// own palette, not the app's design tokens.
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { ArrowUp, ArrowDown, X } from "lucide-react";
@@ -89,7 +90,7 @@ export function TerminalFindWidget({ termId, onClose }: Props) {
 
   return (
     <div
-      className="absolute top-1.5 right-2 z-20 flex items-center gap-1 rounded-md bg-bg-chrome border border-line-soft px-1.5 py-1 shadow-lg"
+      className="absolute top-1.5 right-2 z-20 flex items-center gap-1 rounded-lg bg-bg-1 border border-line-soft px-1.5 py-1 shadow-[var(--shadow-flyout)]"
       onKeyDown={onKeyDown}
     >
       <input
@@ -98,9 +99,9 @@ export function TerminalFindWidget({ termId, onClose }: Props) {
         onChange={(e) => setQuery(e.target.value)}
         placeholder="Find"
         spellCheck={false}
-        className="h-6 w-44 rounded bg-bg-content px-2 text-[12px] text-text-1 placeholder:text-text-4 outline-none"
+        className="h-6 w-44 rounded bg-bg-content px-2 text-[12px] text-text-1 placeholder:text-text-4 outline-none focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-accent/50"
       />
-      <span className="w-16 shrink-0 text-center text-[11px] tabular-nums text-text-4">
+      <span className="w-20 shrink-0 truncate text-center text-[11px] tabular-nums text-text-4">
         {query ? (count ? `${count.index} of ${count.total}` : "No results") : ""}
       </span>
       <Toggle active={!!opts.caseSensitive} label="Match Case" onClick={() => setOpts((o) => ({ ...o, caseSensitive: !o.caseSensitive }))}>
@@ -109,17 +110,17 @@ export function TerminalFindWidget({ termId, onClose }: Props) {
       <Toggle active={!!opts.wholeWord} label="Match Whole Word" onClick={() => setOpts((o) => ({ ...o, wholeWord: !o.wholeWord }))}>
         W
       </Toggle>
-      <Toggle active={!!opts.regex} label="Use Regular Expression" onClick={() => setOpts((o) => ({ ...o, regex: !o.regex }))}>
+      <Toggle active={!!opts.regex} label="Match a pattern" onClick={() => setOpts((o) => ({ ...o, regex: !o.regex }))}>
         .*
       </Toggle>
       <FindBtn label="Previous Match" onClick={() => runNext(true)}>
-        <ArrowUp size={13} />
+        <ArrowUp className="h-3.5 w-3.5" />
       </FindBtn>
       <FindBtn label="Next Match" onClick={() => runNext(false)}>
-        <ArrowDown size={13} />
+        <ArrowDown className="h-3.5 w-3.5" />
       </FindBtn>
       <FindBtn label="Close" onClick={close}>
-        <X size={13} />
+        <X className="h-3.5 w-3.5" />
       </FindBtn>
     </div>
   );
@@ -140,7 +141,7 @@ function FindBtn({
       title={label}
       aria-label={label}
       onClick={onClick}
-      className="h-6 w-6 grid place-items-center rounded text-text-4 hover:text-text-2 hover:bg-bg-hover"
+      className="h-6 w-6 grid place-items-center rounded text-text-4 transition-colors hover:text-text-2 hover:bg-bg-hover"
     >
       {children}
     </button>
@@ -166,9 +167,9 @@ function Toggle({
       aria-pressed={active}
       onClick={onClick}
       className={[
-        "h-6 min-w-6 px-1 grid place-items-center rounded text-[11px] font-medium leading-none",
+        "h-6 min-w-6 px-1 grid place-items-center rounded text-[11px] font-medium leading-none transition-colors",
         active
-          ? "bg-[var(--color-accent)]/15 text-[var(--color-accent)]"
+          ? "bg-accent/10 text-accent hover:bg-accent/15"
           : "text-text-4 hover:text-text-2 hover:bg-bg-hover",
       ].join(" ")}
     >

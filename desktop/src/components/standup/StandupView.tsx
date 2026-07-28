@@ -14,6 +14,7 @@ import {
   type Task,
   type TeamManifest,
 } from "../../lib/api";
+import { AsciiSpinner } from "../ui/ascii-spinner";
 
 type Props = {
   repoRoot: string;
@@ -107,15 +108,14 @@ export function StandupView({ repoRoot, embedded = false }: Props) {
       <div className="px-4 py-3 border-b border-line-soft flex items-center gap-3">
         <h2 className="text-[14px] font-medium text-text-1">Standup</h2>
         <span className="text-[11px] text-text-3">
-          Last {DAYS_BACK} days · per-member rollup
+          Last {DAYS_BACK} days · what each person worked on
         </span>
         <div className="ml-auto flex items-center gap-2">
           {postNote && (
+            // Only a failure needs the reader here; a successful post is
+            // confirmed by the text alone.
             <span
-              className="text-[11px]"
-              style={{
-                color: postNote.ok ? "var(--color-green)" : "var(--color-red)",
-              }}
+              className={`text-[11px] ${postNote.ok ? "text-text-3" : "text-red"}`}
             >
               {postNote.text}
             </span>
@@ -124,7 +124,7 @@ export function StandupView({ repoRoot, embedded = false }: Props) {
             type="button"
             className="text-[11px] px-2 py-0.5 rounded bg-bg-2 hover:bg-bg-3 text-text-2 disabled:opacity-50"
             disabled={posting || loading || empty}
-            title={`Publish this rollup to the team's #${STANDUP_CHANNEL} channel`}
+            title={`Share this summary with the team in #${STANDUP_CHANNEL}`}
             onClick={() => void post()}
           >
             {posting ? "Posting…" : `Post to #${STANDUP_CHANNEL}`}
@@ -134,16 +134,13 @@ export function StandupView({ repoRoot, embedded = false }: Props) {
 
       <div className="flex-1 overflow-y-auto p-4 space-y-4">
         {loading && (
-          <div className="text-[12px] text-text-3">Loading rollup…</div>
+          <div className="flex items-center gap-2 text-[12px] text-text-4">
+            <AsciiSpinner />
+            Loading…
+          </div>
         )}
         {err && (
-          <div
-            className="text-[11px] px-2 py-1 rounded"
-            style={{
-              background: "color-mix(in oklab, var(--color-red) 12%, transparent)",
-              color: "var(--color-red)",
-            }}
-          >
+          <div className="text-[11px] px-2 py-1 rounded bg-red/10 text-red">
             {err}
           </div>
         )}
@@ -151,10 +148,9 @@ export function StandupView({ repoRoot, embedded = false }: Props) {
           <TasksSummaryCard summary={taskSummary} days={DAYS_BACK} />
         )}
         {!loading && !err && empty && (
-          <div className="text-[12px] text-text-3">
-            No intent entries or task activity in the last {DAYS_BACK} days.
-            Activity will appear here once team members log intent or move
-            tasks.
+          <div className="text-[12px] text-text-3 leading-snug">
+            Nothing happened in the last {DAYS_BACK} days. As soon as someone
+            saves work or moves a task, it shows up here.
           </div>
         )}
         {buckets.map((b) => (
@@ -167,8 +163,8 @@ export function StandupView({ repoRoot, embedded = false }: Props) {
       </div>
 
       <div className="px-4 py-2 border-t border-line-soft text-[10.5px] text-text-4">
-        Sourced from the intent log + Tasks board. Post publishes a markdown
-        digest to #{STANDUP_CHANNEL}.
+        Built from what your team saved and the Tasks board. Post shares a
+        written summary in #{STANDUP_CHANNEL}.
       </div>
     </div>
   );
@@ -207,7 +203,7 @@ function TasksSummaryCard({
               className="text-[11.5px] text-text-2 truncate"
               title={t.title}
             >
-              <span className="text-green">✓</span>{" "}
+              <span className="text-text-4" aria-hidden>✓</span>{" "}
               {t.sequence_id > 0 && (
                 <span className="text-text-4 tabular-nums">
                   AURA-{t.sequence_id}{" "}
@@ -255,7 +251,7 @@ function DaySection({
                   {display}
                 </span>
                 <span className="text-[10.5px] text-text-4 tabular-nums">
-                  {rows.length} intent{rows.length === 1 ? "" : "s"}
+                  {rows.length} update{rows.length === 1 ? "" : "s"}
                 </span>
               </div>
               <ul className="space-y-0.5">

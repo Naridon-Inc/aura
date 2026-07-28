@@ -2244,7 +2244,7 @@ pub struct TaskView {
     /// schema bump.
     pub layout: String,
     /// Filter object: `{ status: ["backlog"], priority: ["high"],
-    /// assignee: ["@me", "owner"], labels: ["bug"], agent: ["claude"] }`.
+    /// assignee: ["@me", "ashiq"], labels: ["bug"], agent: ["claude"] }`.
     /// Empty arrays / missing keys mean "no filter on that dimension".
     #[serde(default)]
     pub filters: serde_json::Value,
@@ -2754,12 +2754,12 @@ mod tests {
 
     #[test]
     fn backfill_wraps_single_assignee_into_array() {
-        let mut file = TaskFile { tasks: vec![fixture_legacy_task("backlog", "low", Some("owner"), &[])] };
+        let mut file = TaskFile { tasks: vec![fixture_legacy_task("backlog", "low", Some("ashiq"), &[])] };
         let states = empty_states();
         let mut labels = TaskLabelFile::default();
         backfill_ontology(&mut file, &states, &mut labels);
-        assert_eq!(file.tasks[0].assignee_ids, vec!["owner".to_string()]);
-        assert_eq!(file.tasks[0].assignee.as_deref(), Some("owner"));
+        assert_eq!(file.tasks[0].assignee_ids, vec!["ashiq".to_string()]);
+        assert_eq!(file.tasks[0].assignee.as_deref(), Some("ashiq"));
     }
 
     #[test]
@@ -2778,7 +2778,7 @@ mod tests {
 
     #[test]
     fn backfill_is_idempotent() {
-        let mut file = TaskFile { tasks: vec![fixture_legacy_task("done", "high", Some("owner"), &["bug"])] };
+        let mut file = TaskFile { tasks: vec![fixture_legacy_task("done", "high", Some("ashiq"), &["bug"])] };
         let states = empty_states();
         let mut labels = TaskLabelFile::default();
         let (m1, _) = backfill_ontology(&mut file, &states, &mut labels);
@@ -3043,19 +3043,19 @@ mod tests {
     #[test]
     fn emit_update_activity_splits_assignee_add_and_remove() {
         let repo = tmp_repo("emitassign");
-        let mut before = fixture_legacy_task("backlog", "medium", Some("owner"), &[]);
+        let mut before = fixture_legacy_task("backlog", "medium", Some("ashiq"), &[]);
         before.id = "t1".into();
-        before.assignee_ids = vec!["owner".into()];
+        before.assignee_ids = vec!["ashiq".into()];
         let mut after = before.clone();
-        after.assignee_ids = vec!["teammate".into()];
-        after.assignee = Some("teammate".into());
+        after.assignee_ids = vec!["mck".into()];
+        after.assignee = Some("mck".into());
         emit_update_activity(&repo, &before, &after);
         let log_path = repo.join(".aura").join("tasks").join("task_activity.jsonl");
         let txt = std::fs::read_to_string(&log_path).unwrap();
         assert!(txt.contains("assigned"));
         assert!(txt.contains("unassigned"));
-        assert!(txt.contains("teammate"));
-        assert!(txt.contains("owner"));
+        assert!(txt.contains("mck"));
+        assert!(txt.contains("ashiq"));
     }
 
     #[test]

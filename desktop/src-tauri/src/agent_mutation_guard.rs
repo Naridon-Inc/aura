@@ -345,6 +345,7 @@ pub async fn agent_guard_accept_with_intent(
             status: "M".into(),
             additions: None,
             deletions: None,
+            symbols: Vec::new(),
             commit: None,
             base: None,
         }],
@@ -484,9 +485,44 @@ pub async fn agent_guard_self_heal_nudge(
     all_rels.extend(created.iter().cloned());
     all_rels.extend(deleted.iter().cloned());
 
-    // (1) Auto-log stub intent — relative paths, marked as a stub so
-    // the agent can later backfill and aura tooling can flag pending
-    // backfills in dashboards if anyone cares.
+    // (1) Auto-log a covering intent for these files. Resolve the live Claude
+    // session first so the row carries BOTH a durable link to the conversation
+    // AND its actual prompt as the reason. The guard only fires while an agent
+    // is actively editing, so the freshest transcript IS this session's
+    // (see newest_session_id_for_repo).
+    let claude_sid = crate::cmd_claude_sessions::newest_session_id_for_repo(&repo_root);
+
+    // The "why": the user's own words from this session, captured at edit time
+    // so a file an external CLI touched no longer reads "no notes mention this
+    // file" until a commit runs. When the transcript has no readable prompt yet
+    // we fall back to an honest, plain-language line — never the old
+    // "[auto] … backfill pending" text, which is engineer jargon that surfaced
+    // verbatim in the non-engineer-facing "why" column.
+    let session_prompt = claude_sid
+        .as_deref()
+        .and_then(|sid| crate::cmd_claude_sessions::latest_prompt_for_session(&repo_root, sid));
+    // Resolve the "why", best source first:
+    //   1. the live session's own prompt — the actual ask, most truthful;
+    //   2. Aura's own brain reading the diff — the "if the agent didn't log
+    //      intent, we do it with our brain" path, so a change never lands as
+    //      a hollow, meaningless flag;
+    //   3. an honest last-resort stub when even the brain can't be reached.
+    let (stub_intent, stub_source) = match session_prompt {
+        Some(reason) => (reason, "session_prompt"),
+        None => match brain_infer_intent(&repo_root, &all_rels).await {
+            Some(line) => (line, "brain_inferred"),
+            None => (
+                format!(
+                    "{agent_id} edited {n} file(s) — reason not captured yet",
+                    n = files.len(),
+                ),
+                "guard_auto_stub",
+            ),
+        },
+    };
+    // A brain-inferred line is a real reason too — only the bare stub counts
+    // as "not captured" for the backfill note's wording.
+    let captured_reason = stub_source != "guard_auto_stub";
     let stub_changeset = crate::cmd_aura::IntentChangeset {
         files: all_rels
             .iter()
@@ -495,24 +531,15 @@ pub async fn agent_guard_self_heal_nudge(
                 status: "M".into(),
                 additions: None,
                 deletions: None,
+                symbols: Vec::new(),
                 commit: None,
                 base: None,
             })
             .collect(),
         block_id: None,
-        source: Some("guard_auto_stub".into()),
+        source: Some(stub_source.into()),
         captured_at: None,
     };
-    let stub_intent = format!(
-        "[auto] agent {agent_id} edited {n} file(s); backfill pending — {summary}",
-        n = files.len(),
-    );
-    // Stamp the active Claude session id so this auto-stub — the row that most
-    // often shows an empty Transcript tab — carries a durable link to its live
-    // conversation, instead of leaving the Session detail to guess by mtime.
-    // Resolved by newest-jsonl-for-repo: the guard only fires while an agent is
-    // actively editing, so the freshest transcript IS this session's.
-    let claude_sid = crate::cmd_claude_sessions::newest_session_id_for_repo(&repo_root);
     let _ = crate::cmd_aura::aura_log_intent(
         repo_root.clone(),
         stub_intent,
@@ -526,20 +553,30 @@ pub async fn agent_guard_self_heal_nudge(
     let backfill_path = std::path::PathBuf::from(&repo_root)
         .join(".aura")
         .join("agent_pending_backfill.json");
+    let ask = if captured_reason {
+        format!(
+            "aura-guard bound this session's prompt as the reason for {} file(s). \
+            If a more specific one-line reason fits these exact changes, call \
+            aura_log_intent to refine it. Files: {}",
+            files.len(),
+            all_rels.join(", ")
+        )
+    } else {
+        format!(
+            "aura-guard logged a covering reason for {} file(s) but couldn't read \
+            this session's prompt yet. When you have a moment, call aura_log_intent \
+            with the real one-line reason for these changes. Files: {}",
+            files.len(),
+            all_rels.join(", ")
+        )
+    };
     let payload = serde_json::json!({
         "agent_id": agent_id,
         "session_id": session_id,
         "summary": summary,
         "files": all_rels,
         "queued_at_unix_s": now_unix_secs(),
-        "ask": format!(
-            "aura-guard auto-logged a stub intent covering {} file(s). \
-            When you have a moment, call aura_log_intent with the real \
-            one-line reason for these changes so the audit trail \
-            isn't just '[auto]'. Files: {}",
-            files.len(),
-            all_rels.join(", ")
-        ),
+        "ask": ask,
     });
     if let Some(parent) = backfill_path.parent() {
         let _ = std::fs::create_dir_all(parent);
@@ -792,6 +829,122 @@ fn path_covers(claim: &str, target: &str) -> bool {
         format!("{claim}/")
     };
     target.starts_with(&claim_dir)
+}
+
+/// Ask Aura's own brain to read the diff for `rels` and return a one-line
+/// intent — the "if the agent didn't log it, we do it with our brain" path.
+/// Bounded by a hard timeout so a slow or absent brain never stalls the
+/// self-heal; `None` on any failure/empty result, which lets the caller fall
+/// back to an honest stub.
+async fn brain_infer_intent(repo_root: &str, rels: &[String]) -> Option<String> {
+    if rels.is_empty() {
+        return None;
+    }
+    let diff = collect_diff_for(repo_root, rels);
+    if diff.trim().is_empty() {
+        return None;
+    }
+
+    use crate::manager::brain::types::{ChatMessage, ChatRequest};
+    let prompt = format!(
+        "A coding agent changed these files but didn't say why. Read the diff \
+         and write the reason as ONE terse line (max 12 words, plain language, \
+         no quotes, no file names, no code). It becomes the 'why' in an audit \
+         trail.\n\nFiles: {}\n\nDiff:\n{}",
+        rels.join(", "),
+        diff,
+    );
+    let request = ChatRequest {
+        messages: vec![ChatMessage {
+            role: "user".into(),
+            content: serde_json::json!(prompt),
+        }],
+        system: Some(
+            "You write one-line change intents for an audit trail. Output only \
+             the single line — no preamble, no quotes."
+                .into(),
+        ),
+        tools: vec![],
+        max_tokens: Some(40),
+        temperature: Some(0.2),
+        effort: None,
+        fast: true,
+        model: None,
+        long_context: false,
+        approval: None,
+        cwd: repo_root.to_string(),
+    };
+
+    let text = match tokio::time::timeout(
+        Duration::from_secs(12),
+        crate::cmd_loop::plan_collect(request),
+    )
+    .await
+    {
+        Ok(Ok(t)) => t,
+        _ => return None,
+    };
+
+    let line = clean_intent_line(&text);
+    if line.is_empty() {
+        None
+    } else {
+        Some(line)
+    }
+}
+
+/// Build a bounded diff for the changed files to hand the brain. Prefers
+/// `git diff HEAD` (both staged and working changes vs the last commit); for
+/// brand-new/untracked files that don't show there, falls back to their head
+/// bytes so the brain still has content to summarize.
+fn collect_diff_for(repo_root: &str, rels: &[String]) -> String {
+    const CAP: usize = 6000;
+    let mut args: Vec<String> = vec![
+        "--no-pager".into(),
+        "diff".into(),
+        "HEAD".into(),
+        "--".into(),
+    ];
+    args.extend(rels.iter().cloned());
+    let mut diff = std::process::Command::new("git")
+        .args(&args)
+        .current_dir(repo_root)
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
+        .unwrap_or_default();
+
+    if diff.trim().is_empty() {
+        for r in rels {
+            if let Ok(body) =
+                std::fs::read_to_string(std::path::Path::new(repo_root).join(r))
+            {
+                diff.push_str(&format!("--- new file {r} ---\n"));
+                diff.push_str(&body.chars().take(2000).collect::<String>());
+                diff.push('\n');
+            }
+        }
+    }
+
+    if diff.len() > CAP {
+        diff.truncate(CAP);
+        diff.push_str("\n… (truncated)");
+    }
+    diff
+}
+
+/// Take the first non-empty line of a brain reply and strip wrapping quotes
+/// so a chatty model that answers with `"Added a search box."` still yields a
+/// clean audit line.
+fn clean_intent_line(raw: &str) -> String {
+    raw.lines()
+        .map(|l| l.trim())
+        .find(|l| !l.is_empty())
+        .unwrap_or("")
+        .trim_matches(|c| c == '"' || c == '\'' || c == '`')
+        .trim()
+        .to_string()
 }
 
 fn now_unix_secs() -> i64 {

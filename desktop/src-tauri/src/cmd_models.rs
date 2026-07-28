@@ -170,6 +170,34 @@ fn embedded_aura_catalog() -> AuraCatalog {
     })
 }
 
+/// Brand metadata (vendor / icon slug / brand name) for a family, for stamping
+/// onto rows that CLI discovery surfaces which the curated catalog didn't carry.
+/// Prefers the catalog's own family metadata; falls back to a fixed map so a
+/// brand-new model still shows the right mark even if the family is somehow
+/// absent from the catalog.
+fn family_brand(aura: &AuraCatalog, family: &str) -> crate::model_discovery::FamilyBrand {
+    if let Some(fam) = aura.families.get(family) {
+        return crate::model_discovery::FamilyBrand {
+            vendor: Some(fam.vendor.clone()),
+            brand: Some(fam.brand.clone()),
+            brand_name: Some(fam.brand_name.clone()),
+        };
+    }
+    let (vendor, brand, brand_name) = match family {
+        "kimi" => ("Moonshot AI", "kimi", "Kimi"),
+        "antigravity" => ("Google", "antigravity", "Antigravity"),
+        "openai" => ("OpenAI", "codex", "GPT"),
+        "gemini" => ("Google", "gemini", "Gemini"),
+        "anthropic" => ("Anthropic", "claude", "Claude"),
+        _ => return crate::model_discovery::FamilyBrand::default(),
+    };
+    crate::model_discovery::FamilyBrand {
+        vendor: Some(vendor.to_string()),
+        brand: Some(brand.to_string()),
+        brand_name: Some(brand_name.to_string()),
+    }
+}
+
 /// Fetch the Aura-hosted catalog with a short timeout. ANY failure (offline,
 /// 404 before the file is deployed, malformed) falls back to the embedded
 /// copy — this never errors out, the picker always has a curated set.
@@ -558,38 +586,48 @@ pub async fn agent_models_list(force: Option<bool>) -> Result<ModelCatalog, Stri
     let mut families: BTreeMap<String, Vec<ModelInfo>> = BTreeMap::new();
     let mut errors: BTreeMap<String, String> = BTreeMap::new();
 
-    for family in ["anthropic", "openai", "gemini"] {
+    // `kimi` and `antigravity` are CLI-wrapper families with no first-party key
+    // slot — they were never served by the backend before, so the frontend fell
+    // back to its static list. Include them here so their curated catalog rows
+    // (and the CLI discovery below) reach the picker like every other family.
+    for family in ["anthropic", "openai", "gemini", "xai", "kimi", "antigravity"] {
         // Seed from the curated Aura catalog — this is the offered set.
         let mut rows = aura.family_models(family);
 
         // Enrich with the user's own account when a key is present. A live
         // fetch can ONLY append ids the curated set doesn't already carry; it
-        // never removes or reorders the curated rows.
-        match resolve_key(family) {
-            None => {
-                errors.insert(family.to_string(), "no API key configured".to_string());
-            }
-            Some(key) => {
-                let fetched = match family {
-                    "anthropic" => fetch_anthropic(&client, &key).await,
-                    "openai" => fetch_openai(&client, &key).await,
-                    "gemini" => fetch_gemini(&client, &key).await,
-                    _ => unreachable!(),
-                };
-                match fetched {
-                    Ok(live) => {
-                        let have: std::collections::HashSet<String> =
-                            rows.iter().map(|m| m.id.clone()).collect();
-                        for m in live {
-                            if !m.id.is_empty() && !have.contains(&m.id) {
-                                rows.push(m);
+        // never removes or reorders the curated rows. Only first-party API
+        // families have a key slot (`key_triplet`); xAI (OpenAI-compatible
+        // custom brain) and the CLI-wrapper families (kimi/antigravity) have
+        // none, so we skip the fetch — and, crucially, don't record a spurious
+        // "no API key configured" error for them.
+        if key_triplet(family).is_some() {
+            match resolve_key(family) {
+                None => {
+                    errors.insert(family.to_string(), "no API key configured".to_string());
+                }
+                Some(key) => {
+                    let fetched = match family {
+                        "anthropic" => fetch_anthropic(&client, &key).await,
+                        "openai" => fetch_openai(&client, &key).await,
+                        "gemini" => fetch_gemini(&client, &key).await,
+                        _ => unreachable!(),
+                    };
+                    match fetched {
+                        Ok(live) => {
+                            let have: std::collections::HashSet<String> =
+                                rows.iter().map(|m| m.id.clone()).collect();
+                            for m in live {
+                                if !m.id.is_empty() && !have.contains(&m.id) {
+                                    rows.push(m);
+                                }
                             }
                         }
-                    }
-                    Err(e) => {
-                        // Non-fatal: the curated rows still stand. Record it so
-                        // the UI can explain a missing/invalid key if it wants.
-                        errors.insert(family.to_string(), e);
+                        Err(e) => {
+                            // Non-fatal: the curated rows still stand. Record it
+                            // so the UI can explain a missing/invalid key.
+                            errors.insert(family.to_string(), e);
+                        }
                     }
                 }
             }
@@ -597,6 +635,21 @@ pub async fn agent_models_list(force: Option<bool>) -> Result<ModelCatalog, Stri
 
         if !rows.is_empty() {
             families.insert(family.to_string(), rows);
+        }
+    }
+
+    // Fold in what the user's *installed* CLIs actually offer. For CLI-wrapper
+    // families (kimi/antigravity) the installed CLI defines membership; for the
+    // shared native+CLI families (openai) it appends ids the curated set lacks.
+    // Every probe is best-effort — a missing/failed CLI leaves the family on its
+    // curated rows. See `model_discovery` for the merge policy.
+    let discovered = crate::model_discovery::discover_all().await;
+    for (family, disc) in discovered {
+        let brand = family_brand(&aura, &family);
+        let existing = families.remove(&family).unwrap_or_default();
+        let merged = crate::model_discovery::merge_discovered(&family, existing, disc, &brand);
+        if !merged.is_empty() {
+            families.insert(family, merged);
         }
     }
 
@@ -657,5 +710,8 @@ mod tests {
             .find(|m| m.label == "Opus 4.8 1M")
             .expect("Opus 4.8 1M row present");
         assert_eq!(opus_1m.long_context, Some(true), "longContext flag lost in parse");
+
+        let xai = cat.family_models("xai");
+        assert_eq!(xai.first().map(|m| m.id.as_str()), Some("grok-4.5"));
     }
 }

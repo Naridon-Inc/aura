@@ -50,6 +50,8 @@ mod tests {
             ts: 0,
             key_id: None,
             sig: None,
+            pubkey: None,
+            worktree: None,
         }
     }
 

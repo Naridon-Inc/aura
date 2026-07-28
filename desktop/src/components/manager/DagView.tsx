@@ -109,7 +109,7 @@ export function DagView({
   }, [recompute, tasks.length]);
 
   if (tasks.length === 0) {
-    return <div className="text-fg-muted text-sm">No tasks staged.</div>;
+    return <div className="text-text-3 text-sm">No tasks staged.</div>;
   }
 
   return (
@@ -134,7 +134,7 @@ export function DagView({
       <div className="flex flex-col gap-3 relative">
         {waves.map((wave, idx) => (
           <div key={idx}>
-            <div className="text-[10px] uppercase tracking-wide text-fg-muted mb-1">
+            <div className="text-[10px] uppercase tracking-wide text-text-3 mb-1">
               Wave {idx + 1}
             </div>
             <div className="flex flex-wrap gap-x-12 gap-y-2">
@@ -234,21 +234,21 @@ function EdgeTooltip({ edge, tasks }: { edge: EdgeGeom; tasks: ManagerTask[] }) 
       className="absolute z-20 pointer-events-none bg-bg-1 border border-line rounded shadow-lg px-2 py-1.5 text-[10.5px] max-w-xs"
       style={{ left: x, top: y, transform: "translateX(-50%)" }}
     >
-      <div className="text-fg-muted uppercase tracking-wide text-[9px] mb-0.5">
+      <div className="text-text-3 uppercase tracking-wide text-[9px] mb-0.5">
         #{edge.parentId} → #{edge.childId} handover
       </div>
       {summary ? (
-        <div className="text-fg-strong whitespace-pre-wrap line-clamp-4">
+        <div className="text-text-1 whitespace-pre-wrap line-clamp-4">
           {summary.length > 240 ? summary.slice(0, 240) + "…" : summary}
         </div>
       ) : (
-        <div className="text-fg-muted italic">
+        <div className="text-text-3 italic">
           {parent.status === "done"
             ? "(no summary captured)"
             : "Waiting for upstream task to complete."}
         </div>
       )}
-      <div className="text-fg-muted text-[9px] mt-1">click for full prompt →</div>
+      <div className="text-text-3 text-[9px] mt-1">click for full prompt →</div>
     </div>
   );
 }
@@ -291,13 +291,13 @@ function PromptPreviewModal({
         onClick={(e) => e.stopPropagation()}
       >
         <div className="flex items-center justify-between px-3 py-2 border-b border-line-soft">
-          <div className="text-[11px] text-fg-muted uppercase tracking-wide">
+          <div className="text-[11px] text-text-3 uppercase tracking-wide">
             Handover #{parentId} → #{childId}
           </div>
           <Button
             variant="ghost"
             size="icon-sm"
-            className="text-fg-muted hover:text-fg-strong text-xs"
+            className="text-text-3 hover:text-text-1 text-xs"
             onClick={onClose}
           >
             ✕
@@ -305,11 +305,11 @@ function PromptPreviewModal({
         </div>
         <div className="flex-1 min-h-0 overflow-auto p-3">
           {text === null && !error && (
-            <div className="text-fg-muted text-xs">Building prompt…</div>
+            <div className="text-text-3 text-xs">Building prompt…</div>
           )}
-          {error && <div className="text-rose-400 text-xs">{error}</div>}
+          {error && <div className="text-red text-xs">{error}</div>}
           {text && (
-            <pre className="text-[11.5px] text-fg-strong whitespace-pre-wrap font-mono">
+            <pre className="text-[11.5px] text-text-1 whitespace-pre-wrap font-mono">
               {text}
             </pre>
           )}
@@ -321,10 +321,10 @@ function PromptPreviewModal({
 
 const STATUS_STROKE: Record<ManagerTaskStatus, string> = {
   pending: "var(--color-line)",
-  running: "var(--color-blue, #5B8DEF)",
-  done: "var(--color-green, #3FB950)",
-  failed: "var(--color-red, #EF4444)",
-  manual_pending: "var(--color-amber, #F59E0B)",
+  running: "var(--color-blue)",
+  done: "var(--color-green)",
+  failed: "var(--color-red)",
+  manual_pending: "var(--color-amber)",
   skipped: "var(--color-line)",
 };
 

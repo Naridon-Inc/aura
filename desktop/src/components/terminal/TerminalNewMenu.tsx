@@ -1,6 +1,6 @@
 // The `+` menu for the terminal panel toolbar — mirrors VS Code's
 // "New Terminal" dropdown. New / New Window (popout) / Split, the list
-// of configured profiles, a "Split with Profile" submenu, and the
+// of configured profiles, a "Split with Another Shell" submenu, and the
 // settings + default-profile affordances. Built on the shared Radix
 // `DropdownMenu` so submenus + the radio group come for free and the
 // menu portals out of the panel's clipped overflow.
@@ -54,7 +54,7 @@ export function TerminalNewMenu({
   return (
     <DropdownMenu>
       <DropdownMenuTrigger asChild>{trigger}</DropdownMenuTrigger>
-      <DropdownMenuContent align={align} className="min-w-[15rem]">
+      <DropdownMenuContent align={align} className="min-w-[14rem] max-w-[20rem]">
         <DropdownMenuItem onSelect={() => onNewTerminal()}>
           <Plus />
           New Terminal
@@ -76,27 +76,27 @@ export function TerminalNewMenu({
         {profiles.length > 0 && (
           <>
             <DropdownMenuSeparator />
-            <DropdownMenuLabel className="text-text-4 text-[11px]">
-              Profiles
+            <DropdownMenuLabel>
+              Shells
             </DropdownMenuLabel>
             {profiles.map((p) => (
               <DropdownMenuItem key={p.id} onSelect={() => onNewTerminal(p.id)}>
-                <span className="text-text-4 font-mono text-[11px]">{">_"}</span>
-                {p.name}
+                <span className="font-mono text-text-4 text-[10px]">{">_"}</span>
+                <span className="min-w-0 truncate">{p.name}</span>
                 {p.id === defaultProfileId && (
-                  <span className="ml-auto text-text-5 text-[10px]">default</span>
+                  <span className="ml-auto text-[11px] tracking-wider text-text-4">Default</span>
                 )}
               </DropdownMenuItem>
             ))}
             <DropdownMenuSub>
               <DropdownMenuSubTrigger>
                 <SplitIcon />
-                Split with Profile
+                Split with Another Shell
               </DropdownMenuSubTrigger>
               <DropdownMenuSubContent>
                 {profiles.map((p) => (
                   <DropdownMenuItem key={p.id} onSelect={() => onSplit(p.id)}>
-                    {p.name}
+                    <span className="min-w-0 truncate">{p.name}</span>
                   </DropdownMenuItem>
                 ))}
               </DropdownMenuSubContent>
@@ -107,11 +107,11 @@ export function TerminalNewMenu({
         <DropdownMenuSeparator />
         <DropdownMenuItem onSelect={onConfigureSettings}>
           <Settings />
-          Configure Terminal Settings
+          Terminal Settings
         </DropdownMenuItem>
         {profiles.length > 0 && (
           <DropdownMenuSub>
-            <DropdownMenuSubTrigger>Select Default Profile</DropdownMenuSubTrigger>
+            <DropdownMenuSubTrigger>Choose the Default Shell</DropdownMenuSubTrigger>
             <DropdownMenuSubContent>
               <DropdownMenuRadioGroup
                 value={defaultProfileId ?? ""}
@@ -119,7 +119,7 @@ export function TerminalNewMenu({
               >
                 {profiles.map((p) => (
                   <DropdownMenuRadioItem key={p.id} value={p.id}>
-                    {p.name}
+                    <span className="min-w-0 truncate">{p.name}</span>
                   </DropdownMenuRadioItem>
                 ))}
               </DropdownMenuRadioGroup>

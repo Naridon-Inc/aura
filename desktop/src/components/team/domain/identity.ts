@@ -26,21 +26,44 @@ export function norm(s: string | null | undefined): string {
   return (s ?? "").toLowerCase().trim();
 }
 
-/** The set of normalized tokens that identify the local user. Built from
- *  the team identity (roster) and the device identity, each contributing
- *  its raw handle/name and — where it looks like an email — the local
- *  part. Membership in this set is what makes a message `fromMe`. */
-export type SelfKeys = Set<string>;
+/** The normalized tokens that identify the local user, split by how much
+ *  they can be trusted on their own:
+ *
+ *  - `strong` — a deliberate, per-person identity: the GitHub-anchored roster
+ *    handle ("mhask"), the #aura pseudonym, a declared "also me" seat. A
+ *    sender matching one of these is ALWAYS us.
+ *  - `weak` — email local-parts. `resolve_handle` falls back to the email
+ *    local-part when there's no GitHub anchor, and `handle_from_email` hands
+ *    the SAME local-part to every teammate configured with a colliding
+ *    `user.email` (two laptops literally sharing one address). So a weak match
+ *    ALONE can't prove identity — it only counts as us when the message's
+ *    device id doesn't reveal a different install.
+ *
+ *  This split is what stops a colleague on a shared git email from rendering
+ *  with a "you" badge, while still filing our own historical messages (sent
+ *  under the email-prefix handle before we had a GitHub login) as ours. */
+export interface SelfKeys {
+  strong: Set<string>;
+  weak: Set<string>;
+}
 
-/** Add `value` and, when it contains an `@`, its email-local-part to the
- *  key set. Both forms matter: `resolve_handle` can stamp either the full
- *  address's local part or a bare handle depending on roster state. */
-function addKey(keys: SelfKeys, value: string | null | undefined): void {
+/** Optional device context for `isSelfSender`. When both ids are present and
+ *  differ, a weak (email-local-part) match is rejected — the sender is a
+ *  different install wearing a handle we happen to share. */
+export interface SelfMatchCtx {
+  senderDeviceId?: string | null;
+  myDeviceId?: string | null;
+}
+
+/** Add `value` and, when it contains an `@`, its email-local-part to `set`.
+ *  Both forms matter: `resolve_handle` can stamp either the full address's
+ *  local part or a bare handle depending on roster state. */
+function addKey(set: Set<string>, value: string | null | undefined): void {
   const n = norm(value);
   if (!n) return;
-  keys.add(n);
+  set.add(n);
   const at = n.indexOf("@");
-  if (at > 0) keys.add(n.slice(0, at));
+  if (at > 0) set.add(n.slice(0, at));
 }
 
 /** Build the local-user key set from the two identity sources. Pure —
@@ -74,48 +97,89 @@ export function buildSelfKeys(opts: {
   /** The machine's GitHub account login (`gh api user`). This is the
    *  per-person anchor: the backend bakes it into the roster handle, so
    *  it equals `effectiveHandle` once known and is what `resolve_handle`
-   *  stamps on new messages ("owner", not the "owner" email
+   *  stamps on new messages ("mhask", not the "ashiqwayanad007" email
    *  prefix). It's stable across repos and across the several git emails
    *  one person commits under, so two of your own machines stay distinct
    *  without anyone signing into Aura. Optional — absent when `gh` isn't
    *  set up, in which case the email-prefix handle carries identity. */
   accountLogin?: string | null;
 }): SelfKeys {
-  const keys: SelfKeys = new Set();
-  // Collect every form our OWN messages could have been stamped with.
-  // `resolve_handle` stamps a *handle*: the GitHub login when we know it
-  // ("owner"), else the email local-part ("owner"), else a
-  // per-repo override — plus the opt-in #aura pseudonym. We add all of
-  // them, including the email local-part, so messages we sent *before* the
-  // GitHub login became our handle still file as ours.
-  addKey(keys, opts.effectiveHandle);
-  addKey(keys, opts.accountLogin);
-  addKey(keys, opts.auraAlias);
-  addKey(keys, opts.handle);
-  addKey(keys, opts.email);
+  const strong = new Set<string>();
+  const weak = new Set<string>();
+  // The GitHub login is the per-person anchor: when present, `resolve_handle`
+  // bakes it into our handle, so the handle is a deliberate identity (strong).
+  // Signed out, the handle degrades to the email local-part — which a
+  // colleague on the same git email would also get — so it must be treated as
+  // weak (device-confirmed) instead.
+  const hasAnchor = !!norm(opts.accountLogin);
+  addKey(strong, opts.accountLogin);
+  addKey(strong, opts.auraAlias);
+  const handleTarget = hasAnchor ? strong : weak;
+  addKey(handleTarget, opts.effectiveHandle);
+  addKey(handleTarget, opts.handle);
   // Linked seats the user declared as "also me" (see readSelfLinks). Their
-  // handles/emails join the key set so their messages file as ours — the
-  // "unify ownership" half — without merging the roster rows themselves.
-  for (const h of opts.alsoHandles ?? []) addKey(keys, h);
-  for (const e of opts.alsoEmails ?? []) addKey(keys, e);
+  // handles are a deliberate claim (strong); each declared email contributes
+  // its full form (strong — two people rarely share a whole address) plus its
+  // local-part (weak — not injective across colliding `user.email`s).
+  for (const h of opts.alsoHandles ?? []) addKey(strong, h);
+  for (const e of opts.alsoEmails ?? []) {
+    const n = norm(e);
+    if (!n) continue;
+    strong.add(n);
+    const at = n.indexOf("@");
+    if (at > 0) weak.add(n.slice(0, at));
+  }
+  // The primary git/roster email is THE shared-identity vector (the same
+  // address configured on two machines, two teammates behind one team box), so
+  // both its full form and local-part are weak — they only mean "me" once the
+  // device id agrees.
+  addKey(weak, opts.email);
   // NOTE: the git *display name* (deviceDisplay) and device email are
   // deliberately NOT folded in. A handle is never the display name, so the
   // name can never match a real sender — but two teammates can share one
-  // ("Owner" on both of one person's Macs), so adding it buys nothing and
+  // ("Ashiq" on both of one person's Macs), so adding it buys nothing and
   // only risks claiming a namesake's messages as ours.
-  return keys;
+  return { strong, weak };
 }
 
-/** True when `sender` (a message's `from_handle`) identifies the local
- *  user. Tests the sender both verbatim and as an email-local-part so a
- *  message stamped `alias@example.com` matches a `alias`
- *  key and vice-versa. */
-export function isSelfSender(sender: string | null | undefined, keys: SelfKeys): boolean {
+/** True when `sender` (a message's `from_handle`) identifies the local user.
+ *  Tests the sender both verbatim and as an email-local-part so a message
+ *  stamped `mubasheer.ck@hotmail.com` matches a `mubasheer.ck` key and
+ *  vice-versa.
+ *
+ *  A STRONG match (GitHub-anchored handle, pseudonym, declared seat) is always
+ *  us. A WEAK match (email local-part) is us only when `ctx` doesn't prove the
+ *  sender is a different install: if the message carries a device id and it
+ *  isn't ours, the "match" is really a colleague who shares our git-email
+ *  local-part, and returning true there is exactly the "my teammate's message
+ *  shows a 'you' badge" bug. When no device id is available (legacy rows, our
+ *  own local echoes) we keep the historic behaviour and trust the weak match. */
+export function isSelfSender(
+  sender: string | null | undefined,
+  keys: SelfKeys,
+  ctx?: SelfMatchCtx,
+): boolean {
+  const sd = norm(ctx?.senderDeviceId);
+  const md = norm(ctx?.myDeviceId);
+  // Same install → us, whatever handle the message wore. The device id is a
+  // per-install UUID that does NOT change when you reconfigure git or sign into
+  // a different GitHub account, so this unifies our own history across an
+  // identity switch on this machine: messages we sent under an OLD git username
+  // still file as ours instead of splitting off as a phantom stranger. (The
+  // rare shared-install case — two people taking turns on one app install — is
+  // out of scope; identity there is already ambiguous.)
+  if (sd && md && sd === md) return true;
   const n = norm(sender);
   if (!n) return false;
-  if (keys.has(n)) return true;
   const at = n.indexOf("@");
-  if (at > 0 && keys.has(n.slice(0, at))) return true;
+  const local = at > 0 ? n.slice(0, at) : "";
+  if (keys.strong.has(n) || (local && keys.strong.has(local))) return true;
+  if (keys.weak.has(n) || (local && keys.weak.has(local))) {
+    // A weak (email-local-part) match on a message from a DIFFERENT install is
+    // a colleague who shares our git-email local-part — not us.
+    if (sd && md && sd !== md) return false;
+    return true;
+  }
   return false;
 }
 
@@ -123,12 +187,12 @@ export function isSelfSender(sender: string | null | undefined, keys: SelfKeys):
  *  WITHOUT ever collapsing onto the DISPLAY NAME.
  *
  *  A handle is an identity key: it buckets DMs and drives self/peer
- *  attribution. Two teammates who merely share a display name — "Owner" on
+ *  attribution. Two teammates who merely share a display name — "Ashiq" on
  *  a second GitHub seat, two "John"s on a team — must NOT merge into one
  *  bucket, which is exactly what a name fallback did (the "aura shows my two
  *  accounts as one user" bug). Precedence mirrors the roster's own keying
  *  and the Rust `handle_from_row`:
- *    1. email local-part — the roster's canonical key ("mo", "owner")
+ *    1. email local-part — the roster's canonical key ("mo", "ashiqwayanad007")
  *    2. a device-scoped token — distinct per machine, so two email-less
  *       senders stay separate; invisible to the reader, who sees `from_name`
  *    3. a name slug — ONLY when neither identifier exists (legacy rows),
