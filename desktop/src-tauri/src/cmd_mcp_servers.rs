@@ -367,8 +367,18 @@ pub fn mcp_servers_add(
     if trimmed.is_empty() {
         return Err("server name is required".into());
     }
-    if command.trim().is_empty() {
-        return Err("server command is required".into());
+    // A pure-remote server has no command — `list_tools` / `call_tool`
+    // branch on `server_url` and hand the whole call to the HTTP
+    // transport without ever reading `command`. Demanding one here made
+    // the "Atlassian (remote · native OAuth)" template — which ships
+    // `command: ""` on purpose — impossible to add: the form let you
+    // save it and the backend refused. One of the two has to be
+    // reachable; neither on its own is enough.
+    let has_remote = server_url
+        .as_deref()
+        .is_some_and(|s| !s.trim().is_empty());
+    if command.trim().is_empty() && !has_remote {
+        return Err("give the server a command to run, or a remote URL".into());
     }
     let path = server_path(&trimmed)?;
     if path.exists() {
@@ -937,8 +947,12 @@ pub async fn mcp_servers_auth_run(
     name: String,
 ) -> Result<McpAuthRunResult, String> {
     use tauri::Emitter;
-    let path = server_path(&name)?;
-    let cfg = read_config(&path)?;
+    let config_name = name.clone();
+    let cfg = crate::blocking::run(move || {
+        let path = server_path(&config_name)?;
+        read_config(&path)
+    })
+    .await?;
 
     let mut cmd = Command::new(&cfg.command);
     cmd.args(&cfg.args)
@@ -1055,8 +1069,10 @@ fn extract_https_url(line: &str) -> Option<String> {
 pub async fn mcp_tools_list(
     plugin_state: State<'_, PluginHostState>,
 ) -> Result<Vec<McpServerToolList>, String> {
-    let mut cfgs: Vec<McpServerConfig> =
-        list_configs()?.into_iter().filter(|c| c.enabled).collect();
+    let mut cfgs: Vec<McpServerConfig> = crate::blocking::run(|| {
+        list_configs().map(|configs| configs.into_iter().filter(|c| c.enabled).collect())
+    })
+    .await?;
     // Plugin-bundled servers: resolve secrets BEFORE any await (the
     // registry borrow is synchronous). A failed interpolation — secret
     // not set, capability missing — becomes an error row, not a crash,

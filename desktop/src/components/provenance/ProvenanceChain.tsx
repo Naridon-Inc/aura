@@ -67,27 +67,27 @@ function ChainLink({
 
       <div className="min-w-0 flex-1 pb-3">
         <div className="flex items-center gap-1.5">
-          <span className="min-w-0 flex-1 truncate text-[12.5px] text-text-1" title={title}>
+          <span className="min-w-0 flex-1 truncate text-base text-text-1" title={title}>
             {title}
           </span>
           {record.intent_type ? (
-            <span className="shrink-0 rounded border border-line-soft px-1.5 py-0.5 text-[10px] text-text-3">
+            <span className="shrink-0 rounded border border-line-soft px-1.5 py-0.5 text-2xs text-text-3">
               {humanizeIntentType(record.intent_type)}
             </span>
           ) : null}
-          <span className="ml-auto shrink-0 text-[10.5px] tabular-nums text-text-4">
+          <span className="ml-auto shrink-0 text-xs tabular-nums text-text-4">
             {formatAttestWhen(record.created_at)}
           </span>
         </div>
         <div className="mt-1.5 flex flex-wrap items-center gap-1.5">
-          <span className="font-mono text-[10.5px] text-text-4" title={record.id}>
+          <span className="font-mono text-xs text-text-4" title={record.id}>
             {shortBlockId(record.id)}
           </span>
           <span className="text-text-5">·</span>
           <TrustBadge ok={sealed} label={sealed ? "Sealed" : "Not sealed"} tone="green" />
           {record.rekor ? <TrustBadge ok label="Public copy" tone="blue" /> : null}
           {record.human_id ? (
-            <span className="truncate font-mono text-[10px] text-text-4" title={record.human_id}>
+            <span className="truncate font-mono text-2xs text-text-4" title={record.human_id}>
               {record.human_id}
             </span>
           ) : null}
@@ -103,7 +103,7 @@ function ChainLink({
           type="button"
           onClick={onOpen}
           title="Open the change this record came from"
-          className="group flex w-full items-start gap-2.5 rounded px-1.5 text-left transition-colors hover:bg-bg-2/50"
+          className="group flex w-full items-start gap-2.5 rounded px-1.5 text-left transition-colors hover:bg-state-hover"
         >
           {inner}
         </button>
@@ -127,8 +127,8 @@ export function ProvenanceChain({
 }) {
   return (
     <section>
-      <p className="mb-3 text-[11.5px] leading-relaxed text-text-3">
-        Every change the AI makes is sealed into a record and linked to the one before it — so
+      <p className="mb-3 text-sm leading-relaxed text-text-3">
+        Every change the AI makes is sealed into a record and linked to the one before it, so
         the history can&apos;t be quietly rewritten. Read top-to-bottom, this is the chain.
       </p>
       <ul className="flex flex-col">

@@ -81,10 +81,10 @@ export function TerminalNewMenu({
             </DropdownMenuLabel>
             {profiles.map((p) => (
               <DropdownMenuItem key={p.id} onSelect={() => onNewTerminal(p.id)}>
-                <span className="font-mono text-text-4 text-[10px]">{">_"}</span>
+                <span className="font-mono text-text-4 text-2xs">{">_"}</span>
                 <span className="min-w-0 truncate">{p.name}</span>
                 {p.id === defaultProfileId && (
-                  <span className="ml-auto text-[11px] tracking-wider text-text-4">Default</span>
+                  <span className="ml-auto text-xs tracking-wider text-text-4">Default</span>
                 )}
               </DropdownMenuItem>
             ))}

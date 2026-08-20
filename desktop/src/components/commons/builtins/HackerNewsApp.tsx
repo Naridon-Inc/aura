@@ -13,6 +13,8 @@ import { useCallback, useEffect, useState } from "react";
 import { MessageSquare, RefreshCw, ExternalLink, ArrowUp } from "lucide-react";
 
 import { api } from "../../../lib/api";
+import { relativeAgeFromSecs } from "../../../lib/relativeTime";
+import { compactNumber } from "../../../lib/compactNumber";
 
 type Feed = "top" | "new" | "ask" | "show";
 
@@ -75,17 +77,9 @@ function parseHits(body: string): Story[] {
   return out;
 }
 
-function compactNum(n: number): string {
-  if (n >= 1_000) return `${(n / 1_000).toFixed(1)}k`;
-  return String(n);
-}
-
 function ago(createdUtc: number): string {
-  if (!createdUtc) return "";
-  const secs = Math.max(0, Math.floor(Date.now() / 1000 - createdUtc));
-  if (secs < 3600) return `${Math.max(1, Math.floor(secs / 60))}m`;
-  if (secs < 86400) return `${Math.floor(secs / 3600)}h`;
-  return `${Math.floor(secs / 86400)}d`;
+  // One ladder for the whole app — see lib/relativeTime.
+  return relativeAgeFromSecs(createdUtc, { style: "compact" });
 }
 
 /** The HN thread URL for a story id. */
@@ -159,10 +153,10 @@ export function HackerNewsApp() {
               type="button"
               onClick={() => setFeed(f.id)}
               className={[
-                "h-7 px-2.5 rounded-md text-[11.5px] transition-colors",
+                "h-7 px-2.5 rounded-md text-sm transition-colors",
                 feed === f.id
                   ? "bg-accent/15 text-accent"
-                  : "text-text-3 hover:text-text-1 hover:bg-bg-2",
+                  : "text-text-3 hover:text-text-1 hover:bg-state-hover",
               ].join(" ")}
             >
               {f.label}
@@ -173,7 +167,7 @@ export function HackerNewsApp() {
           type="button"
           onClick={() => void load(feed)}
           aria-label="Refresh"
-          className="h-7 w-7 flex-shrink-0 inline-flex items-center justify-center rounded-md text-text-3 hover:text-text-1 hover:bg-bg-2 transition-colors"
+          className="h-7 w-7 flex-shrink-0 inline-flex items-center justify-center rounded-md text-text-3 hover:text-text-1 hover:bg-state-hover transition-colors"
         >
           <RefreshCw size={13} className={loading ? "animate-spin" : ""} />
         </button>
@@ -185,17 +179,17 @@ export function HackerNewsApp() {
           <SkeletonList />
         ) : error ? (
           <div className="flex flex-col items-center justify-center gap-2 py-16 text-center px-6">
-            <div className="text-[13px] text-text-2">{error}</div>
+            <div className="text-base text-text-2">{error}</div>
             <button
               type="button"
               onClick={() => void load(feed)}
-              className="h-8 px-3 rounded-md border border-line-soft bg-bg-2 text-[12px] text-text-1 hover:bg-bg-3 transition-colors"
+              className="h-8 px-3 rounded-md border border-line-soft bg-bg-2 text-sm text-text-1 hover:bg-bg-3 transition-colors"
             >
               Try again
             </button>
           </div>
         ) : stories.length === 0 ? (
-          <div className="py-16 text-center text-[12px] text-text-4">
+          <div className="py-16 text-center text-sm text-text-4">
             Nothing here right now.
           </div>
         ) : (
@@ -214,8 +208,8 @@ function StoryRow({ rank, story }: { rank: number; story: Story }) {
   const host = hostOf(story.url);
   const open = story.url ?? threadUrl(story.id);
   return (
-    <li className="group flex items-start gap-2.5 px-3.5 py-2.5 hover:bg-bg-1/60 transition-colors">
-      <span className="w-5 flex-shrink-0 pt-0.5 text-right text-[11px] tabular-nums text-text-5">
+    <li className="group flex items-start gap-2.5 px-3.5 py-2.5 hover:bg-state-hover transition-colors">
+      <span className="w-5 flex-shrink-0 pt-0.5 text-right text-xs tabular-nums text-text-5">
         {rank}
       </span>
       <div className="min-w-0 flex-1">
@@ -224,19 +218,19 @@ function StoryRow({ rank, story }: { rank: number; story: Story }) {
           onClick={() => void openExternal(open)}
           className="text-left w-full"
         >
-          <span className="text-[12.5px] leading-snug text-text-1 group-hover:text-accent transition-colors line-clamp-2">
+          <span className="text-base leading-snug text-text-1 group-hover:text-accent transition-colors line-clamp-2">
             {story.title}
           </span>
           {host ? (
-            <span className="ml-1.5 text-[10px] text-text-5 whitespace-nowrap">
+            <span className="ml-1.5 text-2xs text-text-5 whitespace-nowrap">
               ({host})
             </span>
           ) : null}
         </button>
-        <div className="flex items-center gap-2 mt-1 text-[10.5px] text-text-4">
+        <div className="flex items-center gap-2 mt-1 text-xs text-text-4">
           <span className="inline-flex items-center gap-0.5">
             <ArrowUp size={11} className="text-text-5" />
-            <span className="tabular-nums">{compactNum(story.points)}</span>
+            <span className="tabular-nums">{compactNumber(story.points)}</span>
           </span>
           {story.author ? <span>by {story.author}</span> : null}
           {story.createdUtc ? <span>· {ago(story.createdUtc)}</span> : null}
@@ -247,7 +241,7 @@ function StoryRow({ rank, story }: { rank: number; story: Story }) {
             title="Open the HN discussion"
           >
             <MessageSquare size={11} />
-            <span className="tabular-nums">{compactNum(story.comments)}</span>
+            <span className="tabular-nums">{compactNumber(story.comments)}</span>
           </button>
         </div>
       </div>

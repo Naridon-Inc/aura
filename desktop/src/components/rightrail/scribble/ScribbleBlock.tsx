@@ -20,14 +20,7 @@ import {
   formatAge,
   type ScribbleBlock as Block,
 } from "./scribbleModel";
-
-/** Compact date for a task carried from more than a day ago, e.g. "Jul 20". */
-function shortDate(ts: number): string {
-  return new Date(ts).toLocaleDateString(undefined, {
-    month: "short",
-    day: "numeric",
-  });
-}
+import { shortDate } from "../../../lib/calendarDate";
 
 /** A bare, auto-growing single-field editor: no chrome, grows to fit wrapped
  *  text, and turns Enter into "new block" (Shift+Enter is ignored — blocks are
@@ -52,10 +45,19 @@ function BlockInput({
   const ref = useRef<HTMLTextAreaElement>(null);
 
   // Grow to fit the content — no inner scrollbar, no fixed height.
+  //
+  // `auto`, NOT `0px`. With `overflow: hidden` and an EMPTY value there is
+  // nothing to overflow, so a zeroed box reports `scrollHeight === clientHeight
+  // === 0` and the field collapses to no height at all: the placeholder is
+  // clipped away and there is no target left to click. That's every empty
+  // block — including the trailing draft that is the only place to type — so an
+  // untouched Scribble showed a day heading over a void with no writable line
+  // anywhere in it. `auto` lets the browser lay out its natural one row first,
+  // which is the floor `scrollHeight` then reports.
   useLayoutEffect(() => {
     const el = ref.current;
     if (!el) return;
-    el.style.height = "0px";
+    el.style.height = "auto";
     el.style.height = `${el.scrollHeight}px`;
   }, [value]);
 
@@ -70,6 +72,9 @@ function BlockInput({
     el.setSelectionRange(end, end);
   }, [autoFocus]);
 
+  // The placeholder sits at `text-4`, not the faintest `text-5`: on an untouched
+  // space it is the only thing on screen telling you that you can write here at
+  // all, so it has to be legible rather than merely present.
   return (
     <textarea
       ref={ref}
@@ -89,7 +94,7 @@ function BlockInput({
           if (!e.shiftKey) onEnter();
         }
       }}
-      className="block w-full resize-none overflow-hidden border-0 bg-transparent p-0 text-[12.5px] leading-snug text-text-1 outline-none placeholder:text-text-5"
+      className="block w-full resize-none overflow-hidden border-0 bg-transparent p-0 text-base leading-snug text-text-1 outline-none placeholder:text-text-4"
     />
   );
 }
@@ -141,7 +146,7 @@ export function ScribbleBlock({
     .join(" ");
 
   return (
-    <div className="group relative flex items-start gap-2 rounded px-2 py-[3px] hover:bg-bg-2/50">
+    <div className="group relative flex items-start gap-2 rounded px-2 py-[3px] hover:bg-state-hover">
       {/* gutter — checkbox for tasks; a faint "make a task" circle on hover for
           notes; a dot for read-only notes. Aligned to the first text line. */}
       <div className="flex h-[18px] w-4 flex-shrink-0 items-center justify-center">
@@ -178,7 +183,13 @@ export function ScribbleBlock({
           <BlockInput
             value={block.text}
             autoFocus={Boolean(autoFocus) || editing}
-            placeholder="Write…  **bold**, *italic*, @mention, gif — [] for a task"
+            // Short on purpose. There is a trailing draft after EVERY block, so
+            // this repeats the whole way down the page as you write — the old
+            // "**bold**, *italic*, @mention, gif — [] for a task" printed a
+            // markdown cheat-sheet under every line you'd just finished. The
+            // two mechanics that aren't guessable (Enter, and `[]`) are taught
+            // once, in the footer, while the space is still empty.
+            placeholder="Write anything…"
             onChange={onChangeText}
             onEnter={onEnter}
             onFocus={() => setEditing(true)}
@@ -189,7 +200,7 @@ export function ScribbleBlock({
             text={block.text}
             members={members}
             onClick={editable ? () => setEditing(true) : undefined}
-            className={`block break-words text-[12.5px] leading-snug ${
+            className={`block break-words text-base leading-snug ${
               editable ? "cursor-text" : ""
             } ${block.done ? "text-text-4 line-through" : "text-text-1"}`}
           />
@@ -199,7 +210,7 @@ export function ScribbleBlock({
       {/* inline status — always on, content-sized, so the body reaches the
           row's end. A carried task shows "Yesterday" (one day) or its short
           date (older); a finished task shows who checked it. */}
-      <div className="flex flex-shrink-0 items-center gap-1 pt-[1px] text-[10px] leading-[18px]">
+      <div className="flex flex-shrink-0 items-center gap-1 pt-[1px] text-2xs leading-[18px]">
         {carried &&
           (carriedDays === 1 ? (
             <span
@@ -209,7 +220,7 @@ export function ScribbleBlock({
               Yesterday
             </span>
           ) : (
-            <span className="text-[9.5px] text-text-5" title={metaTitle}>
+            <span className="text-2xs text-text-5" title={metaTitle}>
               {shortDate(block.createdAt)}
             </span>
           ))}
@@ -225,7 +236,7 @@ export function ScribbleBlock({
           it never reserves layout width: the body owns the full row until you
           hover, then the meta + pin/remove float in over the end. */}
       {!isEmpty && (
-        <div className="absolute right-1 top-1/2 flex -translate-y-1/2 items-center gap-1 rounded-md bg-bg-2/95 px-1.5 py-0.5 text-[10px] opacity-0 shadow-sm ring-1 ring-line-soft/60 transition-opacity group-hover:opacity-100">
+        <div className="absolute right-1 top-1/2 flex -translate-y-1/2 items-center gap-1 rounded-md bg-bg-2/95 px-1.5 py-0.5 text-2xs opacity-0 shadow-sm ring-1 ring-line-soft/60 transition-opacity group-hover:opacity-100">
           <span className="text-text-5" title={metaTitle}>
             {block.author ? `@${block.author} · ` : ""}
             {formatAge(block.createdAt, nowMs)}

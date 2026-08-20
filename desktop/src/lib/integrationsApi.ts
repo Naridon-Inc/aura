@@ -39,6 +39,12 @@ export type MirrorSummary = {
 export type ConnectionStatus = {
   kind: IntegrationKind;
   connected: boolean;
+  /** Whether this machine carries the provider's credentials at all —
+   *  i.e. whether `~/.aura/integrations.toml` has its block. A different
+   *  question from `connected`, and the card needs both: without it the
+   *  only honest thing it can offer is a Connect button that opens
+   *  nothing and errors after the click. */
+  configured: boolean;
   identity?: ExternalIdentity | null;
   sites?: CloudSite[];
   scopes?: string | null;

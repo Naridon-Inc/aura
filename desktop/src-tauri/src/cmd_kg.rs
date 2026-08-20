@@ -115,19 +115,25 @@ fn now_secs() -> u64 {
 
 #[tauri::command]
 pub async fn aura_kg_load(repo_root: String) -> Result<Option<KgGraph>, String> {
-    let path = cache_path(&repo_root);
-    if !path.exists() {
-        return Ok(None);
-    }
-    let body = fs::read_to_string(&path).map_err(|e| format!("read kg: {e}"))?;
-    let g: KgGraph = serde_json::from_str(&body).map_err(|e| format!("parse kg: {e}"))?;
-    Ok(Some(g))
+    crate::blocking::run(move || {
+        let path = cache_path(&repo_root);
+        if !path.exists() {
+            return Ok(None);
+        }
+        let body = fs::read_to_string(&path).map_err(|e| format!("read kg: {e}"))?;
+        let g: KgGraph = serde_json::from_str(&body).map_err(|e| format!("parse kg: {e}"))?;
+        Ok(Some(g))
+    })
+    .await
 }
 
 #[tauri::command]
 pub async fn aura_kg_build(repo_root: String, force: bool) -> Result<KgGraph, String> {
-    let path = cache_path(&repo_root);
-    let head = current_head_sha(&repo_root);
+    let prep_root = repo_root.clone();
+    let (path, head) = crate::blocking::run(move || {
+        (cache_path(&prep_root), current_head_sha(&prep_root))
+    })
+    .await;
     // Cache hit: same HEAD sha and not forced → return cached.
     if !force {
         if let Ok(Some(g)) = aura_kg_load(repo_root.clone()).await {
@@ -137,81 +143,85 @@ pub async fn aura_kg_build(repo_root: String, force: bool) -> Result<KgGraph, St
         }
     }
 
-    let mut nodes: Vec<KgNode> = Vec::new();
-    let mut edges: Vec<KgEdge> = Vec::new();
-    let mut symbol_index: HashMap<String, Vec<String>> = HashMap::new(); // name -> [node_id]
+    crate::blocking::run(move || {
+        let mut nodes: Vec<KgNode> = Vec::new();
+        let mut edges: Vec<KgEdge> = Vec::new();
+        let mut symbol_index: HashMap<String, Vec<String>> = HashMap::new(); // name -> [node_id]
 
-    walk(&PathBuf::from(&repo_root), &repo_root, &mut |rel_path, abs_path| {
-        let ext = rel_path
-            .extension()
-            .and_then(|s| s.to_str())
-            .unwrap_or("")
-            .to_ascii_lowercase();
-        let rel_str = rel_path.to_string_lossy().to_string();
-        if SOURCE_EXTS.contains(&ext.as_str()) {
+        walk(&PathBuf::from(&repo_root), &repo_root, &mut |rel_path, abs_path| {
+            let ext = rel_path
+                .extension()
+                .and_then(|s| s.to_str())
+                .unwrap_or("")
+                .to_ascii_lowercase();
+            let rel_str = rel_path.to_string_lossy().to_string();
+            if SOURCE_EXTS.contains(&ext.as_str()) {
+                let body = fs::read_to_string(abs_path).unwrap_or_default();
+                ingest_source(&rel_str, &body, &mut nodes, &mut edges, &mut symbol_index);
+            } else if DOC_EXTS.contains(&ext.as_str()) {
+                let body = fs::read_to_string(abs_path).unwrap_or_default();
+                ingest_doc(&rel_str, &body, &mut nodes, &mut edges, &symbol_index);
+            }
+        });
+
+        // Second pass for source-symbol references — needs the full
+        // symbol_index built above.
+        walk(&PathBuf::from(&repo_root), &repo_root, &mut |rel_path, abs_path| {
+            let ext = rel_path
+                .extension()
+                .and_then(|s| s.to_str())
+                .unwrap_or("")
+                .to_ascii_lowercase();
+            if !SOURCE_EXTS.contains(&ext.as_str()) {
+                return;
+            }
             let body = fs::read_to_string(abs_path).unwrap_or_default();
-            ingest_source(&rel_str, &body, &mut nodes, &mut edges, &mut symbol_index);
-        } else if DOC_EXTS.contains(&ext.as_str()) {
+            let rel_str = rel_path.to_string_lossy().to_string();
+            let file_id = format!("file:{rel_str}");
+            scan_references(&file_id, &body, &symbol_index, &mut edges);
+        });
+
+        // Doc mention pass — re-run mention extraction now that we have
+        // the full source-symbol index. ingest_doc above only added nodes;
+        // we add mention edges here so they're complete.
+        walk(&PathBuf::from(&repo_root), &repo_root, &mut |rel_path, abs_path| {
+            let ext = rel_path
+                .extension()
+                .and_then(|s| s.to_str())
+                .unwrap_or("")
+                .to_ascii_lowercase();
+            if !DOC_EXTS.contains(&ext.as_str()) {
+                return;
+            }
             let body = fs::read_to_string(abs_path).unwrap_or_default();
-            ingest_doc(&rel_str, &body, &mut nodes, &mut edges, &symbol_index);
+            let rel_str = rel_path.to_string_lossy().to_string();
+            let doc_id = format!("doc:{rel_str}");
+            scan_mentions(&doc_id, &body, &symbol_index, &mut edges);
+        });
+
+        // Compute degrees, communities, god flags, surprise flags.
+        annotate(&mut nodes, &mut edges);
+
+        let stats = compute_stats(&nodes, &edges);
+        let graph = KgGraph {
+            nodes,
+            edges,
+            built_at: now_secs(),
+            head_sha: head,
+            stats,
+        };
+
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).map_err(|e| format!("mkdir kg dir: {e}"))?;
         }
-    });
-
-    // Second pass for source-symbol references — needs the full
-    // symbol_index built above.
-    walk(&PathBuf::from(&repo_root), &repo_root, &mut |rel_path, abs_path| {
-        let ext = rel_path
-            .extension()
-            .and_then(|s| s.to_str())
-            .unwrap_or("")
-            .to_ascii_lowercase();
-        if !SOURCE_EXTS.contains(&ext.as_str()) {
-            return;
-        }
-        let body = fs::read_to_string(abs_path).unwrap_or_default();
-        let rel_str = rel_path.to_string_lossy().to_string();
-        let file_id = format!("file:{rel_str}");
-        scan_references(&file_id, &body, &symbol_index, &mut edges);
-    });
-
-    // Doc mention pass — re-run mention extraction now that we have
-    // the full source-symbol index. ingest_doc above only added nodes;
-    // we add mention edges here so they're complete.
-    walk(&PathBuf::from(&repo_root), &repo_root, &mut |rel_path, abs_path| {
-        let ext = rel_path
-            .extension()
-            .and_then(|s| s.to_str())
-            .unwrap_or("")
-            .to_ascii_lowercase();
-        if !DOC_EXTS.contains(&ext.as_str()) {
-            return;
-        }
-        let body = fs::read_to_string(abs_path).unwrap_or_default();
-        let rel_str = rel_path.to_string_lossy().to_string();
-        let doc_id = format!("doc:{rel_str}");
-        scan_mentions(&doc_id, &body, &symbol_index, &mut edges);
-    });
-
-    // Compute degrees, communities, god flags, surprise flags.
-    annotate(&mut nodes, &mut edges);
-
-    let stats = compute_stats(&nodes, &edges);
-    let graph = KgGraph {
-        nodes,
-        edges,
-        built_at: now_secs(),
-        head_sha: head,
-        stats,
-    };
-
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent).map_err(|e| format!("mkdir kg dir: {e}"))?;
-    }
-    let body = serde_json::to_string_pretty(&graph).map_err(|e| format!("serialize kg: {e}"))?;
-    let tmp = path.with_extension("json.tmp");
-    fs::write(&tmp, body).map_err(|e| format!("write kg: {e}"))?;
-    fs::rename(&tmp, &path).map_err(|e| format!("rename kg: {e}"))?;
-    Ok(graph)
+        let body =
+            serde_json::to_string_pretty(&graph).map_err(|e| format!("serialize kg: {e}"))?;
+        let tmp = path.with_extension("json.tmp");
+        fs::write(&tmp, body).map_err(|e| format!("write kg: {e}"))?;
+        fs::rename(&tmp, &path).map_err(|e| format!("rename kg: {e}"))?;
+        Ok(graph)
+    })
+    .await
 }
 
 fn walk<F: FnMut(&Path, &Path)>(root: &Path, base: &str, on_file: &mut F) {

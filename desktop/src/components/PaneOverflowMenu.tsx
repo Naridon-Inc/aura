@@ -3,10 +3,11 @@
 // / Restart / Stop / Close-pane / Leave-split into one chip so the
 // pane header keeps its real estate for status chips and identity.
 
-import { useEffect, useRef, useState, type ReactNode } from "react";
+import { useRef, useState, type ReactNode } from "react";
 
 import { cn } from "../lib/utils";
 import { MENU_PANEL, MENU_ROW, MENU_ROW_DANGER, MENU_SEP } from "./ui/menuSurface";
+import { useDismiss } from "../lib/useDismiss";
 
 export type PaneMenuItem =
   | {
@@ -32,23 +33,7 @@ export function PaneOverflowMenu({ items, title = "More actions", triggerClassNa
   const [open, setOpen] = useState(false);
   const wrapRef = useRef<HTMLDivElement>(null);
 
-  useEffect(() => {
-    if (!open) return;
-    function onDoc(e: MouseEvent) {
-      if (!wrapRef.current) return;
-      if (wrapRef.current.contains(e.target as Node)) return;
-      setOpen(false);
-    }
-    function onKey(e: KeyboardEvent) {
-      if (e.key === "Escape") setOpen(false);
-    }
-    document.addEventListener("mousedown", onDoc);
-    document.addEventListener("keydown", onKey);
-    return () => {
-      document.removeEventListener("mousedown", onDoc);
-      document.removeEventListener("keydown", onKey);
-    };
-  }, [open]);
+  useDismiss(open, () => setOpen(false), wrapRef);
 
   return (
     <div ref={wrapRef} className="relative inline-flex">
@@ -58,7 +43,7 @@ export function PaneOverflowMenu({ items, title = "More actions", triggerClassNa
         title={title}
         className={
           triggerClassName ??
-          "w-7 h-6 inline-flex items-center justify-center rounded text-text-3 hover:text-text-1 hover:bg-bg-2 transition-colors"
+          "w-7 h-6 inline-flex items-center justify-center rounded text-text-3 hover:text-text-1 hover:bg-state-hover transition-colors"
         }
       >
         <DotsIcon />

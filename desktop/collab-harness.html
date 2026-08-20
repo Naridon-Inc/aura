@@ -1,0 +1,24 @@
+<!doctype html>
+<!--
+  Visual harness for the session-live collab surface.
+
+  Dev-server only: Vite's build input is index.html, so this page never reaches
+  a bundle. `bun run dev` serves it at /collab-harness.html, and
+  scripts/collab-screens.mjs drives it with Playwright to capture what a guest,
+  a watcher and a host actually see.
+
+  It exists because the state tests in src/components/collab/wire.test.ts can
+  prove the store holds the right values and still tell you nothing about
+  whether the panel renders them, fits, or reads correctly in either theme.
+-->
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Collab harness</title>
+  </head>
+  <body>
+    <div id="collab-harness"></div>
+    <script type="module" src="/src/components/collab/__harness__/main.tsx"></script>
+  </body>
+</html>

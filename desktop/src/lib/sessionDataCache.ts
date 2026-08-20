@@ -73,6 +73,12 @@ export function loadFileDiff(
   file: IntentChangesetFile,
   sinceBase = false,
 ): Promise<string> {
+  // A teammate's file, known from the team plane. There is no local patch, and
+  // the fall-through below would produce a real-looking one: `git diff HEAD --
+  // <path>` renders the VIEWER's own uncommitted edits to that path, attributed
+  // to whoever's session is open. Callers render the symbol list instead — this
+  // guard is the door, so no future caller can reach git through it.
+  if (file.remote_only) return Promise.resolve("");
   // Committed run — the patch is immutable, so cache it on the sha.
   if (file.commit) {
     const key = `${repoRoot}@${file.commit}@${file.path}`;

@@ -17,6 +17,8 @@ import {
 } from "lucide-react";
 
 import { api } from "../../../lib/api";
+import { relativeAgeFromSecs } from "../../../lib/relativeTime";
+import { compactNumber } from "../../../lib/compactNumber";
 
 type Sort = "hot" | "new" | "top" | "rising";
 
@@ -72,18 +74,9 @@ function parseListing(body: string): Post[] {
   return out;
 }
 
-function compactNum(n: number): string {
-  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}m`;
-  if (n >= 1_000) return `${(n / 1_000).toFixed(1)}k`;
-  return String(n);
-}
-
 function ago(createdUtc: number): string {
-  if (!createdUtc) return "";
-  const secs = Math.max(0, Math.floor(Date.now() / 1000 - createdUtc));
-  if (secs < 3600) return `${Math.max(1, Math.floor(secs / 60))}m`;
-  if (secs < 86400) return `${Math.floor(secs / 3600)}h`;
-  return `${Math.floor(secs / 86400)}d`;
+  // One ladder for the whole app — see lib/relativeTime.
+  return relativeAgeFromSecs(createdUtc, { style: "compact" });
 }
 
 async function openExternal(url: string) {
@@ -172,14 +165,14 @@ export function RedditApp() {
             spellCheck={false}
             placeholder="subreddit"
             aria-label="Subreddit"
-            className="h-7 w-full pl-6 pr-2 rounded-md border border-line-soft bg-bg-1 text-[12px] text-text-1 placeholder:text-text-5 focus:outline-none focus:border-accent transition-colors"
+            className="h-7 w-full pl-6 pr-2 rounded-md border border-line-soft bg-bg-1 text-sm text-text-1 placeholder:text-text-5 focus:outline-none focus:border-accent transition-colors"
           />
         </form>
         <button
           type="button"
           onClick={() => void load(subreddit, sort)}
           aria-label="Refresh"
-          className="h-7 w-7 flex-shrink-0 inline-flex items-center justify-center rounded-md text-text-3 hover:text-text-1 hover:bg-bg-2 transition-colors order-last sm:order-none"
+          className="h-7 w-7 flex-shrink-0 inline-flex items-center justify-center rounded-md text-text-3 hover:text-text-1 hover:bg-state-hover transition-colors order-last sm:order-none"
         >
           <RefreshCw size={13} className={loading ? "animate-spin" : ""} />
         </button>
@@ -190,10 +183,10 @@ export function RedditApp() {
               type="button"
               onClick={() => setSort(s.id)}
               className={[
-                "h-7 px-2 rounded-md text-[11.5px] transition-colors",
+                "h-7 px-2 rounded-md text-sm transition-colors",
                 sort === s.id
                   ? "bg-accent/15 text-accent"
-                  : "text-text-3 hover:text-text-1 hover:bg-bg-2",
+                  : "text-text-3 hover:text-text-1 hover:bg-state-hover",
               ].join(" ")}
             >
               {s.label}
@@ -208,17 +201,17 @@ export function RedditApp() {
           <SkeletonList />
         ) : error ? (
           <div className="flex flex-col items-center justify-center gap-2 py-16 text-center px-6">
-            <div className="text-[13px] text-text-2">{error}</div>
+            <div className="text-base text-text-2">{error}</div>
             <button
               type="button"
               onClick={() => void load(subreddit, sort)}
-              className="h-8 px-3 rounded-md border border-line-soft bg-bg-2 text-[12px] text-text-1 hover:bg-bg-3 transition-colors"
+              className="h-8 px-3 rounded-md border border-line-soft bg-bg-2 text-sm text-text-1 hover:bg-bg-3 transition-colors"
             >
               Try again
             </button>
           </div>
         ) : posts.length === 0 ? (
-          <div className="py-16 text-center text-[12px] text-text-4">
+          <div className="py-16 text-center text-sm text-text-4">
             No posts here yet.
           </div>
         ) : (
@@ -242,13 +235,13 @@ function PostRow({ post }: { post: Post }) {
       <button
         type="button"
         onClick={() => void openExternal(href)}
-        className="group w-full flex items-start gap-3 px-3.5 py-2.5 text-left hover:bg-bg-1/60 transition-colors"
+        className="group w-full flex items-start gap-3 px-3.5 py-2.5 text-left hover:bg-state-hover transition-colors"
       >
         {/* Score */}
         <div className="flex flex-col items-center w-9 flex-shrink-0 pt-0.5 text-text-4">
           <ArrowBigUp size={15} className="text-text-5" />
-          <span className="text-[11px] font-semibold tabular-nums text-text-3">
-            {compactNum(post.score)}
+          <span className="text-xs font-semibold tabular-nums text-text-3">
+            {compactNumber(post.score)}
           </span>
         </div>
 
@@ -269,27 +262,27 @@ function PostRow({ post }: { post: Post }) {
         {/* Body */}
         <div className="min-w-0 flex-1">
           <div className="flex items-center gap-1.5 mb-0.5">
-            <span className="text-[10.5px] font-medium text-text-3">
+            <span className="text-xs font-medium text-text-3">
               r/{post.subreddit}
             </span>
-            <span className="text-[10px] text-text-5">· u/{post.author}</span>
+            <span className="text-2xs text-text-5">· u/{post.author}</span>
             {post.createdUtc ? (
-              <span className="text-[10px] text-text-5">
+              <span className="text-2xs text-text-5">
                 · {ago(post.createdUtc)}
               </span>
             ) : null}
             {post.over18 ? (
-              <span className="text-[9px] font-semibold text-red border border-red/30 rounded px-1">
+              <span className="text-2xs font-semibold text-red border border-red/30 rounded px-1">
                 NSFW
               </span>
             ) : null}
           </div>
-          <div className="text-[12.5px] leading-snug text-text-1 group-hover:text-accent transition-colors line-clamp-2">
+          <div className="text-base leading-snug text-text-1 group-hover:text-accent transition-colors line-clamp-2">
             {post.title}
           </div>
-          <div className="flex items-center gap-1 mt-1 text-[10.5px] text-text-4">
+          <div className="flex items-center gap-1 mt-1 text-xs text-text-4">
             <MessageSquare size={11} />
-            <span className="tabular-nums">{compactNum(post.comments)}</span>
+            <span className="tabular-nums">{compactNumber(post.comments)}</span>
             <span>comments</span>
           </div>
         </div>

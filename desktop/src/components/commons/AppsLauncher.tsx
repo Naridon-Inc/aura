@@ -99,7 +99,7 @@ export function AppsLauncher({ onGetApp }: Props) {
             onClick={() => setOpenKey(null)}
             title="Back to apps"
             aria-label="Back to apps"
-            className="w-7 h-7 rounded flex items-center justify-center text-text-4 hover:text-text-1 hover:bg-bg-2 transition-colors"
+            className="w-7 h-7 rounded flex items-center justify-center text-text-4 hover:text-text-1 hover:bg-state-hover transition-colors"
           >
             <svg width="14" height="14" viewBox="0 0 16 16" fill="none">
               <path
@@ -111,7 +111,7 @@ export function AppsLauncher({ onGetApp }: Props) {
               />
             </svg>
           </button>
-          <span className="text-text-1 text-[12px] font-medium truncate flex-1">
+          <span className="text-text-1 text-sm font-medium truncate flex-1">
             {title}
           </span>
           <button
@@ -122,7 +122,7 @@ export function AppsLauncher({ onGetApp }: Props) {
             }}
             title="Open as a full editor tab"
             aria-label="Open as a full editor tab"
-            className="w-7 h-7 rounded flex items-center justify-center text-text-4 hover:text-text-1 hover:bg-bg-2 transition-colors"
+            className="w-7 h-7 rounded flex items-center justify-center text-text-4 hover:text-text-1 hover:bg-state-hover transition-colors"
           >
             <svg width="13" height="13" viewBox="0 0 24 24" fill="none" aria-hidden>
               <path
@@ -147,10 +147,10 @@ export function AppsLauncher({ onGetApp }: Props) {
       <section>
         <SectionHeader title="Your apps" hint="Open here · pop out for room" />
         {!hasYours ? (
-          <div className="text-text-4 text-[11.5px] leading-snug max-w-md">
+          <div className="text-text-4 text-sm leading-snug max-w-md">
             No apps yet. Enable one from the catalog below, or publish your own
             with{" "}
-            <span className="font-mono text-text-3">aura plugin new</span> — a
+            <span className="font-mono text-text-3">aura plugin new</span>. A
             plugin that declares{" "}
             <span className="font-mono text-text-3">contributes.apps</span> shows
             up here.
@@ -185,7 +185,7 @@ export function AppsLauncher({ onGetApp }: Props) {
           hint="Sandboxed · installs are signed + trust-gated"
         />
         {discover.length === 0 ? (
-          <div className="text-text-4 text-[11.5px]">
+          <div className="text-text-4 text-sm">
             You have everything in the catalog. Nice.
           </div>
         ) : (
@@ -224,8 +224,8 @@ function appTitleForKey(
 function SectionHeader({ title, hint }: { title: string; hint: string }) {
   return (
     <header className="flex items-baseline justify-between mb-2">
-      <span className="text-text-2 text-[12px] font-semibold">{title}</span>
-      <span className="text-text-5 text-[10.5px]">{hint}</span>
+      <span className="text-text-2 text-sm font-semibold">{title}</span>
+      <span className="text-text-5 text-xs">{hint}</span>
     </header>
   );
 }
@@ -281,13 +281,13 @@ function AppTile({
       type="button"
       onClick={onOpen}
       title={title}
-      className="group flex flex-col items-center gap-1.5 rounded-lg border border-line-soft bg-bg-0 shadow-[var(--shadow-card)] hover:bg-bg-2 hover:border-accent/40 px-2 py-2.5 transition-colors text-center"
+      className="group flex flex-col items-center gap-1.5 rounded-lg border border-line-soft bg-bg-0 shadow-[var(--shadow-card)] hover:bg-state-hover hover:border-accent/40 px-2 py-2.5 transition-colors text-center"
     >
       <AppLogo logo={logo} glyph={glyph} size={26} />
-      <span className="text-text-1 text-[11.5px] font-medium truncate w-full">
+      <span className="text-text-1 text-sm font-medium truncate w-full">
         {title}
       </span>
-      <span className="text-text-5 text-[9.5px] truncate w-full">
+      <span className="text-text-5 text-2xs truncate w-full">
         {subtitle}
       </span>
     </button>
@@ -314,15 +314,15 @@ function CatalogAppCard({
       <AppLogo logo={entry.logo} glyph={entry.glyph} size={28} />
       <div className="min-w-0 flex-1">
         <div className="flex items-center gap-1.5">
-          <span className="text-text-1 text-[12px] font-medium truncate">
+          <span className="text-text-1 text-sm font-medium truncate">
             {entry.title}
           </span>
-          <span className="text-[9px] text-text-5 bg-bg-1 border border-line-soft rounded px-1 flex-shrink-0">
+          <span className="text-2xs text-text-5 bg-bg-1 border border-line-soft rounded px-1 flex-shrink-0">
             {CATEGORY_LABEL[entry.category]}
           </span>
         </div>
         <div
-          className="text-text-4 text-[10.5px] leading-snug truncate"
+          className="text-text-4 text-xs leading-snug truncate"
           title={entry.tagline}
         >
           {entry.tagline}
@@ -330,7 +330,7 @@ function CatalogAppCard({
       </div>
       {builtin && !ready ? (
         <span
-          className="flex-shrink-0 px-2 py-1 text-[10px] rounded bg-bg-1 border border-line-soft text-text-5"
+          className="flex-shrink-0 px-2 py-1 text-2xs rounded bg-bg-1 border border-line-soft text-text-5"
           title="Branding is in; the integration ships soon."
         >
           Soon
@@ -339,7 +339,7 @@ function CatalogAppCard({
         <button
           type="button"
           onClick={ready ? onEnable : onGet}
-          className="flex-shrink-0 px-2.5 py-1 text-[10.5px] rounded bg-accent/15 hover:bg-accent/25 text-accent transition-colors"
+          className="flex-shrink-0 px-2.5 py-1 text-xs rounded bg-accent/15 hover:bg-accent/25 text-accent transition-colors"
           title={
             ready
               ? "Enable this bundled app"

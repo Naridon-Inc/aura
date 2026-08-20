@@ -5,26 +5,32 @@
 // "aura"; AuraRailPanel re-reads the persisted sid when the project root
 // matches.
 
+import { placeForNewWork, writeAmbientSid } from "./ambientSession";
 import { sendAmbientManagerTurn } from "./managerTurn";
 
 export type FocusManagerDetail = {
   repoRoot: string;
   sessionId: string;
+  /** The machine this session's hands are on, or null for this laptop. */
+  machineId: string | null;
 };
 
 export const FOCUS_MANAGER_EVENT = "aura:focus-manager";
 
-const ambientKey = (repoRoot: string) => `aura.ambient.${repoRoot}`;
-
-export function focusAmbientManager(repoRoot: string, sessionId: string): void {
-  try {
-    localStorage.setItem(ambientKey(repoRoot), sessionId);
-  } catch {
-    /* localStorage quota — non-fatal */
-  }
+/** Make `sessionId` the chat about `repoRoot` at `machineId`, and bring it to
+ *  the user's attention. The place is part of which pointer gets written: a
+ *  chat about the copy of this project on a box must not become the answer to
+ *  "open Aura here" back on this laptop. Omit it and the place is wherever the
+ *  window is standing. */
+export function focusAmbientManager(
+  repoRoot: string,
+  sessionId: string,
+  machineId: string | null = placeForNewWork(repoRoot),
+): void {
+  writeAmbientSid(repoRoot, machineId, sessionId);
   window.dispatchEvent(
     new CustomEvent<FocusManagerDetail>(FOCUS_MANAGER_EVENT, {
-      detail: { repoRoot, sessionId },
+      detail: { repoRoot, sessionId, machineId },
     }),
   );
 }

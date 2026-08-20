@@ -40,11 +40,11 @@ export function PageActionBar({ primary, actions, kebab, className }: PageAction
           {primary.label}
         </Button>
       )}
-      {showPrimarySep && <span aria-hidden className="mx-1 h-5 w-px bg-ui-border-base" />}
+      {showPrimarySep && <span aria-hidden className="mx-1 h-5 w-px bg-line-soft" />}
       {actions.map((action) => (
         <ActionIconButton key={action.key} action={action} />
       ))}
-      {showKebabSep && <span aria-hidden className="mx-1 h-5 w-px bg-ui-border-base" />}
+      {showKebabSep && <span aria-hidden className="mx-1 h-5 w-px bg-line-soft" />}
       {kebab}
     </Container>
   );

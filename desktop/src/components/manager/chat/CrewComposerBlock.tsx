@@ -17,9 +17,12 @@
 
 import * as React from "react";
 import { createPortal } from "react-dom";
-import { ChevronDown, ChevronUp, Loader2, Users } from "lucide-react";
+import { ChevronDown, ChevronUp, Users } from "lucide-react";
 
-import { api, type ReadyViewDto } from "../../../lib/api";
+import { AsciiSpinner } from "../../ui/ascii-spinner";
+
+import { type ReadyViewDto } from "../../../lib/api";
+import { fetchReadyView } from "../../../lib/loopCache";
 import { buildActivityFeed } from "../../commons/crew/crewActivity";
 import {
   bestProof,
@@ -71,8 +74,9 @@ export function CrewComposerBlock({
     }
     let alive = true;
     const tick = () => {
-      void api
-        .loopReadyView(repoRoot)
+      // Shared with the Crew surface, which polls the same graph on its own
+      // timer while this strip is docked under the composer beside it.
+      void fetchReadyView(repoRoot)
         .then((v) => {
           if (alive) setView(v);
         })
@@ -150,11 +154,11 @@ export function CrewComposerBlock({
         title={open ? "Hide the crew" : "Show the crew"}
       >
         <span className="aura-crew-glyph" aria-hidden>
-          {liveCount > 0 ? (
-            <Loader2 size={13} className="animate-spin" />
-          ) : (
-            <Users size={13} />
-          )}
+          {/* Agents are working right now — the one thing the house spinner
+              is for. This drew a lucide `Loader2` instead, which put a second
+              "something is running" glyph in the same transcript as the one
+              the tool cards and status line already use. */}
+          {liveCount > 0 ? <AsciiSpinner size={13} /> : <Users size={13} />}
         </span>
         <span className="aura-crew-summary">
           {summary}

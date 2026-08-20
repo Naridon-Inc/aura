@@ -22,8 +22,9 @@ import {
 import { cn } from "../../lib/utils";
 import { MENU_PANEL, MENU_ROW, MENU_ROW_DANGER, MENU_SEP } from "../ui/menuSurface";
 import type { Folder as PageFolder } from "../../lib/api";
-import { folderTint, folderSoftBg } from "../pages2/folderColors";
+import { folderTint } from "../pages2/folderColors";
 import { FolderColorPopover } from "./FolderColorPopover";
+import { useDismiss } from "../../lib/useDismiss";
 
 type Props = {
   folder: PageFolder;
@@ -74,17 +75,14 @@ export function PageFolderGroup({
   }, [renaming, folder.name]);
 
   // Close the kebab menu / color popover on outside click.
-  useEffect(() => {
-    if (!menuOpen) return;
-    function onDown(e: MouseEvent) {
-      if (!menuRef.current?.contains(e.target as Node)) {
-        setMenuOpen(false);
-        setColorOpen(false);
-      }
-    }
-    window.addEventListener("mousedown", onDown);
-    return () => window.removeEventListener("mousedown", onDown);
-  }, [menuOpen]);
+  useDismiss(
+    menuOpen,
+    () => {
+      setMenuOpen(false);
+      setColorOpen(false);
+    },
+    menuRef,
+  );
 
   const tint = folderTint(folder.color);
 
@@ -116,15 +114,16 @@ export function PageFolderGroup({
           setMenuOpen(true);
         }}
         className={cn(
-          "group relative h-7 flex items-center gap-1 rounded-md text-[12px] cursor-pointer select-none transition-colors",
-          "text-text-1 hover:bg-bg-2",
+          "group relative h-7 flex items-center gap-1 rounded-md text-sm cursor-pointer select-none transition-colors",
+          "text-text-1 hover:bg-state-hover",
           isDropTarget && "ring-1 ring-inset ring-accent",
         )}
-        style={{
-          paddingLeft: 6,
-          paddingRight: 6,
-          background: expanded ? folderSoftBg(folder.color) : undefined,
-        }}
+        // No fill for "expanded" — the chevron already says whether a folder
+        // is open, and a filled row two rows above a filled selected row
+        // teaches the reader two different meanings for one mark. The
+        // folder's colour stays on the folder icon, where it identifies
+        // WHICH folder rather than what state it's in.
+        style={{ paddingLeft: 6, paddingRight: 6 }}
         onClick={() => !renaming && onToggle()}
       >
         <span
@@ -157,7 +156,7 @@ export function PageFolderGroup({
               else if (e.key === "Escape") setRenaming(false);
             }}
             onBlur={commitRename}
-            className="flex-1 min-w-0 bg-bg-1 border border-line-default rounded px-1 py-0 text-[12px] text-text-1 outline-none"
+            className="flex-1 min-w-0 bg-bg-1 border border-line-default rounded px-1 py-0 text-sm text-text-1 outline-none"
           />
         ) : (
           <span className="flex-1 min-w-0 truncate font-medium">
@@ -165,7 +164,7 @@ export function PageFolderGroup({
           </span>
         )}
         {!renaming && count > 0 && (
-          <span className="text-[10px] text-text-5 tabular-nums group-hover:hidden">
+          <span className="text-2xs text-text-5 tabular-nums group-hover:hidden">
             {count}
           </span>
         )}
@@ -176,7 +175,7 @@ export function PageFolderGroup({
             e.stopPropagation();
             setMenuOpen((v) => !v);
           }}
-          className="opacity-0 group-hover:opacity-100 w-5 h-5 grid place-items-center rounded text-text-4 hover:text-text-1 hover:bg-bg-3 flex-shrink-0"
+          className="opacity-0 group-hover:opacity-100 w-5 h-5 grid place-items-center rounded text-text-4 hover:text-text-1 hover:bg-state-hover flex-shrink-0"
         >
           <MoreHorizontal className="w-3.5 h-3.5" strokeWidth={1.75} aria-hidden />
         </button>

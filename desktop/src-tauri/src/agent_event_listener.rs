@@ -764,43 +764,20 @@ fn wrote_file(event: &CliAgentEvent) -> Option<String> {
     None
 }
 
-/// Resolve the `aura` binary the way the rest of the shell does:
-/// `$AURA_BIN`, then `aura` on PATH (via `which`), then `~/.cargo/bin/aura`,
-/// finally a bare `aura` (let exec/PATH sort it). Never a hardcoded dev path.
+/// The `aura` binary every spawn in the shell goes through. Never a bare
+/// `"aura"` handed to exec, and never a hardcoded dev path.
 ///
-/// `pub(crate)` so the carryover bridge (`cmd_carryover.rs`) resolves the
-/// binary identically instead of re-deriving the lookup — one resolver,
-/// one set of rules.
+/// This used to take the first `aura` on PATH and stop there. That is the
+/// wrong rule on a machine with more than one: an early-install
+/// `/usr/local/bin/aura` at 0.4.6-alpha shadows a current `~/.cargo/bin/aura`,
+/// and every passthrough in the app quietly runs the old one. The version
+/// comparison now lives in `cmd_doctor_cli::resolve_runnable_aura`, next to
+/// the constant it compares against.
+///
+/// `pub(crate)` and kept at this name because it is what thirty-odd call
+/// sites already ask for — one resolver, one set of rules.
 pub(crate) fn resolve_aura_bin() -> String {
-    if let Some(v) = std::env::var_os("AURA_BIN") {
-        let s = v.to_string_lossy().to_string();
-        if !s.trim().is_empty() {
-            return s;
-        }
-    }
-    if let Ok(out) = std::process::Command::new("/usr/bin/which")
-        .arg("aura")
-        .output()
-    {
-        if out.status.success() {
-            if let Ok(s) = String::from_utf8(out.stdout) {
-                let t = s.trim();
-                if !t.is_empty() {
-                    return t.to_string();
-                }
-            }
-        }
-    }
-    if let Some(home) = std::env::var_os("HOME") {
-        let mut p = std::path::PathBuf::from(home);
-        p.push(".cargo");
-        p.push("bin");
-        p.push("aura");
-        if p.exists() {
-            return p.to_string_lossy().to_string();
-        }
-    }
-    "aura".to_string()
+    crate::cmd_doctor_cli::resolve_runnable_aura()
 }
 
 /// Mint a unique gate id. Uses uuid v4 (in-tree); the session id is

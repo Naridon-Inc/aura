@@ -101,6 +101,15 @@ export function IdentityRepoRow({ status, onChanged }: IdentityRepoRowProps) {
     void run(() => identityOverrideClear(status.repo_root));
   }, [run, status.repo_root]);
 
+  // Git may simply have no email for you here — a fresh machine, or a repo
+  // nobody configured. That is not the same as "we don't recognise this
+  // email": there is no email to recognise, and the row used to say both at
+  // once. It also matters for the actions. `team_claim` reads
+  // `git config user.email` and answers "git user.email is not configured for
+  // this repo", so This is me / I'm new can only fail. Picking a teammate
+  // still works — a pin is stored against the project, not the email.
+  const noEmail = !status.email?.trim();
+
   const options: SelectOption[] = status.candidates.map((c) => ({
     value: c.handle,
     label: <CandidateLabel member={c} />,
@@ -110,21 +119,27 @@ export function IdentityRepoRow({ status, onChanged }: IdentityRepoRowProps) {
   const settled = status.confusion === "clear";
 
   return (
-    <div className="flex flex-col gap-2 border border-line-soft rounded-[5px] bg-bg-content px-3 py-2.5">
+    // A repo is a settings row, not a card: the pane it lives in is a
+    // ruled list and a bordered box per project made five projects read as
+    // five separate panels. Same 28px rhythm, same 14/13 scale.
+    <div className="flex flex-col gap-2 py-7">
       {/* header: project + committing-as */}
       <div className="flex items-baseline justify-between gap-3">
-        <span className="text-[13px] font-medium text-text-1 truncate">
+        <span className="text-sm font-medium text-text-1 truncate">
           {status.repo_name}
         </span>
-        <span className="text-[11.5px] text-text-3 truncate">
-          Committing as {status.email || "an unset git email"}
+        <span className="text-[13px] text-text-3 truncate">
+          {/* "Committing as an unset git email" filled the value slot with a
+              description of the hole. It reads like an address until you
+              finish the sentence, and it names nothing to do about it. */}
+          {noEmail ? "No git email set here" : `Committing as ${status.email}`}
         </span>
       </div>
 
       {/* verdict line */}
       {settled ? (
         <div className="flex items-center justify-between gap-3">
-          <span className="flex items-center gap-1.5 text-[12.5px] text-text-2">
+          <span className="flex items-center gap-1.5 text-[13px] text-text-2">
             <span
               className="inline-block h-1.5 w-1.5 rounded-full bg-accent-green"
               aria-hidden
@@ -136,7 +151,7 @@ export function IdentityRepoRow({ status, onChanged }: IdentityRepoRowProps) {
               type="button"
               onClick={() => setPicking(true)}
               disabled={busy}
-              className="text-[11.5px] text-text-3 hover:text-text-1 transition-colors disabled:opacity-50"
+              className="text-[13px] text-text-3 hover:text-text-1 transition-colors disabled:opacity-50"
             >
               Not you? Change
             </button>
@@ -144,8 +159,22 @@ export function IdentityRepoRow({ status, onChanged }: IdentityRepoRowProps) {
         </div>
       ) : (
         <div className="flex flex-col gap-2">
-          <p className="text-[12.5px] text-text-2 leading-snug">
-            {status.confusion === "not_on_roster" ? (
+          <p className="text-[13px] text-text-2 leading-relaxed">
+            {noEmail ? (
+              status.candidates.length > 0 ? (
+                <>
+                  Git has no email for you in this project, so Aura can&apos;t
+                  tell which teammate you are here. Pick yourself and it will
+                  remember.
+                </>
+              ) : (
+                <>
+                  Git has no email for you in this project, and nobody has
+                  joined this project&apos;s team yet — so there&apos;s nobody to
+                  match you to.
+                </>
+              )
+            ) : status.confusion === "not_on_roster" ? (
               <>We don&apos;t recognise this email on your team yet.</>
             ) : status.best_guess ? (
               <>
@@ -160,24 +189,29 @@ export function IdentityRepoRow({ status, onChanged }: IdentityRepoRowProps) {
             )}
           </p>
           <div className="flex flex-wrap items-center gap-2">
-            {status.confusion !== "not_on_roster" && (
+            {/* Both of these claim a seat keyed on the git email, so with no
+                email they are buttons whose only outcome is an error. */}
+            {!noEmail && status.confusion !== "not_on_roster" && (
               <Button size="xs" onClick={confirmMe} disabled={busy}>
                 This is me
               </Button>
             )}
-            {status.confusion === "not_on_roster" && (
+            {!noEmail && status.confusion === "not_on_roster" && (
               <Button size="xs" onClick={addMe} disabled={busy}>
-                I&apos;m new — add me
+                I&apos;m new. Add me
               </Button>
             )}
             {!picking && status.candidates.length > 0 && (
               <Button
                 size="xs"
-                variant="subtle"
+                // With no git email this is the only thing left that works,
+                // and the only action in a row shouldn't read as the
+                // secondary one.
+                variant={noEmail ? "default" : "subtle"}
                 onClick={() => setPicking(true)}
                 disabled={busy}
               >
-                Pick someone else
+                {noEmail ? "Pick who you are" : "Pick someone else"}
               </Button>
             )}
           </div>
@@ -207,7 +241,7 @@ export function IdentityRepoRow({ status, onChanged }: IdentityRepoRowProps) {
                 setPick("");
               }}
               disabled={busy}
-              className="text-[11.5px] text-text-3 hover:text-text-1 transition-colors disabled:opacity-50"
+              className="text-[13px] text-text-3 hover:text-text-1 transition-colors disabled:opacity-50"
             >
               Cancel
             </button>
@@ -216,7 +250,7 @@ export function IdentityRepoRow({ status, onChanged }: IdentityRepoRowProps) {
                 type="button"
                 onClick={resetPin}
                 disabled={busy}
-                className="text-[11.5px] text-text-3 hover:text-text-1 transition-colors disabled:opacity-50"
+                className="text-[13px] text-text-3 hover:text-text-1 transition-colors disabled:opacity-50"
               >
                 Use my git email instead
               </button>
@@ -226,7 +260,7 @@ export function IdentityRepoRow({ status, onChanged }: IdentityRepoRowProps) {
       )}
 
       {error && (
-        <p className="text-[11.5px] text-text-3" role="alert">
+        <p className="text-[13px] text-text-3" role="alert">
           {error}
         </p>
       )}

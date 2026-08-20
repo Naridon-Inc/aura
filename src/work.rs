@@ -23,10 +23,12 @@ use std::process::Command;
 
 use colored::Colorize;
 
+use crate::env_cmd;
 use crate::loop_worktree::{self, LoopWorktree};
 use crate::merge_driver;
 use crate::repo_settings;
 use crate::worktree_scripts;
+use aura_env::Scope;
 
 #[derive(clap::Subcommand)]
 pub enum WorkSubcommands {
@@ -202,26 +204,57 @@ fn create_worktree(
     Ok((slug, path, branch))
 }
 
-/// Run the project's `[worktree] setup` warm-up in `path`, with the work env
-/// exported, printing progress. No-op when `no_setup` or none is configured.
+/// Bring a fresh worktree to the environment the project declares, with the work
+/// env exported, printing progress. No-op when `no_setup` or nothing is declared.
+///
+/// This used to run `[worktree] setup` and nothing else, which warmed the
+/// project's own dependencies and silently assumed everything underneath them —
+/// the toolchain, the tools the setup script shells out to, the database the
+/// tests talk to. It now runs the whole declared spec, so what a person gets
+/// here is what a box gets: same plan, same order, same judgement, one
+/// implementation. A project that declares only `setup` gets a plan of exactly
+/// one step, which is the behaviour it already had.
 fn run_setup(repo_root: &Path, path: &Path, slug: &str, branch: &str, no_setup: bool) {
-    if no_setup {
+    if no_setup || worktree_scripts::spec(repo_root).is_empty() {
         return;
     }
-    let Some(cmd) = worktree_scripts::load(repo_root).setup else {
-        return;
-    };
     let env_owned = work_env(slug, branch);
     let env: Vec<(&str, &str)> = env_owned.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
     println!();
-    println!("  {} {}", "warming up".dimmed(), cmd.dimmed());
-    if worktree_scripts::run_phase(path, Some(&cmd), false, &env) {
-        println!("  {}", "ready".green());
-    } else {
-        println!(
-            "  {} warm-up didn't finish cleanly — the worktree is still here; fix it there",
-            "⚠".yellow()
-        );
+    println!("  {}", "warming up".dimmed());
+    match worktree_scripts::bring_to_spec(repo_root, path, Scope::Full, false, &env, false) {
+        Ok(report) => {
+            env_cmd::print_report(&report);
+            if !report.at_spec {
+                println!(
+                    "  {} the worktree is still here; fix it there",
+                    "⚠".yellow()
+                );
+            }
+        }
+        // A refused seal is the one failure worth stopping to read: the spec on
+        // disk is not the spec anybody reviewed.
+        Err(e) => println!("  {} {}", "⚠".yellow(), e.yellow()),
+    }
+}
+
+/// Take a worktree's world down: the declared services first, in reverse of the
+/// order that brought them up, then the project's own `[worktree] archive`.
+///
+/// Best-effort throughout — a teardown that stopped at the first failure would
+/// leave the rest of the world running, which is the opposite of what was asked.
+fn cleanup(repo_root: &Path, path: &Path, slug: &str, branch: &str) {
+    if worktree_scripts::spec(repo_root).is_empty() {
+        return;
+    }
+    let env_owned = work_env(slug, branch);
+    let env: Vec<(&str, &str)> = env_owned.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
+    match worktree_scripts::teardown(repo_root, path, false, &env) {
+        Ok(0) => {}
+        Ok(stopped) => println!("  {} {} command(s)", "cleanup".dimmed(), stopped),
+        // Dropping a worktree is not the moment to fail on a settings file, but
+        // it is very much the moment to say that nothing was taken down.
+        Err(e) => println!("  {} nothing taken down — {}", "⚠".yellow(), e.yellow()),
     }
 }
 
@@ -485,16 +518,12 @@ fn cmd_merge(
     if keep {
         println!("  {} {}", "kept worktree".dimmed(), path.display());
     } else {
-        // Run the project's `[worktree] archive` cleanup before teardown (stop a
-        // dev server, drop containers, prune scratch). Best-effort — a failed
-        // cleanup never blocks the teardown.
-        if let Some(cmd) = worktree_scripts::load(repo_root).archive.as_deref() {
-            println!("  {} {}", "cleanup".dimmed(), cmd.dimmed());
-            let env_owned = work_env(&slug, &branch);
-            let env: Vec<(&str, &str)> =
-                env_owned.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
-            let _ = worktree_scripts::run_phase(&path, Some(cmd), false, &env);
-        }
+        // Take the declared services down, then run the project's own
+        // `[worktree] archive` (stop a dev server, drop containers, prune
+        // scratch). Best-effort — a failed cleanup never blocks the teardown,
+        // and a service left running is exactly what leaks a port onto the next
+        // worktree that wants it.
+        cleanup(repo_root, &path, &slug, &branch);
         match loop_worktree::discard(repo_root, &wt) {
             Ok(()) => println!("  {}", "worktree cleaned up".dimmed()),
             Err(e) => println!("  {} couldn't remove worktree: {}", "·".dimmed(), first_line(&e)),
@@ -524,14 +553,7 @@ fn cmd_drop(repo_root: &Path, name: &str) -> Result<(), Box<dyn std::error::Erro
             plural(ahead)
         );
     }
-    // Run the project's `[worktree] archive` cleanup before teardown (best-effort).
-    if let Some(cmd) = worktree_scripts::load(repo_root).archive.as_deref() {
-        println!("  {} {}", "cleanup".dimmed(), cmd.dimmed());
-        let env_owned = work_env(&slug, &branch);
-        let env: Vec<(&str, &str)> =
-            env_owned.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
-        let _ = worktree_scripts::run_phase(&path, Some(cmd), false, &env);
-    }
+    cleanup(repo_root, &path, &slug, &branch);
     let wt = LoopWorktree { path, branch };
     loop_worktree::discard(repo_root, &wt)?;
     println!("{} {}", "✓ dropped".green().bold(), slug);

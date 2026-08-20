@@ -17,57 +17,14 @@
 //! Everything else is a `tool_call` state-machine object keyed by callId.
 
 import type { StreamEvent } from "../../api";
-import { describeTool } from "../../../components/manager/chat/toolDescribe";
-import type { ToolGlyph, ToolResult } from "../../../components/manager/chat/types";
+import type { ToolResult } from "../../../components/manager/chat/types";
+import { asObj, kindFor, norm, titleFor } from "./describe";
 import type {
   NormalizedEvent,
   NormalizedQuestion,
   ToolContent,
-  ToolKind,
   TodoItem,
 } from "../events";
-
-/** ACP-ish glyph → ToolKind. `toolDescribe` already normalizes per-brain
- *  naming into a glyph; we re-use that instead of re-deriving the kind. */
-const GLYPH_TO_KIND: Record<ToolGlyph, ToolKind> = {
-  read: "read",
-  search: "search",
-  glob: "search",
-  list: "read",
-  fetch: "fetch",
-  edit: "edit",
-  write: "edit",
-  run: "execute",
-  dispatch: "other",
-  ask: "other",
-  task: "todo",
-  page: "other",
-  review: "other",
-  plan: "plan",
-  generic: "other",
-};
-
-function asObj(input: unknown): Record<string, unknown> {
-  return input && typeof input === "object"
-    ? (input as Record<string, unknown>)
-    : {};
-}
-
-function norm(name: string): string {
-  return name.toLowerCase().replace(/[-_]/g, "");
-}
-
-/** Build a humanized one-line title from the tool-describe registry so the
- *  card headline reads "Editing foo.ts", never `str_replace`. */
-function titleFor(name: string, input: unknown, result?: ToolResult): string {
-  const v = describeTool(name, input, result);
-  return v.subject ? `${v.verb} ${v.subject}` : v.verb;
-}
-
-function kindFor(name: string, input: unknown): ToolKind {
-  const v = describeTool(name, input);
-  return GLYPH_TO_KIND[v.glyph ?? "generic"] ?? "other";
-}
 
 /** Parse Claude's `AskUserQuestion` input into normalized questions (a set,
  *  each possibly multi-select). A flat single-question input degrades to a

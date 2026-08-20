@@ -31,6 +31,7 @@ import {
 import { AgentIcon } from "./AgentIcon";
 import { Input } from "../ui/input";
 import { AsciiSpinner } from "../ui/ascii-spinner";
+import { titleCaseName } from "../../lib/textCase";
 
 type Props = {
   /** Active workspace root. Lanes are scoped to it. */
@@ -74,17 +75,17 @@ export function LaneSwitcher({ repoRoot, onFocusLane }: Props) {
   return (
     <div className="flex flex-col gap-2 p-2 w-[300px] bg-bg-2 border border-line rounded-lg">
       <div className="flex items-center justify-between px-1">
-        <span className="text-text-1 text-[12.5px] font-medium">Lanes</span>
-        <span className="text-text-5 text-[10.5px] tabular-nums">
+        <span className="text-text-1 text-base font-medium">Lanes</span>
+        <span className="text-text-5 text-xs tabular-nums">
           {lanes.length === 0
             ? "no lanes yet"
             : `${lanes.length} running`}
         </span>
       </div>
 
-      <p className="px-1 text-text-4 text-[10.5px] leading-snug">
+      <p className="px-1 text-text-4 text-xs leading-snug">
         A lane is an isolated copy of your project for one agent. Start a new
-        lane to run another agent in parallel — your files never collide.
+        lane to run another agent in parallel. Your files never collide.
       </p>
 
       {/* Lane list */}
@@ -100,16 +101,16 @@ export function LaneSwitcher({ repoRoot, onFocusLane }: Props) {
                   background: isActive ? "var(--color-accent)" : "transparent",
                 }}
               >
-                <AgentIcon agentId={lane.agent} size={16} active={isActive} />
+                <AgentIcon agentId={lane.agent} size={16} />
                 <div className="flex-1 min-w-0">
                   <div
-                    className="text-[12px] truncate"
+                    className="text-sm truncate"
                     style={{ color: isActive ? "var(--color-bg-0)" : "var(--color-text-1)" }}
                   >
                     {lane.label || laneTitle(lane)}
                   </div>
                   <div
-                    className="text-[10px] font-mono truncate"
+                    className="text-2xs font-mono truncate"
                     style={{
                       color: isActive
                         ? "color-mix(in srgb, var(--color-bg-0) 70%, transparent)"
@@ -127,7 +128,7 @@ export function LaneSwitcher({ repoRoot, onFocusLane }: Props) {
                     onDiscard(lane, false);
                   }}
                   title="Close this lane"
-                  className="opacity-0 group-hover:opacity-100 focus-visible:opacity-100 transition-opacity text-[10.5px] px-1.5 py-0.5 rounded flex-shrink-0 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-accent/50"
+                  className="opacity-0 group-hover:opacity-100 focus-visible:opacity-100 transition-opacity text-xs px-1.5 py-0.5 rounded flex-shrink-0 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-accent/50"
                   style={{
                     color: isActive
                       ? "color-mix(in srgb, var(--color-bg-0) 85%, transparent)"
@@ -145,7 +146,7 @@ export function LaneSwitcher({ repoRoot, onFocusLane }: Props) {
       {/* Dirty-guard confirmation */}
       {dirtyConfirm && (
         <div className="flex flex-col gap-2 p-2 rounded-md bg-bg-1 border border-line-soft">
-          <span className="text-text-1 text-[11.5px] leading-snug">
+          <span className="text-text-1 text-sm leading-snug">
             This lane has unsaved work
             {dirtyConfirm.changedFiles > 0 && (
               <>
@@ -160,7 +161,7 @@ export function LaneSwitcher({ repoRoot, onFocusLane }: Props) {
             <button
               type="button"
               onClick={() => onDiscard(dirtyConfirm.lane, true)}
-              className="text-[11px] px-2 h-6 rounded text-white"
+              className="text-xs px-2 h-6 rounded text-white"
               style={{ background: "var(--color-red)" }}
             >
               Discard anyway
@@ -168,7 +169,7 @@ export function LaneSwitcher({ repoRoot, onFocusLane }: Props) {
             <button
               type="button"
               onClick={() => setDirtyConfirm(null)}
-              className="text-[11px] px-2 h-6 rounded text-text-3 hover:bg-bg-hover"
+              className="text-xs px-2 h-6 rounded text-text-3 hover:bg-state-hover"
             >
               Keep it
             </button>
@@ -177,7 +178,7 @@ export function LaneSwitcher({ repoRoot, onFocusLane }: Props) {
       )}
 
       {error && (
-        <div className="px-1 text-red text-[10.5px] font-mono break-words">
+        <div className="px-1 text-red text-xs font-mono break-words">
           {error}
         </div>
       )}
@@ -203,10 +204,10 @@ export function LaneSwitcher({ repoRoot, onFocusLane }: Props) {
         <button
           type="button"
           onClick={() => setStarting(true)}
-          className="flex items-center justify-center gap-1.5 h-8 rounded-md text-[11.5px] font-medium text-white transition-opacity hover:opacity-90"
+          className="flex items-center justify-center gap-1.5 h-8 rounded-md text-sm font-medium text-white transition-opacity hover:opacity-90"
           style={{ background: "var(--color-accent)" }}
         >
-          <span className="text-[13px] leading-none">+</span>
+          <span className="text-base leading-none">+</span>
           Start a new lane
         </button>
       )}
@@ -253,19 +254,19 @@ function NewLanePicker({
 
   return (
     <div className="flex flex-col gap-2 p-2 rounded-md bg-bg-1 border border-line-soft">
-      <span className="text-text-1 text-[11.5px] font-medium">
+      <span className="text-text-1 text-sm font-medium">
         Start a new lane
       </span>
 
       <div className="flex flex-col gap-1">
         {agents === null && (
-          <span className="flex items-center gap-1.5 text-text-4 text-[10.5px]">
+          <span className="flex items-center gap-1.5 text-text-4 text-xs">
             <AsciiSpinner />
             Finding agents…
           </span>
         )}
         {agents && agents.length === 0 && (
-          <span className="text-text-4 text-[10.5px]">
+          <span className="text-text-4 text-xs">
             No agents found. Install Claude Code, Gemini, or Codex first.
           </span>
         )}
@@ -281,9 +282,9 @@ function NewLanePicker({
                 background: active ? "var(--color-accent)" : "transparent",
               }}
             >
-              <AgentIcon agentId={a.id} label={a.label} size={16} active={active} />
+              <AgentIcon agentId={a.id} label={a.label} size={16} />
               <span
-                className="text-[12px] flex-1"
+                className="text-sm flex-1"
                 style={{ color: active ? "var(--color-bg-0)" : "var(--color-text-1)" }}
               >
                 {a.label}
@@ -297,7 +298,7 @@ function NewLanePicker({
         value={label}
         onChange={(e) => setLabel(e.target.value)}
         placeholder="Name this lane (optional)"
-        className="text-[11.5px] placeholder:text-text-5"
+        className="text-sm placeholder:text-text-5"
       />
 
       <div className="flex items-center gap-2">
@@ -305,7 +306,7 @@ function NewLanePicker({
           type="button"
           disabled={!agentId || busy}
           onClick={() => agentId && onStart(agentId, label.trim())}
-          className="flex-1 h-7 rounded-md text-[11.5px] font-medium text-white disabled:opacity-50 transition-opacity hover:opacity-90"
+          className="flex-1 h-7 rounded-md text-sm font-medium text-white disabled:opacity-50 transition-opacity hover:opacity-90"
           style={{ background: "var(--color-accent)" }}
         >
           {busy ? "Starting…" : "Start lane"}
@@ -313,7 +314,7 @@ function NewLanePicker({
         <button
           type="button"
           onClick={onCancel}
-          className="h-7 px-2.5 rounded-md text-[11.5px] text-text-3 hover:bg-bg-hover"
+          className="h-7 px-2.5 rounded-md text-sm text-text-3 hover:bg-state-hover"
         >
           Cancel
         </button>
@@ -325,6 +326,6 @@ function NewLanePicker({
 /** Human-ish title for a lane that has no user label — "Claude lane"
  *  reads far better than the raw branch in the headline slot. */
 function laneTitle(lane: Lane): string {
-  const name = lane.agent.charAt(0).toUpperCase() + lane.agent.slice(1);
+  const name = titleCaseName(lane.agent);
   return `${name} lane`;
 }

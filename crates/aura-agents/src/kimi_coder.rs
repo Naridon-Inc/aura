@@ -4,13 +4,13 @@
 //!   * OneShot / StreamJson: `kimi -p <prompt>`
 //!   * PtyRepl:              `kimi`
 //!
-//! Discovery is multi-name + extended-PATH because the Kimi CLI ships
-//! under several different binary names (`kimi`, `kimi-cli`, `kimi-coder`,
-//! `moonshot`) depending on install method, and macOS GUI apps inherit
-//! launchd's slim PATH that often misses `~/.local/bin` and `~/.npm-global/bin`.
-//! We probe a candidate list against `which` first, then fall back to
-//! direct existence checks under common per-user install dirs. The first
-//! hit wins and is cached for the process lifetime.
+//! Discovery is multi-name because the Kimi CLI ships under several
+//! different binary names (`kimi`, `kimi-cli`, `kimi-coder`, `moonshot`)
+//! depending on install method. The extended-PATH half — GUI apps inherit
+//! launchd's slim PATH, which misses `~/.local/bin` and friends — is not
+//! Kimi's problem alone and lives in [`crate::bin_resolve`], which every
+//! agent goes through. The first candidate that resolves wins, and the
+//! answer is cached for the process lifetime.
 //!
 //! If your Kimi install lives somewhere we don't probe, override via
 //! `~/.aura/agents.toml` — that's exactly what the TOML loader is for.
@@ -18,8 +18,6 @@
 use crate::{
     AgentProvider, Capabilities, CostPer1k, InvokeMode, InvokeRequest, Invocation,
 };
-use std::path::PathBuf;
-use std::process::Command;
 use std::sync::OnceLock;
 
 pub struct KimiCoder;
@@ -35,57 +33,13 @@ const PREFS: &[(&str, i32)] = &[
 
 const CANDIDATES: &[&str] = &["kimi", "kimi-cli", "kimi-coder", "moonshot"];
 
-fn home_dir() -> Option<PathBuf> {
-    std::env::var_os("HOME").map(PathBuf::from)
-}
-
-/// Extra directories to probe when `which` fails. macOS GUI apps don't
-/// inherit the user's shell PATH, so binaries installed by Homebrew /
-/// pipx / npm-global / cargo often need manual lookup.
-fn extended_dirs() -> Vec<PathBuf> {
-    let mut dirs: Vec<PathBuf> = vec![
-        PathBuf::from("/opt/homebrew/bin"),
-        PathBuf::from("/usr/local/bin"),
-    ];
-    if let Some(home) = home_dir() {
-        dirs.push(home.join(".local/bin"));
-        dirs.push(home.join(".npm-global/bin"));
-        dirs.push(home.join(".cargo/bin"));
-        dirs.push(home.join("bin"));
-    }
-    dirs
-}
-
-/// Resolve the Kimi binary path lazily. Returns `None` if no candidate
-/// is found. Cached for the process lifetime.
+/// Resolve the Kimi binary lazily — the multi-name half is Kimi's own, the
+/// extended-PATH half is shared with every other agent (see
+/// [`crate::bin_resolve`]). Cached for the process lifetime.
 fn resolve_bin() -> Option<&'static str> {
     static CACHED: OnceLock<Option<String>> = OnceLock::new();
     CACHED
-        .get_or_init(|| {
-            // 1) `which <candidate>` for each candidate name.
-            for name in CANDIDATES {
-                if Command::new("which")
-                    .arg(name)
-                    .output()
-                    .map(|o| o.status.success())
-                    .unwrap_or(false)
-                {
-                    return Some((*name).to_string());
-                }
-            }
-            // 2) Fall back to direct existence under extended PATH dirs.
-            //    Pin to the absolute path so spawn doesn't re-PATH-search
-            //    (which would fail again under launchd PATH).
-            for dir in extended_dirs() {
-                for name in CANDIDATES {
-                    let p = dir.join(name);
-                    if p.exists() {
-                        return Some(p.to_string_lossy().into_owned());
-                    }
-                }
-            }
-            None
-        })
+        .get_or_init(|| crate::bin_resolve::resolve(CANDIDATES))
         .as_deref()
 }
 

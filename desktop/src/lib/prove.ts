@@ -7,34 +7,34 @@
 //     jargon. Preferred.
 //   • runProve — the legacy human-text parse (ProveResult), kept for callers
 //     not yet migrated (the per-task / per-run goal cards).
+//
+// Reading the human report is its own problem — four ways it used to turn a
+// failed proof into a green one — and lives in `proveReport.ts`, pure and
+// tested. This module is the two bridges and the plain-language wording.
 
 import { api } from "./api";
+import { sentenceCase } from "./textCase";
+import { parseProveOutput, verdictOf } from "./proveReport";
 
-export type Check = {
-  ok: boolean;
-  /** Raw line for fallback display when parsing can't structure it. */
-  line: string;
-  /** Best-effort parsed kind ("Class" / "Function" / …). */
-  kind: string | null;
-  /** Best-effort parsed identifier (between single quotes). */
-  identifier: string | null;
-};
-
-export type ProveResult = {
-  checks: Check[];
-  proven: boolean;
-  /** Final summary line (e.g. "0 of 4 semantic links verified"). */
-  summary: string;
-  /** Raw stdout/stderr for the dropdown — debugging when the parser misses. */
-  raw: string;
-};
-
-export type ProveTone = "ok" | "partial" | "fail";
+export {
+  gapKind,
+  gaps,
+  parseProveOutput,
+  verdictOf,
+  type Check,
+  type ProveResult,
+  type ProveTone,
+} from "./proveReport";
+import type { ProveResult } from "./proveReport";
 
 /** Run a requirement check against the repo and return the structured verdict.
  *  Pass `atCommit` to prove against the code as it was at that commit (or the
  *  nearest checkpoint around it) instead of the checked-out branch — so a
- *  session's goals prove against the code that session produced. */
+ *  session's goals prove against the code that session produced.
+ *
+ *  The exit status goes to the parser: `aura prove` exits 0 whether or not the
+ *  goal is proven, so a non-zero status means the command failed and nothing
+ *  it printed is a verdict about the code. */
 export async function runProve(
   repoRoot: string,
   goal: string,
@@ -43,7 +43,7 @@ export async function runProve(
   const argv = ["prove", "--goal", goal];
   if (atCommit) argv.push("--at", atCommit);
   const res = await api.auraCli(repoRoot, argv);
-  return parseProveOutput(`${res.stdout}\n${res.stderr}`);
+  return parseProveOutput(`${res.stdout}\n${res.stderr}`, res.status);
 }
 
 // ── Structured (--json) path ────────────────────────────────────────────────
@@ -97,26 +97,36 @@ export async function runProveStructured(
     /* fall through to legacy parse */
   }
   // Legacy fallback: derive an outcome from the human report.
-  const legacy = parseProveOutput(`${res.stdout}\n${res.stderr}`);
+  const legacy = parseProveOutput(`${res.stdout}\n${res.stderr}`, res.status);
   const { tone, ok, total } = verdictOf(legacy);
   const verdict: ProveVerdict =
-    tone === "ok" ? "verified" : tone === "partial" ? "partial" : total > 0 ? "not_wired" : "unknown";
+    tone === "ok"
+      ? "verified"
+      : tone === "partial"
+        ? "partial"
+        : tone === "fail"
+          ? "not_wired"
+          : "unknown";
   return {
     goal,
     checks: legacy.checks.map((c) => ({
       node_name: c.identifier ?? c.line,
       node_type: c.kind ?? "Logic",
       must_call: null,
-      exists: c.ok,
-      is_stub: false,
-      wired: null,
+      exists: c.ok || c.stub || c.unwired,
+      is_stub: c.stub,
+      wired: c.unwired ? false : null,
       passed: c.ok,
       reason: c.ok ? `${c.line} is built` : `${c.line} isn't in the code yet`,
     })),
     passed: ok,
     total,
     verdict,
-    error: total === 0 ? "Couldn't work out what this goal needs yet." : null,
+    // We got here because `--json` produced nothing we could read: the binary
+    // is too old to know the flag, or the command failed. Saying "couldn't work
+    // out what this goal needs" would be the engine's sentence for a goal it
+    // can't decompose — blaming the wording of a request that was never read.
+    error: legacy.blocked ?? (total === 0 ? "Aura couldn’t run this check." : null),
   };
 }
 
@@ -142,16 +152,12 @@ export function humanizeIdentifier(name: string): string {
     .toLowerCase();
 }
 
-function capitalize(s: string): string {
-  return s.length ? s[0].toUpperCase() + s.slice(1) : s;
-}
-
 /** The capability a check is about, as a plain phrase — the humanized node
  *  name, capitalized ("Resolve email consent"). Falls back to the engine reason
  *  for a non-identifier node so nothing is ever mangled. */
 export function capabilityPhrase(c: ProveCheck): string {
   if (!c.node_name || /\s/.test(c.node_name)) return c.reason;
-  const thing = capitalize(humanizeIdentifier(c.node_name));
+  const thing = sentenceCase(humanizeIdentifier(c.node_name));
   return thing || c.reason;
 }
 
@@ -165,11 +171,11 @@ export function plainCheckLine(c: ProveCheck): string {
   if (!c.node_name || /\s/.test(c.node_name)) return c.reason;
   const thing = capabilityPhrase(c);
   const calls = c.must_call ? humanizeIdentifier(c.must_call) : null;
-  if (!c.exists) return `${thing} — not built yet.`;
-  if (c.is_stub) return `${thing} — started, but still an empty placeholder.`;
-  if (calls && c.wired === false) return `${thing} — built, but not connected to ${calls} yet.`;
-  if (c.passed) return calls ? `${thing} — built and connected to ${calls}.` : `${thing} — built.`;
-  return `${thing} — not fully wired yet.`;
+  if (!c.exists) return `${thing}, not built yet.`;
+  if (c.is_stub) return `${thing}. Started, but still an empty placeholder.`;
+  if (calls && c.wired === false) return `${thing}. Built, but not connected to ${calls} yet.`;
+  if (c.passed) return calls ? `${thing}. Built and connected to ${calls}.` : `${thing}. Built.`;
+  return `${thing}, not fully wired yet.`;
 }
 
 /** Why a not-yet-passing check matters, in plain words — explained from its
@@ -179,9 +185,9 @@ export function whyItMatters(c: ProveCheck): string {
   if (!c.exists)
     return "One of the steps this goal needs. Until it exists, the goal can't work from start to finish.";
   if (c.is_stub)
-    return "It's a placeholder — it looks finished, but there's no real logic inside, so it quietly does nothing.";
+    return "It's a placeholder. It looks finished, but there's no real logic inside, so it quietly does nothing.";
   if (c.must_call && c.wired === false)
-    return "It's built, but nothing calls it — so this step never actually runs.";
+    return "It's built, but nothing calls it, so this step never actually runs.";
   return "This part isn't finished, so the goal can't fully work yet.";
 }
 
@@ -219,61 +225,12 @@ export function finishAllInstruction(outcome: ProveOutcome): string {
   if (missing.length === 0) return "";
   const status = (c: ProveCheck) =>
     !c.exists ? "not built yet" : c.is_stub ? "only a placeholder" : "built but not wired in";
-  const lines = missing.map((c) => `- ${capabilityPhrase(c)} — ${status(c)}`);
+  const lines = missing.map((c) => `- ${capabilityPhrase(c)} · ${status(c)}`);
   const n = missing.length;
   return [
-    `The goal "${outcome.goal}" isn't finished yet — ${n} part${n === 1 ? "" : "s"} still need work:`,
+    `The goal "${outcome.goal}" isn't finished yet. ${n} part${n === 1 ? "" : "s"} still need work:`,
     ...lines,
     "",
     `Build and wire each one in, logging your intent as you go, then run \`aura prove --goal "${outcome.goal}"\` and keep going until every part passes. Don't report it done until that check is green.`,
   ].join("\n");
-}
-
-/** Reduce a result to a three-way tone + the wired/total counts. */
-export function verdictOf(result: ProveResult): {
-  tone: ProveTone;
-  ok: number;
-  total: number;
-} {
-  const ok = result.checks.filter((c) => c.ok).length;
-  const total = result.checks.length;
-  const tone: ProveTone =
-    result.proven || (total > 0 && ok === total) ? "ok" : ok === 0 ? "fail" : "partial";
-  return { tone, ok, total };
-}
-
-export function parseProveOutput(text: string): ProveResult {
-  const checks: Check[] = [];
-  let summary = "";
-  let proven = false;
-  for (const rawLine of text.split("\n")) {
-    const line = rawLine.replace(/^\s+|\s+$/g, "");
-    if (!line) continue;
-    if (line.startsWith("✓") || line.startsWith("✗")) {
-      const ok = line.startsWith("✓");
-      const body = line.slice(1).trim();
-      const m = /^(\w+)\s+'([^']+)'/.exec(body);
-      checks.push({
-        ok,
-        line: body,
-        kind: m?.[1] ?? null,
-        identifier: m?.[2] ?? null,
-      });
-      continue;
-    }
-    if (/^✅|^Goal .* PROVEN|is PROVEN/.test(line)) {
-      proven = true;
-      summary = line.replace(/^[✅❌]\s*/, "");
-      continue;
-    }
-    if (/^❌|NOT PROVEN/.test(line)) {
-      proven = false;
-      summary = line.replace(/^[✅❌]\s*/, "");
-      continue;
-    }
-    if (/semantic links verified/.test(line)) {
-      summary = line.replace(/^[✅❌]\s*/, "");
-    }
-  }
-  return { checks, proven, summary, raw: text.trim() };
 }

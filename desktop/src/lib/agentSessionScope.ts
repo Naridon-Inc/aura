@@ -19,7 +19,7 @@
 //      points two PTYs at one conversation. The first to claim an id keeps it;
 //      a sibling that lands on an in-flight id starts fresh instead.
 
-import { api } from "./api";
+import { refreshSessions } from "./sessionsCache";
 import type { ClaudeSession } from "./api";
 
 function stripTrailingSlash(p: string): string {
@@ -32,10 +32,10 @@ function stripTrailingSlash(p: string): string {
  *  `/Users/muhammed/.aura/worktrees/…/zagreb`
  *  → `-Users-muhammed--aura-worktrees-…-zagreb`, and
  *  `/Users/muhammed/Documents/New Git` → `-Users-muhammed-Documents-New-Git`.
- *  NB the Rust `encode_path` (cmd_claude_sessions.rs) only maps `/` and ` ` and
- *  so does NOT match on-disk for dotted paths — we can't reuse it here. */
+ *  Kept byte-identical to the Rust `encode_path` in cmd_claude_sessions.rs. */
 function encodeProjectDir(p: string): string {
-  return stripTrailingSlash(p).replace(/[^A-Za-z0-9]/g, "-");
+  const trimmed = stripTrailingSlash(p) || p;
+  return trimmed.replace(/[^A-Za-z0-9]/g, "-");
 }
 
 /** The encoded project-dir a transcript physically lives in, pulled straight
@@ -94,11 +94,78 @@ export async function ownWorktreeSessions(
 ): Promise<ClaudeSession[]> {
   let list: ClaudeSession[];
   try {
-    list = await api.claudeListSessions(repoRoot);
+    list = await refreshSessions(repoRoot);
   } catch {
     return [];
   }
   return list.filter((s) => isOwnWorktreeSession(s, repoRoot));
+}
+
+/** A conversation to resume and the directory it has to be resumed FROM. */
+export type ResumeTarget = { sessionId: string; cwd: string };
+
+/** Where `claude --resume <id>` must be launched for that id to resolve.
+ *
+ *  Claude finds a session by looking under `~/.claude/projects/<encoded-cwd>/`
+ *  for `<id>.jsonl` — the launch cwd, never the git repo. Launch it anywhere
+ *  else and there is no error: you get a brand-new blank REPL, and the CLI's
+ *  own `/resume` picker (keyed the same way) doesn't list the conversation
+ *  either. That is the whole "the agent was working in a worktree and came
+ *  back empty" bug — 65 of the 71 sessions in one real project were authored
+ *  under a worktree's project dir, so resuming them from the project root
+ *  could only ever have found the other 6.
+ *
+ *  The backend already resolves this per session (`ClaudeSession.cwd`, picked
+ *  in `scan_session` against the transcript's own on-disk dir). We re-check it
+ *  here rather than trust it blind, because the lister deliberately REWRITES
+ *  `cwd` to the query root for orphaned sessions whose worktree is gone — and
+ *  for those the workspace root really is the best available place to land. */
+export function resumeCwdOf(
+  session: Pick<ClaudeSession, "cwd" | "file_path">,
+  repoRoot: string,
+): string {
+  const cwd = session.cwd?.trim();
+  if (!cwd) return repoRoot;
+  const dir = projectDirOf(session.file_path);
+  // No `file_path` to check against (shouldn't happen — the lister always sets
+  // it): take the recorded cwd, which is still closer than the workspace root.
+  if (!dir) return cwd;
+  return encodeProjectDir(cwd) === dir ? cwd : repoRoot;
+}
+
+/** Which conversation a tab should resume, and where to spawn it.
+ *
+ *  One place, because the mount-resume path, the "Start agent" overlay and the
+ *  Manager's "Resume recent" row each used to answer it themselves and only
+ *  one of the three got the cwd right.
+ *
+ *  `bound` is the id this tab is pinned to (its own durable binding, or the
+ *  per-repo channel pin). A pinned id is honoured only if it belongs to THIS
+ *  worktree — see {@link isOwnWorktreeSession} for why a sibling's session must
+ *  never be adopted. `allowNewest` lets a tab with no pin at all fall back to
+ *  this worktree's newest real conversation; the "Start all" path deliberately
+ *  does not, so unpinned tabs start fresh instead of cloning one thread.
+ *
+ *  `null` means "start fresh" — always a valid answer, never an error. */
+export async function resolveResumeTarget(
+  repoRoot: string,
+  bound: string | null | undefined,
+  opts?: { allowNewest?: boolean },
+): Promise<ResumeTarget | null> {
+  const own = await ownWorktreeSessions(repoRoot);
+  if (bound) {
+    const hit = own.find((s) => s.session_id === bound);
+    return hit
+      ? { sessionId: hit.session_id, cwd: resumeCwdOf(hit, repoRoot) }
+      : null;
+  }
+  if (!opts?.allowNewest) return null;
+  // Skip single-greeting leftovers — reopening one reads as "my history is
+  // gone" just as loudly as starting fresh, without the honesty.
+  const newest = own.find((s) => s.turn_count >= 2) ?? own[0];
+  return newest
+    ? { sessionId: newest.session_id, cwd: resumeCwdOf(newest, repoRoot) }
+    : null;
 }
 
 // Session ids whose cold-resume is IN FLIGHT right now, keyed by repoRoot. Held

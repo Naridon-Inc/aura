@@ -1,32 +1,36 @@
-// Lives directly inside the macOS title bar — `titleBarStyle: "Overlay"`
-// in tauri.conf.json hides the native title and lets us paint into that
-// strip. The outer element carries `data-tauri-drag-region` AND a JS
-// mousedown fallback that calls `getCurrentWindow().startDragging()`
-// directly — the data-attribute injector misses some click targets in
-// Tauri 2 (e.g. event-bubbled clicks inside flex containers), so we
-// always have a working drag path either way. Buttons swallow their
-// own click via stopPropagation so they keep working.
+// The window's chrome vocabulary — the controls that live in the macOS title
+// bar strip (`titleBarStyle: "Overlay"` in tauri.conf.json hides the native
+// title and lets us paint into it), plus the drag behaviour any strip that
+// starts at y=0 has to carry.
 
-import { forwardRef, useEffect, useRef, useState, type ReactNode } from "react";
+import { forwardRef, useEffect, useRef, useState } from "react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
-import { StatusPills } from "./topbar/StatusPills";
-import { windowControlsInset } from "./topbar/windowControls";
+import { beginWindowDrag } from "../lib/windowDrag";
+import { useWindowControlsInset } from "./topbar/windowControls";
 import { Tooltip, TooltipTrigger, TooltipContent } from "./ui/tooltip";
-import { Kbd } from "./ui/kbd";
 import { MENU_PANEL, MENU_ROW } from "./ui/menuSurface";
-import { AccountMenu } from "./account/AccountMenu";
-import {
-  ProjectSwitcher,
-  type ProjectSwitcherWorkspace,
-} from "./ProjectSwitcher";
-import type { WorktreeRef } from "./WorkspaceRail";
 import { api, type ResourceSnapshot } from "../lib/api";
-import { CODE_MAP_ENABLED, MEMORY_SURFACE_ENABLED } from "../lib/featureFlags";
 import { applyUpdate, checkForUpdate } from "../lib/updater";
 import { getVersion } from "@tauri-apps/api/app";
-import { useIsFullscreen } from "../lib/useIsFullscreen";
+import { useDismiss } from "../lib/useDismiss";
+import { formatMegabytes } from "../lib/bytes";
+import { percent } from "../lib/percent";
+import { askConfirm } from "./ui/ask";
 
-function handleDrag(e: React.MouseEvent) {
+/**
+ * Move the window from a mousedown on a chrome strip.
+ *
+ * Any strip painted at y=0 needs this: `data-tauri-drag-region` alone misses
+ * some click targets in Tauri 2 (event-bubbled clicks inside flex containers),
+ * so every such strip carries the attribute AND this handler, and one of the
+ * two always works. Exported because the tab strip is now one of those strips
+ * — it starts at the top of the window, so its empty half is where a person
+ * reaches to move the window, exactly as the band above it used to be.
+ *
+ * Pass `undefined` instead while the window is fullscreen: it can neither be
+ * dragged nor zoomed there, and a live handler just fires no-op native calls.
+ */
+export function startWindowDrag(e: React.MouseEvent) {
   // Only the primary button drags. Skip drag when the mousedown was
   // really aimed at a clickable child (button / input / link) — those
   // need to fire their own handlers, not move the window.
@@ -37,399 +41,155 @@ function handleDrag(e: React.MouseEvent) {
     getCurrentWindow().toggleMaximize().catch(() => {});
     return;
   }
-  getCurrentWindow().startDragging().catch(() => {});
+  beginWindowDrag();
 }
 
-type TopBarProps = {
-  projectLabel: string;
-  reviewOpen: boolean;
-  terminalOpen: boolean;
-  onOpenPalette?: () => void;
-  onToggleReview?: () => void;
-  onToggleTerminal?: () => void;
-  /** Open the Review Changes pane. */
-  onOpenInspector?: () => void;
-  /** Open the Audit Trail pane. */
-  onOpenReplay?: () => void;
-  /** Open the Code Map pane. */
-  onOpenGraph?: () => void;
-  onOpenMemory?: () => void;
-  onOpenDoctor?: () => void;
-  /** Mobile remote — pair a phone over LAN to drive this session. */
-  onOpenRemote?: () => void;
-  /** Slot for the Impact Inbox badge — App.tsx wires the actual
-   *  `<ImpactInbox>` so the topbar stays project-agnostic. */
-  inboxSlot?: ReactNode;
-  /** Active project root — drives the StatusPills row. */
-  repoRoot?: string | null;
-  onOpenGit?: () => void;
-  onOpenSettings?: () => void;
-  onFocusChat?: () => void;
-  /** Sidebar collapse/expand — restored to the TopBar so the chrome owns
-   *  window-level actions in one strip instead of stranding the toggle
-   *  in the nav rail. */
-  sidebarOpen?: boolean;
-  onToggleSidebar?: () => void;
-  /** `+` button — opens the Manager launcher for a new objective session. */
-  onNewSession?: () => void;
-  /** ADE chrome — render a slim header (brand · centered search ·
-   *  settings · profile). The status + utility cluster (StatusPills,
-   *  resource, inbox, toggles, more-tools) moves to the bottom StatusBar,
-   *  composed by App and passed via its `trailing` slot. */
-  adeChrome?: boolean;
-  /** Avatar initial for the profile button (ADE header only). */
-  userInitial?: string;
-  /** Profile button — opens Settings → Identity (ADE header only). */
-  onOpenProfile?: () => void;
-  /** ADE v2 re-homes the profile + settings + help cluster into the left
-   *  sidebar (Conductor pattern) so the work-surface header can stop before
-   *  the review rail. When set, the header keeps only the pane toggles. */
-  hideAccountCluster?: boolean;
-  /** ADE breadcrumb switcher — the current project › worktree, opening the
-   *  nested project/worktree picker (Image #1 / #2). Only wired for the
-   *  full-height ADE shell; omit and the breadcrumb simply doesn't render. */
-  activeRoot?: string;
-  activeName?: string;
-  activeEmoji?: string;
-  workspaces?: ProjectSwitcherWorkspace[];
-  worktreesByRoot?: Record<string, WorktreeRef[]>;
-  onSwitchProject?: (root: string) => void;
-  onOpenWorktree?: (path: string) => void;
-  onAddWorkspace?: () => void;
-};
+// The window's chrome controls. The sidebar owns identity, search, project
+// switching and navigation; the bottom StatusBar owns status and system
+// indicators. What was left here — the three "show/hide a pane" toggles —
+// used to justify a 30px band of its own spanning the whole work column,
+// stacked directly above the tab strip.
+//
+// That band was 95% empty. Two icons at its right end, one at its left, and
+// between them seven hundred pixels of nothing, with the tab strip's own
+// controls sitting 30px below in the SAME corner: four controls in two rows
+// where one row would do. The top of the window read as two headers because
+// it WAS two headers.
+//
+// So the band is gone and its contents moved into the tab strip, which was
+// already a full-width row at the top of the work column with a trailing
+// slot two of its call sites were using. Nothing is on screen that wasn't
+// before; it is on ONE line now, and the sidebar header, the tab strip and
+// the review rail's header all start and end at the same two y values —
+// which is what "one header" has to mean before it can look like anything.
+//
+// The two clusters below are what remains, rendered by whoever owns the row
+// they belong to:
+//   • `SidebarPeek`   — the show-sidebar affordance. Only exists while the
+//     sidebar is collapsed, and it must sit clear of the macOS traffic
+//     lights, which land on whatever the work column draws first in that
+//     state. It carries the gutter itself.
+//   • `PaneToggles`   — terminal + review. The right end of the tab strip.
 
-export function TopBar({
-  projectLabel,
-  reviewOpen,
-  terminalOpen,
-  onOpenPalette,
-  onToggleReview,
-  onToggleTerminal,
-  onOpenInspector,
-  onOpenReplay,
-  onOpenGraph,
-  onOpenMemory,
-  onOpenDoctor,
-  onOpenRemote,
-  inboxSlot,
-  repoRoot,
-  onOpenGit,
-  onOpenSettings,
-  onFocusChat,
+/** Leading cluster of the tab row while the sidebar is collapsed: the
+ *  traffic-light gutter plus the one control that brings the sidebar back.
+ *
+ *  Renders nothing at all when the sidebar is open — in that state the
+ *  sidebar's own header owns the window's top-left corner and the lights sit
+ *  over it, so the tab row starts flush against the column divider. */
+export function SidebarPeek({
   sidebarOpen,
   onToggleSidebar,
-  onNewSession,
-  adeChrome,
-  userInitial,
-  onOpenProfile,
-  hideAccountCluster,
-  activeRoot,
-  activeName,
-  activeEmoji,
-  workspaces,
-  worktreesByRoot,
-  onSwitchProject,
-  onOpenWorktree,
-  onAddWorkspace,
-}: TopBarProps) {
-  // ADE chrome — identity + search + account + layout chrome. The header
-  // owns the window-level pane toggles (sidebar / terminal / review) so
-  // all "show/hide a pane" controls live in one strip and bracket the
-  // window symmetrically; the bottom StatusBar keeps status + system
-  // indicators (status pills, resource, inbox, more-tools).
-  const fullscreen = useIsFullscreen();
-  if (adeChrome) {
-    return (
-      <div
-        data-tauri-drag-region={fullscreen ? undefined : true}
-        onMouseDown={fullscreen ? undefined : handleDrag}
-        className="relative flex items-center w-full h-full pr-2 gap-1.5 text-text-3"
-      >
-        {/* Left — the window-buttons gutter (no workspace rail in ADE), then
-            the sidebar toggle FIRST so it sits right beside the macOS lights
-            on the same baseline (they read as one control row), then
-            new-session, then a compact brand mark. The gutter is reserved only
-            when the sidebar is COLLAPSED: open, the sidebar is the leftmost
-            column and its own header owns the corner, so this strip starts
-            right of the lights and takes a plain edge pad. Same helper the
-            sidebar header uses — one number, one rule. */}
-        <div
-          data-tauri-drag-region={fullscreen ? undefined : true}
-          className="flex items-center gap-1"
-          style={{ paddingLeft: windowControlsInset(!sidebarOpen) }}
-        >
-          {/* The full-height sidebar owns the project switcher, search,
-              extensions and window nav now. All that remains here is a
-              show-sidebar affordance for when the sidebar is collapsed —
-              in that state its traffic lights fall onto this header, so the
-              inset is reserved only then (open ⇒ lights live over the
-              sidebar and this is a plain drag region). */}
-          {!sidebarOpen && onToggleSidebar && (
-            <Tooltip>
-              <TooltipTrigger asChild>
-                <ChromeBtn title="Show sidebar (⌘B)" onClick={onToggleSidebar} tooltip>
-                  <svg width="13" height="13" viewBox="0 0 16 16" fill="none">
-                    <rect x="1.5" y="2.5" width="13" height="11" rx="1.5" stroke="currentColor" />
-                    <line x1="6" y1="2.5" x2="6" y2="13.5" stroke="currentColor" />
-                  </svg>
-                </ChromeBtn>
-              </TooltipTrigger>
-              <TooltipContent side="bottom">Show sidebar (⌘B)</TooltipContent>
-            </Tooltip>
-          )}
-          {/* The location breadcrumb — current project › worktree — opening
-              the nested project/worktree picker. Sits top-left of the work
-              surface (Conductor/Superset pattern), not in the sidebar. */}
-          {workspaces && activeRoot && activeName && (
-            <ProjectSwitcher
-              activeRoot={activeRoot}
-              activeName={activeName}
-              activeEmoji={activeEmoji}
-              workspaces={workspaces}
-              worktreesByRoot={worktreesByRoot}
-              onSwitch={onSwitchProject ?? (() => {})}
-              onOpenWorktree={onOpenWorktree}
-              onAdd={onAddWorkspace ?? (() => {})}
-            />
-          )}
-        </div>
-
-        {/* Right — layout chrome (terminal + review pane toggles) then
-            the account cluster (settings + profile). The pane toggles sit
-            here, opposite the sidebar toggle on the left, so the three
-            "show/hide a pane" controls bracket the window like real window
-            chrome instead of being stranded in the footer. */}
-        <div className="ml-auto flex items-center gap-1">
-          <Tooltip>
-            <TooltipTrigger asChild>
-              <ChromeBtn
-                title="Toggle terminal (⌘J)"
-                active={terminalOpen}
-                onClick={onToggleTerminal}
-                tooltip
-              >
-                <svg width="13" height="13" viewBox="0 0 16 16" fill="none">
-                  <rect x="1.5" y="2.5" width="13" height="11" rx="1.5" stroke="currentColor" />
-                  <path d="M4 6l2.5 2L4 10" stroke="currentColor" strokeWidth="1.4" fill="none" />
-                  <line x1="8" y1="10.5" x2="12" y2="10.5" stroke="currentColor" strokeWidth="1.2" />
-                </svg>
-              </ChromeBtn>
-            </TooltipTrigger>
-            <TooltipContent side="bottom">Toggle terminal (⌘J)</TooltipContent>
-          </Tooltip>
-          <Tooltip>
-            <TooltipTrigger asChild>
-              <ChromeBtn
-                title={reviewOpen ? "Hide review rail (⌘R)" : "Show review rail (⌘R)"}
-                active={reviewOpen}
-                onClick={onToggleReview}
-                tooltip
-              >
-                <svg width="13" height="13" viewBox="0 0 16 16" fill="none">
-                  <rect x="1.5" y="2.5" width="13" height="11" rx="1.5" stroke="currentColor" />
-                  <line x1="10" y1="2.5" x2="10" y2="13.5" stroke="currentColor" />
-                </svg>
-              </ChromeBtn>
-            </TooltipTrigger>
-            <TooltipContent side="bottom">
-              {reviewOpen ? "Hide review rail (⌘R)" : "Show review rail (⌘R)"}
-            </TooltipContent>
-          </Tooltip>
-          {!hideAccountCluster && (
-            <>
-              <span className="w-px h-4 bg-line-soft mx-0.5" aria-hidden />
-              <Tooltip>
-                <TooltipTrigger asChild>
-                  <ChromeBtn title="Help & support" onClick={openHelpPane} tooltip>
-                    <HelpGlyph />
-                  </ChromeBtn>
-                </TooltipTrigger>
-                <TooltipContent side="bottom">Help &amp; support</TooltipContent>
-              </Tooltip>
-              {onOpenSettings && (
-                <Tooltip>
-                  <TooltipTrigger asChild>
-                    <ChromeBtn title="Settings" onClick={onOpenSettings} tooltip>
-                      <GearGlyph />
-                    </ChromeBtn>
-                  </TooltipTrigger>
-                  <TooltipContent side="bottom">Settings</TooltipContent>
-                </Tooltip>
-              )}
-              <AccountMenu userInitial={userInitial} onOpenProfile={onOpenProfile} />
-            </>
-          )}
-        </div>
-      </div>
-    );
-  }
-
+}: {
+  sidebarOpen?: boolean;
+  onToggleSidebar?: () => void;
+}) {
+  // Before the early return — this component may start rendering the moment
+  // the sidebar closes, and a hook that only runs in one branch is a hook
+  // that changes position between renders.
+  const inset = useWindowControlsInset(true);
+  if (sidebarOpen || !onToggleSidebar) return null;
   return (
     <div
+      // The gutter is mostly empty space under the macOS traffic lights, and
+      // with the sidebar closed it's the only chrome left in the window's
+      // top-left corner — so it drags the window, the way the band it
+      // replaced did. `startWindowDrag` steps aside for the button.
       data-tauri-drag-region
-      onMouseDown={handleDrag}
-      className="flex items-center w-full h-full px-2 gap-1"
+      onMouseDown={startWindowDrag}
+      className="flex items-center gap-1 bg-bg-chrome border-b border-line-soft text-text-3"
+      style={{ paddingLeft: inset, paddingRight: 4 }}
     >
-      {/* Workspace rail (64px) handles traffic-light reservation — our
-          chrome buttons start at the rail edge with normal padding. The
-          sidebar toggle now lives in NavRail (Stage 10A) — moved out of
-          the TopBar so the chrome stays focused on window-level actions
-          (back/forward/search/review/terminal). */}
-      <div data-tauri-drag-region className="flex items-center gap-0.5 text-text-3">
-        {onToggleSidebar && (
-          <Tooltip>
-            <TooltipTrigger asChild>
-              <ChromeBtn
-                title={sidebarOpen ? "Hide sidebar (⌘B)" : "Show sidebar (⌘B)"}
-                active={!sidebarOpen}
-                onClick={onToggleSidebar}
-                tooltip
-              >
-                <svg width="13" height="13" viewBox="0 0 16 16" fill="none">
-                  <rect x="1.5" y="2.5" width="13" height="11" rx="1.5" stroke="currentColor" />
-                  <line x1="6" y1="2.5" x2="6" y2="13.5" stroke="currentColor" />
-                </svg>
-              </ChromeBtn>
-            </TooltipTrigger>
-            <TooltipContent side="bottom">
-              {sidebarOpen ? "Hide sidebar (⌘B)" : "Show sidebar (⌘B)"}
-            </TooltipContent>
-          </Tooltip>
-        )}
-        {onNewSession && (
-          <Tooltip>
-            <TooltipTrigger asChild>
-              <ChromeBtn title="New session (⌘N)" onClick={onNewSession} tooltip>
-                <svg width="13" height="13" viewBox="0 0 16 16" fill="none">
-                  <line x1="8" y1="3" x2="8" y2="13" stroke="currentColor" strokeWidth="1.4" />
-                  <line x1="3" y1="8" x2="13" y2="8" stroke="currentColor" strokeWidth="1.4" />
-                </svg>
-              </ChromeBtn>
-            </TooltipTrigger>
-            <TooltipContent side="bottom">New session (⌘N)</TooltipContent>
-          </Tooltip>
-        )}
-      </div>
-
-      {/* centered ⌘K search */}
-      <div
-        data-tauri-drag-region
-        className="flex-1 flex justify-center"
-      >
-        <button
-          onClick={onOpenPalette}
-          className="flex items-center gap-2 bg-bg-1 hover:bg-bg-2 border border-line text-text-3 text-[12px] rounded-md h-[22px] pl-3 pr-1.5 transition-colors"
-          style={{ width: 320 }}
-        >
-          <svg width="11" height="11" viewBox="0 0 16 16" fill="none">
-            <circle cx="7" cy="7" r="4" stroke="currentColor" strokeWidth="1.4" fill="none" />
-            <line x1="10" y1="10" x2="13.5" y2="13.5" stroke="currentColor" strokeWidth="1.4" />
-          </svg>
-          <span className="flex-1 text-left">Search {projectLabel}</span>
-          <Kbd>⌘K</Kbd>
-        </button>
-      </div>
-
-      <div data-tauri-drag-region className="flex items-center gap-1.5 text-text-3">
-        <StatusPills
-          repoRoot={repoRoot ?? null}
-          onOpenGit={onOpenGit}
-          onOpenSettings={onOpenSettings}
-          onFocusChat={onFocusChat}
-        />
-        <ResourcePill />
-        {inboxSlot}
-        {onOpenRemote && (
-          <Tooltip>
-            <TooltipTrigger asChild>
-              <ChromeBtn
-                title="Mobile remote — pair a phone over LAN"
-                onClick={onOpenRemote}
-                tooltip
-              >
-                {/* Phone glyph (rounded rectangle + speaker slot + home dot).
-                    Reads as "phone" at 16×16 better than a wifi/qr icon. */}
-                <svg width="13" height="13" viewBox="0 0 16 16" fill="none">
-                  <rect
-                    x="4.5"
-                    y="1.5"
-                    width="7"
-                    height="13"
-                    rx="1.5"
-                    stroke="currentColor"
-                  />
-                  <line x1="6.5" y1="3" x2="9.5" y2="3" stroke="currentColor" strokeWidth="0.9" />
-                  <circle cx="8" cy="12.5" r="0.6" fill="currentColor" />
-                </svg>
-              </ChromeBtn>
-            </TooltipTrigger>
-            <TooltipContent side="bottom">
-              Mobile remote — pair a phone over LAN
-            </TooltipContent>
-          </Tooltip>
-        )}
-        <Tooltip>
-          <TooltipTrigger asChild>
-            <ChromeBtn
-              title="Toggle terminal (⌘J)"
-              active={terminalOpen}
-              onClick={onToggleTerminal}
-              tooltip
-            >
-              <svg width="13" height="13" viewBox="0 0 16 16" fill="none">
-                <rect x="1.5" y="2.5" width="13" height="11" rx="1.5" stroke="currentColor" />
-                <path d="M4 6l2.5 2L4 10" stroke="currentColor" strokeWidth="1.4" fill="none" />
-                <line x1="8" y1="10.5" x2="12" y2="10.5" stroke="currentColor" strokeWidth="1.2" />
-              </svg>
-            </ChromeBtn>
-          </TooltipTrigger>
-          <TooltipContent side="bottom">Toggle terminal (⌘J)</TooltipContent>
-        </Tooltip>
-        <Tooltip>
-          <TooltipTrigger asChild>
-            <ChromeBtn
-              title="Toggle review (⌘R)"
-              active={reviewOpen}
-              onClick={onToggleReview}
-              tooltip
-            >
-              <svg width="13" height="13" viewBox="0 0 16 16" fill="none">
-                <rect x="1.5" y="2.5" width="13" height="11" rx="1.5" stroke="currentColor" />
-                <line x1="10" y1="2.5" x2="10" y2="13.5" stroke="currentColor" />
-              </svg>
-            </ChromeBtn>
-          </TooltipTrigger>
-          <TooltipContent side="bottom">Toggle review (⌘R)</TooltipContent>
-        </Tooltip>
-        <MoreMenu
-          onOpenInspector={onOpenInspector}
-          onOpenReplay={onOpenReplay}
-          onOpenGraph={onOpenGraph}
-          onOpenMemory={onOpenMemory}
-          onOpenDoctor={onOpenDoctor}
-        />
-      </div>
+      <Tooltip>
+        <TooltipTrigger asChild>
+          <ChromeBtn title="Show sidebar (⌘B)" onClick={onToggleSidebar} tooltip>
+            <svg width="13" height="13" viewBox="0 0 16 16" fill="none">
+              <rect x="1.5" y="2.5" width="13" height="11" rx="1.5" stroke="currentColor" />
+              <line x1="6" y1="2.5" x2="6" y2="13.5" stroke="currentColor" />
+            </svg>
+          </ChromeBtn>
+        </TooltipTrigger>
+        <TooltipContent side="bottom">Show sidebar (⌘B)</TooltipContent>
+      </Tooltip>
     </div>
   );
 }
 
-// Right-side overflow menu. Deeper / less-frequent surfaces live here
-// instead of stacking up on the workspace rail. Copy is plain English
-// around the question each surface answers, so a non-engineer can pick
-// the right tool without reading docs.
+/** Trailing cluster of the tab row: the terminal and review-rail toggles.
+ *
+ *  These are window chrome, not tab actions, which is why they sit hard
+ *  against the right edge past everything the strip itself owns — and why
+ *  they keep the same icons, the same `ChromeBtn` and the same shortcuts
+ *  they had in the band. Only the row they live on changed. */
+export function PaneToggles({
+  reviewOpen,
+  terminalOpen,
+  onToggleReview,
+  onToggleTerminal,
+}: {
+  reviewOpen: boolean;
+  terminalOpen: boolean;
+  onToggleReview?: () => void;
+  onToggleTerminal?: () => void;
+}) {
+  return (
+    <div className="flex items-center gap-1 px-2 bg-bg-chrome border-b border-line-soft text-text-3">
+      <Tooltip>
+        <TooltipTrigger asChild>
+          <ChromeBtn
+            title="Toggle terminal (⌘J)"
+            active={terminalOpen}
+            onClick={onToggleTerminal}
+            tooltip
+          >
+            <svg width="13" height="13" viewBox="0 0 16 16" fill="none">
+              <rect x="1.5" y="2.5" width="13" height="11" rx="1.5" stroke="currentColor" />
+              <path d="M4 6l2.5 2L4 10" stroke="currentColor" strokeWidth="1.4" fill="none" />
+              <line x1="8" y1="10.5" x2="12" y2="10.5" stroke="currentColor" strokeWidth="1.2" />
+            </svg>
+          </ChromeBtn>
+        </TooltipTrigger>
+        <TooltipContent side="bottom">Toggle terminal (⌘J)</TooltipContent>
+      </Tooltip>
+      <Tooltip>
+        <TooltipTrigger asChild>
+          <ChromeBtn
+            title={reviewOpen ? "Hide review rail (⌘⌥R)" : "Show review rail (⌘⌥R)"}
+            active={reviewOpen}
+            onClick={onToggleReview}
+            tooltip
+          >
+            <svg width="13" height="13" viewBox="0 0 16 16" fill="none">
+              <rect x="1.5" y="2.5" width="13" height="11" rx="1.5" stroke="currentColor" />
+              <line x1="10" y1="2.5" x2="10" y2="13.5" stroke="currentColor" />
+            </svg>
+          </ChromeBtn>
+        </TooltipTrigger>
+        <TooltipContent side="bottom">
+          {reviewOpen ? "Hide review rail (⌘⌥R)" : "Show review rail (⌘⌥R)"}
+        </TooltipContent>
+      </Tooltip>
+    </div>
+  );
+}
+
+// Right-side overflow menu.
+//
+// It used to hold five more: Review Changes, Proof trail, Code Map, Memory,
+// Doctor. Every one of them is a destination in Trace, which is a page with
+// its own switcher — so this was a second door to the same five places, and
+// it called them by different names than the page does. Two menus naming the
+// same rooms differently is worse than one menu, and the one that belongs to
+// the room wins. What is left is the update check, which belongs to the app
+// rather than to any repo or page.
 export function MoreMenu({
-  onOpenInspector,
-  onOpenReplay,
-  onOpenGraph,
-  onOpenMemory,
-  onOpenDoctor,
   placement = "down",
 }: {
-  onOpenInspector?: () => void;
-  onOpenReplay?: () => void;
-  onOpenGraph?: () => void;
-  onOpenMemory?: () => void;
-  onOpenDoctor?: () => void;
+
+
+
+
+
   /** "up" anchors the panel above the trigger — for the bottom StatusBar. */
   placement?: "up" | "down";
 }) {
@@ -443,21 +203,7 @@ export function MoreMenu({
   >({ kind: "idle" });
   const wrapRef = useRef<HTMLDivElement>(null);
 
-  useEffect(() => {
-    if (!open) return;
-    const onDoc = (e: MouseEvent) => {
-      if (!wrapRef.current?.contains(e.target as Node)) setOpen(false);
-    };
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") setOpen(false);
-    };
-    document.addEventListener("mousedown", onDoc);
-    document.addEventListener("keydown", onKey);
-    return () => {
-      document.removeEventListener("mousedown", onDoc);
-      document.removeEventListener("keydown", onKey);
-    };
-  }, [open]);
+  useDismiss(open, () => setOpen(false), wrapRef);
 
   async function onCheckUpdates() {
     setUpdateState({ kind: "checking" });
@@ -468,9 +214,12 @@ export function MoreMenu({
         setUpdateState({ kind: "uptodate", current });
         return;
       }
-      const proceed = window.confirm(
-        `Aura ${info.version} is available.${info.notes ? `\n\n${info.notes}` : ""}\n\nDownload and install now? The app will restart when done.`,
-      );
+      const proceed = await askConfirm({
+        title: `Aura ${info.version} is available`,
+        body: `${info.notes ? `${info.notes}\n\n` : ""}Download and install it now? The app restarts when it's done.`,
+        confirmLabel: "Download and install",
+        cancelLabel: "Not now",
+      });
       if (!proceed) {
         setUpdateState({ kind: "idle" });
         return;
@@ -496,39 +245,6 @@ export function MoreMenu({
     handler?: () => void;
   }> = [
     {
-      label: "Review Changes",
-      hint: "Check what changed vs what was asked",
-      handler: onOpenInspector,
-    },
-    {
-      label: "Proof trail",
-      hint: "See proof every change is genuine and untampered",
-      handler: onOpenReplay,
-    },
-    ...(CODE_MAP_ENABLED
-      ? [
-          {
-            label: "Code Map",
-            hint: "Find files and pieces connected to a change",
-            handler: onOpenGraph,
-          },
-        ]
-      : []),
-    ...(MEMORY_SURFACE_ENABLED
-      ? [
-          {
-            label: "Memory",
-            hint: "Notes Aura remembers about this project",
-            handler: onOpenMemory,
-          },
-        ]
-      : []),
-    {
-      label: "Doctor",
-      hint: "Check repo health and fix common issues",
-      handler: onOpenDoctor,
-    },
-    {
       label: "Check for Updates",
       hint: "Look for a newer Aura release",
       handler: onCheckUpdates,
@@ -545,10 +261,7 @@ export function MoreMenu({
         return `You're on the latest (v${updateState.current}).`;
       case "downloading": {
         if (updateState.total && updateState.total > 0) {
-          const pct = Math.min(
-            100,
-            Math.round((updateState.done / updateState.total) * 100),
-          );
+          const pct = percent(updateState.done, updateState.total);
           return `Downloading update… ${pct}%`;
         }
         const mb = (updateState.done / (1024 * 1024)).toFixed(1);
@@ -610,7 +323,7 @@ export function MoreMenu({
                 className={`${MENU_ROW} flex-col !items-start gap-0.5`}
               >
                 <span className="font-medium">{it.label}</span>
-                <span className="text-[11px] text-text-4 leading-tight">
+                <span className="text-xs text-text-4 leading-tight">
                   {it.hint}
                 </span>
               </button>
@@ -620,7 +333,7 @@ export function MoreMenu({
             <div
               // A failed update is a real failure, so it keeps red — but on
               // the app's own `--color-red` token, not a raw Tailwind rose.
-              className={`mt-1 mx-1 px-2.5 py-1.5 rounded text-[11px] leading-tight border ${
+              className={`mt-1 mx-1 px-2.5 py-1.5 rounded text-xs leading-tight border ${
                 updateState.kind === "error"
                   ? "border-red/30 bg-red/10 text-red"
                   : "border-line-soft bg-bg-2 text-text-3"
@@ -675,23 +388,9 @@ export function ResourcePill({
     };
   }, [open]);
 
-  useEffect(() => {
-    if (!open) return;
-    const onDoc = (e: MouseEvent) => {
-      if (!wrapRef.current?.contains(e.target as Node)) setOpen(false);
-    };
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") setOpen(false);
-    };
-    document.addEventListener("mousedown", onDoc);
-    document.addEventListener("keydown", onKey);
-    return () => {
-      document.removeEventListener("mousedown", onDoc);
-      document.removeEventListener("keydown", onKey);
-    };
-  }, [open]);
+  useDismiss(open, () => setOpen(false), wrapRef);
 
-  const label = snap ? formatMb(snap.aura_memory_mb) : "—";
+  const label = snap ? formatMegabytes(snap.aura_memory_mb) : "—";
 
   return (
     <div ref={wrapRef} className="relative">
@@ -699,10 +398,10 @@ export function ResourcePill({
         type="button"
         title="Resource usage"
         onClick={() => setOpen((v) => !v)}
-        className={`h-[22px] px-2 rounded flex items-center gap-1.5 text-[11px] font-medium transition-colors ${
+        className={`h-[22px] px-2 rounded flex items-center gap-1.5 text-xs font-medium transition-colors ${
           open
             ? "bg-bg-card text-text-1"
-            : "text-text-3 hover:bg-bg-hover hover:text-text-1"
+            : "text-text-3 hover:bg-state-hover hover:text-text-1"
         }`}
       >
         <svg width="11" height="11" viewBox="0 0 16 16" fill="none">
@@ -721,7 +420,7 @@ export function ResourcePill({
           style={{ width: 320 }}
         >
           <div className="px-3 pt-2.5 pb-1.5 border-b border-line-soft">
-            <div className="text-[10px] font-semibold tracking-wider uppercase text-text-4">
+            <div className="section-label">
               Resource Usage
             </div>
           </div>
@@ -744,7 +443,7 @@ export function ResourcePill({
             />
           </div>
           <div className="px-3 pt-2 pb-1">
-            <div className="text-[10px] font-semibold tracking-wider uppercase text-text-4">
+            <div className="section-label">
               Aura processes
             </div>
           </div>
@@ -753,21 +452,21 @@ export function ResourcePill({
               snap.processes.map((p) => (
                 <div
                   key={p.pid}
-                  className="flex items-center gap-2 px-1.5 py-1 rounded hover:bg-bg-2"
+                  className="flex items-center gap-2 px-1.5 py-1 rounded hover:bg-state-hover"
                 >
-                  <span className="text-[12px] text-text-1 flex-1 truncate font-medium">
+                  <span className="text-sm text-text-1 flex-1 truncate font-medium">
                     {p.name}
                   </span>
-                  <span className="text-[11px] text-text-4 tabular-nums w-12 text-right">
+                  <span className="text-xs text-text-4 tabular-nums w-12 text-right">
                     {p.cpu_percent.toFixed(1)}%
                   </span>
-                  <span className="text-[11px] text-text-3 tabular-nums w-14 text-right">
+                  <span className="text-xs text-text-3 tabular-nums w-14 text-right">
                     {p.memory_mb} MB
                   </span>
                 </div>
               ))
             ) : (
-              <div className="px-2 py-3 text-[11px] text-text-4">
+              <div className="px-2 py-3 text-xs text-text-4">
                 No aura processes detected.
               </div>
             )}
@@ -781,51 +480,13 @@ export function ResourcePill({
 function ResourceStat({ label, value }: { label: string; value: string }) {
   return (
     <div className="flex flex-col gap-0.5">
-      <span className="text-[10px] font-semibold tracking-wider uppercase text-text-4">
+      <span className="section-label">
         {label}
       </span>
-      <span className="text-[12px] text-text-1 tabular-nums">{value}</span>
+      <span className="text-sm text-text-1 tabular-nums">{value}</span>
     </div>
   );
 }
-
-function formatMb(mb: number): string {
-  if (mb >= 1024) return `${(mb / 1024).toFixed(2)} GB`;
-  return `${mb} MB`;
-}
-
-// Gear glyph for the ADE header settings button (mirrors the one that
-// used to live in the AdeSidebar head before the chrome consolidation).
-function GearGlyph() {
-  // 1.9 is the app's gear weight (sidebar header + roster menu both use it);
-  // this one was drawn a hair heavier and read bolder beside them.
-  return (
-    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.9">
-      <circle cx="12" cy="12" r="3" />
-      <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1Z" />
-    </svg>
-  );
-}
-
-function HelpGlyph() {
-  return (
-    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-      <circle cx="12" cy="12" r="9" />
-      <path d="M9.1 9a3 3 0 0 1 5.8 1c0 2-3 2.5-3 4" strokeLinecap="round" />
-      <circle cx="12" cy="17" r="0.6" fill="currentColor" stroke="none" />
-    </svg>
-  );
-}
-
-// Opens Settings deep-linked to the Help & Support pane. Self-contained —
-// dispatches the same `aura:open-settings` CustomEvent SettingsDialog
-// listens for, so no extra prop threading through the TopBar tree.
-function openHelpPane() {
-  window.dispatchEvent(
-    new CustomEvent("aura:open-settings", { detail: { pane: "help" } }),
-  );
-}
-
 // Compact 20px tile so the whole row fits inside the 30px topbar with
 // the macOS traffic lights aligned to the same vertical centerline.
 //
@@ -860,7 +521,7 @@ export const ChromeBtn = forwardRef<
       className={`w-[20px] h-[20px] rounded flex items-center justify-center transition-colors ${
         active
           ? "bg-bg-card text-text-1"
-          : "hover:bg-bg-hover hover:text-text-1"
+          : "hover:bg-state-hover hover:text-text-1"
       }${className ? ` ${className}` : ""}`}
       {...rest}
     >

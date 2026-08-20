@@ -5,13 +5,17 @@
 //   green   "aligned"  — every modified identifier appears in intent
 //   amber   "drift"    — partial overlap (≥30% but <60%)
 //   red     "diverged" — <30% overlap (signature of intent poisoning)
-//   gray    "unknown"  — no commit message + no intent log entry
+//   gray    "not checked" — there was nothing to check the change against:
+//                        no reason recorded, or a reason Aura itself wrote
+//                        by reading this same diff (see lib/intentBasis)
 //
 // Hovering reveals the score and banner label. Click is a no-op at
 // this level — parent decides whether to open IntentInspector.
 
 import { useIntentMatch, type IntentBanner } from "../lib/useIntentMatch";
+import { basisCanBeChecked, uncheckableShort } from "../lib/intentBasis";
 import { Tooltip, TooltipTrigger, TooltipContent } from "./ui/tooltip";
+import { percentOf } from "../lib/percent";
 
 type Size = "xs" | "sm";
 
@@ -31,9 +35,14 @@ export function IntentMatchChip({
   onClick,
 }: Props) {
   const m = useIntentMatch(repoRoot, sha);
-  const tone = bannerTone(m.banner);
+  // A green dot claims the change matched what was asked. That claim is only
+  // available when a reason was recorded independently of the change — when
+  // Aura wrote the reason by reading the diff, the score matches itself and
+  // the honest dot is the gray one. See lib/intentBasis.
+  const checkable = basisCanBeChecked(m.basis);
+  const tone = bannerTone(checkable ? m.banner : "unknown");
   const dotSize = size === "xs" ? "size-1.5" : "size-2";
-  const pct = Math.round(m.score * 100);
+  const pct = percentOf(m.score);
 
   const body = (
     <span
@@ -46,7 +55,7 @@ export function IntentMatchChip({
         style={{ background: tone.dot }}
       />
       {showLabel && (
-        <span className="text-[10px] font-medium" style={{ color: tone.text }}>
+        <span className="text-2xs font-medium" style={{ color: tone.text }}>
           {tone.label}
         </span>
       )}
@@ -56,11 +65,11 @@ export function IntentMatchChip({
   return (
     <Tooltip>
       <TooltipTrigger asChild>{body}</TooltipTrigger>
-      <TooltipContent side="top" className="text-[11px] font-mono">
+      <TooltipContent side="top" className="text-xs font-mono">
         {m.loading ? (
           <span>Checking…</span>
-        ) : m.banner === "unknown" ? (
-          <span>Nothing recorded to check against</span>
+        ) : !checkable ? (
+          <span>{uncheckableShort(m.banner === "unknown" ? "none" : m.basis)}</span>
         ) : (
           <span>
             {tone.label} · {pct}% of the changes match what was asked

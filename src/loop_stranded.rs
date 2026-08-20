@@ -54,6 +54,13 @@ const ARTIFACT_DIRS: &[&str] = &[
     ".aura/",
     ".git/",
     ".entire/",
+    // Tauri regenerates its capability/ACL schemas into `src-tauri/gen/schemas`
+    // on every build and gitignores them by its own rule. They carry a `.json`
+    // extension, which [`is_source`] otherwise treats as source worth
+    // recovering — so without this line an agent that merely *built* the shell
+    // strands four files it never wrote and its node fails with work that is
+    // perfectly intact.
+    "gen/schemas/",
 ];
 
 /// Extensions we treat as *source* worth recovering. A stray binary, lockfile,
@@ -313,6 +320,31 @@ mod tests {
         assert!(is_artifact(".aura/snapshots/foo.json"));
         assert!(!is_artifact("aura-cloud/src/push.rs"));
         assert!(!is_artifact("src/main.rs"));
+    }
+
+    /// A `cargo build` of the shell rewrites Tauri's generated schemas. They
+    /// are `.json`, so [`is_source`] says yes and the guard would strand four
+    /// files the agent never authored — which is exactly how a green B5 node
+    /// came back `failed` with its work committed and intact.
+    #[test]
+    fn tauri_generated_schemas_are_not_lost_source() {
+        assert!(is_artifact(
+            "aura-shell/src-tauri/gen/schemas/capabilities.json"
+        ));
+        assert!(is_artifact(
+            "aura-shell/src-tauri/gen/schemas/desktop-schema.json"
+        ));
+        // Real hand-written schema files elsewhere are still source.
+        assert!(!is_artifact("aura-cloud/schemas/billing.json"));
+        assert_eq!(
+            evaluate(
+                &set(&[]),
+                &["aura-shell/src-tauri/gen/schemas/acl-manifests.json".into()],
+                &[],
+                &[],
+            ),
+            Vec::<String>::new()
+        );
     }
 
     #[test]

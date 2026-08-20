@@ -22,6 +22,7 @@ use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Manager};
 
 use crate::cmd_remote_relay::{cloud_origin, cloud_token, read_credentials, RemoteRelayState};
+use crate::cloud_org::OrgScoped;
 
 /// How often the desktop beacons presence. Paired with the cloud's 60s
 /// freshness window (`remote_devices::FRESHNESS_WINDOW_SECS`) this tolerates
@@ -205,6 +206,7 @@ async fn beat_once(app: &AppHandle, client: &reqwest::Client) -> Result<(), Stri
     let resp = client
         .post(&url)
         .bearer_auth(&token)
+        .org_scoped()
         .json(&body)
         .send()
         .await

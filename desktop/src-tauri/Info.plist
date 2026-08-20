@@ -2,6 +2,29 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
+    <!-- Fullscreen must reach the top of the screen on notched Macs.
+
+         Without this key, a `.titled` window entering fullscreen on a display
+         with a camera housing is inset BELOW the safe area: macOS hands the
+         window `screenHeight - safeAreaInsets.top` (measured on a 16" M4 Pro:
+         1290 of 1329 points) and paints the 39pt strip it kept back solid
+         black. The window is transparent for the vibrancy backing, so nothing
+         of ours covers it — it reads as a dead band across the whole top of
+         the app, above the sidebar header AND the work-surface header.
+
+         Setting this zeroes `NSScreen.safeAreaInsets` and drops the auxiliary
+         top areas, and the fullscreen window is handed the display's full
+         frame. Verified against a standalone AppKit repro of this window's
+         exact style mask, in three bundles differing only by this key: unset
+         and `false` both letterbox at 1290; `true` fills 1329.
+
+         It is a no-op everywhere else — displays without a camera housing
+         already report zero insets, and windowed/zoomed layout is driven by
+         `visibleFrame`, which this does not touch. The notch lands over the
+         middle of our top strip, which SidebarHeader deliberately leaves as
+         empty drag region. -->
+    <key>NSPrefersDisplaySafeAreaCompatibilityMode</key>
+    <true/>
     <key>NSMicrophoneUsageDescription</key>
     <string>Aura uses your microphone for huddles — voice chat with teammates working in the same repo.</string>
     <key>NSCameraUsageDescription</key>

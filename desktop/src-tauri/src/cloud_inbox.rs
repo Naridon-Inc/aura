@@ -14,6 +14,7 @@ use tauri::{AppHandle, Manager};
 use tracing::warn;
 
 use crate::cloud_session_sync::{cloud_origin, cloud_token, read_credentials};
+use crate::cloud_org::OrgScoped;
 
 #[derive(Debug, Deserialize)]
 struct PolledMessage {
@@ -109,6 +110,7 @@ async fn poll_once(
     let resp = client
         .get(&url)
         .bearer_auth(&token)
+        .org_scoped()
         .send()
         .await
         .map_err(|e| format!("GET {url}: {e}"))?;

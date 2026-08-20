@@ -355,15 +355,15 @@ impl GlobalSync {
             }
         };
 
-        let checkpoints = match CheckpointStore::get_all_checkpoints(&repo) {
-            Ok(c) => c,
+        let checkpoint = match CheckpointStore::latest_checkpoint(&repo) {
+            Ok(checkpoint) => checkpoint,
             Err(e) => {
                 println!("{} Failed to read checkpoints: {}", "✗".red(), e);
                 return;
             }
         };
 
-        if let Some(latest) = checkpoints.first() {
+        if let Some(latest) = checkpoint.as_ref() {
             println!("  {} Pushing local Merkle-Graph to Sovereign Vault...", "↳".dimmed());
 
             let client = reqwest::blocking::Client::new();

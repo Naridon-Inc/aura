@@ -90,14 +90,14 @@ export function InlineDiff({ repoRoot, path }: { repoRoot: string; path: string 
   }, [repoRoot, path]);
 
   const note = (text: string, tone = "text-text-4") => (
-    <div className={`mx-2 mb-1 px-8 py-1.5 text-[10.5px] ${tone}`}>{text}</div>
+    <div className={`mx-2 mb-1 px-8 py-1.5 text-xs ${tone}`}>{text}</div>
   );
 
   if (error) return note(error, "text-red");
   if (lines === null) {
     return (
-      <div className="mx-2 mb-1 flex items-center gap-1.5 px-8 py-1.5 text-[10.5px] text-text-4">
-        <AsciiSpinner className="text-[10px]" />
+      <div className="mx-2 mb-1 flex items-center gap-1.5 px-8 py-1.5 text-xs text-text-4">
+        <AsciiSpinner className="text-2xs" />
         <span>Reading this change…</span>
       </div>
     );
@@ -105,7 +105,7 @@ export function InlineDiff({ repoRoot, path }: { repoRoot: string; path: string 
   if (lines.length === 0) return note("No line changes to show.");
 
   return (
-    <div className="mx-2 mb-1 overflow-x-auto rounded-sm border border-line-soft/60 bg-bg-1/50 font-mono text-[11px] leading-[1.55]">
+    <div className="mx-2 mb-1 overflow-x-auto rounded-sm border border-line-soft/60 bg-bg-1/50 font-mono text-xs leading-[1.55]">
       <div className="w-max min-w-full">
         {lines.map((l, i) => (
           <div

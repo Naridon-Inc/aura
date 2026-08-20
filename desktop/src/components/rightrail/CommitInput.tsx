@@ -18,6 +18,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { api, type AheadBehind, type RadarCollision } from "../../lib/api";
+import { fetchAheadBehind } from "../../lib/gitStateCache";
 import { useDocumentVisibility } from "../../lib/useDocumentVisibility";
 import {
   DropdownMenu,
@@ -71,6 +72,11 @@ export function CommitInput({
     has_upstream: false,
     branch: null,
   });
+  // The seed above is a valid AheadBehind meaning "never published", so until
+  // this flips true every reading of it is a fabrication — and the chip below
+  // used to print an amber "unpublished" from it, on the first frame and
+  // forever after a failed read.
+  const [aheadRead, setAheadRead] = useState(false);
   const visible = useDocumentVisibility();
   const taRef = useRef<HTMLTextAreaElement | null>(null);
   // AURA-19 — awareness card state. `radarWarnings` non-null renders the
@@ -97,10 +103,15 @@ export function CommitInput({
     let cancelled = false;
     async function tick() {
       try {
-        const ab = await api.gitAheadBehind(repoRoot);
-        if (!cancelled) setAhead(ab);
+        const ab = await fetchAheadBehind(repoRoot);
+        if (!cancelled) {
+          setAhead(ab);
+          setAheadRead(true);
+        }
       } catch {
-        // Non-fatal — branch chip just shows no upstream.
+        // Non-fatal, but NOT "no upstream": that was this catch's old excuse,
+        // and it made a failed git call indistinguishable from a branch
+        // nobody had pushed. `aheadRead` stays false and the chip says so.
       }
     }
     void tick();
@@ -126,8 +137,9 @@ export function CommitInput({
         pushCount: ahead.ahead,
         pullCount: ahead.behind,
         hasUpstream: ahead.has_upstream,
+        known: aheadRead,
       }),
-    [canCommit, hasStagedChanges, isPending, ahead],
+    [canCommit, hasStagedChanges, isPending, ahead, aheadRead],
   );
 
   const runAfter = useCallback(() => {
@@ -136,7 +148,10 @@ export function CommitInput({
     // refreshTick but the effect runs in the next microtask.
     void api
       .gitAheadBehind(repoRoot)
-      .then(setAhead)
+      .then((ab) => {
+        setAhead(ab);
+        setAheadRead(true);
+      })
       .catch(() => {});
     // Broadcast so the rest of the git UI re-reads after a commit / push /
     // pull / sync — the History list re-loads, the working-diff pane refreshes,
@@ -320,23 +335,25 @@ export function CommitInput({
   return (
     <div className="border-t border-line-soft bg-bg-1/30 shrink-0 min-w-0 overflow-hidden">
       {liveActive && (
-        <div className="px-3 py-1.5 flex items-center gap-1.5 text-[10px] text-text-4 border-b border-line-soft">
+        <div className="px-3 py-1.5 flex items-center gap-1.5 text-2xs text-text-4 border-b border-line-soft">
           <span
             className="h-[6px] w-[6px] rounded-full bg-accent-green shrink-0"
             aria-hidden
           />
           <span className="truncate">
-            Live — changes sync automatically. Commit publishes a snapshot.
+            Live. Changes sync automatically. Commit publishes a snapshot.
           </span>
         </div>
       )}
       {/* Branch chip + ahead/behind glyphs */}
-      <div className="px-3 py-1.5 flex items-center gap-2 text-[10.5px] text-text-3 min-w-0">
+      <div className="px-3 py-1.5 flex items-center gap-2 text-xs text-text-3 min-w-0">
         <BranchGlyph />
         <span className="font-mono text-text-2 truncate min-w-0">
           {ahead.branch ?? "no branch"}
         </span>
-        {ahead.has_upstream ? (
+        {!aheadRead ? (
+          <span className="text-text-4">checking…</span>
+        ) : ahead.has_upstream ? (
           <>
             {ahead.ahead > 0 && (
               <span className="flex items-center gap-0.5 text-text-2 tabular-nums">
@@ -357,7 +374,7 @@ export function CommitInput({
         ) : (
           <span
             className="text-amber"
-            title="This branch only lives on your machine — Publish it to share."
+            title="This branch only lives on your machine. Publish it to share."
           >
             unpublished
           </span>
@@ -381,7 +398,7 @@ export function CommitInput({
       {(info || error) && (
         <div
           title={error ?? info ?? undefined}
-          className={`px-3 py-1 text-[10.5px] border-t border-line-soft truncate ${
+          className={`px-3 py-1 text-xs border-t border-line-soft truncate ${
             error ? "bg-red/10 text-red" : "bg-green/10 text-green"
           }`}
         >
@@ -394,7 +411,7 @@ export function CommitInput({
           anyway" resumes the interrupted action. */}
       {radarWarnings && radarWarnings.length > 0 && (
         <div className="mx-2 mt-2 rounded border border-line-soft bg-bg-0 overflow-hidden">
-          <div className="px-2.5 py-1.5 flex items-center gap-1.5 text-[10.5px] text-text-2 border-b border-line-soft">
+          <div className="px-2.5 py-1.5 flex items-center gap-1.5 text-xs text-text-2 border-b border-line-soft">
             <span className="font-medium">
               {radarWarnings.length === 1
                 ? "A teammate is on this code"
@@ -403,7 +420,7 @@ export function CommitInput({
             <button
               type="button"
               onClick={dismissRadar}
-              className="ml-auto w-4 h-4 flex items-center justify-center rounded text-text-4 hover:text-text-1 hover:bg-bg-hover"
+              className="ml-auto w-4 h-4 flex items-center justify-center rounded text-text-4 hover:text-text-1 hover:bg-state-hover"
               title="Dismiss"
             >
               ×
@@ -414,7 +431,7 @@ export function CommitInput({
             return (
               <div
                 key={c.event_id}
-                className="px-2.5 py-1.5 flex items-start gap-1.5 text-[10.5px] text-text-3"
+                className="px-2.5 py-1.5 flex items-start gap-1.5 text-xs text-text-3"
                 title={[c.reason, c.their_intent].filter(Boolean).join("\n")}
               >
                 <span
@@ -423,7 +440,7 @@ export function CommitInput({
                 />
                 <span className="flex-1 min-w-0">
                   <span className="text-text-1">{actorShort(c.peer)}</span>
-                  {c.peer_is_agent ? " (agent)" : ""} · {meta.disposition} —{" "}
+                  {c.peer_is_agent ? " (agent)" : ""} · {meta.disposition} ·{" "}
                   <span className="font-mono text-text-2">
                     {c.their_symbol || c.their_file || "your in-flight files"}
                   </span>{" "}
@@ -436,7 +453,7 @@ export function CommitInput({
             );
           })}
           {radarWarnings.length > 3 && (
-            <div className="px-2.5 pb-1.5 text-[10px] text-text-4">
+            <div className="px-2.5 pb-1.5 text-2xs text-text-4">
               +{radarWarnings.length - 3} more in the Team Radar panel
             </div>
           )}
@@ -444,14 +461,14 @@ export function CommitInput({
             <button
               type="button"
               onClick={resumeAfterRadar}
-              className="h-6 px-2 rounded bg-bg-2 hover:bg-bg-1 text-text-1 text-[10.5px] font-medium border border-line-soft transition-colors"
+              className="h-6 px-2 rounded bg-bg-2 hover:bg-bg-3 text-text-1 text-xs font-medium border border-line-soft transition-colors"
             >
               Commit anyway
             </button>
             <button
               type="button"
               onClick={dismissRadar}
-              className="h-6 px-2 rounded text-text-3 hover:text-text-1 text-[10.5px] transition-colors"
+              className="h-6 px-2 rounded text-text-3 hover:text-text-1 text-xs transition-colors"
             >
               Review first
             </button>
@@ -470,7 +487,7 @@ export function CommitInput({
               : "Stage changes to commit"
           }
           disabled={isPending}
-          className="w-full min-h-[52px] resize-y bg-bg-0 border border-line-soft rounded px-2 py-1.5 text-[11.5px] text-text-1 placeholder:text-text-4 focus:outline-none focus:border-text-3 transition-colors"
+          className="w-full min-h-[52px] resize-y bg-bg-0 border border-line-soft rounded px-2 py-1.5 text-sm text-text-1 placeholder:text-text-4 focus:outline-none focus:border-text-3 transition-colors"
           onKeyDown={(e) => {
             if (
               e.key === "Enter" &&
@@ -489,12 +506,12 @@ export function CommitInput({
             onClick={handlePrimary}
             disabled={primary.disabled}
             title={primary.tooltip}
-            className="flex-1 min-w-0 h-7 rounded-l bg-bg-2 hover:bg-bg-1 active:bg-bg-2 disabled:opacity-50 disabled:cursor-not-allowed text-text-1 text-[11px] font-medium flex items-center justify-center gap-1.5 transition-colors border border-line-soft border-r-0"
+            className="flex-1 min-w-0 h-7 rounded-l bg-bg-2 hover:bg-bg-3 active:bg-bg-2 disabled:opacity-50 disabled:cursor-not-allowed text-text-1 text-xs font-medium flex items-center justify-center gap-1.5 transition-colors border border-line-soft border-r-0"
           >
             <ActionGlyph action={primary.action} />
             <span className="truncate">{primary.label}</span>
             {primary.action !== "commit" && primary.action !== "publish" && (
-              <span className="text-[10px] text-text-3 tabular-nums">
+              <span className="text-2xs text-text-3 tabular-nums">
                 {primary.action === "push"
                   ? ahead.ahead
                   : primary.action === "pull"
@@ -509,17 +526,17 @@ export function CommitInput({
               <button
                 type="button"
                 disabled={isPending}
-                className="h-7 px-2 shrink-0 rounded-r bg-bg-2 hover:bg-bg-1 disabled:opacity-50 text-text-2 border border-line-soft transition-colors"
+                className="h-7 px-2 shrink-0 rounded-r bg-bg-2 hover:bg-bg-3 disabled:opacity-50 text-text-2 border border-line-soft transition-colors"
                 aria-label="More commit actions"
               >
                 <ChevronDownGlyph />
               </button>
             </DropdownMenuTrigger>
-            <DropdownMenuContent align="end" className="w-56 text-[11.5px]">
+            <DropdownMenuContent align="end" className="w-56 text-sm">
               <DropdownMenuItem
                 onSelect={doCommit}
                 disabled={!canCommit}
-                className="text-[11.5px]"
+                className="text-sm"
               >
                 <CheckGlyph />
                 Commit
@@ -527,7 +544,7 @@ export function CommitInput({
               <DropdownMenuItem
                 onSelect={doCommitAndPush}
                 disabled={!canCommit}
-                className="text-[11.5px]"
+                className="text-sm"
               >
                 <ArrowUpGlyph />
                 Commit & Push
@@ -537,15 +554,19 @@ export function CommitInput({
 
               <DropdownMenuItem
                 onSelect={() => doPush(false)}
-                disabled={ahead.ahead === 0 && ahead.has_upstream}
-                className="text-[11.5px]"
+                disabled={!aheadRead || (ahead.ahead === 0 && ahead.has_upstream)}
+                className="text-sm"
               >
                 <ArrowUpGlyph />
                 <span className="flex-1">
-                  {ahead.has_upstream ? "Push" : "Publish branch"}
+                  {!aheadRead
+                    ? "Push"
+                    : ahead.has_upstream
+                      ? "Push"
+                      : "Publish branch"}
                 </span>
                 {ahead.ahead > 0 && (
-                  <span className="text-[10px] text-text-3 tabular-nums">
+                  <span className="text-2xs text-text-3 tabular-nums">
                     {ahead.ahead}
                   </span>
                 )}
@@ -553,12 +574,12 @@ export function CommitInput({
               <DropdownMenuItem
                 onSelect={doPull}
                 disabled={ahead.behind === 0}
-                className="text-[11.5px]"
+                className="text-sm"
               >
                 <ArrowDownGlyph />
                 <span className="flex-1">Pull</span>
                 {ahead.behind > 0 && (
-                  <span className="text-[10px] text-text-3 tabular-nums">
+                  <span className="text-2xs text-text-3 tabular-nums">
                     {ahead.behind}
                   </span>
                 )}
@@ -566,12 +587,12 @@ export function CommitInput({
               <DropdownMenuItem
                 onSelect={doSync}
                 disabled={ahead.ahead === 0 && ahead.behind === 0}
-                className="text-[11.5px]"
+                className="text-sm"
               >
                 <SyncGlyph />
                 Sync
               </DropdownMenuItem>
-              <DropdownMenuItem onSelect={doFetch} className="text-[11.5px]">
+              <DropdownMenuItem onSelect={doFetch} className="text-sm">
                 <RefreshGlyph />
                 Fetch
               </DropdownMenuItem>

@@ -109,18 +109,18 @@ export function PairPhoneDialog({ open, onClose }: PairPhoneDialogProps) {
         onClick={(e) => e.stopPropagation()}
       >
         <div className="flex max-w-[420px] flex-col items-center gap-2 text-center">
-          <h2 className="text-[16px] font-medium text-white">Pair phone</h2>
-          <p className="text-[13px] leading-relaxed text-white/60">
+          <h2 className="text-lg font-medium text-white">Pair phone</h2>
+          <p className="text-base leading-relaxed text-white/60">
             Open the Aura app on your phone, tap{" "}
             <span className="font-medium text-white/90">Scan QR code</span>, and
-            point it at this screen. Your phone signs in to the same account —
+            point it at this screen. Your phone signs in to the same account. 
             nothing to type.
           </p>
         </div>
 
         {error ? (
           <div className="flex flex-col items-center gap-4">
-            <div role="alert" className="max-w-[380px] text-center text-[13px] text-red">
+            <div role="alert" className="max-w-[380px] text-center text-base text-red">
               {error}
             </div>
             <Button
@@ -150,7 +150,7 @@ export function PairPhoneDialog({ open, onClose }: PairPhoneDialogProps) {
                   className="h-full w-full"
                 />
               ) : (
-                <div className="flex items-center gap-2 text-[14px] text-neutral-500">
+                <div className="flex items-center gap-2 text-md text-neutral-500">
                   {expired ? (
                     "Code expired"
                   ) : (
@@ -164,17 +164,17 @@ export function PairPhoneDialog({ open, onClose }: PairPhoneDialogProps) {
 
             {pair && (
               <div className="flex flex-col items-center gap-1">
-                <div className="text-[10px] uppercase tracking-wider text-white/40">
+                <div className="section-label text-white/40">
                   Or enter this code
                 </div>
-                <div className="font-mono text-[22px] tracking-[0.22em] text-white/90">
+                <div className="font-mono text-xl tracking-[0.22em] text-white/90">
                   {pair.user_code}
                 </div>
               </div>
             )}
 
             <div className="flex items-center gap-4">
-              <div className="text-[12px] text-white/45">
+              <div className="text-sm text-white/45">
                 {expired
                   ? "This code is no longer valid."
                   : remaining !== null
@@ -193,7 +193,7 @@ export function PairPhoneDialog({ open, onClose }: PairPhoneDialogProps) {
           </>
         )}
 
-        <div className="max-w-[380px] text-center text-[11.5px] leading-relaxed text-white/35">
+        <div className="max-w-[380px] text-center text-sm leading-relaxed text-white/35">
           Only scan this with your own phone. The code grants access to your
           account, expires in about 10 minutes, and works once.
         </div>

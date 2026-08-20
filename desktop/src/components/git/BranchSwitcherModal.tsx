@@ -16,9 +16,12 @@ import { createPortal } from "react-dom";
 import { Check, Cloud, GitBranch, Plus, Search } from "lucide-react";
 
 import { api, type GitBranchRich, type RadarEvent } from "../../lib/api";
+import { monogram } from "../../lib/monogram";
 import { Button } from "../ui/button";
 import { AsciiSpinner } from "../ui/ascii-spinner";
 import { useBranches } from "./branches";
+import { branchSyncDetail } from "../rightrail/reviewState";
+import { relativeAgeFromSecs } from "../../lib/relativeTime";
 
 type Props = {
   repoRoot: string;
@@ -189,9 +192,9 @@ export function BranchSwitcherModal({ repoRoot, onClose }: Props) {
               setIdx(0);
             }}
             placeholder="Switch branch…"
-            className="flex-1 bg-transparent text-[13px] text-text-1 placeholder:text-text-4 focus:outline-none"
+            className="flex-1 bg-transparent text-base text-text-1 placeholder:text-text-4 focus:outline-none"
           />
-          <span className="text-[10px] tracking-wider text-text-5">esc</span>
+          <span className="text-2xs tracking-wider text-text-5">esc</span>
         </div>
 
         {/* Create-from-here */}
@@ -209,7 +212,7 @@ export function BranchSwitcherModal({ repoRoot, onClose }: Props) {
                 }
               }}
               placeholder="new-branch-name"
-              className="flex-1 bg-transparent font-mono text-[12.5px] text-text-1 placeholder:text-text-4 focus:outline-none"
+              className="flex-1 bg-transparent font-mono text-base text-text-1 placeholder:text-text-4 focus:outline-none"
             />
             <Button
               type="button"
@@ -228,7 +231,7 @@ export function BranchSwitcherModal({ repoRoot, onClose }: Props) {
               setCreating(true);
               setNewName("");
             }}
-            className="flex w-full items-center gap-2 border-b border-line-soft px-3.5 py-2.5 text-left text-[12.5px] text-text-2 transition-colors hover:bg-bg-2"
+            className="flex w-full items-center gap-2 border-b border-line-soft px-3.5 py-2.5 text-left text-base text-text-2 transition-colors hover:bg-state-hover"
           >
             <Plus size={14} className="shrink-0 text-accent" />
             Create branch from here…
@@ -237,7 +240,7 @@ export function BranchSwitcherModal({ repoRoot, onClose }: Props) {
 
         {br.error && (
           <div
-            className="border-b border-line-soft px-3.5 py-2 text-[11.5px]"
+            className="border-b border-line-soft px-3.5 py-2 text-sm"
             style={{ color: "var(--color-red)", background: "color-mix(in oklab, var(--color-red) 8%, transparent)" }}
           >
             {br.error}
@@ -247,12 +250,12 @@ export function BranchSwitcherModal({ repoRoot, onClose }: Props) {
         {/* Rich rows */}
         <div ref={listRef} className="max-h-[52vh] overflow-y-auto py-1">
           {loading ? (
-            <div className="flex items-center gap-1.5 px-3.5 py-3 text-[12px] text-text-4">
-              <AsciiSpinner className="text-[10px]" />
+            <div className="flex items-center gap-1.5 px-3.5 py-3 text-sm text-text-4">
+              <AsciiSpinner className="text-2xs" />
               <span>Reading this project's branches…</span>
             </div>
           ) : filtered.length === 0 ? (
-            <div className="px-3.5 py-3 text-[12px] text-text-4">No branches match.</div>
+            <div className="px-3.5 py-3 text-sm text-text-4">No branches match.</div>
           ) : (
             filtered.map((b, i) => (
               <BranchRowRich
@@ -309,10 +312,10 @@ function BranchRowRich({
         e.preventDefault();
         if (!b.isCurrent) onPick();
       }}
-      title={b.upstream ? `tracks ${b.upstream}` : undefined}
+      title={b.upstream ? `Shared copy: ${b.upstream}` : undefined}
       className={
         "flex w-full items-start gap-2.5 px-3.5 py-2 text-left transition-colors disabled:cursor-default " +
-        (active && !b.isCurrent ? "bg-bg-card" : b.isCurrent ? "" : "hover:bg-bg-2")
+        (active && !b.isCurrent ? "bg-bg-card" : b.isCurrent ? "" : "hover:bg-state-hover")
       }
     >
       <span className="mt-0.5 flex w-4 shrink-0 justify-center">
@@ -329,33 +332,41 @@ function BranchRowRich({
         <span className="flex items-center gap-2">
           <span
             className={
-              "truncate font-mono text-[12.5px] " +
+              "truncate font-mono text-base " +
               (b.isCurrent ? "font-medium text-text-1" : "text-text-1")
             }
           >
             {b.name}
           </span>
           {b.isCurrent && (
-            <span className="shrink-0 text-[9.5px] uppercase tracking-wider text-accent">
+            <span className="shrink-0 text-2xs text-accent">
               current
             </span>
           )}
           <AheadBehindChip ahead={b.ahead} behind={b.behind} hasUpstream={!!b.upstream} />
-          <span className="shrink-0 rounded border border-line-soft bg-bg-2 px-1 py-px text-[9px] uppercase tracking-wider text-text-4">
+          <span className="meta-tag">
             {b.isRemote ? "remote" : "local"}
           </span>
         </span>
         {secondary && (
-          <span className="truncate text-[10.5px] text-text-4">{secondary}</span>
+          <span className="truncate text-xs text-text-4">{secondary}</span>
         )}
       </span>
 
       {presence.length > 0 && <PresencePips actors={presence} />}
-      {busy && <span className="shrink-0 self-center text-[10px] text-text-4">…</span>}
+      {busy && <span className="shrink-0 self-center text-2xs text-text-4">…</span>}
     </button>
   );
 }
 
+// A branch row is a dense line of 2xs text, so the chip stays terse — two
+// arrows and two numbers. That makes the hover the only place the state is
+// actually explained, and this file used to write its own three explanations
+// ("3 ahead · 5 behind upstream", "In step with upstream.", "This branch has
+// no upstream — it only lives on your machine.") while the review rail wrote
+// the same three a second time. `branchSyncDetail` is the one copy, and it
+// leads with what the numbers MEAN before the git fact — an arrow and a
+// number explain themselves to nobody.
 function AheadBehindChip({
   ahead,
   behind,
@@ -365,27 +376,25 @@ function AheadBehindChip({
   behind: number;
   hasUpstream: boolean;
 }) {
+  const detail = branchSyncDetail(ahead, behind, hasUpstream);
   if (!hasUpstream) {
     return (
-      <span
-        className="shrink-0 text-[9.5px] text-text-5"
-        title="This branch has no upstream — it only lives on your machine."
-      >
-        unpublished
+      <span className="shrink-0 text-2xs text-text-5" title={detail}>
+        only here
       </span>
     );
   }
   if (ahead === 0 && behind === 0) {
     return (
-      <span className="shrink-0 text-[9.5px] text-text-5" title="In step with upstream.">
+      <span className="shrink-0 text-2xs text-text-5" title={detail}>
         in step
       </span>
     );
   }
   return (
     <span
-      className="inline-flex shrink-0 items-center gap-1 text-[9.5px] tabular-nums text-text-3"
-      title={`${ahead} ahead · ${behind} behind upstream`}
+      className="inline-flex shrink-0 items-center gap-1 text-2xs tabular-nums text-text-3"
+      title={detail}
     >
       {ahead > 0 && <span>↑{ahead}</span>}
       {behind > 0 && <span>↓{behind}</span>}
@@ -407,7 +416,7 @@ function PresencePips({ actors }: { actors: string[] }) {
       {shown.map((a, i) => (
         <span
           key={a}
-          className="flex items-center justify-center rounded-full border text-[8.5px] font-medium uppercase"
+          className="flex items-center justify-center rounded-full border text-2xs font-medium uppercase"
           style={{
             width: 18,
             height: 18,
@@ -422,27 +431,19 @@ function PresencePips({ actors }: { actors: string[] }) {
         </span>
       ))}
       {extra > 0 && (
-        <span className="ml-1 text-[9.5px] text-text-4">+{extra}</span>
+        <span className="ml-1 text-2xs text-text-4">+{extra}</span>
       )}
     </span>
   );
 }
 
 function initials(actor: string): string {
-  // Strip an "@host" suffix (radar actors look like "ashiq@cursor"), then take
-  // up to two leading letters.
-  const name = actor.split("@")[0].replace(/[^A-Za-z0-9]/g, " ").trim();
-  if (!name) return "·";
-  const parts = name.split(/\s+/);
-  if (parts.length >= 2) return (parts[0][0] + parts[1][0]).toUpperCase();
-  return name.slice(0, 2).toUpperCase();
+  // One monogram for the whole app — see lib/monogram. Stripping the "@host" off a radar actor
+  // ("ashiq@cursor") is what the shared one does for every caller now.
+  return monogram(actor, { empty: "·" });
 }
 
 function relativeTime(unix: number): string {
-  const diff = Math.floor(Date.now() / 1000) - unix;
-  if (diff < 60) return "just now";
-  if (diff < 3600) return `${Math.floor(diff / 60)}m ago`;
-  if (diff < 86400) return `${Math.floor(diff / 3600)}h ago`;
-  if (diff < 2592000) return `${Math.floor(diff / 86400)}d ago`;
-  return `${Math.floor(diff / 2592000)}mo ago`;
+  // One ladder for the whole app — see lib/relativeTime.
+  return relativeAgeFromSecs(unix);
 }

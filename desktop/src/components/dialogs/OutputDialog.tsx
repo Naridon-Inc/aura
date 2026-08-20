@@ -41,22 +41,22 @@ export function OutputDialog({ open, title, body, loading, error, onClose }: Out
       }
     >
       {error ? (
-        <div role="alert" className="text-red text-[11.5px]">{error}</div>
+        <div role="alert" className="text-red text-sm">{error}</div>
       ) : body ? (
         // Render the body even while still loading so streamed agent
         // output appears live. The "running…" pill drops in next to the
         // copy button so the user can tell it isn't done.
         <pre
-          className="bg-bg-1 border border-line rounded p-3 overflow-auto text-[11px] font-mono text-text-2 whitespace-pre-wrap leading-relaxed"
+          className="bg-bg-1 border border-line rounded p-3 overflow-auto text-xs font-mono text-text-2 whitespace-pre-wrap leading-relaxed"
           style={{ maxHeight: "60vh" }}
         >
           {body}
           {loading && <span className="text-text-4">▌</span>}
         </pre>
       ) : loading ? (
-        <div className="text-text-4 text-[11.5px] py-6 text-center">running…</div>
+        <div className="text-text-4 text-sm py-6 text-center">running…</div>
       ) : (
-        <div className="text-text-4 text-[11.5px]">no output</div>
+        <div className="text-text-4 text-sm">no output</div>
       )}
     </Dialog>
   );

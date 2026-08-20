@@ -225,20 +225,25 @@ export function reachedSummary(goal: GoalRecord, outcome?: ProveOutcome | null):
   const r = rollup(goal);
   if (r.at == null || r.verdict === "verified") return null;
   if (r.verdict === "unknown")
-    return "Aura couldn't check this yet — there's no saved snapshot of the code to compare against.";
+    return "Aura couldn't check this yet. There's no saved snapshot of the code to compare against.";
   if (r.total === 0) return "Aura couldn't work out what this goal needs yet.";
   const missing = Math.max(0, r.total - r.ok);
   if (r.ok === 0) {
     // How many parts exist in the code — 0 pass, but "built and not wired up" is
-    // a different (and honest) story from "nothing built at all".
+    // a different (and honest) story from "nothing built at all". Only the live
+    // outcome knows which; without it the answer is neither, and null keeps it
+    // that way. Defaulting to 0 here told you nothing had been written whenever
+    // the card was drawn from recorded history — which is its first frame.
     const built = outcome
       ? Math.min(r.total, outcome.checks.filter((c) => c.exists).length)
-      : 0;
+      : null;
+    if (built == null)
+      return `None of the ${r.total} parts are passing yet. Run a check to see which are built and which aren't there at all.`;
     if (built > 0)
       return built === r.total
-        ? `All ${r.total} parts are built — but none are wired up yet, so it isn't finished.`
-        : `${built} of ${r.total} parts are built — but none are wired up yet, so it isn't finished.`;
-    return `None of the ${r.total} parts this needs are built yet — so it isn't finished.`;
+        ? `All ${r.total} parts are built, but none are wired up yet, so it isn't finished.`
+        : `${built} of ${r.total} parts are built, but none are wired up yet, so it isn't finished.`;
+    return `None of the ${r.total} parts this needs are built yet, so it isn't finished.`;
   }
   return `${r.ok} of ${r.total} parts are in place; the other ${missing} ${
     missing === 1 ? "isn't" : "aren't"
@@ -260,18 +265,18 @@ export function doneClaim(
   if (committed) {
     if (r.verdict === "verified")
       return {
-        text: "Your agent committed this as done — and Aura's check of the code agrees.",
+        text: "Your agent committed this as done, and Aura's check of the code agrees.",
         tone: "agree",
       };
     if (r.verdict !== "unknown")
       return {
-        text: "Your agent committed this as finished — but Aura's check of the code says it isn't there yet.",
+        text: "Your agent committed this as finished, but Aura's check of the code says it isn't there yet.",
         tone: "gap",
       };
   }
   if (goal.source === "ask" && r.at != null && r.verdict !== "verified" && r.verdict !== "unknown")
     return {
-      text: "This is what you asked your agent to build — the check below is where it actually stands.",
+      text: "This is what you asked your agent to build. The check below is where it actually stands.",
       tone: "context",
     };
   return null;

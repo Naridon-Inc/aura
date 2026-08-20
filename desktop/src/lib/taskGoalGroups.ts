@@ -56,7 +56,7 @@ const THEMES: ThemeRule[] = [
   {
     id: "memory",
     title: "Agent memory you can trust",
-    meaning: "Aura remembers earlier work — and can show where each memory came from in your code.",
+    meaning: "Aura remembers earlier work, and can show where each memory came from in your code.",
     test: /\bmemory\b/i,
   },
   {
@@ -68,19 +68,19 @@ const THEMES: ThemeRule[] = [
   {
     id: "sovereign",
     title: "Your own git, fully owned",
-    meaning: "Your code and its history live in plain git you control — signed, shareable, no central server required.",
+    meaning: "Your code and its history live in plain git you control. Signed, shareable, no central server required.",
     test: /\bm4\b|\bsovereign\b/i,
   },
   {
     id: "commons",
-    title: "Commons — share apps & plugins",
+    title: "Commons. Share apps & plugins",
     meaning: "Publish and install mini-apps and extensions, with a shared team lounge.",
     test: /\bcommons\b|\bexchange\b|\blounge\b|mini-?app/i,
   },
   {
     id: "trace",
     title: "See exactly what the AI did",
-    meaning: "A clear record of every session, change, and reason — who did what, and why.",
+    meaning: "A clear record of every session, change, and reason, who did what, and why.",
     test: /\btrace\b|accountability spine|\btranscript\b/i,
   },
   {

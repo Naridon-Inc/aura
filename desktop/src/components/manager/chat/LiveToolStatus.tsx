@@ -92,7 +92,7 @@ export function LiveToolStatus({ tools }: { tools: ToolBlock[] }) {
         </span>
         {!allDone && (
           <span
-            className="shrink-0 tabular-nums text-[10.5px]"
+            className="shrink-0 tabular-nums text-xs"
             style={{ fontFamily: "var(--font-mono)", color: "var(--color-text-3)" }}
           >
             · {tools.length} steps
@@ -105,7 +105,7 @@ export function LiveToolStatus({ tools }: { tools: ToolBlock[] }) {
           <StepDots tools={tools} activeIdx={activeIdx} />
           {subject && (
             <span
-              className={`min-w-0 truncate text-[11.5px] ${activeView.mono ? "font-mono" : ""}`}
+              className={`min-w-0 truncate text-sm ${activeView.mono ? "font-mono" : ""}`}
               style={{ color: "var(--color-text-3)" }}
               title={subject}
             >
@@ -114,7 +114,7 @@ export function LiveToolStatus({ tools }: { tools: ToolBlock[] }) {
           )}
           {activeStatus !== "running" && activeView.metric && (
             <span
-              className="shrink-0 tabular-nums text-[10.5px]"
+              className="shrink-0 tabular-nums text-xs"
               style={{ fontFamily: "var(--font-mono)", color: "var(--color-text-3)" }}
             >
               {activeView.metric}

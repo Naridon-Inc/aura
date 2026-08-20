@@ -10,7 +10,8 @@
 // task count and total characters keep the block from eating the agent's
 // context window — this is grounding, not a data dump.
 
-import { api, type Task } from "./api";
+import { type Task } from "./api";
+import { fetchTasks } from "./tasksCache";
 
 export type WorkspacePromptContextOptions = {
   /** Explicit tasks to include, by id or `AURA-<n>` handle (case-insensitive). */
@@ -64,7 +65,7 @@ export async function buildWorkspacePromptContext(
 
   let tasks: Task[];
   try {
-    tasks = await api.tasksList(repoRoot);
+    tasks = await fetchTasks(repoRoot);
   } catch {
     return "";
   }

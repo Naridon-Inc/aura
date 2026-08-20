@@ -135,13 +135,13 @@ export function KnowledgeDialog({ open, repoRoot, onClose }: KnowledgeDialogProp
             autoFocus
           />
           {error ? (
-            <div role="alert" className="text-red text-[11.5px]">{error}</div>
+            <div role="alert" className="text-red text-sm">{error}</div>
           ) : loading && results.length === 0 ? (
-            <div className="text-text-4 text-[11.5px] py-6 text-center">searching…</div>
+            <div className="text-text-4 text-sm py-6 text-center">searching…</div>
           ) : results.length === 0 ? (
-            <div className="text-text-4 text-[11.5px] py-6 text-center">
+            <div className="text-text-4 text-sm py-6 text-center">
               {query.trim()
-                ? "no matches — try a different query"
+                ? "no matches. Try a different query"
                 : "no team knowledge stored yet"}
             </div>
           ) : (
@@ -179,28 +179,28 @@ function KnowledgeRow({
       <button
         type="button"
         onClick={onToggle}
-        className="w-full flex items-start gap-2 px-3 py-2 text-left hover:bg-bg-2"
+        className="w-full flex items-start gap-2 px-3 py-2 text-left hover:bg-state-hover"
       >
-        <span className="text-[11.5px] text-text-1 flex-1 min-w-0">
-          <span className="text-[10.5px] uppercase tracking-wide text-text-4 mr-2">
+        <span className="text-sm text-text-1 flex-1 min-w-0">
+          <span className="section-label mr-2">
             {entry.category || "general"}
           </span>
           {entry.question}
         </span>
-        <span className="shrink-0 text-[10.5px] text-text-4">
+        <span className="shrink-0 text-xs text-text-4">
           {entry.username || "?"} · ↑ {entry.upvotes ?? 0}
         </span>
       </button>
       {expanded && (
         <div className="px-3 pb-3 pt-1 border-t border-line-soft">
-          <div className="text-[11.5px] text-text-1 whitespace-pre-wrap break-words">
+          <div className="text-sm text-text-1 whitespace-pre-wrap break-words">
             {entry.answer}
           </div>
           <div className="flex items-center gap-2 mt-2">
             <Button variant="subtle" size="xs" onClick={onUpvote}>
               ↑ Upvote
             </Button>
-            <span className="text-[10.5px] text-text-4 font-mono">{entry.id}</span>
+            <span className="text-xs text-text-4 font-mono">{entry.id}</span>
           </div>
         </div>
       )}
@@ -245,10 +245,10 @@ function ComposeForm({
 
   return (
     <div className="flex flex-col gap-2">
-      <div className="text-[11.5px] text-text-1">New knowledge entry</div>
-      {err && <div role="alert" className="text-red text-[11.5px]">{err}</div>}
+      <div className="text-sm text-text-1">New knowledge entry</div>
+      {err && <div role="alert" className="text-red text-sm">{err}</div>}
       <label className="flex flex-col gap-1">
-        <span className="text-[10.5px] text-text-3 uppercase tracking-wide">Question</span>
+        <span className="section-label">Question</span>
         <Input
           value={question}
           onChange={(e) => setQuestion(e.target.value)}
@@ -256,18 +256,18 @@ function ComposeForm({
         />
       </label>
       <label className="flex flex-col gap-1">
-        <span className="text-[10.5px] text-text-3 uppercase tracking-wide">Answer</span>
+        <span className="section-label">Answer</span>
         <textarea
           value={answer}
           onChange={(e) => setAnswer(e.target.value)}
           rows={6}
           placeholder="Exponential backoff with jitter, capped at 60s. See src/retry.rs."
-          className="px-2 py-1.5 rounded bg-bg-1 border border-line-soft text-text-1 text-[11.5px] font-mono resize-y"
+          className="px-2 py-1.5 rounded bg-bg-1 border border-line-soft text-text-1 text-sm font-mono resize-y"
         />
       </label>
       <div className="flex items-center gap-2">
         <label className="flex flex-col gap-1 flex-1">
-          <span className="text-[10.5px] text-text-3 uppercase tracking-wide">Category</span>
+          <span className="section-label">Category</span>
           <Select
             value={category}
             onChange={setCategory}
@@ -276,7 +276,7 @@ function ComposeForm({
           />
         </label>
         <label className="flex flex-col gap-1 flex-[2]">
-          <span className="text-[10.5px] text-text-3 uppercase tracking-wide">
+          <span className="section-label">
             Tags (comma-separated)
           </span>
           <Input

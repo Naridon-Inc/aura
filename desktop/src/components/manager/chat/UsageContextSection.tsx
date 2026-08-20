@@ -16,7 +16,8 @@
 //! no datum for (Cached input, Reasoning output) are simply not passed and so
 //! never render — the section stays honest rather than padded.
 
-import { Bar, contextFill, formatTokens, Rule, SectionHead, StatRow } from "./usageAtoms";
+import { Bar, contextFill, Rule, SectionHead, StatRow } from "./usageAtoms";
+import { compactNumber } from "../../../lib/compactNumber";
 
 export function UsageContextSection({
   input,
@@ -43,7 +44,7 @@ export function UsageContextSection({
     <>
       <SectionHead
         title="Context"
-        meta={`${formatTokens(total)}/${formatTokens(contextWindow)}`}
+        meta={`${compactNumber(total)}/${compactNumber(contextWindow)}`}
       />
       <div className="mt-2.5">
         <Bar frac={frac} fill={contextFill(frac)} />
@@ -55,13 +56,13 @@ export function UsageContextSection({
       <Rule />
 
       <div className="flex flex-col gap-1.5">
-        <StatRow label="Input" value={formatTokens(input)} />
+        <StatRow label="Input" value={compactNumber(input)} />
         {cachedInput != null && (
-          <StatRow label="Cached input" value={formatTokens(cachedInput)} />
+          <StatRow label="Cached input" value={compactNumber(cachedInput)} />
         )}
-        <StatRow label="Output" value={formatTokens(output)} />
+        <StatRow label="Output" value={compactNumber(output)} />
         {reasoningOutput != null && (
-          <StatRow label="Reasoning output" value={formatTokens(reasoningOutput)} />
+          <StatRow label="Reasoning output" value={compactNumber(reasoningOutput)} />
         )}
       </div>
     </>

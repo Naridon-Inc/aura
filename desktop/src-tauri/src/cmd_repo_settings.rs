@@ -64,9 +64,12 @@ pub struct NamedScript {
 /// is advisory, never required.
 #[tauri::command]
 pub async fn repo_worktree_settings_get(repo_root: String) -> Result<RepoWorktreeSettings, String> {
-    let path = settings_path(Path::new(&repo_root));
-    let text = std::fs::read_to_string(&path).unwrap_or_default();
-    Ok(parse(&text))
+    crate::blocking::run(move || {
+        let path = settings_path(Path::new(&repo_root));
+        let text = std::fs::read_to_string(&path).unwrap_or_default();
+        Ok(parse(&text))
+    })
+    .await
 }
 
 /// Write the repo's worktree settings to `<repo_root>/.aura/settings.toml`,
@@ -78,14 +81,17 @@ pub async fn repo_worktree_settings_set(
     repo_root: String,
     settings: RepoWorktreeSettings,
 ) -> Result<(), String> {
-    let path = settings_path(Path::new(&repo_root));
-    let existing = std::fs::read_to_string(&path).unwrap_or_default();
-    let rendered = render(&existing, &settings)?;
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)
-            .map_err(|e| format!("couldn't create {}: {e}", parent.display()))?;
-    }
-    std::fs::write(&path, rendered).map_err(|e| format!("couldn't write {}: {e}", path.display()))
+    crate::blocking::run(move || {
+        let path = settings_path(Path::new(&repo_root));
+        let existing = std::fs::read_to_string(&path).unwrap_or_default();
+        let rendered = render(&existing, &settings)?;
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)
+                .map_err(|e| format!("couldn't create {}: {e}", parent.display()))?;
+        }
+        std::fs::write(&path, rendered).map_err(|e| format!("couldn't write {}: {e}", path.display()))
+    })
+    .await
 }
 
 // ─── internals ──────────────────────────────────────────────────────────────-

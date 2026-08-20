@@ -39,6 +39,8 @@ use serde_json::{json, Map, Value};
 use std::collections::BTreeSet;
 use std::fs;
 use std::path::PathBuf;
+use std::sync::OnceLock;
+use std::time::Instant;
 
 use crate::cloud_session_sync::{aura_dir, read_credentials};
 
@@ -177,13 +179,18 @@ fn base_properties(extra: Option<Value>, set_person: bool, signed_in: bool) -> V
         );
     }
 
-    if let Some(Value::Object(extra)) = extra {
-        for (k, v) in extra {
-            // Never let a caller smuggle in person-merge or identity fields.
-            if k == "distinct_id" || k == "$set" || k == "$set_once" {
-                continue;
+    if let Some(extra) = extra {
+        // Every caller-supplied property passes the guard: short, content-free
+        // scalars only. The audit is enforced, not trusted — see
+        // `telemetry_guard`. Reserved `$` keys never reach here from a caller.
+        if let Value::Object(extra) = crate::telemetry_guard::sanitize(extra) {
+            for (k, v) in extra {
+                // Never let a caller smuggle in person-merge or identity fields.
+                if k == "distinct_id" || k == "$set" || k == "$set_once" {
+                    continue;
+                }
+                props.insert(k, v);
             }
-            props.insert(k, v);
         }
     }
     Value::Object(props)
@@ -199,37 +206,51 @@ fn is_signed_in() -> bool {
         .unwrap_or(false)
 }
 
-/// Fire one event. Best-effort, non-blocking: spawns a detached task and
-/// returns immediately. Silently no-ops when there's no key or no consent.
-/// `respect` is the consent lever this event needs (product vs crash).
-fn emit(event: &str, extra: Option<Value>, set_person: bool, lever: ConsentLever) {
+/// Build the wire payload for one event, or `None` when this event must not
+/// be sent (no consent, no key, no device id). Every send path goes through
+/// here so the gates cannot be forgotten by one of them.
+fn payload_for(
+    event: &str,
+    extra: Option<Value>,
+    set_person: bool,
+    lever: ConsentLever,
+) -> Option<(String, Value)> {
     let c = consent();
     if !c.decided {
-        return;
+        return None;
     }
     let allowed = match lever {
         ConsentLever::Product => c.product,
         ConsentLever::Crash => c.crash,
     };
     if !allowed {
-        return;
+        return None;
     }
-    let Some(key) = posthog_key() else {
-        return;
-    };
+    let key = posthog_key()?;
     let distinct_id = match crate::cmd_device::load_or_create_device() {
         Ok(d) if !d.device_id.trim().is_empty() => d.device_id,
-        _ => return,
+        _ => return None,
     };
     let signed_in = is_signed_in();
-    let host = posthog_host();
+    let url = format!("{}/capture/", posthog_host());
     let payload = json!({
         "api_key": key,
         "event": event,
         "distinct_id": distinct_id,
         "properties": base_properties(extra, set_person, signed_in),
     });
+    Some((url, payload))
+}
 
+/// Fire one event. Best-effort, non-blocking: spawns a detached task and
+/// returns immediately. Silently no-ops when there's no key or no consent.
+/// `lever` is the consent lever this event needs (product vs crash).
+/// Returns whether the event was actually queued — `track_once` needs that to
+/// avoid burning a once-per-install milestone on a launch that sent nothing.
+fn emit(event: &str, extra: Option<Value>, set_person: bool, lever: ConsentLever) -> bool {
+    let Some((url, payload)) = payload_for(event, extra, set_person, lever) else {
+        return false;
+    };
     tauri::async_runtime::spawn(async move {
         let client = match reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(8))
@@ -238,9 +259,35 @@ fn emit(event: &str, extra: Option<Value>, set_person: bool, lever: ConsentLever
             Ok(c) => c,
             Err(_) => return,
         };
-        let url = format!("{host}/capture/");
         let _ = client.post(&url).json(&payload).send().await;
     });
+    true
+}
+
+/// Send one event and wait for it, on a thread of its own. Only for shutdown:
+/// a detached spawn loses the race with process exit, so the one event we
+/// most want at quit time — how long the session lasted — would never arrive.
+/// Bounded by a short request timeout so a dead network can't hold up a quit.
+fn emit_blocking(event: &str, extra: Option<Value>, lever: ConsentLever) {
+    let Some((url, payload)) = payload_for(event, extra, false, lever) else {
+        return;
+    };
+    let handle = std::thread::spawn(move || {
+        let Ok(rt) = tokio::runtime::Builder::new_current_thread().enable_all().build() else {
+            return;
+        };
+        rt.block_on(async move {
+            let client = match reqwest::Client::builder()
+                .timeout(std::time::Duration::from_secs(2))
+                .build()
+            {
+                Ok(c) => c,
+                Err(_) => return,
+            };
+            let _ = client.post(&url).json(&payload).send().await;
+        });
+    });
+    let _ = handle.join();
 }
 
 #[derive(Clone, Copy)]
@@ -253,6 +300,69 @@ enum ConsentLever {
 pub fn track(event: &str, extra: Option<Value>) {
     emit(event, extra, false, ConsentLever::Product);
 }
+
+// ── Once-per-install milestones ───────────────────────────────────────────
+//
+// Activation is a question about the *first* time someone does something —
+// first agent started, first intent logged, first review run. Counting those
+// off a stream of repeated events means guessing at a session boundary; a
+// small marker file answers it exactly, and survives restarts.
+
+fn milestones_path() -> Option<PathBuf> {
+    Some(aura_dir().ok()?.join("telemetry-milestones.json"))
+}
+
+fn read_milestones() -> BTreeSet<String> {
+    milestones_path()
+        .and_then(|p| fs::read_to_string(p).ok())
+        .and_then(|raw| serde_json::from_str(&raw).ok())
+        .unwrap_or_default()
+}
+
+/// Record a milestone the first time it ever happens on this install, and
+/// never again. Nothing is written unless the event was really sent, so a
+/// user who turns telemetry on later still gets a true first-time signal.
+pub fn track_once(event: &str, extra: Option<Value>) {
+    track_once_keyed(event, event, extra);
+}
+
+/// `track_once` where the thing remembered and the event sent are different
+/// names — a funnel wants every step under one event (`flow_step`) while
+/// each step must still fire only once.
+pub fn track_once_keyed(marker: &str, event: &str, extra: Option<Value>) {
+    let mut seen = read_milestones();
+    if seen.contains(marker) {
+        return;
+    }
+    if !emit(event, extra, false, ConsentLever::Product) {
+        return;
+    }
+    seen.insert(marker.to_string());
+    if let (Some(path), Ok(json)) = (milestones_path(), serde_json::to_string(&seen)) {
+        let _ = fs::write(path, json);
+    }
+}
+
+/// Record an activation-funnel step, once per install. The mirror of the
+/// frontend's `trackActivation` — same marker, same event name — so both
+/// sides feed one funnel rather than two half-funnels that can't be joined.
+pub fn track_activation(step: &str) {
+    track_once_keyed(
+        &format!("activation:{step}"),
+        "flow_step",
+        Some(json!({ "flow": "activation", "step": step })),
+    );
+}
+
+// ── Session length ────────────────────────────────────────────────────────
+
+/// When this launch started. Set once in `on_startup`, read at quit, so
+/// `app_closed` can carry how long the app was actually open — the only
+/// engagement signal `app_opened` alone cannot give.
+static LAUNCHED_AT: OnceLock<Instant> = OnceLock::new();
+
+/// Quit fires twice (ExitRequested, then Exit); the close event fires once.
+static SHUTDOWN_SENT: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 // ── Crash report forwarding (offline queue) ───────────────────────────────
 //
@@ -358,8 +468,30 @@ fn flush_pending_crashes() {
 /// Called once from the app `.setup()` hook. Records the `app_opened` event
 /// (with the per-launch person `$set`) and forwards any pending crash reports.
 pub fn on_startup() {
+    let _ = LAUNCHED_AT.set(Instant::now());
     emit("app_opened", None, true, ConsentLever::Product);
+    track_once("first_launch", None);
     flush_pending_crashes();
+}
+
+/// Called once as the app quits. Reports how long this launch lasted — the
+/// difference between "opened it and bounced" and "worked in it all day",
+/// which no other event can tell us apart. Sent synchronously because a
+/// detached send does not survive process exit.
+pub fn on_shutdown() {
+    // Tauri fires both ExitRequested and Exit; one session is one event.
+    if SHUTDOWN_SENT.swap(true, std::sync::atomic::Ordering::SeqCst) {
+        return;
+    }
+    let Some(started) = LAUNCHED_AT.get() else {
+        return;
+    };
+    let seconds = started.elapsed().as_secs();
+    emit_blocking(
+        "app_closed",
+        Some(json!({ "session_seconds": seconds })),
+        ConsentLever::Product,
+    );
 }
 
 // ── Tauri commands ─────────────────────────────────────────────────────────
@@ -374,13 +506,16 @@ pub async fn telemetry_consent_get() -> Result<TelemetryConsent, String> {
 /// an `app_opened` so the install is counted from this launch.
 #[tauri::command]
 pub async fn telemetry_set_consent(product: bool, crash: bool) -> Result<TelemetryConsent, String> {
-    write_consent(product, crash)?;
-    let c = consent();
-    if c.product {
-        emit("app_opened", None, true, ConsentLever::Product);
-    }
-    flush_pending_crashes();
-    Ok(c)
+    crate::blocking::run(move || {
+        write_consent(product, crash)?;
+        let c = consent();
+        if c.product {
+            emit("app_opened", None, true, ConsentLever::Product);
+        }
+        flush_pending_crashes();
+        Ok(c)
+    })
+    .await
 }
 
 /// Record a product event from the frontend. `event` is a namespaced verb
@@ -393,5 +528,24 @@ pub async fn telemetry_track(event: String, props: Option<Value>) -> Result<(), 
         return Ok(());
     }
     track(event, props);
+    Ok(())
+}
+
+/// Record a frontend event that must fire at most once per install —
+/// activation-funnel steps, first-time milestones. `marker` is what gets
+/// remembered on disk; `event` is what PostHog receives, so a whole funnel
+/// can land under one event name and still fire each step only once.
+#[tauri::command]
+pub async fn telemetry_track_once(
+    marker: String,
+    event: String,
+    props: Option<Value>,
+) -> Result<(), String> {
+    let marker = marker.trim();
+    let event = event.trim();
+    if marker.is_empty() || event.is_empty() {
+        return Ok(());
+    }
+    track_once_keyed(marker, event, props);
     Ok(())
 }

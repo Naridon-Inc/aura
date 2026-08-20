@@ -14,6 +14,8 @@ import {
 import { IconButton } from "@medusajs/ui";
 
 import { PageActionBar as UiPageActionBar } from "../ui/PageActionBar";
+import { pageRefUrl } from "../../lib/auraRelay";
+import { parsePageKey } from "../pages2/pagesApi";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -67,7 +69,13 @@ export function PageActionBar({
 
   async function copyLink() {
     try {
-      await navigator.clipboard.writeText(`aura://page/${pageKey}`);
+      // `pageKey` is the in-app composite (`scope|bucket|id`) — pasting THAT
+      // after `aura://page/` produced a link nothing could open, because the
+      // ref parser reads slash segments. Same page, spelled the way the rest
+      // of the app spells it.
+      const parsed = parsePageKey(pageKey);
+      if (!parsed) return;
+      await navigator.clipboard.writeText(pageRefUrl(parsed));
       setCopied("link");
       window.setTimeout(() => setCopied(null), 1400);
     } catch {
@@ -138,7 +146,7 @@ export function PageActionBar({
                 Duplicate page
               </DropdownMenuItem>
             )}
-            <DropdownMenuItem onClick={onDelete} className="text-ui-fg-error">
+            <DropdownMenuItem onClick={onDelete} className="text-red">
               <Trash2 className="size-3.5" aria-hidden />
               Delete page
             </DropdownMenuItem>

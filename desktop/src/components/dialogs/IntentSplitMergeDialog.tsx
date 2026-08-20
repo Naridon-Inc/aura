@@ -7,6 +7,8 @@ import { useEffect, useMemo, useState } from "react";
 import { Dialog } from "../Dialog";
 import { Button } from "../ui/button";
 import { api, type IntentRow } from "../../lib/api";
+import { fetchIntentRows } from "../../lib/intentCache";
+import { basename } from "../../lib/paths";
 
 type Mode = "split" | "merge";
 
@@ -18,12 +20,6 @@ type Props = {
   intentTs: number | null;
   onClose: () => void;
 };
-
-function shortName(p: string): string {
-  const i = p.lastIndexOf("/");
-  return i >= 0 ? p.slice(i + 1) : p;
-}
-
 export function IntentSplitMergeDialog({ open, repoRoot, intentTs, onClose }: Props) {
   const [mode, setMode] = useState<Mode>("split");
   const [rows, setRows] = useState<IntentRow[]>([]);
@@ -41,8 +37,7 @@ export function IntentSplitMergeDialog({ open, repoRoot, intentTs, onClose }: Pr
     setMoveSet(new Set());
     setNewIntent("");
     setMergeWithTs(null);
-    api
-      .auraIntentRecent(repoRoot, 50)
+    fetchIntentRows(repoRoot, 50)
       .then(setRows)
       .catch((e) => setErr(String(e)));
   }, [open, repoRoot]);
@@ -145,17 +140,17 @@ export function IntentSplitMergeDialog({ open, repoRoot, intentTs, onClose }: Pr
         </>
       }
     >
-      <div className="space-y-3 text-[11.5px]">
+      <div className="space-y-3 text-sm">
         {!target ? (
           <div className="text-text-4">no reason selected</div>
         ) : (
           <>
             <div className="border border-line-soft rounded bg-bg-0 px-2 py-1.5">
-              <div className="text-text-3 text-[10.5px] uppercase tracking-wider">
+              <div className="section-label">
                 Original reason
               </div>
-              <div className="text-text-1 text-[12px] leading-snug">{target.intent}</div>
-              <div className="text-text-5 text-[10.5px] mt-0.5">
+              <div className="text-text-1 text-sm leading-snug">{target.intent}</div>
+              <div className="text-text-5 text-xs mt-0.5">
                 {targetFiles.length} file{targetFiles.length === 1 ? "" : "s"} ·{" "}
                 {target.agent_id}
               </div>
@@ -173,12 +168,12 @@ export function IntentSplitMergeDialog({ open, repoRoot, intentTs, onClose }: Pr
             {mode === "split" ? (
               <>
                 <div>
-                  <div className="text-text-4 text-[10.5px] uppercase tracking-wider mb-1">
+                  <div className="section-label mb-1">
                     Move these files into a new reason
                   </div>
                   <div className="border border-line-soft rounded bg-bg-0 max-h-[160px] overflow-y-auto">
                     {targetFiles.length === 0 ? (
-                      <div className="px-2 py-3 text-text-4 text-[11px]">
+                      <div className="px-2 py-3 text-text-4 text-xs">
                         this reason covers no files
                       </div>
                     ) : (
@@ -187,7 +182,7 @@ export function IntentSplitMergeDialog({ open, repoRoot, intentTs, onClose }: Pr
                         return (
                           <label
                             key={f.path}
-                            className={`flex items-center gap-2 px-2 py-1 text-[11.5px] cursor-pointer hover:bg-bg-2 ${
+                            className={`flex items-center gap-2 px-2 py-1 text-sm cursor-pointer hover:bg-state-hover ${
                               checked ? "" : "opacity-55"
                             }`}
                           >
@@ -198,13 +193,13 @@ export function IntentSplitMergeDialog({ open, repoRoot, intentTs, onClose }: Pr
                               disabled={busy}
                               className="accent-accent-green"
                             />
-                            <span className="w-3 text-[10px] font-mono text-text-4">
+                            <span className="w-3 text-2xs font-mono text-text-4">
                               {(f.status || "M").trim()}
                             </span>
                             <span className="text-text-1 truncate" title={f.path}>
-                              {shortName(f.path)}
+                              {basename(f.path)}
                             </span>
-                            <span className="ml-auto text-text-5 text-[10.5px] font-mono truncate">
+                            <span className="ml-auto text-text-5 text-xs font-mono truncate">
                               {f.path}
                             </span>
                           </label>
@@ -214,7 +209,7 @@ export function IntentSplitMergeDialog({ open, repoRoot, intentTs, onClose }: Pr
                   </div>
                 </div>
                 <div>
-                  <div className="text-text-4 text-[10.5px] uppercase tracking-wider mb-1">
+                  <div className="section-label mb-1">
                     New reason
                   </div>
                   <textarea
@@ -223,18 +218,18 @@ export function IntentSplitMergeDialog({ open, repoRoot, intentTs, onClose }: Pr
                     placeholder="What were these files actually for?"
                     disabled={busy}
                     rows={3}
-                    className="w-full bg-bg-1 border border-line rounded px-2 py-1.5 text-text-1 text-[12px] outline-none focus:border-text-4 resize-y leading-relaxed"
+                    className="w-full bg-bg-1 border border-line rounded px-2 py-1.5 text-text-1 text-sm outline-none focus:border-text-4 resize-y leading-relaxed"
                   />
                 </div>
               </>
             ) : (
               <div>
-                <div className="text-text-4 text-[10.5px] uppercase tracking-wider mb-1">
+                <div className="section-label mb-1">
                   Merge with
                 </div>
                 <div className="border border-line-soft rounded bg-bg-0 max-h-[220px] overflow-y-auto">
                   {otherIntents.length === 0 ? (
-                    <div className="px-2 py-3 text-text-4 text-[11px]">
+                    <div className="px-2 py-3 text-text-4 text-xs">
                       no other reasons to merge with
                     </div>
                   ) : (
@@ -244,8 +239,8 @@ export function IntentSplitMergeDialog({ open, repoRoot, intentTs, onClose }: Pr
                       return (
                         <label
                           key={r.timestamp}
-                          className={`flex items-start gap-2 px-2 py-1.5 text-[11.5px] cursor-pointer hover:bg-bg-2 ${
-                            checked ? "bg-bg-2" : ""
+                          className={`flex items-start gap-2 px-2 py-1.5 text-sm cursor-pointer hover:bg-state-hover ${
+                            checked ? "bg-state-selected" : ""
                           }`}
                         >
                           <input
@@ -258,7 +253,7 @@ export function IntentSplitMergeDialog({ open, repoRoot, intentTs, onClose }: Pr
                           />
                           <div className="flex-1 min-w-0">
                             <div className="text-text-1 truncate">{r.intent}</div>
-                            <div className="text-text-5 text-[10.5px]">
+                            <div className="text-text-5 text-xs">
                               {fc} file{fc === 1 ? "" : "s"} · {r.agent_id}
                             </div>
                           </div>
@@ -267,14 +262,14 @@ export function IntentSplitMergeDialog({ open, repoRoot, intentTs, onClose }: Pr
                     })
                   )}
                 </div>
-                <div className="text-text-5 text-[10.5px] mt-1">
+                <div className="text-text-5 text-xs mt-1">
                   The older reason is dropped; the newer one stays, with both texts joined.
                 </div>
               </div>
             )}
           </>
         )}
-        {err && <div role="alert" className="text-red text-[11px]">{err}</div>}
+        {err && <div role="alert" className="text-red text-xs">{err}</div>}
       </div>
     </Dialog>
   );
@@ -296,8 +291,8 @@ function ModeChip({
     <button
       type="button"
       onClick={() => onClick(id)}
-      className={`px-2 h-6 rounded text-[11px] uppercase tracking-wider ${
-        active ? "bg-bg-2 text-text-1" : "text-text-4 hover:text-text-2"
+      className={`px-2 h-6 rounded text-xs ${
+        active ? "bg-state-selected text-text-1" : "text-text-4 hover:text-text-2"
       }`}
     >
       {children}

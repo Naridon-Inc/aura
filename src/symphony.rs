@@ -778,7 +778,7 @@ fn truncate_str(s: &str, max: usize) -> String {
     if s.len() <= max {
         format!("{:width$}", s, width = max)
     } else {
-        format!("{}…", &s[..max - 1])
+        format!("{}…", crate::text::clip(s, max.saturating_sub(1)))
     }
 }
 

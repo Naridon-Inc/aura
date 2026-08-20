@@ -111,20 +111,20 @@ function mdComponents(isDark: boolean, compact = false) {
     : "border-l-4 border-neutral-300 text-neutral-600";
   const h = compact
     ? {
-        h1: "text-[13px] font-semibold text-text-1 mt-3.5 mb-1.5 first:mt-0",
-        h2: "text-[12px] font-semibold text-text-1 mt-3 mb-1 first:mt-0",
-        h3: "text-[11.5px] font-semibold text-text-1 mt-2.5 mb-1 first:mt-0",
-        h4: "text-[11px] font-semibold text-text-2 mt-2.5 mb-0.5 first:mt-0",
-        h5: "text-[11px] font-semibold text-text-2 mt-2 mb-0.5 first:mt-0",
-        h6: "text-[10.5px] font-semibold uppercase tracking-wider text-text-3 mt-2 mb-0.5 first:mt-0",
+        h1: "text-base font-semibold text-text-1 mt-3.5 mb-1.5 first:mt-0",
+        h2: "text-sm font-semibold text-text-1 mt-3 mb-1 first:mt-0",
+        h3: "text-sm font-semibold text-text-1 mt-2.5 mb-1 first:mt-0",
+        h4: "text-xs font-semibold text-text-2 mt-2.5 mb-0.5 first:mt-0",
+        h5: "text-xs font-semibold text-text-2 mt-2 mb-0.5 first:mt-0",
+        h6: "section-label mt-2 mb-0.5 first:mt-0",
       }
     : {
-        h1: "text-[16px] font-semibold mt-5 mb-2 pb-1.5 border-b border-bd-2",
-        h2: "text-[14px] font-semibold mt-4 mb-1.5 pb-1 border-b border-bd-2",
-        h3: "text-[13px] font-semibold mt-3 mb-1",
-        h4: "text-[12.5px] font-semibold mt-2.5 mb-1",
-        h5: "text-[12px] font-semibold mt-2.5 mb-0.5",
-        h6: "text-[11px] font-semibold mt-2.5 mb-0.5 uppercase tracking-wider",
+        h1: "text-lg font-semibold mt-5 mb-2 pb-1.5 border-b border-bd-2",
+        h2: "text-md font-semibold mt-4 mb-1.5 pb-1 border-b border-bd-2",
+        h3: "text-base font-semibold mt-3 mb-1",
+        h4: "text-base font-semibold mt-2.5 mb-1",
+        h5: "text-sm font-semibold mt-2.5 mb-0.5",
+        h6: "section-label mt-2.5 mb-0.5",
       };
   const blockMargin = compact ? "my-2" : "my-2.5";
   return {
@@ -221,7 +221,7 @@ function mdComponents(isDark: boolean, compact = false) {
         );
       }
       return (
-        <code className={`${className ?? ""} block font-mono text-[12.5px]`} {...rest}>
+        <code className={`${className ?? ""} block font-mono text-base`} {...rest}>
           {children}
         </code>
       );
@@ -234,7 +234,7 @@ function mdComponents(isDark: boolean, compact = false) {
     ),
     table: (p: any) => (
       <div className="my-3 overflow-x-auto">
-        <table {...p} className="border-collapse text-[12px]" />
+        <table {...p} className="border-collapse text-sm" />
       </div>
     ),
     th: (p: any) => <th {...p} className={`${tableHead} border px-3 py-1 font-semibold text-left`} />,

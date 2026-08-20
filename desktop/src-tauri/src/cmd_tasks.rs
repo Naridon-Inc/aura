@@ -19,6 +19,34 @@ pub struct LinkedPr {
     pub url: String,
 }
 
+/// One line of a task's plan.
+///
+/// Deliberately two fields. Anything richer — an owner, a due date, an
+/// estimate — is a sign the line should have been a sub-task, which the board
+/// already models with `parent_id` and which gets its own row, its own handle
+/// and its own status. Steps are the cheap unit: they exist so progress can be
+/// counted, not so a second task tracker can grow inside a task.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct TaskStep {
+    pub text: String,
+    #[serde(default)]
+    pub done: bool,
+}
+
+impl Task {
+    /// How far along, when the task says. `None` when it has no plan — which
+    /// is a real answer and must not be rendered as "0 of 0".
+    pub fn step_progress(&self) -> Option<(usize, usize)> {
+        if self.steps.is_empty() {
+            return None;
+        }
+        Some((
+            self.steps.iter().filter(|s| s.done).count(),
+            self.steps.len(),
+        ))
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Task {
     pub id: String,
@@ -131,6 +159,20 @@ pub struct Task {
     /// Cycle detection happens at sort time.
     #[serde(default)]
     pub dependencies: Vec<String>,
+    /// The plan, in order, each line checkable.
+    ///
+    /// A task filed by an agent used to be a title and nothing else, so the
+    /// only status the board could report was "an agent is building this now"
+    /// — true of a task one minute in and of one that has been wedged for an
+    /// hour. Steps are what make a status line specific: "3 of 5 — wire the
+    /// adapter" tells a human where it is and, when the count stops moving,
+    /// that it is stuck.
+    ///
+    /// Empty on every row written before this and on anything a human jotted
+    /// down in one line, which is a legitimate way to file a reminder. The
+    /// insistence lives in the MCP tool, where the work is automated.
+    #[serde(default)]
+    pub steps: Vec<TaskStep>,
     /// Linked A2A bead id when this task was minted from / to an
     /// agent-to-agent run. The bead is the source of truth for agent
     /// execution; the task tracks the human framing.
@@ -139,6 +181,14 @@ pub struct Task {
     /// Sprint / iteration this task belongs to (free-form slug).
     #[serde(default)]
     pub sprint: Option<String>,
+    /// The crew this task belongs to (its slug, e.g. "perf"). Written by an
+    /// agent that files a task while draining a crew, and by the crew wizard.
+    /// It is what gives a crew-filed row a home — the board and the crew graph
+    /// group it under this crew instead of the loose "Unsorted" pile — and it
+    /// is projected onto the row's loop node so the graph reads it. `None` (the
+    /// default "main" crew) means no crew set and the row reads as loose.
+    #[serde(default)]
+    pub crew_id: Option<String>,
     /// OO.4 — Plane-style Cycle pointer. References a row in
     /// `<repo>/.aura/tasks/task_cycles.json` (see `cmd_tasks_cycles`).
     /// Empty on rows written before OO.4 — the heal pass leaves them
@@ -828,10 +878,19 @@ pub struct CreateTaskInput {
     pub objective: Option<String>,
     #[serde(default)]
     pub dependencies: Vec<String>,
+    /// The plan, in order. Sent as plain sentences — the caller states the
+    /// work, not its progress, so every step lands unchecked. See
+    /// `Task::steps`.
+    #[serde(default)]
+    pub steps: Vec<String>,
     #[serde(default)]
     pub bead_id: Option<String>,
     #[serde(default)]
     pub sprint: Option<String>,
+    /// The crew this task belongs to (its slug). Gives the row a home under a
+    /// crew instead of the loose pile. Omitted / "main" means the default crew.
+    #[serde(default)]
+    pub crew_id: Option<String>,
     /// OO.4 — Plane-style Cycle pointer. Optional on create; can be
     /// set directly here or via `tasks_cycle_assign` after the fact.
     #[serde(default)]
@@ -907,10 +966,21 @@ pub struct UpdateTaskInput {
     pub objective: Option<String>,
     #[serde(default)]
     pub dependencies: Option<Vec<String>>,
+    /// Replace the whole plan. Use this to *edit* the steps — rewording
+    /// one, adding a missed one, dropping one that turned out to be
+    /// nothing. To tick a step off use `tasks_step_set` instead: it
+    /// addresses a single row, so two agents working the same task can't
+    /// overwrite each other's progress with a stale copy of the list.
+    #[serde(default)]
+    pub steps: Option<Vec<TaskStep>>,
     #[serde(default)]
     pub bead_id: Option<String>,
     #[serde(default)]
     pub sprint: Option<String>,
+    /// Re-home the task onto a crew (its slug). `Some("")` or "main" clears it
+    /// back to the default crew (loose). Omitted leaves the current crew as-is.
+    #[serde(default)]
+    pub crew_id: Option<String>,
     /// OO.4 — Plane-style Cycle pointer. Setting to `Some("")` clears
     /// the pointer; the empty string is treated as null by the
     /// backend. Prefer the dedicated `tasks_cycle_assign` /
@@ -1272,8 +1342,27 @@ pub async fn tasks_create(repo_root: String, input: CreateTaskInput) -> Result<T
         is_epic: input.is_epic,
         objective: input.objective,
         dependencies: input.dependencies,
+        // A plan is not progress: everything the caller states arrives
+        // unchecked, whoever is filing it. Blank lines are dropped rather than
+        // stored, so a trailing newline in a model's answer doesn't become a
+        // step nobody can ever complete.
+        steps: input
+            .steps
+            .iter()
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty())
+            .map(|s| TaskStep {
+                text: s.to_string(),
+                done: false,
+            })
+            .collect(),
         bead_id: input.bead_id,
         sprint: input.sprint,
+        // The default "main" crew means "no crew set" — store nothing so the
+        // row reads as loose rather than pinned to a crew that isn't real.
+        crew_id: input
+            .crew_id
+            .filter(|c| !c.is_empty() && c != "main"),
         // OO.4 — Plane Cycle + Module pointers. Empty string in either
         // field clears the pointer (matches the update path's
         // convention) so the frontend can send a single shape for
@@ -1475,8 +1564,10 @@ pub async fn tasks_upsert_external(
             is_epic: None,
             objective: None,
             dependencies: None,
+            steps: None,
             bead_id: None,
             sprint: None,
+            crew_id: None,
             cycle_id: None,
             module_id: None,
             external_source: Some(input.external_source.clone()),
@@ -1518,8 +1609,13 @@ pub async fn tasks_upsert_external(
         is_epic: false,
         objective: None,
         dependencies: Vec::new(),
+        // A task mirrored in from Jira or Linear has its plan over there. We
+        // don't invent one, and an empty list reads honestly as "no steps
+        // stated here" rather than as a plan with nothing in it.
+        steps: Vec::new(),
         bead_id: None,
         sprint: None,
+        crew_id: None,
         cycle_id: None,
         module_id: None,
         external_source: Some(input.external_source.clone()),
@@ -1680,11 +1776,26 @@ pub async fn tasks_update(repo_root: String, input: UpdateTaskInput) -> Result<T
     if let Some(v) = input.dependencies {
         t.dependencies = v;
     }
+    if let Some(v) = input.steps {
+        t.steps = v
+            .into_iter()
+            .filter(|s| !s.text.trim().is_empty())
+            .map(|s| TaskStep {
+                text: s.text.trim().to_string(),
+                done: s.done,
+            })
+            .collect();
+    }
     if let Some(v) = input.bead_id {
         t.bead_id = Some(v);
     }
     if let Some(v) = input.sprint {
         t.sprint = Some(v);
+    }
+    // Re-home onto a crew. An empty string or the default "main" clears it back
+    // to loose; any other slug pins the row (and its loop node) to that crew.
+    if let Some(v) = input.crew_id {
+        t.crew_id = if v.is_empty() || v == "main" { None } else { Some(v) };
     }
     // OO.4 — Cycle / Module pointers. An empty string clears; any
     // other value is taken as-is. Catalog-side mirror is deferred to
@@ -1770,6 +1881,53 @@ pub async fn tasks_update(repo_root: String, input: UpdateTaskInput) -> Result<T
             crate::notify::Reason::Mentioned,
         );
     }
+    Ok(updated)
+}
+
+/// Tick one step of a task's plan off, or put it back.
+///
+/// Addressed by position rather than by sending the whole list back,
+/// because progress is the one field two workers touch at once: an agent
+/// finishing step 3 while a human reorders the plan would otherwise
+/// overwrite whichever write landed second with a stale copy of the
+/// other's. Out-of-range indexes are refused rather than ignored — a
+/// caller counting steps wrong should hear about it, not silently mark
+/// nothing.
+#[tauri::command]
+pub async fn tasks_step_set(
+    repo_root: String,
+    id: String,
+    index: usize,
+    done: bool,
+) -> Result<Task, String> {
+    let root = Path::new(&repo_root);
+    let mut file = load(root)?;
+    let t = file
+        .tasks
+        .iter_mut()
+        .find(|t| t.id == id)
+        .ok_or_else(|| format!("task not found: {id}"))?;
+    let total = t.steps.len();
+    let step = t
+        .steps
+        .get_mut(index)
+        .ok_or_else(|| format!("task {id} has {total} steps; there is no step {index}"))?;
+    if step.done == done {
+        return Ok(t.clone());
+    }
+    step.done = done;
+    let text = step.text.clone();
+    t.updated_at = now_iso();
+    let updated = t.clone();
+    save(root, &file)?;
+    let _ = crate::cmd_tasks_activity::append_activity(
+        root,
+        &updated.id,
+        if done { "step_done" } else { "step_reopened" },
+        "system",
+        serde_json::json!({ "index": index, "text": text, "of": total }),
+    );
+    crate::cmd_tasks_sync::publish_upsert(&repo_root, &updated);
     Ok(updated)
 }
 
@@ -2706,8 +2864,10 @@ mod tests {
             is_epic: false,
             objective: None,
             dependencies: Vec::new(),
+            steps: Vec::new(),
             bead_id: None,
             sprint: None,
+            crew_id: None,
             cycle_id: None,
             module_id: None,
             archived_at: None,

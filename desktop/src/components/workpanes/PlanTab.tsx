@@ -27,7 +27,7 @@ import {
   useRef,
   useState,
 } from "react";
-import { FileText, ListChecks } from "lucide-react";
+import { FileText, ListChecks, MessageSquare } from "lucide-react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import remarkMath from "remark-math";
@@ -38,7 +38,9 @@ import { useManagerSession } from "../../lib/managerStore";
 import { AgentIcon } from "../agent/AgentIcon";
 import { MermaidDiagram } from "../notes/MermaidDiagram";
 import { WizardStepTabs } from "../ui/wizard";
+import { EmptyState } from "../ui/state";
 import { api, type AgentDescriptor, type PlanParallelism } from "../../lib/api";
+import { useDismiss } from "../../lib/useDismiss";
 
 export function PlanTab({ plan }: { plan: PlanTabData }) {
   const store = useEditorStore();
@@ -708,14 +710,15 @@ function FileRefChip({
 
 // ── Helpers ─────────────────────────────────────────────────────────
 
-// Empty-state hero for a plan with no body content. The brain
-// occasionally emits a stub plan envelope (just a title) when it's
-// queueing a follow-up turn — without this, the PlanTab page would be
-// a giant blank canvas with one floating title. We give it weight by
-// showing the AURA wordmark, a one-line description of what a plan
-// even is in this app, and (when we know which session minted the
-// plan) a single primary action that drops the user back into the
-// chat where the plan was proposed.
+// Empty state for a plan with no body content. The brain occasionally emits a
+// stub plan envelope (just a title) when it's queueing a follow-up turn —
+// without this, the PlanTab page would be a giant blank canvas with one
+// floating title. When we know which session minted the plan, the one action
+// drops the reader back into the chat where it was proposed.
+//
+// This used to be a bespoke hero: a wordmark, a 36px display title and an
+// inverted white button that appeared nowhere else in the app. It says the
+// same thing in the app's own shape now.
 export function PlanEmptyState({
   title,
   onOpenChat,
@@ -724,51 +727,17 @@ export function PlanEmptyState({
   onOpenChat: (() => void) | null;
 }) {
   return (
-    <div className="h-full w-full flex flex-col items-center justify-center bg-bg-content px-8 py-12">
-      <div className="max-w-[480px] w-full flex flex-col items-center gap-5 text-center">
-        <div
-          className="t-2xs t-ui uppercase"
-          style={{
-            color: "var(--color-text-3)",
-            letterSpacing: "0.18em",
-          }}
-        >
-          Aura
-        </div>
-        <div
-          className="t-3xl t-heading"
-          style={{
-            fontSize: "clamp(28px, 4vw, 36px)",
-            lineHeight: 1.1,
-            color: "var(--color-text-1)",
-            letterSpacing: "var(--letter-spacing-tight)",
-          }}
-        >
-          {title?.trim() ? title : "No plan yet"}
-        </div>
-        <p
-          className="t-base"
-          style={{ color: "var(--color-text-3)", maxWidth: 380 }}
-        >
-          Plans appear here when the Manager drafts a multi-step build.
-          Until then, the chat is the source of truth — describe the goal
-          and Aura will propose a plan you can review.
-        </p>
-        {onOpenChat && (
-          <button
-            type="button"
-            onClick={onOpenChat}
-            className="t-sm t-ui px-3 py-1.5 transition-colors"
-            style={{
-              background: "var(--color-text-1)",
-              color: "var(--color-bg-1)",
-              borderRadius: "var(--radius-sm)",
-            }}
-          >
-            Open chat
-          </button>
-        )}
-      </div>
+    <div className="flex h-full w-full items-center justify-center bg-bg-content">
+      <EmptyState
+        icon={ListChecks}
+        title={title?.trim() ? title : "No plan yet"}
+        body="A plan is Aura’s proposal for a job too big to do in one go. The steps it means to take, written down before it takes them, so you can change your mind first. Describe what you want in chat and one appears here."
+        action={
+          onOpenChat
+            ? { label: "Open chat", onClick: onOpenChat, icon: MessageSquare }
+            : undefined
+        }
+      />
     </div>
   );
 }
@@ -815,14 +784,7 @@ function SkillBadge({
     };
   }, [open, agents.length]);
 
-  useEffect(() => {
-    if (!open) return;
-    const onDoc = (e: MouseEvent) => {
-      if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false);
-    };
-    document.addEventListener("mousedown", onDoc);
-    return () => document.removeEventListener("mousedown", onDoc);
-  }, [open]);
+  useDismiss(open, () => setOpen(false), ref);
 
   const matchesSuggestion =
     !currentAgent || currentAgent === suggestion.providerId;
@@ -927,16 +889,7 @@ export function PlanDecisionControls({
   const [menuOpen, setMenuOpen] = useState(false);
   const menuRef = useRef<HTMLDivElement>(null);
 
-  useEffect(() => {
-    if (!menuOpen) return;
-    const onDoc = (e: MouseEvent) => {
-      if (menuRef.current && !menuRef.current.contains(e.target as Node)) {
-        setMenuOpen(false);
-      }
-    };
-    document.addEventListener("mousedown", onDoc);
-    return () => document.removeEventListener("mousedown", onDoc);
-  }, [menuOpen]);
+  useDismiss(menuOpen, () => setMenuOpen(false), menuRef);
 
   const decide = useCallback(
     async (decision: "build" | "revise" | "cancel") => {
@@ -980,7 +933,7 @@ export function PlanDecisionControls({
           color: "var(--color-bg-0)",
           borderRadius: "var(--radius-md)",
         }}
-        title="Waiting for your go-ahead — start building this plan"
+        title="Waiting for your go-ahead. Start building this plan"
       >
         {submitting === "build" ? "Building…" : "Build"}
       </button>
@@ -1142,9 +1095,9 @@ function PlanTabParallelism({
   disabled: boolean;
 }) {
   const options: { id: PlanParallelism; label: string; hint: string }[] = [
-    { id: "auto", label: "Auto", hint: "Zone-overlap heuristic (default)" },
-    { id: "parallel", label: "Parallel", hint: "Concurrent parallel copies, ignore overlap" },
-    { id: "serial", label: "Serial", hint: "One task at a time" },
+    { id: "auto", label: "When safe", hint: "Side by side, unless two tasks would touch the same files" },
+    { id: "parallel", label: "All at once", hint: "Side by side even when two touch the same files" },
+    { id: "serial", label: "One at a time", hint: "Never run two together" },
   ];
   return (
     <div

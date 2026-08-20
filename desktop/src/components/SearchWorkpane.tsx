@@ -16,6 +16,7 @@ import { api, type GrepHit, type GrepOpts, type ReplaceReport } from "../lib/api
 import { AsciiSpinner } from "./ui/ascii-spinner";
 import { Kbd } from "./ui/kbd";
 import { Input } from "./ui/input";
+import { askConfirm } from "./ui/ask";
 
 type Props = {
   repoRoot: string;
@@ -277,11 +278,18 @@ export function SearchWorkpane({ repoRoot, open, onClose }: Props) {
   async function replaceInFiles(paths: string[]) {
     if (!query.trim()) return;
     if (paths.length === 0) return;
-    const confirmMsg =
-      paths.length === 1
-        ? `Replace in ${shortPath(paths[0])}? This rewrites the file on disk.`
-        : `Replace across ${paths.length} files? This rewrites them on disk.`;
-    if (!window.confirm(confirmMsg)) return;
+    const one = paths.length === 1;
+    const ok = await askConfirm({
+      title: one
+        ? `Replace in ${shortPath(paths[0])}?`
+        : `Replace across ${paths.length} files?`,
+      body: one
+        ? "The file is rewritten on disk."
+        : "Those files are rewritten on disk.",
+      confirmLabel: "Replace",
+      tone: "danger",
+    });
+    if (!ok) return;
     setReplacing(true);
     setError(null);
     try {
@@ -321,15 +329,15 @@ export function SearchWorkpane({ repoRoot, open, onClose }: Props) {
       {/* Header */}
       <div className="h-11 px-4 border-b border-line-soft flex items-center gap-2.5 flex-shrink-0">
         <SearchIcon size={14} className="text-text-4 shrink-0" />
-        <div className="text-[13px] font-medium text-text-1">
+        <div className="text-base font-medium text-text-1">
           Search this project
         </div>
-        <div className="text-[11px] text-text-5 font-mono truncate">
+        <div className="text-xs text-text-5 font-mono truncate">
           {shortPath(repoRoot)}
         </div>
         <div className="flex-1" />
         {!searching && query.trim() && totalHits > 0 && (
-          <div className="text-[11px] text-text-4">
+          <div className="text-xs text-text-4">
             {totalHits} {totalHits === 1 ? "match" : "matches"} ·{" "}
             {totalFiles} {totalFiles === 1 ? "file" : "files"}
           </div>
@@ -337,7 +345,7 @@ export function SearchWorkpane({ repoRoot, open, onClose }: Props) {
         <button
           type="button"
           onClick={() => setShowReplace((v) => !v)}
-          className={`text-[11px] px-2 py-1 rounded ${
+          className={`text-xs px-2 py-1 rounded ${
             showReplace
               ? "bg-bg-2 text-text-1"
               : "text-text-4 hover:text-text-1"
@@ -350,14 +358,14 @@ export function SearchWorkpane({ repoRoot, open, onClose }: Props) {
           type="button"
           onClick={onClose}
           title="Close (Esc)"
-          className="text-[12px] text-text-4 hover:text-text-1 px-1.5 py-0.5 rounded hover:bg-bg-2"
+          className="text-sm text-text-4 hover:text-text-1 px-1.5 py-0.5 rounded hover:bg-state-hover"
         >
           ×
         </button>
       </div>
 
       {error && (
-        <div className="px-4 py-2 text-[11.5px] text-red bg-red/10 border-b border-line-soft">
+        <div className="px-4 py-2 text-sm text-red bg-red/10 border-b border-line-soft">
           {error}
         </div>
       )}
@@ -365,7 +373,7 @@ export function SearchWorkpane({ repoRoot, open, onClose }: Props) {
       {/* A finished replace is a receipt, not an alarm — it reads on the
           neutral ramp; only the failure banner above carries colour. */}
       {report && (
-        <div className="px-4 py-2 text-[11.5px] text-text-2 bg-bg-2 border-b border-line-soft">
+        <div className="px-4 py-2 text-sm text-text-2 bg-bg-2 border-b border-line-soft">
           Replaced {report.total_replacements} occurrence
           {report.total_replacements === 1 ? "" : "s"} across{" "}
           {report.files_changed} file{report.files_changed === 1 ? "" : "s"}.
@@ -383,16 +391,16 @@ export function SearchWorkpane({ repoRoot, open, onClose }: Props) {
                 value={query}
                 onChange={(e) => setQuery(e.target.value)}
                 placeholder="Search"
-                className="flex-1 min-w-0 h-7 text-[12px] font-mono"
+                className="flex-1 min-w-0 h-7 text-sm font-mono"
               />
               <button
                 type="button"
                 onClick={() => setCaseSensitive((v) => !v)}
                 title="Match Case (Aa)"
-                className={`text-[10.5px] font-mono px-1.5 py-1 rounded border ${
+                className={`text-xs font-mono px-1.5 py-1 rounded border ${
                   caseSensitive
                     ? "bg-accent/20 border-accent text-text-1"
-                    : "border-transparent text-text-4 hover:text-text-1 hover:bg-bg-2"
+                    : "border-transparent text-text-4 hover:text-text-1 hover:bg-state-hover"
                 }`}
               >
                 Aa
@@ -401,10 +409,10 @@ export function SearchWorkpane({ repoRoot, open, onClose }: Props) {
                 type="button"
                 onClick={() => setWholeWord((v) => !v)}
                 title="Whole Word"
-                className={`text-[10.5px] font-mono px-1.5 py-1 rounded border ${
+                className={`text-xs font-mono px-1.5 py-1 rounded border ${
                   wholeWord
                     ? "bg-accent/20 border-accent text-text-1"
-                    : "border-transparent text-text-4 hover:text-text-1 hover:bg-bg-2"
+                    : "border-transparent text-text-4 hover:text-text-1 hover:bg-state-hover"
                 }`}
               >
                 ab
@@ -413,10 +421,10 @@ export function SearchWorkpane({ repoRoot, open, onClose }: Props) {
                 type="button"
                 onClick={() => setRegex((v) => !v)}
                 title="Regex"
-                className={`text-[10.5px] font-mono px-1.5 py-1 rounded border ${
+                className={`text-xs font-mono px-1.5 py-1 rounded border ${
                   regex
                     ? "bg-accent/20 border-accent text-text-1"
-                    : "border-transparent text-text-4 hover:text-text-1 hover:bg-bg-2"
+                    : "border-transparent text-text-4 hover:text-text-1 hover:bg-state-hover"
                 }`}
               >
                 .*
@@ -430,14 +438,14 @@ export function SearchWorkpane({ repoRoot, open, onClose }: Props) {
                   value={replacement}
                   onChange={(e) => setReplacement(e.target.value)}
                   placeholder="Replace"
-                  className="flex-1 min-w-0 h-7 text-[12px] font-mono"
+                  className="flex-1 min-w-0 h-7 text-sm font-mono"
                 />
                 <button
                   type="button"
                   disabled={!canReplace || replacing}
                   onClick={() => replaceInFiles(groups.map((g) => g.path))}
                   title="Replace All"
-                  className="text-[11px] px-2 py-1 rounded bg-accent/20 text-text-1 hover:bg-accent/30 disabled:opacity-40 disabled:cursor-not-allowed"
+                  className="text-xs px-2 py-1 rounded bg-accent/20 text-text-1 hover:bg-accent/30 disabled:opacity-40 disabled:cursor-not-allowed"
                 >
                   All
                 </button>
@@ -446,7 +454,7 @@ export function SearchWorkpane({ repoRoot, open, onClose }: Props) {
           </div>
 
           <div className="p-3 flex flex-col gap-2 border-b border-line-soft">
-            <label className="text-[10.5px] uppercase tracking-wide text-text-5">
+            <label className="section-label">
               files to include
             </label>
             <Input
@@ -454,9 +462,9 @@ export function SearchWorkpane({ repoRoot, open, onClose }: Props) {
               value={include}
               onChange={(e) => setInclude(e.target.value)}
               placeholder="src/**/*.ts, *.md"
-              className="h-7 text-[11.5px] font-mono"
+              className="h-7 text-sm font-mono"
             />
-            <label className="text-[10.5px] uppercase tracking-wide text-text-5">
+            <label className="section-label">
               files to exclude
             </label>
             <Input
@@ -464,11 +472,11 @@ export function SearchWorkpane({ repoRoot, open, onClose }: Props) {
               value={exclude}
               onChange={(e) => setExclude(e.target.value)}
               placeholder="**/dist/**, **/*.lock"
-              className="h-7 text-[11.5px] font-mono"
+              className="h-7 text-sm font-mono"
             />
           </div>
 
-          <div className="p-3 text-[11px] text-text-5 flex flex-col gap-1">
+          <div className="p-3 text-xs text-text-5 flex flex-col gap-1">
             {searching && (
               <div className="flex items-center gap-1.5 text-text-4">
                 <AsciiSpinner />
@@ -492,20 +500,20 @@ export function SearchWorkpane({ repoRoot, open, onClose }: Props) {
               <SearchIcon size={22} className="text-text-5" />
               {query.trim() ? (
                 <>
-                  <div className="text-[13px] text-text-2">
+                  <div className="text-base text-text-2">
                     Nothing matches “{query.trim()}”.
                   </div>
-                  <div className="text-[11.5px] text-text-5">
+                  <div className="text-sm text-text-5">
                     Try fewer letters, or turn off the match filters above.
                   </div>
                 </>
               ) : (
                 <>
-                  <div className="text-[13px] text-text-2">
+                  <div className="text-base text-text-2">
                     Search across every file in this project.
                   </div>
-                  <div className="text-[11.5px] text-text-5">
-                    Type above to begin — press{" "}
+                  <div className="text-sm text-text-5">
+                    Type above to begin. Press{" "}
                     <Kbd>⌘⇧F</Kbd> any time to come back.
                   </div>
                 </>
@@ -524,23 +532,23 @@ export function SearchWorkpane({ repoRoot, open, onClose }: Props) {
                     onClick={() => toggleGroup(group.path)}
                     className="flex-1 min-w-0 flex items-center gap-2 text-left"
                   >
-                    <span className="text-[9px] text-text-5 w-2.5 shrink-0">
+                    <span className="text-2xs text-text-5 w-2.5 shrink-0">
                       {isCollapsed ? "▸" : "▾"}
                     </span>
                     <FileText
                       size={13}
                       className="text-text-4 shrink-0"
                     />
-                    <span className="text-[12.5px] text-text-1 truncate shrink-0 max-w-[55%]">
+                    <span className="text-base text-text-1 truncate shrink-0 max-w-[55%]">
                       {base}
                     </span>
                     {dir && (
-                      <span className="text-[11px] text-text-5 font-mono truncate">
+                      <span className="text-xs text-text-5 font-mono truncate">
                         {dir}
                       </span>
                     )}
                   </button>
-                  <span className="shrink-0 rounded-full bg-bg-2 px-1.5 py-px text-[10px] text-text-4 tabular-nums">
+                  <span className="shrink-0 rounded-full bg-bg-2 px-1.5 py-px text-2xs text-text-4 tabular-nums">
                     {group.hits.length}
                   </span>
                   {canReplace && (
@@ -549,7 +557,7 @@ export function SearchWorkpane({ repoRoot, open, onClose }: Props) {
                       disabled={replacing}
                       onClick={() => replaceInFiles([group.path])}
                       title="Replace in this file"
-                      className="opacity-0 group-hover:opacity-100 text-[10.5px] px-1.5 py-0.5 rounded bg-bg-2 text-text-3 hover:text-text-1 disabled:opacity-40"
+                      className="opacity-0 group-hover:opacity-100 text-xs px-1.5 py-0.5 rounded bg-bg-2 text-text-3 hover:text-text-1 disabled:opacity-40"
                     >
                       Replace
                     </button>
@@ -564,10 +572,10 @@ export function SearchWorkpane({ repoRoot, open, onClose }: Props) {
                         onClick={() => openHit(hit)}
                         className="w-full flex items-baseline gap-3 pl-[34px] pr-4 py-[3px] text-left hover:bg-accent/[0.07] group/hit"
                       >
-                        <span className="text-[10.5px] text-text-5 font-mono w-9 text-right shrink-0 tabular-nums group-hover/hit:text-accent">
+                        <span className="text-xs text-text-5 font-mono w-9 text-right shrink-0 tabular-nums group-hover/hit:text-accent">
                           {hit.line}
                         </span>
-                        <span className="text-[11.5px] text-text-2 font-mono truncate flex-1">
+                        <span className="text-sm text-text-2 font-mono truncate flex-1">
                           <MatchLine
                             text={hit.preview}
                             query={query}

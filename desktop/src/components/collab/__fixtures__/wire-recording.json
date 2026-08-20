@@ -1,0 +1,1851 @@
+{
+  "session": "sess-e2e-001",
+  "frames": [
+    {
+      "peer": "guest-early",
+      "frame": {
+        "fatal": true,
+        "message": "session not found",
+        "type": "error"
+      }
+    },
+    {
+      "peer": "teammate",
+      "frame": {
+        "host_online": false,
+        "session_id": "sess-e2e-001",
+        "type": "ready",
+        "you": {
+          "access": "drive",
+          "agent_kind": null,
+          "avatar": null,
+          "id": "p_d882ce2f",
+          "kind": "human",
+          "name": "Priya",
+          "role": "guest",
+          "since": 1785672828,
+          "state": "idle",
+          "user_id": "00000000-0000-0000-0000-0000000000b3"
+        },
+        "your_agents": []
+      }
+    },
+    {
+      "peer": "teammate",
+      "frame": {
+        "participants": [
+          {
+            "access": "drive",
+            "agent_kind": null,
+            "avatar": null,
+            "id": "p_d882ce2f",
+            "kind": "human",
+            "name": "Priya",
+            "role": "guest",
+            "since": 1785672828,
+            "state": "idle",
+            "user_id": "00000000-0000-0000-0000-0000000000b3"
+          }
+        ],
+        "type": "presence"
+      }
+    },
+    {
+      "peer": "host",
+      "frame": {
+        "host_online": true,
+        "session_id": "sess-e2e-001",
+        "type": "ready",
+        "you": {
+          "access": "drive",
+          "agent_kind": null,
+          "avatar": null,
+          "id": "p_90ff5b6b",
+          "kind": "human",
+          "name": "Ashiq",
+          "role": "host",
+          "since": 1785672829,
+          "state": "idle",
+          "user_id": "00000000-0000-0000-0000-0000000000b1"
+        },
+        "your_agents": [
+          {
+            "access": "drive",
+            "agent_kind": "claude",
+            "id": "a_711dd08d2874",
+            "local_id": "local-1",
+            "name": "Claude"
+          }
+        ]
+      }
+    },
+    {
+      "peer": "host",
+      "frame": {
+        "participants": [
+          {
+            "access": "drive",
+            "agent_kind": "claude",
+            "avatar": null,
+            "id": "a_711dd08d2874",
+            "kind": "agent",
+            "name": "Claude",
+            "role": "guest",
+            "since": 1785672829,
+            "state": "coding",
+            "user_id": "00000000-0000-0000-0000-0000000000b1"
+          },
+          {
+            "access": "drive",
+            "agent_kind": null,
+            "avatar": null,
+            "id": "p_90ff5b6b",
+            "kind": "human",
+            "name": "Ashiq",
+            "role": "host",
+            "since": 1785672829,
+            "state": "idle",
+            "user_id": "00000000-0000-0000-0000-0000000000b1"
+          }
+        ],
+        "type": "presence"
+      }
+    },
+    {
+      "peer": "host",
+      "frame": {
+        "online": true,
+        "type": "host"
+      }
+    },
+    {
+      "peer": "guest",
+      "frame": {
+        "host_online": true,
+        "session_id": "sess-e2e-001",
+        "type": "ready",
+        "you": {
+          "access": "watch",
+          "agent_kind": null,
+          "avatar": null,
+          "id": "p_35272e4f",
+          "kind": "human",
+          "name": "Shahabas",
+          "role": "guest",
+          "since": 1785672829,
+          "state": "idle",
+          "user_id": "00000000-0000-0000-0000-0000000000b2"
+        },
+        "your_agents": []
+      }
+    },
+    {
+      "peer": "guest",
+      "frame": {
+        "participants": [
+          {
+            "access": "drive",
+            "agent_kind": "claude",
+            "avatar": null,
+            "id": "a_711dd08d2874",
+            "kind": "agent",
+            "name": "Claude",
+            "role": "guest",
+            "since": 1785672829,
+            "state": "coding",
+            "user_id": "00000000-0000-0000-0000-0000000000b1"
+          },
+          {
+            "access": "watch",
+            "agent_kind": null,
+            "avatar": null,
+            "id": "p_35272e4f",
+            "kind": "human",
+            "name": "Shahabas",
+            "role": "guest",
+            "since": 1785672829,
+            "state": "idle",
+            "user_id": "00000000-0000-0000-0000-0000000000b2"
+          },
+          {
+            "access": "drive",
+            "agent_kind": null,
+            "avatar": null,
+            "id": "p_90ff5b6b",
+            "kind": "human",
+            "name": "Ashiq",
+            "role": "host",
+            "since": 1785672829,
+            "state": "idle",
+            "user_id": "00000000-0000-0000-0000-0000000000b1"
+          }
+        ],
+        "type": "presence"
+      }
+    },
+    {
+      "peer": "host",
+      "frame": {
+        "participants": [
+          {
+            "access": "drive",
+            "agent_kind": "claude",
+            "avatar": null,
+            "id": "a_711dd08d2874",
+            "kind": "agent",
+            "name": "Claude",
+            "role": "guest",
+            "since": 1785672829,
+            "state": "coding",
+            "user_id": "00000000-0000-0000-0000-0000000000b1"
+          },
+          {
+            "access": "watch",
+            "agent_kind": null,
+            "avatar": null,
+            "id": "p_35272e4f",
+            "kind": "human",
+            "name": "Shahabas",
+            "role": "guest",
+            "since": 1785672829,
+            "state": "idle",
+            "user_id": "00000000-0000-0000-0000-0000000000b2"
+          },
+          {
+            "access": "drive",
+            "agent_kind": null,
+            "avatar": null,
+            "id": "p_90ff5b6b",
+            "kind": "human",
+            "name": "Ashiq",
+            "role": "host",
+            "since": 1785672829,
+            "state": "idle",
+            "user_id": "00000000-0000-0000-0000-0000000000b1"
+          }
+        ],
+        "type": "presence"
+      }
+    },
+    {
+      "peer": "guest",
+      "frame": {
+        "fatal": false,
+        "message": "you are watching this session — ask the host for permission to drive",
+        "type": "error"
+      }
+    },
+    {
+      "peer": "host",
+      "frame": {
+        "at": 1785672829,
+        "from": "p_35272e4f",
+        "intent": "ask",
+        "refs": [],
+        "reply_to": null,
+        "seq": 2,
+        "text": "may I drive?",
+        "to": "p_90ff5b6b",
+        "type": "msg"
+      }
+    },
+    {
+      "peer": "guest",
+      "frame": {
+        "at": 1785672829,
+        "from": "p_35272e4f",
+        "intent": "ask",
+        "refs": [],
+        "reply_to": null,
+        "seq": 2,
+        "text": "may I drive?",
+        "to": "p_90ff5b6b",
+        "type": "msg"
+      }
+    },
+    {
+      "peer": "host",
+      "frame": {
+        "participants": [
+          {
+            "access": "drive",
+            "agent_kind": "claude",
+            "avatar": null,
+            "id": "a_711dd08d2874",
+            "kind": "agent",
+            "name": "Claude",
+            "role": "guest",
+            "since": 1785672829,
+            "state": "coding",
+            "user_id": "00000000-0000-0000-0000-0000000000b1"
+          },
+          {
+            "access": "drive",
+            "agent_kind": null,
+            "avatar": null,
+            "id": "p_35272e4f",
+            "kind": "human",
+            "name": "Shahabas",
+            "role": "guest",
+            "since": 1785672829,
+            "state": "idle",
+            "user_id": "00000000-0000-0000-0000-0000000000b2"
+          },
+          {
+            "access": "drive",
+            "agent_kind": null,
+            "avatar": null,
+            "id": "p_90ff5b6b",
+            "kind": "human",
+            "name": "Ashiq",
+            "role": "host",
+            "since": 1785672829,
+            "state": "idle",
+            "user_id": "00000000-0000-0000-0000-0000000000b1"
+          }
+        ],
+        "type": "presence"
+      }
+    },
+    {
+      "peer": "guest",
+      "frame": {
+        "participants": [
+          {
+            "access": "drive",
+            "agent_kind": "claude",
+            "avatar": null,
+            "id": "a_711dd08d2874",
+            "kind": "agent",
+            "name": "Claude",
+            "role": "guest",
+            "since": 1785672829,
+            "state": "coding",
+            "user_id": "00000000-0000-0000-0000-0000000000b1"
+          },
+          {
+            "access": "drive",
+            "agent_kind": null,
+            "avatar": null,
+            "id": "p_35272e4f",
+            "kind": "human",
+            "name": "Shahabas",
+            "role": "guest",
+            "since": 1785672829,
+            "state": "idle",
+            "user_id": "00000000-0000-0000-0000-0000000000b2"
+          },
+          {
+            "access": "drive",
+            "agent_kind": null,
+            "avatar": null,
+            "id": "p_90ff5b6b",
+            "kind": "human",
+            "name": "Ashiq",
+            "role": "host",
+            "since": 1785672829,
+            "state": "idle",
+            "user_id": "00000000-0000-0000-0000-0000000000b1"
+          }
+        ],
+        "type": "presence"
+      }
+    },
+    {
+      "peer": "teammate-live",
+      "frame": {
+        "host_online": true,
+        "session_id": "sess-e2e-001",
+        "type": "ready",
+        "you": {
+          "access": "drive",
+          "agent_kind": null,
+          "avatar": null,
+          "id": "p_384023b7",
+          "kind": "human",
+          "name": "Priya",
+          "role": "guest",
+          "since": 1785672829,
+          "state": "idle",
+          "user_id": "00000000-0000-0000-0000-0000000000b3"
+        },
+        "your_agents": []
+      }
+    },
+    {
+      "peer": "teammate-live",
+      "frame": {
+        "at": 1785672829,
+        "from": "p_35272e4f",
+        "intent": "ask",
+        "refs": [],
+        "reply_to": null,
+        "seq": 2,
+        "text": "may I drive?",
+        "to": "p_90ff5b6b",
+        "type": "msg"
+      }
+    },
+    {
+      "peer": "teammate-live",
+      "frame": {
+        "participants": [
+          {
+            "access": "drive",
+            "agent_kind": "claude",
+            "avatar": null,
+            "id": "a_711dd08d2874",
+            "kind": "agent",
+            "name": "Claude",
+            "role": "guest",
+            "since": 1785672829,
+            "state": "coding",
+            "user_id": "00000000-0000-0000-0000-0000000000b1"
+          },
+          {
+            "access": "drive",
+            "agent_kind": null,
+            "avatar": null,
+            "id": "p_35272e4f",
+            "kind": "human",
+            "name": "Shahabas",
+            "role": "guest",
+            "since": 1785672829,
+            "state": "idle",
+            "user_id": "00000000-0000-0000-0000-0000000000b2"
+          },
+          {
+            "access": "drive",
+            "agent_kind": null,
+            "avatar": null,
+            "id": "p_384023b7",
+            "kind": "human",
+            "name": "Priya",
+            "role": "guest",
+            "since": 1785672829,
+            "state": "idle",
+            "user_id": "00000000-0000-0000-0000-0000000000b3"
+          },
+          {
+            "access": "drive",
+            "agent_kind": null,
+            "avatar": null,
+            "id": "p_90ff5b6b",
+            "kind": "human",
+            "name": "Ashiq",
+            "role": "host",
+            "since": 1785672829,
+            "state": "idle",
+            "user_id": "00000000-0000-0000-0000-0000000000b1"
+          }
+        ],
+        "type": "presence"
+      }
+    },
+    {
+      "peer": "host",
+      "frame": {
+        "participants": [
+          {
+            "access": "drive",
+            "agent_kind": "claude",
+            "avatar": null,
+            "id": "a_711dd08d2874",
+            "kind": "agent",
+            "name": "Claude",
+            "role": "guest",
+            "since": 1785672829,
+            "state": "coding",
+            "user_id": "00000000-0000-0000-0000-0000000000b1"
+          },
+          {
+            "access": "drive",
+            "agent_kind": null,
+            "avatar": null,
+            "id": "p_35272e4f",
+            "kind": "human",
+            "name": "Shahabas",
+            "role": "guest",
+            "since": 1785672829,
+            "state": "idle",
+            "user_id": "00000000-0000-0000-0000-0000000000b2"
+          },
+          {
+            "access": "drive",
+            "agent_kind": null,
+            "avatar": null,
+            "id": "p_384023b7",
+            "kind": "human",
+            "name": "Priya",
+            "role": "guest",
+            "since": 1785672829,
+            "state": "idle",
+            "user_id": "00000000-0000-0000-0000-0000000000b3"
+          },
+          {
+            "access": "drive",
+            "agent_kind": null,
+            "avatar": null,
+            "id": "p_90ff5b6b",
+            "kind": "human",
+            "name": "Ashiq",
+            "role": "host",
+            "since": 1785672829,
+            "state": "idle",
+            "user_id": "00000000-0000-0000-0000-0000000000b1"
+          }
+        ],
+        "type": "presence"
+      }
+    },
+    {
+      "peer": "guest",
+      "frame": {
+        "participants": [
+          {
+            "access": "drive",
+            "agent_kind": "claude",
+            "avatar": null,
+            "id": "a_711dd08d2874",
+            "kind": "agent",
+            "name": "Claude",
+            "role": "guest",
+            "since": 1785672829,
+            "state": "coding",
+            "user_id": "00000000-0000-0000-0000-0000000000b1"
+          },
+          {
+            "access": "drive",
+            "agent_kind": null,
+            "avatar": null,
+            "id": "p_35272e4f",
+            "kind": "human",
+            "name": "Shahabas",
+            "role": "guest",
+            "since": 1785672829,
+            "state": "idle",
+            "user_id": "00000000-0000-0000-0000-0000000000b2"
+          },
+          {
+            "access": "drive",
+            "agent_kind": null,
+            "avatar": null,
+            "id": "p_384023b7",
+            "kind": "human",
+            "name": "Priya",
+            "role": "guest",
+            "since": 1785672829,
+            "state": "idle",
+            "user_id": "00000000-0000-0000-0000-0000000000b3"
+          },
+          {
+            "access": "drive",
+            "agent_kind": null,
+            "avatar": null,
+            "id": "p_90ff5b6b",
+            "kind": "human",
+            "name": "Ashiq",
+            "role": "host",
+            "since": 1785672829,
+            "state": "idle",
+            "user_id": "00000000-0000-0000-0000-0000000000b1"
+          }
+        ],
+        "type": "presence"
+      }
+    },
+    {
+      "peer": "teammate-live",
+      "frame": {
+        "participants": [
+          {
+            "access": "drive",
+            "agent_kind": "claude",
+            "avatar": null,
+            "id": "a_711dd08d2874",
+            "kind": "agent",
+            "name": "Claude",
+            "role": "guest",
+            "since": 1785672829,
+            "state": "coding",
+            "user_id": "00000000-0000-0000-0000-0000000000b1"
+          },
+          {
+            "access": "drive",
+            "agent_kind": null,
+            "avatar": null,
+            "id": "p_35272e4f",
+            "kind": "human",
+            "name": "Shahabas",
+            "role": "guest",
+            "since": 1785672829,
+            "state": "idle",
+            "user_id": "00000000-0000-0000-0000-0000000000b2"
+          },
+          {
+            "access": "watch",
+            "agent_kind": null,
+            "avatar": null,
+            "id": "p_384023b7",
+            "kind": "human",
+            "name": "Priya",
+            "role": "guest",
+            "since": 1785672829,
+            "state": "idle",
+            "user_id": "00000000-0000-0000-0000-0000000000b3"
+          },
+          {
+            "access": "drive",
+            "agent_kind": null,
+            "avatar": null,
+            "id": "p_90ff5b6b",
+            "kind": "human",
+            "name": "Ashiq",
+            "role": "host",
+            "since": 1785672829,
+            "state": "idle",
+            "user_id": "00000000-0000-0000-0000-0000000000b1"
+          }
+        ],
+        "type": "presence"
+      }
+    },
+    {
+      "peer": "host",
+      "frame": {
+        "participants": [
+          {
+            "access": "drive",
+            "agent_kind": "claude",
+            "avatar": null,
+            "id": "a_711dd08d2874",
+            "kind": "agent",
+            "name": "Claude",
+            "role": "guest",
+            "since": 1785672829,
+            "state": "coding",
+            "user_id": "00000000-0000-0000-0000-0000000000b1"
+          },
+          {
+            "access": "drive",
+            "agent_kind": null,
+            "avatar": null,
+            "id": "p_35272e4f",
+            "kind": "human",
+            "name": "Shahabas",
+            "role": "guest",
+            "since": 1785672829,
+            "state": "idle",
+            "user_id": "00000000-0000-0000-0000-0000000000b2"
+          },
+          {
+            "access": "watch",
+            "agent_kind": null,
+            "avatar": null,
+            "id": "p_384023b7",
+            "kind": "human",
+            "name": "Priya",
+            "role": "guest",
+            "since": 1785672829,
+            "state": "idle",
+            "user_id": "00000000-0000-0000-0000-0000000000b3"
+          },
+          {
+            "access": "drive",
+            "agent_kind": null,
+            "avatar": null,
+            "id": "p_90ff5b6b",
+            "kind": "human",
+            "name": "Ashiq",
+            "role": "host",
+            "since": 1785672829,
+            "state": "idle",
+            "user_id": "00000000-0000-0000-0000-0000000000b1"
+          }
+        ],
+        "type": "presence"
+      }
+    },
+    {
+      "peer": "guest",
+      "frame": {
+        "participants": [
+          {
+            "access": "drive",
+            "agent_kind": "claude",
+            "avatar": null,
+            "id": "a_711dd08d2874",
+            "kind": "agent",
+            "name": "Claude",
+            "role": "guest",
+            "since": 1785672829,
+            "state": "coding",
+            "user_id": "00000000-0000-0000-0000-0000000000b1"
+          },
+          {
+            "access": "drive",
+            "agent_kind": null,
+            "avatar": null,
+            "id": "p_35272e4f",
+            "kind": "human",
+            "name": "Shahabas",
+            "role": "guest",
+            "since": 1785672829,
+            "state": "idle",
+            "user_id": "00000000-0000-0000-0000-0000000000b2"
+          },
+          {
+            "access": "watch",
+            "agent_kind": null,
+            "avatar": null,
+            "id": "p_384023b7",
+            "kind": "human",
+            "name": "Priya",
+            "role": "guest",
+            "since": 1785672829,
+            "state": "idle",
+            "user_id": "00000000-0000-0000-0000-0000000000b3"
+          },
+          {
+            "access": "drive",
+            "agent_kind": null,
+            "avatar": null,
+            "id": "p_90ff5b6b",
+            "kind": "human",
+            "name": "Ashiq",
+            "role": "host",
+            "since": 1785672829,
+            "state": "idle",
+            "user_id": "00000000-0000-0000-0000-0000000000b1"
+          }
+        ],
+        "type": "presence"
+      }
+    },
+    {
+      "peer": "guest",
+      "frame": {
+        "participants": [
+          {
+            "access": "drive",
+            "agent_kind": "claude",
+            "avatar": null,
+            "id": "a_711dd08d2874",
+            "kind": "agent",
+            "name": "Claude",
+            "role": "guest",
+            "since": 1785672829,
+            "state": "coding",
+            "user_id": "00000000-0000-0000-0000-0000000000b1"
+          },
+          {
+            "access": "drive",
+            "agent_kind": null,
+            "avatar": null,
+            "id": "p_35272e4f",
+            "kind": "human",
+            "name": "Shahabas",
+            "role": "guest",
+            "since": 1785672829,
+            "state": "idle",
+            "user_id": "00000000-0000-0000-0000-0000000000b2"
+          },
+          {
+            "access": "drive",
+            "agent_kind": null,
+            "avatar": null,
+            "id": "p_90ff5b6b",
+            "kind": "human",
+            "name": "Ashiq",
+            "role": "host",
+            "since": 1785672829,
+            "state": "idle",
+            "user_id": "00000000-0000-0000-0000-0000000000b1"
+          }
+        ],
+        "type": "presence"
+      }
+    },
+    {
+      "peer": "host",
+      "frame": {
+        "participants": [
+          {
+            "access": "drive",
+            "agent_kind": "claude",
+            "avatar": null,
+            "id": "a_711dd08d2874",
+            "kind": "agent",
+            "name": "Claude",
+            "role": "guest",
+            "since": 1785672829,
+            "state": "coding",
+            "user_id": "00000000-0000-0000-0000-0000000000b1"
+          },
+          {
+            "access": "drive",
+            "agent_kind": null,
+            "avatar": null,
+            "id": "p_35272e4f",
+            "kind": "human",
+            "name": "Shahabas",
+            "role": "guest",
+            "since": 1785672829,
+            "state": "idle",
+            "user_id": "00000000-0000-0000-0000-0000000000b2"
+          },
+          {
+            "access": "drive",
+            "agent_kind": null,
+            "avatar": null,
+            "id": "p_90ff5b6b",
+            "kind": "human",
+            "name": "Ashiq",
+            "role": "host",
+            "since": 1785672829,
+            "state": "idle",
+            "user_id": "00000000-0000-0000-0000-0000000000b1"
+          }
+        ],
+        "type": "presence"
+      }
+    },
+    {
+      "peer": "teammate-rejoin",
+      "frame": {
+        "host_online": true,
+        "session_id": "sess-e2e-001",
+        "type": "ready",
+        "you": {
+          "access": "watch",
+          "agent_kind": null,
+          "avatar": null,
+          "id": "p_9e75ac6f",
+          "kind": "human",
+          "name": "Priya",
+          "role": "guest",
+          "since": 1785672830,
+          "state": "idle",
+          "user_id": "00000000-0000-0000-0000-0000000000b3"
+        },
+        "your_agents": []
+      }
+    },
+    {
+      "peer": "teammate-rejoin",
+      "frame": {
+        "at": 1785672829,
+        "from": "p_35272e4f",
+        "intent": "ask",
+        "refs": [],
+        "reply_to": null,
+        "seq": 2,
+        "text": "may I drive?",
+        "to": "p_90ff5b6b",
+        "type": "msg"
+      }
+    },
+    {
+      "peer": "teammate-rejoin",
+      "frame": {
+        "participants": [
+          {
+            "access": "drive",
+            "agent_kind": "claude",
+            "avatar": null,
+            "id": "a_711dd08d2874",
+            "kind": "agent",
+            "name": "Claude",
+            "role": "guest",
+            "since": 1785672829,
+            "state": "coding",
+            "user_id": "00000000-0000-0000-0000-0000000000b1"
+          },
+          {
+            "access": "drive",
+            "agent_kind": null,
+            "avatar": null,
+            "id": "p_35272e4f",
+            "kind": "human",
+            "name": "Shahabas",
+            "role": "guest",
+            "since": 1785672829,
+            "state": "idle",
+            "user_id": "00000000-0000-0000-0000-0000000000b2"
+          },
+          {
+            "access": "drive",
+            "agent_kind": null,
+            "avatar": null,
+            "id": "p_90ff5b6b",
+            "kind": "human",
+            "name": "Ashiq",
+            "role": "host",
+            "since": 1785672829,
+            "state": "idle",
+            "user_id": "00000000-0000-0000-0000-0000000000b1"
+          },
+          {
+            "access": "watch",
+            "agent_kind": null,
+            "avatar": null,
+            "id": "p_9e75ac6f",
+            "kind": "human",
+            "name": "Priya",
+            "role": "guest",
+            "since": 1785672830,
+            "state": "idle",
+            "user_id": "00000000-0000-0000-0000-0000000000b3"
+          }
+        ],
+        "type": "presence"
+      }
+    },
+    {
+      "peer": "host",
+      "frame": {
+        "participants": [
+          {
+            "access": "drive",
+            "agent_kind": "claude",
+            "avatar": null,
+            "id": "a_711dd08d2874",
+            "kind": "agent",
+            "name": "Claude",
+            "role": "guest",
+            "since": 1785672829,
+            "state": "coding",
+            "user_id": "00000000-0000-0000-0000-0000000000b1"
+          },
+          {
+            "access": "drive",
+            "agent_kind": null,
+            "avatar": null,
+            "id": "p_35272e4f",
+            "kind": "human",
+            "name": "Shahabas",
+            "role": "guest",
+            "since": 1785672829,
+            "state": "idle",
+            "user_id": "00000000-0000-0000-0000-0000000000b2"
+          },
+          {
+            "access": "drive",
+            "agent_kind": null,
+            "avatar": null,
+            "id": "p_90ff5b6b",
+            "kind": "human",
+            "name": "Ashiq",
+            "role": "host",
+            "since": 1785672829,
+            "state": "idle",
+            "user_id": "00000000-0000-0000-0000-0000000000b1"
+          },
+          {
+            "access": "watch",
+            "agent_kind": null,
+            "avatar": null,
+            "id": "p_9e75ac6f",
+            "kind": "human",
+            "name": "Priya",
+            "role": "guest",
+            "since": 1785672830,
+            "state": "idle",
+            "user_id": "00000000-0000-0000-0000-0000000000b3"
+          }
+        ],
+        "type": "presence"
+      }
+    },
+    {
+      "peer": "guest",
+      "frame": {
+        "participants": [
+          {
+            "access": "drive",
+            "agent_kind": "claude",
+            "avatar": null,
+            "id": "a_711dd08d2874",
+            "kind": "agent",
+            "name": "Claude",
+            "role": "guest",
+            "since": 1785672829,
+            "state": "coding",
+            "user_id": "00000000-0000-0000-0000-0000000000b1"
+          },
+          {
+            "access": "drive",
+            "agent_kind": null,
+            "avatar": null,
+            "id": "p_35272e4f",
+            "kind": "human",
+            "name": "Shahabas",
+            "role": "guest",
+            "since": 1785672829,
+            "state": "idle",
+            "user_id": "00000000-0000-0000-0000-0000000000b2"
+          },
+          {
+            "access": "drive",
+            "agent_kind": null,
+            "avatar": null,
+            "id": "p_90ff5b6b",
+            "kind": "human",
+            "name": "Ashiq",
+            "role": "host",
+            "since": 1785672829,
+            "state": "idle",
+            "user_id": "00000000-0000-0000-0000-0000000000b1"
+          },
+          {
+            "access": "watch",
+            "agent_kind": null,
+            "avatar": null,
+            "id": "p_9e75ac6f",
+            "kind": "human",
+            "name": "Priya",
+            "role": "guest",
+            "since": 1785672830,
+            "state": "idle",
+            "user_id": "00000000-0000-0000-0000-0000000000b3"
+          }
+        ],
+        "type": "presence"
+      }
+    },
+    {
+      "peer": "host",
+      "frame": {
+        "participants": [
+          {
+            "access": "drive",
+            "agent_kind": "claude",
+            "avatar": null,
+            "id": "a_711dd08d2874",
+            "kind": "agent",
+            "name": "Claude",
+            "role": "guest",
+            "since": 1785672829,
+            "state": "coding",
+            "user_id": "00000000-0000-0000-0000-0000000000b1"
+          },
+          {
+            "access": "drive",
+            "agent_kind": null,
+            "avatar": null,
+            "id": "p_35272e4f",
+            "kind": "human",
+            "name": "Shahabas",
+            "role": "guest",
+            "since": 1785672829,
+            "state": "idle",
+            "user_id": "00000000-0000-0000-0000-0000000000b2"
+          },
+          {
+            "access": "drive",
+            "agent_kind": null,
+            "avatar": null,
+            "id": "p_90ff5b6b",
+            "kind": "human",
+            "name": "Ashiq",
+            "role": "host",
+            "since": 1785672829,
+            "state": "idle",
+            "user_id": "00000000-0000-0000-0000-0000000000b1"
+          }
+        ],
+        "type": "presence"
+      }
+    },
+    {
+      "peer": "guest",
+      "frame": {
+        "participants": [
+          {
+            "access": "drive",
+            "agent_kind": "claude",
+            "avatar": null,
+            "id": "a_711dd08d2874",
+            "kind": "agent",
+            "name": "Claude",
+            "role": "guest",
+            "since": 1785672829,
+            "state": "coding",
+            "user_id": "00000000-0000-0000-0000-0000000000b1"
+          },
+          {
+            "access": "drive",
+            "agent_kind": null,
+            "avatar": null,
+            "id": "p_35272e4f",
+            "kind": "human",
+            "name": "Shahabas",
+            "role": "guest",
+            "since": 1785672829,
+            "state": "idle",
+            "user_id": "00000000-0000-0000-0000-0000000000b2"
+          },
+          {
+            "access": "drive",
+            "agent_kind": null,
+            "avatar": null,
+            "id": "p_90ff5b6b",
+            "kind": "human",
+            "name": "Ashiq",
+            "role": "host",
+            "since": 1785672829,
+            "state": "idle",
+            "user_id": "00000000-0000-0000-0000-0000000000b1"
+          }
+        ],
+        "type": "presence"
+      }
+    },
+    {
+      "peer": "guest",
+      "frame": {
+        "at": 1785672830,
+        "from": "p_35272e4f",
+        "intent": "instruct",
+        "refs": [],
+        "reply_to": null,
+        "seq": 3,
+        "text": "add a retry to the fetch",
+        "to": "a_711dd08d2874",
+        "type": "msg"
+      }
+    },
+    {
+      "peer": "host",
+      "frame": {
+        "at": 1785672830,
+        "from": "p_35272e4f",
+        "intent": "instruct",
+        "refs": [],
+        "reply_to": null,
+        "seq": 3,
+        "text": "add a retry to the fetch",
+        "to": "a_711dd08d2874",
+        "type": "msg"
+      }
+    },
+    {
+      "peer": "host",
+      "frame": {
+        "at": 1785672830,
+        "from": "p_90ff5b6b",
+        "intent": "chat",
+        "refs": [],
+        "reply_to": null,
+        "seq": 4,
+        "text": "on it",
+        "to": null,
+        "type": "msg"
+      }
+    },
+    {
+      "peer": "guest",
+      "frame": {
+        "at": 1785672830,
+        "from": "p_90ff5b6b",
+        "intent": "chat",
+        "refs": [],
+        "reply_to": null,
+        "seq": 4,
+        "text": "on it",
+        "to": null,
+        "type": "msg"
+      }
+    },
+    {
+      "peer": "guest",
+      "frame": {
+        "entry": {
+          "at": 1785672830,
+          "author": {
+            "agent_kind": "claude",
+            "id": "a_711dd08d2874",
+            "kind": "agent",
+            "name": "Claude"
+          },
+          "id": "fc47d0e2-2dad-49c7-8854-bd3e8e395e69",
+          "role": "assistant",
+          "seq": 5,
+          "text": "Added a retry with backoff."
+        },
+        "seq": 5,
+        "type": "transcript"
+      }
+    },
+    {
+      "peer": "host",
+      "frame": {
+        "entry": {
+          "at": 1785672830,
+          "author": {
+            "agent_kind": "claude",
+            "id": "a_711dd08d2874",
+            "kind": "agent",
+            "name": "Claude"
+          },
+          "id": "fc47d0e2-2dad-49c7-8854-bd3e8e395e69",
+          "role": "assistant",
+          "seq": 5,
+          "text": "Added a retry with backoff."
+        },
+        "seq": 5,
+        "type": "transcript"
+      }
+    },
+    {
+      "peer": "host",
+      "frame": {
+        "participants": [
+          {
+            "access": "drive",
+            "agent_kind": "claude",
+            "avatar": null,
+            "id": "a_711dd08d2874",
+            "kind": "agent",
+            "name": "Claude",
+            "role": "guest",
+            "since": 1785672829,
+            "state": "coding",
+            "user_id": "00000000-0000-0000-0000-0000000000b1"
+          },
+          {
+            "access": "drive",
+            "agent_kind": null,
+            "avatar": null,
+            "id": "p_90ff5b6b",
+            "kind": "human",
+            "name": "Ashiq",
+            "role": "host",
+            "since": 1785672829,
+            "state": "idle",
+            "user_id": "00000000-0000-0000-0000-0000000000b1"
+          }
+        ],
+        "type": "presence"
+      }
+    },
+    {
+      "peer": "guest-rejoin",
+      "frame": {
+        "host_online": true,
+        "session_id": "sess-e2e-001",
+        "type": "ready",
+        "you": {
+          "access": "drive",
+          "agent_kind": null,
+          "avatar": null,
+          "id": "p_84038ac2",
+          "kind": "human",
+          "name": "Shahabas",
+          "role": "guest",
+          "since": 1785672830,
+          "state": "idle",
+          "user_id": "00000000-0000-0000-0000-0000000000b2"
+        },
+        "your_agents": []
+      }
+    },
+    {
+      "peer": "guest-rejoin",
+      "frame": {
+        "at": 1785672829,
+        "from": "p_35272e4f",
+        "intent": "ask",
+        "refs": [],
+        "reply_to": null,
+        "seq": 2,
+        "text": "may I drive?",
+        "to": "p_90ff5b6b",
+        "type": "msg"
+      }
+    },
+    {
+      "peer": "guest-rejoin",
+      "frame": {
+        "at": 1785672830,
+        "from": "p_35272e4f",
+        "intent": "instruct",
+        "refs": [],
+        "reply_to": null,
+        "seq": 3,
+        "text": "add a retry to the fetch",
+        "to": "a_711dd08d2874",
+        "type": "msg"
+      }
+    },
+    {
+      "peer": "guest-rejoin",
+      "frame": {
+        "at": 1785672830,
+        "from": "p_90ff5b6b",
+        "intent": "chat",
+        "refs": [],
+        "reply_to": null,
+        "seq": 4,
+        "text": "on it",
+        "to": null,
+        "type": "msg"
+      }
+    },
+    {
+      "peer": "guest-rejoin",
+      "frame": {
+        "entry": {
+          "at": 1785672830,
+          "author": {
+            "agent_kind": "claude",
+            "id": "a_711dd08d2874",
+            "kind": "agent",
+            "name": "Claude"
+          },
+          "id": "fc47d0e2-2dad-49c7-8854-bd3e8e395e69",
+          "role": "assistant",
+          "seq": 5,
+          "text": "Added a retry with backoff."
+        },
+        "seq": 5,
+        "type": "transcript"
+      }
+    },
+    {
+      "peer": "guest-rejoin",
+      "frame": {
+        "participants": [
+          {
+            "access": "drive",
+            "agent_kind": "claude",
+            "avatar": null,
+            "id": "a_711dd08d2874",
+            "kind": "agent",
+            "name": "Claude",
+            "role": "guest",
+            "since": 1785672829,
+            "state": "coding",
+            "user_id": "00000000-0000-0000-0000-0000000000b1"
+          },
+          {
+            "access": "drive",
+            "agent_kind": null,
+            "avatar": null,
+            "id": "p_90ff5b6b",
+            "kind": "human",
+            "name": "Ashiq",
+            "role": "host",
+            "since": 1785672829,
+            "state": "idle",
+            "user_id": "00000000-0000-0000-0000-0000000000b1"
+          },
+          {
+            "access": "drive",
+            "agent_kind": null,
+            "avatar": null,
+            "id": "p_84038ac2",
+            "kind": "human",
+            "name": "Shahabas",
+            "role": "guest",
+            "since": 1785672830,
+            "state": "idle",
+            "user_id": "00000000-0000-0000-0000-0000000000b2"
+          }
+        ],
+        "type": "presence"
+      }
+    },
+    {
+      "peer": "host",
+      "frame": {
+        "participants": [
+          {
+            "access": "drive",
+            "agent_kind": "claude",
+            "avatar": null,
+            "id": "a_711dd08d2874",
+            "kind": "agent",
+            "name": "Claude",
+            "role": "guest",
+            "since": 1785672829,
+            "state": "coding",
+            "user_id": "00000000-0000-0000-0000-0000000000b1"
+          },
+          {
+            "access": "drive",
+            "agent_kind": null,
+            "avatar": null,
+            "id": "p_90ff5b6b",
+            "kind": "human",
+            "name": "Ashiq",
+            "role": "host",
+            "since": 1785672829,
+            "state": "idle",
+            "user_id": "00000000-0000-0000-0000-0000000000b1"
+          },
+          {
+            "access": "drive",
+            "agent_kind": null,
+            "avatar": null,
+            "id": "p_84038ac2",
+            "kind": "human",
+            "name": "Shahabas",
+            "role": "guest",
+            "since": 1785672830,
+            "state": "idle",
+            "user_id": "00000000-0000-0000-0000-0000000000b2"
+          }
+        ],
+        "type": "presence"
+      }
+    },
+    {
+      "peer": "pretender",
+      "frame": {
+        "host_online": true,
+        "session_id": "sess-e2e-001",
+        "type": "ready",
+        "you": {
+          "access": "drive",
+          "agent_kind": null,
+          "avatar": null,
+          "id": "p_94d653da",
+          "kind": "human",
+          "name": "Shahabas",
+          "role": "guest",
+          "since": 1785672830,
+          "state": "idle",
+          "user_id": "00000000-0000-0000-0000-0000000000b2"
+        },
+        "your_agents": []
+      }
+    },
+    {
+      "peer": "pretender",
+      "frame": {
+        "fatal": false,
+        "message": "this session already has a host — joined as guest",
+        "type": "error"
+      }
+    },
+    {
+      "peer": "pretender",
+      "frame": {
+        "at": 1785672829,
+        "from": "p_35272e4f",
+        "intent": "ask",
+        "refs": [],
+        "reply_to": null,
+        "seq": 2,
+        "text": "may I drive?",
+        "to": "p_90ff5b6b",
+        "type": "msg"
+      }
+    },
+    {
+      "peer": "pretender",
+      "frame": {
+        "at": 1785672830,
+        "from": "p_35272e4f",
+        "intent": "instruct",
+        "refs": [],
+        "reply_to": null,
+        "seq": 3,
+        "text": "add a retry to the fetch",
+        "to": "a_711dd08d2874",
+        "type": "msg"
+      }
+    },
+    {
+      "peer": "pretender",
+      "frame": {
+        "at": 1785672830,
+        "from": "p_90ff5b6b",
+        "intent": "chat",
+        "refs": [],
+        "reply_to": null,
+        "seq": 4,
+        "text": "on it",
+        "to": null,
+        "type": "msg"
+      }
+    },
+    {
+      "peer": "pretender",
+      "frame": {
+        "entry": {
+          "at": 1785672830,
+          "author": {
+            "agent_kind": "claude",
+            "id": "a_711dd08d2874",
+            "kind": "agent",
+            "name": "Claude"
+          },
+          "id": "fc47d0e2-2dad-49c7-8854-bd3e8e395e69",
+          "role": "assistant",
+          "seq": 5,
+          "text": "Added a retry with backoff."
+        },
+        "seq": 5,
+        "type": "transcript"
+      }
+    },
+    {
+      "peer": "pretender",
+      "frame": {
+        "participants": [
+          {
+            "access": "drive",
+            "agent_kind": "claude",
+            "avatar": null,
+            "id": "a_711dd08d2874",
+            "kind": "agent",
+            "name": "Claude",
+            "role": "guest",
+            "since": 1785672829,
+            "state": "coding",
+            "user_id": "00000000-0000-0000-0000-0000000000b1"
+          },
+          {
+            "access": "drive",
+            "agent_kind": null,
+            "avatar": null,
+            "id": "p_90ff5b6b",
+            "kind": "human",
+            "name": "Ashiq",
+            "role": "host",
+            "since": 1785672829,
+            "state": "idle",
+            "user_id": "00000000-0000-0000-0000-0000000000b1"
+          },
+          {
+            "access": "drive",
+            "agent_kind": null,
+            "avatar": null,
+            "id": "p_84038ac2",
+            "kind": "human",
+            "name": "Shahabas",
+            "role": "guest",
+            "since": 1785672830,
+            "state": "idle",
+            "user_id": "00000000-0000-0000-0000-0000000000b2"
+          },
+          {
+            "access": "drive",
+            "agent_kind": null,
+            "avatar": null,
+            "id": "p_94d653da",
+            "kind": "human",
+            "name": "Shahabas",
+            "role": "guest",
+            "since": 1785672830,
+            "state": "idle",
+            "user_id": "00000000-0000-0000-0000-0000000000b2"
+          }
+        ],
+        "type": "presence"
+      }
+    },
+    {
+      "peer": "host",
+      "frame": {
+        "participants": [
+          {
+            "access": "drive",
+            "agent_kind": "claude",
+            "avatar": null,
+            "id": "a_711dd08d2874",
+            "kind": "agent",
+            "name": "Claude",
+            "role": "guest",
+            "since": 1785672829,
+            "state": "coding",
+            "user_id": "00000000-0000-0000-0000-0000000000b1"
+          },
+          {
+            "access": "drive",
+            "agent_kind": null,
+            "avatar": null,
+            "id": "p_90ff5b6b",
+            "kind": "human",
+            "name": "Ashiq",
+            "role": "host",
+            "since": 1785672829,
+            "state": "idle",
+            "user_id": "00000000-0000-0000-0000-0000000000b1"
+          },
+          {
+            "access": "drive",
+            "agent_kind": null,
+            "avatar": null,
+            "id": "p_84038ac2",
+            "kind": "human",
+            "name": "Shahabas",
+            "role": "guest",
+            "since": 1785672830,
+            "state": "idle",
+            "user_id": "00000000-0000-0000-0000-0000000000b2"
+          },
+          {
+            "access": "drive",
+            "agent_kind": null,
+            "avatar": null,
+            "id": "p_94d653da",
+            "kind": "human",
+            "name": "Shahabas",
+            "role": "guest",
+            "since": 1785672830,
+            "state": "idle",
+            "user_id": "00000000-0000-0000-0000-0000000000b2"
+          }
+        ],
+        "type": "presence"
+      }
+    },
+    {
+      "peer": "guest-rejoin",
+      "frame": {
+        "participants": [
+          {
+            "access": "drive",
+            "agent_kind": "claude",
+            "avatar": null,
+            "id": "a_711dd08d2874",
+            "kind": "agent",
+            "name": "Claude",
+            "role": "guest",
+            "since": 1785672829,
+            "state": "coding",
+            "user_id": "00000000-0000-0000-0000-0000000000b1"
+          },
+          {
+            "access": "drive",
+            "agent_kind": null,
+            "avatar": null,
+            "id": "p_90ff5b6b",
+            "kind": "human",
+            "name": "Ashiq",
+            "role": "host",
+            "since": 1785672829,
+            "state": "idle",
+            "user_id": "00000000-0000-0000-0000-0000000000b1"
+          },
+          {
+            "access": "drive",
+            "agent_kind": null,
+            "avatar": null,
+            "id": "p_84038ac2",
+            "kind": "human",
+            "name": "Shahabas",
+            "role": "guest",
+            "since": 1785672830,
+            "state": "idle",
+            "user_id": "00000000-0000-0000-0000-0000000000b2"
+          },
+          {
+            "access": "drive",
+            "agent_kind": null,
+            "avatar": null,
+            "id": "p_94d653da",
+            "kind": "human",
+            "name": "Shahabas",
+            "role": "guest",
+            "since": 1785672830,
+            "state": "idle",
+            "user_id": "00000000-0000-0000-0000-0000000000b2"
+          }
+        ],
+        "type": "presence"
+      }
+    },
+    {
+      "peer": "host",
+      "frame": {
+        "participants": [
+          {
+            "access": "drive",
+            "agent_kind": "claude",
+            "avatar": null,
+            "id": "a_711dd08d2874",
+            "kind": "agent",
+            "name": "Claude",
+            "role": "guest",
+            "since": 1785672829,
+            "state": "coding",
+            "user_id": "00000000-0000-0000-0000-0000000000b1"
+          },
+          {
+            "access": "drive",
+            "agent_kind": null,
+            "avatar": null,
+            "id": "p_90ff5b6b",
+            "kind": "human",
+            "name": "Ashiq",
+            "role": "host",
+            "since": 1785672829,
+            "state": "idle",
+            "user_id": "00000000-0000-0000-0000-0000000000b1"
+          },
+          {
+            "access": "drive",
+            "agent_kind": null,
+            "avatar": null,
+            "id": "p_84038ac2",
+            "kind": "human",
+            "name": "Shahabas",
+            "role": "guest",
+            "since": 1785672830,
+            "state": "idle",
+            "user_id": "00000000-0000-0000-0000-0000000000b2"
+          }
+        ],
+        "type": "presence"
+      }
+    },
+    {
+      "peer": "guest-rejoin",
+      "frame": {
+        "participants": [
+          {
+            "access": "drive",
+            "agent_kind": "claude",
+            "avatar": null,
+            "id": "a_711dd08d2874",
+            "kind": "agent",
+            "name": "Claude",
+            "role": "guest",
+            "since": 1785672829,
+            "state": "coding",
+            "user_id": "00000000-0000-0000-0000-0000000000b1"
+          },
+          {
+            "access": "drive",
+            "agent_kind": null,
+            "avatar": null,
+            "id": "p_90ff5b6b",
+            "kind": "human",
+            "name": "Ashiq",
+            "role": "host",
+            "since": 1785672829,
+            "state": "idle",
+            "user_id": "00000000-0000-0000-0000-0000000000b1"
+          },
+          {
+            "access": "drive",
+            "agent_kind": null,
+            "avatar": null,
+            "id": "p_84038ac2",
+            "kind": "human",
+            "name": "Shahabas",
+            "role": "guest",
+            "since": 1785672830,
+            "state": "idle",
+            "user_id": "00000000-0000-0000-0000-0000000000b2"
+          }
+        ],
+        "type": "presence"
+      }
+    },
+    {
+      "peer": "host",
+      "frame": {
+        "body_b64": null,
+        "code": "eeezxz",
+        "headers": {
+          "accept": "*/*",
+          "accept-encoding": "gzip, deflate",
+          "accept-language": "*",
+          "host": "127.0.0.1:5173",
+          "sec-fetch-mode": "cors",
+          "user-agent": "node"
+        },
+        "id": "r_910ca3de6511415dbb257f5bb90a6736",
+        "method": "GET",
+        "path": "/",
+        "port": 5173,
+        "type": "tunnel_req"
+      }
+    },
+    {
+      "peer": "guest-rejoin",
+      "frame": {
+        "fatal": true,
+        "message": "this session is no longer shared",
+        "type": "error"
+      }
+    },
+    {
+      "peer": "host",
+      "frame": {
+        "participants": [
+          {
+            "access": "drive",
+            "agent_kind": "claude",
+            "avatar": null,
+            "id": "a_711dd08d2874",
+            "kind": "agent",
+            "name": "Claude",
+            "role": "guest",
+            "since": 1785672829,
+            "state": "coding",
+            "user_id": "00000000-0000-0000-0000-0000000000b1"
+          },
+          {
+            "access": "drive",
+            "agent_kind": null,
+            "avatar": null,
+            "id": "p_90ff5b6b",
+            "kind": "human",
+            "name": "Ashiq",
+            "role": "host",
+            "since": 1785672829,
+            "state": "idle",
+            "user_id": "00000000-0000-0000-0000-0000000000b1"
+          }
+        ],
+        "type": "presence"
+      }
+    },
+    {
+      "peer": "host",
+      "frame": {
+        "participants": [
+          {
+            "access": "drive",
+            "agent_kind": "claude",
+            "avatar": null,
+            "id": "a_711dd08d2874",
+            "kind": "agent",
+            "name": "Claude",
+            "role": "guest",
+            "since": 1785672829,
+            "state": "coding",
+            "user_id": "00000000-0000-0000-0000-0000000000b1"
+          },
+          {
+            "access": "drive",
+            "agent_kind": null,
+            "avatar": null,
+            "id": "p_90ff5b6b",
+            "kind": "human",
+            "name": "Ashiq",
+            "role": "host",
+            "since": 1785672829,
+            "state": "idle",
+            "user_id": "00000000-0000-0000-0000-0000000000b1"
+          }
+        ],
+        "type": "presence"
+      }
+    },
+    {
+      "peer": "guest-evicted",
+      "frame": {
+        "fatal": true,
+        "message": "session not found",
+        "type": "error"
+      }
+    }
+  ]
+}

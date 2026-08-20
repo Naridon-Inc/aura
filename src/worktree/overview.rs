@@ -507,6 +507,7 @@ mod tests {
                 patterns: vec!["aura-cli/".into()],
                 mode: ZoneMode::Block,
                 worktree: Some("barcelona".into()),
+                claimed_at: 0,
             },
             ZoneRule {
                 zone_id: "z2".into(),
@@ -514,6 +515,7 @@ mod tests {
                 patterns: vec!["aura-web/".into()],
                 mode: ZoneMode::Warn,
                 worktree: Some("granada".into()),
+                claimed_at: 0,
             },
         ];
         let p = presence(

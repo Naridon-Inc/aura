@@ -38,24 +38,30 @@ import {
   MonitorOff,
   PhoneOff,
 } from "lucide-react";
-import { api } from "../lib/api";
+import { api, AURA_CLI_INSTALL_COMMAND, type AuraCliCheck } from "../lib/api";
 import { BranchSwitcherModal } from "./git/BranchSwitcherModal";
 import { Tooltip, TooltipTrigger, TooltipContent } from "./ui/tooltip";
 import { MENU_PANEL } from "./ui/menuSurface";
 import { ClaudeUsageRing } from "./manager/chat/ClaudeUsageRing";
 import { AuraMark } from "./AuraMark";
 import {
+  humanizeCopyTitle,
   humanizeWorkspaceName,
   isMachineLeaf,
   isWorktreeRoot,
 } from "../lib/workspaceLabel";
+import { useWorkspaceCustomization } from "../lib/workspaceCustomization";
+import { useDismiss } from "../lib/useDismiss";
 
 type StatusBarProps = {
   /** Repo root for the BranchSwitcher's git ops (list/checkout/create) and
    *  the leftmost branch chip. Empty string disables the switcher's git
    *  calls. */
   repoRoot: string;
-  changedFiles: number;
+  /** How many files differ. `null` until a `git diff` has come back — the
+   *  chip may not say "No changes yet" on the strength of a read that hasn't
+   *  happened. */
+  changedFiles: number | null;
   auditUnacked?: number;
   conflictsOpen?: number;
   /** Footer changes chip click — routes to the Review changes surface and
@@ -76,17 +82,11 @@ type StatusBarProps = {
    *  collapsed. Defaults to `true` so callers that don't wire this
    *  still see the pill (graceful pre-dock behavior). */
   sidebarOpen?: boolean;
-  /** Task #229 — installed `aura` CLI version check. When set, renders
-   *  a chip showing ok/outdated/missing/unknown so users notice when
-   *  the bundled MCP contract drifts from the binary on PATH. `null`
+  /** Task #229 — version check for the `aura` CLI the app runs. When set,
+   *  renders a chip showing ok/outdated/missing/unknown so users notice when
+   *  the bundled MCP contract drifts from the binary in use. `null`
    *  while the first check is in flight; the chip stays hidden. */
-  cliVersion?: {
-    installed: string | null;
-    expected: string;
-    path: string | null;
-    status: "ok" | "outdated" | "missing" | "unknown";
-    raw: string | null;
-  } | null;
+  cliVersion?: AuraCliCheck | null;
   /** Refresh handler — wired to a button inside the popover so users
    *  don't have to restart the shell after upgrading the CLI. */
   onRefreshCliVersion?: () => void;
@@ -132,7 +132,7 @@ export function StatusBar({
     // fill the bar; the two inner zones are items-center so their inset
     // chips sit centered in the taller strip. overflow-visible lets the
     // upward popovers (branch, cli, model) escape the bar.
-    <div className="flex items-stretch flex-nowrap w-full h-full text-[11px] border-t border-line-soft bg-bg-0 select-none">
+    <div className="flex items-stretch flex-nowrap w-full h-full text-xs border-t border-line-soft bg-bg-0 select-none">
       {/* Persistent huddle status pill — V.Y.4. Renders nothing when
           no call is active OR when the sidebar is open (the
           VoiceDockPanel dock is the primary surface in that case).
@@ -144,20 +144,24 @@ export function StatusBar({
         {/* Workspace identity — branch (with live list/checkout/create),
             then changes, then the path. The branch leads because it's the
             single most consequential bit of workspace state. */}
-        <BranchSwitcher repoRoot={repoRoot} dirty={changedFiles > 0} />
+        <BranchSwitcher repoRoot={repoRoot} dirty={(changedFiles ?? 0) > 0} />
         {/* Changes — plain "N changes", no line-churn numbers. Click opens
-            the Review changes surface. Dim (no click) when nothing's changed. */}
+            the Review changes surface. Dim (no click) when nothing's changed.
+            Before the first read lands it shows an em-dash: "0 changes" and
+            "No changes yet" are answers, and we don't have one yet. */}
         <Item
           icon={<FileIcon />}
           title={
-            changedFiles > 0
-              ? `${changedFiles} change${changedFiles === 1 ? "" : "s"} — click to review`
-              : "No changes yet"
+            changedFiles === null
+              ? "Aura hasn’t read this workspace’s changes yet"
+              : changedFiles > 0
+                ? `${changedFiles} change${changedFiles === 1 ? "" : "s"}. Click to review`
+                : "No changes yet"
           }
-          onClick={changedFiles > 0 ? onClickDiff : undefined}
-          dim={changedFiles === 0}
+          onClick={changedFiles !== null && changedFiles > 0 ? onClickDiff : undefined}
+          dim={changedFiles === null || changedFiles === 0}
         >
-          <span className="tabular-nums">{changedFiles}</span>
+          <span className="tabular-nums">{changedFiles === null ? "—" : changedFiles}</span>
           <span className="text-text-4">change{changedFiles === 1 ? "" : "s"}</span>
         </Item>
 
@@ -176,7 +180,7 @@ export function StatusBar({
           <Item
             dot="amber"
             onClick={onClickConflicts}
-            title="Merge conflicts — click to resolve"
+            title="Merge conflicts. Click to resolve"
             tone="amber"
           >
             <span className="tabular-nums">{conflictsOpen}</span>
@@ -214,13 +218,15 @@ export function StatusBar({
             hover reveals the provider/model, 5h %, weekly %, session cost and
             freshness. */}
         <ClaudeUsageRing variant="footer" />
-        {/* CLI version chip only when there's actual drift — an update or a
-            missing binary. In sync (status "ok", or an undeterminable
-            "unknown") it renders nothing, so the calm footer never carries a
-            green "all good" chip as noise. Auto-update via CliUpdateToast is
-            unaffected. */}
+        {/* CLI version chip only when there's actual drift — an update, a
+            missing binary, or an older copy shadowing ours on PATH. In sync
+            (status "ok", or an undeterminable "unknown") it renders nothing,
+            so the calm footer never carries a green "all good" chip as noise.
+            Auto-update via CliUpdateToast is unaffected. */}
         {cliVersion &&
-          (cliVersion.status === "outdated" || cliVersion.status === "missing") && (
+          (cliVersion.status === "outdated" ||
+            cliVersion.status === "missing" ||
+            cliVersion.shadowing) && (
             <CliVersionChip
               info={cliVersion}
               onRefresh={onRefreshCliVersion}
@@ -241,8 +247,16 @@ export function StatusBar({
 //
 // Renders as a flat Item with a colored dot:
 //   • green  → installed.major.minor == expected (status "ok")
-//   • amber  → installed but on a different minor (status "outdated")
-//   • red    → no binary on PATH ("missing"), or `--version` unparseable ("unknown")
+//   • amber  → installed but on a different minor (status "outdated"), or
+//              an older copy is ahead of ours on PATH (`info.shadowing`)
+//   • red    → no `aura` at all ("missing"), or `--version` unparseable
+//
+// `info.installed` / `info.path` describe the binary the app RUNS. They used
+// to describe whatever `which aura` answered first, which stopped being the
+// same thing when the resolver learned to step over a stale PATH entry — so
+// the chip reported `0.4.6-alpha` off a binary the app had already refused
+// to use. `info.shadowing` is that other copy, said as its own fact: the app
+// is fine, and the `aura` the user types in a terminal is not.
 //
 // Click toggles a popover anchored above the chip with the actual
 // version strings, the resolved path, the raw `--version` line, and a
@@ -253,13 +267,7 @@ function CliVersionChip({
   onRefresh,
   onUpdate,
 }: {
-  info: {
-    installed: string | null;
-    expected: string;
-    path: string | null;
-    status: "ok" | "outdated" | "missing" | "unknown";
-    raw: string | null;
-  };
+  info: AuraCliCheck;
   onRefresh?: () => void;
   onUpdate?: () => Promise<void>;
 }) {
@@ -285,50 +293,43 @@ function CliVersionChip({
     }
   }
 
-  useEffect(() => {
-    if (!open) return;
-    function onDoc(e: MouseEvent) {
-      const t = e.target as Node | null;
-      if (wrapRef.current && t && !wrapRef.current.contains(t)) setOpen(false);
-    }
-    function onKey(e: KeyboardEvent) {
-      if (e.key === "Escape") setOpen(false);
-    }
-    document.addEventListener("mousedown", onDoc);
-    document.addEventListener("keydown", onKey);
-    return () => {
-      document.removeEventListener("mousedown", onDoc);
-      document.removeEventListener("keydown", onKey);
-    };
-  }, [open]);
+  useDismiss(open, () => setOpen(false), wrapRef);
+
+  // The app's own CLI is fine and something older is winning on PATH. Its
+  // own state, not a variant of "outdated" — nothing about the app is stale.
+  const shadowed = info.status === "ok" && info.shadowing !== null;
 
   const dotTone: "green" | "amber" | "red" =
-    info.status === "ok"
-      ? "green"
-      : info.status === "outdated"
-        ? "amber"
+    info.status === "outdated" || shadowed
+      ? "amber"
+      : info.status === "ok"
+        ? "green"
         : "red";
-  const labelText =
-    info.status === "ok"
+  const labelText = shadowed
+    ? "old aura on PATH"
+    : info.status === "ok"
       ? `aura ${info.installed ?? ""}`
       : info.status === "outdated"
         ? `aura ${info.installed ?? "?"} → ${info.expected}`
         : info.status === "missing"
           ? "aura missing"
           : "aura ?";
-  const titleText =
-    info.status === "ok"
+  const titleText = shadowed
+    ? `Aura runs ${info.installed} from ${info.path}. A terminal finds ${info.shadowing?.installed} at ${info.shadowing?.path} first.`
+    : info.status === "ok"
       ? `Aura CLI ${info.installed} matches expected ${info.expected}`
       : info.status === "outdated"
-        ? `Aura CLI ${info.installed} is out of sync — shell expects ${info.expected}. Click for install command.`
+        ? `Aura CLI ${info.installed} is out of sync. Shell expects ${info.expected}. Click for install command.`
         : info.status === "missing"
-          ? "Aura CLI not found on PATH. Click for install command."
+          ? "No aura command found on this computer. Click for install command."
           : "Aura CLI version could not be determined. Click for details.";
 
   // Install command shown in the popover. Cargo path is the canonical
   // route today; the bundled installer also exists but isn't a one-line
-  // copy-paste, so we surface cargo here and link the docs URL.
-  const installCmd = `cargo install --git https://github.com/Naridon-Inc/aura aura-cli`;
+  // copy-paste, so we surface cargo here and link the docs URL. Shared with
+  // the "Aura off" strip, which offers the same escape hatch — one command,
+  // said the same way wherever the user meets the problem.
+  const installCmd = AURA_CLI_INSTALL_COMMAND;
 
   function copyInstall() {
     navigator.clipboard
@@ -359,7 +360,7 @@ function CliVersionChip({
       </Item>
       {open && (
         <div
-          className={`${MENU_PANEL} absolute right-0 bottom-full mb-1 !p-3 text-[11.5px] text-text-2`}
+          className={`${MENU_PANEL} absolute right-0 bottom-full mb-1 !p-3 text-sm text-text-2`}
           style={{ minWidth: 320 }}
         >
           <div className="flex items-center justify-between mb-2">
@@ -370,7 +371,7 @@ function CliVersionChip({
                 onClick={() => {
                   onRefresh();
                 }}
-                className="text-[10.5px] px-1.5 py-0.5 rounded hover:bg-bg-2 text-text-3"
+                className="text-xs px-1.5 py-0.5 rounded hover:bg-state-hover text-text-3"
                 title="Re-run the version check"
               >
                 Refresh
@@ -389,33 +390,67 @@ function CliVersionChip({
                       : "var(--color-red)",
               }}
             >
-              {info.status}
+              {shadowed ? "old copy on your PATH" : info.status}
             </dd>
-            <dt className="text-text-4">Installed</dt>
+            {/* "Aura uses", not "Installed" — with two aura binaries on the
+                machine, which one this row is about is the whole question. */}
+            <dt className="text-text-4">Aura uses</dt>
             <dd className="font-mono tabular-nums">
               {info.installed ?? "—"}
             </dd>
-            <dt className="text-text-4">Expected</dt>
-            <dd className="font-mono tabular-nums">{info.expected}</dd>
+            {/* Only worth a row when it differs. In the shadowing case the
+                app's CLI already matches, and printing the same number
+                twice invites the reader to hunt for a difference. */}
+            {info.installed !== info.expected && (
+              <>
+                <dt className="text-text-4">Expected</dt>
+                <dd className="font-mono tabular-nums">{info.expected}</dd>
+              </>
+            )}
             {info.path && (
               <>
                 <dt className="text-text-4">Path</dt>
-                <dd className="font-mono text-[10.5px] truncate" title={info.path}>
+                <dd className="font-mono text-xs truncate" title={info.path}>
                   {info.path}
+                </dd>
+              </>
+            )}
+            {info.shadowing && (
+              <>
+                <dt className="text-text-4">Terminal</dt>
+                <dd
+                  className="font-mono text-xs truncate"
+                  style={{ color: "var(--color-amber)" }}
+                  title={info.shadowing.path}
+                >
+                  {info.shadowing.installed} · {info.shadowing.path}
                 </dd>
               </>
             )}
             {info.raw && info.raw !== `aura ${info.installed}` && (
               <>
                 <dt className="text-text-4">Raw</dt>
-                <dd className="font-mono text-[10.5px] text-text-3 truncate" title={info.raw}>
+                <dd className="font-mono text-xs text-text-3 truncate" title={info.raw}>
                   {info.raw}
                 </dd>
               </>
             )}
           </dl>
-          {info.status !== "ok" && info.status !== "unknown" && (
+          {(info.status === "outdated" ||
+            info.status === "missing" ||
+            shadowed) && (
             <div className="mt-3 pt-2 border-t border-line-soft">
+              {shadowed && (
+                // Say the consequence, not the mechanism. Nobody reads a
+                // footer popover to learn about PATH precedence; they read it
+                // to find out whether they have a problem and what fixes it.
+                <div className="text-text-3 mb-2 leading-snug">
+                  Aura is fine — it runs the newer one. But an{" "}
+                  <span className="font-mono text-xs">aura</span> command you
+                  type yourself gets the old copy. Replacing it needs your
+                  computer&apos;s password.
+                </div>
+              )}
               {/* One-click update — installs the binary bundled with this
                   release in place. No terminal, no cargo compile. */}
               {onUpdate && (
@@ -423,7 +458,7 @@ function CliVersionChip({
                   type="button"
                   onClick={() => void runUpdate()}
                   disabled={updating}
-                  className="w-full text-[11.5px] px-2 py-1.5 rounded mb-2 transition-colors disabled:opacity-60"
+                  className="w-full text-sm px-2 py-1.5 rounded mb-2 transition-colors disabled:opacity-60"
                   style={{
                     background: "var(--color-accent)",
                     color: "var(--color-bg-0)",
@@ -436,12 +471,14 @@ function CliVersionChip({
                     ? "Updating…"
                     : info.status === "missing"
                       ? `Install Aura CLI ${info.expected}`
-                      : `Update to ${info.expected}`}
+                      : shadowed
+                        ? `Replace the old copy with ${info.expected}`
+                        : `Update to ${info.expected}`}
                 </button>
               )}
               {updateError && (
                 <div
-                  className="text-[10.5px] mb-2"
+                  className="text-xs mb-2"
                   style={{ color: "var(--color-red)" }}
                 >
                   {updateError}
@@ -450,7 +487,7 @@ function CliVersionChip({
               <div className="text-text-4 mb-1">or install manually:</div>
               <div className="flex items-center gap-1.5">
                 <code
-                  className="flex-1 font-mono text-[10.5px] px-1.5 py-1 rounded bg-bg-2 truncate"
+                  className="flex-1 font-mono text-xs px-1.5 py-1 rounded bg-bg-2 truncate"
                   title={installCmd}
                 >
                   {installCmd}
@@ -458,7 +495,7 @@ function CliVersionChip({
                 <button
                   type="button"
                   onClick={copyInstall}
-                  className="text-[10.5px] px-2 py-1 rounded hover:bg-bg-2 text-text-3"
+                  className="text-xs px-2 py-1 rounded hover:bg-state-hover text-text-3"
                   title="Copy install command"
                 >
                   {copied ? "Copied" : "Copy"}
@@ -510,7 +547,7 @@ function Item({
   const toneBg =
     tone === "red" ? "bg-red/10" : tone === "amber" ? "bg-amber/10" : "";
   const className = `inline-flex items-center gap-1.5 h-[20px] px-2 rounded-[6px] whitespace-nowrap flex-none transition-colors ${toneBg} ${
-    interactive ? "hover:bg-bg-2 cursor-pointer" : ""
+    interactive ? "hover:bg-state-hover cursor-pointer" : ""
   }`;
   const content = (
     <>
@@ -603,22 +640,51 @@ function BranchSwitcher({ repoRoot, dirty }: { repoRoot: string; dirty: boolean 
     };
   }, [repoRoot]);
 
+  // Subscribed so renaming the workspace you're standing in repaints this chip
+  // straight away — `humanizeCopyTitle` resolves a typed name through the
+  // customisation store, and without a subscription the footer would keep the
+  // old name until the next git poll.
+  useWorkspaceCustomization();
+
   // An Aura "copy" is a parallel workspace an agent works in — a machine git
   // worktree with a hash branch like `worktree-agent-a6f18ff…`. Surfacing that
   // raw branch reads as gibberish to the non-engineer audience, so when we're in
   // one we show the Aura blossom + the friendly "<project> · copy" name instead.
   const isCopy =
     isWorktreeRoot(repoRoot) || (!!branch && isMachineLeaf(branch));
-  const copyLabel = isCopy ? humanizeWorkspaceName(repoRoot) : null;
-  const branchTitle = isCopy
-    ? `${copyLabel} — an Aura copy: a parallel workspace an agent works in${
-        branch ? ` (branch ${branch})` : ""
-      }${dirty ? " · uncommitted changes" : ""} — open source control`
+  // A copy is named after its BRANCH, everywhere — that is what the roster
+  // rows and the sidebar's project anchor call it, and `humanizeCopyTitle`
+  // exists precisely so the answer is one answer. Naming it after the folder
+  // instead put two names for one checkout on screen at once: the anchor read
+  // "main" while this chip read "New Git · trunk 0.19.33". The folder is the
+  // fallback for a detached copy, which has no branch to be named after.
+  //
+  // The project prefix goes with it: the anchor at the top of the sidebar says
+  // which project you are in on every screen, so repeating it in the footer
+  // spent a third of a 240px chip restating it.
+  const copyLabel = !isCopy
+    ? null
     : branch
-      ? `On branch ${branch}${dirty ? " · uncommitted changes" : ""} — open source control`
+      ? humanizeCopyTitle(branch, false, repoRoot)
+      : humanizeWorkspaceName(repoRoot);
+  // The home checkout gets the same treatment. It isn't an Aura copy, so it
+  // keeps the fork glyph rather than the branded pill — but the NAME is the
+  // name, and this chip was still printing the raw ref. Standing in New Git's
+  // main checkout the roster row read "commons platform" and this chip read
+  // `feat/commons-platform`: the same checkout, six inches apart, one of them
+  // in the branch-slug jargon this product exists to stop showing people. The
+  // raw ref stays in the tooltip and in the switcher the caret opens, which is
+  // an explicitly-git surface; the footer label is not.
+  const branchLabel = branch ? humanizeCopyTitle(branch, false, repoRoot) : "—";
+  const branchTitle = isCopy
+    ? `${copyLabel}. An Aura copy: a parallel workspace an agent works in${
+        branch ? ` (branch ${branch})` : ""
+      }${dirty ? " · uncommitted changes" : ""}. Open source control`
+    : branch
+      ? `On branch ${branch}${dirty ? " · uncommitted changes" : ""}. Open source control`
       : repoRoot
-        ? "Not on a branch right now — open source control"
-        : "This folder isn't tracked yet — open source control";
+        ? "Not on a branch right now. Open source control"
+        : "This folder isn't tracked yet. Open source control";
 
   return (
     <div className="relative flex items-center flex-none">
@@ -635,7 +701,7 @@ function BranchSwitcher({ repoRoot, dirty }: { repoRoot: string; dirty: boolean 
                 window.dispatchEvent(new CustomEvent("aura:open-source-control"))
               }
               aria-label={branchTitle}
-              className="inline-flex items-center gap-1.5 h-full pl-2 pr-1 whitespace-nowrap transition-colors hover:bg-bg-2"
+              className="inline-flex items-center gap-1.5 h-full pl-2 pr-1 whitespace-nowrap transition-colors hover:bg-state-hover"
               style={{ color: "var(--color-text-1)" }}
             >
               {isCopy ? (
@@ -677,7 +743,7 @@ function BranchSwitcher({ repoRoot, dirty }: { repoRoot: string; dirty: boolean 
                     <path d="M12 12C14.5 12 14.5 6 17 6" />
                     <path d="M12 12C14.5 12 14.5 18 17 18" />
                   </svg>
-                  <span className="truncate font-medium">{branch ?? "—"}</span>
+                  <span className="truncate font-medium">{branchLabel}</span>
                 </>
               )}
               {dirty && (
@@ -698,7 +764,7 @@ function BranchSwitcher({ repoRoot, dirty }: { repoRoot: string; dirty: boolean 
               type="button"
               onClick={() => setModalOpen(true)}
               aria-label="Switch branch"
-              className="inline-flex items-center h-full px-1 text-text-3 transition-colors hover:bg-bg-2 hover:text-text-1"
+              className="inline-flex items-center h-full px-1 text-text-3 transition-colors hover:bg-state-hover hover:text-text-1"
             >
               <Caret />
             </button>
@@ -884,9 +950,9 @@ function CallStatusPill({ suppressed = false }: { suppressed?: boolean }) {
         title={
           isConnecting
             ? `Joining ${channelLabel}…`
-            : `In huddle — click to focus ${channelLabel}`
+            : `In huddle. Click to focus ${channelLabel}`
         }
-        className="inline-flex items-center gap-1.5 px-2 hover:bg-bg-2 transition-colors"
+        className="inline-flex items-center gap-1.5 px-2 hover:bg-state-hover transition-colors"
         style={{ color: "var(--color-text-1)" }}
       >
         <span
@@ -898,7 +964,7 @@ function CallStatusPill({ suppressed = false }: { suppressed?: boolean }) {
           }}
           aria-hidden
         />
-        <span className="truncate max-w-[160px] font-medium text-[11px]">
+        <span className="truncate max-w-[160px] font-medium text-xs">
           {channelLabel}
         </span>
       </button>
@@ -909,7 +975,7 @@ function CallStatusPill({ suppressed = false }: { suppressed?: boolean }) {
         disabled={isConnecting}
         title={micPref ? "Mute mic" : "Unmute mic"}
         aria-label={micPref ? "Mute mic" : "Unmute mic"}
-        className="inline-flex items-center gap-1.5 px-2 hover:bg-bg-2 transition-colors disabled:opacity-50 disabled:hover:bg-transparent"
+        className="inline-flex items-center gap-1.5 px-2 hover:bg-state-hover transition-colors disabled:opacity-50 disabled:hover:bg-transparent"
         style={{
           color: micPref
             ? "var(--color-text-2)"
@@ -917,7 +983,7 @@ function CallStatusPill({ suppressed = false }: { suppressed?: boolean }) {
         }}
       >
         {micPref ? <Mic size={12} /> : <MicOff size={12} />}
-        <span className="hidden lg:inline text-[11px]">{micPref ? "Mic" : "Muted"}</span>
+        <span className="hidden lg:inline text-xs">{micPref ? "Mic" : "Muted"}</span>
         {micPref && !isConnecting && <MicVuBar />}
       </button>
 
@@ -927,7 +993,7 @@ function CallStatusPill({ suppressed = false }: { suppressed?: boolean }) {
         disabled={isConnecting}
         title={deafenPref ? "Un-deafen" : "Deafen (mute everyone)"}
         aria-label={deafenPref ? "Un-deafen" : "Deafen"}
-        className="inline-flex items-center gap-1.5 px-2 hover:bg-bg-2 transition-colors disabled:opacity-50 disabled:hover:bg-transparent"
+        className="inline-flex items-center gap-1.5 px-2 hover:bg-state-hover transition-colors disabled:opacity-50 disabled:hover:bg-transparent"
         style={{
           color: deafenPref
             ? "var(--color-red)"
@@ -935,7 +1001,7 @@ function CallStatusPill({ suppressed = false }: { suppressed?: boolean }) {
         }}
       >
         {deafenPref ? <HeadphoneOff size={12} /> : <Headphones size={12} />}
-        <span className="hidden lg:inline text-[11px]">{deafenPref ? "Deafened" : "Audio"}</span>
+        <span className="hidden lg:inline text-xs">{deafenPref ? "Deafened" : "Audio"}</span>
       </button>
 
       <button
@@ -956,7 +1022,7 @@ function CallStatusPill({ suppressed = false }: { suppressed?: boolean }) {
               ? "View screen share"
               : "Start screen share"
         }
-        className="relative inline-flex items-center gap-1.5 px-2 hover:bg-bg-2 transition-colors disabled:opacity-50 disabled:hover:bg-transparent"
+        className="relative inline-flex items-center gap-1.5 px-2 hover:bg-state-hover transition-colors disabled:opacity-50 disabled:hover:bg-transparent"
         style={{
           color: localSharing
             ? "var(--color-red)"
@@ -966,7 +1032,7 @@ function CallStatusPill({ suppressed = false }: { suppressed?: boolean }) {
         }}
       >
         {localSharing ? <MonitorOff size={12} /> : <Monitor size={12} />}
-        <span className="hidden lg:inline text-[11px]">
+        <span className="hidden lg:inline text-xs">
           {localSharing
             ? "Stop"
             : remoteSharing
@@ -974,7 +1040,7 @@ function CallStatusPill({ suppressed = false }: { suppressed?: boolean }) {
               : "Screen"}
         </span>
         {!localSharing && remoteSharing && remoteShareCount > 1 && (
-          <span className="lg:hidden text-[10px] font-medium">
+          <span className="lg:hidden text-2xs font-medium">
             {remoteShareCount}
           </span>
         )}
@@ -996,7 +1062,7 @@ function CallStatusPill({ suppressed = false }: { suppressed?: boolean }) {
         style={{ color: "var(--color-red)" }}
       >
         <PhoneOff size={12} />
-        <span className="text-[11px] font-medium">Leave</span>
+        <span className="text-xs font-medium">Leave</span>
       </button>
     </span>
   );

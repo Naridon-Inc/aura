@@ -400,53 +400,56 @@ pub struct NoteDeleteInput {
 
 #[tauri::command]
 pub async fn notes_list(input: NoteListInput) -> Result<Vec<NoteSummary>, String> {
-    let repo = PathBuf::from(&input.repo_root);
-    let root = notes_root(&repo);
-    if !root.exists() {
-        return Ok(Vec::new());
-    }
-    let mut out = Vec::new();
-    let scopes: Vec<NoteScope> = match input.scope {
-        Some(s) => vec![s],
-        None => vec![NoteScope::Team, NoteScope::Channel, NoteScope::Member],
-    };
-    for scope in scopes {
-        let scope_root = root.join(scope.dir_name());
-        if !scope_root.exists() {
-            continue;
+    crate::blocking::run(move || {
+        let repo = PathBuf::from(&input.repo_root);
+        let root = notes_root(&repo);
+        if !root.exists() {
+            return Ok(Vec::new());
         }
-        match scope {
-            NoteScope::Team => {
-                collect_dir(&scope_root, scope.clone(), String::new(), &mut out);
+        let mut out = Vec::new();
+        let scopes: Vec<NoteScope> = match input.scope {
+            Some(s) => vec![s],
+            None => vec![NoteScope::Team, NoteScope::Channel, NoteScope::Member],
+        };
+        for scope in scopes {
+            let scope_root = root.join(scope.dir_name());
+            if !scope_root.exists() {
+                continue;
             }
-            NoteScope::Channel | NoteScope::Member => {
-                let entries = match fs::read_dir(&scope_root) {
-                    Ok(e) => e,
-                    Err(_) => continue,
-                };
-                for entry in entries.flatten() {
-                    let path = entry.path();
-                    if !path.is_dir() {
-                        continue;
-                    }
-                    let bucket = entry.file_name().to_string_lossy().to_string();
-                    if let Some(want) = &input.bucket {
-                        if want != &bucket {
+            match scope {
+                NoteScope::Team => {
+                    collect_dir(&scope_root, scope.clone(), String::new(), &mut out);
+                }
+                NoteScope::Channel | NoteScope::Member => {
+                    let entries = match fs::read_dir(&scope_root) {
+                        Ok(e) => e,
+                        Err(_) => continue,
+                    };
+                    for entry in entries.flatten() {
+                        let path = entry.path();
+                        if !path.is_dir() {
                             continue;
                         }
+                        let bucket = entry.file_name().to_string_lossy().to_string();
+                        if let Some(want) = &input.bucket {
+                            if want != &bucket {
+                                continue;
+                            }
+                        }
+                        collect_dir(&path, scope.clone(), bucket, &mut out);
                     }
-                    collect_dir(&path, scope.clone(), bucket, &mut out);
                 }
             }
         }
-    }
-    // Stable order: newest updated_at first; fallback to id.
-    out.sort_by(|a, b| {
-        b.updated_at
-            .cmp(&a.updated_at)
-            .then_with(|| a.id.cmp(&b.id))
-    });
-    Ok(out)
+        // Stable order: newest updated_at first; fallback to id.
+        out.sort_by(|a, b| {
+            b.updated_at
+                .cmp(&a.updated_at)
+                .then_with(|| a.id.cmp(&b.id))
+        });
+        Ok(out)
+    })
+    .await
 }
 
 fn collect_dir(
@@ -867,107 +870,113 @@ fn collect_with_bodies(
 
 #[tauri::command]
 pub async fn notes_backlinks(input: NotesBacklinksInput) -> Result<Vec<NoteSummary>, String> {
-    let repo = PathBuf::from(&input.repo_root);
-    let target = input.title.trim().to_lowercase();
-    if target.is_empty() {
-        return Ok(Vec::new());
-    }
-    let mut out = Vec::new();
-    for (summary, body) in walk_all_notes(&repo) {
-        // Skip self-references — a note shouldn't show up in its own
-        // backlinks panel.
-        if summary.title.to_lowercase() == target {
-            continue;
+    crate::blocking::run(move || {
+        let repo = PathBuf::from(&input.repo_root);
+        let target = input.title.trim().to_lowercase();
+        if target.is_empty() {
+            return Ok(Vec::new());
         }
-        // Scan for [[Anything matching target]] case-insensitively.
-        // We don't pre-compile a regex because the per-note body
-        // is usually short and we'd rather avoid the regex dep
-        // surface here.
-        let lower = body.to_lowercase();
-        let mut found = false;
-        let mut idx = 0;
-        while let Some(pos) = lower[idx..].find("[[") {
-            let start = idx + pos + 2;
-            let Some(end_rel) = lower[start..].find("]]") else {
-                break;
-            };
-            let inner = lower[start..start + end_rel].trim();
-            if inner == target {
-                found = true;
-                break;
+        let mut out = Vec::new();
+        for (summary, body) in walk_all_notes(&repo) {
+            // Skip self-references — a note shouldn't show up in its own
+            // backlinks panel.
+            if summary.title.to_lowercase() == target {
+                continue;
             }
-            idx = start + end_rel + 2;
+            // Scan for [[Anything matching target]] case-insensitively.
+            // We don't pre-compile a regex because the per-note body
+            // is usually short and we'd rather avoid the regex dep
+            // surface here.
+            let lower = body.to_lowercase();
+            let mut found = false;
+            let mut idx = 0;
+            while let Some(pos) = lower[idx..].find("[[") {
+                let start = idx + pos + 2;
+                let Some(end_rel) = lower[start..].find("]]") else {
+                    break;
+                };
+                let inner = lower[start..start + end_rel].trim();
+                if inner == target {
+                    found = true;
+                    break;
+                }
+                idx = start + end_rel + 2;
+            }
+            if found {
+                out.push(summary);
+            }
         }
-        if found {
-            out.push(summary);
-        }
-    }
-    // Newest-first, matches notes_list ordering.
-    out.sort_by(|a, b| {
-        b.updated_at
-            .cmp(&a.updated_at)
-            .then_with(|| a.id.cmp(&b.id))
-    });
-    Ok(out)
+        // Newest-first, matches notes_list ordering.
+        out.sort_by(|a, b| {
+            b.updated_at
+                .cmp(&a.updated_at)
+                .then_with(|| a.id.cmp(&b.id))
+        });
+        Ok(out)
+    })
+    .await
 }
 
 #[tauri::command]
 pub async fn notes_search(input: NotesSearchInput) -> Result<Vec<NoteSearchHit>, String> {
-    let repo = PathBuf::from(&input.repo_root);
-    let query = input.query.trim();
-    if query.is_empty() {
-        return Ok(Vec::new());
-    }
-    let q_lower = query.to_lowercase();
-    let limit = input.limit.unwrap_or(50).min(500) as usize;
-    let mut out = Vec::new();
-    for (summary, body) in walk_all_notes(&repo) {
-        let body_lower = body.to_lowercase();
-        let title_lower = summary.title.to_lowercase();
-        let in_title = title_lower.contains(&q_lower);
-        let mut match_count = 0u32;
-        let mut idx = 0;
-        while let Some(pos) = body_lower[idx..].find(&q_lower) {
-            match_count += 1;
-            idx += pos + q_lower.len();
+    crate::blocking::run(move || {
+        let repo = PathBuf::from(&input.repo_root);
+        let query = input.query.trim();
+        if query.is_empty() {
+            return Ok(Vec::new());
         }
-        if !in_title && match_count == 0 {
-            continue;
+        let q_lower = query.to_lowercase();
+        let limit = input.limit.unwrap_or(50).min(500) as usize;
+        let mut out = Vec::new();
+        for (summary, body) in walk_all_notes(&repo) {
+            let body_lower = body.to_lowercase();
+            let title_lower = summary.title.to_lowercase();
+            let in_title = title_lower.contains(&q_lower);
+            let mut match_count = 0u32;
+            let mut idx = 0;
+            while let Some(pos) = body_lower[idx..].find(&q_lower) {
+                match_count += 1;
+                idx += pos + q_lower.len();
+            }
+            if !in_title && match_count == 0 {
+                continue;
+            }
+            // Snippet — first body hit with ~60 chars on each side; if the
+            // match is only in the title, snippet falls back to the body's
+            // first 120 chars.
+            let snippet = if let Some(first_hit) = body_lower.find(&q_lower) {
+                let start = first_hit.saturating_sub(60);
+                let end = (first_hit + q_lower.len() + 60).min(body.len());
+                let mut s = body[start..end].to_string();
+                if start > 0 {
+                    s.insert_str(0, "…");
+                }
+                if end < body.len() {
+                    s.push('…');
+                }
+                s
+            } else {
+                body.chars().take(120).collect::<String>()
+            };
+            out.push(NoteSearchHit {
+                note: summary,
+                snippet,
+                match_count: match_count + if in_title { 1 } else { 0 },
+            });
+            if out.len() >= limit {
+                break;
+            }
         }
-        // Snippet — first body hit with ~60 chars on each side; if the
-        // match is only in the title, snippet falls back to the body's
-        // first 120 chars.
-        let snippet = if let Some(first_hit) = body_lower.find(&q_lower) {
-            let start = first_hit.saturating_sub(60);
-            let end = (first_hit + q_lower.len() + 60).min(body.len());
-            let mut s = body[start..end].to_string();
-            if start > 0 {
-                s.insert_str(0, "…");
-            }
-            if end < body.len() {
-                s.push('…');
-            }
-            s
-        } else {
-            body.chars().take(120).collect::<String>()
-        };
-        out.push(NoteSearchHit {
-            note: summary,
-            snippet,
-            match_count: match_count + if in_title { 1 } else { 0 },
+        // Order: title hits first (match_count includes +1 for title), then
+        // by match count desc, then by recency.
+        out.sort_by(|a, b| {
+            b.match_count
+                .cmp(&a.match_count)
+                .then_with(|| b.note.updated_at.cmp(&a.note.updated_at))
         });
-        if out.len() >= limit {
-            break;
-        }
-    }
-    // Order: title hits first (match_count includes +1 for title), then
-    // by match count desc, then by recency.
-    out.sort_by(|a, b| {
-        b.match_count
-            .cmp(&a.match_count)
-            .then_with(|| b.note.updated_at.cmp(&a.note.updated_at))
-    });
-    Ok(out)
+        Ok(out)
+    })
+    .await
 }
 
 #[tauri::command]

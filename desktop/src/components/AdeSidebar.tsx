@@ -9,7 +9,7 @@
 // work (FilesSidebar, CommsPanel, Tasks/Pages, History + trace tools)
 // is reused verbatim from the existing app, nothing rebuilt.
 //
-// Rendered only when the `aura.ade.v2` flag is on (see useAdeV2); the
+// The app's one left sidebar (there used to be a flag and a second one); the
 // legacy three-column shell stays the untouched default.
 
 import {
@@ -17,22 +17,18 @@ import {
   useRef,
   useState,
   type CSSProperties,
+  type KeyboardEvent as ReactKeyboardEvent,
+  type PointerEvent as ReactPointerEvent,
   type ReactNode,
 } from "react";
-import {
-  CODE_MAP_ENABLED,
-  MEMORY_SURFACE_ENABLED,
-  TEAM_ACTIVITY_ENABLED,
-  TIMELINE_V2,
-  TRACE_V2,
-} from "../lib/featureFlags";
-import { Tooltip, TooltipTrigger, TooltipContent } from "./ui/tooltip";
+import type { TraceKey } from "./trace/traceDestinations";
 import { Segment } from "./ui/segment";
 import {
   readTeamUnread,
   subscribeTeamUnread,
   type TeamUnreadSummary,
 } from "../lib/teamUnread";
+import { SidebarFooter } from "./ade/SidebarFooter";
 import { WhatsNewCard } from "./WhatsNewCard";
 import type { ReleaseCta, ReleaseNote } from "../lib/releaseNotes";
 
@@ -47,11 +43,23 @@ const SECTIONS: { id: AdeSection; label: string; glyph: ReactNode }[] = [
   { id: "trace", label: "Trace", glyph: <ShieldGlyph /> },
 ];
 
+// The nav renders `buildRows` in place of the "build" entry when the host
+// supplies them (see the `buildRows` prop) — those rows ARE the Build section,
+// named for the three places it holds. Hosts that don't pass them fall back to
+// the plain "Build" row, so the section list stays whole either way.
+const TAIL_SECTIONS = SECTIONS.filter((s) => s.id !== "build");
+
 type AdeSidebarProps = {
+  /** The rail's one body: your projects, and the checkouts under them.
+   *
+   *  This used to be four bodies swapped by section — Build's roster, Team's
+   *  conversations, Pages' documents, Trace's menu of views — so the widest
+   *  column on screen changed its subject every time you changed destination,
+   *  and the projects, the one index that is true wherever you are standing,
+   *  were visible in exactly one of them. Each of the other three has its own
+   *  navigation on its own page now, which is where a page's navigation
+   *  belongs. What is left is a rail that always answers the same question. */
   buildBody: ReactNode;
-  teamBody: ReactNode;
-  planBody: ReactNode;
-  traceBody: ReactNode;
   /** ADE auto-follow — the section to surface for whatever the user is
    *  looking at in the center pane (Build for an agent/terminal/file,
    *  Plan for the Tasks board / a Page, etc.). Re-selecting only fires
@@ -68,6 +76,10 @@ type AdeSidebarProps = {
    *  drives the Trace segment's notification badge. 0 hides it. Team's
    *  badge is sourced internally from the live chat unread bridge. */
   traceCount?: number;
+  /** The open project, for the foot of the rail — it resolves who `@me` is
+   *  from this repo's roster, the same answer Team and Tasks show. Empty with
+   *  no project open, which the footer reads as "can't name you". */
+  repoRoot?: string;
   /** Set after a MINOR update — renders the small dismissible "what's new"
    *  card at the top of the sidebar. (Major updates show a modal instead, so
    *  this is undefined for them.) */
@@ -76,7 +88,41 @@ type AdeSidebarProps = {
   onDismissWhatsNew?: () => void;
   /** Take the note's offered action (e.g. open the phone-app waitlist). */
   onWhatsNewCta?: (kind: ReleaseCta) => void;
+  /** The Build section's own destinations — Aura, Workspaces, Tasks (see
+   *  BuildNav). They render as the HEAD of this one nav list rather than
+   *  as a second band below it, and any click in them selects Build, because
+   *  standing in one of them is standing in Build. Supplied, they replace the
+   *  "Build" row entirely: a row captioning a group whose first entry says the
+   *  same thing is a row spent on nothing. */
+  buildRows?: ReactNode;
+  /** Take the reader to a section's home surface.
+   *
+   *  Until this existed, these rows were a readout wearing a button's clothes.
+   *  `activeSection` flows one way — the host derives it from whichever pane is
+   *  focused, so the rail FOLLOWS the work surface — and a click here only set
+   *  this component's own `section` state. The result was that clicking Team
+   *  lit the Team row, swapped the rail to Team's channel list, and left
+   *  Workspaces (or a file, or a board) sitting in the other 1268px. You asked
+   *  to go to Team and the app changed its filing cabinet instead of its page.
+   *
+   *  So the host opens the section's home here, the surface changes, and
+   *  `activeSection` comes back around and confirms the same section the click
+   *  chose. Navigation stays one-way — surface is still the source of truth —
+   *  and the rows become the doors they always looked like.
+   *
+   *  Not called for `build`: its rows (`buildRows`) are their own doors and
+   *  carry their own handlers. */
+  onNavigate?: (section: AdeSection) => void;
 };
+
+// How tall the destination list is allowed to be, in px. Persisted per
+// device: where you put the split is a property of your screen, not of the
+// project you happen to have open.
+const NAV_H_KEY = "aura.ade.navHeight";
+
+// One row plus the nav's own padding — the floor keeps at least one
+// destination reachable, so a drag to the top can't hide the navigation.
+const NAV_MIN_H = 44;
 
 function readSection(): AdeSection {
   try {
@@ -94,17 +140,26 @@ function readSection(): AdeSection {
   return "build";
 }
 
+function readNavHeight(): number | null {
+  try {
+    const n = Number(localStorage.getItem(NAV_H_KEY));
+    return Number.isFinite(n) && n >= NAV_MIN_H ? n : null;
+  } catch {
+    return null;
+  }
+}
+
 export function AdeSidebar({
   buildBody,
-  teamBody,
-  planBody,
-  traceBody,
   activeSection,
   workspaceKey,
   traceCount = 0,
+  repoRoot = "",
   whatsNew,
   onDismissWhatsNew,
   onWhatsNewCta,
+  buildRows,
+  onNavigate,
 }: AdeSidebarProps) {
   const [section, setSection] = useState<AdeSection>(() => readSection());
 
@@ -146,11 +201,97 @@ export function AdeSidebar({
     setSection("build");
   }, [workspaceKey]);
 
-  const bodies: Record<AdeSection, ReactNode> = {
-    build: buildBody,
-    team: teamBody,
-    plan: planBody,
-    trace: traceBody,
+  // ── the split between the destinations and your projects ───────────
+  //
+  // There used to be TWO hairlines here, a few pixels apart: the nav drew a
+  // border under itself and the roster drew one over its "Projects" header,
+  // neither knowing about the other. One line now, and since a line between
+  // two lists that both want the room is a thing you should be able to move,
+  // it is the handle as well — drag it, or grab it with the keyboard and use
+  // the arrow keys; double-click gives the nav its natural height back.
+  const navRef = useRef<HTMLElement | null>(null);
+  const [navHeight, setNavHeight] = useState<number | null>(() =>
+    readNavHeight(),
+  );
+  const [dragging, setDragging] = useState(false);
+
+  // Never taller than the rows actually need: past that you'd be dragging out
+  // blank space, and the projects below would lose room for nothing.
+  const navMaxH = () => navRef.current?.scrollHeight ?? Infinity;
+  const clampNav = (px: number) =>
+    Math.round(Math.max(NAV_MIN_H, Math.min(navMaxH(), px)));
+
+  const commitNav = (px: number | null) => {
+    setNavHeight(px);
+    try {
+      if (px == null) localStorage.removeItem(NAV_H_KEY);
+      else localStorage.setItem(NAV_H_KEY, String(px));
+    } catch {
+      /* private mode — the drag still holds for this session */
+    }
+  };
+
+  const onDividerDown = (e: ReactPointerEvent<HTMLDivElement>) => {
+    const nav = navRef.current;
+    if (!nav || e.button !== 0) return;
+    e.preventDefault();
+    const top = nav.getBoundingClientRect().top;
+    const handle = e.currentTarget;
+    handle.setPointerCapture(e.pointerId);
+    setDragging(true);
+    let last = navHeight ?? nav.getBoundingClientRect().height;
+    const move = (ev: PointerEvent) => {
+      last = clampNav(ev.clientY - top);
+      setNavHeight(last);
+    };
+    const up = () => {
+      handle.removeEventListener("pointermove", move);
+      handle.removeEventListener("pointerup", up);
+      handle.removeEventListener("pointercancel", up);
+      setDragging(false);
+      commitNav(last);
+    };
+    handle.addEventListener("pointermove", move);
+    handle.addEventListener("pointerup", up);
+    handle.addEventListener("pointercancel", up);
+  };
+
+  // Reserve the announcement's own height at the foot of the scroller.
+  //
+  // Measured rather than guessed: the card's height depends on how long the
+  // release's headline wraps, and a hard-coded inset is either a gap under an
+  // absent card or a project row stuck behind a present one. Observed, so a
+  // rail resize that re-wraps the text re-reserves in the same frame.
+  const stackRef = useRef<HTMLDivElement | null>(null);
+  const noticeRef = useRef<HTMLDivElement | null>(null);
+  useEffect(() => {
+    const stack = stackRef.current;
+    const notice = noticeRef.current;
+    if (!stack) return;
+    if (!notice) {
+      stack.style.removeProperty("--ade-notice-h");
+      return;
+    }
+    const apply = () =>
+      stack.style.setProperty("--ade-notice-h", `${notice.offsetHeight}px`);
+    apply();
+    if (typeof ResizeObserver === "undefined") return;
+    const ro = new ResizeObserver(apply);
+    ro.observe(notice);
+    return () => ro.disconnect();
+  }, [whatsNew]);
+
+  const onDividerKey = (e: ReactKeyboardEvent<HTMLDivElement>) => {
+    const step = e.shiftKey ? 32 : 8;
+    if (e.key === "ArrowUp" || e.key === "ArrowDown") {
+      e.preventDefault();
+      const from =
+        navHeight ?? navRef.current?.getBoundingClientRect().height ?? NAV_MIN_H;
+      commitNav(clampNav(from + (e.key === "ArrowDown" ? step : -step)));
+    } else if (e.key === "Enter" || e.key === "Escape") {
+      e.preventDefault();
+      commitNav(null);
+    }
   };
 
   return (
@@ -158,87 +299,151 @@ export function AdeSidebar({
       {/* Account + Settings + Help used to sit here as a top identity row;
           they were consolidated into the sidebar header strip (account +
           settings) — Help was dropped — so the sidebar body starts straight
-          at the section content. */}
-      {whatsNew ? (
-        <WhatsNewCard
-          note={whatsNew}
-          onDismiss={() => onDismissWhatsNew?.()}
-          onCta={onWhatsNewCta}
-        />
-      ) : null}
-      <div className="ade-side-body">
-        {SECTIONS.map((s) => (
-          <div
-            key={s.id}
-            className={`ade-sec${section === s.id ? " show" : ""}`}
-          >
-            {bodies[s.id]}
-          </div>
-        ))}
-      </div>
+          at the section content. The what's-new notice used to sit here too;
+          it lives in the announcement slot at the foot of the rail now, so
+          shipping a release no longer pushes the project list down the page
+          (see `.ade-side-stack` below). */}
 
-      <div className="ade-side-foot">
-        <div className="ade-seg">
-          {SECTIONS.map((s) => {
-            const count = s.id === "team"
+      {/* The app's destinations, at the top, where navigation goes. They used
+          to live in the sidebar's FOOTER as stacked icon tiles ~850px below
+          the panel they control — a switch that far from its effect reads as a
+          status bar, not a spine: the rail said "Trace" at the top and the only
+          way to leave Trace was at the very bottom of the window.
+
+          ONE list, one treatment. Until now this was two: four section rows
+          here, then a hairline, then Aura / Workspaces / Mission Control as a
+          second band in smaller type with an accent-tint active state against
+          this band's surface fill. Both bands held destinations, so the split
+          was asking the reader to infer a rule that didn't exist, and it cost
+          a whole row to the word "Build" — the caption of a group whose first
+          entry already said it, in a word that means nothing to someone who
+          doesn't write code. The lit row is the lit row, wherever you are. */}
+      <nav
+        ref={navRef}
+        className="ade-nav"
+        aria-label="Sections"
+        style={navHeight != null ? { height: navHeight } : undefined}
+      >
+        {buildRows ? (
+          // `display: contents` — the rows are siblings of the ones below, not
+          // a group. The wrapper exists only to catch their clicks (standing in
+          // any of them is standing in Build) and to hold back their active
+          // paint while the reader is off in Team / Pages / Trace, where those
+          // rows are not where they are.
+          <div
+            className={`ade-navgrp${section === "build" ? " on" : ""}`}
+            onClickCapture={() => setSection("build")}
+          >
+            {buildRows}
+          </div>
+        ) : null}
+        {(buildRows ? TAIL_SECTIONS : SECTIONS).map((s) => {
+          const count =
+            s.id === "team"
               ? teamUnread.total
               : s.id === "trace"
                 ? traceCount
                 : 0;
-            return (
-              <button
-                key={s.id}
-                type="button"
-                data-tour={`section-${s.id}`}
-                className={section === s.id ? "active" : ""}
-                onClick={() => setSection(s.id)}
-                title={s.label}
-              >
-                {s.glyph}
-                {s.label}
-                {count > 0 ? <CountBadge count={count} /> : null}
-              </button>
-            );
-          })}
+          const active = section === s.id;
+          return (
+            <button
+              key={s.id}
+              type="button"
+              data-tour={`section-${s.id}`}
+              className={`ade-nav-row${active ? " active" : ""}`}
+              aria-current={active ? "page" : undefined}
+              onClick={() => {
+                setSection(s.id);
+                // …and go there. See `onNavigate`.
+                onNavigate?.(s.id);
+              }}
+            >
+              {s.glyph}
+              <span className="nm">{s.label}</span>
+              {/* Not while you're standing in it. This badge exists to tell
+                  you from Pages or Trace that 69 messages are waiting; the
+                  section itself says so again, in the same amber, on the row
+                  you'd actually click to read them ("Catch up" in Team,
+                  "Impacts on me" in Trace). One number on screen, and it's
+                  the one nearest the thing it's about. */}
+              {count > 0 && !active ? <CountBadge count={count} /> : null}
+            </button>
+          );
+        })}
+      </nav>
+
+      {/* The one line between them, and the handle for it. */}
+      <div
+        className={`ade-nav-split${dragging ? " dragging" : ""}`}
+        role="separator"
+        aria-orientation="horizontal"
+        aria-label="Resize the destinations list"
+        tabIndex={0}
+        onPointerDown={onDividerDown}
+        onDoubleClick={() => commitNav(null)}
+        onKeyDown={onDividerKey}
+      />
+
+      {/* Your projects, under the nav, in every section — never swapped out
+          for a second index that belongs to somewhere you're only visiting.
+
+          The stack holds two layers: the list, which scrolls, and the
+          announcement, which doesn't. The announcement is pinned over the
+          foot of the list rather than stacked above or below it, so it never
+          takes a row away from the index — the list keeps the full column and
+          simply passes underneath, dissolving into the card through the fade
+          the slot draws above itself. The scroller reserves exactly the
+          card's measured height at its bottom, so the last project can still
+          be scrolled clear of it instead of sitting permanently behind it. */}
+      <div ref={stackRef} className="ade-side-stack">
+        <div className="ade-side-body">
+          <div className="ade-sec show">{buildBody}</div>
         </div>
+        {whatsNew ? (
+          <div ref={noticeRef} className="ade-side-notice">
+            <WhatsNewCard
+              note={whatsNew}
+              onDismiss={() => onDismissWhatsNew?.()}
+              onCta={onWhatsNewCta}
+            />
+          </div>
+        ) : null}
       </div>
+
+      {/* The foot of the rail. The nav that used to sit here was moved to the
+          top (a destination switcher belongs beside what it switches), which
+          left the bottom edge saying nothing at all. What belongs at a bottom
+          edge is standing and shelter: which plan you're on, and the two doors
+          — help and settings — that have no section of their own. */}
+      <SidebarFooter repoRoot={repoRoot} />
     </div>
   );
 }
 
-/* ── segment notification badges ──────────────────────────────────── */
+/* ── section notification counts ──────────────────────────────────── */
 
-// Count badge for the section buttons: a plain dot for a single item, a
-// numbered pill (capped 9+) once there's more than one.
-// The switcher's "there's something new here" marker. Amber, not red — new
-// work waiting is an ask, and red has to keep meaning "this broke". Not the
-// accent either: in this rail the accent marks WHERE YOU ARE (the active
-// section, the active row), so filling every count badge with it drowns the
-// one signal it exists to carry and leaves the whole panel reading as a
-// single tinted wash. (The stylesheet still paints `.ade-seg-badge` red; the
-// inline value is what overrides it.)
+// A count of things waiting on you, as a trailing pill on the destination
+// row. It used to be a badge overhanging the corner of a stacked icon tile,
+// which is the shape you reach for when the control has no room for a
+// number beside its label — a row has that room, so the count sits inline
+// where every other count in this rail sits.
+// Amber, not red — new work waiting is an ask, and red has to keep meaning
+// "this broke". Not the accent either: in this rail the accent marks WHERE
+// YOU ARE, so filling every count with it drowns the one signal it exists to
+// carry and leaves the whole panel reading as a single tinted wash.
 const SEG_BADGE_INK: CSSProperties = {
   background: "var(--color-amber)",
   color: "var(--color-bg-0)",
 };
 
 function CountBadge({ count }: { count: number }) {
-  if (count <= 1) {
-    return (
-      <span
-        className="ade-seg-badge ade-seg-badge--dot"
-        style={SEG_BADGE_INK}
-        aria-hidden
-      />
-    );
-  }
   return (
-    <span
-      className="ade-seg-badge"
-      style={SEG_BADGE_INK}
-      aria-label={`${count} new`}
-    >
-      {count > 9 ? "9+" : count}
+    <span className="unread" style={SEG_BADGE_INK} aria-label={`${count} new`}>
+      {/* Capped at 99, not 9. Team had 70 unread messages and this badge said
+          "9+" while the Unreads row one click away said "70" — the same number
+          rendered two ways, and the one you see first is the one that throws
+          away the magnitude. Seventy waiting is a different day from ten. */}
+      {count > 99 ? "99+" : count}
     </span>
   );
 }
@@ -268,11 +473,26 @@ function MessageGlyph() {
 
 // Pages — a document with a folded corner and text lines. The Plan section is
 // Pages-only now (Tasks moved to Team), so it reads as its own thing.
+// Stacked pages — a sheet with a second one behind it. It used to draw a
+// single document with two text lines in it, which reads as "Document"; the
+// nav rail's mark for the very same destination drew stacked pages, so Pages
+// wore two different icons depending on which surface you were looking at (and
+// none at all on its pane tab). One concept now, rendered in each surface's own
+// stroke system — this sidebar's 24-grid/2px, the rail's 16-grid/1.2px.
 function PagesGlyph() {
   return (
     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-      <path d="M14 3H6a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9Z" strokeLinejoin="round" />
-      <path d="M14 3v6h6M9 13h6M9 17h4" strokeLinecap="round" strokeLinejoin="round" />
+      <path
+        d="M15 3H10a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2h8a2 2 0 0 0 2-2V8Z"
+        strokeLinejoin="round"
+      />
+      <path d="M15 3v5h5" strokeLinecap="round" strokeLinejoin="round" />
+      <path
+        d="M5 7v12a2 2 0 0 0 2 2h8"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+        opacity="0.55"
+      />
     </svg>
   );
 }
@@ -290,9 +510,16 @@ function ShieldGlyph() {
 }
 
 // Small generic row glyph — one consistent stroke style across the
-// Plan/Trace launcher rows. `moat` paints it with the accent so the
-// Trace "Accountability" tools read as the differentiated moat.
-function RowGlyph({ children, moat }: { children: ReactNode; moat?: boolean }) {
+// Plan/Trace launcher rows.
+//
+// A `moat` prop used to paint eight of these nine glyphs with the accent, so
+// the Trace tools would "read as the differentiated moat". In this rail the
+// accent means you are here — the count pill forty lines below says so in its
+// own comment — and eight rows wearing it permanently left the one row you
+// were actually on with nothing to distinguish it but a fill. It also put a
+// second glyph vocabulary directly under six neutral navigation glyphs in the
+// same column. Marketing emphasis is not a state.
+function RowGlyph({ children }: { children: ReactNode }) {
   return (
     <svg
       className="ade-glyph"
@@ -302,7 +529,6 @@ function RowGlyph({ children, moat }: { children: ReactNode; moat?: boolean }) {
       strokeWidth="1.7"
       strokeLinecap="round"
       strokeLinejoin="round"
-      style={moat ? { color: "var(--color-accent)" } : undefined}
     >
       {children}
     </svg>
@@ -320,9 +546,12 @@ export function PlanBody({
   onOpenTasks: () => void;
   onOpenPages: () => void;
 }) {
+  // Two rows, and each used to carry its own ALL-CAPS heading above it —
+  // "TASKS" over "Board", "PAGES" over "Open Pages". A heading that captions
+  // exactly one row isn't a group, it's the row's label written twice at two
+  // sizes. The rows say what they open.
   return (
-    <div>
-      <div className="ade-sec-h">Tasks</div>
+    <div className="px-1.5 pt-1">
       <button type="button" className="ade-row" onClick={onOpenTasks}>
         <RowGlyph>
           <rect x="3" y="3" width="18" height="18" rx="2" />
@@ -330,13 +559,12 @@ export function PlanBody({
         </RowGlyph>
         <span className="nm">Board</span>
       </button>
-      <div className="ade-sec-h">Pages</div>
       <button type="button" className="ade-row" onClick={onOpenPages}>
         <RowGlyph>
           <path d="M14 3H6a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9Z" />
           <path d="M14 3v6h6M8 13h8M8 17h6" />
         </RowGlyph>
-        <span className="nm">Open Pages</span>
+        <span className="nm">Pages</span>
       </button>
     </div>
   );
@@ -436,9 +664,9 @@ export function PlanSection({
             {onOpenAutomations && (
               <button
                 type="button"
-                title="Automations — schedule and orchestrate agent runs"
+                title="Automations. Schedule and orchestrate agent runs"
                 onClick={onOpenAutomations}
-                className="h-[22px] px-1.5 rounded text-[11px] text-text-4 hover:text-text-1 hover:bg-bg-0 transition-colors"
+                className="h-[22px] px-1.5 rounded text-xs text-text-4 hover:text-text-1 hover:bg-state-hover transition-colors"
               >
                 Automations
               </button>
@@ -448,7 +676,7 @@ export function PlanSection({
                 type="button"
                 title="A quick summary of what everyone got done"
                 onClick={onOpenStandup}
-                className="h-[22px] px-1.5 rounded text-[11px] text-text-4 hover:text-text-1 hover:bg-bg-0 transition-colors"
+                className="h-[22px] px-1.5 rounded text-xs text-text-4 hover:text-text-1 hover:bg-state-hover transition-colors"
               >
                 Standup
               </button>
@@ -497,313 +725,26 @@ export type TraceActions = {
   impactsCount?: number;
   // Which launcher row maps to the center pane on screen. Lets the rail
   // highlight "you are here" instead of reading as a flat tool menu —
-  // the same cue the section tab strip gives, one level down.
-  activeKey?:
-    | "overview"
-    | "sessions"
-    | "team"
-    | "usage"
-    | "goals"
-    | "intent"
-    | "review"
-    | "checks"
-    | "impacts"
-    | "rewind"
-    | "timeline"
-    | "attest"
-    | "doctor"
-    | "memory"
-    | null;
+  // the same cue the section tab strip gives, one level down. Shared with the
+  // surface strip (TraceKey) so the two entrances light for the same reasons.
+  activeKey?: TraceKey | null;
+  /** Goals and Safety check are the two rows that ASK rather than navigate:
+   *  they hand a question to Aura and the answer arrives in the chat, so they
+   *  can never be `activeKey` (no pane opens). Set this while the question is
+   *  out and the row spins instead of taking a second click. */
+  busyKey?: "goals" | "review" | null;
 };
 
-// Reused row glyphs (kept as elements so both the v2 and legacy layouts
-// draw identical icons).
-const GLYPH_INTENT_AST = (
-  <>
-    <path d="M5 9a4 4 0 0 0 4 4h6M19 15a4 4 0 0 1-4-4H9" />
-    <path d="m16 6 3 3-3 3M8 18l-3-3 3-3" />
-  </>
-);
-const GLYPH_REVIEW = (
-  <path d="M12 3v18M3 7h18M6 7l-3 6a3 3 0 0 0 6 0ZM18 7l-3 6a3 3 0 0 0 6 0Z" />
-);
-const GLYPH_GOAL = (
-  <>
-    <circle cx="12" cy="12" r="9" />
-    <circle cx="12" cy="12" r="5" />
-    <circle cx="12" cy="12" r="1" />
-  </>
-);
-const GLYPH_REWIND = (
-  <>
-    <path d="M3 12a9 9 0 1 0 3-6.7L3 8" />
-    <path d="M3 3v5h5" />
-  </>
-);
-const GLYPH_ATTEST = (
-  <>
-    <path d="M12 2 4 5v6c0 5 8 11 8 11s8-6 8-11V5Z" />
-    <path d="m9 12 2 2 4-4" />
-  </>
-);
-const GLYPH_MEMORY = (
-  <>
-    <ellipse cx="12" cy="6" rx="8" ry="3" />
-    <path d="M4 6v12c0 1.7 3.6 3 8 3s8-1.3 8-3V6M4 12c0 1.7 3.6 3 8 3s8-1.3 8-3" />
-  </>
-);
-const GLYPH_DOCTOR = (
-  <>
-    <path d="M5 3v6a5 5 0 0 0 10 0V3" />
-    <path d="M5 3H3M15 3h2M10 14v3a4 4 0 0 0 8 0v-1" />
-    <circle cx="18" cy="13" r="2" />
-  </>
-);
-const GLYPH_CODEMAP = (
-  <>
-    <circle cx="6" cy="6" r="2.5" />
-    <circle cx="18" cy="9" r="2.5" />
-    <circle cx="9" cy="18" r="2.5" />
-    <path d="M8 7.5 15.5 9M8 16l1.5-7" />
-  </>
-);
-const GLYPH_OVERVIEW = (
-  <>
-    <path d="M5 18a8 8 0 1 1 14 0" />
-    <path d="M12 14.5 16 9" strokeLinecap="round" />
-    <circle cx="12" cy="14.5" r="1.1" />
-  </>
-);
-const GLYPH_SESSIONS = (
-  <>
-    <rect x="3" y="4" width="18" height="5" rx="1.5" />
-    <rect x="3" y="13" width="18" height="5" rx="1.5" />
-    <path d="M7 6.5h.01M7 15.5h.01" />
-  </>
-);
-// Team activity — two figures + a pulse line, hinting "what everyone's AI is
-// doing to our project, as it happens".
-const GLYPH_TEAM_ACTIVITY = (
-  <>
-    <circle cx="9" cy="8" r="3" />
-    <path d="M3.5 19a5.5 5.5 0 0 1 11 0" />
-    <path d="M16 4.5a3 3 0 0 1 0 5.8M18.5 19a5.5 5.5 0 0 0-3-4.9" />
-  </>
-);
-// Cost & usage — a banknote: a rounded bill with a coin in the middle,
-// hinting "what this is costing us in tokens and dollars".
-const GLYPH_USAGE = (
-  <>
-    <rect x="2.5" y="6" width="19" height="12" rx="2" />
-    <circle cx="12" cy="12" r="2.5" />
-    <path d="M6 9.5v5M18 9.5v5" />
-  </>
-);
-// Cross-branch impacts — a horizontal git-fork: one node on the left splitting
-// rightward into two diverged branch nodes, hinting "a change on another
-// branch reaches yours". Deliberately horizontal (no vertical trunk) so it
-// reads unmistakably as a fork.
-const GLYPH_IMPACTS = (
-  <>
-    <circle cx="5" cy="12" r="2" />
-    <circle cx="19" cy="6" r="2" />
-    <circle cx="19" cy="18" r="2" />
-    <path d="M7 12h5" />
-    <path d="M12 12C14.5 12 14.5 6 17 6" />
-    <path d="M12 12C14.5 12 14.5 18 17 18" />
-  </>
-);
-// Safety check — a shield with a check, hinting "a second set of eyes
-// finds bugs, security holes, and things that don't match the ask".
-const GLYPH_SAFETY = (
-  <>
-    <path d="M12 3 5 5.5v5.2c0 4.4 3 7.3 7 8.8 4-1.5 7-4.4 7-8.8V5.5Z" />
-    <path d="m9 11.5 2 2 4-4.2" />
-  </>
-);
+// The glyphs each Trace destination wears now live beside the destination
+// list itself (components/trace/traceDestinations.tsx), because the surface
+// strip draws the same marks and a mark defined in a sidebar is a mark the
+// other entrance has to copy. Imported above for the legacy layout, which
+// still names its rows by hand.
 
-// Project timeline — a churn sparkline over a baseline with a playhead dot,
-// echoing the scrubber: "scrub the project's history and watch it evolve".
-const GLYPH_TIMELINE = (
-  <>
-    <path d="M3 17h18" />
-    <path d="M7 17v-3M11 17v-6M15 17v-2.5M19 17v-7" />
-    <circle cx="11" cy="11" r="1.9" />
-  </>
-);
-
-function TraceRow({
-  onClick,
-  glyph,
-  label,
-  moat,
-  active,
-  hint,
-  count,
-}: {
-  onClick: () => void;
-  glyph: ReactNode;
-  label: string;
-  moat?: boolean;
-  active?: boolean;
-  /** Plain-language "what is this" — several Trace tools have jargon
-   *  labels (Attestations, Intent ↔ AST). Shown as a styled tooltip. */
-  hint?: string;
-  /** Optional trailing count chip (e.g. the number of impacts reaching
-   *  your work). Omitted/0 renders nothing. */
-  count?: number;
-}) {
-  const btn = (
-    <button
-      type="button"
-      className={`ade-row${active ? " active" : ""}`}
-      aria-current={active ? "page" : undefined}
-      aria-label={hint ? `${label} — ${hint}` : undefined}
-      onClick={onClick}
-    >
-      <RowGlyph moat={moat}>{glyph}</RowGlyph>
-      <span className="nm">{label}</span>
-      {count && count > 0 ? (
-        // Same solid count pill the section switcher uses (SEG_BADGE_INK) —
-        // a count that's asking for you should look identical wherever it
-        // appears in this sidebar. Amber, because that is what it is: an
-        // unresolved impact is the dirty/attention state, not a place you
-        // can navigate to, and the accent in this rail means "you are here".
-        <span
-          className="ml-auto flex-shrink-0 min-w-[18px] text-center rounded-full px-1.5 py-px text-[10px] font-semibold tabular-nums"
-          style={SEG_BADGE_INK}
-          aria-label={`${count} ${count === 1 ? "impact" : "impacts"}`}
-        >
-          {count > 9 ? "9+" : count}
-        </span>
-      ) : null}
-    </button>
-  );
-  if (!hint) return btn;
-  return (
-    <Tooltip>
-      <TooltipTrigger asChild>{btn}</TooltipTrigger>
-      <TooltipContent side="right" className="max-w-[220px]">
-        {hint}
-      </TooltipContent>
-    </Tooltip>
-  );
-}
-
-export function TraceBody(actions: TraceActions) {
-  // Trace v2 — the calm entire.io-style spine: a short primary nav
-  // (Overview · Sessions · Goals), then the semantic / cryptographic
-  // moat under "Verify", then the heavier "Tools". Pull Requests moved
-  // out to the right rail's PRs tab (one home), so they're absent here.
-  if (TRACE_V2) {
-    const k = actions.activeKey ?? null;
-    const impactsCount = actions.impactsCount ?? 0;
-    // Rail organized around the QUESTION each tool answers, not the kind of
-    // tool it is: what happened + what it taught Aura (Activity, incl.
-    // Memory), is my work sound (Trust & safety), travel the past / undo
-    // (History), then quiet utilities (More). "Did it match?" and "Genuine
-    // records" left the rail — they're per-change facts that now live ON each
-    // session/change in the detail view (the Alignment + Attestation tabs),
-    // not as top-level menu sections. Every concept has exactly ONE home.
-    return (
-      // 6px horizontal gutter so every row's active pill insets from the
-      // rail edge (instead of bleeding to it) and section headers + row
-      // glyphs land at a consistent 14px — the shared rail inset that
-      // Tasks/Pages now match.
-      <div className="px-1.5">
-        {/* Rail title — shield glyph + name. Gives Trace the header the
-            other sections get from their own chrome (Plan's sub-tabs,
-            Build's nav) and restores the top breathing room the flush
-            full-bleed mount otherwise loses. */}
-        <div className="ade-rail-title">
-          <ShieldGlyph />
-          <span>Trace</span>
-        </div>
-
-        {/* Landing summary — ungrouped. Links down to every canonical home;
-            renders no full dashboard of its own. */}
-        <TraceRow onClick={actions.onOverview} glyph={GLYPH_OVERVIEW} label="Overview" active={k === "overview"} hint="Live activity, headline numbers, and a one-line cost summary — at a glance, links to the rest." />
-
-        {/* What happened — and what it taught Aura. Your runs and the team's
-            are the raw activity; Memory is its durable distillation: the
-            decisions, conventions, and gotchas Aura now carries into every
-            session. Memory lives HERE, beside the sessions that produced it,
-            instead of buried next to the undo button — the raw → distilled
-            story reads top to bottom. */}
-        <div className="ade-sec-h">Activity</div>
-        <TraceRow onClick={actions.onSessions} glyph={GLYPH_SESSIONS} label="My sessions" moat active={k === "sessions"} hint="Your own AI coding sessions — open any run to see what changed and why." />
-        {TEAM_ACTIVITY_ENABLED && (
-          <TraceRow onClick={actions.onTeamActivity} glyph={GLYPH_TEAM_ACTIVITY} label="Team activity" moat active={k === "team"} hint="Every AI change across your team — who made it, why, and if it touches the work you're in." />
-        )}
-        {MEMORY_SURFACE_ENABLED && (
-          <TraceRow onClick={actions.onMemory} glyph={GLYPH_MEMORY} label="Memory" moat active={k === "memory"} hint="What Aura remembers about this project — the decisions, conventions, and gotchas it carries into every session. Search it, see where each fact came from, and forget anything that's wrong." />
-        )}
-
-        {/* Two trust rungs: built right (Goals) → reviewed (Safety check).
-            Each answers a distinct question so neither reads as a synonym of
-            the other. "Ready to ship" used to be a third rung here — it's now
-            an ambient pill at the commit moment (CommitInput's ShipReadyPill),
-            a live status rather than a place you navigate to. Impacts shows
-            only when something on another branch actually reaches your work. */}
-        <div className="ade-sec-h">Trust &amp; safety</div>
-        <TraceRow onClick={actions.onProve} glyph={GLYPH_GOAL} label="Goals" moat active={k === "goals"} hint="Pick something you asked for and confirm it's truly built — Aura traces it through the real code, end to end." />
-        <TraceRow onClick={actions.onReview} glyph={GLYPH_SAFETY} label="Safety check" moat active={k === "review"} hint="A second set of eyes on your changes — bugs, security holes, and things that don't match what you asked." />
-        {impactsCount > 0 && (
-          <TraceRow
-            onClick={actions.onImpacts}
-            glyph={GLYPH_IMPACTS}
-            label="Impacts on me"
-            moat
-            active={k === "impacts"}
-            count={impactsCount}
-            hint="Code you depend on changed on another branch — fix or acknowledge before it bites."
-          />
-        )}
-
-        {/* The past, in one home: browse how the project came to be (Project
-            timeline). The old separate "Time machine" browse row is gone — its
-            unique job, bringing a single past version back, now lives where you
-            actually SEE the change: a "Bring this back" on each changed piece
-            inside a session's Changes tab (My sessions). One verb, one place,
-            no second list that does the same thing. The full Time-machine view
-            is still reachable on demand — right-click a symbol → "Bring back",
-            or from a session's Change story. */}
-        {TIMELINE_V2 && (
-          <>
-            <div className="ade-sec-h">History</div>
-            <TraceRow onClick={actions.onTimeline} glyph={GLYPH_TIMELINE} label="Project timeline" moat active={k === "timeline"} hint="Relive how the project came to be — scrub a bottom timeline through every moment, with the reason and the code behind it." />
-          </>
-        )}
-
-        {/* Quiet utilities — money, diagnostics, and the structural map. */}
-        <div className="ade-sec-h">More</div>
-        <TraceRow onClick={actions.onCostUsage} glyph={GLYPH_USAGE} label="Cost &amp; usage" active={k === "usage"} hint="Token spend and per-developer cost — this month and all time, the one home for usage." />
-        <TraceRow onClick={actions.onDoctor} glyph={GLYPH_DOCTOR} label="Project health" active={k === "doctor"} hint="A quick health check of your project — finds anything stuck or half-set-up before it trips you, and tells you how to fix it." />
-        {CODE_MAP_ENABLED && (
-          <TraceRow onClick={actions.onCodeMap} glyph={GLYPH_CODEMAP} label="Code Map" hint="A map of your project's files and how they connect — what touches what." />
-        )}
-      </div>
-    );
-  }
-
-  // Legacy layout (flag off) — Accountability + Insight, unchanged.
-  return (
-    <div>
-      <div className="ade-sec-h">Accountability</div>
-      <TraceRow onClick={actions.onIntentAst} glyph={GLYPH_INTENT_AST} label="Change story" moat />
-      <TraceRow onClick={actions.onReview} glyph={GLYPH_REVIEW} label="Semantic Review" moat />
-      <TraceRow onClick={actions.onProve} glyph={GLYPH_GOAL} label="Prove a goal" moat />
-      <TraceRow onClick={actions.onRewind} glyph={GLYPH_REWIND} label="Rewind" moat />
-      <TraceRow onClick={actions.onAttest} glyph={GLYPH_ATTEST} label="Attestations" moat />
-      <div className="ade-sec-h">Insight</div>
-      {CODE_MAP_ENABLED && (
-        <TraceRow onClick={actions.onCodeMap} glyph={GLYPH_CODEMAP} label="Code Map" />
-      )}
-      {MEMORY_SURFACE_ENABLED && (
-        <TraceRow onClick={actions.onMemory} glyph={GLYPH_MEMORY} label="Memory" />
-      )}
-      <TraceRow onClick={actions.onDoctor} glyph={GLYPH_DOCTOR} label="Doctor" />
-    </div>
-  );
-}
-
+// TraceRow + TraceBody used to live here: Trace's ten destinations, drawn
+// as a 232px column of rows under the nav. The switcher is on the surface
+// now (components/trace/TraceTabs.tsx), above whichever Trace pane is open,
+// and nothing rendered these any more. A rail nobody can reach is not a
+// fallback, it is a second copy of a menu waiting to disagree with the
+// first — so it is gone rather than parked behind a flag. The destinations
+// themselves live in components/trace/traceDestinations.tsx.

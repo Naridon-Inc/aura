@@ -112,7 +112,7 @@ pub fn run(list_only: bool, interactive: bool) -> Result<(), String> {
             println!(
                 "  {}. [{}] {} :: {} on {}",
                 i + 1,
-                &c.id[..8],
+                crate::text::clip(&c.id, 8),
                 c.file_path,
                 c.function_name.cyan(),
                 c.branch,

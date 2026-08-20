@@ -15,22 +15,13 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { api, type NoteDoc } from "../../../lib/api";
 import { AsciiSpinner } from "../../ui/ascii-spinner";
 import { TiptapEditor } from "../../notes/TiptapEditor";
+import { relativeAgeFromSecs } from "../../../lib/relativeTime";
 
 const AUTOSAVE_DELAY_MS = 600;
 
 function relativeTime(secs: number): string {
-  if (!secs) return "never";
-  const now = Math.floor(Date.now() / 1000);
-  const delta = Math.max(0, now - secs);
-  if (delta < 10) return "just now";
-  if (delta < 60) return `${delta}s ago`;
-  if (delta < 3600) return `${Math.floor(delta / 60)}m ago`;
-  if (delta < 86400) return `${Math.floor(delta / 3600)}h ago`;
-  const days = Math.floor(delta / 86400);
-  if (days < 30) return `${days}d ago`;
-  const months = Math.floor(days / 30);
-  if (months < 12) return `${months}mo ago`;
-  return `${Math.floor(months / 12)}y ago`;
+  // One ladder for the whole app — see lib/relativeTime.
+  return relativeAgeFromSecs(secs, { empty: "never" });
 }
 
 export function ChannelCanvasTab({
@@ -136,7 +127,7 @@ export function ChannelCanvasTab({
 
   return (
     <div className="flex-1 min-h-0 flex flex-col bg-bg-1">
-      <div className="flex-shrink-0 flex items-center gap-2 px-3 h-7 text-[10.5px] text-text-4 border-b border-line-soft">
+      <div className="flex-shrink-0 flex items-center gap-2 px-3 h-7 text-xs text-text-4 border-b border-line-soft">
         <span aria-hidden>📝</span>
         <span className="truncate">
           {isTeam ? "Team canvas" : `#${channelName} canvas`}
@@ -144,7 +135,7 @@ export function ChannelCanvasTab({
         <span className="text-text-5">·</span>
         {loading ? (
           <span className="flex items-center gap-1.5">
-            <AsciiSpinner className="text-[10.5px]" />
+            <AsciiSpinner className="text-xs" />
             Loading…
           </span>
         ) : (
@@ -152,7 +143,7 @@ export function ChannelCanvasTab({
         )}
         {saving && (
           <span className="flex items-center" aria-label="Saving">
-            <AsciiSpinner className="text-[10.5px]" />
+            <AsciiSpinner className="text-xs" />
           </span>
         )}
         {error && (
@@ -168,8 +159,8 @@ export function ChannelCanvasTab({
           bare
           placeholder={
             isTeam
-              ? "Team-wide canvas — start typing."
-              : `Canvas for #${channelName} — start typing.`
+              ? "Team-wide canvas. Start typing."
+              : `Canvas for #${channelName}. Start typing.`
           }
         />
       </div>

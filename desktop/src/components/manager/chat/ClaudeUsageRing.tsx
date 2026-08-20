@@ -15,6 +15,9 @@ import { useEffect, useRef, useState } from "react";
 
 import { api, type ClaudeUsageSnapshot } from "../../../lib/api";
 import { Tooltip, TooltipContent, TooltipTrigger } from "../../ui/tooltip";
+import { relativeAgeFromDelta } from "../../../lib/relativeTime";
+import { formatCost } from "../../../lib/money";
+import { percentOf } from "../../../lib/percent";
 
 /** How often to re-read the Claude usage snapshot. Cheap (a bounded tail read)
  *  and the windows move slowly, so a relaxed cadence is plenty. */
@@ -120,8 +123,8 @@ function UsageRing({
 /** One label/value line inside the hover breakdown. */
 function TipRow({ label, value }: { label: string; value: string }) {
   return (
-    <div className="flex items-baseline justify-between gap-3 text-[10.5px] leading-tight">
-      <span className="text-text-5 uppercase tracking-wider text-[9.5px]">
+    <div className="flex items-baseline justify-between gap-3 text-xs leading-tight">
+      <span className="section-label">
         {label}
       </span>
       <span className="text-text-1 tabular-nums">{value}</span>
@@ -160,9 +163,8 @@ export function useClaudeUsage(): ClaudeUsageSnapshot | null {
 
 /** "just now" / "3m ago" / "2h ago" for the reading's freshness. */
 function ageLabel(secs: number): string {
-  if (secs < 45) return "just now";
-  if (secs < 3600) return `${Math.round(secs / 60)}m ago`;
-  return `${Math.round(secs / 3600)}h ago`;
+  // One ladder for the whole app — see lib/relativeTime.
+  return relativeAgeFromDelta(secs);
 }
 
 /** The ring + its hover breakdown. Renders nothing until the reading is fresh
@@ -189,7 +191,7 @@ export function ClaudeUsageRing({
 
   const triggerClass =
     variant === "footer"
-      ? "inline-flex items-center justify-center h-[20px] px-2 rounded-[6px] flex-none select-none cursor-default transition-colors hover:bg-bg-2"
+      ? "inline-flex items-center justify-center h-[20px] px-2 rounded-[6px] flex-none select-none cursor-default transition-colors hover:bg-state-hover"
       : "flex items-center select-none cursor-default opacity-80 hover:opacity-100 transition-opacity";
 
   return (
@@ -203,21 +205,21 @@ export function ClaudeUsageRing({
         side="top"
         className="max-w-[240px] bg-bg-2 border border-line-soft text-text-1 shadow-lg"
       >
-        <div className="text-[10px] uppercase tracking-wider text-text-4 mb-1">
+        <div className="section-label mb-1">
           {snap.model ? `Claude · ${snap.model}` : "Claude"}
         </div>
         <div className="flex flex-col gap-0.5">
           {has5h && (
-            <TipRow label="5h window" value={`${Math.round(snap.five_h_pct!)}%`} />
+            <TipRow label="5h window" value={`${percentOf(snap.five_h_pct! / 100)}%`} />
           )}
           {has7d && (
-            <TipRow label="this week" value={`${Math.round(snap.seven_d_pct!)}%`} />
+            <TipRow label="this week" value={`${percentOf(snap.seven_d_pct! / 100)}%`} />
           )}
           {typeof snap.cost_usd === "number" && (
-            <TipRow label="session" value={`$${snap.cost_usd.toFixed(2)}`} />
+            <TipRow label="session" value={formatCost(snap.cost_usd)} />
           )}
         </div>
-        <div className="text-[10px] text-text-5 mt-1.5">
+        <div className="text-2xs text-text-5 mt-1.5">
           from Claude Code · {ageLabel(snap.age_secs)}
         </div>
       </TooltipContent>

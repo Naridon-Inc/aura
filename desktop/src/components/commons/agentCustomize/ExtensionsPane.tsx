@@ -33,9 +33,9 @@ export function ExtensionsPane() {
           system. */}
       <div className="shrink-0 border-b border-line-soft px-8 pt-7 pb-4">
         <div className="mx-auto max-w-3xl">
-          <h2 className="text-[16px] font-semibold text-text-1">Extensions</h2>
-          <p className="mt-1 text-[12.5px] leading-relaxed text-text-3">
-            Editor add-ons from the VS Code world — themes, languages, snippets
+          <h2 className="text-lg font-semibold text-text-1">Extensions</h2>
+          <p className="mt-1 text-base leading-relaxed text-text-3">
+            Editor add-ons from the VS Code world. Themes, languages, snippets
             and smart code help. Add-ons built for Aura itself live under
             Plugins; this is the compatibility track for what VS Code supports.
           </p>
@@ -47,7 +47,7 @@ export function ExtensionsPane() {
                   key={t.id}
                   type="button"
                   onClick={() => setView(t.id)}
-                  className={`rounded px-3 py-1 text-[12px] transition-colors ${
+                  className={`rounded px-3 py-1 text-sm transition-colors ${
                     active
                       ? "bg-bg-2 text-text-1"
                       : "text-text-3 hover:text-text-1"

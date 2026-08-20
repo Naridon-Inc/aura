@@ -71,7 +71,7 @@ export function PluginSandboxFrame({
 
   if (failed) {
     return (
-      <div className="flex-1 min-h-0 flex items-center justify-center text-[11px] text-text-3 px-4 text-center">
+      <div className="flex-1 min-h-0 flex items-center justify-center text-xs text-text-3 px-4 text-center">
         {title}: failed to load ({pluginId})
       </div>
     );

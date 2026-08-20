@@ -33,7 +33,7 @@ export function BrowserTabSwitcher({
   return (
     <div className="absolute inset-0 z-20 flex flex-col bg-bg-1">
       <div className="flex items-center justify-between h-11 px-3 flex-shrink-0">
-        <span className="text-[12px] font-semibold text-text-1">
+        <span className="text-sm font-semibold text-text-1">
           {tabs.length} {tabs.length === 1 ? "tab" : "tabs"}
         </span>
         <button
@@ -41,7 +41,7 @@ export function BrowserTabSwitcher({
           onClick={onClose}
           title="Done"
           aria-label="Done"
-          className="flex items-center justify-center w-7 h-7 rounded-full text-text-3 hover:text-text-1 hover:bg-bg-3 transition-colors"
+          className="flex items-center justify-center w-7 h-7 rounded-full text-text-3 hover:text-text-1 hover:bg-state-hover transition-colors"
         >
           <X className="h-4 w-4" />
         </button>
@@ -56,7 +56,7 @@ export function BrowserTabSwitcher({
             className={`group w-full flex items-center gap-2.5 h-12 pl-3 pr-2 rounded-xl text-left transition-colors ${
               t.id === activeId
                 ? "bg-bg-2 ring-1 ring-accent/50"
-                : "bg-bg-2/60 hover:bg-bg-2 ring-1 ring-line-soft"
+                : "bg-bg-2/60 hover:bg-state-hover ring-1 ring-line-soft"
             }`}
           >
             {t.loading ? (
@@ -65,8 +65,8 @@ export function BrowserTabSwitcher({
               <Globe className="h-4 w-4 flex-shrink-0 text-text-3" />
             )}
             <div className="min-w-0 flex-1">
-              <div className="text-[12.5px] text-text-1 truncate">{tabTitle(t)}</div>
-              {t.url && <div className="text-[10.5px] text-text-4 truncate">{hostOf(t.url)}</div>}
+              <div className="text-base text-text-1 truncate">{tabTitle(t)}</div>
+              {t.url && <div className="text-xs text-text-4 truncate">{hostOf(t.url)}</div>}
             </div>
             <span
               role="button"
@@ -77,7 +77,7 @@ export function BrowserTabSwitcher({
               }}
               title="Close tab"
               aria-label="Close tab"
-              className="flex items-center justify-center w-6 h-6 flex-shrink-0 rounded-full text-text-4 hover:text-text-1 hover:bg-bg-3 opacity-0 group-hover:opacity-100 transition-opacity"
+              className="flex items-center justify-center w-6 h-6 flex-shrink-0 rounded-full text-text-4 hover:text-text-1 hover:bg-state-hover opacity-0 group-hover:opacity-100 transition-opacity"
             >
               <X className="h-3.5 w-3.5" />
             </span>
@@ -87,10 +87,10 @@ export function BrowserTabSwitcher({
         <button
           type="button"
           onClick={onNewTab}
-          className="w-full flex items-center justify-center gap-2 h-12 rounded-xl border border-dashed border-line-soft text-text-3 hover:text-text-1 hover:bg-bg-2 transition-colors"
+          className="w-full flex items-center justify-center gap-2 h-12 rounded-xl border border-dashed border-line-soft text-text-3 hover:text-text-1 hover:bg-state-hover transition-colors"
         >
           <Plus className="h-4 w-4" />
-          <span className="text-[12px] font-medium">New tab</span>
+          <span className="text-sm font-medium">New tab</span>
         </button>
       </div>
     </div>

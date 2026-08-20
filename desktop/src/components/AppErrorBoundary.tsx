@@ -15,6 +15,8 @@
 // very thing that's broken — so it can't lean on `--color-*` / Tailwind classes.
 
 import { Component, type ErrorInfo, type ReactNode } from "react";
+import { isBenignRuntimeNoise, isCancellation } from "../lib/runtimeNoise";
+import { errorKind, trackError } from "../lib/track";
 
 type Props = { children: ReactNode };
 type State = {
@@ -33,54 +35,6 @@ const APPEARANCE_KEYS = [
   "aura.editor.applyChrome",
   "aura.theme.variant",
 ];
-
-// Some runtime errors are pure noise and must NOT blank the app:
-//  • "ResizeObserver loop …" — a benign layout-thrash warning every browser
-//    emits; it is not an actual failure.
-//  • Tauri's event teardown race — `unlisten()` is async and its internal
-//    `unregisterListener` reads `listeners[eventId].handlerId` with no guard.
-//    When a listener is torn down twice (fast unmount, an effect re-running on
-//    boot), the already-removed entry is `undefined` and it throws. The
-//    listener is *already gone*, so this is harmless — but as an unhandled
-//    rejection it would otherwise trip the snag screen on launch. Swallow it.
-function isBenignRuntimeNoise(message: string): boolean {
-  if (!message) return false;
-  if (message.includes("ResizeObserver loop")) return true;
-  if (message.includes("handlerId") || message.includes("unregisterListener"))
-    return true;
-  //  • Monaco / VS Code cancellation — a `CancellationError` (name === message
-  //    === "Canceled") is thrown routinely when an editor or model is disposed
-  //    while an async op (tokenization, hover, diff compute, the loader's init)
-  //    is still in flight. The work was simply abandoned; nothing failed. But
-  //    Monaco surfaces it as an unhandled promise rejection, so without this
-  //    guard a user closing a file mid-highlight gets blanked into the snag
-  //    screen. VS Code's own global handler ignores CancellationError for the
-  //    same reason. Match the bare message and the "Canceled: Canceled"
-  //    name:message form, both US and UK spelling.
-  const t = message.trim();
-  if (t === "Canceled" || t === "Cancelled") return true;
-  if (t.includes("Canceled: Canceled") || t.includes("Cancelled: Cancelled"))
-    return true;
-  //  • Monaco diff-editor teardown race — `@monaco-editor/react`'s DiffEditor
-  //    frees the original/modified TextModels BEFORE the DiffEditorWidget that
-  //    still references them (its unmount cleanup disposes the models first, the
-  //    widget last), so newer Monaco's "reset the model before you dispose it"
-  //    invariant fires "TextModel got disposed before DiffEditorWidget model got
-  //    reset". It's a pure ordering assertion while the pane is already
-  //    unmounting — the models get disposed either way, nothing failed — but
-  //    React surfaces it from the passive unmount effect straight to this
-  //    boundary, so without this guard closing a diff (or switching the file it
-  //    shows) would blank the app into the snag screen.
-  if (t.includes("DiffEditorWidget model got reset")) return true;
-  return false;
-}
-
-// A thrown value is a Monaco/VS Code cancellation if its name marks it so —
-// checked separately because some cancellations carry an empty message.
-function isCancellation(reason: unknown): boolean {
-  const name = reason instanceof Error ? reason.name : "";
-  return name === "Canceled" || name === "Cancelled" || name === "CancellationError";
-}
 
 export class AppErrorBoundary extends Component<Props, State> {
   state: State = { error: null, info: null, showDetails: false, copied: false };
@@ -104,6 +58,10 @@ export class AppErrorBoundary extends Component<Props, State> {
       return;
     }
     this.setState({ info: info.componentStack ?? null });
+    // A render crash blanks the whole app, so it is the single most valuable
+    // error to know about. Class name only — never the message or the stack,
+    // both of which carry paths and user content.
+    trackError("render", errorKind(error));
     // Keep the raw error in the console for anyone who opens devtools.
     console.error("[AppErrorBoundary] caught a render error:", error, info);
   }
@@ -200,7 +158,7 @@ export class AppErrorBoundary extends Component<Props, State> {
 
           <h1 style={S.title}>Something went wrong on screen</h1>
           <p style={S.lede}>
-            None of your work is lost — this is just the screen failing to draw.
+            None of your work is lost. This is just the screen failing to draw.
             The most common cause is a color theme that doesn’t fit. You can put
             the look back to normal, or reload and carry on.
           </p>
@@ -299,12 +257,14 @@ const S: Record<string, React.CSSProperties> = {
     background: ACCENT,
     boxShadow: "0 0 0 4px color-mix(in srgb, var(--color-accent, #7ef0a0) 16%, transparent)",
   },
+  // Deliberately inline, like everything else here: this boundary has to
+  // paint when the stylesheet itself is what failed, so it cannot use
+  // .section-label. It carries that rule's values by hand instead — 11px,
+  // medium, one step back in grey, sentence case.
   kicker: {
     fontSize: 11,
-    letterSpacing: 0.6,
-    textTransform: "uppercase",
     color: TEXT_3,
-    fontWeight: 600,
+    fontWeight: 500,
   },
   title: { margin: "0 0 8px", fontSize: 19, fontWeight: 600, color: TEXT_1, letterSpacing: -0.2 },
   lede: { margin: "0 0 18px", fontSize: 13, lineHeight: 1.65, color: TEXT_2 },
@@ -316,12 +276,10 @@ const S: Record<string, React.CSSProperties> = {
     marginBottom: 18,
   },
   whatLabel: {
-    fontSize: 10,
-    textTransform: "uppercase",
-    letterSpacing: 0.6,
+    fontSize: 11,
     color: TEXT_3,
     marginBottom: 5,
-    fontWeight: 600,
+    fontWeight: 500,
   },
   whatMsg: {
     fontSize: 12.5,

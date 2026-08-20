@@ -123,6 +123,12 @@ pub async fn workspace_launch(
             // aren't dropped. `None` on either → the agent's own default.
             spec.model.clone(),
             spec.effort.clone(),
+            // A launched workspace is a worktree cut out of this laptop's
+            // disk, so its agents run here — the same thing
+            // `workspaceCreateStore` says out loud when a launch names a
+            // machine. When a machine can hold a worktree of its own, this
+            // is the line that carries it.
+            None,
         )
         .await
         {

@@ -11,20 +11,24 @@
 
 import { useEffect, useState } from "react";
 import { fetchChangeNoteReport } from "../../lib/changeNoteCache";
+import { relativeAgeAuto } from "../../lib/relativeTime";
 import { humanizeIdentifier } from "../../lib/prove";
+import { sentenceCase } from "../../lib/textCase";
 import type {
   FileChangeNote,
   ChangedSymbol,
 } from "../../lib/api";
 
-/** A code identifier as a plain, title-cased phrase — `senderFor` → "Sender
- *  For", `EmailDispatcher` → "Email Dispatcher" — using the SAME humanizer the
- *  Goals and split-diff surfaces use, so the whole app reads the same. Falls
- *  back to the raw name if it humanizes to nothing. */
+/** A code identifier as a plain phrase — `senderFor` → "Sender for",
+ *  `EmailDispatcher` → "Email dispatcher". Both halves are shared now: the
+ *  humanizer that produces the words, and the casing that finishes them. This
+ *  comment used to claim the Goals and split-diff surfaces read the same while
+ *  hand-rolling its own casing and printing "Sender For" beside their "Sender
+ *  for". Falls back to the raw name if it humanizes to nothing. */
 function humanLabel(id: string): string {
   const words = humanizeIdentifier(id).trim();
   if (!words) return id;
-  return words.replace(/\b\w/g, (c) => c.toUpperCase());
+  return sentenceCase(words);
 }
 
 const VERB: Record<string, { glyph: string; tone: string; word: string }> = {
@@ -38,22 +42,22 @@ function SymbolRow({ s }: { s: ChangedSymbol }) {
   return (
     <li className="flex items-baseline gap-1.5 leading-relaxed">
       <span
-        className={"w-2 shrink-0 text-center font-mono text-[11px] " + v.tone}
+        className={"w-2 shrink-0 text-center font-mono text-xs " + v.tone}
         title={v.word}
       >
         {v.glyph}
       </span>
       {/* Plain, title-cased name for the reader; the raw identifier stays in
           the hover for an engineer who wants it. */}
-      <span className="text-[12px] text-text-1" title={s.identifier}>
+      <span className="text-sm text-text-1" title={s.identifier}>
         {humanLabel(s.identifier)}
       </span>
-      <span className="shrink-0 text-[10.5px] text-text-4">
+      <span className="shrink-0 text-xs text-text-4">
         {prettyKind(s.kind)}
       </span>
       {s.rationale ? (
-        <span className="min-w-0 text-[11.5px] text-text-3">
-          — {s.rationale}
+        <span className="min-w-0 text-sm text-text-3">
+          · {s.rationale}
         </span>
       ) : null}
     </li>
@@ -96,18 +100,18 @@ function AffectsRow({ note }: { note: FileChangeNote }) {
   if (note.features.length) {
     return (
       <div className="flex flex-wrap items-center gap-1.5">
-        <span className="text-[11px] text-text-3">Affects</span>
+        <span className="text-xs text-text-3">Affects</span>
         {note.features.slice(0, 6).map((f) => (
           <span
             key={`${f.file}:${f.entrySymbol}`}
             title={`${prettyEntryKind(f.kind)} · ${f.entrySymbol} (${f.file})`}
-            className="rounded border border-accent/30 bg-accent/10 px-1.5 py-px text-[11px] text-accent"
+            className="rounded border border-accent/30 bg-accent/10 px-1.5 py-px text-xs text-accent"
           >
             {f.name}
           </span>
         ))}
         {note.truncated ? (
-          <span className="text-[10.5px] text-text-4">(+ more)</span>
+          <span className="text-xs text-text-4">(+ more)</span>
         ) : null}
       </div>
     );
@@ -116,11 +120,11 @@ function AffectsRow({ note }: { note: FileChangeNote }) {
     const names = note.direct_callers.slice(0, 4).map((c) => c.symbol);
     const extra = note.dependent_count - names.length;
     return (
-      <div className="text-[11.5px] text-text-3">
+      <div className="text-sm text-text-3">
         <span className="text-text-2">Re-check </span>
         {names.map((n, i) => (
           <span key={n}>
-            <span className="font-mono text-[11px] text-text-1">{n}</span>
+            <span className="font-mono text-xs text-text-1">{n}</span>
             {i < names.length - 1 ? <span>, </span> : null}
           </span>
         ))}
@@ -132,8 +136,8 @@ function AffectsRow({ note }: { note: FileChangeNote }) {
   }
   if (note.leaf) {
     return (
-      <div className="text-[11.5px] text-text-3">
-        Nothing else calls this — safe in isolation.
+      <div className="text-sm text-text-3">
+        Nothing else calls this. Safe in isolation.
       </div>
     );
   }
@@ -208,19 +212,8 @@ function baseName(p: string): string {
 /** A short relative stamp for "when this was recorded". `commit_time` is unix
  *  seconds; tolerate millis too. */
 function relWhen(value: number): string {
-  if (!value) return "";
-  const ms = value < 1e12 ? value * 1000 : value;
-  const sec = Math.max(0, Math.floor((Date.now() - ms) / 1000));
-  if (sec < 60) return "just now";
-  const min = Math.floor(sec / 60);
-  if (min < 60) return `${min}m ago`;
-  const hr = Math.floor(min / 60);
-  if (hr < 24) return `${hr}h ago`;
-  const d = Math.floor(hr / 24);
-  if (d < 30) return `${d}d ago`;
-  const mo = Math.floor(d / 30);
-  if (mo < 12) return `${mo}mo ago`;
-  return `${Math.floor(mo / 12)}y ago`;
+  // One ladder for the whole app — see lib/relativeTime.
+  return relativeAgeAuto(value);
 }
 
 function Chevron({ open }: { open: boolean }) {
@@ -316,18 +309,18 @@ export function ChangeNoteCard({
         type="button"
         onClick={() => setOpen((v) => !v)}
         aria-expanded={open}
-        className="flex w-full items-baseline gap-2 px-3 py-2 text-left hover:bg-bg-2/40"
+        className="flex w-full items-baseline gap-2 px-3 py-2 text-left hover:bg-state-hover"
       >
         <Chevron open={open} />
-        <span className="shrink-0 rounded bg-bg-2 px-1.5 py-px text-[10px] uppercase tracking-wide text-text-4">
+        <span className="meta-tag">
           Change
         </span>
-        <span className="min-w-0 flex-1 text-[12.5px] leading-snug text-text-1">
+        <span className="min-w-0 flex-1 text-base leading-snug text-text-1">
           {note.note}
           {reason ? (
             <span className="text-text-3">
               {" "}
-              — <span className="italic">{reason}</span>
+              · <span className="italic">{reason}</span>
             </span>
           ) : null}
           {blast ? (
@@ -335,7 +328,7 @@ export function ChangeNoteCard({
           ) : null}
         </span>
         {!open && symbolCount > 0 ? (
-          <span className="shrink-0 text-[10.5px] text-text-4">
+          <span className="shrink-0 text-xs text-text-4">
             {symbolCount} update{symbolCount === 1 ? "" : "s"}
           </span>
         ) : null}
@@ -350,10 +343,10 @@ export function ChangeNoteCard({
               one-liner. The root-cause / thought-process the user can recover. */}
           {story?.body ? (
             <div>
-              <div className="text-[10px] uppercase tracking-wide text-text-4">
+              <div className="section-label">
                 Why this changed
               </div>
-              <p className="mt-0.5 whitespace-pre-wrap text-[11.5px] leading-relaxed text-text-2">
+              <p className="mt-0.5 whitespace-pre-wrap text-sm leading-relaxed text-text-2">
                 {story.body}
               </p>
             </div>
@@ -375,7 +368,7 @@ export function ChangeNoteCard({
               so a reader sees this file in the context of the whole change. */}
           {story?.alongside.length ? (
             <div>
-              <div className="text-[10px] uppercase tracking-wide text-text-4">
+              <div className="section-label">
                 Changed alongside
                 <span className="ml-1 text-text-4">{story.alongside.length}</span>
               </div>
@@ -384,13 +377,13 @@ export function ChangeNoteCard({
                   <span
                     key={f}
                     title={f}
-                    className="rounded border border-line-soft bg-bg-2 px-1.5 py-px font-mono text-[10.5px] text-text-3"
+                    className="rounded border border-line-soft bg-bg-2 px-1.5 py-px font-mono text-xs text-text-3"
                   >
                     {baseName(f)}
                   </span>
                 ))}
                 {story.alongside.length > 12 ? (
-                  <span className="text-[10.5px] text-text-4">
+                  <span className="text-xs text-text-4">
                     +{story.alongside.length - 12} more
                   </span>
                 ) : null}
@@ -400,7 +393,7 @@ export function ChangeNoteCard({
 
           {/* Who / when — the accountability footer for this file's change. */}
           {story?.author ? (
-            <div className="pt-0.5 text-[10.5px] text-text-4">
+            <div className="pt-0.5 text-xs text-text-4">
               Recorded by{" "}
               <span className="text-text-3">{story.author}</span>
               {story.when ? ` · ${relWhen(story.when)}` : null}

@@ -18,6 +18,7 @@ use std::process::Command;
 use std::sync::Arc;
 
 pub mod antigravity;
+pub mod bin_resolve;
 pub mod builtin_catalog;
 pub mod claude_code;
 pub mod codex;
@@ -92,6 +93,42 @@ impl ReasoningEffort {
             ReasoningEffort::Medium => "medium",
             ReasoningEffort::High => "high",
             ReasoningEffort::Max => "high",
+        }
+    }
+
+    /// OpenCode `--variant` value. Verified against `opencode run --help`
+    /// (1.18.11): "model variant (provider-specific reasoning effort, e.g.
+    /// high, max, minimal)". Because the accepted words are the PROVIDER's,
+    /// not OpenCode's, this is only ever emitted when the user picked an
+    /// effort explicitly — never as a default that could reject a model that
+    /// has no variants.
+    pub fn opencode_variant(self, fast: bool) -> &'static str {
+        if fast {
+            return "minimal";
+        }
+        match self {
+            ReasoningEffort::Low => "low",
+            ReasoningEffort::Medium => "medium",
+            ReasoningEffort::High => "high",
+            ReasoningEffort::Max => "max",
+        }
+    }
+
+    /// Pi `--thinking <level>` value. Pi's ladder is off / minimal / low /
+    /// medium / high / xhigh / max — the only CLI here whose vocabulary is
+    /// already ours, so this maps one-to-one with nothing lost at either end.
+    /// `fast` takes "minimal" rather than "off": pi's own help calls minimal
+    /// the low-latency tier, and "off" would disable extended thinking on a
+    /// model that may reason better with a little of it.
+    pub fn pi_thinking(self, fast: bool) -> &'static str {
+        if fast {
+            return "minimal";
+        }
+        match self {
+            ReasoningEffort::Low => "low",
+            ReasoningEffort::Medium => "medium",
+            ReasoningEffort::High => "high",
+            ReasoningEffort::Max => "max",
         }
     }
 
@@ -196,6 +233,44 @@ impl ApprovalPolicy {
         }
     }
 
+    /// OpenCode approval args. Verified against `opencode run --help` and
+    /// `opencode agent list` (1.18.11): `--auto` auto-approves every
+    /// permission that isn't explicitly denied, and `plan` is a real built-in
+    /// primary agent, so read-only mode is a genuine agent switch rather than
+    /// a sentence of prompt text asking the model to behave.
+    ///
+    /// `AcceptEdits` has no faithful mapping — `--auto` waves through shell
+    /// and network too, which is a wider grant than the user asked for — so it
+    /// emits nothing and leaves OpenCode on its own gating.
+    pub fn opencode_args(self) -> Vec<String> {
+        match self {
+            ApprovalPolicy::Default | ApprovalPolicy::AcceptEdits => Vec::new(),
+            ApprovalPolicy::Plan => vec!["--agent".into(), "plan".into()],
+            ApprovalPolicy::Bypass => vec!["--auto".into()],
+        }
+    }
+
+    /// Pi approval args. Pi has NO approval gate — its `RpcCommand` union has
+    /// no approval round-trip, and `--approve` is about trusting
+    /// project-local config files, not tool calls. What it has instead is
+    /// `--tools <allowlist>`, decided at spawn time, and its own help gives
+    /// the read-only set by name: `pi --tools read,grep,find,ls -p "Review
+    /// the code in src/"` — captioned "Read-only mode (no file modifications
+    /// possible)". So `Plan` is a real capability restriction here rather
+    /// than a sentence asking the model to behave, and one it cannot talk
+    /// itself out of: `write`, `edit` and `bash` are not loaded at all.
+    ///
+    /// `AcceptEdits` and `Bypass` emit nothing, and that is already correct:
+    /// with no gate to relax, pi's default IS full autonomy.
+    pub fn pi_args(self) -> Vec<String> {
+        match self {
+            ApprovalPolicy::Default | ApprovalPolicy::AcceptEdits | ApprovalPolicy::Bypass => {
+                Vec::new()
+            }
+            ApprovalPolicy::Plan => vec!["--tools".into(), "read,grep,find,ls".into()],
+        }
+    }
+
     /// A short read-only steering line for CLIs with no approval flag
     /// (cursor / kimi / opencode). Only `Plan` is faithfully expressible as
     /// prompt text; the looser modes can't be safely emulated, so they
@@ -254,10 +329,15 @@ impl InvokeRequest<'_> {
     }
 
     /// The prompt with a read-only PLAN steer prepended when the approval
-    /// policy is `Plan` — for the thin CLIs (cursor / kimi / opencode /
-    /// generic / pi) that have no native approval flag to carry it. Returns
-    /// the prompt unchanged for every other policy and when unset, so the
-    /// invocation stays byte-identical to the pre-feature build.
+    /// policy is `Plan` — for the thin CLIs (cursor / kimi / generic) that
+    /// have no native approval flag to carry it. Returns the prompt unchanged
+    /// for every other policy and when unset, so the invocation stays
+    /// byte-identical to the pre-feature build.
+    ///
+    /// This is the weakest form of read-only mode there is — the model can
+    /// simply not comply — so it is a last resort, not a default. OpenCode
+    /// (`--agent plan`) and pi (`--tools read,grep,find,ls`) both have real
+    /// mechanisms and use them instead.
     pub fn plan_steered_prompt(&self) -> String {
         match self.approval.and_then(|a| a.prompt_steer()) {
             Some(lead) => format!("{lead}\n\n{}", self.prompt),
@@ -302,14 +382,17 @@ pub trait AgentProvider: Send + Sync {
     fn id(&self) -> &str;
     fn label(&self) -> &str;
 
-    /// Whether the binary is on PATH. Default: shell out to `which`.
-    /// Providers can override (e.g. to honor an env var).
+    /// Whether the binary can be found. Providers can override (e.g. to
+    /// honor an env var, or to probe several binary names).
+    ///
+    /// Not a bare `which`: the app is usually launched from the Dock, where
+    /// PATH is launchd's four system directories and every user install is
+    /// invisible. An agent that reads as missing is dropped from the picker
+    /// and never probed for its models, so this question decides whether
+    /// the user's own installed agent exists as far as Aura is concerned.
+    /// See [`crate::bin_resolve`].
     fn is_available(&self) -> bool {
-        Command::new("which")
-            .arg(self.bin_name())
-            .output()
-            .map(|o| o.status.success())
-            .unwrap_or(false)
+        crate::bin_resolve::is_installed(&[self.bin_name()])
     }
 
     /// `<bin> --version` first line, best-effort. Default reads stdout

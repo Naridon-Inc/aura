@@ -20,14 +20,15 @@
 
 import { useMemo } from "react";
 import type { BillingMemberRow, TeamMember, UsageDeveloper } from "../../lib/api";
+import { isAutomationIdentity } from "../../lib/agentIdentity";
 import { AgentIcon } from "../agent/AgentIcon";
 import {
-  fmtCost,
-  fmtTokens,
   initialsOf,
   providerForModel,
   relTimeFromTs,
 } from "./usageProviders";
+import { compactNumber } from "../../lib/compactNumber";
+import { formatCost } from "../../lib/money";
 
 /** A teammate joined from roster + (optional) billing. `billing` is null when
  *  this person has no cloud usage row this month (or cloud is unavailable). */
@@ -35,6 +36,12 @@ type JoinedMember = {
   key: string;
   name: string;
   handle: string;
+  /** Git email, kept so two seats sharing a display name can be told apart.
+   *  This repo genuinely has "Ashiq" twice under different addresses. */
+  email: string;
+  /** A machine, not a teammate — Aura's own agent, the checkpointer, a CI
+   *  bot. Listed separately so a *cost* view never counts them as people. */
+  automation: boolean;
   commits: number;
   lastSeen: number;
   admin: boolean;
@@ -180,6 +187,8 @@ function joinMembers(
       key: m.email || m.handle,
       name: m.name || m.handle || m.email,
       handle: m.handle || emailLocal(m.email),
+      email: normKey(m.email),
+      automation: isAutomationIdentity(m.name, m.email),
       commits: m.commits,
       lastSeen: m.last_seen,
       admin: m.admin,
@@ -206,6 +215,9 @@ function joinMembers(
       key: `billing:${b.developer_id}`,
       name: b.display_name || b.github_login || b.developer_id,
       handle: normKey(b.github_login),
+      email: "",
+      // A billing seat is somebody the org pays for — never a bot.
+      automation: false,
       commits: 0,
       lastSeen: 0,
       admin: false,
@@ -225,6 +237,8 @@ function joinMembers(
       key: `local:${key}`,
       name: agg.handle || key,
       handle: agg.handle,
+      email: key,
+      automation: isAutomationIdentity(agg.handle, key),
       commits: 0,
       lastSeen: 0,
       admin: false,
@@ -272,6 +286,132 @@ function TokenBar({
         }}
       />
     </span>
+  );
+}
+
+/** One person (or one machine) in the team list. Extracted so the Automation
+ *  group renders identically to the Team group without a second copy of the
+ *  markup drifting away from it. */
+function MemberRow({
+  m,
+  qualifier,
+  teamMaxTokens,
+  nowSecs,
+  usageKnown,
+}: {
+  m: JoinedMember;
+  /** Rendered after the name when two seats share a display name — this repo
+   *  has "Ashiq" under two git emails, and two identical rows in a spend list
+   *  is a puzzle, not a fact. Empty string = the name stands alone. */
+  qualifier: string;
+  teamMaxTokens: number;
+  nowSecs: number;
+  /** We have per-dev numbers from somewhere, so a member with none is a real
+   *  "no usage" rather than us simply not knowing. */
+  usageKnown: boolean;
+}) {
+  return (
+    <div className="flex items-center gap-2.5 rounded-lg border border-line-soft bg-bg-1 px-3 py-2">
+      {/* Avatar monogram */}
+      <span
+        className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full text-sm font-semibold text-text-2"
+        style={{ background: "var(--color-bg-2)" }}
+        aria-hidden="true"
+      >
+        {initialsOf(m.name)}
+      </span>
+
+      {/* Identity + meta */}
+      <div className="flex min-w-0 flex-1 flex-col gap-0.5">
+        <div className="flex items-center gap-1.5">
+          <span className="truncate text-base font-medium text-text-1">
+            {m.name}
+          </span>
+          {qualifier ? (
+            <span className="truncate text-xs text-text-4">{qualifier}</span>
+          ) : null}
+          {m.admin ? (
+            <span className="meta-tag">
+              admin
+            </span>
+          ) : null}
+          {m.isUpstream ? (
+            <span className="meta-tag">
+              upstream
+            </span>
+          ) : null}
+        </div>
+        <div className="flex items-center gap-2 text-xs text-text-4">
+          {m.commits > 0 ? (
+            <span>
+              {m.commits} {m.commits === 1 ? "commit" : "commits"}
+            </span>
+          ) : (
+            <span>cloud only</span>
+          )}
+          {m.lastSeen > 0 ? (
+            <>
+              <span className="text-text-4">·</span>
+              <span>active {relTimeFromTs(m.lastSeen, nowSecs)}</span>
+            </>
+          ) : null}
+        </div>
+      </div>
+
+      {/* Provider logos used (only when billing tells us truthfully) */}
+      {m.providers.length > 0 ? (
+        <div className="flex shrink-0 items-center -space-x-1">
+          {m.providers.slice(0, 4).map((p) => (
+            <span
+              key={p}
+              className="rounded-full p-0.5"
+              style={{ background: "var(--color-bg-content)" }}
+              title={p}
+            >
+              <AgentIcon agentId={p} size={15} />
+            </span>
+          ))}
+        </div>
+      ) : null}
+
+      {/* Token spend — billing row when present, else the local
+          git-shared aggregate. Never zeros-as-truth. */}
+      {m.billing ? (
+        <div className="flex shrink-0 items-center gap-2">
+          <TokenBar
+            tokensIn={m.billing.tokens_in}
+            tokensOut={m.billing.tokens_out}
+            teamMax={teamMaxTokens}
+          />
+          <div className="flex w-16 flex-col items-end leading-tight">
+            <span className="font-mono text-sm text-text-2">
+              {compactNumber(m.tokensTotal)}
+            </span>
+            <span className="font-mono text-2xs text-text-4">
+              {formatCost(m.billing.cost_usd)}
+            </span>
+          </div>
+        </div>
+      ) : m.local ? (
+        <div className="flex shrink-0 items-center gap-2">
+          <TokenBar
+            tokensIn={m.local.tokensIn}
+            tokensOut={m.local.tokensOut}
+            teamMax={teamMaxTokens}
+          />
+          <div className="flex w-16 flex-col items-end leading-tight">
+            <span className="font-mono text-sm text-text-2">
+              {compactNumber(m.tokensTotal)}
+            </span>
+            <span className="font-mono text-2xs text-text-4">
+              {formatCost(m.local.costUsd)}
+            </span>
+          </div>
+        </div>
+      ) : usageKnown ? (
+        <span className="shrink-0 text-xs text-text-4">no usage</span>
+      ) : null}
+    </div>
   );
 }
 
@@ -328,11 +468,36 @@ export function TeamOverview({
     [sorted],
   );
 
+  // Machines out of the people list. They still render — dropping them would
+  // lose commits the repo really contains — but under their own heading, so
+  // "Team · 4" counts colleagues and Aura's own agent stops sitting at the top
+  // of a spend list as if it were the most expensive person on the project.
+  const people = useMemo(() => sorted.filter((m) => !m.automation), [sorted]);
+  const machines = useMemo(() => sorted.filter((m) => m.automation), [sorted]);
+
+  // Display names that appear on more than one seat. Two rows both reading
+  // "Ashiq" (different git emails, 3022 commits vs 1) is unreadable; these get
+  // their email printed beside the name. We don't merge them — deciding two
+  // git identities are one person isn't this view's call to make.
+  const ambiguous = useMemo(() => {
+    const counts = new Map<string, number>();
+    for (const m of people) {
+      const k = m.name.trim().toLowerCase();
+      counts.set(k, (counts.get(k) ?? 0) + 1);
+    }
+    return new Set(
+      [...counts.entries()].filter(([, n]) => n > 1).map(([k]) => k),
+    );
+  }, [people]);
+
+  const qualifierFor = (m: JoinedMember): string =>
+    ambiguous.has(m.name.trim().toLowerCase()) ? m.email || m.handle : "";
+
   if (sorted.length === 0) {
     return (
       <section className="flex flex-col gap-2">
-        <h3 className="text-[11px] uppercase tracking-wide text-text-4">Team</h3>
-        <div className="rounded-lg border border-line-soft bg-bg-1 px-3 py-3 text-center text-[12px] text-text-4">
+        <h3 className="section-label">Team</h3>
+        <div className="rounded-lg border border-line-soft bg-bg-1 px-3 py-3 text-center text-sm text-text-4">
           No teammates yet. As collaborators commit to this repo, they appear
           here.
         </div>
@@ -343,16 +508,16 @@ export function TeamOverview({
   return (
     <section className="flex flex-col gap-2">
       <div className="flex items-baseline justify-between">
-        <h3 className="text-[11px] uppercase tracking-wide text-text-4">
+        <h3 className="section-label">
           Team
           <span className="ml-1.5 font-normal text-text-4">
-            · {sorted.length}
+            · {people.length}
           </span>
         </h3>
         {cloudAvailable ? null : localAvailable ? (
           <span
-            className="text-[11px] text-text-4"
-            title="Per-developer numbers come from .aura/usage_by_dev.jsonl — each teammate's own aura usage runs keep their rows fresh, and git syncs the file across clones."
+            className="text-xs text-text-4"
+            title="Per-developer numbers come from .aura/usage_by_dev.jsonl. Each teammate's own aura usage runs keep their rows fresh, and git syncs the file across clones."
           >
             Local aggregate · shared via git
           </span>
@@ -360,124 +525,63 @@ export function TeamOverview({
           <button
             type="button"
             onClick={onSignInHint}
-            className="text-[11px] text-text-4 hover:text-text-2"
+            className="text-xs text-text-4 hover:text-text-2"
           >
             Sign in to Aura Cloud for team usage
           </button>
         ) : (
-          <span className="text-[11px] text-text-4">
+          <span className="text-xs text-text-4">
             Sign in to Aura Cloud for team usage
           </span>
         )}
       </div>
 
       <div className="flex flex-col gap-2">
-        {sorted.map((m) => (
-          <div
-            key={m.key}
-            className="flex items-center gap-2.5 rounded-lg border border-line-soft bg-bg-1 px-3 py-2"
-          >
-            {/* Avatar monogram */}
-            <span
-              className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full text-[12px] font-semibold text-text-2"
-              style={{ background: "var(--color-bg-2)" }}
-              aria-hidden="true"
-            >
-              {initialsOf(m.name)}
-            </span>
-
-            {/* Identity + meta */}
-            <div className="flex min-w-0 flex-1 flex-col gap-0.5">
-              <div className="flex items-center gap-1.5">
-                <span className="truncate text-[13px] font-medium text-text-1">
-                  {m.name}
-                </span>
-                {m.admin ? (
-                  <span className="rounded bg-bg-2 px-1 py-px text-[10px] uppercase tracking-wide text-text-4">
-                    admin
-                  </span>
-                ) : null}
-                {m.isUpstream ? (
-                  <span className="rounded border border-line-soft px-1 py-px text-[10px] uppercase tracking-wide text-text-4">
-                    upstream
-                  </span>
-                ) : null}
-              </div>
-              <div className="flex items-center gap-2 text-[11px] text-text-4">
-                {m.commits > 0 ? (
-                  <span>
-                    {m.commits} {m.commits === 1 ? "commit" : "commits"}
-                  </span>
-                ) : (
-                  <span>cloud only</span>
-                )}
-                {m.lastSeen > 0 ? (
-                  <>
-                    <span className="text-text-4">·</span>
-                    <span>active {relTimeFromTs(m.lastSeen, nowSecs)}</span>
-                  </>
-                ) : null}
-              </div>
-            </div>
-
-            {/* Provider logos used (only when billing tells us truthfully) */}
-            {m.providers.length > 0 ? (
-              <div className="flex shrink-0 items-center -space-x-1">
-                {m.providers.slice(0, 4).map((p) => (
-                  <span
-                    key={p}
-                    className="rounded-full p-0.5"
-                    style={{ background: "var(--color-bg-content)" }}
-                    title={p}
-                  >
-                    <AgentIcon agentId={p} size={15} />
-                  </span>
-                ))}
-              </div>
-            ) : null}
-
-            {/* Token spend — billing row when present, else the local
-                git-shared aggregate. Never zeros-as-truth. */}
-            {m.billing ? (
-              <div className="flex shrink-0 items-center gap-2">
-                <TokenBar
-                  tokensIn={m.billing.tokens_in}
-                  tokensOut={m.billing.tokens_out}
-                  teamMax={teamMaxTokens}
-                />
-                <div className="flex w-16 flex-col items-end leading-tight">
-                  <span className="font-mono text-[12px] text-text-2">
-                    {fmtTokens(m.tokensTotal)}
-                  </span>
-                  <span className="font-mono text-[10px] text-text-4">
-                    {fmtCost(m.billing.cost_usd)}
-                  </span>
-                </div>
-              </div>
-            ) : m.local ? (
-              <div className="flex shrink-0 items-center gap-2">
-                <TokenBar
-                  tokensIn={m.local.tokensIn}
-                  tokensOut={m.local.tokensOut}
-                  teamMax={teamMaxTokens}
-                />
-                <div className="flex w-16 flex-col items-end leading-tight">
-                  <span className="font-mono text-[12px] text-text-2">
-                    {fmtTokens(m.tokensTotal)}
-                  </span>
-                  <span className="font-mono text-[10px] text-text-4">
-                    {fmtCost(m.local.costUsd)}
-                  </span>
-                </div>
-              </div>
-            ) : cloudAvailable || localAvailable ? (
-              <span className="shrink-0 text-[11px] text-text-4">
-                no usage
-              </span>
-            ) : null}
+        {people.length > 0 ? (
+          people.map((m) => (
+            <MemberRow
+              key={m.key}
+              m={m}
+              qualifier={qualifierFor(m)}
+              teamMaxTokens={teamMaxTokens}
+              nowSecs={nowSecs}
+              usageKnown={cloudAvailable || localAvailable}
+            />
+          ))
+        ) : (
+          <div className="rounded-lg border border-line-soft bg-bg-1 px-3 py-3 text-center text-sm text-text-4">
+            Only Aura has committed here so far. Teammates appear as they push
+            their first commit.
           </div>
-        ))}
+        )}
       </div>
+
+      {/* Aura's own agent and the checkpointer commit under their own git
+          identities. They belong on the page — those commits are real — but
+          they are not colleagues, and in a spend view listing them beside
+          people implies somebody is paying them a salary. */}
+      {machines.length > 0 ? (
+        <div className="mt-3 flex flex-col gap-2">
+          <div className="flex items-baseline gap-2">
+            <h3 className="section-label">
+              Automation
+            </h3>
+            <span className="text-xs text-text-4">
+              commits made by Aura, not by a person
+            </span>
+          </div>
+          {machines.map((m) => (
+            <MemberRow
+              key={m.key}
+              m={m}
+              qualifier=""
+              teamMaxTokens={teamMaxTokens}
+              nowSecs={nowSecs}
+              usageKnown={false}
+            />
+          ))}
+        </div>
+      ) : null}
     </section>
   );
 }

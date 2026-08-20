@@ -108,7 +108,15 @@ pub struct OpenReq {
     /// Agent vs plain-shell. `#[serde(default)]` → `Agent` keeps the
     /// existing agent callers (and any in-flight pre-`kind` daemon)
     /// valid without a coordinated upgrade.
-    #[serde(default)]
+    ///
+    /// On the wire it is `session_kind`, matching `ListByKind`. `Request`
+    /// is internally tagged on `kind`, and this is a newtype variant, so
+    /// its fields land in the SAME object as the tag: named `kind` here,
+    /// every Open frame carried the key twice and the daemon rejected it
+    /// with `duplicate field 'kind'` before it ever spawned a PTY. An
+    /// older daemon reads this as a missing field and falls back to
+    /// `Agent` — which is what it did before session kinds existed.
+    #[serde(default, rename = "session_kind")]
     pub kind: SessionKind,
     /// Friendly label for the reattach/restore UI (e.g. a terminal tab
     /// name). Agents leave this `None` and derive their own title.
@@ -200,6 +208,44 @@ mod tests {
         );
         let k: SessionKind = serde_json::from_str("\"agent\"").unwrap();
         assert_eq!(k, SessionKind::Agent);
+    }
+
+    #[test]
+    fn an_open_request_survives_its_own_wire() {
+        // `Open` is a newtype variant, so `OpenReq`'s fields share the
+        // object with the `"kind"` tag. When the session kind was also
+        // named `kind`, serde happily wrote the key twice and the daemon
+        // answered every Open with `duplicate field 'kind'` — no PTY, no
+        // terminal, just an early EOF at the client. Encoding is not the
+        // test; decoding what we encoded is.
+        let req = Request::Open(OpenReq {
+            agent_id: "test".into(),
+            repo_root: "/r".into(),
+            bin: "/bin/cat".into(),
+            args: vec![],
+            env: vec![],
+            cols: 80,
+            rows: 24,
+            kind: SessionKind::Plain,
+            label: None,
+            cwd: None,
+        });
+        let json = serde_json::to_string(&req).unwrap();
+        assert_eq!(
+            json.matches("\"kind\":").count(),
+            1,
+            "the envelope tag must be the only `kind` on an Open frame: {json}"
+        );
+        assert!(json.contains("\"session_kind\":\"plain\""));
+
+        let back: Request = serde_json::from_str(&json).expect("daemon must decode its own Open");
+        match back {
+            Request::Open(r) => {
+                assert_eq!(r.kind, SessionKind::Plain);
+                assert_eq!(r.bin, "/bin/cat");
+            }
+            other => panic!("expected Open, got {other:?}"),
+        }
     }
 
     #[test]

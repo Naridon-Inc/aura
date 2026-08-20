@@ -12,6 +12,7 @@ import type {
   Trigger,
   WriteMode,
 } from "../../lib/api";
+import { relativeAgeFromIso } from "../../lib/relativeTime";
 
 // ── Cadence ──────────────────────────────────────────────────────────────
 
@@ -95,7 +96,7 @@ export function describeAction(a: Action | null | undefined): string {
     case "run_agent": {
       const who = a.agent || "an agent";
       const what = a.prompt.trim();
-      return what ? `Run ${who} — ${truncate(what, 60)}` : `Run agent ${who}`;
+      return what ? `Run ${who} · ${truncate(what, 60)}` : `Run agent ${who}`;
     }
     case "run_pr_review":
       return a.base ? `Review my changes vs ${a.base}` : "Review my changes";
@@ -117,20 +118,15 @@ function truncate(s: string, max: number): string {
 
 // ── Run records ──────────────────────────────────────────────────────────
 
-/** "2m ago" / "yesterday" / "3d ago" from an ISO timestamp. */
+/** "2m ago" / "3d ago" from an ISO timestamp. */
 export function relativeTime(iso: string | null | undefined): string {
-  if (!iso) return "";
-  const t = Date.parse(iso);
-  if (Number.isNaN(t)) return "";
-  const secs = Math.max(0, Math.floor((Date.now() - t) / 1000));
-  if (secs < 45) return "just now";
-  const mins = Math.floor(secs / 60);
-  if (mins < 60) return `${mins}m ago`;
-  const hrs = Math.floor(mins / 60);
-  if (hrs < 24) return `${hrs}h ago`;
-  const days = Math.floor(hrs / 24);
-  if (days === 1) return "yesterday";
-  return `${days}d ago`;
+  // One ladder for the whole app — see lib/relativeTime.
+  //
+  // This also answered "yesterday" whenever the elapsed time worked out to
+  // between 24 and 48 hours. That is a calendar claim derived from a duration,
+  // and the two disagree: a run at 2pm on Monday said "yesterday" all through
+  // Tuesday, and then kept saying it until 2pm on Wednesday.
+  return relativeAgeFromIso(iso);
 }
 
 /** "14s" / "1m02s" elapsed between two ISO timestamps. */

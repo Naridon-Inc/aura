@@ -2,13 +2,25 @@
 // (intent log appends, snapshots, intent attribute/split/merge, zone
 // claims). Click a row → inverse-op preview → confirm → backend
 // reverses it and stamps `undone_at` on the entry. The most recent
-// un-undone op is highlighted as the ⌘Z target so the keymap (W1.4)
-// stays consistent with the dialog.
+// un-undone op that CAN be reversed is highlighted as the ⌘Z target so the
+// keymap (W1.4) stays consistent with the dialog.
+//
+// "that CAN be reversed" is load-bearing. This used to target the most recent
+// un-undone op of any kind, and three of the eight kinds the engine records —
+// conflict_open, conflict_resolve, guard_revert — have no arm in `apply_undo`
+// (op_log.rs:147-155). Settle a merge conflict and the newest row is a
+// conflict_resolve: the button lit up, read "Undo: conflict_resolve", and
+// answered the press with the engine's own "no inverse implemented for op kind
+// 'conflict_resolve'". Whether a thing can be undone is knowable before you
+// press it, so it's said before you press it. See lib/opKinds.
 
 import { useCallback, useEffect, useMemo, useState } from "react";
+import { Undo2 } from "lucide-react";
 import { Dialog } from "../Dialog";
-import { AsciiSpinner } from "../ui/ascii-spinner";
+import { relativeAgeFromSecs } from "../../lib/relativeTime";
+import { isUndoable, opKindLabel } from "../../lib/opKinds";
 import { Button } from "../ui/button";
+import { EmptyState, ErrorNote, LoadingState } from "../ui/state";
 import { api, type OpEntry } from "../../lib/api";
 
 type OpLogDialogProps = {
@@ -16,6 +28,51 @@ type OpLogDialogProps = {
   repoRoot: string;
   onClose: () => void;
 };
+
+/** What the footer may claim, given how much of the list it has actually read.
+ *
+ *  The list itself has a loading state and an empty state. The footer and the
+ *  button had neither: `target` is null while the read is in flight and null
+ *  again if it throws, and both cases fell into the same arm as a list that was
+ *  genuinely read and held nothing reversible — so the dialog opened saying
+ *  "Nothing in this list can be reversed." before it had looked, and kept
+ *  saying it after a failure. Somebody opens this when they're frightened of
+ *  what an agent just did; that sentence is the worst possible wrong answer at
+ *  the worst possible moment. */
+export function undoCopy(s: {
+  loading: boolean;
+  failed: boolean;
+  hasTarget: boolean;
+  selected: boolean;
+  busy: boolean;
+}): { footnote: string; label: string; title: string } {
+  if (s.loading)
+    return {
+      footnote: "Reading what Aura has done…",
+      label: s.busy ? "undoing…" : "Undo the last step",
+      title: "Still reading what Aura has done",
+    };
+  if (s.failed)
+    return {
+      footnote:
+        "Aura couldn't read this list just now, so it can't tell you what's reversible. Reopen this window to try again.",
+      label: s.busy ? "undoing…" : "Undo the last step",
+      title: "Aura couldn't read this list just now",
+    };
+  if (!s.hasTarget)
+    return {
+      footnote: "Nothing in this list can be reversed.",
+      label: s.busy ? "undoing…" : "Nothing to undo",
+      title: "Nothing here can be undone",
+    };
+  return {
+    footnote: s.selected
+      ? "The step you picked will be undone."
+      : "Undoes the most recent step that can be reversed.",
+    label: s.busy ? "undoing…" : s.selected ? "Undo this step" : "Undo the last step",
+    title: "",
+  };
+}
 
 export function OpLogDialog({ open, repoRoot, onClose }: OpLogDialogProps) {
   const [ops, setOps] = useState<OpEntry[]>([]);
@@ -48,9 +105,16 @@ export function OpLogDialog({ open, repoRoot, onClose }: OpLogDialogProps) {
     }
   }, [open, refresh]);
 
+  // A row you can't press is a row you can't select, so `selected` is already
+  // reversible by construction — the `isUndoable` guard here is belt and braces
+  // for a list that refreshed under a stale selection.
   const target = useMemo(() => {
-    if (selected) return ops.find((o) => o.op_id === selected) ?? null;
-    return ops.find((o) => o.undone_at === null) ?? null;
+    const reversible = (o: OpEntry) => o.undone_at === null && isUndoable(o.kind);
+    if (selected) {
+      const picked = ops.find((o) => o.op_id === selected);
+      return picked && reversible(picked) ? picked : null;
+    }
+    return ops.find(reversible) ?? null;
   }, [ops, selected]);
 
   async function undo() {
@@ -70,11 +134,19 @@ export function OpLogDialog({ open, repoRoot, onClose }: OpLogDialogProps) {
     }
   }
 
+  const copy = undoCopy({
+    loading,
+    failed: err !== null && ops.length === 0,
+    hasTarget: target !== null,
+    selected: selected !== null,
+    busy,
+  });
+
   return (
     <Dialog
       open={open}
       onClose={onClose}
-      title="Operation log"
+      title="What Aura did"
       width={680}
       footer={
         <>
@@ -86,76 +158,90 @@ export function OpLogDialog({ open, repoRoot, onClose }: OpLogDialogProps) {
             size="xs"
             onClick={undo}
             disabled={busy || !target}
-            title={target ? `Undo op ${target.op_id.slice(0, 8)}` : "Nothing to undo"}
+            // The hover named the step by its engine tag and its id — "Undo op
+            // 5f3a1c04" — neither of which is a thing anybody recognises. When
+            // there IS a target the step's own name beats any generic line.
+            title={
+              target
+                ? `Undo "${opKindLabel(target.kind)}" · ${target.summary}`
+                : copy.title
+            }
           >
-            {busy ? "undoing…" : target ? `Undo: ${target.kind}` : "Nothing to undo"}
+            {copy.label}
           </Button>
         </>
       }
     >
-      <div className="space-y-2 text-[11.5px]">
-        {err && <div role="alert" className="text-red text-[11px]">{err}</div>}
+      <div className="space-y-2 text-sm">
+        {err && <ErrorNote className="text-xs">{err}</ErrorNote>}
         {result && (
-          <div className="text-text-2 text-[11px] bg-bg-2 border border-line-soft rounded px-2 py-1.5">
+          <div className="text-text-2 text-xs bg-bg-2 border border-line-soft rounded px-2 py-1.5">
             {result}
           </div>
         )}
         {loading && ops.length === 0 && (
-          <div className="flex items-center gap-1.5 text-text-4 text-[11px]">
-            <AsciiSpinner className="text-[11px] leading-none" /> Loading recent actions…
-          </div>
+          <LoadingState label="Reading what Aura has done…" />
         )}
         {!loading && ops.length === 0 && (
-          <div className="text-text-4 text-[11px]">No operations recorded yet.</div>
+          <EmptyState
+            icon={Undo2}
+            title="Nothing to undo yet"
+            // Was "Every change Aura makes on your behalf is recorded here so
+            // you can take it back." Eight things reach this list and not one of
+            // them is an agent editing your code: snapshot, log_intent,
+            // intent_attribute, intent_split, intent_merge, conflict_open,
+            // conflict_resolve, guard_revert (the `record_op` call sites in
+            // cmd_aura.rs, cmd_conflicts.rs and agent_mutation_guard.rs). They
+            // are Aura's own bookkeeping. Someone frightened by what an AI did
+            // to their files would open this on that sentence, find it empty,
+            // and conclude nothing had happened.
+            body="Aura's own bookkeeping shows up here (reasons it logged, backups it took, conflicts it settled) each with a way to reverse it. Your agents' edits to your files aren't in this list. Nothing yet."
+            size="sm"
+          />
         )}
         <div className="max-h-[55vh] overflow-y-auto border border-line-soft rounded">
           {ops.map((op) => {
             const isSelected = selected === op.op_id;
             const isUndoTarget = !selected && target?.op_id === op.op_id;
             const undone = op.undone_at !== null;
+            // Three of the eight kinds have no inverse. Those rows are history
+            // to read, not history to arm the button with — so they're dimmed
+            // and inert exactly like an already-undone row, and say why.
+            const reversible = isUndoable(op.kind);
+            const inert = undone || !reversible;
             return (
               <button
                 key={op.op_id}
                 type="button"
                 onClick={() => setSelected(isSelected ? null : op.op_id)}
-                disabled={undone}
+                disabled={inert}
                 className={[
                   "w-full text-left px-2.5 py-1.5 border-b border-line-soft last:border-b-0 transition-colors",
-                  undone
+                  inert
                     ? "opacity-50 cursor-not-allowed"
                     : isSelected
                     ? "bg-bg-3"
                     : isUndoTarget
                     ? "bg-bg-2 hover:bg-bg-3"
-                    : "hover:bg-bg-2",
+                    : "hover:bg-state-hover",
                 ].join(" ")}
               >
                 <div className="flex items-center gap-2">
-                  <span className="text-text-4 text-[10px] font-mono w-12 shrink-0">
-                    {op.op_id.slice(0, 8)}
-                  </span>
-                  <span
-                    className={[
-                      "text-[10px] uppercase tracking-wider px-1.5 py-0.5 rounded shrink-0",
-                      "bg-bg-3 text-text-3",
-                    ].join(" ")}
-                  >
-                    {op.kind}
-                  </span>
-                  <span className="text-text-1 text-[11.5px] truncate flex-1">
+                  <span className="meta-tag shrink-0">{opKindLabel(op.kind)}</span>
+                  <span className="text-text-1 text-sm truncate flex-1">
                     {op.summary}
                   </span>
-                  <span className="text-text-4 text-[10px] shrink-0">
+                  <span className="text-text-4 text-2xs shrink-0">
                     {formatAge(op.ts)}
                   </span>
-                  {undone && (
-                    <span className="text-text-4 text-[10px] uppercase shrink-0">
-                      undone
-                    </span>
-                  )}
+                  {undone ? (
+                    <span className="section-label shrink-0">undone</span>
+                  ) : !reversible ? (
+                    <span className="section-label shrink-0">can’t be undone</span>
+                  ) : null}
                 </div>
                 {isSelected && (
-                  <pre className="mt-1.5 text-[10px] font-mono text-text-3 bg-bg-1 border border-line-soft rounded p-1.5 max-h-32 overflow-auto whitespace-pre-wrap break-all">
+                  <pre className="mt-1.5 text-2xs font-mono text-text-3 bg-bg-1 border border-line-soft rounded p-1.5 max-h-32 overflow-auto whitespace-pre-wrap break-all">
                     {JSON.stringify(op.undo_payload, null, 2)}
                   </pre>
                 )}
@@ -163,10 +249,20 @@ export function OpLogDialog({ open, repoRoot, onClose }: OpLogDialogProps) {
             );
           })}
         </div>
-        <div className="text-text-4 text-[10px]">
-          {selected
-            ? "Selected op will be undone."
-            : "Defaults to undoing the most recent un-undone op (also bound to ⌘Z outside editor focus)."}
+        <div className="text-text-4 text-2xs">
+          {/* Said "the most recent un-undone op", which was both the engine's
+              words and a description of the bug — it targeted the newest row
+              whether or not that row could be reversed.
+
+              The replacement first read "⌘Z does the same when you're not
+              typing in a file". It doesn't: ⌘Z fires `aura:open-op-log`
+              (App.tsx:1030) and OPENS this list. Naming a shortcut is a claim
+              about what it's bound to, and it's checkable — which is the whole
+              point of the two commits either side of this one.
+
+              Every arm now comes from `undoCopy`, which knows whether the list
+              has been read at all — see the note on that function. */}
+          {copy.footnote}
         </div>
       </div>
     </Dialog>
@@ -174,14 +270,7 @@ export function OpLogDialog({ open, repoRoot, onClose }: OpLogDialogProps) {
 }
 
 function formatAge(ts: number): string {
-  const ms = Date.now() - ts * 1000;
-  if (ms < 0) return "now";
-  const s = Math.floor(ms / 1000);
-  if (s < 60) return `${s}s`;
-  const m = Math.floor(s / 60);
-  if (m < 60) return `${m}m`;
-  const h = Math.floor(m / 60);
-  if (h < 24) return `${h}h`;
-  const d = Math.floor(h / 24);
-  return `${d}d`;
+  // One ladder for the whole app — see lib/relativeTime. This copy stopped at
+  // days, so an operation from a year ago read "412d".
+  return relativeAgeFromSecs(ts, { style: "compact" });
 }

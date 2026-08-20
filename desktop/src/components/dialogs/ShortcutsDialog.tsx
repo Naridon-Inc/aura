@@ -5,6 +5,13 @@
 // shortcut. It reads straight from the shared SHORTCUT_GROUPS map, so it can
 // never drift from what the app actually binds. No search, no state, no
 // backend — just a two-column reference you glance at and dismiss with Esc.
+//
+// It is also the ONLY one now. The tasks board used to open a second sheet of
+// its own on `?`, listing ten card keys this one had never heard of, so the
+// entry reading "Show all shortcuts" was showing about two thirds of them.
+// The board's keys are a scoped group in the shared map and `?` opens this
+// dialog — which is why groups can carry a `note`: a key that only works on
+// a focused task card has to say so.
 
 import { useEffect } from "react";
 
@@ -59,18 +66,33 @@ export function ShortcutsDialog({
           <Kbd>esc</Kbd>
         </div>
 
-        <div className={cn(MODAL_BODY, "grid grid-cols-1 gap-x-8 gap-y-4 sm:grid-cols-2")}>
+        <div
+          className={cn(
+            MODAL_BODY,
+            "max-h-[70vh] overflow-y-auto",
+            "grid grid-cols-1 gap-x-8 gap-y-4 sm:grid-cols-2",
+          )}
+        >
           {SHORTCUT_GROUPS.map((group) => (
             <section key={group.title} className="flex flex-col gap-1.5">
-              <h3 className="pb-0.5 text-[10px] font-semibold uppercase tracking-[0.09em] text-text-5">
+              <h3 className="section-label pb-0.5">
                 {group.title}
               </h3>
+              {/* Where a scoped group applies. Without it these read as global
+                  and fail on the wrong screen, which is worse than not
+                  listing them — and not listing them is what the app used to
+                  do. */}
+              {group.note ? (
+                <p className="-mt-1 pb-0.5 text-xs text-text-4">{group.note}</p>
+              ) : null}
               {group.items.map((s) => (
+                // Keyed by label, not by combo: Enter and Esc each mean two
+                // different things on two different surfaces now.
                 <div
-                  key={s.keys}
+                  key={s.label}
                   className="flex items-center justify-between gap-4 py-0.5"
                 >
-                  <span className="text-[12.5px] text-text-2">{s.label}</span>
+                  <span className="text-base text-text-2">{s.label}</span>
                   <span className="flex shrink-0 items-center gap-0.5">
                     {comboKeys(s.keys).map((cap, i) => (
                       <Kbd key={i}>{cap}</Kbd>
@@ -82,7 +104,7 @@ export function ShortcutsDialog({
           ))}
         </div>
 
-        <div className={cn(MODAL_FOOTER, "justify-start text-[11px] text-text-4")}>
+        <div className={cn(MODAL_FOOTER, "justify-start text-xs text-text-4")}>
           Press <span className="font-medium text-text-3">⌘/</span> anytime to bring this back.
         </div>
       </div>

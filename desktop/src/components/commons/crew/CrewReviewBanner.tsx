@@ -56,20 +56,26 @@ export function CrewReviewBanner({
   const n = flags.length;
 
   return (
-    <div className="shrink-0 border-b border-line-soft bg-amber/[0.07]">
+    // No amber wash. This strip used to be tinted the same 7% amber as the
+    // situation line above the board, at the same full width, one hairline
+    // apart — so a suggestion about tasks that have not started yet looked
+    // exactly like an agent stopped mid-flight waiting on a person. Only one of
+    // those two things means the crew cannot move, and it is not this one. The
+    // amber survives where it belongs: on the mark, so the strip is still
+    // findable, and nowhere else.
+    <div className="shrink-0 border-b border-line-soft">
       <button
         type="button"
         onClick={() => setOpen((v) => !v)}
-        className="flex w-full items-center gap-2 px-6 py-2.5 text-left"
+        className="flex w-full items-center gap-2 px-6 py-2.5 text-left hover:bg-state-hover"
       >
         <AlertTriangle size={14} style={{ color: "var(--color-amber)" }} className="shrink-0" />
-        <span className="text-[12px] font-medium text-text-2">
+        <span className="text-sm font-medium text-text-2">
           {n} task{n === 1 ? "" : "s"} worth a second look before you run
         </span>
-        <span className="text-[11.5px] text-text-4">
-          — some look already done, duplicated, or empty.
+        <span className="text-sm text-text-4">. Some look already done, duplicated, or empty.
         </span>
-        <span className="ml-auto flex items-center gap-1 text-[11px] text-text-4">
+        <span className="ml-auto flex items-center gap-1 text-xs text-text-4">
           {open ? "Hide" : "Review"}
           {open ? <ChevronDown size={13} /> : <ChevronRight size={13} />}
         </span>
@@ -98,18 +104,18 @@ export function CrewReviewBanner({
                 <div className="min-w-0 flex-1">
                   <div className="flex items-center gap-2">
                     <span
-                      className="text-[9.5px] font-semibold uppercase tracking-[0.07em]"
+                      className="text-xs font-medium"
                       style={{ color: meta.tone }}
                     >
                       {meta.label}
                     </span>
-                    <span className="truncate text-[12.5px] font-medium text-text-1" title={f.title}>
+                    <span className="truncate text-base font-medium text-text-1" title={f.title}>
                       {f.title}
                     </span>
                   </div>
-                  <p className="mt-0.5 text-[11.5px] leading-relaxed text-text-4">{f.reason}</p>
+                  <p className="mt-0.5 text-sm leading-relaxed text-text-4">{f.reason}</p>
                   {f.evidence ? (
-                    <p className="mt-0.5 text-[11px] text-text-5">
+                    <p className="mt-0.5 text-xs text-text-5">
                       <span className="opacity-70">↔ same as</span> {f.evidence}
                     </p>
                   ) : null}

@@ -41,7 +41,7 @@ export function CollisionsSection({
               <button
                 type="button"
                 onClick={() => file && onOpenFile?.(file)}
-                className="group w-full flex items-center gap-2 px-2 py-1.5 rounded-sm hover:bg-bg-2/60 transition-colors min-w-0 text-left"
+                className="group w-full flex items-center gap-2 px-2 py-1.5 rounded-sm hover:bg-state-hover transition-colors min-w-0 text-left"
               >
                 <span
                   className="shrink-0 w-1.5 h-1.5 rounded-full"
@@ -51,28 +51,28 @@ export function CollisionsSection({
                 <ActorMark actor={c.peer} isAgent={c.peer_is_agent} size={18} />
                 <span className="flex-1 min-w-0">
                   <span className="flex items-center gap-1.5 min-w-0">
-                    <span className="text-[12px] text-text-1 truncate">
+                    <span className="text-sm text-text-1 truncate">
                       {actorShort(c.peer)}
                     </span>
-                    <span className="text-[10px] text-text-4 shrink-0">
+                    <span className="text-2xs text-text-4 shrink-0">
                       {sev.disposition}
                     </span>
                     {!c.same_branch && (
-                      <span className="text-[10px] text-text-4 font-mono truncate shrink min-w-0">
+                      <span className="text-2xs text-text-4 font-mono truncate shrink min-w-0">
                         {c.their_branch}
                       </span>
                     )}
                   </span>
-                  <span className="block text-[10.5px] text-text-3 truncate">
+                  <span className="block text-xs text-text-3 truncate">
                     {c.reason}
                   </span>
                 </span>
-                <span className="shrink-0 text-[10px] text-text-4 tabular-nums">
+                <span className="shrink-0 text-2xs text-text-4 tabular-nums">
                   {agoFromMs(c.age_ms)}
                 </span>
               </button>
             </TooltipTrigger>
-            <TooltipContent side="left" className="text-[10.5px]">
+            <TooltipContent side="left" className="text-xs">
               <div className="font-medium mb-0.5 truncate max-w-[260px]">
                 {c.peer}
                 {c.peer_is_agent ? " · agent" : ""}

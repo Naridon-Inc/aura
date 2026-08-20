@@ -1,39 +1,40 @@
-// Identity choice dialog — surfaces the per-repo identity override
-// picker when a user has multiple plausible identities (their local git
-// email, plus one or more team roster handles their git email
-// canonicalises to via alias).
+// Identity choice dialog — asks which of *your own* identities should
+// appear on your messages in this repo.
 //
-// Triggered on the FIRST chat send in a repo when:
-//   1. No per-repo override is currently set, AND
-//   2. The local git email doesn't match any roster primary email, AND
-//   3. There's at least one canonical roster handle to choose from
-//      (either via alias, or by offering each enrolled member).
+// Triggered on the FIRST chat send in a repo, and from the sidebar notice.
+// It has two modes, decided by the evidence this machine can actually
+// produce (see `./identityChoices`):
 //
-// Layout follows the rest of the chat dialog family (CommsPanel's
-// `ChatDoctorDialog`, `SettingsDialog`): centred modal, dark amber
-// accent for identity-related affordances, "remember choice" checkbox
-// that maps directly to `api.identityOverrideSet`. Cancelling without a
-// pick simply sends the message under the email-local-part fallback —
+//   • at least one identity this computer can prove is yours, and it
+//     differs from what you're sending as → pick between them;
+//   • no such identity and no local git author at all → set one up
+//     (`IdentitySetupForm`), because a menu with nothing legitimate on it
+//     is not a question worth asking.
+//
+// It used to have a third behaviour, and that was the bug: with no local
+// git email it listed every `claimed` member of the repo's committed
+// roster as a candidate "you". A stranger who cloned a public project and
+// wasn't signed in was offered precisely one identity on their first
+// message — a real teammate's name, handle and email. Roster membership
+// describes other people; it is not evidence about the person at this
+// keyboard. `buildIdentityChoices` no longer enumerates it.
+//
+// Layout follows the rest of the chat dialog family (`ChatDoctorDialog`,
+// `SettingsDialog`): centred modal, "remember choice" checkbox mapping to
+// `api.identityOverrideSet`. Cancelling sends under the existing default —
 // same behaviour as if the dialog were never shown.
 
 import { useEffect, useMemo, useState } from "react";
 import { X } from "lucide-react";
 import { Button } from "../ui/button";
-import { api, type ChatDoctorReport, type TeamManifest } from "../../lib/api";
-
-type Choice = {
-  /** Stable id used for the radio button. */
-  id: string;
-  /** Handle without the leading `@`. */
-  handle: string;
-  /** Display name for the second line. Empty string falls back to handle. */
-  name: string;
-  /** Email this choice represents. Persisted into the override so the
-   *  cloud presence beacon stamps the same address teammates see. */
-  email: string;
-  /** Whether this is the local git identity (the do-nothing default). */
-  isLocalGit: boolean;
-};
+import { IdentitySetupForm } from "./IdentitySetupForm";
+import { buildIdentityChoices } from "./identityChoices";
+import {
+  api,
+  type ChatDoctorReport,
+  type CloudAuthStatus,
+  type TeamManifest,
+} from "../../lib/api";
 
 export type IdentityChoiceDialogProps = {
   /** Absolute repo root the choice applies to — the override key. */
@@ -41,17 +42,17 @@ export type IdentityChoiceDialogProps = {
   /** Pre-fetched ChatDoctor report so the dialog doesn't issue its own
    *  network call. Caller refreshes it after `onPicked`. */
   report: ChatDoctorReport;
-  /** Team manifest used to enumerate possible identities beyond the
-   *  alias-resolved one. Lets a user with two genuinely-claimable
-   *  identities (e.g. two roster handles with overlapping aliases) pick
-   *  among them. */
+  /** Team manifest, used only to match the signed-in Aura account to a
+   *  seat it is recorded on — never to enumerate other people. */
   manifest: TeamManifest | null;
+  /** Signed-in Aura account, or `null` when signed out / not yet read. */
+  account: CloudAuthStatus | null;
   /** Fired after the user picks AND the override write succeeds. The
    *  parent then triggers `aura:identity-updated` so CommsPanel reloads
    *  `effective_handle` / `effective_name`. */
   onPicked: () => void;
   /** Close without persisting a choice. The send proceeds under the
-   *  email-local-part default — exactly the legacy behaviour. */
+   *  existing default — exactly the legacy behaviour. */
   onClose: () => void;
 };
 
@@ -63,13 +64,18 @@ export function IdentityChoiceDialog({
   repoRoot,
   report,
   manifest,
+  account,
   onPicked,
   onClose,
 }: IdentityChoiceDialogProps) {
-  const choices = useMemo<Choice[]>(() => buildChoices(report, manifest), [
-    report,
-    manifest,
-  ]);
+  const choices = useMemo(
+    () => buildIdentityChoices({ report, manifest, account }),
+    [report, manifest, account],
+  );
+  // Nothing to switch to means there is no choice to make, whatever else
+  // is in the roster — fall through to the setup form instead of drawing
+  // a one-row menu or an empty one.
+  const canChoose = choices.some((c) => !c.isLocalGit);
   const [pickedId, setPickedId] = useState<string>(
     () => choices.find((c) => !c.isLocalGit)?.id ?? choices[0]?.id ?? "",
   );
@@ -105,7 +111,7 @@ export function IdentityChoiceDialog({
         );
       } else if (remember && picked.isLocalGit) {
         // Explicitly picking the local-git default with "remember"
-        // ticked means "stop nagging me on this repo, treat the git
+        // ticked means "stop asking me on this repo, treat the git
         // email as canonical going forward". Clear any existing
         // override so the resolver falls back to the alias map.
         await api.identityOverrideClear(repoRoot);
@@ -118,12 +124,6 @@ export function IdentityChoiceDialog({
       setBusy(false);
     }
   };
-
-  if (choices.length === 0) {
-    // Nothing to choose between — dismiss silently so the send flow
-    // doesn't stall on an empty dialog.
-    return null;
-  }
 
   return (
     <div
@@ -139,9 +139,11 @@ export function IdentityChoiceDialog({
         <header className="flex items-center justify-between border-b border-line-soft px-4 py-2.5">
           <h2
             id="identity-choice-title"
-            className="text-[12.5px] font-semibold text-text-1"
+            className="text-base font-semibold text-text-1"
           >
-            Send as which identity?
+            {canChoose
+              ? "Which name should your messages carry?"
+              : "Tell Aura who you are"}
           </h2>
           <button
             type="button"
@@ -153,158 +155,112 @@ export function IdentityChoiceDialog({
           </button>
         </header>
 
-        <div className="px-4 py-3 text-[11.5px] text-text-2 leading-snug">
-          Your local git email is{" "}
-          <code className="font-mono">{report.git_email || "—"}</code>, but the
-          team roster recognises you under a different handle. Pick the one
-          that should appear on your chat messages in this repo.
-        </div>
+        {canChoose ? (
+          <>
+            <div className="px-4 py-3 text-sm text-text-2 leading-snug">
+              You go by more than one name on this project. Pick the one your
+              teammates should see on your messages here. Aura only lists names
+              it can tell are yours.
+            </div>
 
-        <ul className="px-4 pb-2 space-y-1.5">
-          {choices.map((c) => {
-            const checked = c.id === pickedId;
-            return (
-              <li key={c.id}>
-                <label
-                  className={`flex items-start gap-2 rounded border px-2.5 py-2 cursor-pointer ${
-                    checked
-                      ? "border-accent/40 bg-accent/10"
-                      : "border-line-soft bg-bg-2 hover:bg-bg-hover"
-                  }`}
-                >
-                  <input
-                    type="radio"
-                    name="identity-choice"
-                    value={c.id}
-                    checked={checked}
-                    onChange={() => setPickedId(c.id)}
-                    className="mt-0.5"
-                  />
-                  <div className="min-w-0 flex-1">
-                    <div className="text-[12px] font-medium text-text-1 truncate">
-                      @{c.handle}
-                      {c.isLocalGit && (
-                        <span className="ml-1.5 text-[10px] uppercase tracking-wide text-text-4">
-                          (local git)
-                        </span>
-                      )}
-                    </div>
-                    {c.name && c.name !== c.handle && (
-                      <div className="text-[11px] text-text-3 truncate">
-                        {c.name}
+            <ul className="px-4 pb-2 space-y-1.5">
+              {choices.map((c) => {
+                const checked = c.id === pickedId;
+                return (
+                  <li key={c.id}>
+                    <label
+                      className={`flex items-start gap-2 rounded border px-2.5 py-2 cursor-pointer ${
+                        checked
+                          ? "border-accent/40 bg-accent/10"
+                          : "border-line-soft bg-bg-2 hover:bg-state-hover"
+                      }`}
+                    >
+                      <input
+                        type="radio"
+                        name="identity-choice"
+                        value={c.id}
+                        checked={checked}
+                        onChange={() => setPickedId(c.id)}
+                        // The selected row already wears the brand tint; the
+                        // radio inside it was drawing in the OS blue.
+                        className="mt-0.5 accent-accent"
+                      />
+                      <div className="min-w-0 flex-1">
+                        <div className="text-sm font-medium text-text-1 truncate">
+                          @{c.handle}
+                          {c.isLocalGit && (
+                            <span className="section-label ml-1.5">
+                              (what you use now)
+                            </span>
+                          )}
+                        </div>
+                        {c.name && c.name !== c.handle && (
+                          <div className="text-xs text-text-3 truncate">
+                            {c.name}
+                          </div>
+                        )}
+                        {c.email && (
+                          <div className="text-xs text-text-4 truncate font-mono">
+                            {c.email}
+                          </div>
+                        )}
+                        <div className="mt-0.5 text-xs text-text-4 leading-snug">
+                          {c.reason}
+                        </div>
                       </div>
-                    )}
-                    <div className="text-[10.5px] text-text-4 truncate font-mono">
-                      {c.email || "—"}
-                    </div>
-                  </div>
-                </label>
-              </li>
-            );
-          })}
-        </ul>
+                    </label>
+                  </li>
+                );
+              })}
+            </ul>
 
-        <label className="flex items-center gap-2 px-4 py-2 text-[11px] text-text-2 cursor-pointer">
-          <input
-            type="checkbox"
-            checked={remember}
-            onChange={(e) => setRemember(e.target.checked)}
+            <label className="flex items-center gap-2 px-4 py-2 text-xs text-text-2 cursor-pointer">
+              <input
+                type="checkbox"
+                checked={remember}
+                onChange={(e) => setRemember(e.target.checked)}
+              />
+              Remember this choice for this project
+            </label>
+
+            {err && (
+              <div className="mx-4 mb-2 rounded border border-red/30 bg-red/10 px-2 py-1 text-xs text-red">
+                {err}
+              </div>
+            )}
+
+            <footer className="flex items-center justify-end gap-2 border-t border-line-soft px-4 py-2.5">
+              <Button
+                type="button"
+                variant="secondary"
+                size="sm"
+                onClick={onClose}
+                disabled={busy}
+                className="text-sm"
+              >
+                Cancel
+              </Button>
+              <button
+                type="button"
+                onClick={apply}
+                disabled={busy || !picked}
+                className="rounded border border-accent/40 bg-accent/15 px-3 py-1 text-sm text-accent transition-colors hover:bg-accent/25 disabled:opacity-50"
+              >
+                {busy ? "Saving…" : "Use this name"}
+              </button>
+            </footer>
+          </>
+        ) : (
+          <IdentitySetupForm
+            repoRoot={repoRoot}
+            account={account}
+            initialName={report.git_name ?? ""}
+            initialEmail={report.git_email ?? ""}
+            onSaved={onPicked}
+            onClose={onClose}
           />
-          Remember this choice for this repo
-        </label>
-
-        {err && (
-          <div className="mx-4 mb-2 rounded border border-red/30 bg-red/10 px-2 py-1 text-[11px] text-red">
-            {err}
-          </div>
         )}
-
-        <footer className="flex items-center justify-end gap-2 border-t border-line-soft px-4 py-2.5">
-          <Button
-            type="button"
-            variant="secondary"
-            size="sm"
-            onClick={onClose}
-            disabled={busy}
-            className="text-[11.5px]"
-          >
-            Cancel
-          </Button>
-          <button
-            type="button"
-            onClick={apply}
-            disabled={busy || !picked}
-            className="rounded border border-accent/40 bg-accent/15 px-3 py-1 text-[11.5px] text-accent transition-colors hover:bg-accent/25 disabled:opacity-50"
-          >
-            {busy ? "Saving…" : "Use this identity"}
-          </button>
-        </footer>
       </div>
     </div>
   );
-}
-
-/** Build the deduped choice list shown by the dialog. The canonical
- *  alias-resolved handle (if any) goes first, then claimed roster
- *  members the user might also be, then the local git identity as the
- *  "do nothing" fallback. We dedupe by email so a member who is both
- *  the canonical resolved handle AND a roster row doesn't appear twice. */
-function buildChoices(
-  report: ChatDoctorReport,
-  manifest: TeamManifest | null,
-): Choice[] {
-  const out: Choice[] = [];
-  const seenEmails = new Set<string>();
-  const pushOnce = (choice: Choice) => {
-    const key = choice.email.toLowerCase();
-    if (key && seenEmails.has(key)) return;
-    if (key) seenEmails.add(key);
-    out.push(choice);
-  };
-
-  // 1. Canonical alias-resolved handle first — that's the headline fix
-  //    (mck@naridon.com when the user's local git is the hotmail alias).
-  if (report.canonical_handle && report.canonical_handle !== report.handle) {
-    pushOnce({
-      id: `canonical:${report.canonical_handle}`,
-      handle: report.canonical_handle,
-      name: report.canonical_handle,
-      email: report.canonical_email ?? report.git_email,
-      isLocalGit: false,
-    });
-  }
-
-  // 2. Other claimed roster members. The user might be enrolled under
-  //    more than one handle on a multi-account repo — let them pick.
-  const members = manifest?.members ?? [];
-  for (const m of members) {
-    if (!m.claimed) continue;
-    pushOnce({
-      id: `member:${m.handle}`,
-      handle: m.handle,
-      name: m.name || m.handle,
-      email: m.email,
-      isLocalGit: false,
-    });
-  }
-
-  // 3. The local git identity itself as the explicit "do nothing"
-  //    option. Always last so the eye-tracking lands on the canonical
-  //    choice first.
-  if (report.git_email) {
-    pushOnce({
-      id: `local:${report.git_email}`,
-      handle: report.handle || emailLocalPart(report.git_email),
-      name: report.git_name || report.handle,
-      email: report.git_email,
-      isLocalGit: true,
-    });
-  }
-
-  return out;
-}
-
-function emailLocalPart(email: string): string {
-  const at = email.indexOf("@");
-  return (at >= 0 ? email.slice(0, at) : email).toLowerCase();
 }

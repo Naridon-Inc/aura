@@ -1,26 +1,49 @@
-// Account menu — the top-right titlebar avatar's popover. Clicking the
-// avatar opens this: when signed out it offers a single "Sign in" button
-// that opens the full-screen welcome surface (the SignInWizard — the same
-// aura-cloud device-code flow, just roomier and more inviting than a
-// cramped popover); when signed in it shows who you are plus Account
-// settings and Sign out. The popover stays tiny; the welcome does the work.
+// Account menu — the popover behind the plan chip at the foot of the sidebar
+// (and behind the wide identity row / bare avatar where those are still used).
+// Signed out it offers a single "Sign in" button that opens the full-screen
+// welcome surface (the SignInWizard — the same aura-cloud device-code flow,
+// just roomier and more inviting than a cramped popover); signed in it shows
+// who you are plus Account settings and Sign out. The popover stays tiny; the
+// welcome does the work.
+//
+// It opens on the SAME primitive as every other menu in the app — the shared
+// DropdownMenu. It used to be a Medusa Popover, which is a different component
+// with a different panel: its own `w-72 p-4` shell, its own elevation, its own
+// open animation. Borrowing menuSurface's row classes onto it got the rows
+// looking right but left the surface underneath them belonging to a second
+// menu family, so the one flyout you open from the foot of the rail was the
+// one flyout that didn't match. A popover is for arbitrary content; this is a
+// list of things you can do, which is a menu.
+//
+// It is deliberately short. The compaction came out of the content, not out of
+// the metrics: the rows are still the shared 36px at the shared size, because a
+// menu that shrinks its own rows to feel tidy is exactly the drift this file
+// just stopped doing. What went instead was everything saying the same thing
+// twice — the ORGANIZATION caption and its ✓ row (now a subtitle under your
+// name), a separator between every pair of rows, and two lines of prose above
+// the Sign in button explaining what the button does.
 
 import { useCallback, useEffect, useState, type ReactNode } from "react";
 import { api, type CloudAuthStatus } from "../../lib/api";
+import { onOrgChanged } from "../../lib/cloudOrgs";
 import {
-  Popover,
-  PopoverContent,
-  PopoverTrigger,
-} from "../ui/popover";
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from "../ui/dropdown-menu";
+import { OrgSwitcher } from "./OrgSwitcher";
 
 export function AccountMenu({
   userInitial,
   onOpenProfile,
   wide = false,
   square = false,
+  trigger,
 }: {
-  /** Letter shown in the avatar — same value the bare titlebar button
-   *  used, kept so the chrome looks identical when the menu is closed. */
+  /** Fallback letter for the avatar, used when nobody is signed in and
+   *  there is no name to take one from. */
   userInitial?: string;
   /** Opens Settings → Identity. Reused as the "Account settings" action
    *  once the user is signed in. */
@@ -34,9 +57,21 @@ export function AccountMenu({
    *  of the round accent-filled avatar. Used in the sidebar header strip so
    *  the profile control reads as quiet chrome, not a brand badge. */
   square?: boolean;
+  /** Render this element as the trigger instead of one of the built-in
+   *  avatars. The sidebar's foot passes its plan chip, so the chip that
+   *  states which plan you're on is also the control that opens the account
+   *  — one account control in the window rather than a chip at the bottom
+   *  and an avatar at the top that each knew half the story. */
+  trigger?: ReactNode;
 }) {
   const [open, setOpen] = useState(false);
   const [status, setStatus] = useState<CloudAuthStatus | null>(null);
+  // The name the rest of the app already calls you — your git identity, the
+  // one on your commits and in chat and presence. Cloud logins made before
+  // the token started carrying `cloud_user` have no name attached, and this
+  // popover was the only place that admitted it: it said "Signed in" and drew
+  // a placeholder dot while every other surface used your name.
+  const [localName, setLocalName] = useState<string | null>(null);
 
   const refresh = useCallback(async () => {
     try {
@@ -46,22 +81,43 @@ export function AccountMenu({
     }
   }, []);
 
+  useEffect(() => {
+    let live = true;
+    api
+      .deviceIdentity()
+      .then((d) => {
+        if (live) setLocalName(d.display_name?.trim() || null);
+      })
+      .catch(() => {});
+    return () => {
+      live = false;
+    };
+  }, []);
+
   // Pull status when the menu opens (cheap, reads credentials.json) and
   // keep it fresh while other surfaces flip the auth state. The wide
   // sidebar row shows the name inline, so it also refreshes on mount — and,
   // because it's always visible, on window focus too, so an org created on
   // the web appears in the switcher without restarting the app. The popover
   // variant already re-reads every time it opens, so it needs no focus hook.
+  //
+  // A caller-supplied trigger is on screen the same way the wide row is — the
+  // sidebar's plan chip states who you are before anything is clicked — so it
+  // wants the same always-visible refresh, not the popover's open-time one.
+  //
+  // Switching org is the third thing that changes this caption — the name
+  // stays, the line under it doesn't — so it re-reads on that too.
+  const onScreen = wide || !!trigger;
   useEffect(() => {
-    if (open || wide) refresh();
+    if (open || onScreen) refresh();
     const onChange = () => refresh();
-    window.addEventListener("aura:cloud-auth-changed", onChange);
-    if (wide) window.addEventListener("focus", onChange);
+    const off = onOrgChanged(onChange);
+    if (onScreen) window.addEventListener("focus", onChange);
     return () => {
-      window.removeEventListener("aura:cloud-auth-changed", onChange);
-      if (wide) window.removeEventListener("focus", onChange);
+      off();
+      if (onScreen) window.removeEventListener("focus", onChange);
     };
-  }, [open, wide, refresh]);
+  }, [open, onScreen, refresh]);
 
   // Opening the full-screen welcome is a one-liner: close the popover and
   // let App.tsx mount the SignInWizard. It broadcasts `aura:cloud-auth-changed`
@@ -82,25 +138,37 @@ export function AccountMenu({
   }, [refresh]);
 
   const connected = !!status?.connected;
-  const who = status?.user || null;
+  const who = status?.user || localName;
 
+  // The avatar's letter comes from whoever is signed in. Every call site used
+  // to hand it a literal, so the app showed one developer's initial to
+  // everyone; the name is right here, so take it from there and keep the prop
+  // only as the last fallback.
+  const initial = (who?.trim()?.[0] ?? userInitial ?? "·").toUpperCase();
+
+  // Which org you are acting as. The name when we have learned it — that is
+  // what a person calls their team — and the slug otherwise, which is all the
+  // pairing exchange ever wrote.
+  const orgWord = status?.org_name?.trim() || status?.org_slug?.trim();
   const orgLine = connected
-    ? status?.org_slug
-      ? `${status.org_slug} · Aura Cloud`
+    ? orgWord
+      ? `${orgWord} · Aura Cloud`
       : "Aura Cloud"
     : "Sign in to sync";
 
   return (
-    <Popover open={open} onOpenChange={setOpen}>
-      <PopoverTrigger asChild>
-        {wide ? (
+    <DropdownMenu open={open} onOpenChange={setOpen}>
+      <DropdownMenuTrigger asChild>
+        {trigger ? (
+          trigger
+        ) : wide ? (
           // Subtle single-line identity row — deliberately quiet, matching the
           // weight of the nav rows below it (Conductor's Workspaces / Mission
           // Control), not a bordered account card. Small avatar + muted name +
           // a faint chevron; the org + actions live in the popover.
           <button
             type="button"
-            className="group flex items-center gap-2 w-full min-w-0 pl-1 pr-1.5 py-1 rounded-md text-left text-text-3 hover:bg-bg-2 hover:text-text-1 transition-colors"
+            className="group flex items-center gap-2 w-full min-w-0 pl-1 pr-1.5 py-1 rounded-md text-left text-text-3 hover:bg-state-hover hover:text-text-1 transition-colors"
             aria-label="Profile & account"
             title={
               connected
@@ -113,9 +181,9 @@ export function AccountMenu({
               style={{ width: 20, height: 20, fontSize: 10 }}
               aria-hidden
             >
-              {userInitial ?? "·"}
+              {initial}
             </span>
-            <span className="min-w-0 flex-1 truncate text-[12px] leading-tight">
+            <span className="min-w-0 flex-1 truncate text-sm leading-tight">
               {connected ? (who ?? "Signed in") : "Sign in"}
             </span>
             <svg
@@ -142,152 +210,107 @@ export function AccountMenu({
             aria-label="Profile & account"
             title="Profile & account"
           >
-            {userInitial ?? "·"}
+            {initial}
           </button>
         )}
-      </PopoverTrigger>
-      <PopoverContent
-        align={wide ? "start" : "end"}
+      </DropdownMenuTrigger>
+      {/* Both the wide row and the foot's plan chip are left-edge controls in
+          the leftmost column of the window, so the panel hangs from their left
+          edge; only the bare titlebar avatar, which sits at the right end of a
+          strip, hangs from its right. */}
+      <DropdownMenuContent
+        align={wide || trigger ? "start" : "end"}
         sideOffset={6}
-        className="w-72 p-0 overflow-hidden"
+        className="w-52"
       >
-        {/* Identity header */}
-        <div className="flex items-center gap-2.5 px-3 py-3 border-b border-line-soft">
-          <span className="ade-tb-av shrink-0" aria-hidden>
-            {userInitial ?? "·"}
-          </span>
-          <div className="min-w-0">
-            <div className="text-[12.5px] font-medium text-text-1 truncate">
-              {connected ? who ?? "Signed in" : "Not signed in"}
-            </div>
-            <div className="text-[11px] text-text-4 truncate">
-              {connected ? "Aura Cloud" : "Sign in to sync"}
-            </div>
+        {/* Identity — a two-line caption, not a row. The rows below it are
+            things you can do; this is the one thing here that is only a fact,
+            so it doesn't take a row's height or a row's hover.
+            `orgLine` carries the org, which used to cost a separator, an
+            ORGANIZATION caption and a full row with a ✓ on it — three elements
+            and ~70px to say a word that fits under your name. It stays a
+            subtitle: the switching happens in the row right below, which costs
+            one line no matter how many orgs you are in. */}
+        <div className="px-2 pt-0.5 pb-1.5">
+          <div className="truncate text-sm leading-4 text-text-1">
+            {connected ? who ?? "Signed in" : "Not signed in"}
+          </div>
+          <div className="truncate text-2xs leading-4 text-text-4">
+            {orgLine}
           </div>
         </div>
+
+        {/* Directly under the line that names the org, because it is the
+            control for that line. Signed out there is no org to be in, so
+            there is nothing here to offer. */}
+        {connected && (
+          <>
+            <DropdownMenuSeparator />
+            <OrgSwitcher />
+          </>
+        )}
+
+        <DropdownMenuSeparator />
 
         {/* Shaping how the AI works on this project isn't tied to being
             signed in, so it sits above the auth-specific rows either way. */}
-        <div className="border-b border-line-soft p-1.5">
-          <MenuItem
-            onClick={() => {
-              setOpen(false);
-              window.dispatchEvent(
-                new CustomEvent("aura:open-agent-customizations"),
-              );
-            }}
-          >
-            Customize agent
-          </MenuItem>
-        </div>
+        <DropdownMenuItem
+          onSelect={() =>
+            window.dispatchEvent(
+              new CustomEvent("aura:open-agent-customizations"),
+            )
+          }
+        >
+          Customize agent
+        </DropdownMenuItem>
 
         {connected ? (
           <>
-            {/* Organizations you belong to. Refreshed every time this popover
-                opens (and, in the sidebar row, on window focus), so an org
-                created on the web shows up without restarting the app. */}
-            {status?.org_slug && (
-              <div className="border-b border-line-soft p-1.5">
-                <div className="px-2.5 pt-1 pb-1 text-[10px] font-semibold uppercase tracking-[0.08em] text-text-5">
-                  Organization
-                </div>
-                <div className="flex items-center gap-2 px-2.5 py-1.5 rounded text-[12.5px] text-text-1">
-                  <span
-                    className="ade-tb-av shrink-0"
-                    style={{ width: 18, height: 18, fontSize: 9 }}
-                    aria-hidden
-                  >
-                    {status.org_slug.charAt(0).toUpperCase()}
-                  </span>
-                  <span className="min-w-0 flex-1 truncate">
-                    {status.org_slug}
-                  </span>
-                  <svg
-                    width="13"
-                    height="13"
-                    viewBox="0 0 16 16"
-                    fill="none"
-                    className="shrink-0 text-accent"
-                    aria-label="Active"
-                  >
-                    <path
-                      d="M3.5 8.5l3 3 6-7"
-                      stroke="currentColor"
-                      strokeWidth="1.6"
-                      strokeLinecap="round"
-                      strokeLinejoin="round"
-                    />
-                  </svg>
-                </div>
-              </div>
+            {/* Account actions. No separator ahead of them — "Customize agent"
+                already sits above under one, and a four-row menu that rules
+                itself off after every row is mostly rules. */}
+            <DropdownMenuItem
+              onSelect={() =>
+                window.dispatchEvent(new CustomEvent("aura:open-pair-phone"))
+              }
+            >
+              Pair phone
+            </DropdownMenuItem>
+            {onOpenProfile && (
+              <DropdownMenuItem onSelect={onOpenProfile}>
+                Account settings
+              </DropdownMenuItem>
             )}
-            {/* Account actions — sit below the org list (Conductor IA #79:
-                Settings moved beneath the organizations). */}
-            <div className="p-1.5">
-              <MenuItem
-                onClick={() => {
-                  setOpen(false);
-                  window.dispatchEvent(new CustomEvent("aura:open-pair-phone"));
-                }}
-              >
-                Pair phone
-              </MenuItem>
-              {onOpenProfile && (
-                <MenuItem
-                  onClick={() => {
-                    setOpen(false);
-                    onOpenProfile();
-                  }}
-                >
-                  Account settings
-                </MenuItem>
-              )}
-              <MenuItem onClick={signOut} tone="danger">
-                Sign out
-              </MenuItem>
-            </div>
+            {/* Sign out is a plain row, not a red one. Red is how this app says
+                something went wrong; signing out is something you meant to do,
+                and it takes one click to undo. The rule it sits under is a
+                separator, which is what actually marks it as the last thing. */}
+            <DropdownMenuSeparator />
+            <DropdownMenuItem onSelect={() => void signOut()}>
+              Sign out
+            </DropdownMenuItem>
           </>
         ) : (
-          <div className="p-3">
-            <div className="text-[11.5px] leading-snug text-text-3 mb-2.5">
-              Sign in to sync across devices and show your real name and
-              avatar in Team chat.
-            </div>
+          <>
+            {/* Just the button. It used to sit under two lines of prose about
+                syncing and avatars — but the caption at the top of this menu
+                already reads "Sign in to sync", so the paragraph was the same
+                sentence a second time, in a panel whose whole job here is one
+                click. */}
             <button
               type="button"
               onClick={openSignIn}
-              className="h-9 w-full inline-flex items-center justify-center rounded-md text-[12.5px] font-medium hover:brightness-110 transition-[filter]"
-              style={{ background: "var(--color-accent)", color: "var(--color-accent-foreground)" }}
+              className="mt-1 h-7 w-full inline-flex items-center justify-center rounded-md text-sm font-medium outline-none hover:brightness-110 transition-[filter]"
+              style={{
+                background: "var(--color-accent)",
+                color: "var(--color-accent-foreground)",
+              }}
             >
               Sign in
             </button>
-          </div>
+          </>
         )}
-      </PopoverContent>
-    </Popover>
-  );
-}
-
-function MenuItem({
-  children,
-  onClick,
-  tone = "default",
-}: {
-  children: ReactNode;
-  onClick: () => void;
-  tone?: "default" | "danger";
-}) {
-  return (
-    <button
-      type="button"
-      onClick={onClick}
-      className={`w-full text-left px-2.5 py-1.5 rounded text-[12.5px] transition-colors ${
-        tone === "danger"
-          ? "text-red hover:bg-bg-2"
-          : "text-text-2 hover:text-text-1 hover:bg-bg-2"
-      }`}
-    >
-      {children}
-    </button>
+      </DropdownMenuContent>
+    </DropdownMenu>
   );
 }

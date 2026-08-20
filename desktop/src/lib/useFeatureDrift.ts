@@ -18,22 +18,64 @@ import { useEffect, useState } from "react";
 import type { Gate } from "./featureSignals";
 import type { GoalRun } from "./goalStore";
 import { fetchIntentMatch, type IntentBanner } from "./useIntentMatch";
+import { basisCanBeChecked, type IntentBasis } from "./intentBasis";
+import { percentOf } from "./percent";
 
-type Alignment = { banner: IntentBanner; score: number };
+type Alignment = { banner: IntentBanner; score: number; basis?: IntentBasis };
 
-/** Fold per-commit intent-vs-actual results into the Drift gate. Weighs only
- *  commits Aura could actually score (a commit with no recorded intent reads
- *  "unknown" and is set aside, never counted as drift). Returns null when there
- *  is nothing scorable — the caller then falls back to the heuristic. */
+/** Fold per-commit intent-vs-actual results into the Drift gate.
+ *
+ *  Only some of a feature's commits can be scored. A commit with no recorded
+ *  intent reads "unknown", and a commit whose only "reason" was written by
+ *  Aura from that same diff scores against itself (lib/intentBasis) — set
+ *  both aside and neither can be counted as drift or as proof of its absence.
+ *
+ *  What's left is a *sample*, and every number this gate prints has to name
+ *  which set it counted. "Across all 2 commits, the code that changed is what
+ *  was asked for" was true of the sample and read as a verdict on the feature,
+ *  even when ten more commits went unmeasured. So: the rationale always names
+ *  the gap, and when the sample is under half the feature the gate stops
+ *  claiming anything at all — the same "—" the heuristic shows when there
+ *  aren't enough runs to see a trend.
+ *
+ *  Returns null only when the feature has no commits behind it yet. An
+ *  unscoreable feature gets a real "couldn't check" gate, because null means
+ *  "keep showing the placeholder" to every caller and an absence of evidence
+ *  is not a loading state. */
 export function driftFromAlignments(aligns: Alignment[]): Gate | null {
-  const known = aligns.filter((a) => a.banner !== "unknown");
-  if (known.length === 0) return null;
+  const total = aligns.length;
+  if (total === 0) return null;
+  const known = aligns.filter(
+    (a) => a.banner !== "unknown" && basisCanBeChecked(a.basis ?? "stated"),
+  );
+  const n = known.length;
+  const noun = (k: number) => `commit${k === 1 ? "" : "s"}`;
+
+  // Under half the feature scoreable: report the coverage, not a verdict.
+  if (n * 2 < total) {
+    return {
+      key: "drift",
+      label: "Drift",
+      value: "—",
+      pct: 0,
+      band: "unknown",
+      rationale:
+        n === 0
+          ? `None of the ${total} ${noun(total)} behind this feature recorded a reason to check the code against. There's nothing to measure drift from.`
+          : `Only ${n} of ${total} ${noun(total)} recorded a reason to check the code against, not enough to tell whether the work held to the ask.`,
+    };
+  }
+
   const diverged = known.filter((a) => a.banner === "diverged").length;
   const slipped = known.filter((a) => a.banner === "drift").length;
-  const avg = known.reduce((sum, a) => sum + a.score, 0) / known.length;
-  const pct = Math.max(0, Math.min(100, Math.round(avg * 100)));
-  const n = known.length;
-  const noun = `commit${n === 1 ? "" : "s"}`;
+  const avg = known.reduce((sum, a) => sum + a.score, 0) / n;
+  const pct = percentOf(avg);
+  const unchecked = total - n;
+  // Named in every sentence below — the reader has to be able to tell a clean
+  // feature from a mostly-unrecorded one at a glance.
+  const gap = unchecked
+    ? ` The other ${unchecked} ${noun(unchecked)} recorded no reason to check against.`
+    : "";
 
   if (diverged === 0 && slipped === 0) {
     return {
@@ -42,7 +84,7 @@ export function driftFromAlignments(aligns: Alignment[]): Gate | null {
       value: "Held",
       pct,
       band: "strong",
-      rationale: `Held true to the ask — across all ${n} ${noun}, the code that changed is what was asked for.`,
+      rationale: `Held true to the ask. In ${unchecked ? `the ${n} ${noun(n)} Aura could check` : `all ${n} ${noun(n)}`}, the code that changed is what was asked for.${gap}`,
     };
   }
   const off = diverged + slipped;
@@ -52,13 +94,18 @@ export function driftFromAlignments(aligns: Alignment[]): Gate | null {
     value: diverged > 0 ? "Diverged" : "Slipped",
     pct,
     band: diverged > 0 ? "weak" : "fair",
-    rationale: `${off} of ${n} ${noun} changed code the ask didn't mention — the work drifted from what was requested.`,
+    rationale: `${off} of ${unchecked ? `the ${n} ${noun(n)} Aura could check` : `${n} ${noun(n)}`} changed code the ask didn't mention. The work drifted from what was requested.${gap}`,
   };
 }
 
 /** Score a feature's Drift from the real intent-vs-actual signal across its
- *  distinct commits. Returns null while loading, when there are no commits, or
- *  when none could be scored — so a caller can fall back to the heuristic gate. */
+ *  distinct commits. Returns null only while there is no answer yet — loading,
+ *  no repo, no commits, or a failed read — so a caller can fall back to the
+ *  heuristic gate for that beat. Once it has read the commits it always
+ *  answers, including "couldn't check": the heuristic measures proof
+ *  regressions, a different question wearing the same label, and letting it
+ *  stand in permanently would answer Drift with something that never looked
+ *  at the ask. */
 export function useFeatureDrift(
   repoRoot: string | undefined,
   runs: GoalRun[],
@@ -79,7 +126,11 @@ export function useFeatureDrift(
     void Promise.all(commits.map((sha) => fetchIntentMatch(repoRoot, sha)))
       .then((results) => {
         if (!alive) return;
-        setGate(driftFromAlignments(results.map((m) => ({ banner: m.banner, score: m.score }))));
+        setGate(
+          driftFromAlignments(
+            results.map((m) => ({ banner: m.banner, score: m.score, basis: m.basis })),
+          ),
+        );
       })
       .catch(() => {
         if (alive) setGate(null);

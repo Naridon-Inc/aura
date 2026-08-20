@@ -41,7 +41,7 @@ export function AddOnsPane({
           so each track's own pane carries the explaining copy below it. */}
       <div className="shrink-0 border-b border-line-soft px-8 pt-5 pb-3">
         <div className="mx-auto flex max-w-3xl items-center gap-2">
-          <span className="text-[11px] font-semibold uppercase tracking-wide text-text-4">
+          <span className="section-label">
             Add-ons
           </span>
           <div className="ml-1 inline-flex rounded-md border border-line-soft bg-bg-1/40 p-0.5">
@@ -53,7 +53,7 @@ export function AddOnsPane({
                   key={t.id}
                   type="button"
                   onClick={() => setTab(t.id)}
-                  className={`inline-flex items-center gap-1.5 rounded px-3 py-1 text-[12px] transition-colors ${
+                  className={`inline-flex items-center gap-1.5 rounded px-3 py-1 text-sm transition-colors ${
                     active
                       ? "bg-bg-2 text-text-1"
                       : "text-text-3 hover:text-text-1"

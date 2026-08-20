@@ -1,11 +1,11 @@
-/** Team (chat) bounded context — local persistence (unread + pinned).
+/** Team (chat) bounded context — local persistence (unread + pinned + drafts).
  *
- *  Thin localStorage adapters for the two pieces of per-user chat state
- *  that live on-device only: the last-read timestamp per conversation
- *  (drives unread counts) and the set of locally-pinned message ids per
- *  conversation. No React; every accessor is guarded so test/headless
- *  envs without localStorage degrade to empty. Lifted verbatim from
- *  CommsPanel. */
+ *  Thin localStorage adapters for the pieces of per-user chat state that
+ *  live on-device only: the last-read timestamp per conversation (drives
+ *  unread counts), the set of locally-pinned message ids per conversation,
+ *  and unsent composer text per conversation. No React; every accessor is
+ *  guarded so test/headless envs without localStorage degrade to empty.
+ *  The first two were lifted verbatim from CommsPanel. */
 
 // ── unread persistence ───────────────────────────────────────────────
 
@@ -64,4 +64,82 @@ export function persistPinned(convId: string, ids: Set<string>) {
   } catch {
     /* noop */
   }
+}
+
+// ── draft persistence (per conv) ─────────────────────────────────────
+//
+// Unsent composer text. It stayed in a per-mount `useState` before, so
+// typing half a message and clicking another channel threw it away —
+// and the Drafts destination showed a permanent "No drafts" whose copy
+// promised exactly the behaviour that didn't exist.
+//
+// On-device only, and deliberately so: a draft is a thought you haven't
+// decided to send yet, and syncing it to the cloud would put words you
+// never committed to in front of the team.
+
+const DRAFT_PREFIX = "aura.chat.draft.";
+
+export type Draft = {
+  convId: string;
+  body: string;
+  /** Unix ms of the last keystroke — orders the list and dates the row. */
+  ts: number;
+};
+
+export function loadDraft(convId: string): Draft | null {
+  try {
+    if (typeof localStorage === "undefined") return null;
+    const raw = localStorage.getItem(`${DRAFT_PREFIX}${convId}`);
+    if (!raw) return null;
+    const parsed: unknown = JSON.parse(raw);
+    if (!parsed || typeof parsed !== "object") return null;
+    const { body, ts } = parsed as { body?: unknown; ts?: unknown };
+    if (typeof body !== "string" || !body.trim()) return null;
+    return { convId, body, ts: typeof ts === "number" ? ts : 0 };
+  } catch {
+    return null;
+  }
+}
+
+/** Empty (or whitespace-only) text clears the row rather than storing a
+ *  blank draft — otherwise deleting what you typed would leave a ghost in
+ *  the list that can't be got rid of. */
+export function persistDraft(convId: string, body: string, ts: number) {
+  try {
+    if (typeof localStorage === "undefined") return;
+    const key = `${DRAFT_PREFIX}${convId}`;
+    if (!body.trim()) {
+      localStorage.removeItem(key);
+    } else {
+      localStorage.setItem(key, JSON.stringify({ body, ts }));
+    }
+  } catch {
+    /* noop */
+  }
+}
+
+export function clearDraft(convId: string) {
+  try {
+    if (typeof localStorage === "undefined") return;
+    localStorage.removeItem(`${DRAFT_PREFIX}${convId}`);
+  } catch {
+    /* noop */
+  }
+}
+
+/** Every saved draft, newest first — what the Drafts destination lists. */
+export function loadAllDrafts(): Draft[] {
+  const out: Draft[] = [];
+  try {
+    if (typeof localStorage === "undefined") return out;
+    for (let i = 0; i < localStorage.length; i++) {
+      const k = localStorage.key(i);
+      if (!k || !k.startsWith(DRAFT_PREFIX)) continue;
+      const draft = loadDraft(k.slice(DRAFT_PREFIX.length));
+      if (draft) out.push(draft);
+    }
+  } catch {
+    /* localStorage may be unavailable in test envs */
+  }
+  return out.sort((a, b) => b.ts - a.ts);
 }

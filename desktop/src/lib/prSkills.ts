@@ -35,7 +35,7 @@ Requirements:
 - A "Changes" section: bullet per logical change, grouped by area.
 - A "Testing" section: what was verified and how.
 - Call out anything reviewers should look at extra carefully (risk, tradeoffs, follow-ups).
-- Keep it factual — derive everything from the actual diff and commits, never invent.
+- Keep it factual. Derive everything from the actual diff and commits, never invent.
 
 {{CONTEXT}}`;
 
@@ -44,10 +44,10 @@ const REVIEW_TEMPLATE = `You are reviewing a pull request as a senior engineer o
 Review {{PR_TITLE}} (branch \`{{HEAD_REF}}\`{{PR_NUMBER}}).
 
 Focus, in order:
-1. Correctness — bugs, missed edge cases, broken invariants.
-2. Safety — security issues, data loss paths, race conditions.
-3. Architecture — layer violations, duplication, APIs that will age badly.
-4. Polish — naming, dead code, missing tests. Mention only when it matters.
+1. Correctness. Bugs, missed edge cases, broken invariants.
+2. Safety. Security issues, data loss paths, race conditions.
+3. Architecture. Layer violations, duplication, APIs that will age badly.
+4. Polish. Naming, dead code, missing tests. Mention only when it matters.
 
 For each finding give file, what's wrong, and a concrete fix. End with a verdict:
 approve / approve-with-nits / request-changes, plus one sentence of rationale.
@@ -60,7 +60,7 @@ Work through the open feedback on {{PR_TITLE}} (branch \`{{HEAD_REF}}\`{{PR_NUMB
 - Read every unresolved review comment.
 - For each: either implement the fix, or explain (briefly, in the code-change
   summary) why it should stay as-is.
-- Keep fixes minimal and on-topic — no drive-by refactors.
+- Keep fixes minimal and on-topic. No drive-by refactors.
 - After the changes, summarize comment-by-comment what was done.
 
 {{CONTEXT}}`;
@@ -100,7 +100,7 @@ export const PR_SKILLS: readonly PrSkill[] = [
   {
     id: "ship",
     label: "Ship",
-    summary: "Verify green checks + approvals, then merge — never force past red",
+    summary: "Verify green checks + approvals, then merge, never force past red",
     template: SHIP_TEMPLATE,
   },
 ];

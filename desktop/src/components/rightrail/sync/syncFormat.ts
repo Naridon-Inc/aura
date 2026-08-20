@@ -2,27 +2,23 @@
 // components so the control/section files stay presentational. No React,
 // no state: pure functions over the raw api shapes.
 
+import { relativeAgeFromSecs } from "../../../lib/relativeTime";
+import { monogram } from "../../../lib/monogram";
+
 /** Compact "now" / "5s" / "3m" / "2h" / "4d" since a Unix-seconds stamp.
  *  Returns "—" for a missing/zero stamp. */
 export function agoShort(unixSecs: number | null | undefined): string {
-  if (!unixSecs) return "—";
-  const secs = Math.max(0, Math.floor(Date.now() / 1000 - unixSecs));
-  if (secs < 5) return "now";
-  if (secs < 60) return `${secs}s`;
-  const mins = Math.floor(secs / 60);
-  if (mins < 60) return `${mins}m`;
-  const hrs = Math.floor(mins / 60);
-  if (hrs < 24) return `${hrs}h`;
-  return `${Math.floor(hrs / 24)}d`;
+  // One ladder for the whole app — see lib/relativeTime. This copy stopped at
+  // days, so a conflict left open for a year read "412d".
+  return relativeAgeFromSecs(unixSecs ?? 0, { style: "compact", empty: "—" });
 }
 
 /** Two-letter initials from an agent/session id or a display name. */
 export function initials(name: string): string {
-  const cleaned = name.replace(/[^a-zA-Z0-9 ]/g, " ").trim();
-  if (!cleaned) return "··";
-  const parts = cleaned.split(/\s+/);
-  if (parts.length === 1) return parts[0].slice(0, 2).toUpperCase();
-  return (parts[0][0] + parts[parts.length - 1][0]).toUpperCase();
+  // One monogram for the whole app — see lib/monogram. This one replaced every symbol with a
+  // space before splitting, so "mo@touchstage.com" read "MC" — M from "mo",
+  // C from "com".
+  return monogram(name, { empty: "··" });
 }
 
 // Avatar palette — status hues only. The arctic accent (#6aa5ff) is

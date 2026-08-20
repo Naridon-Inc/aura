@@ -191,12 +191,31 @@ fn is_expired(t: &ProviderTokens) -> bool {
     now + 30 >= exp
 }
 
+/// Does this machine carry credentials for `kind` at all — i.e. does
+/// `~/.aura/integrations.toml` have its block? Separate from "is the
+/// user signed in", and the settings card needs both: an unconfigured
+/// provider can't be connected no matter how many times you press the
+/// button, and saying so before the click beats failing after it.
+///
+/// A missing or unparseable file reads as "not configured", which is
+/// what the user needs to hear either way. The file is re-read per call
+/// on purpose — same contract as `config::jira()` / `config::linear()`,
+/// so dropping in credentials takes effect without a restart.
+fn provider_configured(kind: IntegrationKind) -> bool {
+    let cfg = config::load().unwrap_or_default();
+    match kind {
+        IntegrationKind::Jira => cfg.jira.is_some(),
+        IntegrationKind::Linear => cfg.linear.is_some(),
+    }
+}
+
 /// Compose a `ConnectionStatus` from a state-file entry. Used by both
 /// `_status` (after refresh) and `_list` (no refresh).
 fn status_from_state(kind: IntegrationKind, st: &ProviderState) -> ConnectionStatus {
     ConnectionStatus {
         kind,
         connected: true,
+        configured: provider_configured(kind),
         identity: st.identity.clone(),
         sites: st.sites.clone(),
         scopes: st.scopes.clone(),
@@ -282,6 +301,7 @@ pub async fn integrations_jira_connect(app: AppHandle) -> Result<ConnectionStatu
     Ok(ConnectionStatus {
         kind: IntegrationKind::Jira,
         connected: true,
+        configured: provider_configured(IntegrationKind::Jira),
         identity: Some(outcome.identity),
         sites: outcome.sites,
         scopes: outcome.tokens.scope.clone(),
@@ -348,6 +368,7 @@ pub async fn integrations_jira_status() -> Result<ConnectionStatus, String> {
     Ok(ConnectionStatus {
         kind: IntegrationKind::Jira,
         connected: true,
+        configured: provider_configured(IntegrationKind::Jira),
         identity: None,
         sites: Vec::new(),
         scopes: blob.scope,
@@ -834,6 +855,7 @@ pub async fn integrations_linear_connect(app: AppHandle) -> Result<ConnectionSta
     Ok(ConnectionStatus {
         kind: IntegrationKind::Linear,
         connected: true,
+        configured: provider_configured(IntegrationKind::Linear),
         identity: Some(outcome.identity),
         sites: Vec::new(),
         scopes: outcome.tokens.scope.clone(),
@@ -876,6 +898,7 @@ pub async fn integrations_linear_status() -> Result<ConnectionStatus, String> {
     Ok(ConnectionStatus {
         kind: IntegrationKind::Linear,
         connected: true,
+        configured: provider_configured(IntegrationKind::Linear),
         identity: None,
         sites: Vec::new(),
         scopes: blob.scope,
@@ -913,6 +936,7 @@ pub fn integrations_list() -> Result<Vec<ConnectionStatus>, String> {
             out.push(ConnectionStatus {
                 kind: IntegrationKind::Jira,
                 connected: true,
+                configured: provider_configured(IntegrationKind::Jira),
                 identity: None,
                 sites: Vec::new(),
                 scopes: t.scope,
@@ -922,7 +946,10 @@ pub fn integrations_list() -> Result<Vec<ConnectionStatus>, String> {
             });
         }
     } else {
-        out.push(ConnectionStatus::disconnected(IntegrationKind::Jira));
+        out.push(ConnectionStatus {
+            configured: provider_configured(IntegrationKind::Jira),
+            ..ConnectionStatus::disconnected(IntegrationKind::Jira)
+        });
     }
 
     // Linear — single-workspace, no sites/mirrors.
@@ -935,6 +962,7 @@ pub fn integrations_list() -> Result<Vec<ConnectionStatus>, String> {
             out.push(ConnectionStatus {
                 kind: IntegrationKind::Linear,
                 connected: true,
+                configured: provider_configured(IntegrationKind::Linear),
                 identity: None,
                 sites: Vec::new(),
                 scopes: t.scope,
@@ -944,7 +972,10 @@ pub fn integrations_list() -> Result<Vec<ConnectionStatus>, String> {
             });
         }
     } else {
-        out.push(ConnectionStatus::disconnected(IntegrationKind::Linear));
+        out.push(ConnectionStatus {
+            configured: provider_configured(IntegrationKind::Linear),
+            ..ConnectionStatus::disconnected(IntegrationKind::Linear)
+        });
     }
 
     Ok(out)

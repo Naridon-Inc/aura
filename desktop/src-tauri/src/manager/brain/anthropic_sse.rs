@@ -112,6 +112,7 @@ pub fn decode_stream(
                             tool_use_id: id,
                             name,
                             input,
+                            signature: None,
                         };
                     }
                 }

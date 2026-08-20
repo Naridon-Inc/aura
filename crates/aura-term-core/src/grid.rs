@@ -17,6 +17,7 @@ use std::sync::{Arc, Mutex};
 use alacritty_terminal::Term;
 use alacritty_terminal::event::VoidListener;
 use alacritty_terminal::grid::{Dimensions, Scroll};
+use alacritty_terminal::index::{Column, Line};
 use alacritty_terminal::term::Config as TermConfig;
 use alacritty_terminal::term::cell::Flags;
 use alacritty_terminal::vte::ansi::Processor;
@@ -261,6 +262,59 @@ impl TermState {
         }
     }
 
+    fn transcript(&self) -> Vec<String> {
+        let grid = self.term.grid();
+        let cols = grid.columns();
+        if cols == 0 {
+            return Vec::new();
+        }
+        let mut out: Vec<String> = Vec::with_capacity(grid.total_lines());
+        // True when the row we just read filled its last column and the
+        // terminal marked it WRAPLINE — the next row is the same logical line
+        // continued, not a new one.
+        let mut continues = false;
+        for l in grid.topmost_line().0..=grid.bottommost_line().0 {
+            let row = &grid[Line(l)];
+            let width = cols.min(row.len());
+            if width == 0 {
+                continue;
+            }
+            let mut text = String::with_capacity(width);
+            for c in 0..width {
+                let cell = &row[Column(c)];
+                // A wide glyph occupies two cells; the second is a spacer
+                // carrying no character of its own. Emitting it would double
+                // every CJK character and every emoji.
+                if cell.flags.contains(Flags::WIDE_CHAR_SPACER) {
+                    continue;
+                }
+                text.push(cell.c);
+            }
+            let wrapped = row[Column(width - 1)].flags.contains(Flags::WRAPLINE);
+            // Only a row that ends the logical line gets its padding trimmed;
+            // a wrapped row is full by definition and its final cells are
+            // content, not padding.
+            if !wrapped {
+                let end = text.trim_end().len();
+                text.truncate(end);
+            }
+            if continues {
+                if let Some(prev) = out.last_mut() {
+                    prev.push_str(&text);
+                } else {
+                    out.push(text);
+                }
+            } else {
+                out.push(text);
+            }
+            continues = wrapped;
+        }
+        while matches!(out.last(), Some(l) if l.is_empty()) {
+            out.pop();
+        }
+        out
+    }
+
     fn scroll(&mut self, scroll: Scroll) {
         self.term.scroll_display(scroll);
     }
@@ -442,6 +496,38 @@ impl GridTerminal {
     /// before mouse-drag selection lands.
     pub fn visible_text(&self) -> String {
         snapshot_to_text(&self.snapshot())
+    }
+
+    /// Everything the terminal has shown — scrollback first, then the
+    /// viewport — as logical lines, with soft-wrapped rows rejoined.
+    ///
+    /// [`Self::visible_text`] answers "what is on screen", which is what a
+    /// copy-without-selection wants. This answers "what did this terminal
+    /// say", which is what a *transcript* wants, and the two differ the
+    /// moment output is longer than the window.
+    ///
+    /// Rejoining wrapped rows is the part that matters for a reader. The grid
+    /// hard-breaks at the PTY's column count; a transcript rendered anywhere
+    /// else — a chat column, a phone — has its own width, and re-wrapping text
+    /// that was already broken at 120 columns leaves the ragged half-lines you
+    /// see when a path or a sentence is split across two rows and then split
+    /// again. `WRAPLINE` is the terminal's own record of which breaks it
+    /// invented, so undoing exactly those is lossless.
+    ///
+    /// Bounded by the grid's scrollback (`SCROLLBACK` lines); older lines have
+    /// already been evicted by the terminal itself and are not recoverable
+    /// here.
+    pub fn transcript_lines(&self) -> Vec<String> {
+        match self.state.lock() {
+            Ok(state) => state.transcript(),
+            Err(poisoned) => poisoned.into_inner().transcript(),
+        }
+    }
+
+    /// [`Self::transcript_lines`] joined with newlines. No trailing newline —
+    /// the last line is the live one and may still be being written.
+    pub fn transcript_text(&self) -> String {
+        self.transcript_lines().join("\n")
     }
 }
 
@@ -731,5 +817,98 @@ mod tests {
             .map(|c| c.ch)
             .collect();
         assert!(last2.starts_with("line-39"));
+    }
+
+    // ---- transcript_lines -------------------------------------------------
+    //
+    // These pin the three things a chat transcript needs that `visible_text`
+    // cannot give it. Each corresponds to a defect that was visible in the
+    // agent chat before the block text was taken from a grid: a spinner that
+    // grew a new copy of itself every frame, a menu whose rows all landed on
+    // one line, and answers that scrolled off and were simply gone.
+
+    #[test]
+    fn a_carriage_return_repaint_overwrites_instead_of_accumulating() {
+        // How every CLI draws a spinner: return to column 0 and paint the
+        // frame again. Concatenating the bytes yields
+        // "Working.Working..Working..." — the grid yields the last frame.
+        let mut term = GridTerminal::with_size(40, 6);
+        term.apply_output(b"Working.\rWorking..\rWorking...");
+
+        assert_eq!(term.transcript_lines(), vec!["Working..."]);
+    }
+
+    #[test]
+    fn cursor_positioned_rows_stay_on_separate_lines() {
+        // A TUI that paints a menu with absolute cursor moves emits no
+        // newlines at all. Stripping the escapes and keeping the printable
+        // text runs every row together into one paragraph.
+        let mut term = GridTerminal::with_size(40, 6);
+        term.apply_output(b"\x1b[1;1H1. first\x1b[2;1H2. second\x1b[3;1H3. third");
+
+        assert_eq!(
+            term.transcript_lines(),
+            vec!["1. first", "2. second", "3. third"],
+        );
+    }
+
+    #[test]
+    fn a_cell_repaint_lands_in_place_rather_than_appending() {
+        // The nastier version: the app repaints only the cells that changed,
+        // seeking to each one. Byte order bears no relation to reading order.
+        let mut term = GridTerminal::with_size(40, 4);
+        term.apply_output(b"Working");
+        term.apply_output(b"\x1b[1;1HW\x1b[1;5Hi\x1b[1;6Hn\x1b[1;7Hg");
+
+        assert_eq!(term.transcript_lines(), vec!["Working"]);
+    }
+
+    #[test]
+    fn output_that_scrolled_off_the_viewport_is_still_in_the_transcript() {
+        let mut term = GridTerminal::with_size(40, 4);
+        for i in 0..12 {
+            term.apply_output(format!("line-{i:02}\r\n").as_bytes());
+        }
+
+        let lines = term.transcript_lines();
+        assert_eq!(lines.first().map(String::as_str), Some("line-00"));
+        assert_eq!(lines.last().map(String::as_str), Some("line-11"));
+        // …and the viewport alone would have shown only the last few.
+        assert!(!term.visible_text().contains("line-00"));
+    }
+
+    #[test]
+    fn a_soft_wrapped_line_is_rejoined() {
+        // The grid breaks at the PTY's width. A chat column is a different
+        // width, so the break has to be undone or the reader sees a path
+        // split mid-word for no reason they can see.
+        let mut term = GridTerminal::with_size(20, 6);
+        term.apply_output(b"~/.aura/worktrees/p-806b69/feed-doctor\r\n");
+
+        assert_eq!(
+            term.transcript_lines(),
+            vec!["~/.aura/worktrees/p-806b69/feed-doctor"],
+        );
+    }
+
+    #[test]
+    fn a_hard_newline_is_never_rejoined() {
+        // The mirror of the test above: only breaks the *terminal* invented
+        // get undone. A newline the agent actually wrote is content.
+        let mut term = GridTerminal::with_size(20, 6);
+        term.apply_output(b"first\r\nsecond\r\n");
+
+        assert_eq!(term.transcript_lines(), vec!["first", "second"]);
+    }
+
+    #[test]
+    fn erase_in_line_removes_what_it_erased() {
+        let mut term = GridTerminal::with_size(40, 4);
+        term.apply_output(b"keep this and drop that\r\x1b[10C\x1b[K");
+
+        // The blank the erase left behind is padding, and padding at the end
+        // of a line that isn't wrapped is trimmed — so "keep this", not
+        // "keep this ".
+        assert_eq!(term.transcript_lines(), vec!["keep this"]);
     }
 }

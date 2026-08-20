@@ -33,6 +33,23 @@ docker build --platform "$PLATFORM" \
   -f "$REPO_ROOT/aura-shell/docker/Dockerfile.linux" \
   -t "$IMAGE" "$REPO_ROOT/aura-shell/docker"
 
+# The frontend dist is ensured in its OWN container, before the one that
+# compiles. tauri-build embeds dist at compile time, and a container that writes
+# dist and then compiles against it in the same run gives the compile a
+# pre-rewrite view of the directory — 0.19.33's arm64 leg failed to read exactly
+# the 68 assets its own rebuild had just added, while the identical dist
+# compiled cleanly in the next container. Splitting the two is the fix; the
+# build container below only verifies freshness and refuses to compile a stale
+# one (see _linux-build-inner.sh).
+echo "▸ ensuring the frontend dist ($ARCH / $PLATFORM)"
+docker run --rm --platform "$PLATFORM" \
+  -v "$REPO_ROOT":/work \
+  -v aura-linux-nodemods:/work/aura-shell/node_modules \
+  -v aura-linux-dist:/work/aura-shell/dist \
+  -e ARCH="$ARCH" -e MODE=dist \
+  "$IMAGE" \
+  bash /work/aura-shell/scripts/_linux-build-inner.sh
+
 echo "▸ running $MODE build ($ARCH / $PLATFORM)"
 # node_modules is shadowed by a container-private volume: `bun install` inside
 # the container must NOT overwrite the host's macOS-native node_modules (a

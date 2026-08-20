@@ -17,17 +17,18 @@
         try {
           var variant = localStorage.getItem("aura.theme.variant");
           /* Explicit pick (modal/ember/amber/emerald) wins; `conductor` is the
-             old name for the amber pack and reads forward. Otherwise the ADE
-             v2 master flag defaults the surface to amber (ON unless an
-             explicit "0"). Keep in sync with themeStore.ts:readVariant. */
-          if (variant === "conductor") {
+             old name for the amber pack and reads forward. Anything else —
+             absent, unknown, or the retired "default" pack — is the ground.
+             Keep in sync with themeStore.ts:readVariant. */
+          if (variant !== "modal" && variant !== "ember" && variant !== "emerald") {
             variant = "amber";
-          } else if (variant !== "modal" && variant !== "ember" && variant !== "amber" && variant !== "emerald") {
-            variant = localStorage.getItem("aura.ade.v2") !== "0" ? "amber" : "default";
           }
           var pref = localStorage.getItem("aura.theme");
           var isLight = false;
-          if (variant === "modal" || variant === "ember" || variant === "amber" || variant === "emerald") {
+          /* Keep in sync with themeStore.DARK_ONLY_VARIANTS. Amber is NOT in
+             it — it ships a real light palette, and listing it here painted
+             the first frame dark for anyone who asked for light. */
+          if (variant === "modal" || variant === "ember" || variant === "emerald") {
             isLight = false; /* dark-only variants */
           } else if (pref === "light") {
             isLight = true;

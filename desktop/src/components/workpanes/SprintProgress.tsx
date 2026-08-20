@@ -14,6 +14,8 @@
 import { useEffect, useRef, useState } from "react";
 
 import { api, type Sprint, type Task } from "../../lib/api";
+import { fetchTasks } from "../../lib/tasksCache";
+import { percent } from "../../lib/percent";
 
 /** Local-day YYYY-MM-DD for comparing against sprint start/end strings. */
 function ymd(d: Date): string {
@@ -73,7 +75,7 @@ export function SprintProgress({ repoRoot }: { repoRoot: string }) {
       try {
         const [s, t] = await Promise.all([
           api.sprintsList(repoRoot),
-          api.tasksList(repoRoot),
+          fetchTasks(repoRoot),
         ]);
         if (!aliveRef.current) return;
         setSprints(Array.isArray(s) ? s : []);
@@ -110,7 +112,7 @@ export function SprintProgress({ repoRoot }: { repoRoot: string }) {
   const done = usePoints
     ? sprintTasks.filter((t) => t.status === "done").reduce((n, t) => n + (t.estimate ?? 0), 0)
     : sprintTasks.filter((t) => t.status === "done").length;
-  const pct = total > 0 ? Math.round((done / total) * 100) : 0;
+  const pct = percent(done, total);
 
   const trend = buildTrend(sprints, tasks, active.active ? active.id : null);
   const peak = Math.max(1, ...trend.map((d) => d.delivered));
@@ -120,15 +122,15 @@ export function SprintProgress({ repoRoot }: { repoRoot: string }) {
 
   return (
     <section className="flex flex-col gap-2.5">
-      <h3 className="text-[11px] uppercase tracking-wide text-text-4">
+      <h3 className="section-label">
         Sprint
       </h3>
       <div className="rounded-lg border border-line-soft bg-bg-1 px-3 py-3">
         <div className="flex items-baseline justify-between gap-3">
-          <span className="truncate text-[13px] font-medium text-text-1">
+          <span className="truncate text-base font-medium text-text-1">
             {active.name}
           </span>
-          <span className="shrink-0 text-[11px] text-text-4">
+          <span className="shrink-0 text-xs text-text-4">
             {active.velocity != null
               ? "completed"
               : running
@@ -138,7 +140,7 @@ export function SprintProgress({ repoRoot }: { repoRoot: string }) {
         </div>
 
         {active.goal ? (
-          <div className="mt-1 truncate text-[12px] text-text-3" title={active.goal}>
+          <div className="mt-1 truncate text-sm text-text-3" title={active.goal}>
             {active.goal}
           </div>
         ) : null}
@@ -155,7 +157,7 @@ export function SprintProgress({ repoRoot }: { repoRoot: string }) {
               }}
             />
           </span>
-          <span className="shrink-0 font-mono text-[11px] text-text-3 tabular-nums">
+          <span className="shrink-0 font-mono text-xs text-text-3 tabular-nums">
             {done}/{total} {unit} · {pct}%
           </span>
         </div>
@@ -163,7 +165,7 @@ export function SprintProgress({ repoRoot }: { repoRoot: string }) {
         {/* Velocity trend — past sprints' delivered work. */}
         {trend.length > 0 ? (
           <div className="mt-3 flex items-end gap-1 border-t border-line-soft pt-2.5">
-            <span className="mr-1 self-center text-[10.5px] uppercase tracking-wide text-text-5">
+            <span className="section-label mr-1 self-center">
               Velocity
             </span>
             <div className="flex h-7 flex-1 items-end gap-[3px]">

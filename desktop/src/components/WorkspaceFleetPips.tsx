@@ -38,7 +38,7 @@ export function WorkspaceFleetPips({ tabs, anyRunning }: Props) {
       ))}
       {more > 0 && (
         <span
-          className="text-[8px] font-semibold tabular-nums text-text-3 leading-none"
+          className="text-2xs font-semibold tabular-nums text-text-3 leading-none"
           style={{ marginLeft: 1 }}
         >
           +{more}

@@ -12,11 +12,12 @@
 // iconbtns with rounded-md and a thin `.sep-v` divider between the
 // primary action group and the surface toggles.
 
-import { useEffect, useRef, useState } from "react";
+import { useRef, useState } from "react";
 import { Link2, Eye, MoreHorizontal, Trash2 } from "lucide-react";
 import { cn } from "../../lib/utils";
 import { MENU_PANEL } from "../ui/menuSurface";
 import { Button } from "../ui/button";
+import { useDismiss } from "../../lib/useDismiss";
 
 type Props = {
   /** Human handle copied to clipboard from the link button.
@@ -41,19 +42,8 @@ export function TaskActionBar({
   const [menuOpen, setMenuOpen] = useState(false);
   const menuRef = useRef<HTMLDivElement | null>(null);
 
-  // Outside-click dismisses the kebab popover. The bar lives inside
-  // a header that can scroll, so we listen on document rather than
-  // wrap in a Popover primitive (which would re-anchor unnecessarily).
-  useEffect(() => {
-    if (!menuOpen) return;
-    function onDoc(e: MouseEvent) {
-      if (!menuRef.current?.contains(e.target as Node)) {
-        setMenuOpen(false);
-      }
-    }
-    document.addEventListener("mousedown", onDoc);
-    return () => document.removeEventListener("mousedown", onDoc);
-  }, [menuOpen]);
+  // Outside-click or Escape dismisses the kebab popover.
+  useDismiss(menuOpen, () => setMenuOpen(false), menuRef);
 
   async function copy() {
     try {
@@ -102,7 +92,7 @@ export function TaskActionBar({
                 setMenuOpen(false);
                 onDelete();
               }}
-              className="w-full justify-start gap-2.5 rounded-md px-2 py-1.5 h-auto text-[13px] text-red hover:bg-red/10 hover:text-red"
+              className="w-full justify-start gap-2.5 rounded-md px-2 py-1.5 h-auto text-base text-red hover:bg-red/10 hover:text-red"
             >
               <Trash2 className="w-3.5 h-3.5" strokeWidth={1.75} aria-hidden />
               Delete task
@@ -140,7 +130,7 @@ function IconBtn({
         "rounded-md",
         active
           ? "bg-bg-2 text-text-1"
-          : "text-text-4 hover:bg-bg-2 hover:text-text-1",
+          : "text-text-4 hover:bg-state-hover hover:text-text-1",
       )}
     >
       {children}

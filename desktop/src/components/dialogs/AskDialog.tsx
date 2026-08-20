@@ -98,7 +98,7 @@ export function AskDialog({ open, repoRoot, initialQuery, onClose }: AskDialogPr
       width={720}
       footer={
         <>
-          <span className="text-text-4 text-[10.5px] mr-auto">⌘↵ to ask · esc to close</span>
+          <span className="text-text-4 text-xs mr-auto">⌘↵ to ask · esc to close</span>
           <Button variant="ghost" size="xs" onClick={() => setTurns([])} disabled={turns.length === 0}>
             Clear
           </Button>
@@ -113,10 +113,10 @@ export function AskDialog({ open, repoRoot, initialQuery, onClose }: AskDialogPr
           <div className="py-8 px-1">
             <div className="flex items-center gap-2 justify-center mb-2">
               <span className="h-1.5 w-1.5 rounded-full" style={{ background: BLUE }} />
-              <span className="text-text-2 text-[13px] font-medium">Ask about this project</span>
+              <span className="text-text-2 text-base font-medium">Ask about this project</span>
             </div>
-            <div className="text-text-4 text-[12px] text-center mb-4 max-w-[440px] mx-auto leading-relaxed">
-              Aura remembers what was built here and why. Ask in plain words — how a
+            <div className="text-text-4 text-sm text-center mb-4 max-w-[440px] mx-auto leading-relaxed">
+              Aura remembers what was built here and why. Ask in plain words. How a
               part works, what changed, or why it was done that way.
             </div>
             <div className="flex flex-wrap gap-1.5 justify-center">
@@ -127,7 +127,7 @@ export function AskDialog({ open, repoRoot, initialQuery, onClose }: AskDialogPr
                     setDraft(q);
                     inputRef.current?.focus();
                   }}
-                  className="text-[11.5px] text-text-2 bg-bg-1 border border-line rounded-lg px-3 py-1.5 transition-colors"
+                  className="text-sm text-text-2 bg-bg-1 border border-line rounded-lg px-3 py-1.5 transition-colors"
                   onMouseEnter={(e) => (e.currentTarget.style.borderColor = BLUE_EDGE)}
                   onMouseLeave={(e) => (e.currentTarget.style.borderColor = "")}
                 >
@@ -142,19 +142,19 @@ export function AskDialog({ open, repoRoot, initialQuery, onClose }: AskDialogPr
           <div key={ti} className="mb-5 last:mb-1">
             {/* The question */}
             <div className="flex items-baseline gap-2 mb-2.5">
-              <span className="text-text-4 text-[10px] uppercase tracking-wider shrink-0 mt-0.5">
+              <span className="section-label shrink-0 mt-0.5">
                 You asked
               </span>
-              <span className="text-text-1 text-[13px] font-medium leading-snug">{t.q}</span>
+              <span className="text-text-1 text-base font-medium leading-snug">{t.q}</span>
             </div>
 
             {t.loading ? (
-              <div className="flex items-center gap-2 text-text-4 text-[11.5px] py-2 pl-0.5">
+              <div className="flex items-center gap-2 text-text-4 text-sm py-2 pl-0.5">
                 <AsciiSpinner />
                 <span>Looking through your project's history…</span>
               </div>
             ) : t.err ? (
-              <div role="alert" className="text-red text-[11.5px] py-1">{t.err}</div>
+              <div role="alert" className="text-red text-sm py-1">{t.err}</div>
             ) : t.result ? (
               <AnswerBlock
                 result={t.result}
@@ -179,7 +179,7 @@ export function AskDialog({ open, repoRoot, initialQuery, onClose }: AskDialogPr
         }}
         placeholder="Ask anything about this project…"
         rows={2}
-        className="mt-3 w-full resize-none rounded-lg bg-bg-1 border border-line text-text-1 text-[12.5px] px-3 py-2.5 outline-none focus:border-line"
+        className="mt-3 w-full resize-none rounded-lg bg-bg-1 border border-line text-text-1 text-base px-3 py-2.5 outline-none focus:border-line"
       />
     </Dialog>
   );
@@ -199,11 +199,11 @@ function AnswerBlock({
   if (result.kind === "empty") {
     return (
       <div className="rounded-lg border border-line bg-bg-1 px-3.5 py-3">
-        <div className="text-text-2 text-[12.5px] leading-relaxed">
+        <div className="text-text-2 text-base leading-relaxed">
           This project doesn't have any saved history yet.
         </div>
-        <div className="text-text-4 text-[11.5px] leading-relaxed mt-1">
-          Once agents make changes here, Aura remembers what changed and why —
+        <div className="text-text-4 text-sm leading-relaxed mt-1">
+          Once agents make changes here, Aura remembers what changed and why. 
           then you can ask and get real answers.
         </div>
       </div>
@@ -213,12 +213,12 @@ function AnswerBlock({
   if (result.kind === "no-match") {
     return (
       <div className="rounded-lg border border-line bg-bg-1 px-3.5 py-3">
-        <div className="text-text-2 text-[12.5px] leading-relaxed">
+        <div className="text-text-2 text-base leading-relaxed">
           I looked through {result.total.toLocaleString()} saved{" "}
           {result.total === 1 ? "decision" : "decisions"} but nothing matched that.
         </div>
-        <div className="text-text-4 text-[11.5px] leading-relaxed mt-1">
-          Try naming the part you mean — like “email”, “login”, or “payments”.
+        <div className="text-text-4 text-sm leading-relaxed mt-1">
+          Try naming the part you mean, like “email”, “login”, or “payments”.
         </div>
       </div>
     );
@@ -236,15 +236,15 @@ function AnswerBlock({
           borderLeft: `2px solid ${BLUE}`,
         }}
       >
-        <div className="text-text-4 text-[9.5px] uppercase tracking-wider mb-1.5">
+        <div className="section-label mb-1.5">
           What your project's history shows
         </div>
-        <div className="text-text-1 text-[13.5px] leading-relaxed">{answer}</div>
+        <div className="text-text-1 text-md leading-relaxed">{answer}</div>
       </div>
 
       {/* Where it came from — the trail of past decisions. */}
       <div className="mt-3">
-        <div className="text-text-4 text-[10px] uppercase tracking-wider mb-2 pl-0.5">
+        <div className="section-label mb-2 pl-0.5">
           Where this comes from · {sources.length} past{" "}
           {sources.length === 1 ? "decision" : "decisions"}
         </div>
@@ -263,10 +263,10 @@ function AnswerBlock({
                 onMouseEnter={(e) => (e.currentTarget.style.borderColor = BLUE_EDGE)}
                 onMouseLeave={(e) => (e.currentTarget.style.borderColor = "")}
               >
-                <div className="text-text-2 text-[12px] leading-snug">
+                <div className="text-text-2 text-sm leading-snug">
                   {isOpen ? s.text : s.title}
                 </div>
-                <div className="flex items-center gap-1.5 mt-1.5 text-text-4 text-[10px]">
+                <div className="flex items-center gap-1.5 mt-1.5 text-text-4 text-2xs">
                   <span>{s.agent}</span>
                   {when && (
                     <>

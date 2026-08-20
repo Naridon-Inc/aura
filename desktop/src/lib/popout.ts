@@ -14,6 +14,13 @@
 
 import { WebviewWindow } from "@tauri-apps/api/webviewWindow";
 
+import { localPlace, placeRepoRoot, type PlaceRef } from "./placeRef";
+import {
+  placeFromPopoutQuery,
+  placeToPopoutQuery,
+  popoutPlaceParts,
+} from "./popoutPlace";
+
 // `tasks` = the whole board (a floating portrait list). `task` / `pr` = a
 // single item detached into its own window — the granularity the user wants
 // ("an individual task, or a PR … not an entire page"). `agent` = a single
@@ -27,13 +34,29 @@ import { WebviewWindow } from "@tauri-apps/api/webviewWindow";
 // its own window; the session lives in the Rust ManagerRuntime keyed by id,
 // so the window hydrates from `manager:<sid>` snapshots exactly like the
 // in-app view. Used by "Fork to new workspace".
-// `workspace` = a WHOLE workspace detached into its own OS window. Unlike the
+// `workspace` = a WHOLE PLACE detached into its own OS window. Unlike the
 // single-surface kinds above (which mount `PopoutRoot` with one pane), a
-// workspace popout boots the FULL Aura shell (`App`) pinned to that repo root —
-// it's a second, complete window onto a project, with its own tab strip, panes,
-// sidebar and chat. `main.tsx` reads `popout=workspace` and mounts `App` with a
-// boot-root override instead of `PopoutRoot`. The window doesn't touch
+// workspace popout boots the FULL Aura shell (`App`) standing in that place —
+// it's a second, complete window, with its own tab strip, panes, sidebar and
+// chat. `main.tsx` reads `popout=workspace` and mounts `App` with boot
+// overrides instead of `PopoutRoot`. The window doesn't touch
 // `aura.lastWorkspace`, so closing it leaves the main window where it was.
+//
+// The place is EITHER of the two kinds (lib/placeRef): this laptop's checkout
+// at `root`, or a machine somewhere else — a box you are working on, or a cloud
+// conversation that hasn't resolved one yet. A remote place opens a window that
+// comes up standing IN that machine, with that machine's own tabs, rather than
+// in the local copy of the same repo. `lib/popoutPlace` is the codec both the
+// URL and the window label go through.
+//
+// The parent window KEEPS its copy. Popping out a place is not the hand-over
+// that `agent` and `browser` are — those reparent one live thing (a PTY, a
+// native webview) that cannot exist in two windows at once, so the in-app tab is
+// closed on the way out. A place is not one live thing: the sessions run on the
+// box and outlive every window that ever attached, and a second window gets its
+// own module scope and therefore its own copy of every store the first one has.
+// So nothing is taken from the window you clicked in — it is still standing
+// where it was when the new window appears.
 export type PopoutKind =
   | "tasks"
   | "task"
@@ -71,6 +94,19 @@ export interface PopoutSpec {
   /** For kind `terminal` — a daemon session id to reconnect to (live
    *  process survives), else the window spawns a fresh shell in `cwd`. */
   reconnectId?: string;
+  /** For kind `workspace` — WHERE the new window will stand, when that is not
+   *  simply this laptop's checkout at `root`. Absent means `localPlace(root)`,
+   *  which is what every caller meant before places existed. */
+  place?: PlaceRef;
+}
+
+/** The place a whole-window popout stands on. One reading of the spec, used by
+ *  both the window label and the query string, because two spellings of one
+ *  identity is how a window ends up filed under a place it isn't in. Null for
+ *  every other kind — they detach a surface, not a place. */
+function specPlace(spec: PopoutSpec): PlaceRef | null {
+  if (spec.kind !== "workspace") return null;
+  return spec.place ?? (spec.root ? localPlace(spec.root) : null);
 }
 
 export interface PopoutParams {
@@ -90,6 +126,10 @@ export interface PopoutParams {
   /** Present for kind `terminal`. */
   cwd?: string;
   reconnectId?: string;
+  /** Present for kind `workspace` — the place this window stands in. Always
+   *  set for that kind (a workspace popout that names nowhere doesn't parse),
+   *  and never for any other. */
+  place?: PlaceRef;
 }
 
 // Portrait for the board (a tall floating list); a single task is a readable
@@ -110,13 +150,13 @@ const DIMS: Record<
 };
 
 const DEFAULT_TITLE: Record<PopoutKind, string> = {
-  tasks: "Aura — Tasks",
-  task: "Aura — Task",
-  pr: "Aura — PR",
-  agent: "Aura — Agent",
-  browser: "Aura — Browser",
-  manager: "Aura — Chat",
-  terminal: "Aura — Terminal",
+  tasks: "Aura. Tasks",
+  task: "Aura. Task",
+  pr: "Aura. PR",
+  agent: "Aura. Agent",
+  browser: "Aura. Browser",
+  manager: "Aura. Chat",
+  terminal: "Aura. Terminal",
   workspace: "Aura",
 };
 
@@ -131,12 +171,23 @@ function slugify(s: string, max: number): string {
   );
 }
 
-// One window per (kind, root, item): re-invoking focuses the existing popout
-// rather than stacking duplicates, while distinct items each get their own
-// window. Labels are restricted to a safe charset and must match the
-// `popout-*` capability glob.
-function labelFor(spec: PopoutSpec): string {
-  const root = slugify(spec.root, 40);
+/** The OS window `spec` opens in.
+ *
+ *  One window per (kind, root, item): re-invoking focuses the existing popout
+ *  rather than stacking duplicates, while distinct items each get their own
+ *  window. Labels are restricted to a safe charset and must match the
+ *  `popout-*` capability glob.
+ *
+ *  Exported because it is a rule, not an implementation detail: two places that
+ *  share a label are one window pretending to be two, and that is worth a test
+ *  rather than a comment. */
+export function popoutWindowLabel(spec: PopoutSpec): string {
+  const place = specPlace(spec);
+  // A workspace popout is labelled off its PLACE, not off whatever the caller
+  // happened to pass as `root` — a remote place may name no local checkout at
+  // all, and the two halves of its identity have to land in the same label the
+  // query string is built from.
+  const root = slugify(place ? (placeRepoRoot(place) ?? "") : spec.root, 40);
   let item = "";
   if (spec.kind === "task" && spec.taskId) item = `-${slugify(spec.taskId, 24)}`;
   else if (spec.kind === "pr" && spec.prNumber != null) item = `-${spec.prNumber}`;
@@ -153,20 +204,24 @@ function labelFor(spec: PopoutSpec): string {
     // stacking duplicates.
     const disc = spec.reconnectId ?? spec.cwd ?? spec.root;
     item = `-${slugify(disc, 24)}`;
+  } else if (place) {
+    // Which computer. The project half is already the `root` segment above, so
+    // this only has to separate one box from another — and a box from a
+    // conversation, which is what the tag is for. Local places add nothing:
+    // their root IS their identity, so the label they get is the label every
+    // "Open in new window" has always produced.
+    const parts = popoutPlaceParts(place);
+    if (parts) item = `-${parts.tag}-${slugify(parts.id, 28)}`;
   }
   return `popout-${spec.kind}-${root}${item}`;
 }
 
-export async function openPopout(spec: PopoutSpec): Promise<void> {
-  const label = labelFor(spec);
-
-  const existing = await WebviewWindow.getByLabel(label);
-  if (existing) {
-    await existing.setFocus().catch(() => {});
-    return;
-  }
-
-  const dims = DIMS[spec.kind];
+/** What the new window is told about itself, on its own URL.
+ *
+ *  Exported for the same reason the label is: the round trip through here and
+ *  back out of `readPopoutParams` is the whole of "the window carries its own
+ *  place", and it is testable without a webview. */
+export function popoutQuery(spec: PopoutSpec): URLSearchParams {
   const params = new URLSearchParams({ popout: spec.kind, root: spec.root });
   if (spec.kind === "task" && spec.taskId) params.set("taskId", spec.taskId);
   if (spec.kind === "pr" && spec.prNumber != null) {
@@ -190,6 +245,30 @@ export async function openPopout(spec: PopoutSpec): Promise<void> {
     if (spec.reconnectId) params.set("reconnectId", spec.reconnectId);
     if (spec.label) params.set("label", spec.label);
   }
+  // The place, last, so its `root` is the one that survives: a workspace popout
+  // is defined by where it stands, and a caller that passed a root and a place
+  // that disagree gets the place. (They agree for every local caller — the
+  // place IS `localPlace(root)`.)
+  const place = specPlace(spec);
+  if (place) {
+    for (const [k, v] of Object.entries(placeToPopoutQuery(place))) {
+      params.set(k, v);
+    }
+  }
+  return params;
+}
+
+export async function openPopout(spec: PopoutSpec): Promise<void> {
+  const label = popoutWindowLabel(spec);
+
+  const existing = await WebviewWindow.getByLabel(label);
+  if (existing) {
+    await existing.setFocus().catch(() => {});
+    return;
+  }
+
+  const dims = DIMS[spec.kind];
+  const params = popoutQuery(spec);
 
   const win = new WebviewWindow(label, {
     url: `index.html?${params.toString()}`,
@@ -219,12 +298,19 @@ export function readPopoutParams(): PopoutParams | null {
   try {
     const q = new URLSearchParams(window.location.search);
     const kind = q.get("popout");
+    // A whole-workspace popout carries a PLACE, and a place is not always a
+    // path: a machine entered from the fleet or from a cloud conversation has
+    // no local checkout to name. So this kind is read before the shared `root`
+    // guard below — which every other kind still needs, because they load their
+    // data off disk by root and have nothing to show without one.
+    if (kind === "workspace") {
+      const place = placeFromPopoutQuery(q);
+      if (!place) return null;
+      return { kind, root: placeRepoRoot(place) ?? "", place };
+    }
     const root = q.get("root");
     if (!root) return null;
     if (kind === "tasks") return { kind, root };
-    // A whole-workspace popout carries only the root — the window boots the
-    // full App pinned to it (main.tsx), no per-surface discriminator needed.
-    if (kind === "workspace") return { kind, root };
     if (kind === "task") {
       const taskId = q.get("taskId");
       if (taskId) return { kind, root, taskId };

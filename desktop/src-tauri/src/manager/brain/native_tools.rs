@@ -91,9 +91,24 @@ pub fn supports(provider_id: &str) -> bool {
         || provider_id == GEMINI_NATIVE_ID
 }
 
-/// True when `name` is one of the built-in board tools.
+/// True when `name` is one of the built-in server-executed tools — this
+/// module's board tools, the control-plane tools (projects / worktrees /
+/// sessions / PRs) that let the chat reach past its own repo root, the
+/// cloud-plane tools that place work on an always-on machine, the local-plane
+/// tools that start work here and bring cloud work home, or the web tools. All
+/// run through `execute_board_tool`, so the chat loop gates on this one
+/// predicate.
+///
+/// Every family advertised by `all_tool_schemas` MUST be listed here. A tool
+/// the model can see but this predicate rejects is called, never executed and
+/// never answered with a tool_result — the turn then ends with no text and no
+/// error, which reads to the user as the brain silently ignoring them.
 pub fn is_board_tool(name: &str) -> bool {
     TOOL_NAMES.contains(&name)
+        || super::control_plane::is_control_tool(name)
+        || super::cloud_plane::is_cloud_tool(name)
+        || super::local_plane::is_local_tool(name)
+        || super::web_tools::is_web_tool(name)
 }
 
 /// Anthropic-format tool schemas for the board tools. Field names are
@@ -398,11 +413,21 @@ pub fn interactive_tool_schemas() -> Vec<Value> {
     ]
 }
 
-/// Every tool the native loop offers: the board tools plus the two
-/// interactive (card-driving) tools. This is what `stream_one_brain`
-/// injects into the request for an Anthropic-shaped brain.
+/// Every tool the native loop offers: the board tools, the control-plane
+/// tools (every project, its worktrees, its agent sessions, its PRs), the two
+/// placement families (cloud and local) with the sync that joins them, the two
+/// web tools, plus the two interactive (card-driving) tools. This is what
+/// `stream_one_brain` injects into the request for an Anthropic-shaped brain.
+///
+/// Cloud is listed before local deliberately: when a user says "run this" with
+/// no place named, the safer default is the machine that keeps going after the
+/// laptop closes, and a model reads an ordered list as a weak preference.
 pub fn all_tool_schemas() -> Vec<Value> {
     let mut v = board_tool_schemas();
+    v.extend(super::control_plane::tool_schemas());
+    v.extend(super::cloud_plane::tool_schemas());
+    v.extend(super::local_plane::tool_schemas());
+    v.extend(super::web_tools::schemas());
     v.extend(interactive_tool_schemas());
     v
 }
@@ -752,6 +777,45 @@ aura_page_write for Pages. When the user asks about tasks or docs — to find wo
 status, or read/write a doc — use these tools instead of guessing. To choose what to work on next, call \
 aura_tasks_ready: it returns only the tasks whose dependencies and blockers are already done, so you \
 never pick up work that's still blocked.\n\n\
+ACROSS EVERY PROJECT. You are not limited to the project this chat was opened on. \
+aura_projects_list returns every workspace the user has open; aura_worktrees_list, \
+aura_sessions_list and aura_prs_list each take an OPTIONAL `project` and, when you omit it, \
+sweep all of them at once — so \"what's running?\", \"what am I in the middle of?\" and \"any PR \
+waiting on me?\" are each a single call, not a loop you invent. Name a project the way the user \
+did (label, or an absolute path) to narrow. Use aura_session_read to see what a coding agent \
+actually did in a session, and aura_pr_detail to open one PR with its individual CI checks. \
+Keep two questions apart: aura_agents_live is what is running RIGHT NOW (any engine — Claude, \
+Gemini, Codex, Cursor — with the branch it's on and the files it currently holds), while \
+aura_sessions_list is transcripts on disk and includes work that finished hours ago. If the \
+user asks what's happening now, or whether something is still going, reach for aura_agents_live \
+first and only then read a session for the detail. \
+Prefer these over shelling out with bash: they read the same state the app's own screens do, so \
+your answer and what the user sees on screen cannot disagree. When a sweep reports a `note` \
+about being capped, say so rather than implying you covered everything.\n\n\
+WHERE WORK RUNS. Every piece of work has a place it runs, and the cloud is one of those \
+places — not a separate product the user visits. Two tools place work and they are \
+counterparts: aura_cloud_send moves it onto an always-on machine (\"run this on the box\", \
+\"keep going after I close the lid\", \"do the slow half remotely\"), and aura_work_start runs \
+it here, now (\"do that locally\", \"the rest on my laptop\"). Both are about work that already \
+exists — a worktree they just made, a branch they're on, a task on the board. \
+WHEN THE USER SPLITS A BATCH, CALL BOTH. \"Take the first three tasks in the cloud and the \
+next ones locally\" is three aura_cloud_send calls and then aura_work_start calls — not a \
+description of what you would do. Placing some work and narrating the rest is the failure \
+mode here: it reads as agreement and leaves half the batch not running. \
+When the work is a board task, pass `task` (\"AURA-12\") rather than retyping it: the brief \
+then comes from the task's own description instead of your summary of it, and the task is \
+moved to started and labelled with where it went. Otherwise brief it in `text` the way you \
+would brief a coding agent, because it runs with no memory of this conversation. Pass the \
+project when the work is in a different one; a worktree path is a valid project. \
+aura_cloud_send refuses rather than sending into the void when no machine can run the job, so \
+relay the reason it gives — and offer aura_work_start instead, which needs no machine. Use \
+aura_cloud_machines to see what is connected before offering, aura_cloud_jobs to answer \"did \
+that finish?\", aura_cloud_cancel to stop one, and aura_work_sync to bring finished cloud work \
+home. Never call a machine ready unless its can_run is true. Local and cloud are one board, \
+not two: a plan can have some steps here and some on the box, and finished remote work syncs \
+back into this repo. Say which place you chose and why in one clause — work that keeps going \
+after the laptop closes belongs on a machine; quick work in front of them belongs here. \
+If nothing is connected, say so plainly and run it here — do not invent a machine.\n\n\
 UNDERSTANDING THE CODE. To learn the codebase — where something is defined, what a function \
 does, how the pieces connect — reach for Aura's own tools instead of grepping or reading whole \
 files: call aura_atlas for the code map (plain-English summary of each symbol with its file and \
@@ -759,6 +823,11 @@ line) and aura_ask to ask a question and get an answer with citations. They retu
 answer rather than raw file bytes, so they're faster and cost a fraction of the tokens. Read a \
 full file only when you actually need its exact contents (to quote or edit it), not to go \
 fishing for where something lives.\n\n\
+READING THE WEB. You CAN open the internet: web_fetch reads one URL as plain text and \
+web_search finds URLs worth reading. If the user names a site, pastes a link, or asks you to \
+look at a live page, product, or piece of documentation, FETCH IT — never answer that you have \
+no browser. Given a URL, go straight to web_fetch; search first only when you don't know where \
+to look. Say which page an answer came from.\n\n\
 PLANNING. For anything non-trivial — a multi-file change, a new feature, a refactor — do NOT dump a \
 bullet list in chat and do NOT quietly scatter tasks onto the board. Instead:\n\
 (1) If a single decision would change the shape of the work (which approach, scope, where it lives), \
@@ -940,12 +1009,133 @@ pub async fn execute_board_tool(
     input: &Value,
     author: &str,
 ) -> (String, bool, u32) {
+    execute_board_tool_with_app(None, repo_root, "", name, input, author).await
+}
+
+/// The channel a capability prompt is filed under when the call arrived
+/// with no chat behind it. Headless callers are the tests and the CLI
+/// bridge; naming them honestly beats borrowing a session id that doesn't
+/// exist.
+const HEADLESS_CHANNEL: &str = "aura";
+
+/// Put a cloud-plane call through [`Capability::DispatchToMachine`] if it
+/// is one of the ones that actually places work.
+///
+/// Only `aura_cloud_send` dispatches. Listing machines, listing jobs and
+/// cancelling a job you already started are reads and undos — gating them
+/// would put a card in front of "what boxes do I have", which teaches
+/// people to click through the card that matters.
+async fn guard_dispatch(
+    repo_root: &str,
+    session_id: &str,
+    name: &str,
+    input: &Value,
+) -> Result<(), String> {
+    if name != super::cloud_plane::DISPATCH_TOOL {
+        return Ok(());
+    }
+    let channel = if session_id.is_empty() {
+        HEADLESS_CHANNEL
+    } else {
+        session_id
+    };
+    let policy = super::gate::for_agent(channel);
+    let rules = super::authority::Rules::load(std::path::Path::new(repo_root));
+
+    // Name the *work*, not the destination: `aura_cloud_send` picks the
+    // machine itself, so the only thing the person answering can actually
+    // judge is what is being handed over.
+    let detail = input
+        .get("task")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+        .or_else(|| {
+            input
+                .get("text")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(|s| truncate(s, 160))
+        })
+        .unwrap_or_else(|| "work from this conversation".to_string());
+
+    super::gate::guard_capability(
+        &policy,
+        &rules,
+        super::authority::Capability::DispatchToMachine,
+        &detail,
+    )
+    .await
+}
+
+/// `execute_board_tool` with the running app, and the chat, in hand.
+///
+/// One tool family needs the app: starting work on this machine drives the
+/// app's own dispatcher, and there is no honest way to do that from a bare repo
+/// path. The argument is optional rather than required so every caller that has
+/// no app — the tests, and anything headless — keeps working and simply gets a
+/// refusal from the tools that genuinely cannot run without one, instead of the
+/// whole board becoming unreachable outside a live window.
+///
+/// `session_id` is the chat the call came from. Cloud placement uses it to hand
+/// the conversation over with the work and to find its way back afterwards;
+/// every other tool ignores it. Empty means "no chat", which is the truth for a
+/// headless caller rather than a value to invent.
+pub async fn execute_board_tool_with_app(
+    app: Option<&tauri::AppHandle>,
+    repo_root: &str,
+    session_id: &str,
+    name: &str,
+    input: &Value,
+    author: &str,
+) -> (String, bool, u32) {
     // The code-understanding tools report an estimate of the tokens they
     // saved (vs the brain reading the underlying files itself); the board
     // tools touch no source, so they save nothing.
     let (text, is_error, saved) = match name {
         "aura_atlas" => tool_atlas(repo_root, input).await,
         "aura_ask" => tool_ask(repo_root, input).await,
+        // The control plane reads the app's own surfaces (registry, git,
+        // transcripts, `gh`) rather than project files, so it saves no
+        // file-read tokens to credit.
+        n if super::control_plane::is_control_tool(n) => {
+            let (text, is_error) = super::control_plane::execute(repo_root, n, input).await;
+            (text, is_error, 0u32)
+        }
+        // Placing work on a machine that isn't this one. Reads the runner
+        // registry and the shared A2A board rather than project files, so
+        // there are no file-read tokens to credit either.
+        //
+        // The one tool here that *sends* goes through the authority gate
+        // first. Handing a task to another box is the most consequential
+        // thing in this whole tool set — it leaves this machine, it runs
+        // unattended, and it spends money — and until now it was the only
+        // one with nothing in front of it.
+        n if super::cloud_plane::is_cloud_tool(n) => {
+            if let Err(why) = guard_dispatch(repo_root, session_id, n, input).await {
+                (why, true, 0u32)
+            } else {
+                let (text, is_error) =
+                    super::cloud_plane::execute(repo_root, session_id, n, input).await;
+                (text, is_error, 0u32)
+            }
+        }
+        // Starting work here, and bringing cloud work home. The counterpart of
+        // the family above — without it the model can only place work somewhere
+        // else, and "do these here, those in the cloud" has no local half.
+        n if super::local_plane::is_local_tool(n) => {
+            let (text, is_error) = super::local_plane::execute(app, repo_root, n, input).await;
+            (text, is_error, 0u32)
+        }
+        // Reading the web costs tokens rather than saving them, so nothing to
+        // credit — but the page is the answer, and without this the model can
+        // only apologise for not having a browser.
+        n if super::web_tools::is_web_tool(n) => {
+            let (text, is_error) = super::web_tools::execute(n, input).await;
+            (text, is_error, 0u32)
+        }
         _ => {
             let (text, is_error) = match name {
                 "aura_tasks_list" => tool_tasks_list(repo_root, input).await,
@@ -1738,12 +1928,48 @@ mod tests {
     }
 
     #[test]
-    fn all_tool_schemas_is_board_plus_interactive() {
+    fn all_tool_schemas_is_every_family_and_nothing_else() {
         let all = all_tool_schemas();
-        assert_eq!(all.len(), board_tool_schemas().len() + interactive_tool_schemas().len());
+        assert_eq!(
+            all.len(),
+            board_tool_schemas().len()
+                + super::super::control_plane::tool_schemas().len()
+                + super::super::cloud_plane::tool_schemas().len()
+                + super::super::local_plane::tool_schemas().len()
+                + super::super::web_tools::schemas().len()
+                + interactive_tool_schemas().len(),
+            "a family was added to all_tool_schemas without being counted here"
+        );
         let names: Vec<&str> = all.iter().filter_map(|s| s["name"].as_str()).collect();
         assert!(names.contains(&"ask_user"));
         assert!(names.contains(&"propose_plan"));
+        // The control plane must actually reach the model — a tool the brain
+        // is never told about is a tool it never calls.
+        assert!(names.contains(&"aura_projects_list"));
+        assert!(names.contains(&"aura_prs_list"));
+        // …and so must the cloud plane, which is how work gets placed on a
+        // machine that isn't this one.
+        assert!(names.contains(&"aura_cloud_machines"));
+        assert!(names.contains(&"aura_cloud_send"));
+        // Both halves of placement, or "these in the cloud, the rest here" has
+        // no second clause and the model answers it in prose instead.
+        assert!(names.contains(&"aura_work_start"));
+        assert!(names.contains(&"aura_work_sync"));
+    }
+
+    /// Every schema the loop offers must be executable. `is_board_tool` is
+    /// the gate `cmd_brain_chat` checks before dispatching, so a schema that
+    /// fails it would be advertised to the model and then rejected at call
+    /// time — the exact shape of a tool that silently does nothing.
+    #[test]
+    fn every_advertised_tool_is_dispatchable() {
+        for schema in all_tool_schemas() {
+            let name = schema["name"].as_str().expect("schema has a name");
+            assert!(
+                is_board_tool(name) || is_interactive_tool(name),
+                "{name} is advertised but nothing would execute it"
+            );
+        }
     }
 
     #[test]
@@ -2051,6 +2277,64 @@ mod tests {
 
     fn temp_repo() -> tempfile::TempDir {
         tempfile::tempdir().expect("tempdir")
+    }
+
+    /// A project that has refused cloud dispatch stops the tool before it
+    /// reaches the runner registry — no prompt, no board row, no network.
+    ///
+    /// This is the property the whole authority layer exists for: the rule
+    /// is a line in a committed file, and it decides the question rather
+    /// than dressing it up as one.
+    #[tokio::test]
+    async fn a_project_that_refuses_dispatch_stops_the_send() {
+        let tmp = temp_repo();
+        let root = tmp.path();
+        std::fs::create_dir_all(root.join(".aura")).unwrap();
+        std::fs::write(
+            root.join(".aura").join("settings.toml"),
+            "[authority]\ndispatch_to_machine = \"refuse\"\n",
+        )
+        .unwrap();
+
+        let err = guard_dispatch(
+            root.to_str().unwrap(),
+            "",
+            super::super::cloud_plane::DISPATCH_TOOL,
+            &json!({ "task": "AURA-12" }),
+        )
+        .await
+        .expect_err("a refused capability must not proceed");
+
+        assert!(err.contains("AURA-12"), "say what was refused: {err}");
+        assert!(
+            err.contains("settings.toml"),
+            "and where the decision lives, so it can be changed: {err}"
+        );
+    }
+
+    /// Reading the machine board is not dispatching. It must stay free of
+    /// the gate even when the project refuses dispatch outright.
+    #[tokio::test]
+    async fn refusing_dispatch_does_not_gate_the_reads() {
+        let tmp = temp_repo();
+        let root = tmp.path();
+        std::fs::create_dir_all(root.join(".aura")).unwrap();
+        std::fs::write(
+            root.join(".aura").join("settings.toml"),
+            "[authority]\ndispatch_to_machine = \"refuse\"\n",
+        )
+        .unwrap();
+
+        assert!(
+            guard_dispatch(
+                root.to_str().unwrap(),
+                "",
+                "aura_cloud_machines",
+                &json!({}),
+            )
+            .await
+            .is_ok()
+        );
     }
 
     #[tokio::test]

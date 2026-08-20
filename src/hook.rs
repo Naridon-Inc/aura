@@ -36,6 +36,36 @@ impl HookInstaller {
         detected
     }
 
+    /// The directory git will actually run this repository's hooks from.
+    ///
+    /// `.git/hooks` is only right for a plain checkout. In a linked worktree
+    /// `.git` is a *file* pointing at `…/.git/worktrees/<name>`, so creating
+    /// `.git/hooks` there fails outright with "Not a directory" — which is how
+    /// `aura enable` used to die inside every worktree, leaving capture off
+    /// with no way to turn it on. A repo with `core.hooksPath` set runs hooks
+    /// from that directory and nowhere else, so writing to `.git/hooks` there
+    /// installs hooks git never calls. `git rev-parse --git-path hooks`
+    /// answers both cases exactly the way git itself resolves them (shared
+    /// common dir for worktrees, the configured path when one is set).
+    /// Falls back to `.git/hooks` only if git can't be run at all.
+    pub fn hooks_dir() -> std::path::PathBuf {
+        let fallback = Path::new(".git").join("hooks");
+        let Ok(out) = std::process::Command::new("git")
+            .args(["rev-parse", "--git-path", "hooks"])
+            .output()
+        else {
+            return fallback;
+        };
+        if !out.status.success() {
+            return fallback;
+        }
+        let resolved = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        if resolved.is_empty() {
+            return fallback;
+        }
+        std::path::PathBuf::from(resolved)
+    }
+
     /// Installs the Aura semantic engine directly into standard Git as a suite of hooks.
     /// Chains with existing hooks instead of overwriting them — compatible with
     /// Husky, Lefthook, Overcommit, pre-commit, and custom core.hooksPath setups.
@@ -52,7 +82,7 @@ impl HookInstaller {
             println!("  ↳ Aura will chain alongside existing hooks (non-destructive).");
         }
 
-        let hooks_dir = git_dir.join("hooks");
+        let hooks_dir = Self::hooks_dir();
         fs::create_dir_all(&hooks_dir)?;
 
         let current_exe = std::env::current_exe().unwrap_or_else(|_| std::path::PathBuf::from("aura"));
@@ -194,7 +224,7 @@ fi
     ///
     /// Idempotent — re-approving a contract does not stack duplicate blocks.
     pub fn arm_intent_gate() -> Result<(), Box<dyn std::error::Error>> {
-        let hooks_dir = Path::new(".git").join("hooks");
+        let hooks_dir = Self::hooks_dir();
         fs::create_dir_all(&hooks_dir)?;
 
         let current_exe =
@@ -222,7 +252,7 @@ fi
 
     /// Is the intent gate wired into this repository's `pre-commit`?
     pub fn intent_gate_armed() -> bool {
-        fs::read_to_string(Path::new(".git").join("hooks").join("pre-commit"))
+        fs::read_to_string(Self::hooks_dir().join("pre-commit"))
             .map(|s| s.contains("AURA INTENT GATE"))
             .unwrap_or(false)
     }

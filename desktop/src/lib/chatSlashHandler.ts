@@ -10,11 +10,16 @@
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { api } from "./api";
 import type { LoopTask, ManagerSummary, StreamEvent, StreamExitInfo } from "./api";
+import { fetchManagerList } from "./managerCache";
+import { fetchReadyView } from "./loopCache";
+import { refreshSessions } from "./sessionsCache";
 import { resolveAgentId } from "./agents";
 import { managerCommandHelp } from "./managerCommands";
 import { findClaudeCommand, hasPrimed, primeClaudeCommands } from "./claudeCommands";
 import { buildPrSkillPrompt, getPrSkill, PR_SKILLS } from "./prSkills";
 import { launchWorkspace } from "./workspaceCreateStore";
+import { placeForNewWork } from "./ambientSession";
+import { relativeAgeFromSecs } from "./relativeTime";
 
 /** One resumable conversation in a `/resume` picker. */
 export type SlashResumeRow = {
@@ -133,7 +138,7 @@ export async function handleChatSlash(
         handled: true,
         tone: "info",
         output:
-          "Opened the model picker — choose which AI answers your next message. The pick sticks until you change it.",
+          "Opened the model picker. Choose which AI answers your next message. The pick sticks until you change it.",
       };
     case "agents":
     case "agent":
@@ -265,7 +270,7 @@ async function runOnAgentCli(
       handled: true,
       tone: "warn",
       output:
-        `Can't reach **${handle}** — no \`${agentId}\` assistant is installed and on your PATH. ` +
+        `Can't reach **${handle}**. No \`${agentId}\` assistant is installed and on your PATH. ` +
         "Run `/agents` to see what's available here.",
     };
   }
@@ -294,7 +299,7 @@ async function runOnAgentCli(
         handled: true,
         tone: "info",
         output:
-          `No earlier **${handle}** session found in this project — there's nothing to resume yet. ` +
+          `No earlier **${handle}** session found in this project. There's nothing to resume yet. ` +
           "Start one from the agent rail, then `@" +
           handle +
           " /resume` will pick it back up.",
@@ -345,8 +350,8 @@ async function runOnAgentCli(
       handled: true,
       tone: ok ? "info" : "warn",
       output: ok
-        ? `**${label}** — done (the assistant returned no text this time).`
-        : `**${label}** — the assistant exited without producing output.`,
+        ? `**${label}**. Done (the assistant returned no text this time).`
+        : `**${label}**. The assistant exited without producing output.`,
     };
   }
   return {
@@ -367,7 +372,7 @@ async function mostRecentSessionId(
 ): Promise<string | null> {
   if (agentId !== "claude") return null;
   try {
-    const sessions = await api.claudeListSessions(repoRoot);
+    const sessions = await refreshSessions(repoRoot);
     return sessions[0]?.session_id ?? null;
   } catch {
     return null;
@@ -402,7 +407,7 @@ function collectAgentStream(
       cleanup();
       if (timedOut) {
         parts.push(
-          "\n_(stopped waiting after 3 minutes — the assistant may still be working)_",
+          "\n_(stopped waiting after 3 minutes. The assistant may still be working)_",
         );
       }
       resolve({ text: parts.join(""), ok });
@@ -470,17 +475,9 @@ function collectAgentStream(
 /** Terse age ("just now" / "5m ago" / "3h ago" / "2d ago") from a unix-seconds
  *  timestamp. Empty for a missing/zero stamp so the caller omits the time. */
 function statusRelTime(unixSecs: number): string {
-  if (!unixSecs || unixSecs <= 0) return "";
-  const s = Math.floor(Date.now() / 1000 - unixSecs);
-  if (s < 60) return "just now";
-  const m = Math.floor(s / 60);
-  if (m < 60) return `${m}m ago`;
-  const h = Math.floor(m / 60);
-  if (h < 24) return `${h}h ago`;
-  const d = Math.floor(h / 24);
-  if (d < 7) return `${d}d ago`;
-  const w = Math.floor(d / 7);
-  return `${w}w ago`;
+  // One ladder for the whole app — see lib/relativeTime.
+  // Which this file already imported, and already used, 250 lines below.
+  return relativeAgeFromSecs(unixSecs);
 }
 
 /** The short "recording / protection / engine" safety lines — reused by
@@ -498,19 +495,23 @@ async function buildSafetyLines(repoRoot: string): Promise<string[]> {
   // wrongly tell the user "this folder can't record".
   const recordingEnabled = !!capture?.enabled;
   const isGit = capture ? capture.is_git : true;
+  // "as you work" was wrong: capture is a set of git hooks, so it runs when
+  // you commit. Told that the record is being kept continuously, a person
+  // reasonably stops thinking about the hours of uncommitted work — which is
+  // the exact stretch of time the record does not cover.
   const recording = recordingEnabled
-    ? "On — your changes are being saved as you work"
+    ? "On. Each commit gets saved with its reason"
     : isGit
-      ? "Off — your changes aren't being recorded yet"
+      ? "Off. Your commits aren't being recorded yet"
       : "This folder isn't a project yet, so there's nothing to record";
 
   const mode = strict?.mode ?? "off";
   const protection =
     mode === "locked"
-      ? "Locked on — only you (with the passcode) can switch it off"
+      ? "Locked on. Only you (with the passcode) can switch it off"
       : mode === "on"
-        ? "On — risky deletions get a second look before they land"
-        : "Off — assistants can change anything without a check";
+        ? "On. Risky deletions get a second look before they land"
+        : "Off. Assistants can change anything without a check";
 
   const engine = status?.initialized
     ? `Ready${status.block_count != null ? ` · remembering ${status.block_count} pieces of your code` : ""}`
@@ -534,7 +535,7 @@ async function buildStatusReport(repoRoot: string): Promise<string> {
   const [agents, sessions, intentToday, safetyLines] = await Promise.all([
     api.agentDiscover().catch(() => [] as Awaited<ReturnType<typeof api.agentDiscover>>),
     repoRoot
-      ? api.managerList(repoRoot).catch(() => [] as ManagerSummary[])
+      ? fetchManagerList(repoRoot).catch(() => [] as ManagerSummary[])
       : Promise.resolve([] as ManagerSummary[]),
     repoRoot ? api.auraCountIntentsToday(repoRoot).catch(() => null) : Promise.resolve(null),
     buildSafetyLines(repoRoot),
@@ -561,7 +562,7 @@ async function buildStatusReport(repoRoot: string): Promise<string> {
     for (const a of agents) {
       const ver = a.version ? ` · ${a.version}` : "";
       const mark = a.available ? "connected" : "not installed";
-      sections.push(`- **${a.label}** — ${mark}${ver}`);
+      sections.push(`- **${a.label}** · ${mark}${ver}`);
     }
     sections.push(
       "",
@@ -640,13 +641,13 @@ async function runResume(
     return {
       handled: true,
       tone: "warn",
-      output: "Open a project first — past conversations are listed per workspace.",
+      output: "Open a project first. Past conversations are listed per workspace.",
     };
   }
 
   const [nativeRes, claudeRes] = await Promise.allSettled([
-    api.managerList(repoRoot),
-    api.claudeListSessions(repoRoot),
+    fetchManagerList(repoRoot),
+    refreshSessions(repoRoot),
   ]);
 
   if (nativeRes.status === "rejected" && claudeRes.status === "rejected") {
@@ -702,7 +703,7 @@ async function runResume(
       handled: true,
       tone: "info",
       output:
-        "**No earlier conversations here yet.** This is your first chat in this project — once you've had a few (here or in Claude Code), `/resume` lists them with a one-click way back.",
+        "**No earlier conversations here yet.** This is your first chat in this project. Once you've had a few (here or in Claude Code), `/resume` lists them with a one-click way back.",
     };
   }
 
@@ -720,12 +721,8 @@ async function runResume(
 /** "just now" / "3m ago" / "2h ago" / "5d ago" — the same quiet recency phrasing
  *  the question/plan cards use, kept local so `/resume` rows don't pull a dep. */
 function resumeAgoLabel(tsSecs: number, nowSecs: number): string {
-  if (!tsSecs) return "";
-  const delta = Math.max(0, nowSecs - tsSecs);
-  if (delta < 45) return "just now";
-  if (delta < 3600) return `${Math.floor(delta / 60)}m ago`;
-  if (delta < 86400) return `${Math.floor(delta / 3600)}h ago`;
-  return `${Math.floor(delta / 86400)}d ago`;
+  // One ladder for the whole app — see lib/relativeTime.
+  return relativeAgeFromSecs(tsSecs, { now: nowSecs * 1000 });
 }
 
 // ─── /capture — turn change-recording on/off, then show status ───────────
@@ -737,7 +734,7 @@ async function runCapture(repoRoot: string, rest: string[]): Promise<ChatSlashRe
     return {
       handled: true,
       tone: "warn",
-      output: "Open a project first — recording is per-folder.",
+      output: "Open a project first. Recording is per-folder.",
     };
   }
 
@@ -768,14 +765,18 @@ async function runCapture(repoRoot: string, rest: string[]): Promise<ChatSlashRe
   if (sub === "on" || sub === "enable") {
     return flip(
       () => api.captureEnable(repoRoot),
-      "**Recording is on.** Aura will capture your changes as you work.",
+      "**Recording is on.** From your next commit, Aura saves what changed and why.",
       "turn recording on",
     );
   }
   if (sub === "off" || sub === "disable") {
     return flip(
       () => api.captureDisable(repoRoot),
-      "**Recording is off.** Aura will stop capturing changes in this folder.",
+      // The on-message names the moment ("from your next commit"); this one said
+      // "stop capturing changes", which reads as though something continuous was
+      // being switched off. Both ends of one toggle should describe the same
+      // mechanism.
+      "**Recording is off.** Commits in this folder won't be recorded from now on.",
       "turn recording off",
     );
   }
@@ -798,7 +799,7 @@ async function runAgents(): Promise<ChatSlashResult> {
     }
     const lines = discovered.map((a) => {
       const mark = a.available ? "ready" : "not installed";
-      const ver = a.version ? ` — ${a.version}` : "";
+      const ver = a.version ? ` · ${a.version}` : "";
       return `- **${a.label}** (\`${a.id}\`) · ${mark}${ver}`;
     });
     return {
@@ -809,7 +810,7 @@ async function runAgents(): Promise<ChatSlashResult> {
         "",
         ...lines,
         "",
-        "_Send a command straight to one with `@<id> /<command>` — e.g. `@cc /resume`._",
+        "_Send a command straight to one with `@<id> /<command>`. E.g. `@cc /resume`._",
       ].join("\n"),
     };
   } catch (e) {
@@ -842,7 +843,7 @@ async function runProve(repoRoot: string, text: string): Promise<ChatSlashResult
       handled: true,
       tone: "warn",
       output:
-        'Usage: `/prove <what you built>` — describe the goal in plain words, e.g. `/prove users can sign in with Google`.',
+        'Usage: `/prove <what you built>`. Describe the goal in plain words, e.g. `/prove users can sign in with Google`.',
     };
   }
   return runCli(repoRoot, ["goals", "prove", text], `/prove ${text}`);
@@ -858,7 +859,7 @@ async function runRewind(repoRoot: string, rest: string[]): Promise<ChatSlashRes
       handled: true,
       tone: "warn",
       output:
-        "Usage: `/rewind <function> <file>` — rolls one function back to its last safe version, e.g. `/rewind calculate_tax src/billing.ts`.",
+        "Usage: `/rewind <function> <file>`. Rolls one function back to its last safe version, e.g. `/rewind calculate_tax src/billing.ts`.",
     };
   }
   return runCli(repoRoot, ["rewind", identifier, filePath], `/rewind ${identifier} ${filePath}`);
@@ -872,9 +873,9 @@ async function runPr(repoRoot: string, rest: string[]): Promise<ChatSlashResult>
   const sub = (rest[0] || "").toLowerCase();
   if (!sub || sub === "help") {
     const lines = [
-      "**/pr — PR copilot skills**",
+      "**/pr. PR copilot skills**",
       "",
-      ...PR_SKILLS.map((s) => `- \`/pr ${s.id}\` — ${s.summary}`),
+      ...PR_SKILLS.map((s) => `- \`/pr ${s.id}\` · ${s.summary}`),
       "",
       "_Add `#<number>` to target an open PR: `/pr review #42`. Templates are_",
       "_overridable per-repo in `.aura/skills/pr/<skill>.md`._",
@@ -916,27 +917,33 @@ async function runLaunch(repoRoot: string, rest: string[]): Promise<ChatSlashRes
       handled: true,
       tone: "warn",
       output:
-        "Usage: `/launch <branch> <agent> [agent…]` — creates a parallel copy on `<branch>` and spawns each agent inside it. Example: `/launch feat/login claude gemini`.",
+        "Usage: `/launch <branch> <agent> [agent…]`. Creates a parallel copy on `<branch>` and spawns each agent inside it. Example: `/launch feat/login claude gemini`.",
     };
   }
   try {
-    const { manifest } = await launchWorkspace({
+    const { manifest, worktreePath, errors } = await launchWorkspace({
+      // Name the place the copy is asked for in. `/launch` typed into a chat
+      // that is running on a machine means a copy on that machine, made over
+      // there — not quietly cut out of this laptop's disk instead.
+      machineId: placeForNewWork(repoRoot),
       repoRoot,
       branch,
       agents: agentIds.map((agentId) => ({ agentId })),
     });
     const lines = [
-      `**/launch ${branch}** — parallel copy ready at \`${manifest.worktree.path}\``,
+      `**/launch ${branch}**. Parallel copy ready at \`${worktreePath}\``,
       "",
-      ...manifest.sessions.map((s) => `- ${s.agent_id} ${s.resumed ? "(re-attached)" : "spawned"}`),
+      ...(manifest?.sessions ?? []).map(
+        (s) => `- ${s.agent_id} ${s.resumed ? "(re-attached)" : "spawned"}`,
+      ),
     ];
-    if (manifest.errors.length > 0) {
-      lines.push("", "**Failed to spawn:**", ...manifest.errors.map((e) => `- ${e}`));
+    if (errors.length > 0) {
+      lines.push("", "**Failed to spawn:**", ...errors.map((e) => `- ${e}`));
     }
-    lines.push("", "_Tabs are waiting in the new workspace — switch over from the rail._");
+    lines.push("", "_Tabs are waiting in the new workspace. Switch over from the rail._");
     return {
       handled: true,
-      tone: manifest.errors.length > 0 ? "warn" : "ok",
+      tone: errors.length > 0 ? "warn" : "ok",
       output: lines.join("\n"),
     };
   } catch (e) {
@@ -949,7 +956,7 @@ async function runSearch(repoRoot: string, query: string): Promise<ChatSlashResu
     return {
       handled: true,
       tone: "warn",
-      output: "Usage: `/search <text>` — finds matching code across the repo.",
+      output: "Usage: `/search <text>`. Finds matching code across the repo.",
     };
   }
   try {
@@ -970,14 +977,14 @@ async function runSearch(repoRoot: string, query: string): Promise<ChatSlashResu
 }
 
 const ZONES_EMPTY_LEARN = [
-  "**Zone claims — none yet**",
+  "**Zone claims. None yet**",
   "",
   "Zones let teammates carve out short-lived ownership of files so two agents (or two humans) don't fight over the same lines.",
   "",
   "Try it:",
-  "- `/zone claim src/auth.ts` — claim a file while you edit it.",
-  "- `/zone list` — see who's holding what.",
-  "- `/zone release src/auth.ts` — let go when you're done.",
+  "- `/zone claim src/auth.ts`. Claim a file while you edit it.",
+  "- `/zone list`. See who's holding what.",
+  "- `/zone release src/auth.ts`. Let go when you're done.",
   "",
   "Claims auto-expire after 30 min unless renewed.",
 ].join("\n");
@@ -1231,7 +1238,7 @@ async function runLoop(repoRoot: string, rest: string[]): Promise<ChatSlashResul
     try {
       const r = await api.loopSyncBoard(repoRoot);
       const lines = [
-        `**/loop sync** — board → dependency graph`,
+        `**/loop sync**. Board → dependency graph`,
         "",
         `- **${r.synced}** nodes in scope (${r.created} new, ${r.updated} updated)`,
         `- **${r.edges}** dependency edges reconciled`,
@@ -1254,16 +1261,16 @@ async function runLoop(repoRoot: string, rest: string[]): Promise<ChatSlashResul
           handled: true,
           tone: "info",
           output:
-            "**/loop run** — nothing ready to dispatch. Try `/loop sync` first, or `/loop` to see what's blocked.",
+            "**/loop run**. Nothing ready to dispatch. Try `/loop sync` first, or `/loop` to see what's blocked.",
         };
       }
       const lines = [
-        `**/loop run** — dispatched **${r.dispatched.length}** into the Aura brain`,
+        `**/loop run**. Dispatched **${r.dispatched.length}** into the Aura brain`,
         "",
         ...r.dispatched.map((d) => `- ${d.title || d.node_id}`),
       ];
       if (r.ready_remaining > 0) {
-        lines.push("", `_${r.ready_remaining} more ready — re-run \`/loop run\` to continue._`);
+        lines.push("", `_${r.ready_remaining} more ready. Re-run \`/loop run\` to continue._`);
       }
       return { handled: true, tone: "ok", output: lines.join("\n") };
     } catch (e) {
@@ -1273,18 +1280,18 @@ async function runLoop(repoRoot: string, rest: string[]): Promise<ChatSlashResul
 
   if (sub === "status" || sub === "list" || sub === "help") {
     try {
-      const v = await api.loopReadyView(repoRoot);
+      const v = await fetchReadyView(repoRoot);
       const c = v.counts;
       if (c.ready + c.blocked + c.working + c.done + c.other === 0) {
         return {
           handled: true,
           tone: "info",
           output:
-            "**Loop graph — empty.** Run `/loop sync` to project the task board (including any Jira-imported cards) into the dependency graph, then `/loop run` to dispatch the ready set.",
+            "**Loop graph. Empty.** Run `/loop sync` to project the task board (including any Jira-imported cards) into the dependency graph, then `/loop run` to dispatch the ready set.",
         };
       }
       const lines: string[] = [
-        `**Loop ready_view** — ${c.ready} ready · ${c.blocked} blocked · ${c.working} working · ${c.done} done`,
+        `**Loop ready_view** · ${c.ready} ready · ${c.blocked} blocked · ${c.working} working · ${c.done} done`,
       ];
       if (v.ready.length) {
         lines.push("", "**Ready**", ...v.ready.slice(0, 12).map(loopLine));
@@ -1298,7 +1305,7 @@ async function runLoop(repoRoot: string, rest: string[]): Promise<ChatSlashResul
           "**Blocked**",
           ...v.blocked
             .slice(0, 8)
-            .map((b) => `${loopLine(b.task)} — waiting on ${b.unmet.length}`),
+            .map((b) => `${loopLine(b.task)}. Waiting on ${b.unmet.length}`),
         );
       }
       lines.push("", "_`/loop sync` to refresh from the board · `/loop run` to dispatch._");

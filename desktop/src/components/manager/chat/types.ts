@@ -131,6 +131,21 @@ export type TokenUsage = {
   outputTokens: number;
 };
 
+/** What a turn cost in API mode, plus the key's running total. Null for
+ *  subscription and CLI-wrapper brains, which aren't billed per token —
+ *  there's no honest dollar figure to show, so the UI shows none. */
+export type TurnSpend = {
+  /** USD this one response cost. */
+  costUsd: number;
+  /** USD this key has spent since it was added, across EVERY project. */
+  spendUsd: number;
+  /** Unix seconds the key was first seen — the "since" date. */
+  spendSince: number;
+  /** True when a figure was priced off a model-family rate rather than a
+   *  published one; the UI prefixes it with `~`. */
+  estimated: boolean;
+};
+
 /** What the brain accumulates mid-turn. Text blocks are streaming assistant
  *  prose; tool blocks are one Anthropic `tool_use` each, with the eventual
  *  `tool_result` tacked on once dispatch returns; reasoning blocks carry the
@@ -147,4 +162,10 @@ export type StreamBlock =
       name: string;
       input: unknown;
       result?: ToolResult;
+      /** Epoch ms the tool_use first arrived. The live "Running … 1m 08s" row
+       *  anchors its timer here instead of its own mount time, so a view
+       *  remount mid-command (a workspace switch) resumes the real elapsed
+       *  rather than restarting at 0. Absent on blocks rebuilt from a settled
+       *  transcript — those are done and show no timer. */
+      started_at?: number;
     };

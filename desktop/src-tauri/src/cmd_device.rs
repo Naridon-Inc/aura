@@ -218,6 +218,29 @@ pub(crate) fn read_repo_override(repo_root: &Path) -> Option<String> {
 }
 
 pub(crate) fn read_origin_url(repo_root: &Path) -> Option<String> {
+    // Ask git first. A linked worktree keeps `.git` as a *file* holding
+    // `gitdir: …`, so reading `.git/config` there returns that one line,
+    // finds no `[remote "origin"]`, and answers None — which sent every
+    // worktree down the `local-<hash of path>` branch of `room_id_for_repo`
+    // and into a private chat room, split from teammates on the same repo.
+    // Worktrees share the common config, so git answers correctly for both
+    // layouts (and honours `include`/conditional config, which the hand
+    // parser below cannot).
+    if let Ok(out) = std::process::Command::new("git")
+        .arg("-C")
+        .arg(repo_root)
+        .args(["config", "--get", "remote.origin.url"])
+        .output()
+    {
+        if out.status.success() {
+            let url = String::from_utf8_lossy(&out.stdout).trim().to_string();
+            if !url.is_empty() {
+                return Some(url);
+            }
+        }
+    }
+
+    // Fallback for when git isn't runnable at all: parse the config by hand.
     let cfg = fs::read_to_string(repo_root.join(".git").join("config")).ok()?;
     let mut in_origin = false;
     for line in cfg.lines() {
@@ -297,31 +320,40 @@ pub(crate) fn room_id_for_repo(repo_root: &Path) -> String {
 
 #[tauri::command]
 pub async fn device_identity() -> Result<DeviceIdentity, String> {
-    load_or_create_device()
+    crate::blocking::run(move || {
+        load_or_create_device()
+    })
+    .await
 }
 
 #[tauri::command]
 pub async fn device_update(display_name: Option<String>, email: Option<String>) -> Result<DeviceIdentity, String> {
-    let mut current = load_or_create_device()?;
-    if let Some(name) = display_name {
-        let trimmed = name.trim();
-        if !trimmed.is_empty() {
-            current.display_name = trimmed.to_string();
+    crate::blocking::run(move || {
+        let mut current = load_or_create_device()?;
+        if let Some(name) = display_name {
+            let trimmed = name.trim();
+            if !trimmed.is_empty() {
+                current.display_name = trimmed.to_string();
+            }
         }
-    }
-    if let Some(em) = email {
-        let trimmed = em.trim();
-        if !trimmed.is_empty() {
-            current.email = trimmed.to_string();
+        if let Some(em) = email {
+            let trimmed = em.trim();
+            if !trimmed.is_empty() {
+                current.email = trimmed.to_string();
+            }
         }
-    }
-    save_device(&current)?;
-    Ok(current)
+        save_device(&current)?;
+        Ok(current)
+    })
+    .await
 }
 
 #[tauri::command]
 pub async fn device_room_id(repo_root: String) -> Result<String, String> {
-    Ok(room_id_for_repo(Path::new(&repo_root)))
+    crate::blocking::run(move || {
+        Ok(room_id_for_repo(Path::new(&repo_root)))
+    })
+    .await
 }
 
 /// Tauri command — exposes the fixed global Aura room id so the
@@ -341,5 +373,67 @@ pub async fn aura_global_room_id() -> Result<String, String> {
 /// while chat correctly uses the per-repo one.
 #[tauri::command]
 pub async fn device_identity_for_repo(repo_root: String) -> Result<DeviceIdentity, String> {
-    effective_identity(Path::new(&repo_root))
+    crate::blocking::run(move || {
+        effective_identity(Path::new(&repo_root))
+    })
+    .await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn git(cwd: &Path, args: &[&str]) -> bool {
+        std::process::Command::new("git")
+            .arg("-C")
+            .arg(cwd)
+            .args(args)
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false)
+    }
+
+    /// A worktree and its main checkout are the same repository, so they must
+    /// land in the same room. They did not: `read_origin_url` read
+    /// `.git/config` as a file, which in a worktree is the one-line
+    /// `gitdir: …` pointer, so it found no origin and `room_id_for_repo` fell
+    /// through to the `local-<hash of path>` branch — a private room per
+    /// worktree, split from every teammate on the same repo.
+    #[test]
+    fn a_worktree_joins_the_same_room_as_its_main_checkout() {
+        let dir = tempfile::tempdir().unwrap();
+        let main = dir.path().join("main");
+        std::fs::create_dir_all(&main).unwrap();
+        if !git(&main, &["init"]) {
+            return; // no git here — nothing to assert
+        }
+        git(&main, &["config", "user.email", "t@example.com"]);
+        git(&main, &["config", "user.name", "t"]);
+        git(
+            &main,
+            &["remote", "add", "origin", "https://example.com/acme/widgets.git"],
+        );
+        git(&main, &["commit", "--allow-empty", "-m", "init"]);
+
+        let wt = dir.path().join("wt");
+        if !git(&main, &["worktree", "add", wt.to_str().unwrap(), "-b", "feat"]) {
+            return; // worktrees unavailable — nothing to assert
+        }
+        assert!(wt.join(".git").is_file(), "a linked worktree keeps .git as a file");
+
+        assert_eq!(
+            read_origin_url(&wt).as_deref(),
+            Some("https://example.com/acme/widgets.git"),
+            "origin must be readable from inside a worktree"
+        );
+        assert_eq!(
+            room_id_for_repo(&wt),
+            room_id_for_repo(&main),
+            "a worktree and its main checkout must share one room"
+        );
+        assert!(
+            !room_id_for_repo(&wt).starts_with("local-"),
+            "must not fall through to the path-hash room"
+        );
+    }
 }

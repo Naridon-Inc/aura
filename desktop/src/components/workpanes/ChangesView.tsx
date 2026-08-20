@@ -27,13 +27,17 @@ import {
   type ReactNode,
 } from "react";
 import { Churn } from "../diff/Churn";
-import { type FileChangeNote, type IntentChangesetFile } from "../../lib/api";
+import {
+  api,
+  type FileChangeNote,
+  type IntentChangesetFile,
+} from "../../lib/api";
 import { loadFileDiff } from "../../lib/sessionDataCache";
 import { fetchChangeNoteReport } from "../../lib/changeNoteCache";
 import { UnifiedDiff } from "../diff/UnifiedDiff";
 import { SplitDiff, materializeSides } from "../diff/SplitDiff";
 import { ChangeNoteCard } from "./ChangeNoteCard";
-import { SplitDiffHeader } from "./SplitDiffHeader";
+import { SplitDiffHeader, SPLIT_INLINE_PX } from "./SplitDiffHeader";
 import {
   getDiffView,
   setDiffView,
@@ -50,7 +54,8 @@ import { isWorktreeRoot } from "../../lib/workspaceLabel";
 // Monaco folds its side-by-side panes into one inline column below this pane
 // width (matching `renderSideBySideInlineBreakpoint` on the DiffEditor). When
 // that happens the two side-headers can't align to left/right, so they stack.
-const SPLIT_INLINE_PX = 700;
+// Owned by SplitDiffHeader — it is that header's constraint, and the PR Files
+// tab mounts the same header, so both measure against one number.
 
 // Below this surface width the two panes stack into one column.
 const NARROW_PX = 560;
@@ -340,7 +345,7 @@ function ChangeTree({
   return (
     <div className="flex h-full min-h-0 flex-col">
       <div className="flex shrink-0 items-center justify-between gap-2 border-b border-line-soft px-3 py-2">
-        <span className="text-[11px] uppercase tracking-wide text-text-4">
+        <span className="section-label">
           {fileOrder.length} {fileOrder.length === 1 ? "file" : "files"}
           {/* The headline figure for the change being read: one on screen, not
               a repeating row, and it counts exactly the diff this pane holds —
@@ -359,7 +364,7 @@ function ChangeTree({
         <button
           type="button"
           onClick={collapseAll}
-          className="rounded px-1.5 py-0.5 text-[10.5px] text-text-4 hover:bg-bg-2 hover:text-text-2"
+          className="rounded px-1.5 py-0.5 text-xs text-text-4 hover:bg-state-hover hover:text-text-2"
           title={allCollapsed ? "Expand all folders" : "Collapse all folders"}
         >
           {allCollapsed ? "Expand" : "Collapse"}
@@ -375,7 +380,7 @@ function ChangeTree({
                 key={`d:${r.node.path}`}
                 type="button"
                 onClick={() => toggle(r.node.path)}
-                className="flex w-full items-center gap-1.5 py-1 pr-2.5 text-left hover:bg-bg-2"
+                className="flex w-full items-center gap-1.5 py-1 pr-2.5 text-left hover:bg-state-hover"
                 style={{ paddingLeft: indent }}
                 title={r.node.path}
               >
@@ -385,7 +390,7 @@ function ChangeTree({
                 <span className="text-text-3">
                   <FolderGlyph open={open} />
                 </span>
-                <span className="min-w-0 flex-1 truncate text-[12px] text-text-2">
+                <span className="min-w-0 flex-1 truncate text-sm text-text-2">
                   {r.node.name}
                 </span>
                 {/* A folder is not a change — this number is a roll-up of the
@@ -405,20 +410,20 @@ function ChangeTree({
               onClick={() => onSelect(r.node.path)}
               className={
                 "flex w-full items-center gap-1.5 py-1 pr-2.5 text-left " +
-                (isSel ? "bg-bg-card" : "hover:bg-bg-2")
+                (isSel ? "bg-bg-card" : "hover:bg-state-hover")
               }
               style={{ paddingLeft: indent + 16 }}
               title={r.node.path}
             >
               <span
-                className={"w-3 shrink-0 text-center font-mono text-[10.5px] " + g.tone}
+                className={"w-3 shrink-0 text-center font-mono text-xs " + g.tone}
                 title={g.word}
               >
                 {g.letter}
               </span>
               <span
                 className={
-                  "min-w-0 flex-1 truncate text-[12px] " +
+                  "min-w-0 flex-1 truncate text-sm " +
                   (isSel ? "font-medium text-text-1" : "text-text-2")
                 }
               >
@@ -467,17 +472,17 @@ function CodeReveal({
         type="button"
         onClick={onToggle}
         aria-expanded={show}
-        className="flex shrink-0 items-center gap-1.5 border-t border-line-soft px-3 py-1.5 text-left text-[11px] text-text-4 hover:bg-bg-2/40 hover:text-text-2"
+        className="flex shrink-0 items-center gap-1.5 border-t border-line-soft px-3 py-1.5 text-left text-xs text-text-4 hover:bg-state-hover hover:text-text-2"
         title={
           show
             ? "Hide the exact code lines"
-            : "Show the exact code lines that changed — the engineer's view"
+            : "Show the exact code lines that changed. The engineer's view"
         }
       >
         <Chevron open={show} />
         <span>{show ? "Hide the code" : "See the actual code"}</span>
         {!show && (adds > 0 || dels > 0) ? (
-          <span className="font-mono text-[10px] tabular-nums text-text-5">
+          <span className="font-mono text-2xs tabular-nums text-text-5">
             {adds > 0 ? <span className="text-accent-green">+{adds}</span> : null}
             {adds > 0 && dels > 0 ? " " : null}
             {dels > 0 ? <span className="text-text-3">−{dels}</span> : null}
@@ -488,6 +493,57 @@ function CodeReveal({
         <div className="min-h-0 flex-1 overflow-hidden">{children}</div>
       ) : null}
     </>
+  );
+}
+
+/** What a teammate's file changed, when the patch isn't in this clone.
+ *
+ *  The team plane records which file a person touched and which pieces of it
+ *  they moved, but not the lines — their commit may be on a branch nobody here
+ *  has fetched, and `.aura/` is gitignored on most repos so the ledger can't
+ *  arrive by git either. That's a real and useful amount to know, and it is the
+ *  difference between "Sam reworked the retry policy — `backoff`, `send`" and a
+ *  Changes tab that has been empty for every one of Sam's sessions.
+ *
+ *  It deliberately does NOT offer to fetch. We know the file and the person;
+ *  we don't know the branch, and guessing one would send someone chasing the
+ *  wrong ref. */
+function RemoteChangeSummary({ file }: { file: IntentChangesetFile }) {
+  const symbols = file.symbols ?? [];
+  const word = statusGlyph(file.status).word;
+  return (
+    <div className="shrink-0 px-3 py-2.5 text-xs">
+      <div className="text-text-3">
+        A teammate {word} this file. Their code isn&rsquo;t on this machine, so
+        there are no lines to show — pull their branch to read the change
+        itself.
+      </div>
+      {symbols.length > 0 ? (
+        <div className="mt-2">
+          <div className="text-2xs uppercase tracking-wide text-text-4">
+            What they changed in it
+          </div>
+          <ul className="mt-1 flex flex-wrap gap-1">
+            {symbols.map((s) => (
+              <li
+                key={`${s.identifier}:${s.change}`}
+                className="rounded border border-line-soft px-1.5 py-px font-mono text-xs text-text-2"
+                title={
+                  s.kind ? `${s.kind} — ${s.change || "changed"}` : s.change
+                }
+              >
+                {s.identifier}
+                {s.change ? (
+                  <span className="ml-1 font-sans text-2xs text-text-4">
+                    {s.change}
+                  </span>
+                ) : null}
+              </li>
+            ))}
+          </ul>
+        </div>
+      ) : null}
+    </div>
   );
 }
 
@@ -589,6 +645,14 @@ function DiffPane({
 
   useEffect(() => {
     if (!repoRoot) return;
+    // A teammate's file, carried over the team plane. There is no patch here
+    // to fetch — see the panel below, which shows what we do know.
+    if (file.remote_only) {
+      setLoading(false);
+      setError(null);
+      setDiff(null);
+      return;
+    }
     let alive = true;
     setLoading(true);
     setError(null);
@@ -612,7 +676,7 @@ function DiffPane({
     return () => {
       alive = false;
     };
-  }, [repoRoot, file.path, file.commit, sinceBase]);
+  }, [repoRoot, file.path, file.commit, file.remote_only, sinceBase]);
 
   const g = statusGlyph(file.status);
   const adds = typeof file.additions === "number" ? file.additions : 0;
@@ -635,20 +699,20 @@ function DiffPane({
           <button
             type="button"
             onClick={onBack}
-            className="-ml-1 flex items-center gap-0.5 rounded px-1 py-0.5 text-[11px] text-text-3 hover:bg-bg-2 hover:text-text-1"
+            className="-ml-1 flex items-center gap-0.5 rounded px-1 py-0.5 text-xs text-text-3 hover:bg-state-hover hover:text-text-1"
           >
             <BackIcon />
             <span>Files</span>
           </button>
         ) : null}
         <span
-          className={"w-3 shrink-0 text-center font-mono text-[10.5px] " + g.tone}
+          className={"w-3 shrink-0 text-center font-mono text-xs " + g.tone}
           title={g.word}
         >
           {g.letter}
         </span>
         <span
-          className="min-w-0 flex-1 truncate font-mono text-[11.5px] text-text-2"
+          className="min-w-0 flex-1 truncate font-mono text-sm text-text-2"
           dir="rtl"
           title={file.path}
         >
@@ -668,7 +732,7 @@ function DiffPane({
                   type="button"
                   onClick={() => setDiffView("split")}
                   className={
-                    "h-5 px-1.5 text-[10.5px] " +
+                    "h-5 px-1.5 text-xs " +
                     (effectiveMode === "split"
                       ? "bg-bg-2 text-text-1"
                       : "text-text-3 hover:text-text-1")
@@ -682,7 +746,7 @@ function DiffPane({
                   type="button"
                   onClick={() => setDiffView("unified")}
                   className={
-                    "h-5 px-1.5 text-[10.5px] " +
+                    "h-5 px-1.5 text-xs " +
                     (effectiveMode === "unified"
                       ? "bg-bg-2 text-text-1"
                       : "text-text-3 hover:text-text-1")
@@ -699,7 +763,7 @@ function DiffPane({
               aria-pressed={ignoreWs}
               title={ignoreWs ? "Whitespace-only changes hidden" : "Hide whitespace-only changes"}
               className={
-                "ml-1 h-5 shrink-0 rounded border px-1.5 text-[10.5px] " +
+                "ml-1 h-5 shrink-0 rounded border px-1.5 text-xs " +
                 (ignoreWs
                   ? "border-[var(--color-accent)] bg-bg-2 text-[var(--color-accent)]"
                   : "border-line-soft text-text-3 hover:text-text-1")
@@ -738,22 +802,24 @@ function DiffPane({
 
         {/* SECONDARY — the raw code. Its own load / empty state lives here so
             the meaning above never waits on it. */}
-        {loading ? (
-          <div className="shrink-0 px-3 py-2 text-[11px] text-text-4">
+        {file.remote_only ? (
+          <RemoteChangeSummary file={file} />
+        ) : loading ? (
+          <div className="shrink-0 px-3 py-2 text-xs text-text-4">
             Loading the code…
           </div>
         ) : error ? (
-          <div className="shrink-0 px-3 py-2 text-[11px] text-text-3">
+          <div className="shrink-0 px-3 py-2 text-xs text-text-3">
             Couldn&rsquo;t load the code.
-            <span className="mt-1 block font-mono text-[10.5px] text-text-4">
+            <span className="mt-1 block font-mono text-xs text-text-4">
               {error}
             </span>
           </div>
         ) : !hasDiff ? (
-          <div className="shrink-0 px-3 py-2 text-[11px] text-text-4">
+          <div className="shrink-0 px-3 py-2 text-xs text-text-4">
             {file.commit
-              ? "This change didn't alter any text in this file — it was a rename, or a settings-only change."
-              : "Nothing to show here — this file already matches the last saved version."}
+              ? "This change didn't alter any text in this file. It was a rename, or a settings-only change."
+              : "Nothing to show here. This file already matches the last saved version."}
           </div>
         ) : (
           <CodeReveal
@@ -837,6 +903,28 @@ export function ChangesView({
     [files, selected],
   );
 
+  // Start writing the plain-language account of EVERY commit in this changeset
+  // the moment the tab opens — all of them, in parallel, rather than the file
+  // you happen to click first and then the next one and the next one. The words
+  // for a file you haven't reached yet are being written while you read the one
+  // you're on, so by the time you get there it's already filled in instead of
+  // showing "A new piece." for the better part of a minute.
+  //
+  // Fire-and-forget on purpose: nothing here is awaited or rendered. The jobs
+  // land in the shared cache, and the surfaces that read it (this file's header,
+  // and later the same change in a pull request) simply find it warm.
+  const commits = useMemo(() => {
+    const seen = new Set<string>();
+    for (const f of files) if (f.commit) seen.add(f.commit);
+    return [...seen];
+  }, [files]);
+  useEffect(() => {
+    if (!repoRoot) return;
+    for (const sha of commits) {
+      void api.prewarmChangeSummaries(repoRoot, sha).catch(() => {});
+    }
+  }, [repoRoot, commits]);
+
   const tree = (
     <ChangeTree
       files={files}
@@ -855,18 +943,18 @@ export function ChangesView({
           non-engineers). Active segment uses the arctic-blue accent. */}
       {isWorktree ? (
         <div className="flex shrink-0 items-center gap-2 border-b border-line-soft px-2.5 py-1.5">
-          <span className="text-[11px] text-text-3">Showing</span>
+          <span className="text-xs text-text-3">Showing</span>
           <span className="inline-flex shrink-0 items-center overflow-hidden rounded border border-line-soft">
             <button
               type="button"
               onClick={() => setSinceBase(true)}
               className={
-                "h-5 px-2 text-[10.5px] " +
+                "h-5 px-2 text-xs " +
                 (sinceBase
                   ? "bg-accent/15 font-medium text-accent"
                   : "text-text-3 hover:text-text-1")
               }
-              title="Everything this copy changed since it branched off — committed and not yet committed"
+              title="Everything this copy changed since it branched off. Committed and not yet committed"
             >
               All changes
             </button>
@@ -875,7 +963,7 @@ export function ChangesView({
               type="button"
               onClick={() => setSinceBase(false)}
               className={
-                "h-5 px-2 text-[10.5px] " +
+                "h-5 px-2 text-xs " +
                 (!sinceBase
                   ? "bg-accent/15 font-medium text-accent"
                   : "text-text-3 hover:text-text-1")
@@ -923,7 +1011,7 @@ export function ChangesView({
                   busySymbol={busySymbol}
                 />
               ) : (
-                <div className="flex h-full items-center justify-center text-[12px] text-text-4">
+                <div className="flex h-full items-center justify-center text-sm text-text-4">
                   Select a file to view its diff.
                 </div>
               )}

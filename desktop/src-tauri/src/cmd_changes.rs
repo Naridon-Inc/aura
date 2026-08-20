@@ -142,15 +142,18 @@ pub async fn aura_changes_resolve(
     repo_root: String,
     commit_sha: String,
 ) -> Result<ChangeIdRow, String> {
-    let tree = tree_hash(&repo_root, &commit_sha)
-        .ok_or_else(|| format!("git: cannot resolve tree for {commit_sha}"))?;
-    let ts = commit_ts(&repo_root, &commit_sha).unwrap_or(0);
-    let intents = read_intents(&repo_root);
-    let intent = nearest_prior_intent(&intents, ts);
-    Ok(ChangeIdRow {
-        commit_sha,
-        change_id: derive_change_id(intent, &tree),
+    crate::blocking::run(move || {
+        let tree = tree_hash(&repo_root, &commit_sha)
+            .ok_or_else(|| format!("git: cannot resolve tree for {commit_sha}"))?;
+        let ts = commit_ts(&repo_root, &commit_sha).unwrap_or(0);
+        let intents = read_intents(&repo_root);
+        let intent = nearest_prior_intent(&intents, ts);
+        Ok(ChangeIdRow {
+            commit_sha,
+            change_id: derive_change_id(intent, &tree),
+        })
     })
+    .await
 }
 
 #[tauri::command]
@@ -158,21 +161,24 @@ pub async fn aura_changes_list(
     repo_root: String,
     commit_shas: Vec<String>,
 ) -> Result<Vec<ChangeIdRow>, String> {
-    let intents = read_intents(&repo_root);
-    let mut out = Vec::with_capacity(commit_shas.len());
-    for sha in commit_shas {
-        let tree = match tree_hash(&repo_root, &sha) {
-            Some(t) => t,
-            None => continue,
-        };
-        let ts = commit_ts(&repo_root, &sha).unwrap_or(0);
-        let intent = nearest_prior_intent(&intents, ts);
-        out.push(ChangeIdRow {
-            commit_sha: sha,
-            change_id: derive_change_id(intent, &tree),
-        });
-    }
-    Ok(out)
+    crate::blocking::run(move || {
+        let intents = read_intents(&repo_root);
+        let mut out = Vec::with_capacity(commit_shas.len());
+        for sha in commit_shas {
+            let tree = match tree_hash(&repo_root, &sha) {
+                Some(t) => t,
+                None => continue,
+            };
+            let ts = commit_ts(&repo_root, &sha).unwrap_or(0);
+            let intent = nearest_prior_intent(&intents, ts);
+            out.push(ChangeIdRow {
+                commit_sha: sha,
+                change_id: derive_change_id(intent, &tree),
+            });
+        }
+        Ok(out)
+    })
+    .await
 }
 
 #[cfg(test)]

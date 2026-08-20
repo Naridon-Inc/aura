@@ -96,7 +96,7 @@ export function ThreadReplies({
           <button
             type="button"
             onClick={onBackToRail}
-            className="w-7 h-7 rounded text-text-2 hover:text-text-1 hover:bg-bg-2 flex items-center justify-center"
+            className="w-7 h-7 rounded text-text-2 hover:text-text-1 hover:bg-state-hover flex items-center justify-center"
             title="Back to channels"
           >
             <svg width="14" height="14" viewBox="0 0 16 16" fill="none">
@@ -112,7 +112,7 @@ export function ThreadReplies({
         <button
           type="button"
           onClick={onBack}
-          className="w-7 h-7 rounded text-text-2 hover:text-text-1 hover:bg-bg-2 flex items-center justify-center"
+          className="w-7 h-7 rounded text-text-2 hover:text-text-1 hover:bg-state-hover flex items-center justify-center"
           title="Back to channel"
         >
           <svg width="14" height="14" viewBox="0 0 16 16" fill="none">
@@ -120,8 +120,8 @@ export function ThreadReplies({
           </svg>
         </button>
         <div className="flex-1 min-w-0">
-          <div className="text-text-1 text-[12.5px] font-medium truncate">Thread</div>
-          <div className="text-text-4 text-[10.5px] truncate -mt-0.5">
+          <div className="text-text-1 text-base font-medium truncate">Thread</div>
+          <div className="text-text-4 text-xs truncate -mt-0.5">
             in {prettyName(conv)} · {replies.length} repl
             {replies.length === 1 ? "y" : "ies"}
           </div>
@@ -130,11 +130,11 @@ export function ThreadReplies({
 
       {/* Slack-style sub-header — channel name + participant handles. */}
       <div className="flex-shrink-0 px-3 py-1.5 border-b border-line-soft bg-bg-1">
-        <div className="text-text-2 text-[11.5px] font-medium">
+        <div className="text-text-2 text-sm font-medium">
           {prettyName(conv)}
         </div>
         {participants.length > 0 && (
-          <div className="text-text-4 text-[10.5px] truncate" title={participants.join(", ")}>
+          <div className="text-text-4 text-xs truncate" title={participants.join(", ")}>
             {participants.join(", ")}
           </div>
         )}
@@ -144,7 +144,7 @@ export function ThreadReplies({
         {/* Parent — wrapped in a soft-yellow card when pinned. */}
         {parent.pinned ? (
           <div className="rounded-md bg-bg-2 border-l-2 border-line p-2 mb-2">
-            <div className="flex items-center gap-1 mb-1 text-[10px] text-text-4 font-medium">
+            <div className="flex items-center gap-1 mb-1 text-2xs text-text-4 font-medium">
               <PinLucide size={10} />
               <span>Pinned</span>
             </div>
@@ -206,7 +206,7 @@ export function ThreadReplies({
           <button
             type="button"
             onClick={onMarkRead}
-            className="h-7 px-3 rounded-full text-[11px] font-medium"
+            className="h-7 px-3 rounded-full text-xs font-medium"
             style={{
               background: "var(--color-accent-green)",
               color: "var(--color-bg-deep)",
@@ -217,7 +217,7 @@ export function ThreadReplies({
           <button
             type="button"
             onClick={() => composerFocusRef.current?.focus()}
-            className="h-7 px-3 rounded-full text-[11px] font-medium bg-bg-2 border border-line-soft text-text-2 hover:text-text-1"
+            className="h-7 px-3 rounded-full text-xs font-medium bg-bg-2 border border-line-soft text-text-2 hover:text-text-1"
           >
             Reply
           </button>
@@ -227,11 +227,11 @@ export function ThreadReplies({
       {/* TODO(parallel): typing-indicator slot (thread variant) */}
       <div
         data-slot="typing-indicator"
-        className="flex-shrink-0 px-3 text-[10.5px] text-text-4 leading-[18px] truncate"
+        className="flex-shrink-0 px-3 text-xs text-text-4 leading-[18px] truncate"
         style={{ height: 18 }}
       />
       {readOnly ? (
-        <div className="flex-shrink-0 px-3 py-2.5 border-t border-line-soft text-[10.5px] text-text-5 text-center leading-snug">
+        <div className="flex-shrink-0 px-3 py-2.5 border-t border-line-soft text-xs text-text-5 text-center leading-snug">
           This thread updates live as the session continues.
         </div>
       ) : (

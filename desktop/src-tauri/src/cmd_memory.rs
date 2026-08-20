@@ -84,63 +84,66 @@ fn memory_path(repo_root: &str) -> PathBuf {
 
 #[tauri::command]
 pub async fn aura_memory_view(repo_root: String) -> Result<MemoryView, String> {
-    let path = memory_path(&repo_root);
-    if !path.exists() {
-        return Ok(MemoryView {
-            identity: String::new(),
-            stack: vec![],
-            sections: SECTIONS
-                .iter()
-                .map(|s| MemorySection {
-                    name: (*s).to_string(),
-                    entries: vec![],
-                })
-                .collect(),
-            last_updated: 0,
-        });
-    }
-    let raw = fs::read_to_string(&path).map_err(|e| e.to_string())?;
-    let v: serde_json::Value = serde_json::from_str(&raw).map_err(|e| e.to_string())?;
-    let identity = v
-        .get("identity")
-        .and_then(|x| x.as_str())
-        .unwrap_or("")
-        .to_string();
-    let stack = v
-        .get("stack")
-        .and_then(|x| x.as_array())
-        .map(|arr| {
-            arr.iter()
-                .filter_map(|s| s.as_str().map(|s| s.to_string()))
-                .collect()
-        })
-        .unwrap_or_default();
-    let mut sections = Vec::new();
-    for s in SECTIONS {
-        let entries = v
-            .get(*s)
+    crate::blocking::run(move || {
+        let path = memory_path(&repo_root);
+        if !path.exists() {
+            return Ok(MemoryView {
+                identity: String::new(),
+                stack: vec![],
+                sections: SECTIONS
+                    .iter()
+                    .map(|s| MemorySection {
+                        name: (*s).to_string(),
+                        entries: vec![],
+                    })
+                    .collect(),
+                last_updated: 0,
+            });
+        }
+        let raw = fs::read_to_string(&path).map_err(|e| e.to_string())?;
+        let v: serde_json::Value = serde_json::from_str(&raw).map_err(|e| e.to_string())?;
+        let identity = v
+            .get("identity")
+            .and_then(|x| x.as_str())
+            .unwrap_or("")
+            .to_string();
+        let stack = v
+            .get("stack")
             .and_then(|x| x.as_array())
             .map(|arr| {
                 arr.iter()
-                    .filter_map(|e| serde_json::from_value::<MemoryEntry>(e.clone()).ok())
+                    .filter_map(|s| s.as_str().map(|s| s.to_string()))
                     .collect()
             })
             .unwrap_or_default();
-        sections.push(MemorySection {
-            name: (*s).to_string(),
-            entries,
-        });
-    }
-    let last_updated = v
-        .get("last_updated")
-        .and_then(|x| x.as_i64())
-        .unwrap_or(0);
-    Ok(MemoryView {
-        identity,
-        stack,
-        sections,
-        last_updated,
+        let mut sections = Vec::new();
+        for s in SECTIONS {
+            let entries = v
+                .get(*s)
+                .and_then(|x| x.as_array())
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|e| serde_json::from_value::<MemoryEntry>(e.clone()).ok())
+                        .collect()
+                })
+                .unwrap_or_default();
+            sections.push(MemorySection {
+                name: (*s).to_string(),
+                entries,
+            });
+        }
+        let last_updated = v
+            .get("last_updated")
+            .and_then(|x| x.as_i64())
+            .unwrap_or(0);
+        Ok(MemoryView {
+            identity,
+            stack,
+            sections,
+            last_updated,
+        })
     })
+    .await
 }
 
 #[tauri::command]
@@ -150,55 +153,58 @@ pub async fn aura_memory_write_entry(
     content: String,
     tags: Vec<String>,
 ) -> Result<MemoryEntry, String> {
-    if !SECTIONS.contains(&section.as_str()) {
-        return Err(format!("unknown section: {}", section));
-    }
-    let path = memory_path(&repo_root);
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent).map_err(|e| e.to_string())?;
-    }
-    let mut v: serde_json::Value = if path.exists() {
-        let raw = fs::read_to_string(&path).map_err(|e| e.to_string())?;
-        serde_json::from_str(&raw).unwrap_or_else(|_| serde_json::json!({}))
-    } else {
-        serde_json::json!({})
-    };
-    if !v.is_object() {
-        v = serde_json::json!({});
-    }
-    let now = std::time::SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs() as i64)
-        .unwrap_or(0);
-    let id = format!("mem-{:08x}", rand_id());
-    let entry = MemoryEntry {
-        id: id.clone(),
-        content,
-        tags,
-        added_by: "aura-shell".to_string(),
-        added_at: now,
-        // Shell-authored entries carry no provenance — only aura-cli
-        // writes stamp code anchors (memory_provenance.rs).
-        source_commit: None,
-        source_symbol: None,
-        source_symbol_hash: None,
-        intent_id: None,
-        signer_key_id: None,
-        valid_from: None,
-        valid_to: None,
-    };
-    let arr = v
-        .as_object_mut()
-        .unwrap()
-        .entry(section.clone())
-        .or_insert_with(|| serde_json::json!([]));
-    if let Some(a) = arr.as_array_mut() {
-        a.push(serde_json::to_value(&entry).unwrap());
-    }
-    v["last_updated"] = serde_json::json!(now);
-    let pretty = serde_json::to_string_pretty(&v).map_err(|e| e.to_string())?;
-    fs::write(&path, pretty).map_err(|e| e.to_string())?;
-    Ok(entry)
+    crate::blocking::run(move || {
+        if !SECTIONS.contains(&section.as_str()) {
+            return Err(format!("unknown section: {}", section));
+        }
+        let path = memory_path(&repo_root);
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+        }
+        let mut v: serde_json::Value = if path.exists() {
+            let raw = fs::read_to_string(&path).map_err(|e| e.to_string())?;
+            serde_json::from_str(&raw).unwrap_or_else(|_| serde_json::json!({}))
+        } else {
+            serde_json::json!({})
+        };
+        if !v.is_object() {
+            v = serde_json::json!({});
+        }
+        let now = std::time::SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0);
+        let id = format!("mem-{:08x}", rand_id());
+        let entry = MemoryEntry {
+            id: id.clone(),
+            content,
+            tags,
+            added_by: "aura-shell".to_string(),
+            added_at: now,
+            // Shell-authored entries carry no provenance — only aura-cli
+            // writes stamp code anchors (memory_provenance.rs).
+            source_commit: None,
+            source_symbol: None,
+            source_symbol_hash: None,
+            intent_id: None,
+            signer_key_id: None,
+            valid_from: None,
+            valid_to: None,
+        };
+        let arr = v
+            .as_object_mut()
+            .unwrap()
+            .entry(section.clone())
+            .or_insert_with(|| serde_json::json!([]));
+        if let Some(a) = arr.as_array_mut() {
+            a.push(serde_json::to_value(&entry).unwrap());
+        }
+        v["last_updated"] = serde_json::json!(now);
+        let pretty = serde_json::to_string_pretty(&v).map_err(|e| e.to_string())?;
+        fs::write(&path, pretty).map_err(|e| e.to_string())?;
+        Ok(entry)
+    })
+    .await
 }
 
 /// Report from `aura memory import-claude-code --json`. Mirrors
@@ -280,32 +286,35 @@ pub async fn aura_memory_forget_entry(
     repo_root: String,
     id: String,
 ) -> Result<bool, String> {
-    let path = memory_path(&repo_root);
-    if !path.exists() {
-        return Ok(false);
-    }
-    let raw = fs::read_to_string(&path).map_err(|e| e.to_string())?;
-    let mut v: serde_json::Value = serde_json::from_str(&raw).map_err(|e| e.to_string())?;
-    let mut removed = false;
-    for s in SECTIONS {
-        if let Some(arr) = v.get_mut(*s).and_then(|x| x.as_array_mut()) {
-            let before = arr.len();
-            arr.retain(|e| e.get("id").and_then(|x| x.as_str()) != Some(id.as_str()));
-            if arr.len() != before {
-                removed = true;
+    crate::blocking::run(move || {
+        let path = memory_path(&repo_root);
+        if !path.exists() {
+            return Ok(false);
+        }
+        let raw = fs::read_to_string(&path).map_err(|e| e.to_string())?;
+        let mut v: serde_json::Value = serde_json::from_str(&raw).map_err(|e| e.to_string())?;
+        let mut removed = false;
+        for s in SECTIONS {
+            if let Some(arr) = v.get_mut(*s).and_then(|x| x.as_array_mut()) {
+                let before = arr.len();
+                arr.retain(|e| e.get("id").and_then(|x| x.as_str()) != Some(id.as_str()));
+                if arr.len() != before {
+                    removed = true;
+                }
             }
         }
-    }
-    if removed {
-        let now = std::time::SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map(|d| d.as_secs() as i64)
-            .unwrap_or(0);
-        v["last_updated"] = serde_json::json!(now);
-        let pretty = serde_json::to_string_pretty(&v).map_err(|e| e.to_string())?;
-        fs::write(&path, pretty).map_err(|e| e.to_string())?;
-    }
-    Ok(removed)
+        if removed {
+            let now = std::time::SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map(|d| d.as_secs() as i64)
+                .unwrap_or(0);
+            v["last_updated"] = serde_json::json!(now);
+            let pretty = serde_json::to_string_pretty(&v).map_err(|e| e.to_string())?;
+            fs::write(&path, pretty).map_err(|e| e.to_string())?;
+        }
+        Ok(removed)
+    })
+    .await
 }
 
 fn rand_id() -> u32 {
@@ -334,79 +343,82 @@ pub struct SessionSummary {
 
 #[tauri::command]
 pub async fn aura_session_list(repo_root: String, limit: usize) -> Result<Vec<SessionSummary>, String> {
-    let dir = PathBuf::from(&repo_root).join(".aura").join("sessions");
-    if !dir.exists() {
-        return Ok(vec![]);
-    }
-    let mut rows: Vec<(i64, SessionSummary)> = Vec::new();
-    for entry in fs::read_dir(&dir).map_err(|e| e.to_string())? {
-        let entry = match entry {
-            Ok(e) => e,
-            Err(_) => continue,
-        };
-        let path = entry.path();
-        if path.extension().and_then(|x| x.to_str()) != Some("json") {
-            continue;
+    crate::blocking::run(move || {
+        let dir = PathBuf::from(&repo_root).join(".aura").join("sessions");
+        if !dir.exists() {
+            return Ok(vec![]);
         }
-        let raw = match fs::read_to_string(&path) {
-            Ok(s) => s,
-            Err(_) => continue,
-        };
-        let v: serde_json::Value = match serde_json::from_str(&raw) {
-            Ok(v) => v,
-            Err(_) => continue,
-        };
-        let last_activity = v
-            .get("last_activity")
-            .and_then(|x| x.as_i64())
-            .unwrap_or(0);
-        let summary = SessionSummary {
-            session_id: v
-                .get("session_id")
-                .and_then(|x| x.as_str())
-                .unwrap_or("")
-                .to_string(),
-            agent_id: v
-                .get("agent_id")
-                .and_then(|x| x.as_str())
-                .unwrap_or("")
-                .to_string(),
-            phase: v
-                .get("phase")
-                .and_then(|x| x.as_str())
-                .unwrap_or("")
-                .to_string(),
-            started_at: v.get("started_at").and_then(|x| x.as_i64()).unwrap_or(0),
-            last_activity,
-            files_touched: v
-                .get("files_touched")
-                .and_then(|x| x.as_array())
-                .map(|arr| {
-                    arr.iter()
-                        .filter_map(|s| s.as_str().map(|s| s.to_string()))
-                        .collect()
-                })
-                .unwrap_or_default(),
-            checkpoint_count: v
-                .get("checkpoint_count")
-                .and_then(|x| x.as_u64())
-                .unwrap_or(0),
-            base_commit: v
-                .get("base_commit")
-                .and_then(|x| x.as_str())
-                .unwrap_or("")
-                .to_string(),
-            worktree: v
-                .get("worktree")
-                .and_then(|x| x.as_str())
-                .unwrap_or("")
-                .to_string(),
-        };
-        rows.push((last_activity, summary));
-    }
-    rows.sort_by(|a, b| b.0.cmp(&a.0));
-    rows.truncate(limit.max(1));
-    Ok(rows.into_iter().map(|(_, s)| s).collect())
+        let mut rows: Vec<(i64, SessionSummary)> = Vec::new();
+        for entry in fs::read_dir(&dir).map_err(|e| e.to_string())? {
+            let entry = match entry {
+                Ok(e) => e,
+                Err(_) => continue,
+            };
+            let path = entry.path();
+            if path.extension().and_then(|x| x.to_str()) != Some("json") {
+                continue;
+            }
+            let raw = match fs::read_to_string(&path) {
+                Ok(s) => s,
+                Err(_) => continue,
+            };
+            let v: serde_json::Value = match serde_json::from_str(&raw) {
+                Ok(v) => v,
+                Err(_) => continue,
+            };
+            let last_activity = v
+                .get("last_activity")
+                .and_then(|x| x.as_i64())
+                .unwrap_or(0);
+            let summary = SessionSummary {
+                session_id: v
+                    .get("session_id")
+                    .and_then(|x| x.as_str())
+                    .unwrap_or("")
+                    .to_string(),
+                agent_id: v
+                    .get("agent_id")
+                    .and_then(|x| x.as_str())
+                    .unwrap_or("")
+                    .to_string(),
+                phase: v
+                    .get("phase")
+                    .and_then(|x| x.as_str())
+                    .unwrap_or("")
+                    .to_string(),
+                started_at: v.get("started_at").and_then(|x| x.as_i64()).unwrap_or(0),
+                last_activity,
+                files_touched: v
+                    .get("files_touched")
+                    .and_then(|x| x.as_array())
+                    .map(|arr| {
+                        arr.iter()
+                            .filter_map(|s| s.as_str().map(|s| s.to_string()))
+                            .collect()
+                    })
+                    .unwrap_or_default(),
+                checkpoint_count: v
+                    .get("checkpoint_count")
+                    .and_then(|x| x.as_u64())
+                    .unwrap_or(0),
+                base_commit: v
+                    .get("base_commit")
+                    .and_then(|x| x.as_str())
+                    .unwrap_or("")
+                    .to_string(),
+                worktree: v
+                    .get("worktree")
+                    .and_then(|x| x.as_str())
+                    .unwrap_or("")
+                    .to_string(),
+            };
+            rows.push((last_activity, summary));
+        }
+        rows.sort_by(|a, b| b.0.cmp(&a.0));
+        rows.truncate(limit.max(1));
+        Ok(rows.into_iter().map(|(_, s)| s).collect())
+    })
+    .await
 }
 
 #[tauri::command]
@@ -414,15 +426,18 @@ pub async fn aura_session_read(
     repo_root: String,
     session_id: String,
 ) -> Result<serde_json::Value, String> {
-    let path = PathBuf::from(&repo_root)
-        .join(".aura")
-        .join("sessions")
-        .join(format!("{}.json", session_id));
-    if !path.exists() {
-        return Err(format!("session not found: {}", session_id));
-    }
-    let raw = fs::read_to_string(&path).map_err(|e| e.to_string())?;
-    serde_json::from_str(&raw).map_err(|e| e.to_string())
+    crate::blocking::run(move || {
+        let path = PathBuf::from(&repo_root)
+            .join(".aura")
+            .join("sessions")
+            .join(format!("{}.json", session_id));
+        if !path.exists() {
+            return Err(format!("session not found: {}", session_id));
+        }
+        let raw = fs::read_to_string(&path).map_err(|e| e.to_string())?;
+        serde_json::from_str(&raw).map_err(|e| e.to_string())
+    })
+    .await
 }
 
 #[cfg(test)]

@@ -61,6 +61,26 @@ fn nudge_clock() -> &'static Mutex<HashMap<String, Instant>> {
     CLOCK.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
+/// Take this session's nudge slot if the cooldown has elapsed, and say
+/// whether we got it. Claiming and testing are one step on purpose:
+/// two batches landing together must not both decide they may nudge.
+///
+/// This governs the note we leave *for the agent* and nothing else.
+/// Capturing the covering intent is deliberately outside it — see
+/// `agent_guard_self_heal_nudge`.
+fn claim_nudge_slot(session_id: &str) -> bool {
+    let mut clock = nudge_clock().lock().unwrap();
+    let now = Instant::now();
+    let fresh = match clock.get(session_id) {
+        Some(prev) => now.duration_since(*prev) >= Duration::from_millis(NUDGE_COOLDOWN_MS),
+        None => true,
+    };
+    if fresh {
+        clock.insert(session_id.to_string(), now);
+    }
+    fresh
+}
+
 /// How long after `aura_log_intent` we treat a mutation as covered.
 /// Wide enough for an agent to log intent → make the edit through its
 /// tool stack → have the FS event fire on us, tight enough that a
@@ -247,82 +267,85 @@ pub async fn agent_guard_revert_from_snapshot(
     repo_root: String,
     file_path: String,
 ) -> Result<String, String> {
-    let abs = if PathBuf::from(&file_path).is_absolute() {
-        PathBuf::from(&file_path)
-    } else {
-        PathBuf::from(&repo_root).join(&file_path)
-    };
-    let abs_str = abs.to_string_lossy().into_owned();
+    crate::blocking::run(move || {
+        let abs = if PathBuf::from(&file_path).is_absolute() {
+            PathBuf::from(&file_path)
+        } else {
+            PathBuf::from(&repo_root).join(&file_path)
+        };
+        let abs_str = abs.to_string_lossy().into_owned();
 
-    let snap_dir = PathBuf::from(&repo_root).join(".aura").join("snapshots");
-    if !snap_dir.is_dir() {
-        return Err("no .aura/snapshots directory — nothing to restore".into());
-    }
-
-    let mut best: Option<(i64, PathBuf, String)> = None;
-    let entries = std::fs::read_dir(&snap_dir).map_err(|e| e.to_string())?;
-    for entry in entries.flatten() {
-        let p = entry.path();
-        if p.extension().and_then(|s| s.to_str()) != Some("json") {
-            continue;
+        let snap_dir = PathBuf::from(&repo_root).join(".aura").join("snapshots");
+        if !snap_dir.is_dir() {
+            return Err("no .aura/snapshots directory — nothing to restore".into());
         }
-        let body = match std::fs::read_to_string(&p) {
-            Ok(b) => b,
-            Err(_) => continue,
-        };
-        let Ok(json) = serde_json::from_str::<serde_json::Value>(&body) else {
-            continue;
-        };
-        let Some(fp) = json.get("file_path").and_then(|v| v.as_str()) else {
-            continue;
-        };
-        if fp != abs_str {
-            continue;
+
+        let mut best: Option<(i64, PathBuf, String)> = None;
+        let entries = std::fs::read_dir(&snap_dir).map_err(|e| e.to_string())?;
+        for entry in entries.flatten() {
+            let p = entry.path();
+            if p.extension().and_then(|s| s.to_str()) != Some("json") {
+                continue;
+            }
+            let body = match std::fs::read_to_string(&p) {
+                Ok(b) => b,
+                Err(_) => continue,
+            };
+            let Ok(json) = serde_json::from_str::<serde_json::Value>(&body) else {
+                continue;
+            };
+            let Some(fp) = json.get("file_path").and_then(|v| v.as_str()) else {
+                continue;
+            };
+            if fp != abs_str {
+                continue;
+            }
+            let Some(content) = json.get("content").and_then(|v| v.as_str()) else {
+                continue;
+            };
+            let mtime = entry
+                .metadata()
+                .and_then(|m| m.modified())
+                .ok()
+                .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+                .map(|d| d.as_secs() as i64)
+                .unwrap_or(0);
+            if best.as_ref().map(|(t, _, _)| mtime > *t).unwrap_or(true) {
+                best = Some((mtime, p.clone(), content.to_string()));
+            }
         }
-        let Some(content) = json.get("content").and_then(|v| v.as_str()) else {
-            continue;
+
+        let Some((_, snap_path, content)) = best else {
+            return Err(format!("no snapshot found for {abs_str}"));
         };
-        let mtime = entry
-            .metadata()
-            .and_then(|m| m.modified())
-            .ok()
-            .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
-            .map(|d| d.as_secs() as i64)
-            .unwrap_or(0);
-        if best.as_ref().map(|(t, _, _)| mtime > *t).unwrap_or(true) {
-            best = Some((mtime, p.clone(), content.to_string()));
-        }
-    }
 
-    let Some((_, snap_path, content)) = best else {
-        return Err(format!("no snapshot found for {abs_str}"));
-    };
+        // Stamp the editor-write tracker so the watcher doesn't re-fire
+        // on the restore as another unattributed mutation.
+        // The state is a process-global resource managed by Tauri — we use
+        // the convention also followed elsewhere in this module: fetch via
+        // app state passed through commands; here the call site already
+        // knows it's a UI-initiated restore so we stamp from the frontend
+        // via `markEditorWrite` (auto-called inside `writeFile`).
+        std::fs::write(&abs, content).map_err(|e| format!("restore write failed: {e}"))?;
 
-    // Stamp the editor-write tracker so the watcher doesn't re-fire
-    // on the restore as another unattributed mutation.
-    // The state is a process-global resource managed by Tauri — we use
-    // the convention also followed elsewhere in this module: fetch via
-    // app state passed through commands; here the call site already
-    // knows it's a UI-initiated restore so we stamp from the frontend
-    // via `markEditorWrite` (auto-called inside `writeFile`).
-    std::fs::write(&abs, content).map_err(|e| format!("restore write failed: {e}"))?;
+        let _ = crate::op_log::record_op(
+            &repo_root,
+            "guard_revert",
+            &format!("Reverted {abs_str} from snapshot"),
+            "aura-shell-guard",
+            serde_json::json!({
+                "snapshot_path": snap_path.to_string_lossy(),
+                "file": abs_str,
+            }),
+        );
 
-    let _ = crate::op_log::record_op(
-        &repo_root,
-        "guard_revert",
-        &format!("Reverted {abs_str} from snapshot"),
-        "aura-shell-guard",
-        serde_json::json!({
-            "snapshot_path": snap_path.to_string_lossy(),
-            "file": abs_str,
-        }),
-    );
-
-    Ok(snap_path
-        .file_stem()
-        .and_then(|s| s.to_str())
-        .unwrap_or("")
-        .to_string())
+        Ok(snap_path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("")
+            .to_string())
+    })
+    .await
 }
 
 /// Frontend "Accept" flow calls this after the user types a one-line
@@ -348,6 +371,7 @@ pub async fn agent_guard_accept_with_intent(
             symbols: Vec::new(),
             commit: None,
             base: None,
+            remote_only: false,
         }],
         block_id: None,
         source: Some("guard_accept".into()),
@@ -356,22 +380,18 @@ pub async fn agent_guard_accept_with_intent(
     crate::cmd_aura::aura_log_intent(repo_root, intent, agent_id, changeset, None).await
 }
 
-/// Frontend "self-heal" flow calls this on every unattributed-mutation
-/// event before deciding whether to surface the loud red banner. The
-/// command:
-///   1. Picks the most recently-active session in the repo.
-///   2. Composes a one-line prompt telling the agent to run
-///      `aura_log_intent` describing why the file changed.
-///   3. Writes the prompt + newline straight into that agent's PTY.
+/// Frontend calls this on every batch of unattributed-mutation events.
+/// It is the whole background handler — the user is never asked about
+/// any of it. The command:
+///   1. Writes a covering intent for exactly these files, with the best
+///      reason it can get (the session's own prompt → Aura's brain
+///      reading the diff → an honest stub). This always runs.
+///   2. If a live session is addressable and the cooldown allows, queues
+///      a note asking that agent to refine the reason in its own words.
 ///
-/// Returns the (`session_id`, `agent_id`) of the session that got
-/// nudged, or `None` if no session is alive in this repo (in which
-/// case the frontend should fall back to the banner immediately).
-///
-/// This is "Manager nudges Claude" — the user doesn't see the
-/// friction; the manager writes the prompt and the agent self-heals
-/// in seconds. Only if the agent doesn't react in time does the
-/// banner appear.
+/// Returns `None` only when there is nothing to capture. `skipped` in
+/// the result means the *agent* wasn't nagged this round — the capture
+/// happened either way, so it is never grounds to bother the user.
 #[derive(Deserialize)]
 pub struct NudgeFile {
     pub path: String,
@@ -393,28 +413,37 @@ pub async fn agent_guard_self_heal_nudge(
     if files.is_empty() {
         return Ok(None);
     }
-    let Some((session_id, agent_id)) = agents.latest_session_for_repo(&repo_root) else {
-        return Ok(None);
+    // Who is editing. A live session gives us a session id to address the
+    // backfill note to; without one we still know *an* agent is alive,
+    // because `evaluate_event` refuses to emit unless `active_agents_in`
+    // is non-empty. Capture below needs only the label, never the session.
+    let session = agents.latest_session_for_repo(&repo_root);
+    let agent_id = match &session {
+        Some((_, agent)) => agent.clone(),
+        None => agents
+            .active_agents_in(&repo_root)
+            .first()
+            .cloned()
+            .unwrap_or_else(|| "agent".to_string()),
     };
 
     // Cooldown gate — don't re-prompt the same session faster than the
     // agent can plausibly read + react to the previous nudge.
-    {
-        let mut clock = nudge_clock().lock().unwrap();
-        if let Some(prev) = clock.get(&session_id) {
-            if Instant::now().duration_since(*prev)
-                < Duration::from_millis(NUDGE_COOLDOWN_MS)
-            {
-                return Ok(Some(NudgeResult {
-                    session_id,
-                    agent_id,
-                    skipped: true,
-                    file_count: files.len(),
-                }));
-            }
-        }
-        clock.insert(session_id.clone(), Instant::now());
-    }
+    //
+    // This gates the *note to the agent* and nothing else. It used to
+    // return before the capture below ever ran, and that was the bug that
+    // put a wall of red Revert/Accept rows in front of the user: the
+    // window is 20s while INTENT_WINDOW_S is 30s, so during any burst of
+    // writes — a build, a formatter, a multi-file edit — the first batch
+    // logged its covering intent and healed, and every batch for the next
+    // 20s returned `skipped` having logged nothing. Coverage was then
+    // false for all of them and each one escalated. Capture is the part
+    // that keeps the user out of the loop, so capture must not be
+    // rate-limited; only the nagging is.
+    let notify_agent = match &session {
+        None => false,
+        Some((session_id, _)) => claim_nudge_slot(session_id),
+    };
 
     // Build one human-friendly prompt covering all files at once.
     let mut created: Vec<String> = Vec::new();
@@ -490,7 +519,26 @@ pub async fn agent_guard_self_heal_nudge(
     // AND its actual prompt as the reason. The guard only fires while an agent
     // is actively editing, so the freshest transcript IS this session's
     // (see newest_session_id_for_repo).
-    let claude_sid = crate::cmd_claude_sessions::newest_session_id_for_repo(&repo_root);
+    let prompt_root = repo_root.clone();
+    // Only a Claude Code session writes `~/.claude/projects/<repo>/<id>.jsonl`.
+    // When the agent at the keyboard is codex, gemini, opencode or anything
+    // else, the newest transcript in that directory is somebody *else's* — in
+    // practice Aura's own one-shot brain turns — and binding its prompt as the
+    // reason writes a sentence that has nothing to do with the diff. That is
+    // exactly what `verify-intent` is built to catch, so the commit then dies
+    // on an Intent Poisoning the user never caused.
+    let harvest_transcript = writes_claude_transcripts(&agent_id);
+    let (claude_sid, session_prompt) = crate::blocking::run(move || {
+        if !harvest_transcript {
+            return (None, None);
+        }
+        let sid = crate::cmd_claude_sessions::newest_session_id_for_repo(&prompt_root);
+        let prompt = sid.as_deref().and_then(|session_id| {
+            crate::cmd_claude_sessions::latest_prompt_for_session(&prompt_root, session_id)
+        });
+        (sid, prompt)
+    })
+    .await;
 
     // The "why": the user's own words from this session, captured at edit time
     // so a file an external CLI touched no longer reads "no notes mention this
@@ -498,9 +546,6 @@ pub async fn agent_guard_self_heal_nudge(
     // we fall back to an honest, plain-language line — never the old
     // "[auto] … backfill pending" text, which is engineer jargon that surfaced
     // verbatim in the non-engineer-facing "why" column.
-    let session_prompt = claude_sid
-        .as_deref()
-        .and_then(|sid| crate::cmd_claude_sessions::latest_prompt_for_session(&repo_root, sid));
     // Resolve the "why", best source first:
     //   1. the live session's own prompt — the actual ask, most truthful;
     //   2. Aura's own brain reading the diff — the "if the agent didn't log
@@ -534,6 +579,7 @@ pub async fn agent_guard_self_heal_nudge(
                 symbols: Vec::new(),
                 commit: None,
                 base: None,
+                remote_only: false,
             })
             .collect(),
         block_id: None,
@@ -556,40 +602,52 @@ pub async fn agent_guard_self_heal_nudge(
     let ask = if captured_reason {
         format!(
             "aura-guard bound this session's prompt as the reason for {} file(s). \
-            If a more specific one-line reason fits these exact changes, call \
-            aura_log_intent to refine it. Files: {}",
+            If a more specific one-line reason fits these exact changes, {} to \
+            refine it. Files: {}",
             files.len(),
+            backfill_instruction(),
             all_rels.join(", ")
         )
     } else {
         format!(
             "aura-guard logged a covering reason for {} file(s) but couldn't read \
-            this session's prompt yet. When you have a moment, call aura_log_intent \
-            with the real one-line reason for these changes. Files: {}",
+            this session's prompt yet. When you have a moment, {} with the real \
+            one-line reason for these changes. Files: {}",
             files.len(),
+            backfill_instruction(),
             all_rels.join(", ")
         )
     };
-    let payload = serde_json::json!({
-        "agent_id": agent_id,
-        "session_id": session_id,
-        "summary": summary,
-        "files": all_rels,
-        "queued_at_unix_s": now_unix_secs(),
-        "ask": ask,
-    });
-    if let Some(parent) = backfill_path.parent() {
-        let _ = std::fs::create_dir_all(parent);
+    // The note is the only rate-limited half. Skipping it costs nothing —
+    // the covering intent above is already written, so the change is
+    // attributed and the user is never asked about it. All the note buys
+    // is a *better* sentence, later, from the agent itself.
+    let session_id = session.as_ref().map(|(id, _)| id.clone());
+    if notify_agent {
+        let payload = serde_json::json!({
+            "agent_id": agent_id,
+            "session_id": session_id,
+            "summary": summary,
+            "files": all_rels,
+            "queued_at_unix_s": now_unix_secs(),
+            "ask": ask,
+        });
+        let backfill_body = serde_json::to_vec_pretty(&payload).unwrap_or_default();
+        crate::blocking::run(move || {
+            if let Some(parent) = backfill_path.parent() {
+                let _ = std::fs::create_dir_all(parent);
+            }
+            let _ = std::fs::write(&backfill_path, backfill_body);
+        })
+        .await;
     }
-    let _ = std::fs::write(
-        &backfill_path,
-        serde_json::to_vec_pretty(&payload).unwrap_or_default(),
-    );
 
     Ok(Some(NudgeResult {
-        session_id,
+        session_id: session_id.unwrap_or_default(),
         agent_id,
-        skipped: false,
+        // `skipped` now means "the agent wasn't nagged", never "nothing was
+        // captured". The frontend must not read it as a reason to escalate.
+        skipped: !notify_agent,
         file_count: files.len(),
     }))
 }
@@ -634,13 +692,16 @@ async fn evaluate_event(
     // exit-code 0 when ignored, 1 when not, 128 on error). We treat
     // any non-zero exit as "not ignored" so an error doesn't silently
     // mask a real mutation.
-    if is_gitignored(&repo_root, &path) {
-        return;
-    }
-
-    // Intent freshness — does the most recent intent cover this path?
-    let now_s = now_unix_secs();
-    if intent_covers(&repo_root, &path, now_s).unwrap_or(false) {
+    let check_root = repo_root.clone();
+    let check_path = path.clone();
+    let (ignored, covered, now_s) = crate::blocking::run(move || {
+        let ignored = is_gitignored(&check_root, &check_path);
+        let now_s = now_unix_secs();
+        let covered = intent_covers(&check_root, &check_path, now_s).unwrap_or(false);
+        (ignored, covered, now_s)
+    })
+    .await;
+    if ignored || covered {
         return;
     }
 
@@ -840,7 +901,10 @@ async fn brain_infer_intent(repo_root: &str, rels: &[String]) -> Option<String> 
     if rels.is_empty() {
         return None;
     }
-    let diff = collect_diff_for(repo_root, rels);
+    let diff_root = repo_root.to_string();
+    let diff_rels = rels.to_vec();
+    let diff =
+        crate::blocking::run(move || collect_diff_for(&diff_root, &diff_rels)).await;
     if diff.trim().is_empty() {
         return None;
     }
@@ -872,7 +936,16 @@ async fn brain_infer_intent(repo_root: &str, rels: &[String]) -> Option<String> 
         model: None,
         long_context: false,
         approval: None,
-        cwd: repo_root.to_string(),
+        // Deliberately NOT the repo: this turn is Aura talking to itself, and
+        // a CLI-wrapper brain spawned inside the user's project writes its own
+        // session transcript into that project's directory. The guard then
+        // reads the newest transcript there as "the agent's session prompt"
+        // (see `agent_guard_self_heal_nudge`) and logs *this* prompt as the
+        // reason for the user's changes — the intent log poisoning itself in a
+        // loop, which `verify-intent` then correctly rejects as a Logic
+        // Mismatch and halts the commit on. The diff travels inline, so the
+        // brain has no need of the repo as a working directory.
+        cwd: String::new(),
     };
 
     let text = match tokio::time::timeout(
@@ -937,6 +1010,28 @@ fn collect_diff_for(repo_root: &str, rels: &[String]) -> String {
 /// Take the first non-empty line of a brain reply and strip wrapping quotes
 /// so a chatty model that answers with `"Added a search box."` still yields a
 /// clean audit line.
+/// Whether this agent records its conversation as a Claude Code transcript
+/// under `~/.claude/projects/<repo>/<session>.jsonl` — the only shape
+/// `newest_session_id_for_repo` / `latest_prompt_for_session` can read.
+///
+/// Every other engine keeps its own store (codex under `~/.codex/sessions`,
+/// pi under `~/.pi/agent/sessions`, OpenCode in its own database), so asking
+/// the Claude directory for their prompt returns whatever last wrote there
+/// instead of an honest `None`.
+fn writes_claude_transcripts(agent_id: &str) -> bool {
+    matches!(agent_id, "claude" | "claude-code")
+}
+
+/// The line handed to whichever agent left changes unexplained. Both spellings
+/// are named on purpose: an MCP-connected agent has the tool, and one driving a
+/// bare CLI (codex, and any engine the user hasn't wired MCP into) does not —
+/// telling only the first leaves the second with an instruction it cannot
+/// follow and nothing else to try.
+fn backfill_instruction() -> &'static str {
+    "call aura_log_intent — or run `aura log-intent \"<one-line reason>\"` if \
+     that tool isn't available to you —"
+}
+
 fn clean_intent_line(raw: &str) -> String {
     raw.lines()
         .map(|l| l.trim())
@@ -957,6 +1052,64 @@ fn now_unix_secs() -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The bug this guards: a codex session in a repo whose only Claude
+    /// transcript was written by Aura's own summarizer turn. Reading that
+    /// directory returned Aura's prompt, the guard logged it as the reason
+    /// for codex's edits, and `verify-intent` halted the commit on a Logic
+    /// Mismatch the user had no way to understand or fix.
+    #[test]
+    fn only_claude_sessions_are_read_out_of_the_claude_transcript_dir() {
+        assert!(writes_claude_transcripts("claude"));
+        assert!(writes_claude_transcripts("claude-code"));
+        for other in ["codex", "gemini", "opencode", "pi", "kimi", "cursor-agent"] {
+            assert!(
+                !writes_claude_transcripts(other),
+                "{other} keeps its own session store — the Claude directory \
+                 would answer with somebody else's prompt"
+            );
+        }
+    }
+
+    /// An agent without the MCP server has to be told the command it *can*
+    /// run, or the backfill ask is an instruction it can only ignore.
+    #[test]
+    fn the_backfill_ask_names_a_route_a_bare_cli_agent_can_take() {
+        let ask = backfill_instruction();
+        assert!(ask.contains("aura_log_intent"), "MCP route missing");
+        assert!(ask.contains("aura log-intent"), "CLI route missing");
+    }
+
+    /// The bug that put a wall of red rows in front of the user: the
+    /// cooldown used to return out of the whole command, so a burst of
+    /// writes — a build, a formatter, a multi-file edit — captured a
+    /// covering reason for the first batch and nothing at all for every
+    /// batch in the next 20 seconds. Those uncaptured batches then read
+    /// as uncovered and escalated.
+    ///
+    /// The slot may only ever gate the note to the agent. What this
+    /// pins is that a second claim inside the window is refused (so the
+    /// agent isn't nagged twice) while remaining a decision about the
+    /// *note*, taken separately from capture.
+    #[test]
+    fn the_nudge_slot_is_per_session_and_refuses_a_second_claim_in_the_window() {
+        // Distinct ids: the clock is process-global, so a fixed name
+        // would collide with a sibling test run in the same binary.
+        let a = "session-slot-a";
+        let b = "session-slot-b";
+
+        assert!(claim_nudge_slot(a), "first claim must win");
+        assert!(
+            !claim_nudge_slot(a),
+            "a second claim inside NUDGE_COOLDOWN_MS must be refused — \
+             that is what stops the agent being nagged per batch"
+        );
+        assert!(
+            claim_nudge_slot(b),
+            "the cooldown is per session; another session must not \
+             inherit an unrelated session's refusal"
+        );
+    }
 
     #[test]
     fn path_covers_matches_dir_ancestor() {

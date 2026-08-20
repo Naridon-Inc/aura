@@ -92,7 +92,7 @@ export function MobileWaitlistPane({
 
   if (state == null) {
     return (
-      <div className="flex items-center gap-2 py-6 text-[12px] text-text-3">
+      <div className="flex items-center gap-2 py-6 text-sm text-text-3">
         <AsciiSpinner />
         <span>Checking…</span>
       </div>
@@ -113,13 +113,13 @@ export function MobileWaitlistPane({
             <Check className="h-3 w-3" aria-hidden="true" />
           </span>
           <div className="min-w-0">
-            <div className="text-[13px] font-medium text-text-1">
+            <div className="text-base font-medium text-text-1">
               You&rsquo;re on the list.
             </div>
-            <p className="mt-0.5 text-[12px] leading-snug text-text-3">
+            <p className="mt-0.5 text-sm leading-snug text-text-3">
               We&rsquo;ll email {state.email || "you"} the moment the{" "}
               {state.platform ? PLATFORM_LABEL[state.platform].toLowerCase() : "phone"} app
-              is ready to try. Nothing else — no newsletter.
+              is ready to try. Nothing else. No newsletter.
             </p>
           </div>
         </div>
@@ -132,8 +132,8 @@ export function MobileWaitlistPane({
 
   return (
     <div className="flex flex-col gap-3.5">
-      <p className="text-[12px] leading-relaxed text-text-3">
-        Aura is coming to iPhone and Android — check on what your agents are
+      <p className="text-sm leading-relaxed text-text-3">
+        Aura is coming to iPhone and Android. Check on what your agents are
         doing, steer them, and approve work while you&rsquo;re away from your
         desk. Tell us where to reach you and we&rsquo;ll send an invite when
         it&rsquo;s ready.
@@ -142,7 +142,7 @@ export function MobileWaitlistPane({
       <div className="flex flex-col gap-1.5">
         <label
           htmlFor="waitlist-email"
-          className="text-[11px] font-medium text-text-3"
+          className="text-xs font-medium text-text-3"
         >
           Email
         </label>
@@ -167,7 +167,7 @@ export function MobileWaitlistPane({
       </div>
 
       <div className="flex flex-col gap-1.5">
-        <span className="text-[11px] font-medium text-text-3">Which phone?</span>
+        <span className="text-xs font-medium text-text-3">Which phone?</span>
         <Segment<WaitlistPlatform>
           value={platform}
           onChange={setPlatform}
@@ -177,7 +177,7 @@ export function MobileWaitlistPane({
       </div>
 
       {error && (
-        <div className="text-[11.5px] leading-snug text-red-400">{error}</div>
+        <div className="text-sm leading-snug text-red-400">{error}</div>
       )}
 
       <div className="flex items-center gap-2">
@@ -202,7 +202,7 @@ export function MobileWaitlistPane({
         {footer}
       </div>
 
-      <p className="text-[11px] leading-snug text-text-4">
+      <p className="text-xs leading-snug text-text-4">
         Your email goes to us and nobody else, and is used for this one invite.
         Nothing about your code or your projects leaves this computer.
       </p>

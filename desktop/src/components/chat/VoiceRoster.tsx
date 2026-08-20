@@ -16,6 +16,7 @@
 
 import { Headphones, Mic } from "lucide-react";
 import type { TeamMember } from "../../lib/api";
+import { monogram } from "../../lib/monogram";
 
 type VoiceRosterProps = {
   members: TeamMember[];
@@ -44,7 +45,7 @@ export function VoiceRoster({
         type="button"
         onClick={onJoin}
         title="Join voice room"
-        className="flex items-center gap-1 rounded-md border border-line-soft px-2 py-1 text-[10.5px] font-medium text-text-3 hover:bg-bg-2 hover:text-text-1"
+        className="flex items-center gap-1 rounded-md border border-line-soft px-2 py-1 text-xs font-medium text-text-3 hover:bg-state-hover hover:text-text-1"
       >
         <Headphones size={11} />
         <span>Join voice</span>
@@ -73,7 +74,7 @@ export function VoiceRoster({
           {visible.map((m) => (
             <span
               key={m.handle}
-              className="inline-flex h-5 w-5 items-center justify-center rounded-full border border-bg-content text-[9px] font-medium"
+              className="inline-flex h-5 w-5 items-center justify-center rounded-full border border-bg-content text-2xs font-medium"
               style={{ background: tintForName(m.name || m.handle) }}
               aria-label={m.name || m.handle}
             >
@@ -81,13 +82,13 @@ export function VoiceRoster({
             </span>
           ))}
           {overflow > 0 && (
-            <span className="inline-flex h-5 min-w-5 items-center justify-center rounded-full border border-bg-content bg-bg-3 px-1 text-[9px] font-medium text-text-2">
+            <span className="inline-flex h-5 min-w-5 items-center justify-center rounded-full border border-bg-content bg-bg-3 px-1 text-2xs font-medium text-text-2">
               +{overflow}
             </span>
           )}
         </div>
         {n > 0 && (
-          <span className="text-[10px] tabular-nums text-text-3">{n}</span>
+          <span className="text-2xs tabular-nums text-text-3">{n}</span>
         )}
       </div>
       {inThisChannel ? (
@@ -95,7 +96,7 @@ export function VoiceRoster({
           type="button"
           onClick={onLeave}
           title="Leave voice room"
-          className="rounded-md border border-red/40 bg-red/10 px-2 py-1 text-[10.5px] font-medium text-red transition-colors hover:bg-red/20"
+          className="rounded-md border border-red/40 bg-red/10 px-2 py-1 text-xs font-medium text-red transition-colors hover:bg-red/20"
         >
           Leave
         </button>
@@ -104,7 +105,7 @@ export function VoiceRoster({
           type="button"
           onClick={onJoin}
           title="Join voice room"
-          className="flex items-center gap-1 rounded-md border border-line-soft bg-accent-green/10 px-2 py-1 text-[10.5px] font-medium text-accent-green transition-colors hover:bg-accent-green/15"
+          className="flex items-center gap-1 rounded-md border border-line-soft bg-accent-green/10 px-2 py-1 text-xs font-medium text-accent-green transition-colors hover:bg-accent-green/15"
         >
           <Headphones size={11} />
           <span>Join</span>
@@ -122,7 +123,7 @@ export function VoiceCountChip({ count }: { count: number }) {
   if (count <= 0) return null;
   return (
     <span
-      className="ml-1 inline-flex items-center gap-0.5 rounded bg-accent-green/15 px-1 py-0 text-[9.5px] font-semibold tabular-nums text-accent-green"
+      className="ml-1 inline-flex items-center gap-0.5 rounded bg-accent-green/15 px-1 py-0 text-2xs font-semibold tabular-nums text-accent-green"
       title={`${count} in voice`}
       aria-label={`${count} in voice`}
     >
@@ -135,10 +136,8 @@ export function VoiceCountChip({ count }: { count: number }) {
 // ── helpers ──────────────────────────────────────────────────────────
 
 function initials(name: string): string {
-  const parts = name.trim().split(/\s+/).filter(Boolean);
-  if (parts.length === 0) return "?";
-  if (parts.length === 1) return parts[0]!.slice(0, 2).toUpperCase();
-  return (parts[0]![0]! + parts[1]![0]!).toUpperCase();
+  // One monogram for the whole app — see lib/monogram.
+  return monogram(name);
 }
 
 // Stable color picker keyed off the name — same hash family the rest of

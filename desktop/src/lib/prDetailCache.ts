@@ -15,6 +15,7 @@
 // (30s fresh / 10m expiry) still gate the blocking-refetch path.
 
 import { api, type PrDetail } from "./api";
+import { setCache } from "./localStore";
 
 const STALE_MS = 30_000; // 30s: served fresh without refetch
 const EXPIRY_MS = 10 * 60_000; // 10m: beyond this, refetch blocking
@@ -49,14 +50,14 @@ function loadPersisted(k: string): Entry | null {
 }
 
 function savePersisted(k: string, entry: Entry): void {
-  try {
-    localStorage.setItem(
-      lsKey(k),
-      JSON.stringify({ data: entry.data, fetchedAt: entry.fetchedAt }),
-    );
-  } catch {
-    // localStorage can be full / disabled — silently ignore.
-  }
+  // Budgeted. A PR whose diff is enormous is exactly the one that used to
+  // eat the origin's whole 5 MB (measured: 1.6 MB for a single entry) and
+  // starve the workspace snapshots. Over the cap it stays in `mem` for this
+  // session and simply doesn't survive a relaunch — `gh` can fetch it again.
+  setCache(
+    lsKey(k),
+    JSON.stringify({ data: entry.data, fetchedAt: entry.fetchedAt }),
+  );
 }
 
 function notify(k: string, detail: PrDetail): void {

@@ -25,6 +25,8 @@ import {
 } from "react";
 import { createPortal } from "react-dom";
 import type { TeamMember } from "../lib/api";
+import { useDismiss } from "../lib/useDismiss";
+import { monogram } from "../lib/monogram";
 
 type SingleProps = {
   value: string | null | undefined;
@@ -75,8 +77,9 @@ const AVATAR_TINT = {
 } as const;
 
 function initialOf(m: TeamMember): string {
-  const src = (m.name || m.handle || "?").trim();
-  return src.charAt(0).toUpperCase();
+  // One monogram for the whole app — see lib/monogram. This one took a single letter, so the
+  // same teammate was "A" here and "AS" in the crew roster.
+  return monogram(m.name || m.handle);
 }
 
 export function AssigneePicker(props: Props) {
@@ -119,20 +122,9 @@ export function AssigneePicker(props: Props) {
     return ranked.slice(0, 40);
   }, [members, query]);
 
-  useEffect(() => {
-    if (!open) return;
-    const onDoc = (e: MouseEvent) => {
-      const t = e.target as Node;
-      const insideTrigger = rootRef.current?.contains(t) ?? false;
-      // The portalled dropdown lives outside `rootRef`, so we have to
-      // accept clicks landing in it as "inside" — otherwise typing a
-      // search query would dismiss on first mousedown.
-      const insidePopover = popoverRef.current?.contains(t) ?? false;
-      if (!insideTrigger && !insidePopover) setOpen(false);
-    };
-    document.addEventListener("mousedown", onDoc);
-    return () => document.removeEventListener("mousedown", onDoc);
-  }, [open]);
+  // The dropdown is portalled outside `rootRef`, so it counts as inside too
+  // — otherwise typing a search query dismisses on the first mousedown.
+  useDismiss(open, () => setOpen(false), [rootRef, popoverRef]);
 
   // Compute fixed-position coords so the portalled dropdown follows
   // the trigger even when ancestors scroll or resize. Anchored to the
@@ -245,8 +237,8 @@ export function AssigneePicker(props: Props) {
     }
   };
 
-  const triggerSize = dense ? "h-5 px-1.5 text-[10.5px]" : "h-7 px-2 text-[12px]";
-  const avatarSize = dense ? "w-4 h-4 text-[9px]" : "w-5 h-5 text-[10px]";
+  const triggerSize = dense ? "h-5 px-1.5 text-xs" : "h-7 px-2 text-sm";
+  const avatarSize = dense ? "w-4 h-4 text-2xs" : "w-5 h-5 text-2xs";
 
   // ── Trigger renderers ───────────────────────────────────────────
   // Two distinct triggers so each mode renders its own affordance —
@@ -291,17 +283,17 @@ export function AssigneePicker(props: Props) {
               setCursor(0);
             }}
             placeholder={isMulti ? "Add teammates…" : "Search teammates…"}
-            className="w-full bg-transparent border-b border-line-soft px-2.5 py-1.5 text-[12px] text-text-1 focus:outline-none placeholder:text-text-5"
+            className="w-full bg-transparent border-b border-line-soft px-2.5 py-1.5 text-sm text-text-1 focus:outline-none placeholder:text-text-5"
           />
           <div className="max-h-[260px] overflow-y-auto py-1">
             <button
               type="button"
               onMouseEnter={() => setCursor(0)}
               onClick={() => (isMulti ? clearMulti() : commitSingle(null))}
-              className={`w-full flex items-center gap-2 px-2.5 py-1.5 text-[12px] text-left ${cursor === 0 ? "bg-bg-2" : "hover:bg-bg-2"}`}
+              className={`w-full flex items-center gap-2 px-2.5 py-1.5 text-sm text-left ${cursor === 0 ? "bg-bg-2" : "hover:bg-state-hover"}`}
             >
               <span
-                className="w-5 h-5 rounded-full flex items-center justify-center border border-dashed border-line-soft text-text-5 text-[10px]"
+                className="w-5 h-5 rounded-full flex items-center justify-center border border-dashed border-line-soft text-text-5 text-2xs"
                 aria-hidden
               >
                 ?
@@ -311,7 +303,7 @@ export function AssigneePicker(props: Props) {
               </span>
             </button>
             {filtered.length === 0 && (
-              <div className="px-2.5 py-2 text-[11px] text-text-5">
+              <div className="px-2.5 py-2 text-xs text-text-5">
                 No teammates match “{query}”.
               </div>
             )}
@@ -326,10 +318,10 @@ export function AssigneePicker(props: Props) {
                   onClick={() =>
                     isMulti ? toggleMulti(m.handle) : commitSingle(m.handle)
                   }
-                  className={`w-full flex items-center gap-2 px-2.5 py-1.5 text-[12px] text-left ${active ? "bg-bg-2" : "hover:bg-bg-2"}`}
+                  className={`w-full flex items-center gap-2 px-2.5 py-1.5 text-sm text-left ${active ? "bg-state-selected" : "hover:bg-state-hover"}`}
                 >
                   <span
-                    className="w-5 h-5 rounded-full flex items-center justify-center font-semibold text-[10px] flex-shrink-0"
+                    className="w-5 h-5 rounded-full flex items-center justify-center font-semibold text-2xs flex-shrink-0"
                     style={{
                       background: AVATAR_TINT.background,
                       color: AVATAR_TINT.color,
@@ -340,13 +332,13 @@ export function AssigneePicker(props: Props) {
                   <span className="flex-1 min-w-0">
                     <span className="block truncate text-text-1">{m.handle}</span>
                     {m.name && m.name !== m.handle && (
-                      <span className="block truncate text-[10.5px] text-text-4">
+                      <span className="block truncate text-xs text-text-4">
                         {m.name}
                       </span>
                     )}
                   </span>
                   {isSelected && (
-                    <span className="text-accent text-[11px]" aria-hidden>
+                    <span className="text-accent text-xs" aria-hidden>
                       ✓
                     </span>
                   )}
@@ -463,7 +455,7 @@ export function AssigneeStack({
   maxAvatars?: number;
   dense?: boolean;
 }) {
-  const avatarSize = dense ? "w-4 h-4 text-[9px]" : "w-5 h-5 text-[10px]";
+  const avatarSize = dense ? "w-4 h-4 text-2xs" : "w-5 h-5 text-2xs";
   const resolved = handles.map(
     (h) =>
       members.find((m) => m.handle === h) ??

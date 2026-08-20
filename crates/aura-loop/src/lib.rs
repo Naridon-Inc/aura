@@ -84,8 +84,68 @@ pub const KIND_WAVE: &str = "wave";
 pub const KIND_TASK: &str = "task";
 pub const KIND_SUBTASK: &str = "subtask";
 
+// ── Placement: which machine a node is allowed to run on.
+//
+// One graph, two kinds of muscle. A refactor that needs your keychain, your
+// simulator or your eyes belongs on the laptop; a four-hour migration belongs
+// on a box that stays awake after you shut the lid. Before placement the graph
+// could only express "somebody drain this", so whichever process reached the
+// node first ran it — and the answer changed depending on who was awake.
+//
+// A node with no placement stays exactly that: anyone may take it. That is the
+// historical behaviour and the default, so an existing graph drains unchanged.
+/// Pin to a machine a person is sitting at. Cloud runners skip it.
+pub const PLACE_LOCAL: &str = "local";
+/// Send to a runner. The laptop leaves it alone and offers it to the board.
+pub const PLACE_CLOUD: &str = "cloud";
+
 pub fn is_terminal(status: &str) -> bool {
     TERMINAL_STATES.contains(&status)
+}
+
+/// Normalise a placement word, or `None` for "anywhere".
+///
+/// Unrecognised text is `None` rather than an error: placement is an
+/// optimisation, and a graph written by a newer Aura (or hand-edited) must
+/// still drain on an older one. Failing closed here would strand work.
+pub fn normalize_place(raw: &str) -> Option<&'static str> {
+    match raw.trim().to_lowercase().as_str() {
+        PLACE_LOCAL | "laptop" | "here" => Some(PLACE_LOCAL),
+        PLACE_CLOUD | "remote" | "runner" | "box" => Some(PLACE_CLOUD),
+        _ => None,
+    }
+}
+
+/// Is this node's `working` state owned by a different machine?
+///
+/// A lease is a LOCAL crash-recovery device: it says "a runner on this disk
+/// holds this node, and if the lease goes stale that runner died". Placement
+/// breaks that inference. A node we placed on a box and handed to the board is
+/// genuinely working — just not here — and it has no local lease, so the usual
+/// "no lease means crashed" reading is exactly backwards for it. Reclaiming one
+/// would put work back in the ready set while a box is still running it, and
+/// the two runs would race over the same branch.
+///
+/// The board is the authority for these. If the box dies, the board's own
+/// expiry says so, and `cloud-sync` adopts that answer — this machine does not
+/// get to invent it.
+pub fn is_running_elsewhere(task: &LoopTask) -> bool {
+    task.lease.is_none()
+        && task.remote_id.is_some()
+        && task.place.as_deref().and_then(normalize_place) == Some(PLACE_CLOUD)
+}
+
+/// May a process running *here* claim this node?
+///
+/// `here` is the caller's own placement — `PLACE_LOCAL` for the laptop,
+/// `PLACE_CLOUD` for a runner. Unplaced nodes are claimable by both, so the
+/// common case (nobody has said anything about placement) behaves as it always
+/// has: first drainer wins.
+pub fn runs_here(task: &LoopTask, here: &str) -> bool {
+    match task.place.as_deref().and_then(normalize_place) {
+        Some(p) => p == here,
+        None => true,
+    }
 }
 
 /// Priority weight for ready-set ordering. Higher = picked first.
@@ -142,6 +202,12 @@ pub struct LoopTask {
     /// "codex"). `None` → the runner's `--agent` default.
     #[serde(default)]
     pub agent_kind: Option<String>,
+    /// Which *machine* may run this node — `local`, `cloud`, or `None` for
+    /// anywhere. Sits beside `agent_kind` because it answers the same shape of
+    /// question: `agent_kind` picks who does the work, `place` picks where.
+    /// See [`PLACE_LOCAL`] for why a mixed graph needs this.
+    #[serde(default)]
+    pub place: Option<String>,
     #[serde(default)]
     pub branch: Option<String>,
     #[serde(default)]
@@ -234,6 +300,12 @@ pub struct BoardProjection {
     /// Human assignee handle carried from the board card, so the flow can
     /// group work by who owns it and show a real person on every node.
     pub assignee: Option<String>,
+    /// The crew slug carried from the board card. When set, the projected node
+    /// joins that crew — which is what lets the crew graph group a crew-filed
+    /// task under its crew instead of the loose pile. `None` keeps whatever
+    /// crew the node already had (a sync must not silently un-crew a node an
+    /// operator explicitly assigned).
+    pub crew_id: Option<String>,
 }
 
 /// Whether an `upsert_from_board` minted a new node or updated an existing
@@ -315,8 +387,40 @@ impl LoopGraph {
         }
     }
 
+    /// Turn whatever someone typed into a real node id.
+    ///
+    /// Every surface prints the short form — `crew add` answers with
+    /// `479ca3d9`, `crew list` shows the same — because that is what fits on a
+    /// row and what a person copies. So every verb has to take it back;
+    /// printing one id and accepting another is a control that doesn't do what
+    /// it says. An unambiguous prefix works too, but an ambiguous one resolves
+    /// to nothing rather than to a guess: picking a node for someone is worse
+    /// than telling them to be specific.
+    pub fn resolve_id(&self, id: &str) -> Option<String> {
+        let id = id.trim();
+        if id.is_empty() {
+            return None;
+        }
+        if self.path_for(id).exists() {
+            return Some(id.to_string());
+        }
+        let prefixed = format!("t-{id}");
+        if self.path_for(&prefixed).exists() {
+            return Some(prefixed);
+        }
+        let mut hits = self.list().into_iter().map(|t| t.id).filter(|real| {
+            real.starts_with(id)
+                || real
+                    .strip_prefix("t-")
+                    .is_some_and(|slug| slug.starts_with(id))
+        });
+        let first = hits.next()?;
+        hits.next().is_none().then_some(first)
+    }
+
     pub fn get(&self, id: &str) -> Option<LoopTask> {
-        let text = fs::read_to_string(self.path_for(id)).ok()?;
+        let id = self.resolve_id(id)?;
+        let text = fs::read_to_string(self.path_for(&id)).ok()?;
         let mut task: LoopTask = serde_json::from_str(&text).ok()?;
         self.overlay_lease(&mut task);
         Some(task)
@@ -385,6 +489,10 @@ impl LoopGraph {
             status: STATE_SUBMITTED.to_string(),
             priority,
             agent_kind,
+            // Unplaced by default. Callers that care set it on the returned
+            // node, the same way they set `remote_id` and `branch` — the
+            // constructor's positional list is long enough already.
+            place: None,
             branch: None,
             tags,
             commit_sha: None,
@@ -411,6 +519,14 @@ impl LoopGraph {
     /// Add a dependency edge `id → on`. Rejected when it would create a
     /// cycle (the graph must stay a DAG or the ready-set never converges).
     pub fn add_dep(&self, id: &str, on: &str) -> Result<LoopTask, String> {
+        // Both ends take the short form too — an edge is typed from two rows
+        // the board just printed.
+        let on = &self
+            .resolve_id(on)
+            .ok_or_else(|| format!("dependency target {on} not found"))?;
+        let id = &self
+            .resolve_id(id)
+            .ok_or_else(|| format!("task {id} not found"))?;
         if id == on {
             return Err("a task cannot depend on itself".into());
         }
@@ -418,7 +534,10 @@ impl LoopGraph {
         if !idx.contains_key(on) {
             return Err(format!("dependency target {on} not found"));
         }
-        let mut task = idx.get(id).cloned().ok_or_else(|| format!("task {id} not found"))?;
+        let mut task = idx
+            .get(id)
+            .cloned()
+            .ok_or_else(|| format!("task {id} not found"))?;
         if task.depends_on.iter().any(|d| d == on) {
             return Ok(task); // idempotent
         }
@@ -481,11 +600,35 @@ impl LoopGraph {
 
     /// Reclaim any `working` node whose lease has expired back to
     /// `submitted` so it re-enters the ready set. Returns reclaimed ids.
+    ///
+    /// Whole-graph. Correct for a supervisor that owns every crew; a runner
+    /// draining one slice wants [`reclaim_stale_in`] instead.
     pub fn reclaim_stale(&self) -> Vec<String> {
+        self.reclaim_stale_in(&RunScope::default())
+    }
+
+    /// Reclaim stale nodes *within one run's scope*.
+    ///
+    /// Several runners share a single `.aura/a2a/` on one disk, each draining
+    /// its own crew. A lease is evidence about the runner that took it and
+    /// nothing else, so a runner has no standing to declare another crew's
+    /// node dead — its own tick says nothing about whether that runner is
+    /// alive. Reclaiming across the boundary hands a node that is actively
+    /// being built back to the ready set, where a third runner can claim it
+    /// and do the same work twice.
+    pub fn reclaim_stale_in(&self, scope: &RunScope) -> Vec<String> {
         let now = chrono::Utc::now().timestamp();
         let mut reclaimed = Vec::new();
         for mut t in self.list() {
+            if !scope.matches(&t) {
+                continue;
+            }
             if t.status == STATE_WORKING {
+                // Not ours to reclaim — a box is holding it. See
+                // `is_running_elsewhere`.
+                if is_running_elsewhere(&t) {
+                    continue;
+                }
                 let expired = t.lease.as_ref().map(|l| l.is_expired(now)).unwrap_or(true);
                 if expired {
                     t.status = STATE_SUBMITTED.to_string();
@@ -634,6 +777,12 @@ impl LoopGraph {
             t.external_id = p.external_id;
             t.tags = p.tags;
             t.assignee = p.assignee;
+            // Adopt the board's crew when it names one; a board row that names
+            // no crew leaves the node's crew alone, so a sync never un-crews a
+            // node an operator explicitly assigned via set_crew.
+            if p.crew_id.is_some() {
+                t.crew_id = p.crew_id;
+            }
             if t.status != STATE_WORKING {
                 if is_terminal(&p.status) {
                     t.lease = None;
@@ -656,6 +805,10 @@ impl LoopGraph {
                 status: p.status,
                 priority: p.priority,
                 agent_kind: p.agent_kind,
+                // Board cards carry no placement — a card says what to do, not
+                // which machine does it. The graph node is where that gets
+                // decided, so it starts open to both.
+                place: None,
                 branch: None,
                 tags: p.tags,
                 commit_sha: None,
@@ -667,7 +820,7 @@ impl LoopGraph {
                 board_task_id: Some(p.board_task_id),
                 external_source: p.external_source,
                 external_id: p.external_id,
-                crew_id: None,
+                crew_id: p.crew_id,
                 created_at: now,
                 updated_at: now,
             };
@@ -1015,6 +1168,187 @@ mod tests {
             .unwrap()
     }
 
+    /// `crew add` answers with `479ca3d9` and `crew list` prints the same, so
+    /// that is the id a person copies into the next command. Every verb has to
+    /// take it — printing one id and accepting another sends you to `--json`
+    /// to find out what the tool already told you.
+    #[test]
+    fn the_id_the_board_prints_is_an_id_the_board_accepts() {
+        let repo = tmp_repo();
+        let g = LoopGraph::at(&repo);
+        let t = mk(&g, "sweep the callsites", "medium");
+
+        // The short form, exactly as `crew add` echoed it.
+        assert_eq!(g.get(t.short_id()).map(|x| x.id), Some(t.id.clone()));
+        // The stored form still works.
+        assert_eq!(g.get(&t.id).map(|x| x.id), Some(t.id.clone()));
+        // And an unambiguous prefix of either.
+        assert_eq!(
+            g.get(&t.short_id()[..4]).map(|x| x.id),
+            Some(t.id.clone()),
+            "a prefix nobody else shares resolves"
+        );
+        assert!(g.get("no-such-node").is_none());
+    }
+
+    /// An ambiguous prefix must resolve to nothing. Picking a node on someone's
+    /// behalf is worse than making them type more.
+    #[test]
+    fn an_ambiguous_prefix_resolves_to_nothing() {
+        let repo = tmp_repo();
+        let g = LoopGraph::at(&repo);
+        let a = mk(&g, "one", "low");
+        let b = mk(&g, "two", "low");
+        assert_ne!(a.id, b.id);
+
+        // "t-" prefixes every node, so it can never mean one of them.
+        assert!(g.get("t-").is_none(), "a prefix every node shares is not an id");
+    }
+
+    #[test]
+    fn an_unplaced_node_still_runs_anywhere() {
+        // The whole back-compat promise: a graph written before placement
+        // existed must drain on both the laptop and a runner exactly as it
+        // always did. If this ever fails, every existing board goes silent.
+        let repo = tmp_repo();
+        let g = LoopGraph::at(&repo);
+        let t = mk(&g, "ship it", "high");
+        assert!(t.place.is_none());
+        assert!(runs_here(&t, PLACE_LOCAL));
+        assert!(runs_here(&t, PLACE_CLOUD));
+    }
+
+    #[test]
+    fn a_placed_node_is_refused_by_the_other_machine() {
+        let repo = tmp_repo();
+        let g = LoopGraph::at(&repo);
+
+        let mut here = mk(&g, "needs my keychain", "high");
+        here.place = Some(PLACE_LOCAL.to_string());
+        assert!(runs_here(&here, PLACE_LOCAL));
+        assert!(!runs_here(&here, PLACE_CLOUD));
+
+        let mut away = mk(&g, "four hour migration", "high");
+        away.place = Some(PLACE_CLOUD.to_string());
+        assert!(runs_here(&away, PLACE_CLOUD));
+        assert!(!runs_here(&away, PLACE_LOCAL));
+    }
+
+    #[test]
+    fn work_running_on_a_box_is_not_reclaimed_from_under_it() {
+        // The node is `working` with no local lease — which for a local runner
+        // means "crashed, take it back". For work handed to a box it means
+        // "running somewhere else". Reclaiming it would hand the same branch to
+        // a second agent while the first is still on it.
+        let repo = tmp_repo();
+        let g = LoopGraph::at(&repo);
+        let mut t = mk(&g, "four hour migration", "high");
+        t.place = Some(PLACE_CLOUD.to_string());
+        t.remote_id = Some("cloud-task-1".to_string());
+        t.status = STATE_WORKING.to_string();
+        t.lease = None;
+        g.save(&t).unwrap();
+
+        assert!(g.reclaim_stale().is_empty());
+        assert_eq!(g.get(&t.id).unwrap().status, STATE_WORKING);
+    }
+
+    #[test]
+    fn one_crews_runner_does_not_reclaim_another_crews_work() {
+        // Several runners share one `.aura/a2a/` on a disk, each draining its
+        // own crew. A lease is evidence about the runner that took it, so a
+        // runner draining `place` has no standing to call a `env` node dead —
+        // reclaiming it hands work that is actively being built back to the
+        // ready set, where a third runner claims it and does it twice.
+        let repo = tmp_repo();
+        let g = LoopGraph::at(&repo);
+
+        let mut mine = mk(&g, "my crew's node", "high");
+        mine.crew_id = Some("place".to_string());
+        mine.status = STATE_WORKING.to_string();
+        mine.lease = None;
+        g.save(&mine).unwrap();
+
+        let mut theirs = mk(&g, "another crew's node", "high");
+        theirs.crew_id = Some("env".to_string());
+        theirs.status = STATE_WORKING.to_string();
+        theirs.lease = None;
+        g.save(&theirs).unwrap();
+
+        let scope = RunScope {
+            goal: None,
+            crew: Some("place".to_string()),
+        };
+        let reclaimed = g.reclaim_stale_in(&scope);
+        assert!(reclaimed.contains(&mine.id), "own crew is still recovered");
+        assert!(!reclaimed.contains(&theirs.id));
+        assert_eq!(g.get(&theirs.id).unwrap().status, STATE_WORKING);
+
+        // An unscoped supervisor still sees the whole graph.
+        assert!(g.reclaim_stale().contains(&theirs.id));
+    }
+
+    #[test]
+    fn a_crashed_local_runner_is_still_reclaimed() {
+        // The guard above must not blunt ordinary crash recovery: a node with
+        // no placement, or one the box itself pulled down, still comes back.
+        let repo = tmp_repo();
+        let g = LoopGraph::at(&repo);
+
+        let mut plain = mk(&g, "ordinary work", "high");
+        plain.status = STATE_WORKING.to_string();
+        plain.lease = None;
+        g.save(&plain).unwrap();
+
+        // What a runner's own pulled node looks like: it has a board id but no
+        // placement, because placement is the *sender's* instruction.
+        let mut pulled = mk(&g, "pulled from the board", "high");
+        pulled.remote_id = Some("cloud-task-2".to_string());
+        pulled.status = STATE_WORKING.to_string();
+        pulled.lease = None;
+        g.save(&pulled).unwrap();
+
+        let reclaimed = g.reclaim_stale();
+        assert_eq!(reclaimed.len(), 2, "both should come back: {reclaimed:?}");
+        assert_eq!(g.get(&plain.id).unwrap().status, STATE_SUBMITTED);
+        assert_eq!(g.get(&pulled.id).unwrap().status, STATE_SUBMITTED);
+    }
+
+    #[test]
+    fn placement_survives_a_save_and_reload() {
+        let repo = tmp_repo();
+        let g = LoopGraph::at(&repo);
+        let mut t = mk(&g, "run it on the box", "medium");
+        t.place = Some(PLACE_CLOUD.to_string());
+        g.save(&t).unwrap();
+
+        let reloaded = g.get(&t.id).unwrap();
+        assert_eq!(reloaded.place.as_deref(), Some(PLACE_CLOUD));
+    }
+
+    #[test]
+    fn an_unknown_placement_word_means_anywhere_not_nowhere() {
+        // A node placed by a newer Aura — or by hand — must not become
+        // unrunnable on a build that doesn't recognise the word. Stranding
+        // work is a worse failure than ignoring a hint.
+        let repo = tmp_repo();
+        let g = LoopGraph::at(&repo);
+        let mut t = mk(&g, "from the future", "low");
+        t.place = Some("gpu-cluster".to_string());
+        assert!(runs_here(&t, PLACE_LOCAL));
+        assert!(runs_here(&t, PLACE_CLOUD));
+    }
+
+    #[test]
+    fn the_words_people_actually_type_are_understood() {
+        assert_eq!(normalize_place("cloud"), Some(PLACE_CLOUD));
+        assert_eq!(normalize_place(" REMOTE "), Some(PLACE_CLOUD));
+        assert_eq!(normalize_place("box"), Some(PLACE_CLOUD));
+        assert_eq!(normalize_place("local"), Some(PLACE_LOCAL));
+        assert_eq!(normalize_place("Laptop"), Some(PLACE_LOCAL));
+        assert_eq!(normalize_place(""), None);
+    }
+
     #[test]
     fn lease_lives_in_gitignored_sidecar_not_the_graph_file() {
         let repo = tmp_repo();
@@ -1217,6 +1551,7 @@ mod tests {
             external_id: Some("PROJ-7".into()),
             tags: vec![],
             assignee: None,
+            crew_id: None,
         };
         let (a, k1) = g.upsert_from_board(proj("first", STATE_SUBMITTED)).unwrap();
         assert_eq!(k1, UpsertKind::Created);
@@ -1228,6 +1563,37 @@ mod tests {
         assert_eq!(a.id, b.id, "re-sync must reuse the node");
         assert_eq!(b.title, "second");
         assert_eq!(g.list().len(), 1, "no duplicate node minted");
+        let _ = fs::remove_dir_all(&repo);
+    }
+
+    #[test]
+    fn upsert_from_board_carries_and_preserves_crew() {
+        let repo = tmp_repo();
+        let g = LoopGraph::at(&repo);
+        let proj = |crew: Option<&str>| BoardProjection {
+            board_task_id: "T-crew".into(),
+            title: "t".into(),
+            input: String::new(),
+            priority: "medium".into(),
+            kind: KIND_TASK.into(),
+            status: STATE_SUBMITTED.into(),
+            agent_kind: None,
+            parent_task_id: None,
+            external_source: None,
+            external_id: None,
+            tags: vec![],
+            assignee: None,
+            crew_id: crew.map(str::to_string),
+        };
+        // A board card that names a crew mints the node into it.
+        let (a, _) = g.upsert_from_board(proj(Some("perf"))).unwrap();
+        assert_eq!(a.crew_id.as_deref(), Some("perf"));
+        // A later sync that names NO crew must not un-crew the node.
+        let (b, _) = g.upsert_from_board(proj(None)).unwrap();
+        assert_eq!(b.crew_id.as_deref(), Some("perf"), "sync must not un-crew");
+        // A sync that names a different crew re-homes it.
+        let (c, _) = g.upsert_from_board(proj(Some("docs"))).unwrap();
+        assert_eq!(c.crew_id.as_deref(), Some("docs"));
         let _ = fs::remove_dir_all(&repo);
     }
 
@@ -1248,6 +1614,7 @@ mod tests {
             external_id: None,
             tags: vec![],
             assignee: None,
+            crew_id: None,
         };
         let (node, _) = g.upsert_from_board(proj.clone()).unwrap();
         g.claim(&node.id, "runner", 3600).unwrap();

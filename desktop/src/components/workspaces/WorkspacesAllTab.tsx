@@ -1,43 +1,77 @@
 // The "All" tab — every parallel copy across every open project, grouped by
-// how recently its branch was touched (Conductor's time-grouped Workspaces
-// list, honest to Aura's data). One clean line per copy; click to jump into it.
+// how recently its branch was touched (Conductor's Home list, honest to Aura's
+// data). One clean line per copy; click to jump into it.
+//
+// The row is deliberately spare. What identifies a copy is its name and the
+// project it belongs to, so those get the ink: a branch mark, the project's
+// avatar, the humanised title. Everything that used to sit alongside them —
+// a status dot, a "main" pill, a boxed PR chip — was chrome around data that
+// is either already legible (the title says "main copy") or better read from
+// the agent marks and the diff at the right edge. Ornament on 100+ rows is not
+// neutral: it costs the scan.
 
+import { GitBranch } from "../Icons";
+import { branchAddsNothing } from "../../lib/workspaceLabel";
+import type { CloudJobWithRoot } from "../../lib/useCloudJobs";
+import { WorkspacesCloudSection } from "./WorkspacesCloudSection";
+import { WorkspacesMachinesSection } from "./WorkspacesMachinesSection";
 import {
   bucketByTime,
-  relTime,
+  prTint,
+  relTimeShort,
   type WorkspaceCopy,
 } from "./workspacesModel";
-import { AgentChips, DiffPill, PrPill, ProjectGlyph, StatusDot } from "./WorkspacesBits";
+import {
+  AgentChips,
+  CloudMark,
+  DiffPill,
+  FLEET_COLUMN,
+  ProjectGlyph,
+} from "./WorkspacesBits";
 
 export function WorkspacesAllTab({
   copies,
+  cloudJobs = [],
   nowMs,
   activePath,
   onOpen,
 }: {
   copies: WorkspaceCopy[];
+  /** Work handed to a machine that isn't this one. It has no copy on this disk
+   *  to sit beside, so it gets its own section above the list rather than being
+   *  left off the page entirely. */
+  cloudJobs?: CloudJobWithRoot[];
   nowMs: number;
   activePath: string;
   onOpen: (path: string) => void;
 }) {
   const buckets = bucketByTime(copies, nowMs);
-  if (!copies.length) {
-    return (
-      <div className="flex-1 min-h-0 flex items-center justify-center text-text-4 text-sm">
-        No copies yet — open a project or start a parallel copy.
-      </div>
-    );
-  }
   return (
-    <div className="flex-1 min-h-0 overflow-y-auto px-4 py-3">
-      <div className="mx-auto w-full max-w-3xl flex flex-col gap-5">
+    <div className="flex-1 min-h-0 overflow-y-auto px-2 py-2">
+      <div className={`flex flex-col gap-4 ${FLEET_COLUMN}`}>
+        {/* Machines first, then the work sent to them, then the copies on this
+            disk — nearest-to-furthest is the wrong order here. You reach for a
+            machine before there is anything to see on it, so it cannot be a
+            section that only appears once you've used it. */}
+        <WorkspacesMachinesSection repoRoot={activePath} nowMs={nowMs} />
+        <WorkspacesCloudSection jobs={cloudJobs} nowMs={nowMs} />
+        {/* No copies is an ordinary state, not an error, and it is no longer
+            the whole tab: the machines above it are real places whether or not
+            anything is checked out here. So it says its piece where the list
+            would have been, rather than blanking the sections around it. */}
+        {!copies.length && (
+          <p className="px-2 py-6 text-center text-sm text-text-4">
+            No copies yet. Open a project or start a parallel copy.
+          </p>
+        )}
         {buckets.map((b) => (
           <section key={b.key}>
-            <div className="flex items-center gap-2 px-1 pb-1.5">
-              <h3 className="text-[11px] font-semibold uppercase tracking-wider text-text-4">
-                {b.label}
-              </h3>
-              <span className="text-[11px] text-text-5 tabular-nums">
+            {/* Sentence case with a dim count — a time marker the eye can skip
+                past, not a shouted section label. The letterspaced capitals it
+                used to wear competed with the rows they introduced. */}
+            <div className="flex items-center gap-1.5 px-2 pb-1">
+              <h3 className="text-xs font-medium text-text-4">{b.label}</h3>
+              <span className="text-xs text-text-5 tabular-nums">
                 {b.copies.length}
               </span>
             </div>
@@ -70,17 +104,23 @@ function CopyRow({
   isActive: boolean;
   onOpen: (path: string) => void;
 }) {
-  const stamp = relTime(c.committedAt, nowMs);
+  const stamp = relTimeShort(c.committedAt, nowMs);
   return (
     <button
       type="button"
       onClick={() => onOpen(c.path)}
-      title={`${c.path} — open`}
-      className={`group flex w-full items-center gap-2.5 rounded-md px-2.5 h-9 text-left transition-colors ${
-        isActive ? "bg-bg-2" : "hover:bg-bg-2"
+      // The project name left the row when the avatar took over naming it, so
+      // it has to be here — this tooltip is now the only place the full
+      // "which project, which checkout" answer is spelled out.
+      title={`${c.projectName} · ${c.title}\n${c.path}`}
+      className={`group flex h-9 w-full items-center gap-2.5 rounded-lg px-2 text-left transition-colors ${
+        isActive ? "bg-state-selected" : "hover:bg-state-hover"
       }`}
     >
-      <StatusDot status={c.status} />
+      {/* The leading mark on every row: a branch, because that is what a copy
+          is. Straight from the shared icon set — this row has no reason to
+          draw its own. */}
+      <GitBranch size={13} className="flex-none text-text-5" />
       <ProjectGlyph
         root={c.root}
         emoji={c.projectEmoji}
@@ -88,32 +128,34 @@ function CopyRow({
         accent={c.projectAccent}
         size={16}
       />
-      <span className="flex-none max-w-[130px] truncate text-[12px] text-text-3">
-        {c.projectName}
-      </span>
-      <span aria-hidden className="flex-none text-text-5">
-        ›
-      </span>
-      <span className="min-w-0 truncate text-[13px] text-text-1">{c.title}</span>
-      {c.isMain && (
-        <span className="flex-none rounded bg-bg-3 px-1 text-[9px] font-medium uppercase tracking-wide text-text-4">
-          main
-        </span>
-      )}
-      {c.branch && !c.isMain && (
-        <span className="flex-none max-w-[180px] truncate font-mono text-[11px] text-text-4">
+      <span className="min-w-0 truncate text-base text-text-1">{c.title}</span>
+      {/* Only when it adds something. The literal `branch !== title` this
+          used to ask never fired, because a slug is never equal to the
+          sentence made out of it — so "workspaces page" printed
+          `feat/workspaces-page` beside itself, and so did most of the list. */}
+      {!c.isMain && !branchAddsNothing(c.branch, c.title) && (
+        <span className="flex-none max-w-[200px] truncate font-mono text-xs text-text-5">
           {c.branch}
         </span>
       )}
       <span className="flex-1" />
+      <CloudMark cloud={c.cloud} />
       <DiffPill added={c.added} removed={c.removed} />
-      <PrPill pr={c.pr} />
+      {c.pr && (
+        <span
+          className="flex-none text-xs tabular-nums"
+          style={{ color: prTint(c.pr.state) }}
+          title={`PR #${c.pr.number} · ${c.pr.state}`}
+        >
+          #{c.pr.number}
+        </span>
+      )}
       <AgentChips agents={c.agents} />
-      <span className="w-16 flex-none text-right text-[11px] tabular-nums text-text-4 group-hover:hidden">
+      <span className="w-10 flex-none text-right text-xs tabular-nums text-text-4 group-hover:hidden">
         {stamp}
       </span>
-      <span className="hidden w-16 flex-none text-right text-[11px] font-medium text-accent group-hover:inline">
-        Open →
+      <span className="hidden w-10 flex-none text-right text-xs font-medium text-accent group-hover:inline">
+        Open
       </span>
     </button>
   );

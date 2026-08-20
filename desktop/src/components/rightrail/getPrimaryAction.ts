@@ -4,12 +4,19 @@
 //
 // Priority (highest first):
 //   1. canCommit       → "Commit"     (staged + non-empty message)
-//   2. push && pull    → "Sync"       (both directions diverged)
-//   3. push only       → "Push"
-//   4. pull only       → "Pull"
-//   5. no upstream     → "Publish branch"
-//   6. fallthrough     → disabled "Commit" with hint
+//   2. !known          → disabled "Commit" (the git read hasn't landed)
+//   3. push && pull    → "Sync"       (both directions diverged)
+//   4. push only       → "Push"
+//   5. pull only       → "Pull"
+//   6. no upstream     → "Publish branch"
+//   7. fallthrough     → disabled "Commit" with hint
 // Kept as a pure fn so primary-action behaviour is testable + traceable.
+//
+// Step 2 exists because steps 3–6 all read counts, and the counts start at
+// zero with `hasUpstream: false` — which is a real answer meaning "never
+// published". So before any git command returned, and after every one that
+// failed, this offered **Publish branch**. Committing doesn't depend on the
+// read, so step 1 still comes first.
 
 export type PrimaryActionType = "commit" | "sync" | "push" | "pull" | "publish";
 
@@ -27,6 +34,9 @@ export type PrimaryActionInput = {
   pushCount: number;
   pullCount: number;
   hasUpstream: boolean;
+  /** False until a git read has landed. Defaults true so existing callers
+   *  that genuinely have the facts read unchanged. */
+  known?: boolean;
 };
 
 export function getPrimaryAction({
@@ -36,6 +46,7 @@ export function getPrimaryAction({
   pushCount,
   pullCount,
   hasUpstream,
+  known = true,
 }: PrimaryActionInput): PrimaryActionState {
   if (canCommit) {
     return {
@@ -43,6 +54,14 @@ export function getPrimaryAction({
       label: "Commit",
       disabled: isPending,
       tooltip: "Commit staged changes",
+    };
+  }
+  if (!known) {
+    return {
+      action: "commit",
+      label: "Commit",
+      disabled: true,
+      tooltip: "Checking where this branch stands against the shared copy…",
     };
   }
   if (pushCount > 0 && pullCount > 0) {

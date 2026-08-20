@@ -240,8 +240,8 @@ fn dep_edges_for_focus(files: &[String], symbols: &[String]) -> Vec<DepEdge> {
     let Ok(repo) = Repository::discover(".") else {
         return Vec::new();
     };
-    let checkpoints = crate::checkpoint::CheckpointStore::get_all_checkpoints(&repo).unwrap_or_default();
-    let Some(latest) = checkpoints.first() else {
+    let checkpoint = crate::checkpoint::CheckpointStore::latest_checkpoint(&repo).unwrap_or_default();
+    let Some(latest) = checkpoint.as_ref() else {
         return Vec::new();
     };
 

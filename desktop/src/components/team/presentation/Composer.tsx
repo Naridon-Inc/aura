@@ -12,7 +12,6 @@ import {
   useState,
 } from "react";
 import {
-  ALargeSmall,
   AtSign,
   Bold,
   Braces,
@@ -32,7 +31,6 @@ import {
   Plus,
   Quote,
   Smile,
-  SquarePen,
   Strikethrough,
   Trash2,
   Underline,
@@ -52,7 +50,13 @@ import {
   type SnapshotRelayPayload,
 } from "../../../lib/auraRelay";
 import { animalForName, tintForName } from "../../../lib/identityColors";
-import { composerHint, type Conversation } from "../domain";
+import { createVoiceCapture, type VoiceCapture } from "../../../lib/voiceCapture";
+import {
+  composerHint,
+  loadDraft,
+  persistDraft,
+  type Conversation,
+} from "../domain";
 import { ArrowUpIcon } from "./icons";
 
 // ── Aura-native chat slash handlers ──────────────────────────────────
@@ -244,7 +248,11 @@ export function Composer({
   /** Optional external ref so parents (thread view) can focus this. */
   textareaRef?: React.MutableRefObject<HTMLTextAreaElement | null>;
 }) {
-  const [draft, setDraft] = useState("");
+  // What you typed and didn't send survives leaving the conversation.
+  // It used to be plain `useState("")`, so half a message plus a click on
+  // another channel meant the message was gone — and the Drafts
+  // destination promised the opposite in so many words.
+  const [draft, setDraft] = useState(() => loadDraft(conv.id)?.body ?? "");
   const [sending, setSending] = useState(false);
   // Surfaced when a send throws (offline / cloud down). Without this the
   // spinner just stops and the text sits there — a non-engineer reads that
@@ -261,11 +269,35 @@ export function Composer({
   const [emojiPickerOpen, setEmojiPickerOpen] = useState(false);
   const [emojiPickerPosition, setEmojiPickerPosition] = useState({ left: 0, bottom: 62 });
   const [recordingVoice, setRecordingVoice] = useState(false);
+  // Which conversation the state above belongs to. Adjusted during render
+  // rather than in an effect so `draft` and `conv.id` are never briefly
+  // mismatched — a one-frame mismatch would persist what you typed in one
+  // channel under another channel's key. Attachments move with it: a file
+  // you picked for #design must not follow you into a DM.
+  const [draftConvId, setDraftConvId] = useState(conv.id);
   const dropZoneId = useId();
   const taRef = useRef<HTMLTextAreaElement>(null);
   const composerRef = useRef<HTMLDivElement>(null);
   const emojiButtonRef = useRef<HTMLButtonElement>(null);
   const lastTypingSentRef = useRef<number>(0);
+
+  if (draftConvId !== conv.id) {
+    setDraftConvId(conv.id);
+    setDraft(loadDraft(conv.id)?.body ?? "");
+    setAttachments([]);
+    setRepoFiles([]);
+    setSendError(null);
+    setUploadError(null);
+  }
+
+  // Save on every keystroke. The pair is always consistent by the time
+  // this runs, so there is no debounce to get wrong — and a debounce is
+  // exactly what would lose the last thing you typed before switching
+  // away, which is the case this whole thing exists for. Blank text
+  // removes the row rather than storing an empty draft.
+  useEffect(() => {
+    persistDraft(conv.id, draft, Date.now());
+  }, [conv.id, draft]);
 
   // Throttled typing pulse — fired on every meaningful keystroke at most
   // once every 2.5s. Cloud-side TTL is 5s so this keeps the indicator
@@ -356,7 +388,7 @@ export function Composer({
     } catch {
       // Keep the draft + attachments intact so the message isn't lost; just
       // tell the user it didn't go through. Plain language, no error codes.
-      setSendError("Couldn't send — check your connection and try again.");
+      setSendError("Couldn't send. Check your connection and try again.");
     } finally {
       setSending(false);
     }
@@ -531,7 +563,7 @@ export function Composer({
           {attachments.map((a, i) => (
             <div
               key={`pending-at:${a.sha256 ?? a.url}:${i}`}
-              className="h-7 px-2 rounded-md bg-bg-2 border border-line-soft text-text-2 text-[11.5px] flex items-center gap-1.5"
+              className="h-7 px-2 rounded-md bg-bg-2 border border-line-soft text-text-2 text-sm flex items-center gap-1.5"
             >
               <span className="max-w-[140px] truncate" title={a.filename}>
                 {a.filename}
@@ -556,14 +588,14 @@ export function Composer({
         <div
           data-slot="composer-send-error"
           role="alert"
-          className="mb-1.5 flex items-center gap-1.5 text-[11.5px] text-red"
+          className="mb-1.5 flex items-center gap-1.5 text-sm text-red"
         >
           <span aria-hidden>⚠</span>
           <span>{sendError}</span>
         </div>
       )}
       {uploadError && (
-        <div data-slot="composer-upload-error" role="alert" className="mb-1.5 flex items-center justify-between gap-2 text-[11.5px] text-amber">
+        <div data-slot="composer-upload-error" role="alert" className="mb-1.5 flex items-center justify-between gap-2 text-sm text-amber">
           <span>⚠ {uploadError}</span>
           <button type="button" onClick={() => setUploadError(null)} className="text-text-3 hover:text-text-1" aria-label="Dismiss upload error">×</button>
         </div>
@@ -584,16 +616,16 @@ export function Composer({
       ) : (
       <div className="slack-composer-surface">
         <div className="slack-composer-formatbar" aria-label="Formatting tools">
-          <button type="button" onMouseDown={(event) => event.preventDefault()} onClick={formatSelection} title="Bold" aria-label="Bold"><Bold size={15} /></button>
-          <button type="button" onMouseDown={(event) => event.preventDefault()} onClick={() => wrapSelection("_")} title="Italic" aria-label="Italic"><Italic size={15} /></button>
-          <button type="button" onMouseDown={(event) => event.preventDefault()} onClick={() => wrapSelection("<u>", "</u>")} title="Underline" aria-label="Underline"><Underline size={15} /></button>
-          <button type="button" onMouseDown={(event) => event.preventDefault()} onClick={() => wrapSelection("~~")} title="Strikethrough" aria-label="Strikethrough"><Strikethrough size={15} /></button>
+          <button type="button" onMouseDown={(event) => event.preventDefault()} onClick={formatSelection} title="Bold" aria-label="Bold"><Bold size={14} /></button>
+          <button type="button" onMouseDown={(event) => event.preventDefault()} onClick={() => wrapSelection("_")} title="Italic" aria-label="Italic"><Italic size={14} /></button>
+          <button type="button" onMouseDown={(event) => event.preventDefault()} onClick={() => wrapSelection("<u>", "</u>")} title="Underline" aria-label="Underline"><Underline size={14} /></button>
+          <button type="button" onMouseDown={(event) => event.preventDefault()} onClick={() => wrapSelection("~~")} title="Strikethrough" aria-label="Strikethrough"><Strikethrough size={14} /></button>
           <span />
-          <button type="button" onMouseDown={(event) => event.preventDefault()} onClick={() => wrapSelection("[", "](https://)")} title="Link" aria-label="Link"><Link size={15} /></button>
-          <button type="button" onMouseDown={(event) => event.preventDefault()} onClick={() => insertText("1. ")} title="Numbered list" aria-label="Numbered list"><ListOrdered size={16} /></button>
-          <button type="button" onMouseDown={(event) => event.preventDefault()} onClick={() => insertText("- ")} title="Bulleted list" aria-label="Bulleted list"><List size={16} /></button>
-          <button type="button" onMouseDown={(event) => event.preventDefault()} onClick={() => insertText("> ")} title="Quote" aria-label="Quote"><Quote size={15} /></button>
-          <button type="button" onMouseDown={(event) => event.preventDefault()} onClick={insertCodeBlock} title="Code block" aria-label="Code block"><Code2 size={16} /></button>
+          <button type="button" onMouseDown={(event) => event.preventDefault()} onClick={() => wrapSelection("[", "](https://)")} title="Link" aria-label="Link"><Link size={14} /></button>
+          <button type="button" onMouseDown={(event) => event.preventDefault()} onClick={() => insertText("1. ")} title="Numbered list" aria-label="Numbered list"><ListOrdered size={14} /></button>
+          <button type="button" onMouseDown={(event) => event.preventDefault()} onClick={() => insertText("- ")} title="Bulleted list" aria-label="Bulleted list"><List size={14} /></button>
+          <button type="button" onMouseDown={(event) => event.preventDefault()} onClick={() => insertText("> ")} title="Quote" aria-label="Quote"><Quote size={14} /></button>
+          <button type="button" onMouseDown={(event) => event.preventDefault()} onClick={insertCodeBlock} title="Code block" aria-label="Code block"><Code2 size={14} /></button>
         </div>
         <textarea
           ref={taRef}
@@ -650,7 +682,7 @@ export function Composer({
             aria-label="Add attachment or content"
             aria-expanded={addMenuOpen}
           >
-            <Plus size={18} />
+            <Plus size={16} />
           </button>
           <FileUploadButton
             repoRoot={repoRoot}
@@ -672,28 +704,34 @@ export function Composer({
             onClick={toggleEmojiPicker}
             title="Add emoji"
           >
-            <Smile size={17} />
+            <Smile size={15} />
           </button>
           <button type="button" className="slack-composer-tool" onClick={openMentionPicker} title="Mention someone">
-            <AtSign size={17} />
+            <AtSign size={15} />
           </button>
-          <button type="button" className="slack-composer-tool" onClick={formatSelection} title="Format message">
-            <ALargeSmall size={18} />
-          </button>
+          {/* An "Aa" button used to sit here, titled "Format message", and it
+              called the same `formatSelection` as the Bold button in the bar
+              two lines above — which is always open, so there was nothing for
+              it to reveal either. A second Bold under a different name and a
+              different glyph. */}
+          {/* This starts a live huddle — the camera is yours to turn on once
+              you're in. It was titled "Record a video clip", next to a mic
+              that really does record one, so it read as its video sibling.
+              Nothing is recorded and nothing is saved. */}
           <button
             type="button"
             className="slack-composer-tool"
             onClick={() => window.dispatchEvent(new CustomEvent("aura:start-huddle", { detail: { repoRoot, channel: conv.channel ?? "general", channelName: conv.name } }))}
-            title="Record a video clip"
+            title="Start a huddle"
           >
-            <Video size={17} />
+            <Video size={15} />
           </button>
           <button type="button" className="slack-composer-tool" onClick={() => setRecordingVoice(true)} title="Record audio clip">
-            <Mic size={17} />
+            <Mic size={15} />
           </button>
-          <button type="button" className="slack-composer-tool" onClick={() => taRef.current?.focus()} title="Open expanded composer">
-            <SquarePen size={16} />
-          </button>
+          {/* And a pencil titled "Open expanded composer" that called
+              `taRef.current.focus()`. It expanded nothing; it moved the caret
+              into the box already under the cursor. */}
           <div className="flex-1" />
           <button
             type="button"
@@ -727,6 +765,12 @@ export function Composer({
             <Layers3 size={16} /><span>Recent file</span><ChevronRight size={14} className="slack-add-menu-end" />
           </button>
           <button type="button" role="menuitem" onClick={() => { insertCodeBlock(); setAddMenuOpen(false); }}>
+            {/* The two bare <kbd>s in this menu are styled by
+                `.slack-composer-add-menu kbd` as right-aligned plain grey
+                text — the macOS menu-accelerator convention, not a key cap.
+                A boxed cap in a menu row reads as a button you can press.
+                Both keys are real and now listed in lib/shortcuts.ts, which
+                is where the app tells you they exist. */}
             <Braces size={16} /><span>Text snippet</span><kbd>⌘⇧Enter</kbd>
           </button>
           <button type="button" role="menuitem" onClick={() => { insertText("/workflow "); setAddMenuOpen(false); }}>
@@ -796,110 +840,116 @@ function VoiceNoteRecorder({
   onCancel: () => void;
   onSend: (attachment: ChatAttachment) => Promise<void> | void;
 }) {
-  const recorderRef = useRef<MediaRecorder | null>(null);
-  const streamRef = useRef<MediaStream | null>(null);
-  const chunksRef = useRef<Blob[]>([]);
-  const cancelledRef = useRef(false);
-  const finishRef = useRef(false);
-  const pausedRef = useRef(false);
+  // The microphone lives behind `createVoiceCapture` (lib/voiceCapture.ts) —
+  // this component only decides WHEN. It exists solely because the user
+  // pressed record, so opening on mount is the user-initiated path; the
+  // capture releases the device on every exit, including an unmount that
+  // lands while the permission prompt is still up.
+  const captureRef = useRef<VoiceCapture | null>(null);
   const secondsRef = useRef(0);
   const [seconds, setSeconds] = useState(0);
+  const [recording, setRecording] = useState(false);
   const [paused, setPaused] = useState(false);
   const [uploading, setUploading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
+  const uploadVoiceNote = useCallback(
+    async (blob: Blob, duration: number) => {
+      setUploading(true);
+      setError(null);
+      try {
+        const bytesBase64 = arrayBufferToBase64(await blob.arrayBuffer());
+        const uploaded = await api.chatUploadVoiceNote(
+          repoRoot,
+          bytesBase64,
+          `voice-note-${Date.now()}.webm`,
+          blob.type || "audio/webm",
+        );
+        await onSend({
+          url: uploaded.url,
+          sha256: uploaded.sha256,
+          size: uploaded.size,
+          mime: uploaded.mime,
+          filename: uploaded.filename || "voice-note.webm",
+          kind: "voice-note",
+          duration,
+        });
+      } catch (reason) {
+        setError(reason instanceof Error ? reason.message : String(reason));
+        setUploading(false);
+      }
+    },
+    [repoRoot, onSend],
+  );
+  // The capture is built once and outlives individual renders, so it reaches
+  // the upload through a ref rather than a stale closure.
+  const uploadRef = useRef(uploadVoiceNote);
   useEffect(() => {
-    let timer: number | null = null;
-    void navigator.mediaDevices
-      .getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true } })
-      .then((stream) => {
-        if (cancelledRef.current) {
-          stream.getTracks().forEach((track) => track.stop());
-          return;
-        }
-        streamRef.current = stream;
-        const mime = MediaRecorder.isTypeSupported("audio/webm;codecs=opus")
-          ? "audio/webm;codecs=opus"
-          : "audio/webm";
-        const recorder = new MediaRecorder(stream, { mimeType: mime });
-        recorderRef.current = recorder;
-        recorder.ondataavailable = (event) => {
-          if (event.data.size > 0) chunksRef.current.push(event.data);
-        };
-        recorder.onstop = () => {
-          stream.getTracks().forEach((track) => track.stop());
-          if (!finishRef.current || cancelledRef.current) return;
-          const blob = new Blob(chunksRef.current, { type: recorder.mimeType || "audio/webm" });
-          void uploadVoiceNote(blob, secondsRef.current);
-        };
-        recorder.start(250);
-        timer = window.setInterval(() => {
-          if (!pausedRef.current) setSeconds((value) => {
-            const next = value + 1;
-            secondsRef.current = next;
-            return next;
-          });
-        }, 1000);
-      })
-      .catch(() => setError("Microphone access is required to record a voice note."));
+    uploadRef.current = uploadVoiceNote;
+  }, [uploadVoiceNote]);
 
+  useEffect(() => {
+    const capture = createVoiceCapture({
+      onFinished: (blob) => {
+        void uploadRef.current(blob, secondsRef.current);
+      },
+      onError: (message) => {
+        setError(message);
+        setUploading(false);
+      },
+    });
+    captureRef.current = capture;
+    void capture.start().then(() => {
+      setRecording(capture.state() === "recording");
+    });
     return () => {
-      if (timer !== null) window.clearInterval(timer);
-      streamRef.current?.getTracks().forEach((track) => track.stop());
+      // Covers every way this component can go away — the Send/Discard
+      // buttons, a channel switch, an error boundary — and is idempotent with
+      // the capture's own teardown.
+      capture.dispose();
+      captureRef.current = null;
     };
   // The recorder owns one immutable recording session.
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  const uploadVoiceNote = async (blob: Blob, duration: number) => {
-    setUploading(true);
-    setError(null);
-    try {
-      const bytesBase64 = arrayBufferToBase64(await blob.arrayBuffer());
-      const uploaded = await api.chatUploadVoiceNote(
-        repoRoot,
-        bytesBase64,
-        `voice-note-${Date.now()}.webm`,
-        blob.type || "audio/webm",
-      );
-      await onSend({
-        url: uploaded.url,
-        sha256: uploaded.sha256,
-        size: uploaded.size,
-        mime: uploaded.mime,
-        filename: uploaded.filename || "voice-note.webm",
-        kind: "voice-note",
-        duration,
+  // Elapsed-time ticker. Runs only while the device is actually recording, so
+  // a paused clip (or one that never opened) doesn't count seconds it doesn't
+  // have.
+  useEffect(() => {
+    if (!recording || paused) return;
+    const id = window.setInterval(() => {
+      setSeconds((value) => {
+        const next = value + 1;
+        secondsRef.current = next;
+        return next;
       });
-    } catch (reason) {
-      setError(reason instanceof Error ? reason.message : String(reason));
-      setUploading(false);
-    }
-  };
+    }, 1000);
+    return () => {
+      window.clearInterval(id);
+    };
+  }, [recording, paused]);
 
   const cancel = () => {
-    cancelledRef.current = true;
-    const recorder = recorderRef.current;
-    if (recorder && recorder.state !== "inactive") recorder.stop();
+    captureRef.current?.cancel();
     onCancel();
   };
 
   const finish = () => {
-    const recorder = recorderRef.current;
-    if (!recorder || recorder.state === "inactive") return;
-    finishRef.current = true;
+    const capture = captureRef.current;
+    if (!capture) return;
+    const state = capture.state();
+    if (state !== "recording" && state !== "paused") return;
     setUploading(true);
-    recorder.stop();
+    capture.finish();
   };
 
   const togglePause = () => {
-    const recorder = recorderRef.current;
-    if (!recorder || recorder.state === "inactive") return;
-    if (recorder.state === "paused") recorder.resume();
-    else recorder.pause();
-    const next = recorder.state !== "recording";
-    pausedRef.current = next;
-    setPaused(next);
+    const capture = captureRef.current;
+    if (!capture) return;
+    if (capture.state() === "paused") capture.resume();
+    else capture.pause();
+    setPaused(capture.state() === "paused");
   };
 
   return (

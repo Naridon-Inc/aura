@@ -15,6 +15,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { AuraReviewPayload, PrComment, PrFileStat } from "../../lib/api";
+import { findingsByPath } from "../../lib/prReviewState";
 import type { PrLineRelayPayload } from "../../lib/auraRelay";
 import { repoSlugFor } from "../../lib/repoSlug";
 import { AuraRelayMenu } from "../auraRelayMenu";
@@ -88,7 +89,7 @@ export function PrFilesSection({
     return m;
   }, [comments]);
   const auraByPath = useMemo(
-    () => deriveAuraByPath(auraReview, files),
+    () => findingsByPath(auraReview, files.map((f) => f.path)),
     [auraReview, files],
   );
 
@@ -100,18 +101,18 @@ export function PrFilesSection({
     <section className="rounded-lg border border-line-soft bg-bg-content overflow-hidden">
       {/* Toolbar */}
       <div className="flex items-center gap-2 px-4 h-11 border-b border-line-soft/60">
-        <span className="text-[12px] text-text-3 flex items-center gap-1.5">
+        <span className="text-sm text-text-3 flex items-center gap-1.5">
           <CompareIcon />
           Compare
-          <span className="font-mono text-[11px] px-1.5 py-0.5 rounded bg-bg-2 text-text-2">
+          <span className="font-mono text-xs px-1.5 py-0.5 rounded bg-bg-2 text-text-2">
             {baseRef}
           </span>
           <span className="text-text-4">→</span>
-          <span className="font-mono text-[11px] px-1.5 py-0.5 rounded bg-bg-2 text-text-2">
+          <span className="font-mono text-xs px-1.5 py-0.5 rounded bg-bg-2 text-text-2">
             {headRef}
           </span>
         </span>
-        <span className="ml-auto flex items-center gap-3 text-[11.5px] text-text-4">
+        <span className="ml-auto flex items-center gap-3 text-sm text-text-4">
           <span className="tabular-nums">
             {files.length} file{files.length === 1 ? "" : "s"}
           </span>
@@ -325,13 +326,13 @@ function PrFileDiffCard({
         >
           <ChevronIcon expanded={expanded} />
         </Button>
-        <span className="font-mono text-[12px] text-text-1 truncate">
+        <span className="font-mono text-sm text-text-1 truncate">
           {file.path}
         </span>
         <Churn additions={file.additions} deletions={file.deletions} />
 
         {language && (
-          <span className="text-[11px] text-text-4">{language}</span>
+          <span className="text-xs text-text-4">{language}</span>
         )}
         {auraFindingCount > 0 && (
           <StatusChip
@@ -344,7 +345,7 @@ function PrFileDiffCard({
           </StatusChip>
         )}
         <div className="ml-auto flex items-center gap-3">
-          <label className="flex items-center gap-1.5 text-[11.5px] text-text-3 cursor-pointer select-none">
+          <label className="flex items-center gap-1.5 text-sm text-text-3 cursor-pointer select-none">
             <input
               type="checkbox"
               checked={viewed}
@@ -360,7 +361,7 @@ function PrFileDiffCard({
             <button
               type="button"
               className="text-text-4 hover:text-text-1 relative"
-              title={`${commentCount} comment${commentCount === 1 ? "" : "s"} — show threads`}
+              title={`${commentCount} comment${commentCount === 1 ? "" : "s"}. Show threads`}
               onClick={(e) => {
                 e.stopPropagation();
                 setExpanded(true);
@@ -368,7 +369,7 @@ function PrFileDiffCard({
             >
               <BubbleIcon />
               <span
-                className="absolute -top-1 -right-1 min-w-[14px] h-[14px] px-1 rounded-full text-white text-[9px] font-bold flex items-center justify-center"
+                className="absolute -top-1 -right-1 min-w-[14px] h-[14px] px-1 rounded-full text-white text-2xs font-bold flex items-center justify-center"
                 style={{ background: "var(--color-violet)" }}
               >
                 {commentCount}
@@ -430,12 +431,12 @@ function PrFileDiffCard({
         ) : diffError ? (
           // v0.2.12 — surface the real gh/git error so users can act
           // (re-auth, retry, file an issue) instead of guessing.
-          <div className="px-3 py-3 text-[12px]">
+          <div className="px-3 py-3 text-sm">
             <details className="text-red">
               <summary className="cursor-pointer text-red font-medium">
-                Diff unavailable — click for details
+                Diff unavailable. Click for details
               </summary>
-              <pre className="mt-2 px-3 py-2 bg-red/5 border border-red/30 rounded text-[11px] text-red/90 whitespace-pre-wrap break-words">
+              <pre className="mt-2 px-3 py-2 bg-red/5 border border-red/30 rounded text-xs text-red/90 whitespace-pre-wrap break-words">
                 {diffError.length > 400
                   ? `${diffError.slice(0, 400)}…`
                   : diffError}
@@ -443,7 +444,7 @@ function PrFileDiffCard({
             </details>
           </div>
         ) : (
-          <div className="px-3 py-3 text-text-4 text-[12px]">
+          <div className="px-3 py-3 text-text-4 text-sm">
             No diff content (gh returned empty).
           </div>
         )
@@ -467,7 +468,7 @@ function countChunkLines(chunk: string): number {
 
 function FileCardFooter({ chunkLines }: { chunkLines: number }) {
   return (
-    <div className="flex items-center justify-end gap-3 px-3 h-7 border-t border-line-soft/40 bg-bg-content/30 text-[10.5px] text-text-4">
+    <div className="flex items-center justify-end gap-3 px-3 h-7 border-t border-line-soft/40 bg-bg-content/30 text-xs text-text-4">
       <span className="flex items-center gap-1.5">
         <ExpandGlyph />
         {chunkLines} line{chunkLines === 1 ? "" : "s"}
@@ -589,47 +590,6 @@ function extractFirstAdditionsBlock(
     out.push(body);
   }
   return { lines: out };
-}
-
-// Stage 8G — derive a per-file Aura finding count by substring-matching
-// the file path against the freeform invariant_violations / blast_radius
-// strings the backend emits. Fragile but acceptable until the backend
-// surfaces structured per-file findings; gives the user a visible hint
-// that "this file is in the AST review danger zone."
-function deriveAuraByPath(
-  review: AuraReviewPayload | null | undefined,
-  files: PrFileStat[],
-): Map<string, number> {
-  const out = new Map<string, number>();
-  if (!review) return out;
-  const haystacks: string[] = [
-    ...review.invariant_violations,
-    ...review.blast_radius,
-    ...review.cross_branch_conflicts,
-  ];
-  // unverified_nodes is `unknown` (serde_json::Value); accept array of
-  // strings or array of {path,...} objects best-effort.
-  const uv = review.unverified_nodes;
-  if (Array.isArray(uv)) {
-    for (const n of uv) {
-      if (typeof n === "string") haystacks.push(n);
-      else if (n && typeof n === "object") {
-        const obj = n as Record<string, unknown>;
-        const path = typeof obj.path === "string" ? obj.path : null;
-        const node = typeof obj.node === "string" ? obj.node : null;
-        if (path) haystacks.push(path);
-        if (node) haystacks.push(node);
-      }
-    }
-  }
-  for (const f of files) {
-    let n = 0;
-    for (const h of haystacks) {
-      if (h.includes(f.path)) n += 1;
-    }
-    if (n > 0) out.set(f.path, n);
-  }
-  return out;
 }
 
 function SparkleIcon() {

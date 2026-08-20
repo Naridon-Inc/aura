@@ -43,20 +43,33 @@ import {
   primeClaudeCommands,
   type ClaudeCommand,
 } from "../../lib/claudeCommands";
-import type { DirEntry } from "../../lib/api";
+import type { DirEntry, Task } from "../../lib/api";
 import { loadDirList, peekDirList, warmDirList } from "../../lib/dirListCache";
 import { onIdle } from "../../lib/idle";
+import { registerUndoTarget } from "../../lib/undoRouter";
+import { fetchTasks } from "../../lib/tasksCache";
+import { buildTaskAgentPrompt, taskRef } from "../tasks/taskPrompt";
+import { taskStatusLabel } from "../../lib/taskStatus";
 
 /** One row in the slash menu — either a native Aura verb (`source: "aura"`) or
  *  one of Claude Code's own custom commands (`source: "claude"`, which run on
  *  Claude's CLI regardless of the active brain). Both carry a `name` + summary;
  *  only Aura verbs carry an `args` hint, only Claude rows carry a `scope`. */
-type SlashItem = {
+export type SlashItem = {
   name: string;
   summary: string;
   args?: string;
-  source: "aura" | "claude";
+  /** Where the row came from, which decides its badge and its React key.
+   *  `"cli"` rows belong to whichever agent CLI the host composer is driving
+   *  and carry no badge — in that menu every row is that agent's, so labelling
+   *  each one would be noise. */
+  source: "aura" | "claude" | "cli" | "agent";
   scope?: "project" | "user";
+  /** Badge text for `"agent"` rows — the agent that published the command,
+   *  e.g. "OpenCode". These sit in a menu that also holds Aura's verbs and
+   *  the repo's Claude commands, and which of the three a word belongs to
+   *  decides where it runs. */
+  badge?: string;
 };
 
 /** Imperative handle the parent uses to reset / focus the editor without a
@@ -83,7 +96,10 @@ type FileEntry = {
   name: string;
   path: string;
   isDir: boolean;
-  kind?: "file" | "terminal";
+  kind?: "file" | "terminal" | "task";
+  /** Set only on `kind: "task"` rows — the board task behind an `@task` pick.
+   *  Picking the row seeds the composer with this task's kickoff prompt. */
+  task?: Task;
 };
 
 type Props = {
@@ -114,7 +130,36 @@ type Props = {
    *  walk. The parent applies the recalled text via the `setMarkdown` handle in
    *  response to the `aura:composer:history-move` event we dispatch. */
   canRecallHistory?: boolean;
+  /** Where the `/` menu's rows come from, given the verb typed so far.
+   *
+   *  Omitted, it is the Aura brain's own verb catalog plus the repo's Claude
+   *  commands — correct for the brain's composer, because those verbs are
+   *  dispatched by the app after the message is submitted. A slash chip
+   *  serializes back to literal `/name` text (see SlashCommandNode), so in a
+   *  composer that types straight into a CLI child instead of into the app,
+   *  that default menu would be offering `/prove` and `/impacts` to a binary
+   *  that has never heard of them — every pick a guaranteed "unknown command".
+   *  The agent chat therefore supplies its own rows: that CLI's real commands
+   *  and nothing else. */
+  slashRows?: (query: string) => SlashItem[];
+  /** Commands the *running agent* published for itself, merged into the
+   *  default menu after Aura's verbs and the repo's Claude commands.
+   *
+   *  Unlike `slashRows` this adds rather than replaces, because all three
+   *  are genuinely reachable from this composer: Aura's verbs are handled
+   *  by the app, Claude's by the repo, and these by whichever agent is
+   *  answering — it named them, so a chip that serializes back to `/name`
+   *  reaches something that understands it. A name already claimed by an
+   *  earlier source is dropped, so a collision shows once. */
+  agentRows?: SlashItem[];
 };
+
+/** A task the `@task` picker should hide — already finished, so it's not work
+ *  to pick up. Mirrors taskPrompt's isDoneStatus so the two stores agree. */
+function isClosedStatus(status: string): boolean {
+  const s = (status || "").toLowerCase();
+  return s === "done" || s === "completed" || s === "closed" || s === "cancelled";
+}
 
 // Pull the markdown serialization tiptap-markdown bolts onto editor storage.
 function readMarkdown(
@@ -139,6 +184,8 @@ export const TiptapComposer = forwardRef<TiptapComposerHandle, Props>(
       onEscapeWhileBusy,
       onImageFiles,
       canRecallHistory = false,
+      slashRows,
+      agentRows,
     },
     ref,
   ) {
@@ -149,6 +196,10 @@ export const TiptapComposer = forwardRef<TiptapComposerHandle, Props>(
     const [mentionQuery, setMentionQuery] = useState<string | null>(null);
     const [sel, setSel] = useState(0);
     const [fileEntries, setFileEntries] = useState<FileEntry[]>([]);
+    // Open board tasks, for the `@task` picker — so a chat can reach for a task
+    // and start working it. Loaded from the same board store the Tasks place
+    // reads (`.aura/tasks/tasks.json`), narrowed to the ones still open.
+    const [openTasks, setOpenTasks] = useState<Task[]>([]);
     // Claude Code's own custom slash commands (`.claude/commands/*.md`) — shown
     // in the menu alongside Aura's verbs so they're reachable from this chat
     // whatever the active brain. Primed off the cache on mount/repo change.
@@ -173,18 +224,22 @@ export const TiptapComposer = forwardRef<TiptapComposerHandle, Props>(
     const slashMatches = useMemo<SlashItem[]>(() => {
       if (slashQuery === null) return [];
       const q = slashQuery;
+      // A host that owns its own command vocabulary answers for the whole menu
+      // — it is not "extra rows on top of Aura's", because Aura's verbs would
+      // be wrong there (see the `slashRows` prop).
+      if (slashRows) return slashRows(q);
       const aura: SlashItem[] = matchManagerCommands(q).map((c) => ({
         name: c.name,
         summary: c.summary,
         args: c.args,
         source: "aura",
       }));
-      const auraNames = new Set(aura.map((a) => a.name.toLowerCase()));
+      const taken = new Set(aura.map((a) => a.name.toLowerCase()));
       const claude: SlashItem[] = claudeCmds
         .filter(
           (c) =>
             (!q || c.name.toLowerCase().startsWith(q)) &&
-            !auraNames.has(c.name.toLowerCase()),
+            !taken.has(c.name.toLowerCase()),
         )
         .map((c) => ({
           name: c.name,
@@ -192,9 +247,34 @@ export const TiptapComposer = forwardRef<TiptapComposerHandle, Props>(
           source: "claude",
           scope: c.scope,
         }));
-      return [...aura, ...claude];
-    }, [slashQuery, claudeCmds]);
+      for (const c of claude) taken.add(c.name.toLowerCase());
+      // The running agent's own commands, last — a word Aura or the repo
+      // already claims keeps the meaning the user has been relying on.
+      const agent = (agentRows ?? []).filter(
+        (c) =>
+          (!q || c.name.toLowerCase().startsWith(q)) &&
+          !taken.has(c.name.toLowerCase()),
+      );
+      return [...aura, ...claude, ...agent];
+    }, [slashQuery, claudeCmds, slashRows, agentRows]);
     const slashOpen = slashQuery !== null && slashMatches.length > 0;
+
+    // The task rows `@task` offers — mapped once per task list, filtered to the
+    // popup's fragment below. Newest first, so the work you just filed is on top.
+    const taskEntries = useMemo<FileEntry[]>(
+      () =>
+        openTasks
+          .slice()
+          .sort((a, b) => b.updated_at.localeCompare(a.updated_at))
+          .map((t) => ({
+            name: `${taskRef(t)} ${t.title}`,
+            path: `task:${t.id}`,
+            isDir: false,
+            kind: "task" as const,
+            task: t,
+          })),
+      [openTasks],
+    );
 
     // Mention matches: filter the fetched directory listing by the trailing
     // segment of the query (the part after the last `/`).
@@ -202,25 +282,26 @@ export const TiptapComposer = forwardRef<TiptapComposerHandle, Props>(
       if (mentionQuery === null) return [];
       const lastSlash = mentionQuery.lastIndexOf("/");
       const frag = (lastSlash >= 0 ? mentionQuery.slice(lastSlash + 1) : mentionQuery).toLowerCase();
-      const special: FileEntry[] =
-        lastSlash < 0 && "terminal".includes(frag)
-          ? [
-              {
-                name: "terminal",
-                path: "terminal",
-                isDir: false,
-                kind: "terminal",
-              },
-            ]
-          : [];
-      return [...special, ...fileEntries]
-        .filter((e) => e.name.toLowerCase().includes(frag))
+      // Special rows lead the menu and are gated by their OWN keyword, not the
+      // filename filter below — `@task`/`@terminal` are namespaces, so their
+      // rows shouldn't be dropped for not containing the fragment in a name.
+      const special: FileEntry[] = [];
+      if (lastSlash < 0 && "terminal".includes(frag)) {
+        special.push({ name: "terminal", path: "terminal", isDir: false, kind: "terminal" });
+      }
+      // `@task` (or a prefix of it, from `@ta` on) lists the open board tasks.
+      // Requiring ≥2 chars keeps a bare `@t` from flooding with every task.
+      if (lastSlash < 0 && frag.length >= 2 && "task".startsWith(frag)) {
+        special.push(...taskEntries.slice(0, 7));
+      }
+      const files = fileEntries.filter((e) => e.name.toLowerCase().includes(frag));
+      return [...special, ...files]
         .filter(
           (e, i, rows) =>
             rows.findIndex((candidate) => candidate.path === e.path) === i,
         )
         .slice(0, 8);
-    }, [mentionQuery, fileEntries]);
+    }, [mentionQuery, fileEntries, taskEntries]);
     const mentionOpen = mentionQuery !== null && mentionMatches.length > 0;
 
     const popupCount = slashOpen
@@ -438,6 +519,18 @@ export const TiptapComposer = forwardRef<TiptapComposerHandle, Props>(
       editor?.setEditable(!busy);
     }, [editor, busy]);
 
+    // Claim ⌘Z while the composer has focus. ProseMirror's undo stack is
+    // invisible to the OS-level `undo:` selector, so without this a mistyped
+    // message could not be undone the way every other text field can.
+    useEffect(() => {
+      if (!editor) return;
+      return registerUndoTarget({
+        hasFocus: () => editor.isFocused,
+        undo: () => editor.commands.undo(),
+        redo: () => editor.commands.redo(),
+      });
+    }, [editor]);
+
     // Reset the selection highlight whenever the active query changes so the
     // popup always opens on its first row.
     useEffect(() => {
@@ -517,6 +610,29 @@ export const TiptapComposer = forwardRef<TiptapComposerHandle, Props>(
       return onIdle(() => warmDirList(repoRoot));
     }, [repoRoot]);
 
+    // Load the board's open tasks so `@task` can list them. Re-reads when the
+    // mention popup opens (a task filed elsewhere shows up without a reload)
+    // and on repo change. Cache-backed, so the popup paints from the last-known
+    // list while a fresh read lands.
+    useEffect(() => {
+      if (!repoRoot) {
+        setOpenTasks([]);
+        return;
+      }
+      if (mentionQuery === null) return;
+      let alive = true;
+      void fetchTasks(repoRoot)
+        .then((rows) => {
+          if (alive) setOpenTasks(rows.filter((t) => !isClosedStatus(t.status)));
+        })
+        .catch(() => {
+          /* a read blip leaves the last list in place — @task just won't grow */
+        });
+      return () => {
+        alive = false;
+      };
+    }, [repoRoot, mentionQuery !== null]);
+
     // ── Insertion ────────────────────────────────────────────────────────
     // Replace the active `/verb` token with a slashCommand chip + trailing
     // space, ready for args.
@@ -558,6 +674,20 @@ export const TiptapComposer = forwardRef<TiptapComposerHandle, Props>(
         if (!at) return;
         const tokenStart = from - at[1].length; // position right after `@`
 
+        // A task pick isn't a chip — it's a kickoff. Seed the whole composer
+        // with the task's prompt so the next Enter starts the agent on it.
+        // (Picking a task is choosing what to work on, so replacing the draft
+        // `@task…` fragment with the real brief is the intent, not a surprise.)
+        if (entry.kind === "task" && entry.task) {
+          editor.commands.setContent(buildTaskAgentPrompt(entry.task), {
+            emitUpdate: false,
+          });
+          editor.commands.focus("end");
+          onChange(readMarkdown(editor));
+          setMentionQuery(null);
+          return;
+        }
+
         if (entry.isDir) {
           // Rewrite the path fragment to "<dir>/" so the popup descends.
           editor
@@ -583,7 +713,7 @@ export const TiptapComposer = forwardRef<TiptapComposerHandle, Props>(
           .run();
         setMentionQuery(null);
       },
-      [editor],
+      [editor, onChange],
     );
 
     // ── Popup keyboard bridge ────────────────────────────────────────────
@@ -630,18 +760,20 @@ export const TiptapComposer = forwardRef<TiptapComposerHandle, Props>(
                 }}
                 onMouseEnter={() => setSel(i)}
                 className={`w-full flex items-baseline gap-2 px-2.5 py-1.5 text-left transition-colors ${
-                  i === sel ? "bg-bg-2" : "hover:bg-bg-2"
+                  i === sel ? "bg-bg-2" : "hover:bg-state-hover"
                 }`}
               >
-                <span className="font-mono text-[12px] text-text-1 whitespace-nowrap">
+                <span className="font-mono text-sm text-text-1 whitespace-nowrap">
                   /{cmd.name}
                   {cmd.args ? <span className="text-text-4"> {cmd.args}</span> : null}
                 </span>
-                <span className="flex-1 truncate text-[11px] text-text-3">{cmd.summary}</span>
+                <span className="flex-1 truncate text-xs text-text-3">{cmd.summary}</span>
                 {cmd.source === "claude" ? (
-                  <span className="shrink-0 rounded px-1 py-px text-[9.5px] uppercase tracking-wide text-text-4 bg-bg-1 border border-line-soft">
+                  <span className="meta-tag">
                     Claude
                   </span>
+                ) : cmd.source === "agent" && cmd.badge ? (
+                  <span className="meta-tag">{cmd.badge}</span>
                 ) : null}
               </button>
             ))}
@@ -650,31 +782,56 @@ export const TiptapComposer = forwardRef<TiptapComposerHandle, Props>(
 
         {mentionOpen && (
           <PopupShell heading="Context" footer="↑↓ to move · ⏎ to pick · esc to dismiss">
-            {mentionMatches.map((entry, i) => (
-              <button
-                key={entry.path}
-                type="button"
-                onMouseDown={(e) => {
-                  e.preventDefault();
-                  insertMention(entry);
-                }}
-                onMouseEnter={() => setSel(i)}
-                className={`w-full flex items-center gap-2 px-2.5 py-1.5 text-left transition-colors ${
-                  i === sel ? "bg-bg-2" : "hover:bg-bg-2"
-                }`}
-              >
-                <svg className="ico-12 shrink-0 text-text-4">
-                  <use href={entry.isDir ? "#i-folder" : "#i-file"} />
-                </svg>
-                <span className="font-mono text-[12px] text-text-1 truncate">
-                  {entry.kind === "terminal" ? "@terminal" : entry.name}
-                  {entry.isDir ? "/" : ""}
-                </span>
-                <span className="flex-1 truncate text-[10.5px] text-text-4 text-right">
-                  {entry.kind === "terminal" ? "recent terminal output" : entry.path}
-                </span>
-              </button>
-            ))}
+            {mentionMatches.map((entry, i) =>
+              entry.kind === "task" && entry.task ? (
+                <button
+                  key={entry.path}
+                  type="button"
+                  onMouseDown={(e) => {
+                    e.preventDefault();
+                    insertMention(entry);
+                  }}
+                  onMouseEnter={() => setSel(i)}
+                  className={`w-full flex items-center gap-2 px-2.5 py-1.5 text-left transition-colors ${
+                    i === sel ? "bg-bg-2" : "hover:bg-state-hover"
+                  }`}
+                >
+                  <span className="font-mono text-xs text-text-4 shrink-0 tabular-nums">
+                    {taskRef(entry.task)}
+                  </span>
+                  <span className="flex-1 truncate text-sm text-text-1">
+                    {entry.task.title || "(untitled)"}
+                  </span>
+                  <span className="shrink-0 text-xs text-text-4">
+                    {taskStatusLabel(entry.task.status)}
+                  </span>
+                </button>
+              ) : (
+                <button
+                  key={entry.path}
+                  type="button"
+                  onMouseDown={(e) => {
+                    e.preventDefault();
+                    insertMention(entry);
+                  }}
+                  onMouseEnter={() => setSel(i)}
+                  className={`w-full flex items-center gap-2 px-2.5 py-1.5 text-left transition-colors ${
+                    i === sel ? "bg-bg-2" : "hover:bg-state-hover"
+                  }`}
+                >
+                  <svg className="ico-12 shrink-0 text-text-4">
+                    <use href={entry.isDir ? "#i-folder" : "#i-file"} />
+                  </svg>
+                  <span className="font-mono text-sm text-text-1 truncate">
+                    {entry.kind === "terminal" ? "@terminal" : entry.name}
+                    {entry.isDir ? "/" : ""}
+                  </span>
+                  <span className="flex-1 truncate text-xs text-text-4 text-right">
+                    {entry.kind === "terminal" ? "recent terminal output" : entry.path}
+                  </span>
+                </button>
+              ),
+            )}
           </PopupShell>
         )}
 
@@ -703,9 +860,9 @@ function PopupShell({
         border: "1px solid var(--color-line-soft)",
       }}
     >
-      <div className="px-2.5 py-1 text-[10px] uppercase tracking-wider text-text-4">{heading}</div>
+      <div className="section-label px-2.5 py-1">{heading}</div>
       {children}
-      <div className="px-2.5 pt-1 pb-0.5 text-[10px] text-text-4 border-t border-line-soft mt-1">
+      <div className="px-2.5 pt-1 pb-0.5 text-2xs text-text-4 border-t border-line-soft mt-1">
         {footer}
       </div>
     </div>

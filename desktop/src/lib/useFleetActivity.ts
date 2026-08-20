@@ -5,7 +5,8 @@
 // sidebar pulse and the HUD always agree on what "working" means:
 //   - stream coding-agent tabs  → the channel's `running` flag
 //   - PTY / chat coding-agent tabs → the OSC-777 event status (`in_progress`)
-//   - native Aura chat sessions → an in-flight turn, or a `running` status
+//   - native Aura chat sessions → an in-flight turn, or a *recent* `running`
+//     status (see `isSessionWorking` — the stored flag outlives dead processes)
 //
 // GLOBAL by design: the user asked for "when ANYTHING is working" — so this
 // counts every working agent across every open workspace/worktree, not just the
@@ -38,6 +39,43 @@ export type FleetActivity = {
 function sameRoot(a: string, b: string): boolean {
   const norm = (p: string) => (p.length > 1 ? p.replace(/\/+$/, "") : p);
   return norm(a) === norm(b);
+}
+
+// How long a session may go silent and still count as working.
+//
+// `status: "running"` is PERSISTED to `~/.aura/manager-sessions/<id>.json`, and
+// nothing rewrites it when the process holding that turn dies — a crash, a
+// force-quit, a machine reboot mid-turn all leave the flag set forever. So the
+// flag alone answers "did this session ever start a turn", not the question
+// this module exists to answer, which is "is anything working right now".
+//
+// It had been answering the wrong one for months: two sessions on this machine
+// were still flagged running, one last touched six days earlier and one
+// seventy-eight days earlier, and the roster drew a live loader beside both of
+// their projects on every launch — including the bundled Get Started sample, so
+// a brand-new user's very first screen showed a spinner for an agent that was
+// never running. A loader that is always on says nothing at all.
+//
+// `updated_at` is the honest liveness signal: `ManagerSession::touch()` stamps
+// it on every message and every tool call, so a working agent refreshes it
+// continuously. Thirty minutes is deliberately far past any real gap between
+// two turn events — the point is to bury the ghosts, not to police slow work,
+// and a session that speaks again is counted again on the very next poll.
+const STALE_RUNNING_SECS = 30 * 60;
+
+/** Is this session working *right now*?
+ *
+ *  An in-flight turn is authoritative and needs no timer: this process armed
+ *  it, so we know first-hand that it is live. The persisted `running` status is
+ *  the fallback that covers a turn still going after its view unmounted, and it
+ *  is the one that can outlive its process — so it has to prove recency. */
+export function isSessionWorking(
+  s: { id: string; status: string; updated_at: number },
+  nowSecs: number,
+): boolean {
+  if (isManagerTurnInFlight(s.id)) return true;
+  if (s.status !== "running") return false;
+  return nowSecs - s.updated_at < STALE_RUNNING_SECS;
 }
 
 /** Reactive count of agents actively working, fleet-wide. Recomputes when any
@@ -76,9 +114,13 @@ export function useFleetActivity(
 
     // Native Aura chat sessions, any workspace. `isManagerTurnInFlight` reacts
     // immediately on the next store tick; the persisted `running` status covers
-    // a turn still going after a view unmount (the summary poll refreshes it).
+    // a turn still going after a view unmount, and must prove it isn't a ghost
+    // left behind by a dead process (see `isSessionWorking`). Recency is judged
+    // at memo time, which the 5s summary poll re-runs — so a session that goes
+    // stale drops out within a tick of crossing the line.
+    const nowSecs = Date.now() / 1000;
     for (const s of summaries) {
-      if (!(isManagerTurnInFlight(s.id) || s.status === "running")) continue;
+      if (!isSessionWorking(s, nowSecs)) continue;
       count += 1;
       if (s.repo_root && inProject(s.repo_root)) inProjectCount += 1;
     }
@@ -112,8 +154,9 @@ export function useWorkingRoots(): Set<string> {
           : ptyStatuses.get(t.sessionId)?.kind === "in_progress";
       if (busy) roots.add(norm(t.repoRoot));
     }
+    const nowSecs = Date.now() / 1000;
     for (const s of summaries) {
-      if (!(isManagerTurnInFlight(s.id) || s.status === "running")) continue;
+      if (!isSessionWorking(s, nowSecs)) continue;
       if (s.repo_root) roots.add(norm(s.repo_root));
     }
     return roots;

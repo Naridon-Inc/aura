@@ -14,7 +14,7 @@
 //   Approved              — your PR, approved, ready to merge
 //   Waiting for reviewers — your PR, no decision yet
 //   Drafts                — your draft PRs
-//   Merging / merged      — your PR, recently merged
+//   Merged & closed       — anything no longer open, however it ended
 //   Waiting for author    — you reviewed someone else's PR (returned)
 //
 // Click a row → opens the singleton PRDetailPane via
@@ -36,7 +36,17 @@ import {
   subscribePrList,
 } from "../../lib/prsCache";
 import { useEditorStore } from "../../lib/editorStore";
+import {
+  EyeOff,
+  FolderGit2,
+  GitPullRequest,
+  LogIn,
+  RefreshCw,
+} from "lucide-react";
 import { Button } from "../ui/button";
+import { EmptyState, ErrorState, LoadingState } from "../ui/state";
+import { relativeAgeFromIso } from "../../lib/relativeTime";
+import { sentenceCase } from "../../lib/textCase";
 
 // Shared filter state — the InboxPane's bucket list and the
 // InboxSidebar (mounted in the app's left sidebar slot when PR surface
@@ -74,7 +84,10 @@ export const BUCKET_LABEL: Record<Bucket, string> = {
   approved: "Approved",
   waiting_reviewers: "Waiting for reviewers",
   drafts: "Drafts",
-  merged: "Merging and recently merged",
+  // Closed-without-merging lands here too, so the label has to cover it —
+  // and the old "Merging and recently merged" was long enough that the
+  // rail's chip truncated it mid-word.
+  merged: "Merged & closed",
   waiting_author: "Waiting for author",
 };
 
@@ -187,25 +200,29 @@ export function InboxPane({ repoRoot, onClose }: Props) {
       {/* Scrollable bucket list */}
       <div className="h-full overflow-y-auto">
         <header className="flex items-center h-10 px-5 border-b border-line-soft sticky top-0 bg-bg-content z-10">
-          <span className="text-text-1 text-[13px] font-semibold">
+          <span className="text-text-1 text-base font-semibold">
             {activeFilter ? BUCKET_LABEL[activeFilter] : "All pull requests"}
           </span>
-          <span className="ml-2 text-text-4 text-[11px] tabular-nums">
+          <span className="ml-2 text-text-4 text-xs tabular-nums">
             {activeFilter ? buckets[activeFilter].length : total}
           </span>
         </header>
 
         {loading ? (
-          <Hint>loading PRs…</Hint>
+          <LoadingState label="Fetching pull requests…" />
         ) : error ? (
-          <ErrorHint message={error} />
+          <ErrorHint message={error} onRetry={() => void refresh(true)} />
         ) : total === 0 ? (
-          <Hint>
-            no open PRs in this repo. (uses{" "}
-            <span className="font-mono">gh pr list</span> — log in with{" "}
-            <span className="font-mono">gh auth login</span> if this looks
-            wrong.)
-          </Hint>
+          <EmptyState
+            icon={GitPullRequest}
+            title="Nothing waiting on you"
+            body="A pull request is a change someone wants to put into the project, held back until it's been looked at. There are none open right now."
+            action={{
+              label: "Check again",
+              onClick: () => void refresh(true),
+              icon: RefreshCw,
+            }}
+          />
         ) : (
           visibleBuckets.map((b) =>
             buckets[b].length > 0 ? (
@@ -243,10 +260,17 @@ export function bucketize(prs: PrSummary[]): Record<Bucket, PrSummary[]> {
     waiting_author: [],
   };
   for (const p of prs) {
-    // Merged / merging — surface even if state changes; gh only returns
-    // open PRs by default but the field exists in case the proxy ever
-    // includes recently-merged.
-    if (p.state.toLowerCase() === "merged") {
+    // Anything that isn't open is history, and history has one bucket.
+    //
+    // Only `merged` used to land here, and the fetch behind this asks for
+    // `--state all` — so every *closed* PR fell straight through into the
+    // live buckets below. A PR you opened and closed without merging came
+    // out as "Waiting for reviewers": a queue of work waiting on people
+    // who will never look at it, because there is nothing left to review.
+    // That's what pushed the rail's buckets past its own total — 17 in a
+    // bucket, under a chip reading 10.
+    const state = p.state.toLowerCase();
+    if (state !== "open") {
       out.merged.push(p);
       continue;
     }
@@ -337,8 +361,8 @@ export function InboxSidebar({
   return (
     <aside className="h-full w-full flex flex-col bg-bg-content">
       <div className="p-3">
-        <h3 className="text-text-1 text-[13px] font-semibold mb-1">Inbox</h3>
-        <p className="text-text-4 text-[11px] leading-relaxed">
+        <h3 className="text-text-1 text-base font-semibold mb-1">Inbox</h3>
+        <p className="text-text-4 text-xs leading-relaxed">
           Pull requests grouped by your relationship to them.{" "}
           {viewer ? (
             <>
@@ -419,33 +443,44 @@ function FilterItem({
     <button
       type="button"
       onClick={onClick}
-      className={`w-full flex items-center gap-2 px-2.5 py-1.5 rounded-md text-[12px] transition-colors ${
+      className={`w-full flex items-center gap-2 px-2.5 py-1.5 rounded-md text-sm transition-colors ${
         active
           ? "bg-bg-2 text-text-1"
-          : "text-text-3 hover:bg-bg-2 hover:text-text-1"
+          : "text-text-3 hover:bg-state-hover hover:text-text-1"
       }`}
     >
       {dot !== null && (
         <span className={`w-1.5 h-1.5 rounded-full ${dot}`} />
       )}
       <span className="flex-1 text-left truncate">{label}</span>
-      <span className="text-[11px] text-text-4 tabular-nums">{count}</span>
+      <span className="text-xs text-text-4 tabular-nums">{count}</span>
     </button>
   );
 }
 
-function Hint({ children }: { children: React.ReactNode }) {
+/** A command to run, sized to sit inside an empty state's body without
+ *  turning it into a code block the eye lands on before the sentence. */
+function Cmd({ children }: { children: string }) {
   return (
-    <div className="text-text-4 text-[12px] px-5 py-4 max-w-prose">
+    <pre className="mt-2 inline-block rounded bg-bg-2 px-2.5 py-1.5 text-left font-mono text-xs leading-relaxed text-text-2">
       {children}
-    </div>
+    </pre>
   );
 }
 
-function ErrorHint({ message }: { message: string }) {
-  // Friendly empty-state when the project isn't a git repo at all.
-  // Recognises git2 / gh / git error phrasings; keeps the raw message
-  // available for everything else (network, etc).
+function ErrorHint({
+  message,
+  onRetry,
+}: {
+  message: string;
+  onRetry: () => void;
+}) {
+  // Every one of these is a *diagnosis*: the raw stderr behind them is
+  // hostile ("HTTP 401: Bad credentials", "could not read Username for
+  // 'https://github.com'"), and showing it verbatim tells the reader
+  // nothing they can act on. So each recognised cause gets its own name,
+  // its own sentence and its own fix, and only the unrecognised case falls
+  // through to the raw text.
   const m = message.toLowerCase();
   const notGitRepo =
     m.includes("not a git repository") ||
@@ -453,26 +488,24 @@ function ErrorHint({ message }: { message: string }) {
     m.includes("no such file or directory: .git");
   if (notGitRepo) {
     return (
-      <div className="px-5 py-10 text-[12.5px] space-y-3 max-w-prose">
-        <div className="text-text-1 font-medium">Not a git repository yet</div>
-        <p className="text-text-3 leading-relaxed">
-          Pull requests live on top of a git history. Initialise this folder
-          as a git repo and add a remote, then come back — Aura will pick up
-          the PRs automatically.
-        </p>
-        <pre className="bg-bg-2 text-text-2 font-mono text-[11.5px] px-3 py-2 rounded-md whitespace-pre-wrap">
-{`git init
-git remote add origin <your-remote-url>
-git fetch
-`}
-        </pre>
-        <p className="text-text-4 text-[11.5px]">
-          You'll also need{" "}
-          <span className="font-mono">gh auth login</span> from{" "}
-          <span className="font-mono">cli.github.com</span> for Inbox to see
-          PRs.
-        </p>
-      </div>
+      <EmptyState
+        icon={FolderGit2}
+        title="This folder isn’t being tracked yet"
+        body={
+          <>
+            Pull requests are proposed changes to a project’s history, and
+            this folder doesn’t have one. Start tracking it and point it at a
+            remote, and the pull requests appear on their own.
+            <Cmd>{`git init\ngit remote add origin <your-remote-url>\ngit fetch`}</Cmd>
+          </>
+        }
+        footnote={
+          <>
+            You’ll also need the GitHub command-line tool signed in. {" "}
+            <code className="font-mono">gh auth login</code>.
+          </>
+        }
+      />
     );
   }
   // Switched gh accounts, signed out, no token, or hit a 401/403 — the
@@ -506,50 +539,55 @@ git fetch
     (m.includes("graphql") && m.includes("repository"));
   if (isAuth) {
     return (
-      <div className="px-5 py-10 text-[12.5px] space-y-3 max-w-prose">
-        <div className="text-text-1 font-medium">Sign in to GitHub to see PRs</div>
-        <p className="text-text-3 leading-relaxed">
-          Aura uses the GitHub CLI for pull requests. Sign in (or re-sign in
-          if you switched accounts) and the inbox will populate automatically.
-        </p>
-        <pre className="bg-bg-2 text-text-2 font-mono text-[11.5px] px-3 py-2 rounded-md whitespace-pre-wrap">{`gh auth login`}</pre>
-        <p className="text-text-4 text-[11.5px]">
-          Then click Refresh, or wait a few seconds for the inbox to retry.
-        </p>
-      </div>
+      <EmptyState
+        icon={LogIn}
+        title="Sign in to GitHub to see pull requests"
+        body={
+          <>
+            Aura reads pull requests through GitHub’s own command-line tool, so
+            it needs to know who you are. Sign in (or sign in again, if you
+            switched accounts) and this list fills itself.
+            <Cmd>gh auth login</Cmd>
+          </>
+        }
+        action={{ label: "Check again", onClick: onRetry, icon: RefreshCw }}
+      />
     );
   }
   if (isNoAccess) {
     return (
-      <div className="px-5 py-10 text-[12.5px] space-y-3 max-w-prose">
-        <div className="text-text-1 font-medium">No PRs to show</div>
-        <p className="text-text-3 leading-relaxed">
-          The active GitHub account can't see this repository — it may be
-          private and only visible to a different account you signed into,
-          or the repo was renamed/transferred. Re-sign in with the account
-          that has access:
-        </p>
-        <pre className="bg-bg-2 text-text-2 font-mono text-[11.5px] px-3 py-2 rounded-md whitespace-pre-wrap">{`gh auth switch
-# or
-gh auth login`}</pre>
-        <p className="text-text-4 text-[11.5px]">
-          Then click Refresh.
-        </p>
-      </div>
+      <EmptyState
+        icon={EyeOff}
+        title="This account can’t see the project"
+        body={
+          <>
+            The GitHub account you’re signed in as doesn’t have access to this
+            one. It may be private and visible only to another account of
+            yours, or it may have been renamed or moved. Switch to the account
+            that can see it.
+            <Cmd>{`gh auth switch\n# or\ngh auth login`}</Cmd>
+          </>
+        }
+        action={{ label: "Check again", onClick: onRetry, icon: RefreshCw }}
+      />
     );
   }
   return (
-    <div className="px-5 py-4 text-[12px] space-y-2 max-w-prose">
-      <div className="text-red-400 font-mono whitespace-pre-wrap">
-        {message}
-      </div>
-      <div className="text-text-4">
-        Install GitHub CLI from{" "}
-        <span className="font-mono">https://cli.github.com/</span> and run{" "}
-        <span className="font-mono">gh auth login</span> in this repo, then
-        click Refresh.
-      </div>
-    </div>
+    <ErrorState
+      title="Couldn’t reach GitHub"
+      message={
+        <>
+          <span className="block font-mono text-xs text-text-4">{message}</span>
+          <span className="mt-2 block">
+            Aura reads pull requests through GitHub’s command-line tool. If it
+            isn’t installed yet, get it from{" "}
+            <code className="font-mono">cli.github.com</code> and sign in with{" "}
+            <code className="font-mono">gh auth login</code>.
+          </span>
+        </>
+      }
+      onRetry={onRetry}
+    />
   );
 }
 
@@ -577,7 +615,7 @@ function Section({
       <button
         type="button"
         onClick={onToggle}
-        className="w-full flex items-center gap-2.5 px-5 py-2.5 hover:bg-bg-2 transition-colors"
+        className="w-full flex items-center gap-2.5 px-5 py-2.5 hover:bg-state-hover transition-colors"
       >
         <svg
           width="11"
@@ -594,15 +632,15 @@ function Section({
             fill="none"
           />
         </svg>
-        <span className="text-[11px] text-text-4 tabular-nums">{count}</span>
+        <span className="text-xs text-text-4 tabular-nums">{count}</span>
         <span className={`w-1.5 h-1.5 rounded-full ${dot}`} />
-        <span className="text-[12px] text-text-1 font-semibold">{title}</span>
+        <span className="text-sm text-text-1 font-semibold">{title}</span>
       </button>
 
       {expanded && rows.length > 0 && (
         <div>
           {/* column header */}
-          <div className="flex items-center px-5 py-1.5 text-[10px] font-medium text-text-4 uppercase tracking-wider border-t border-line-soft/40 bg-bg-1/30">
+          <div className="section-label flex items-center px-5 py-1.5 border-t border-line-soft/40 bg-bg-1/30">
             <div className="w-6" />
             <div className="flex-1 pl-2">Title</div>
             <div className="w-24 text-right">Status</div>
@@ -650,8 +688,8 @@ function Row({
     <button
       type="button"
       onClick={onSelect}
-      className={`w-full text-left flex items-center px-5 py-2.5 hover:bg-bg-2 transition-colors border-t border-line-soft/40 ${
-        selected ? "bg-bg-2" : ""
+      className={`w-full text-left flex items-center px-5 py-2.5 hover:bg-state-hover transition-colors border-t border-line-soft/40 ${
+        selected ? "bg-state-selected" : ""
       }`}
     >
       <div className="w-6 flex justify-center">
@@ -667,14 +705,14 @@ function Row({
 
       <div className="flex-1 pl-2 min-w-0">
         <div className="flex items-baseline gap-2 min-w-0">
-          <span className="text-[11px] text-text-4 tabular-nums flex-shrink-0">
+          <span className="text-xs text-text-4 tabular-nums flex-shrink-0">
             #{row.number}
           </span>
-          <span className="text-[12.5px] text-text-1 truncate">
+          <span className="text-base text-text-1 truncate">
             {row.title}
           </span>
         </div>
-        <div className="text-[11px] text-text-4 mt-0.5 flex items-center gap-2 tabular-nums min-w-0">
+        <div className="text-xs text-text-4 mt-0.5 flex items-center gap-2 tabular-nums min-w-0">
           <span className="truncate">{row.author}</span>
           <span>·</span>
           <span className="font-mono truncate">{row.head_ref}</span>
@@ -685,11 +723,11 @@ function Row({
 
       <div className="w-24 flex items-center justify-end gap-1.5">
         {row.review_decision ? (
-          <span className={`text-[11px] ${decisionTone}`}>
+          <span className={`text-xs ${decisionTone}`}>
             {humanReviewDecision(row.review_decision)}
           </span>
         ) : (
-          <span className="text-[11px] text-text-4">—</span>
+          <span className="text-xs text-text-4">·</span>
         )}
         {row.checks_state && (
           <span
@@ -705,34 +743,26 @@ function Row({
         )}
       </div>
 
-      <div className="w-24 text-right text-[11px] tabular-nums">
+      <div className="w-24 text-right text-xs tabular-nums">
         <span className="text-green-400">+{row.additions}</span>
         <span className="text-text-4"> / </span>
         <span className="text-red-400">−{row.deletions}</span>
       </div>
 
-      <div className="w-16 text-right text-[11px] text-text-4 tabular-nums">
+      <div className="w-16 text-right text-xs text-text-4 tabular-nums">
         {formatAge(row.updated_at)}
       </div>
     </button>
   );
 }
 
+/** `CHANGES_REQUESTED` → "Changes requested" — byte-identical to the one the
+ *  PR rail had, and now the same call. See lib/textCase. */
 function humanReviewDecision(d: string): string {
-  return d
-    .toLowerCase()
-    .replace(/_/g, " ")
-    .replace(/\b\w/g, (c) => c.toUpperCase());
+  return sentenceCase(d.toLowerCase().replace(/_/g, " "));
 }
 
 function formatAge(iso: string): string {
-  if (!iso) return "—";
-  const t = Date.parse(iso);
-  if (Number.isNaN(t)) return "—";
-  const diff = Math.floor((Date.now() - t) / 1000);
-  if (diff < 60) return "<1m";
-  if (diff < 3600) return `${Math.floor(diff / 60)}m`;
-  if (diff < 86400) return `${Math.floor(diff / 3600)}h`;
-  if (diff < 2592000) return `${Math.floor(diff / 86400)}d`;
-  return `${Math.floor(diff / 2592000)}mo`;
+  // One ladder for the whole app — see lib/relativeTime.
+  return relativeAgeFromIso(iso, { style: "compact", empty: "—" });
 }

@@ -21,8 +21,16 @@
 //!
 //! [`discover`] enumerates the checkouts, [`overview`] joins them against agent
 //! activity, [`render`] and [`cmd`] are the `aura worktrees` surface.
+//!
+//! Two later additions finish the loop from *seeing* another checkout to
+//! *handing it work*: [`board_root`] anchors the task board to the repository
+//! so every checkout reads one board rather than quietly starting its own, and
+//! [`assign`] addresses a task to an agent in a named checkout and tells that
+//! agent it has arrived.
 
 pub mod api;
+pub mod assign;
+pub mod board_root;
 pub mod cmd;
 pub mod discover;
 pub mod migrate;

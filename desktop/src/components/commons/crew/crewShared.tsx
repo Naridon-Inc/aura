@@ -10,23 +10,31 @@ import {
 import { AsciiSpinner } from "../../ui/ascii-spinner";
 
 import type { LoopTask } from "../../../lib/api";
+import { relativeAgeAuto } from "../../../lib/relativeTime";
+import { monogram } from "../../../lib/monogram";
 import { AgentIcon } from "../../agent/AgentIcon";
 import { agentDisplayLabel, canonicalAgentId } from "../../../lib/agentIdentity";
 import { StatusChip, type ChipTone } from "../../ui/statusChip";
 import { StateGlyph } from "../../tasks/StatePill";
 import { proofLabel, type CrewProof } from "./crewProof";
+import { WORK_STATE } from "../../../lib/workState";
 
-// One palette, used as a left-border accent everywhere. Arctic-blue for "ready
-// to go", amber for "an agent is on it", green for done, red for a failure,
-// muted for blocked/other. Green/red are status-only — never affordances.
+// One palette, used as a left-border accent everywhere — the crew's key names
+// for the app's work-state ramp. Green and red are status-only, never
+// affordances.
+//
+// This said "arctic-blue for ready to go". --color-accent has been emerald
+// since the theme was re-cut, so `ready` and `done` were two greens one ramp
+// apart, which on a row of dots reads as one colour. Ready isn't a live state
+// and doesn't need a hue — see lib/workState.
 export const CREW_ACCENT = {
-  ready: "var(--color-accent)",
-  working: "var(--color-amber)",
-  done: "var(--color-accent-green)",
-  failed: "var(--color-red)",
-  blocked: "var(--color-text-5)",
-  paused: "var(--color-text-5)",
-  other: "var(--color-text-5)",
+  ready: WORK_STATE.ready.color,
+  working: WORK_STATE.working.color,
+  done: WORK_STATE.done.color,
+  failed: WORK_STATE.failed.color,
+  blocked: WORK_STATE.blocked.color,
+  paused: WORK_STATE.paused.color,
+  other: WORK_STATE.queued.color,
 } as const;
 
 export const PRIORITY_TONE: Record<string, ChipTone> = {
@@ -67,22 +75,35 @@ export function StatusGlyph({
 /** Plain-language "how long ago", tolerant of seconds- or millis-epoch (loop
  *  nodes stamp seconds; the goals ledger stamps millis). Empty for missing. */
 export function relativeTime(unix: number | null | undefined): string {
-  if (!unix || unix <= 0) return "";
-  const ms = unix < 1e12 ? unix * 1000 : unix;
-  const diff = Date.now() - ms;
-  if (diff < 0) return "just now";
-  const s = Math.floor(diff / 1000);
-  if (s < 45) return "just now";
-  const m = Math.floor(s / 60);
-  if (m < 60) return `${m}m ago`;
-  const h = Math.floor(m / 60);
-  if (h < 24) return `${h}h ago`;
-  const d = Math.floor(h / 24);
-  if (d < 7) return `${d}d ago`;
-  if (d < 30) return `${Math.floor(d / 7)}w ago`;
-  const mo = Math.floor(d / 30);
-  if (mo < 12) return `${mo}mo ago`;
-  return `${Math.floor(mo / 12)}y ago`;
+  // One ladder for the whole app — see lib/relativeTime. The seconds-or-millis
+  // tolerance moved there with it; this file is where it was worked out, and
+  // it is a fact about our data rather than a nicety.
+  //
+  // The rungs it used to carry had the 45-to-60-second hole: under 45 seconds
+  // was "just now", and the next line divided by 60 and floored, so anything
+  // 45s to 59s old printed "0m ago".
+  return relativeAgeAuto(unix);
+}
+
+/** Whether stamping the agent on every row of a list tells the reader anything.
+ *
+ *  It only does when they differ. Hand a whole queue to one agent — the normal
+ *  case — and the mark repeats down twenty-four rows in the one colour this app
+ *  reserves for agents, distinguishing none of them: the loudest thing in the
+ *  pane, saying the same word over and over. Put a second agent on the board and
+ *  it becomes the fastest way to tell whose is whose, so it comes back on its
+ *  own. Callers that know the whole visible set decide; a row can't see its
+ *  neighbours. */
+export function agentsWorthNaming(
+  kinds: Iterable<string | null | undefined>,
+): boolean {
+  let first: string | null = null;
+  for (const k of kinds) {
+    if (!k) continue;
+    if (first === null) first = k;
+    else if (k !== first) return true;
+  }
+  return false;
 }
 
 /** The agent logo for a node, or a neutral "unassigned" dot. */
@@ -99,7 +120,7 @@ export function AgentBit({
   if (!canonical) {
     return (
       <span
-        className="grid shrink-0 place-items-center rounded-full bg-bg-2 text-[9px] font-medium text-text-4"
+        className="grid shrink-0 place-items-center rounded-full bg-bg-2 text-2xs font-medium text-text-4"
         style={{ width: size, height: size }}
         title="No agent assigned yet"
       >
@@ -120,10 +141,8 @@ export function AgentBit({
 
 /** Initials for a human assignee — "Ada Lovelace" → "AL". */
 export function initials(name: string): string {
-  const parts = name.trim().split(/\s+/).filter(Boolean);
-  if (parts.length === 0) return "?";
-  if (parts.length === 1) return parts[0]!.slice(0, 2).toUpperCase();
-  return (parts[0]![0]! + parts[parts.length - 1]![0]!).toUpperCase();
+  // One monogram for the whole app — see lib/monogram.
+  return monogram(name);
 }
 
 /** A small initials chip standing in for the TEAMMATE who owns this task —
@@ -180,7 +199,7 @@ export function PriorityChip({ priority }: { priority: string }) {
 export function CommitChip({ sha }: { sha: string }) {
   return (
     <span
-      className="inline-flex items-center gap-1 text-[10.5px] text-text-4"
+      className="inline-flex items-center gap-1 text-xs text-text-4"
       title={sha}
     >
       <GitCommitHorizontal size={11} />
@@ -210,7 +229,7 @@ export function ProofPill({ proof }: { proof: CrewProof }) {
 export function WorkingLine({ agentKind }: { agentKind?: string | null }) {
   const canonical = agentKind ? canonicalAgentId(agentKind) : null;
   return (
-    <span className="inline-flex items-center gap-1 text-[10.5px] text-text-4">
+    <span className="inline-flex items-center gap-1 text-xs text-text-4">
       <AsciiSpinner />
       running on {canonical ? agentDisplayLabel(canonical) : "the Aura brain"}
     </span>

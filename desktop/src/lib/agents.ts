@@ -28,7 +28,7 @@ export const MANAGER_AGENT: Agent = {
   id: "aura-manager",
   label: "Aura",
   monogram: "M",
-  description: "Coordinator — fans out to subagents, chains their outputs",
+  description: "Coordinator. Fans out to subagents, chains their outputs",
   available: true,
   continuable: true,
 };

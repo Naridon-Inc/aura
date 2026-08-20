@@ -36,6 +36,16 @@ pub struct IntentRow {
     pub intent_type: Option<String>,
     pub signed_block_id: Option<String>,
     pub key_id: Option<String>,
+    /// Where the `intent` text came from, when the mutation guard wrote this
+    /// row rather than an agent calling `log-intent`: `session_prompt`,
+    /// `brain_inferred` or `guard_auto_stub` (see the desktop shell's
+    /// `agent_mutation_guard`). `None` means somebody stated it.
+    ///
+    /// Modelled here because `intent-vs-actual` judges the intent text against
+    /// the AST, and a `brain_inferred` line was written *from* that AST — it
+    /// agrees with the diff by construction, and the check reported "aligned"
+    /// with no way for a caller to know the two sides weren't independent.
+    pub source: Option<String>,
 }
 
 impl IntentRow {
@@ -53,6 +63,9 @@ impl IntentRow {
         }
         if let Some(kid) = &self.key_id {
             v["key_id"] = json!(kid);
+        }
+        if let Some(src) = &self.source {
+            v["source"] = json!(src);
         }
         v
     }
@@ -86,6 +99,15 @@ pub fn parse_intent_line(line: &str) -> Option<IntentRow> {
         .get("key_id")
         .and_then(|t| t.as_str())
         .map(|s| s.to_string());
+    // Written by the mutation guard, nested under the changeset it wrote. A
+    // top-level `source` is accepted too so a re-serialised row (`to_json`
+    // above) round-trips.
+    let source = v
+        .get("changeset")
+        .and_then(|c| c.get("source"))
+        .or_else(|| v.get("source"))
+        .and_then(|t| t.as_str())
+        .map(|s| s.to_string());
     Some(IntentRow {
         timestamp,
         agent_id,
@@ -93,6 +115,7 @@ pub fn parse_intent_line(line: &str) -> Option<IntentRow> {
         intent_type,
         signed_block_id,
         key_id,
+        source,
     })
 }
 
@@ -366,6 +389,7 @@ mod tests {
             intent_type: t.map(|s| s.into()),
             signed_block_id: None,
             key_id: None,
+            source: None,
         }
     }
 
@@ -377,6 +401,38 @@ mod tests {
         assert!(!is_canonical_intent_type("BugFx"));
         assert!(!is_canonical_intent_type("bugfix"));
         assert!(!is_canonical_intent_type(""));
+    }
+
+    #[test]
+    fn parse_reads_the_guards_source_off_the_changeset() {
+        // The shape `agent_mutation_guard` writes: the tag lives inside the
+        // changeset, not at the top level. Nothing read it for a long time,
+        // which is how a line Aura's own model wrote from the diff came to be
+        // compared against that diff and reported as "aligned".
+        let line = r#"{"agent_id":"a","intent":"tightened retries","timestamp":100,"changeset":{"files":[],"source":"brain_inferred"}}"#;
+        let r = parse_intent_line(line).unwrap();
+        assert_eq!(r.source.as_deref(), Some("brain_inferred"));
+    }
+
+    #[test]
+    fn a_stated_reason_has_no_source() {
+        let line = r#"{"agent_id":"a","intent":"x","timestamp":100,"changeset":{"files":[]}}"#;
+        assert_eq!(parse_intent_line(line).unwrap().source, None);
+        let bare = r#"{"agent_id":"a","intent":"x","timestamp":100}"#;
+        assert_eq!(parse_intent_line(bare).unwrap().source, None);
+    }
+
+    #[test]
+    fn source_survives_a_round_trip_through_to_json() {
+        // `meta_bundle` re-emits rows through `to_json`; a row that loses its
+        // source on the way out comes back looking like somebody stated it.
+        let mut r = row(100, None, "x");
+        r.source = Some("guard_auto_stub".into());
+        let line = serde_json::to_string(&r.to_json()).unwrap();
+        assert_eq!(
+            parse_intent_line(&line).unwrap().source.as_deref(),
+            Some("guard_auto_stub")
+        );
     }
 
     #[test]

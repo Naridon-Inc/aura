@@ -10,28 +10,9 @@
 // from a hand check.
 
 import { useState } from "react";
-import type { GoalRun, GoalVerdict } from "../../lib/goalStore";
-
-const VERDICT: Record<GoalVerdict, { label: string; color: string }> = {
-  verified: { label: "Reached", color: "var(--color-accent-green)" },
-  partial: { label: "Partly there", color: "var(--color-amber)" },
-  not_wired: { label: "Not reached", color: "var(--color-red)" },
-  unknown: { label: "Not checked", color: "var(--color-text-4)" },
-};
-
-function ago(ms: number): string {
-  const s = Math.max(0, Math.floor((Date.now() - ms) / 1000));
-  if (s < 60) return "just now";
-  const m = Math.floor(s / 60);
-  if (m < 60) return `${m}m ago`;
-  const h = Math.floor(m / 60);
-  if (h < 24) return `${h}h ago`;
-  const d = Math.floor(h / 24);
-  if (d < 30) return `${d}d ago`;
-  const mo = Math.floor(d / 30);
-  if (mo < 12) return `${mo}mo ago`;
-  return `${Math.floor(mo / 12)}y ago`;
-}
+import type { GoalRun } from "../../lib/goalStore";
+import { VERDICT } from "../../lib/goalVerdict";
+import { relativeAge } from "../../lib/relativeTime";
 
 const SHOWN = 6;
 
@@ -62,20 +43,20 @@ function ThreadRow({
       </div>
       <div className="min-w-0 flex-1 pb-2.5">
         <div className="flex items-center gap-2">
-          <span className="text-[11.5px] font-medium" style={{ color: v.color }}>
+          <span className="text-sm font-medium" style={{ color: v.color }}>
             {v.label}
           </span>
           {run.total > 0 ? (
-            <span className="text-[10px] text-text-4 tabular-nums">{run.ok}/{run.total} in place</span>
+            <span className="text-2xs text-text-4 tabular-nums">{run.ok}/{run.total} in place</span>
           ) : null}
           {onCommit ? (
-            <span className="rounded-sm border border-line-soft px-1 py-px text-[9px] uppercase tracking-wide text-text-4">
+            <span className="meta-tag">
               on commit
             </span>
           ) : null}
-          <span className="ml-auto text-[10px] text-text-5">{ago(run.at)}</span>
+          <span className="ml-auto text-2xs text-text-5">{relativeAge(run.at)}</span>
         </div>
-        <div className="mt-0.5 flex items-center gap-1.5 text-[10.5px] text-text-4">
+        <div className="mt-0.5 flex items-center gap-1.5 text-xs text-text-4">
           <span className="min-w-0 truncate">{who}</span>
           {run.commit ? (
             <>
@@ -106,7 +87,7 @@ export function FeatureHistory({
   const commits = new Set(runs.filter((r) => r.commit).map((r) => r.commit)).size;
   return (
     <section>
-      <div className="mb-2 text-[10px] uppercase tracking-wider text-text-4">
+      <div className="section-label mb-2">
         The feature&apos;s thread
         <span className="ml-1.5 normal-case tracking-normal text-text-5">
           {runs.length} check{runs.length === 1 ? "" : "s"}
@@ -127,7 +108,7 @@ export function FeatureHistory({
         <button
           type="button"
           onClick={() => setExpanded(true)}
-          className="text-[10.5px] text-text-4 hover:text-text-2 transition-colors"
+          className="text-xs text-text-4 hover:text-text-2 transition-colors"
         >
           Show {hidden} earlier check{hidden === 1 ? "" : "s"}
         </button>

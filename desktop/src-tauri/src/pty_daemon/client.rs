@@ -218,8 +218,47 @@ pub struct DaemonHealth {
 /// Convenience: open a session via the daemon. Each call uses a
 /// fresh control connection (cheap; a UNIX socket connect is
 /// microseconds) so we don't have to share one across tasks.
+/// The environment a daemon-spawned child must start from.
+///
+/// A child spawned in-process gets the app's whole environment for free —
+/// portable-pty's `CommandBuilder::new` seeds every child from
+/// `std::env::vars_os()`. A child spawned in the daemon gets the *daemon's*
+/// environment, and the daemon is a long-lived process launchd starts with a
+/// bare `/usr/local/bin:/usr/bin:/bin:…`: no `~/.local/bin`, no homebrew, no
+/// `~/.cargo/bin`, and none of the keys a login shell exports. It also outlives
+/// the app instance that spawned it, so its environment is stale by
+/// construction, not just minimal. `pi` found `/usr/local/bin/node` (v20.10.0)
+/// that way — below its own `engines: >=22.19.0` — and died inside undici
+/// before printing a line, on a machine whose PATH would have given it v22.
+///
+/// So send our own environment across the wire *underneath* the caller's vars:
+/// `server.rs` applies this list in order onto the CommandBuilder, so later
+/// entries win and everything a caller set explicitly still overrides what we
+/// inherited.
+///
+/// `TERM`/`COLORTERM` are the exception. The daemon sets those itself before
+/// applying this list, and a `TERM=dumb` inherited from whatever shell launched
+/// the app must not be able to downgrade an agent's TUI. The in-process path
+/// also sets them *after* inheriting — so skipping them here is the parity
+/// behaviour, not a hole in it.
+fn merge_env<I>(base: I, caller: Vec<(String, String)>) -> Vec<(String, String)>
+where
+    I: IntoIterator<Item = (String, String)>,
+{
+    let mut env: Vec<(String, String)> = base
+        .into_iter()
+        .filter(|(k, _)| k != "TERM" && k != "COLORTERM")
+        .collect();
+    env.extend(caller);
+    env
+}
+
 pub async fn open_session(o: OpenReq) -> Result<String, DaemonError> {
     let mut sock = connect_or_spawn().await?;
+    let o = OpenReq {
+        env: merge_env(std::env::vars(), o.env),
+        ..o
+    };
     send(&mut sock, &Request::Open(o)).await?;
     match recv_response(&mut sock).await? {
         Response::Opened { session_id } => Ok(session_id),
@@ -360,5 +399,74 @@ pub async fn subscribe(session_id: &str) -> Result<UnixStream, DaemonError> {
         other => Err(DaemonError::Protocol(format!(
             "unexpected response: {other:?}"
         ))),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn kv(k: &str, v: &str) -> (String, String) {
+        (k.to_string(), v.to_string())
+    }
+
+    fn lookup<'a>(env: &'a [(String, String)], key: &str) -> Option<&'a str> {
+        // Last write wins, matching how server.rs replays the list onto the
+        // CommandBuilder — so this reads the value the child would actually see.
+        env.iter()
+            .rev()
+            .find(|(k, _)| k == key)
+            .map(|(_, v)| v.as_str())
+    }
+
+    #[test]
+    fn the_child_inherits_our_path_not_the_daemons() {
+        // The whole bug in one assertion: without this the daemon's own
+        // launchd PATH is all a spawned agent ever sees, and node-based CLIs
+        // resolve /usr/local/bin/node no matter what the user has installed.
+        let base = vec![kv("PATH", "/Users/me/.local/bin:/opt/homebrew/bin")];
+        let env = merge_env(base, vec![kv("AURA_AGENT_ID", "pi")]);
+        assert_eq!(
+            lookup(&env, "PATH"),
+            Some("/Users/me/.local/bin:/opt/homebrew/bin")
+        );
+        assert_eq!(lookup(&env, "AURA_AGENT_ID"), Some("pi"));
+    }
+
+    #[test]
+    fn what_the_caller_sets_beats_what_we_inherited() {
+        // Ordering is the contract: a session pinned to this shell's socket,
+        // or to a specific repo root, must not be silently overwritten by a
+        // stale value hanging around in the app's own environment.
+        let base = vec![
+            kv("AURA_REPO_ROOT", "/somewhere/else"),
+            kv("HOME", "/Users/me"),
+        ];
+        let env = merge_env(base, vec![kv("AURA_REPO_ROOT", "/Users/me/project")]);
+        assert_eq!(lookup(&env, "AURA_REPO_ROOT"), Some("/Users/me/project"));
+        assert_eq!(lookup(&env, "HOME"), Some("/Users/me"));
+    }
+
+    #[test]
+    fn a_dumb_terminal_cannot_downgrade_the_agents_tui() {
+        // The daemon sets TERM/COLORTERM itself before applying this list.
+        // Inheriting them would let the shell that launched the app decide
+        // whether agents get colour — so they're the one pair we drop.
+        let base = vec![kv("TERM", "dumb"), kv("COLORTERM", ""), kv("LANG", "en_US")];
+        let env = merge_env(base, vec![]);
+        assert_eq!(lookup(&env, "TERM"), None);
+        assert_eq!(lookup(&env, "COLORTERM"), None);
+        assert_eq!(lookup(&env, "LANG"), Some("en_US"));
+    }
+
+    #[test]
+    fn the_real_process_env_is_what_gets_sent() {
+        // merge_env is pure, but open_session feeds it std::env::vars(); PATH
+        // is set in every environment this can run in, so it proves the wiring.
+        let env = merge_env(std::env::vars(), vec![]);
+        assert!(
+            lookup(&env, "PATH").is_some_and(|p| !p.is_empty()),
+            "the app's own PATH must reach the wire"
+        );
     }
 }

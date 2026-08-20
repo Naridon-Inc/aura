@@ -26,6 +26,7 @@ import { describeTool } from "./toolDescribe";
 import { ToolCard } from "./ToolCard";
 import { ReasoningBlock } from "./ReasoningBlock";
 import type { StreamBlock } from "./types";
+import { countOf } from "../../../lib/plural";
 
 type ToolBlock = Extract<StreamBlock, { kind: "tool" }>;
 
@@ -62,11 +63,6 @@ function toolFamily(block: ToolBlock): StepFamily {
   return "other";
 }
 
-/** Pluralize a count + noun for the summary clauses ("1 file" / "5 files"). */
-function plural(n: number, one: string, many: string): string {
-  return `${n} ${n === 1 ? one : many}`;
-}
-
 /** Build the quiet, plain-language summary clauses from a turn's blocks. The
  *  lead clause is always the total step count ("Worked through N steps"); the
  *  trailing clauses surface the families that actually occurred, in a fixed,
@@ -96,16 +92,16 @@ function summarize(blocks: StreamBlock[]): string | null {
   // Total steps = reasoning whispers + tool calls. Phrased as work, not
   // "tool calls": "Worked through N steps".
   const steps = tools + reasoning;
-  const lead = `Worked through ${plural(steps, "step", "steps")}`;
+  const lead = `Worked through ${countOf(steps, "step")}`;
 
   const clauses: string[] = [];
-  if (fam.read > 0) clauses.push(`read ${plural(fam.read, "file", "files")}`);
+  if (fam.read > 0) clauses.push(`read ${countOf(fam.read, "file")}`);
   if (fam.search > 0)
-    clauses.push(`ran ${plural(fam.search, "search", "searches")}`);
+    clauses.push(`ran ${countOf(fam.search, "search")}`);
   if (fam.edit > 0)
-    clauses.push(`changed ${plural(fam.edit, "file", "files")}`);
+    clauses.push(`changed ${countOf(fam.edit, "file")}`);
   if (fam.run > 0)
-    clauses.push(`ran ${plural(fam.run, "command", "commands")}`);
+    clauses.push(`ran ${countOf(fam.run, "command")}`);
 
   // Keep it to one line: the lead plus at most the three most salient
   // clauses. Anything beyond folds into nothing — the expanded list carries

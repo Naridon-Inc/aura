@@ -6,6 +6,21 @@
 import { invoke } from "@tauri-apps/api/core";
 import { isToolMetadataPath } from "./categorizeChange";
 import { roomAuthHeaders } from "./roomAuth";
+// The place contract is spelled once, in lib/place, and mirrors
+// `manager::brain::place_contract`. Imported rather than restated here: a wire
+// type the UI keeps its own copy of is a type that can disagree with the seam.
+import type { PlaceAddress, PlaceOpen } from "./place/boot";
+import type { PlaceCapabilities } from "./place/contract";
+import type { AgentPhase, EgressReport } from "./place/egress";
+import type { AuthorPlan, GitAuthor } from "./place/author";
+import type { Drift } from "./place/drift";
+import type { ForgeAdvice } from "./place/forge";
+import type { Installed } from "./place/toolbox";
+import type { PushPlan } from "./place/pushCredential";
+import type { KeyPlan } from "./place/agentKey";
+import type { SecretBoot, SecretRef } from "./place/secrets";
+import type { BaseBuild, TeamBase } from "./place/teamBase";
+import type { ToolchainReport } from "./place/toolchain";
 import type {
   ContributesSummary,
   InstalledExtension,
@@ -114,6 +129,34 @@ export type FileBase64 = {
   is_image: boolean;
 };
 
+/** An older `aura` sitting ahead of the one the app runs, on PATH. The app
+ *  steps over it; the user's own terminal doesn't. */
+export type ShadowedCli = {
+  path: string;
+  installed: string;
+};
+
+/** Mirrors `AuraCliVersionCheck` in `cmd_doctor_cli.rs`. `path` / `installed`
+ *  describe the binary the app RUNS — not whatever `which aura` says first.
+ *  Lived in four hand-copied shapes (here twice, App, CliUpdateToast) until
+ *  a new field had to be added to all of them. */
+export type AuraCliCheck = {
+  installed: string | null;
+  expected: string;
+  path: string | null;
+  status: "ok" | "outdated" | "missing" | "unknown";
+  raw: string | null;
+  shadowing: ShadowedCli | null;
+};
+
+/** The one-line manual install for the `aura` helper, for the surfaces that
+ *  offer it as a fallback when the in-app update can't run (root-owned
+ *  install dir, no bundled binary). Shared so the footer chip and the
+ *  "Aura off" strip can never print two different commands at the same
+ *  user for the same problem. */
+export const AURA_CLI_INSTALL_COMMAND =
+  "cargo install --git https://github.com/Naridon-Inc/aura aura-cli";
+
 export type RemoteStatus = {
   running: boolean;
   url: string | null;
@@ -166,6 +209,14 @@ export type LinkedPr = {
   repo: string;
   number: number;
   url: string;
+};
+
+/** One line of a task's plan. Ticked off as the work lands, so anyone
+ *  reading the board sees where a run actually got to rather than the
+ *  fact that something is running. */
+export type TaskStep = {
+  text: string;
+  done: boolean;
 };
 
 // OO.3 — per-repo state catalog. Backend persists this at
@@ -292,10 +343,22 @@ export type Task = {
   objective?: string | null;
   /** Other task IDs that must finish before this one starts. */
   dependencies?: string[];
+  /** The plan, in order. Every task filed by an agent has one — it is
+   *  what lets the board say "step 2 of 5 — wire the picker" instead of
+   *  "an agent is building this now". Empty on rows written before the
+   *  field existed, and on rows mirrored in from Jira or Linear whose
+   *  plan lives in the other system. */
+  steps?: TaskStep[];
   /** Linked A2A bead id — the agent-execution side of this task. */
   bead_id?: string | null;
   /** Sprint / iteration slug ("w20", "may-1", "sprint-7"). */
   sprint?: string | null;
+  /** The crew this task belongs to (its slug, e.g. "perf"). Gives a crew-filed
+   *  row a home: the board and the crew graph group it under this crew instead
+   *  of the loose "Unsorted" pile, and it's projected onto the row's loop node
+   *  so the graph reads it. Empty/absent (the default "main" crew) reads as
+   *  loose. */
+  crew_id?: string | null;
   /** OO.4 — Plane-style Cycle pointer. References an entry in
    *  `tasksCyclesList`. Cleared by the backend heal pass when the
    *  referenced cycle is deleted. */
@@ -355,8 +418,14 @@ export type CreateTaskInput = {
   is_epic?: boolean;
   objective?: string;
   dependencies?: string[];
+  /** The plan, in order, as plain sentences. Sent unchecked — the caller
+   *  states the work, not its progress. */
+  steps?: string[];
   bead_id?: string;
   sprint?: string;
+  /** The crew this task belongs to (its slug). Homes the row under a crew
+   *  instead of the loose pile. Omit / "main" for the default crew. */
+  crew_id?: string;
   /** OO.4 — Plane Cycle pointer. Empty string clears at create time. */
   cycle_id?: string;
   /** OO.4 — Plane Module pointer. Empty string clears at create time. */
@@ -400,8 +469,15 @@ export type UpdateTaskInput = {
   is_epic?: boolean;
   objective?: string;
   dependencies?: string[];
+  /** Replace the whole plan — reword a step, add a missed one, drop one.
+   *  To tick a step off call `tasksStepSet` instead: it addresses one
+   *  row, so a concurrent plan edit can't overwrite the progress. */
+  steps?: TaskStep[];
   bead_id?: string;
   sprint?: string;
+  /** Re-home onto a crew (its slug). Empty string or "main" clears it back to
+   *  the default crew (loose); omit to leave the current crew unchanged. */
+  crew_id?: string;
   /** OO.4 — Plane Cycle pointer writer. Empty string clears the
    *  pointer; the backend treats `""` as null. */
   cycle_id?: string;
@@ -668,6 +744,11 @@ export type TaskViewFilters = {
   labels?: string[];
   /** Free-text search over title + description. */
   q?: string;
+  /** Only work that is past its due date and not finished. Not expressible
+   *  as one of the slug dimensions above — it needs a `due_date < today`
+   *  predicate — so it gets its own flag rather than being faked by routing
+   *  the user to a different bucket. */
+  overdue?: boolean;
 };
 
 export type TaskViewGroupBy =
@@ -675,6 +756,12 @@ export type TaskViewGroupBy =
   | "status"
   | "priority"
   | "assignee"
+  /** Which goal the crew has the task under. This is what the Plan view used
+   *  to draw as a page of its own — goals, with their tasks beneath them — and
+   *  it is a grouping of the same records, so it lives here with the other
+   *  four. The membership comes from the loop graph, not from a field on the
+   *  task, and is resolved by the rail (lib/tasksFilterStore). */
+  | "goal"
   | "label";
 
 export type TaskViewOrderBy =
@@ -852,6 +939,42 @@ export type BrainChoice = {
   has_api_key: boolean;
 };
 
+/** One slash command an agent publishes for itself. Not one of Aura's
+ *  verbs and not one of the repo's `.claude/commands/*.md` — the running
+ *  agent said it understands this word. */
+export type AgentCommand = {
+  name: string;
+  description: string;
+};
+
+/** One mode a live agent can be put into. OpenCode ships `build` and
+ *  `plan`; plan refuses every edit tool, which is why the switch is a real
+ *  call to the agent and not a sentence prepended to the prompt. */
+export type AgentMode = {
+  id: string;
+  name: string;
+  description: string;
+};
+
+/** One line of the agent's own plan. Restated in full whenever it
+ *  changes, so a fresh list replaces the old one rather than extending it. */
+export type AgentPlanEntry = {
+  content: string;
+  status: string;
+  priority: string;
+};
+
+/** What a live agent session is offering right now, beyond its replies.
+ *  Session state, so it is read from the running brain on demand rather
+ *  than cached with the build's capabilities or written into the
+ *  transcript. All four fields are empty when nothing is running. */
+export type AgentSurface = {
+  commands: AgentCommand[];
+  modes: AgentMode[];
+  current_mode: string | null;
+  plan: AgentPlanEntry[];
+};
+
 /** The semantic state a *different* brain reads to resume work at the
  *  exact point of interruption (Claude → Gemini → Kimi). Returned by
  *  `brain_carryover` at the explicit swap moment — NOT per turn. Mirrors
@@ -1018,6 +1141,37 @@ export type BrainTokenUsage = {
   output_tokens: number;
 };
 
+/** Spend on one model inside a key's row. */
+export type ApiModelSpend = {
+  inputTokens: number;
+  outputTokens: number;
+  costUsd: number;
+  requests: number;
+};
+
+/** Spend attributed to one checkout, keyed by repo root. */
+export type ApiProjectSpend = { costUsd: number; requests: number };
+
+/** Everything one API key has spent since it was added. Mirrors the Rust
+ *  `KeySpend`. `keyFp` is the first 12 hex of SHA-256(key) — enough to tell
+ *  two keys apart, useless for reconstructing either. */
+export type ApiKeySpend = {
+  provider: string;
+  keyFp: string;
+  /** Unix seconds the key was first seen. */
+  addedAt: number;
+  /** Unix seconds of the most recent billed turn. */
+  lastAt: number;
+  inputTokens: number;
+  outputTokens: number;
+  costUsd: number;
+  requests: number;
+  /** Any turn in this row was priced off a tier estimate. */
+  estimated: boolean;
+  byModel: Record<string, ApiModelSpend>;
+  byProject: Record<string, ApiProjectSpend>;
+};
+
 /** One event from a `brain_chat_turn` stream. Wire shape matches the
  *  Rust `ChatChunk` enum, with `kind` as the serde discriminator. */
 export type BrainChatChunk =
@@ -1031,6 +1185,19 @@ export type BrainChatChunk =
   // Per-turn token accounting — emitted once, right before `end`, by brains
   // that report usage. Drives the context-fill meter in the chat header.
   | { kind: "usage"; input_tokens: number; output_tokens: number }
+  // What this turn cost in dollars, and what the key has spent since it was
+  // added across every project. Emitted once per turn, right after `usage`,
+  // and ONLY in API mode with a priceable model — a brain on a subscription
+  // or a model with no known rate simply never sends one.
+  | {
+      kind: "cost";
+      cost_usd: number;
+      spend_usd: number;
+      /** Unix seconds the key was added — the "since" in the running total. */
+      spend_since: number;
+      /** The figure came from a model-family rate, not a published one. */
+      estimated: boolean;
+    }
   | {
       kind: "tool_use";
       block_idx: number;
@@ -1066,6 +1233,26 @@ export type AuraProQuota = {
   /** ISO-8601 timestamp the current 30-day window started. */
   period_started_at: string;
 };
+
+/** Why a quota read failed. `auraProIsSignedIn` proves only that a token is on
+ *  disk, so `unauthorized` is the case the panel must be able to see: the
+ *  session is over, and refreshing will repeat the 401 forever. */
+export type AuraProQuotaError = {
+  /** `unauthorized` | `offline` | `server` | `unsupported`. */
+  kind: string;
+  message: string;
+};
+
+/** Narrow a rejected `auraProQuota()` to the typed error the backend sends.
+ *  Anything else (a thrown `Error`, a plain string) is not one. */
+export function isAuraProQuotaError(e: unknown): e is AuraProQuotaError {
+  return (
+    typeof e === "object" &&
+    e !== null &&
+    typeof (e as AuraProQuotaError).kind === "string" &&
+    typeof (e as AuraProQuotaError).message === "string"
+  );
+}
 
 /** One concrete model a provider currently serves (`agent_models_list`). */
 export type ModelInfo = {
@@ -1130,7 +1317,8 @@ export type NoteWriteInput = {
 /** Emitted by the agent_mutation_guard backend when a workspace file
  *  is created/modified/removed while an agent PTY is alive and no
  *  `aura_log_intent` row within the freshness window covers the path.
- *  Listened to by `UnattributedChangesBanner`. */
+ *  Listened to by `AgentMutationGuard`, which is headless — the reason
+ *  is captured in the background and never put to the user. */
 export type UnattributedMutation = {
   /** Absolute path the OS watcher saw. */
   path: string;
@@ -1144,6 +1332,19 @@ export type UnattributedMutation = {
   ts: number;
   /** `path:ts` — stable id for React keying + dedupe. */
   event_id: string;
+};
+
+/** Mirrors `StaleCli` in `cmd_doctor_cli.rs` — the `aura` helper the app just
+ *  ran and how far behind this build it is. Structured, not pre-worded: the
+ *  surface showing it offers the update as a button, and a sentence can't be
+ *  clicked. */
+export type StaleCli = {
+  /** Version that binary reports, e.g. "0.7.2". */
+  installed: string;
+  /** Version this build of the app needs. */
+  expected: string;
+  /** Where the old copy lives, so the user knows which one to replace. */
+  path: string;
 };
 
 /** Result of `aura_ensure_tracked` — whether the just-opened repo is now a
@@ -1161,6 +1362,12 @@ export type AuraTrackStatus = {
   wired: boolean;
   /** Human line for the non-git / error case; null on success. */
   detail: string | null;
+  /** Set when the reason it didn't work is an `aura` helper older than this
+   *  build needs. Retrying that can never succeed — updating it can. */
+  stale_cli: StaleCli | null;
+  /** The helper's own words, unabridged. `detail` is the line we show; this
+   *  is what "Details" opens, so the diagnosis is never lost to the clip. */
+  raw_detail: string | null;
 };
 
 export const api = {
@@ -1296,6 +1503,14 @@ export const api = {
     invoke<void>("git_create_branch", { repoRoot, name }),
   gitRemoteOrigin: (repoRoot: string) =>
     invoke<string>("git_remote_origin", { repoRoot }),
+  /** What repo is this folder, and which org is it bound to? The one rule —
+   *  see `lib/repoSlug.ts`, which caches this and is what UI should call. */
+  repoIdentity: (repoRoot: string) =>
+    invoke<RepoIdentity>("repo_identity_get", { repoRoot }),
+  /** Bind this project to an org explicitly; `null` clears the binding and
+   *  returns it to the cloud's default-org behaviour. */
+  repoIdentityBind: (repoRoot: string, org: string | null) =>
+    invoke<RepoIdentity>("repo_identity_bind", { repoRoot, org }),
   gitLastCommitAge: (repoRoot: string) =>
     invoke<number>("git_last_commit_age", { repoRoot }),
   gitShowHead: (repoRoot: string, file: string) =>
@@ -1307,17 +1522,10 @@ export const api = {
       "cli_detect",
       { name },
     ),
-  /** Task #229 — check the installed `aura` CLI against the version the
+  /** Task #229 — check the `aura` CLI the app runs against the version the
    *  shell expects. Powers the footer chip in `StatusBar`. Returns
    *  status `"ok" | "outdated" | "missing" | "unknown"`. */
-  auraCliVersionCheck: () =>
-    invoke<{
-      installed: string | null;
-      expected: string;
-      path: string | null;
-      status: "ok" | "outdated" | "missing" | "unknown";
-      raw: string | null;
-    }>("aura_cli_version_check"),
+  auraCliVersionCheck: () => invoke<AuraCliCheck>("aura_cli_version_check"),
   /** Install the `aura` CLI bundled with this desktop release in place, so
    *  the on-PATH binary matches the app after an update. Atomic rename +
    *  signature-preserving. Returns a fresh version check. Rejects when there
@@ -1327,13 +1535,9 @@ export const api = {
    *  admin-password prompt; the silent default instead rejects with a
    *  "needs authorization" marker the toast turns into an Authorize button. */
   auraCliInstallBundled: (interactive?: boolean) =>
-    invoke<{
-      installed: string | null;
-      expected: string;
-      path: string | null;
-      status: "ok" | "outdated" | "missing" | "unknown";
-      raw: string | null;
-    }>("aura_cli_install_bundled", { interactive: interactive ?? false }),
+    invoke<AuraCliCheck>("aura_cli_install_bundled", {
+      interactive: interactive ?? false,
+    }),
   claudeAuthStatus: () =>
     invoke<{
       logged_in: boolean;
@@ -1398,6 +1602,11 @@ export const api = {
   // glyph is inserted into whatever text field is focused in the webview — the
   // caller focuses a capture input first, then reads the inserted character.
   openSystemEmojiPicker: () => invoke<void>("open_system_emoji_picker"),
+  /** Ahead/behind vs the upstream. REJECTS when git couldn't be asked — it
+   *  used to be infallible and answer every failure with `{0, 0, has_upstream:
+   *  false}`, which reads exactly like a branch that was never published, so
+   *  four surfaces offered a Publish button off the back of a git error. A
+   *  caller's `catch` must render "couldn't check", never a branch state. */
   gitAheadBehind: (repoRoot: string) =>
     invoke<AheadBehind>("git_ahead_behind", { repoRoot }),
   gitShowCommit: (repoRoot: string, sha: string) =>
@@ -1562,6 +1771,13 @@ export const api = {
      *  full autonomy so it acts like a normal Claude Code session instead of
      *  asking the user to run every command. Omit/"default" → no flag. */
     permissionMode?: PermissionMode,
+    /** The place this agent runs in — a connected machine's id, or null/omitted
+     *  for this laptop. A named machine spawns the CLI over there instead, held
+     *  under tmux so it outlives the connection, in the project directory that
+     *  machine records. `repoRoot` stays this laptop's path either way: it is
+     *  the project the tab is filed under, and where the record of the work
+     *  belongs, whichever machine holds the code. */
+    machineId?: string | null,
   ) =>
     invoke<AgentSessionHandle>("agent_pty_open", {
       agentId,
@@ -1572,6 +1788,7 @@ export const api = {
       forceNew: forceNew ?? false,
       profileName: profileName ?? null,
       permissionMode: permissionMode ?? null,
+      machineId: machineId ?? null,
     }),
   /** Live coding-agent PTY sessions in `repoRoot`, most-recently-active
    *  first. Powers the "Start in agent → hand to a running session"
@@ -1718,6 +1935,91 @@ export const api = {
   claudeListSessions: (repoRoot: string) =>
     invoke<ClaudeSession[]>("claude_list_sessions", { repoRoot }),
 
+  /** Newest Codex session id recorded for this directory, or `null` when
+   *  Codex has never run here. Scoped by the `cwd` in the rollout's own
+   *  `session_meta` — the machine-wide "most recent" is usually another
+   *  repo's conversation. */
+  codexLatestSession: (repoRoot: string) =>
+    invoke<string | null>("codex_latest_session", { repoRoot }),
+
+  /** Tail this repo's Codex rollout — the structured record behind the TUI,
+   *  and what the Chat view renders instead of scraping the terminal.
+   *
+   *  Hold on to the returned `path` + `offset` and pass them back to read only
+   *  what was appended since. When Codex starts a new session the path changes
+   *  and the chunk comes back with `reset: true`, meaning: throw away what you
+   *  accumulated, this is a different conversation. */
+  codexRolloutRead: (
+    repoRoot: string,
+    path: string | null,
+    sinceOffset: number,
+  ) =>
+    invoke<AgentRecordChunk>("codex_rollout_read", {
+      repoRoot,
+      path,
+      sinceOffset,
+    }),
+
+  /** Tail this repo's Kimi wire — the same contract as `codexRolloutRead`, on
+   *  the append-only record Kimi keeps beside each session under
+   *  `~/.kimi-code/sessions`. */
+  kimiWireRead: (repoRoot: string, path: string | null, sinceOffset: number) =>
+    invoke<AgentRecordChunk>("kimi_wire_read", {
+      repoRoot,
+      path,
+      sinceOffset,
+    }),
+
+  /** Newest OpenCode session id recorded for this directory, or `null` when
+   *  OpenCode has never run here. Scoped by the `directory` on the session
+   *  row, and to top-level sessions only — a `task` subagent opens a child
+   *  session in the same folder and is routinely the most recently touched. */
+  opencodeLatestSession: (repoRoot: string) =>
+    invoke<string | null>("opencode_latest_session", { repoRoot }),
+
+  /** Read this repo's OpenCode conversation — the same contract as
+   *  `codexRolloutRead`, over the SQLite store OpenCode keeps at
+   *  `~/.local/share/opencode/opencode.db` rather than a JSONL file.
+   *
+   *  Two fields carry OpenCode-shaped meanings: `path` is the SESSION ID (a
+   *  session is the record; there is no file to name) and `sinceOffset` is
+   *  `max(part.time_updated)` in milliseconds, because a part row mutates in
+   *  place as a tool call settles and a byte cursor would hand back the
+   *  request and never the result. */
+  opencodeRecordRead: (
+    repoRoot: string,
+    path: string | null,
+    sinceOffset: number,
+  ) =>
+    invoke<AgentRecordChunk>("opencode_record_read", {
+      repoRoot,
+      path,
+      sinceOffset,
+    }),
+
+  /** Newest Pi session id recorded for this directory, or `null` when Pi has
+   *  never run here. What a restored tab hands to `pi --session-id <id>`.
+   *  Directory-scoped: Pi keeps every session under one agent directory, so
+   *  "the newest one" on a box driving several worktrees is usually another
+   *  project's conversation. */
+  piLatestSession: (repoRoot: string) =>
+    invoke<string | null>("pi_latest_session", { repoRoot }),
+
+  /** Tail this repo's Pi session — the same contract as `codexRolloutRead`, on
+   *  the append-only JSONL Pi keeps under `~/.pi/agent/sessions`.
+   *
+   *  Finding it needs no index: Pi names the directory after the working
+   *  directory itself, so one string transform locates a repo's sessions and
+   *  the newest `.jsonl` in it is the conversation. The file opens with the
+   *  very session header Pi's `--mode json` wire opens with, and carries the
+   *  same message records, so one adapter reads both. */
+  piSessionRead: (repoRoot: string, path: string | null, sinceOffset: number) =>
+    invoke<AgentRecordChunk>("pi_session_read", {
+      repoRoot,
+      path,
+      sinceOffset,
+    }),
+
   // Latest Claude subscription usage (5-hour + weekly rate-limit %) the CLI
   // statusline recorded. `null` when there's no recent reading. Real data —
   // read from `~/.aura/usage/statusline.jsonl`, never estimated.
@@ -1728,8 +2030,14 @@ export const api = {
   // StreamEvent shape the live wire emits, so the bubble view can
   // replay a resumed conversation in-pane without re-running claude.
   // `limit` keeps only the last N events (0 = unbounded).
-  claudeLoadSession: (filePath: string, limit = 500) =>
-    invoke<StreamEvent[]>("claude_load_session", { filePath, limit }),
+  //
+  // Pass `sessionId` when this read is about to be followed by
+  // `claudeSessionWatch` on the same tab: the backend records how far the
+  // replay got and the watcher resumes from exactly there, instead of opening
+  // at end-of-file and losing whatever was appended in between. Omit it when
+  // only previewing a transcript — a preview must not move a live tab's mark.
+  claudeLoadSession: (filePath: string, limit = 500, sessionId?: string) =>
+    invoke<StreamEvent[]>("claude_load_session", { filePath, limit, sessionId }),
 
   // Live-tail a Claude Code session JSONL file. Spawns a backend task
   // that polls the file every 500ms and emits parsed StreamEvents on
@@ -1942,7 +2250,7 @@ export const api = {
   // that happens while an agent PTY is alive AND no `aura_log_intent`
   // covers the path within the freshness window. Emits
   // `aura:agent-mutation-unattributed` with `UnattributedMutation`
-  // rows; the UnattributedChangesBanner consumes them.
+  // rows; the headless AgentMutationGuard consumes them.
   agentGuardStart: (repoRoot: string) =>
     invoke<void>("agent_guard_start", { repoRoot }),
   agentGuardStop: (repoRoot: string) =>
@@ -2034,8 +2342,27 @@ export const api = {
 
   // Deterministic per-file change notes (what / why / where it affects) for a
   // commit, derived from the AST diff + reverse call graph. No AI tokens.
+  //
+  // `sha` also takes a RANGE — `base...head` for what a branch adds since it
+  // diverged (what a pull request proposes), or `base..head` tip-to-tip. That is
+  // how the PR Files tab gets one change story for the whole pull request
+  // instead of a per-commit one nobody asked for.
   auraChangeNote: (repoRoot: string, sha?: string) =>
     invoke<ChangeNoteReport>("aura_change_note", { repoRoot, sha }),
+
+  /** Which `base...head` spelling this machine can resolve for a pull request
+   *  — `origin/`-qualified, local, or mixed. Null when neither end is here (an
+   *  unfetched fork). Cheap: rev-parse only, no AST work. */
+  resolvePrRange: (repoRoot: string, baseRef: string, headRef: string) =>
+    invoke<string | null>("resolve_pr_range", { repoRoot, baseRef, headRef }),
+
+  /** Write the plain-language account of a change now, with nobody waiting,
+   *  so the surface that shows it opens already filled in. `commit` takes a
+   *  sha, a `base...head` range, or is omitted for the working tree. Resolves
+   *  as soon as the jobs are queued — the words land in the cache behind it.
+   *  Fire-and-forget: callers should not await the words, only the queueing. */
+  prewarmChangeSummaries: (repoRoot: string, commit?: string) =>
+    invoke<number>("prewarm_change_summaries", { repoRoot, commit }),
 
   /** Blast radius for one symbol — who depends on it + which user-facing
    *  features ride on it, from `aura impact <symbol> <file> --json`. Powers the
@@ -2166,6 +2493,24 @@ export const api = {
    *  uncommitted-vs-HEAD behavior (the main checkout has no fork base). */
   gitDiffStats: (repoRoot: string, sinceBase?: boolean) =>
     invoke<DiffStats>("git_diff_stats", { repoRoot, sinceBase: sinceBase ?? null }),
+  /** The same totals for many worktrees in one round-trip, for the roster that
+   *  shows a badge per row. Asked one at a time this was a quarter of all the
+   *  IPC the idle app did; on macOS every `invoke` is a cross-process fetch
+   *  sharing a queue with terminal keystrokes.
+   *
+   *  Never rejects as a whole — one unreadable worktree must not blank the
+   *  badges on the rest. A row that could not be read comes back with
+   *  `stats: null`, which means "we don't know", NOT "+0 −0". */
+  gitDiffStatsBatch: (repoRoots: string[], sinceBase?: boolean) =>
+    invoke<BatchedDiffStats[]>("git_diff_stats_batch", {
+      repoRoots,
+      sinceBase: sinceBase ?? null,
+    }),
+  /** How this repo says it should be run — every candidate we can justify,
+   *  best first, each naming the file it came from. `command: null` means the
+   *  repo told us nothing; the caller asks the user rather than guessing. */
+  runDetect: (repoRoot: string) =>
+    invoke<RunSuggestion>("run_detect", { repoRoot }),
   /** Per-file +/- counts. By default vs HEAD plus untracked files counted as
    *  pure additions (right-rail Changes panel `+12 -3` per row). `sinceBase`
    *  (worktrees only) widens to base→working-tree so committed work shows too. */
@@ -2305,6 +2650,32 @@ export const api = {
     }),
   cloudAuthStatus: () => invoke<CloudAuthStatus>("cloud_auth_status"),
   cloudAuthLogout: () => invoke<void>("cloud_auth_logout"),
+  /** Invite a teammate to your Aura Cloud org by their GitHub username — the
+   *  "invite through Aura" path, so a signed-in team brings someone on without
+   *  touching git-remote permissions. Requires being signed in to a cloud org;
+   *  the server enforces who may invite and which roles they may grant. Throws
+   *  with the server's own message on failure (not found / forbidden / already
+   *  a member). `role` defaults to "member". */
+  cloudOrgInvite: (githubUsername: string, role?: string) =>
+    invoke<void>("cloud_org_invite", { githubUsername, role: role ?? null }),
+  /** Every org this account can act as, with the current one ticked.
+   *  Derived from `GET /api/v2/repos` — the one cross-org read the server has.
+   *  Throws when signed out or the cloud is unreachable: an empty list would
+   *  say "you belong to no orgs", which cannot happen. */
+  cloudOrgs: () => invoke<CloudOrg[]>("cloud_orgs"),
+  /** Act as `slug` from now on, and keep acting as it after a restart.
+   *  Returns the refreshed list so a menu redraws without a second round
+   *  trip. Throws if the slug is not one of yours. */
+  cloudOrgSwitch: (slug: string) => invoke<CloudOrg[]>("cloud_org_switch", { slug }),
+  /** Every project this account can see, across every org, each tagged with
+   *  the org that owns it. */
+  cloudRepos: () => invoke<CloudRepo[]>("cloud_repos"),
+  /** Set this repo's git author (repo-local `user.name` / `user.email`), so a
+   *  signed-in team adopts its Aura-account identity instead of hand-editing
+   *  git config. Never touches `--global`. The values come from
+   *  `gitIdentityFromAccount`. */
+  gitIdentitySet: (repoRoot: string, name: string, email: string) =>
+    invoke<void>("git_identity_set", { repoRoot, name, email }),
   // Scan-to-pair: mint a QR the Aura mobile app scans to authenticate. The
   // desktop must already be signed in (it self-approves the device request).
   cloudPairCreate: (cloudUrl?: string) =>
@@ -2394,6 +2765,16 @@ export const api = {
   /** Drop a person's photo — they fall back to GitHub avatar / animal again. */
   identityAvatarClear: (email: string) =>
     invoke<void>("identity_avatar_clear", { email }),
+  /** Generated portraits this machine already holds, keyed by identity →
+   *  `data:` URL. Reads `~/.aura/avatar-cache/` and never the network, so a
+   *  cold start draws every face it saw last run with nothing going out. */
+  fallbackAvatarCached: (keys: string[]) =>
+    invoke<Record<string, string>>("fallback_avatar_cached", { keys }),
+  /** Claim a generated portrait for one identity and keep it. Returns the
+   *  stored copy if there already is one; only a genuine miss goes out, and
+   *  only once per person per machine. See `lib/fallbackAvatars.ts`. */
+  fallbackAvatarFetch: (key: string) =>
+    invoke<string>("fallback_avatar_fetch", { key }),
   teamAliasAdd: (
     repoRoot: string,
     targetHandle: string,
@@ -2650,6 +3031,11 @@ export const api = {
     invoke<Task>("tasks_create", { repoRoot, input }),
   tasksUpdate: (repoRoot: string, input: UpdateTaskInput) =>
     invoke<Task>("tasks_update", { repoRoot, input }),
+  /** Tick one step of a task's plan off, or put it back. Addressed by
+   *  position rather than by resending the list, so an agent finishing a
+   *  step and a human reordering the plan can't overwrite each other. */
+  tasksStepSet: (repoRoot: string, id: string, index: number, done: boolean) =>
+    invoke<Task>("tasks_step_set", { repoRoot, id, index, done }),
   tasksDelete: (repoRoot: string, id: string) =>
     invoke<void>("tasks_delete", { repoRoot, id }),
   /** QQ.1 — Upsert a task by `(external_source, external_id)`. The
@@ -2994,6 +3380,18 @@ export const api = {
   brainListDescriptors: () =>
     invoke<BrainDescriptor[]>("brain_list_descriptors"),
   brainGetSettings: () => invoke<BrainSettings>("brain_get_settings"),
+  /** What the live agent behind `providerId` is offering in `cwd` right now
+   *  — its published slash commands, the modes it can work in, the plan it
+   *  is working to. Empty for a brain with no running session, and for
+   *  every brain that isn't a hosted agent. */
+  brainSessionSurface: (providerId: string, cwd: string) =>
+    invoke<AgentSurface>("brain_session_surface", { providerId, cwd }),
+  /** Put the live agent in `cwd` into one of the modes its surface offered.
+   *  Rejects (rather than quietly succeeding) when the agent has no modes
+   *  or isn't running there yet — plan mode refuses every edit tool, so a
+   *  failed switch must never look like a successful one. */
+  brainSetSessionMode: (providerId: string, cwd: string, mode: string) =>
+    invoke<void>("brain_set_session_mode", { providerId, cwd, mode }),
   brainSetActive: (providerId: string) =>
     invoke<void>("brain_set_active", { input: { provider_id: providerId } }),
   /** Toggle ledger-driven auto-routing (see {@link BrainSettings.auto_route}). */
@@ -3011,6 +3409,11 @@ export const api = {
     invoke<boolean>("brain_keychain_has", {
       input: { provider_id: providerId },
     }),
+  /** Every API key's spend since it was added, newest activity first. The
+   *  ledger is global (`~/.aura/api-spend.json`), so a row totals a key
+   *  across every project it was used in — the question a key actually
+   *  raises. Keys are identified by fingerprint; the key is never stored. */
+  brainApiSpend: () => invoke<ApiKeySpend[]>("brain_api_spend"),
   /**
    * Register (or update) a custom OpenAI-compatible endpoint —
    * Kimi/Moonshot, Gemini-via-OpenAI-compat, OpenRouter, ollama, etc.
@@ -3319,8 +3722,27 @@ export const api = {
    *  as the objective. Used when the user picks "Aura Manager" from the
    *  agent picker — the session has no tasks until Track B's chat
    *  router decomposes the prompt or a follow-up message. */
-  managerChatStart: (repoRoot: string, prompt: string) =>
-    invoke<string>("manager_chat_start", { repoRoot, prompt }),
+  /** `machineId` names a connected machine when the conversation is about code
+   *  that lives over there. It changes where the chat's tools run and nothing
+   *  else — same brain, same stream, same cards.
+   *
+   *  `projects` seeds the session with more than the one repo it is anchored
+   *  to. `repoRoot` stays first either way — it is the cwd the tools run in —
+   *  and the extras are the other projects the conversation is allowed to be
+   *  about. Used by Aura's own door, which spans every project you have open;
+   *  an ordinary chat omits it and gets exactly one, as before. */
+  managerChatStart: (
+    repoRoot: string,
+    prompt: string,
+    machineId?: string | null,
+    projects?: string[],
+  ) =>
+    invoke<string>("manager_chat_start", {
+      repoRoot,
+      prompt,
+      machineId: machineId ?? null,
+      projects: projects ?? null,
+    }),
   /** Cross-agent continuity — hydrate a native Aura chat session from a
    *  Claude Code / Gemini CLI transcript. Reads the agent's own on-disk
    *  session (`agentId` ∈ {"claude","gemini"}, `agentSessionId` = the
@@ -3397,18 +3819,24 @@ export const api = {
   /** Cloud roundtrip (P1): hand a job to the always-on cloud runner — mints a
    *  submitted task on the shared A2A board (scoped to this repo's origin) that
    *  a runner drains. `agent` is the bare provider id ("claude"); an optional
-   *  acceptance line makes it provable. Returns the cloud task `{id, status}`. */
+   *  acceptance line makes it provable. Returns the cloud task `{id, status}`.
+   *
+   *  `contextId` threads the send: passing the same value as an earlier job
+   *  makes this a reply on that conversation rather than a new stray row, which
+   *  is what lets cloud work be read — and answered — as a chat. */
   loopCloudSend: (
     repoRoot: string,
     text: string,
     agent: string,
     acceptance?: string,
+    contextId?: string,
   ) =>
     invoke<CloudSendResult>("loop_cloud_send", {
       repoRoot,
       text,
       agent,
       acceptance: acceptance ?? null,
+      contextId: contextId ?? null,
     }),
   /** Connect-a-machine: mint a one-time runner-registry token on the signed-in
    *  cloud account so a brand-new box can join your board. Shells the bundled
@@ -3417,6 +3845,606 @@ export const api = {
    *  project). Requires cloud sign-in. */
   runnerProvision: (name: string, repo?: string) =>
     invoke<RunnerProvision>("runner_provision", { name, repo: repo ?? null }),
+  /** Every machine on the signed-in account's runner board, live ones first.
+   *  This is the ONLY honest answer to "is my always-on machine up?" — a remote
+   *  runner that is idle holds no local lease and drops no file on this disk, so
+   *  the local `missionState().host` heuristic reads it as absent. Throws when
+   *  signed out or the cloud is unreachable, which the caller must not confuse
+   *  with an empty board. */
+  cloudRunners: () => invoke<CloudRunner[]>("cloud_runners"),
+  /** Every machine this laptop knows how to reach, most recently used first.
+   *  The runner board says which boxes are UP; this says which ones we have an
+   *  address for. Both are needed to open a workspace on one — a registry row
+   *  carries no host, no login and no key. */
+  machinesList: () => invoke<Machine[]>("machines_list"),
+  /** The one list: the boxes this laptop can reach AND the places your org has,
+   *  each saying whose it is, who added it, and what you may do with it.
+   *
+   *  Never throws for the cloud's sake. The local half is a file on this disk
+   *  and is always answerable, so a signed-out, offline or unhappy-server run
+   *  still returns every box you can reach — with `org.status` saying, in the
+   *  server's own words, why the other half is missing. `machinesList` remains
+   *  the right call for a surface that only wants addresses; this is the one
+   *  for a surface that lists PLACES. */
+  placesList: () => invoke<PlaceRoster>("places_list"),
+  /** What Aura can make for this team, and who would be able to open it. Never
+   *  throws for a person who may not make one — that comes back as `can_make:
+   *  false` with a reason and a sentence, because "you are not an admin" is an
+   *  answer to draw, not an error to report. */
+  placeMakeOffer: () => invoke<PlaceMakeOffer>("place_make_offer"),
+  /** Have Aura make a machine and put it on the org's board as a place.
+   *
+   *  Admin only, and gated by the server at the moment the row is written — a
+   *  refusal there tears the machine back down before this rejects, so nobody
+   *  is left holding a running box they were not allowed to make. `size` is one
+   *  of the ids from `placeMakeOffer`; an unrecognised one is refused rather
+   *  than rounded to the suggestion. */
+  placeMake: (name: string, size: string) =>
+    invoke<MadePlace>("place_make", { name, size }),
+  /** Remember a machine (or update the entry for that `user@host`). Stores the
+   *  key's PATH, never the key. */
+  machineSave: (machine: MachineInput) =>
+    invoke<Machine>("machine_save", { machine }),
+  /** Mark a machine as the one just worked on, so the list orders by attention. */
+  machineTouch: (id: string) => invoke<void>("machine_touch", { id }),
+  /** File a machine under the project it is a cloud copy of. Called on the way
+   *  into a workspace, which is what heals books written before machines knew
+   *  their project. `null` unfiles it. */
+  machineSetProject: (id: string, projectRoot: string | null) =>
+    invoke<void>("machine_set_project", { id, projectRoot }),
+  /** Stop holding a machine's address. Nothing on the box is touched. */
+  machineForget: (id: string) => invoke<void>("machine_forget", { id }),
+  /** The Unix login this member should own on a machine, derived from the Aura
+   *  account they are signed in as. Reaches nothing — a box is the wrong
+   *  computer to ask who you are. Shown before anything is created so the
+   *  member can change it; they may already have an account there under another
+   *  name. Throws when signed out, because a per-member account needs a member. */
+  memberAccountLogin: () => invoke<string>("member_account_login"),
+  /** Give this member their own account on a machine: their own Unix user, their
+   *  own home at 0700, their own `authorized_keys` holding the public half of
+   *  the key this laptop dials with, `umask 077` in their profile, and lingering
+   *  on so their runner starts at boot with nobody logged in.
+   *
+   *  Idempotent — an account that is already there is reported, not remade — so
+   *  it is also the honest way to ask "is my login still mine alone?".
+   *
+   *  `login` defaults to `memberAccountLogin`, `keyPath` to the key the machine
+   *  is already reached with. Only ever the PUBLIC half leaves this Mac. */
+  placeMemberAccount: (machineId: string, login?: string, keyPath?: string) =>
+    invoke<MemberAccount>("place_member_account", {
+      machineId,
+      login: login ?? null,
+      keyPath: keyPath ?? null,
+    }),
+  /** Where the team's already-built environment lives on a place, and what it
+   *  already holds. Makes the account on a place that shares one, so "where is
+   *  it" and "there isn't one yet" are the same question rather than an error
+   *  the first member ever to look gets shown.
+   *
+   *  `machineId` null is this laptop, where the answer is "there is one member
+   *  here and it is you" — reported by the same command rather than by a
+   *  different screen.
+   *
+   *  `carries` must be empty. Anything in it is somebody's credential sitting
+   *  in a place meant to be everyone's, and nothing will be copied out until it
+   *  is gone. */
+  placeTeamBase: (place: { root: string | null; machineId: string | null }) =>
+    invoke<TeamBase>("place_team_base", {
+      root: place.root,
+      machineId: place.machineId,
+    }),
+  /** Build the team's environment once, and start this member from it.
+   *
+   *  The project's declared spec is applied in an account that belongs to
+   *  nobody, and the member's own home is then branched from what it holds —
+   *  their crate cache, their rustup, their npm cache, seeded rather than
+   *  downloaded. The first member through pays the install; the second finds
+   *  the stamp already matching the spec and comes back with `already_built`,
+   *  having installed nothing.
+   *
+   *  Only downloads cross. Every credential the per-member accounts exist to
+   *  separate — keys, `gh` and cloud sign-ins, the name on a commit, an agent
+   *  CLI's session, a crates.io token — stays where it was, and a base found
+   *  holding one is refused out loud rather than copied.
+   *
+   *  Minutes, not seconds, the first time: it is an install and then a copy of
+   *  everything it produced. `login` defaults to this member's own.
+   *  `force` rebuilds a base that is already at spec, and applies one whose
+   *  lock this laptop's team registry cannot vouch for. */
+  placeTeamBaseWarm: (
+    place: { root: string | null; machineId: string | null },
+    login?: string,
+    force = false,
+  ) =>
+    invoke<BaseBuild>("place_team_base_warm", {
+      root: place.root,
+      machineId: place.machineId,
+      login: login ?? null,
+      force,
+    }),
+
+  /** Everything running on a box, right now — read off tmux over the shared ssh
+   *  connection, never from a local record. Sessions outlive the app, the
+   *  window and the laptop's wifi, so this is the only honest answer to "what
+   *  is going on over there". Throws when the box can't be reached, which the
+   *  caller must not render as an empty box. */
+  boxSessions: (machineId: string) =>
+    invoke<BoxSession[]>("box_sessions", { machineId }),
+  /** Every project the box has a copy of *that belongs to the org you opened it
+   *  as*. One runner holds many; this is what the workspace groups its sessions
+   *  by.
+   *
+   *  The box's own discovery is unchanged and still box-wide — it is the only
+   *  thing that knows what is on it. What comes back is narrowed against the
+   *  org's project registry, so a shared runner stops handing a contractor the
+   *  repo names of their client's other clients. `withheld` carries what was
+   *  left out and why; a surface that shows a shorter list and says nothing is
+   *  indistinguishable from a box that quietly lost half its checkouts. */
+  boxProjects: (machineId: string) =>
+    invoke<PlaceProjects>("box_projects", { machineId }),
+  /** What a place can actually run: which of `bins` (agent-CLI binary names)
+   *  are installed, plus git, tmux and aura — all four read off the one probe
+   *  that has to be sent anyway.
+   *
+   *  `machineId` names a box; omit it (null) and the answer is about this
+   *  laptop, in `root`. One call for both, so a capability can never exist for
+   *  one way of getting a place and not the other. A machine id the book
+   *  doesn't hold is an error rather than a quiet answer about this laptop:
+   *  "which agents can you run" answered about the wrong computer is worse
+   *  than unanswered.
+   *
+   *  Throws when the place can't be reached, and the caller must not render
+   *  that as "it has none" — an empty `agents` is the place's own answer, an
+   *  exception is the absence of one. `lib/place` is where that distinction is
+   *  kept; prefer `askCapabilities` over reaching for this directly. */
+  placeCapabilities: (
+    place: { root: string | null; machineId: string | null },
+    bins: string[],
+  ) =>
+    invoke<PlaceCapabilities>("place_capabilities", {
+      root: place.root,
+      machineId: place.machineId,
+      bins,
+    }),
+  /** The command line that opens a terminal at a place — the argv `Place::open`
+   *  would have spawned, rendered as one line.
+   *
+   *  A line at all only because the two surfaces that open terminals do not own
+   *  their pty: the workspace and the connect wizard both start the user's own
+   *  shell on this laptop, and the only way into one is to type. It is derived
+   *  from the argv rather than assembled beside it, which is the whole
+   *  difference from the `remoteShell.ts` builder this replaced — that one was a
+   *  second transport with none of the multiplexing, none of the agreed quoting
+   *  and none of what a managed place will need.
+   *
+   *  Three ways to say which place, and exactly one of them applies: a
+   *  `machineId` names a box in the book; an `address` names one the book has
+   *  never heard of, which is the connect wizard dialling before it saves; and
+   *  neither means this laptop, in `root`.
+   *
+   *  Throws rather than returning something typable when the ask can't be held —
+   *  an address that isn't one, a session name carrying a second command. Prefer
+   *  `askBoot` in `lib/place` over reaching for this directly. */
+  placeBoot: (
+    place: {
+      root?: string | null;
+      machineId?: string | null;
+      address?: PlaceAddress | null;
+    },
+    open: PlaceOpen,
+  ) =>
+    invoke<string>("place_boot", {
+      root: place.root ?? null,
+      machineId: place.machineId ?? null,
+      address: place.address ?? null,
+      open,
+    }),
+  /** What a place HAS, set against what the project ASKS IT FOR — the same
+   *  capability probe as above joined to every check the project's declared
+   *  environment spec makes, in one answer.
+   *
+   *  Neither half is the answer alone. A probe cannot say a missing binary was
+   *  ever wanted, and a spec cannot say what a place has that nobody declared —
+   *  which is where "works here, not there" actually lives. `deps` also
+   *  measures the project's own `[worktree] setup`, which is minutes rather
+   *  than milliseconds, so a panel asking on open leaves it off.
+   *
+   *  `machineId` null is this laptop, and that is the point: the comparison
+   *  anyone wants is the box against the machine it works on. Throws when the
+   *  place can't be reached — prefer `askDrift` in `lib/place`, which is where
+   *  that distinction is kept. */
+  placeDrift: (
+    place: { root: string | null; machineId: string | null },
+    bins: string[],
+    deps: boolean,
+  ) =>
+    invoke<Drift>("place_drift", {
+      root: place.root,
+      machineId: place.machineId,
+      bins,
+      deps,
+    }),
+  /** What the AGENT phase of a run at this place may reach — before anything
+   *  is started, and changing nothing.
+   *
+   *  A run has two phases and they get different networks. Setup installs, with
+   *  everything, because a list that has to contain whatever `npm ci` reaches
+   *  is not a list. The agent phase — the half nobody is watching — is
+   *  default-deny with an allowlist, which is what bounds what a prompt
+   *  injection can actually carry out: reading a token is only worth doing if
+   *  there is somewhere to send it.
+   *
+   *  `bin` is the agent binary, because the floor depends on it — `claude`
+   *  cannot work without api.anthropic.com and `codex` cannot work without
+   *  api.openai.com, and handing either the other's would be a hole nobody
+   *  asked for.
+   *
+   *  `machineId` null is this laptop. One command for both modes, so a wall can
+   *  never exist for one way of getting a place and not the other. Throws when
+   *  the place can't be reached — prefer `askAgentPhase` in `lib/place`. */
+  placeAgentPhase: (
+    place: { root: string | null; machineId: string | null },
+    bin: string,
+  ) =>
+    invoke<AgentPhase>("place_agent_phase", {
+      root: place.root,
+      machineId: place.machineId,
+      bin,
+    }),
+  /** What one run's agent phase wanted and was refused, read off the journal
+   *  its guard left behind.
+   *
+   *  An empty `refused` is the ordinary outcome and the good one. A row in it
+   *  is not necessarily an attack — it is a machine the work wanted that nobody
+   *  had declared, which is a decision somebody now gets to make instead of one
+   *  that was made silently on their behalf. */
+  placeEgressReport: (
+    place: { root: string | null; machineId: string | null },
+    run: string,
+    bin: string,
+  ) =>
+    invoke<EgressReport>("place_egress_report", {
+      root: place.root,
+      machineId: place.machineId,
+      run,
+      bin,
+    }),
+  /** Start a shell or an agent on the box, and hand back the session it
+   *  started. A `branch` gets its own worktree — two agents in one checkout is
+   *  not parallelism, it's a merge conflict with extra steps. The row comes
+   *  back read off the machine, not invented here. */
+  boxStart: (machineId: string, spec: NewBoxSession) =>
+    invoke<BoxSession>("box_start", { machineId, spec }),
+  /** End a session. Whatever it was running ends with it. */
+  boxStop: (machineId: string, session: string) =>
+    invoke<void>("box_stop", { machineId, session }),
+  /** Put a project on the box, in a session you can watch it arrive in — a
+   *  clone of several gigabytes is not something to hide behind a spinner.
+   *
+   *  `member` is who it is cloned for, and it decides which credential the
+   *  clone spends. Omit it and the signed-in member is used; the one thing that
+   *  no longer happens is the clone silently inheriting whatever token the box
+   *  happens to hold. Ask `placePushCredential` first if you want to say which
+   *  one that will be before it is spent. */
+  boxClone: (
+    machineId: string,
+    remoteUrl: string,
+    dir: string,
+    member?: string,
+  ) =>
+    invoke<BoxSession>("box_clone", {
+      machineId,
+      remoteUrl,
+      dir,
+      member: member ?? null,
+    }),
+  /** Which credential a push from this place, by this member, to this remote
+   *  would actually spend — before it is spent.
+   *
+   *  `machineId` names a box; omit it (null) and the answer is about this
+   *  laptop, in `root`. One call for both, so a credential can never be
+   *  arranged for one way of getting a place and not the other.
+   *
+   *  A resolved `PushPlan` with `credential: null` is an ANSWER, not a failure:
+   *  an ssh remote pushes with a key, and a place with nothing configured needs
+   *  somebody to go and configure one. `gap` says which, in words. It only
+   *  throws when the place itself can't be reached. */
+  placePushCredential: (
+    place: { root: string | null; machineId: string | null },
+    remote: string,
+    member?: string,
+  ) =>
+    invoke<PushPlan>("place_push_credential", {
+      root: place.root,
+      machineId: place.machineId,
+      remote,
+      member: member ?? null,
+    }),
+  /** Which credential an agent run at this place, by this member, would spend —
+   *  before it is spent.
+   *
+   *  The same shape as `placePushCredential` and for the same reason: these are
+   *  the two things a place does that cost somebody money. `machineId` names a
+   *  box; omit it (null) and the answer is about this laptop, in `root`.
+   *
+   *  A resolved `KeyPlan` with `key: null` is an ANSWER, not a failure: an engine
+   *  Aura can't authenticate still runs, and a place holding nothing needs
+   *  somebody to sign in. `gap` says which, in words. Nothing it hands back can
+   *  contain key material — the plan carries the variable's name, never its
+   *  value. */
+  placeAgentKey: (
+    place: { root: string | null; machineId: string | null },
+    engine: string,
+    member?: string,
+  ) =>
+    invoke<KeyPlan>("place_agent_key", {
+      root: place.root,
+      machineId: place.machineId,
+      engine,
+      member: member ?? null,
+    }),
+  /** Is this place using the ssh key on this laptop, and could it?
+   *
+   *  `machineId` names a box; omit it (null) and the answer is about this
+   *  laptop, which answers rather than throwing. */
+  placeForwarding: (place: { root: string | null; machineId: string | null }) =>
+    invoke<Forwarding>("place_forwarding", {
+      root: place.root,
+      machineId: place.machineId,
+    }),
+  /** Lend this box the agent on this laptop, or stop.
+   *
+   *  Turning it OFF closes the connection that was carrying the agent, so the
+   *  decision takes effect on the connection in hand rather than on the next
+   *  one. Turning it ON opens nothing: the next call to the box carries the
+   *  agent, and until then nothing has changed on the far side.
+   *
+   *  Ask on the place, per place. There is no global setting and there must not
+   *  be one — lending a machine the use of your key is a judgement about that
+   *  machine and the people with root on it. */
+  placeForwardSet: (machineId: string, on: boolean) =>
+    invoke<Forwarding>("place_forward_set", { machineId, on }),
+  /** Take the agent back now, without changing the arrangement.
+   *
+   *  For the end of a piece of work rather than the end of the lending: the
+   *  place stays opted in and the next thing that reaches it carries the agent
+   *  again. What it does not do is leave a window open onto your key across a
+   *  break in which nothing of yours is running there. Ending the last session
+   *  on a box does this on its own. */
+  placeForwardRelease: (place: { root: string | null; machineId: string | null }) =>
+    invoke<Forwarding>("place_forward_release", {
+      root: place.root,
+      machineId: place.machineId,
+    }),
+  /** Is this place asleep, could it be, and what is keeping it up?
+   *
+   *  Reads the machine book and reaches nothing — safe to call once per row
+   *  while drawing a list, and safe to call about a place that IS asleep, which
+   *  a version that dialled would not be. `machineId` names a box; omit it
+   *  (null) and the answer is about this laptop, which answers rather than
+   *  throwing. */
+  placeSleeping: (place: { root: string | null; machineId: string | null }) =>
+    invoke<Sleeping>("place_sleeping", {
+      root: place.root,
+      machineId: place.machineId,
+    }),
+  /** Stop this machine now, keeping its disk.
+   *
+   *  The deliberate version of what the idle sweep does on a timer, for somebody
+   *  who knows they are finished. It ENDS THE SESSIONS on the box — the files
+   *  survive, the running agents do not — so say that before offering it.
+   *  Rejects, with a sentence, for a place Aura did not make. */
+  placeSleep: (machineId: string) => invoke<Sleeping>("place_sleep", { machineId }),
+  /** Start a sleeping machine and wait until it has an address again.
+   *
+   *  The new address is written to the machine book before this resolves: a
+   *  stopped box gives up its public address and comes back on a different one,
+   *  and a place that is running, billed and dialling yesterday's host is worse
+   *  than one that never slept. */
+  placeWake: (machineId: string) => invoke<Sleeping>("place_wake", { machineId }),
+  /** Is this place starting, since when, and how long that usually takes?
+   *
+   *  The question to ask WHILE waiting. Reads the machine book and the wake in
+   *  flight; reaches nothing, so a panel may ask it on a timer without either
+   *  costing a round trip or — the trap sleeping is built against — poking a
+   *  stopped machine awake just by looking at it.
+   *
+   *  Worth asking about a place that is merely asleep too: the answer says
+   *  whether reaching it would start it, which is what turns "asleep" from a
+   *  thing to press a button about into a thing to ignore. */
+  placeWaking: (place: { root: string | null; machineId: string | null }) =>
+    invoke<Waking>("place_waking", {
+      root: place.root,
+      machineId: place.machineId,
+    }),
+  /** Whose NAME a commit from this place would carry — the other half of
+   *  `placePushCredential`, which settles whose token carries the push.
+   *
+   *  `machineId` names a box; omit it (null) and the answer is about this
+   *  laptop, in `root`. `member` is the signed-in account's derived identity
+   *  (`gitIdentityFromAccount`); pass it and the plan can say whether the
+   *  current author is yours, omit it and the plan is still honest.
+   *
+   *  An `authorship` of `machine` or `missing` is an ANSWER, not a failure. It
+   *  only throws when the place itself can't be reached. */
+  placeAuthor: (
+    place: { root: string | null; machineId: string | null },
+    member?: GitAuthor | null,
+  ) =>
+    invoke<AuthorPlan>("place_author", {
+      root: place.root,
+      machineId: place.machineId,
+      name: member?.name ?? null,
+      email: member?.email ?? null,
+    }),
+  /** Write the account's git identity onto the checkout at this place, wherever
+   *  it is — repo-LOCAL, never `--global`, because a place may be a box a team
+   *  shares. Idempotent. Throws if the place didn't take the identity, rather
+   *  than reporting success over a commit that would still be the machine's. */
+  placeAuthorAdopt: (
+    place: { root: string | null; machineId: string | null },
+    author: GitAuthor,
+  ) =>
+    invoke<AuthorPlan>("place_author_adopt", {
+      root: place.root,
+      machineId: place.machineId,
+      name: author.name,
+      email: author.email,
+    }),
+  /** Where a member's global installs land at this place, and whether a
+   *  teammate would collide with them — their own `GH_CONFIG_DIR`,
+   *  `CARGO_HOME`, `RUSTUP_HOME` and npm prefix, or everybody's.
+   *
+   *  `login` is the member's account ON THAT PLACE, which is not always their
+   *  Aura handle; omit it and the backend resolves the same login the account
+   *  wizard would. */
+  placeToolchain: (
+    place: { root: string | null; machineId: string | null },
+    login?: string,
+  ) =>
+    invoke<ToolchainReport>("place_toolchain", {
+      root: place.root,
+      machineId: place.machineId,
+      login: login ?? null,
+    }),
+  /** What service a remote is, and what git will call this member there.
+   *
+   *  Names no place, because a remote is the same remote from either — it is a
+   *  fact about the URL. Asked before somebody is shown a field to type a token
+   *  into, so a surface can say "GitLab, sent as `oauth2`" instead of taking
+   *  the token and finding out at the first push.
+   *
+   *  Throws only when the string is not a git remote at all. */
+  placeGitForge: (remote: string) =>
+    invoke<ForgeAdvice>("place_git_forge", { remote }),
+  /** What this member holds for this project — names, hosts and fingerprints,
+   *  never values.
+   *
+   *  Takes a `root` and no machine id on purpose: the vault is on this laptop
+   *  whichever place the work runs on, so asking a box what a member holds
+   *  would be asking the wrong computer — and asking it over ssh would be
+   *  sending the secrets there to find out. */
+  placeSecretList: (root: string, member?: string) =>
+    invoke<SecretRef[]>("place_secret_list", { root, member: member ?? null }),
+  /** Keep a secret for this member and this project. Answers with the list as
+   *  it now stands, so a surface never has to re-ask.
+   *
+   *  `value` goes in and never comes out: there is no command that reads one
+   *  back, and that is deliberate rather than missing. Pass `gitHost` to make
+   *  it the credential a push to that host spends (`place_git`'s brokered
+   *  source).
+   *
+   *  `gitForge` names the service when the host does not give it away — a
+   *  self-hosted GitLab at `git.acme.com` is not something a hostname can be
+   *  read for. `gitUser` overrides the username that service sends; leave it
+   *  out and the three public forges fill in their own, while a self-hosted one
+   *  uses this member's own account name. Ask `placeGitForge` first if you want
+   *  to show which before the token is typed. */
+  placeSecretPut: (
+    root: string,
+    name: string,
+    value: string,
+    opts?: { member?: string; gitHost?: string; gitUser?: string; gitForge?: string },
+  ) =>
+    invoke<SecretRef[]>("place_secret_put", {
+      root,
+      member: opts?.member ?? null,
+      name,
+      value,
+      gitHost: opts?.gitHost ?? null,
+      gitUser: opts?.gitUser ?? null,
+      gitForge: opts?.gitForge ?? null,
+    }),
+  /** Drop a secret. What is already in a running process's environment stays
+   *  there until it ends — this is about what the next boot gets. */
+  placeSecretForget: (root: string, name: string, member?: string) =>
+    invoke<SecretRef[]>("place_secret_forget", {
+      root,
+      name,
+      member: member ?? null,
+    }),
+  /** Put this member's secrets where the place's next boot will find them.
+   *
+   *  `machineId` names a box; omit it (null) and this is about this laptop.
+   *  One call for both, so a secret can never be arranged for one way of
+   *  getting a place and not the other — on a box it writes a 0600 file in the
+   *  member's own home and answers with the line a terminal there loads it
+   *  with; on this laptop there is nothing to install, because a process is
+   *  handed its environment directly.
+   *
+   *  Nothing in the answer is a value. `names` is names. */
+  placeSecretBoot: (
+    place: { root: string | null; machineId: string | null },
+    member?: string,
+  ) =>
+    invoke<SecretBoot>("place_secret_boot", {
+      root: place.root,
+      machineId: place.machineId,
+      member: member ?? null,
+    }),
+  /** Install one tool for one member, into a home that is only theirs.
+   *
+   *  `machineId` null is this laptop — one command for both modes, because a
+   *  member who can install for themselves on a box and not on their own
+   *  machine would have to keep two habits. Nothing here runs as root: the
+   *  install lands under the member's own home, on the prefix their login
+   *  profile already puts on their PATH, so two members can hold two versions
+   *  of one tool without either being the other's problem.
+   *
+   *  `home` is that member's home ON that place — what `placeMemberAccount`
+   *  reported — rather than a guess made on this Mac. `login` is who the
+   *  session must turn out to be: set, an install that would land in somebody
+   *  else's home refuses instead.
+   *
+   *  Throws when the place can't be reached, and when the manager has no
+   *  per-member spelling at all (`apt`, `dnf`, `apk`, `brew`) — the message
+   *  names the project's spec and the box's own setup rather than suggesting
+   *  `sudo`. Prefer `installForMe` in `lib/place`. */
+  placeInstallForMe: (
+    place: { root: string | null; machineId: string | null },
+    home: string,
+    ask: { manager: string; name: string; version?: string; bin?: string },
+    login?: string,
+  ) =>
+    invoke<Installed>("place_install_for_me", {
+      root: place.root,
+      machineId: place.machineId,
+      home,
+      manager: ask.manager,
+      name: ask.name,
+      version: ask.version ?? null,
+      bin: ask.bin ?? null,
+      login: login ?? null,
+    }),
+  /** Current state of jobs you sent to the cloud. `loopCloudSend` only ever
+   *  returns `submitted` — the state the row is in the instant it's minted — so
+   *  without this a finished (or failed) job reads as still waiting forever, and
+   *  the runner's reason for failing never reaches the screen. Rows we couldn't
+   *  read are omitted, not invented. */
+  cloudJobStates: (ids: string[]) =>
+    invoke<CloudJobState[]>("cloud_job_states", { ids }),
+  /** Unfinished cloud work for this repo, keyed by the branch it was sent on.
+   *  This is what the cloud glyph on a worktree row is drawn from — the badge
+   *  has to mean "this branch is running somewhere else *right now*", not "the
+   *  account owns a machine". Resolves to `[]` rather than throwing when the
+   *  repo has no remote or nobody is signed in: a missing badge is a
+   *  non-event, and an error here must not disturb the row. */
+  cloudJobsForRepo: (repoRoot: string) =>
+    invoke<CloudPlacement[]>("cloud_jobs_for_repo", { repoRoot }),
+  /** Every recent cloud job for this repo, newest first — including the ones
+   *  `cloudJobsForRepo` deliberately drops: work with no branch (everything the
+   *  workspace composer sends) and work that has already finished. This is the
+   *  only surface on which a job sent to the cloud can be seen at all; without
+   *  it, pressing "Send to cloud" mints a real task on the board and shows the
+   *  user nothing, anywhere, ever. Resolves to `[]` when signed out. */
+  cloudJobsList: (repoRoot: string, limit?: number) =>
+    invoke<CloudJob[]>("cloud_jobs_list", { repoRoot, limit: limit ?? null }),
+  /** Every recent cloud job this account has sent, from any repo, newest first.
+   *  The per-repo read above can only cover repos the app has open; work sent
+   *  from a project you have since closed is real, may still be running, and is
+   *  invisible to it. Resolves to `[]` when signed out. */
+  cloudJobsAll: (limit?: number) =>
+    invoke<CloudJob[]>("cloud_jobs_all", { limit: limit ?? null }),
   /** W-B: park work out of the ready set. One task (`nodeId`) or a whole
    *  `goal`/`crew` subtree. Returns the ids actually paused. */
   loopPause: (
@@ -3676,8 +4704,11 @@ export const api = {
     invoke<void>("settings_set_provider_key", { provider, key }),
   settingsSetActiveProvider: (provider: string) =>
     invoke<void>("settings_set_active_provider", { provider }),
-  settingsSetTelemetry: (enabled: boolean) =>
-    invoke<void>("settings_set_telemetry", { enabled }),
+  // `settingsSetTelemetry` used to sit here. It wrote the same
+  // `telemetry_enabled` that `telemetrySetConsent` writes, and its one caller
+  // — a duplicate switch in Settings → Advanced — is gone. Two ways into one
+  // boolean is what made the two switches drift apart on screen, so the second
+  // way goes too. The Tauri command stays registered for the CLI's own path.
   settingsSetDevMode: (enabled: boolean) =>
     invoke<void>("settings_set_dev_mode", { enabled }),
   settingsSetLocalEmbeddings: (enabled: boolean) =>
@@ -3686,6 +4717,10 @@ export const api = {
    *  clears the override and restores the `~/.aura/worktrees` default. */
   settingsSetWorktreeBase: (path: string) =>
     invoke<void>("settings_set_worktree_base", { path }),
+  /** Turn the pre-commit guard on, unlocked. Locking it behind a passcode
+   *  still needs a human at a terminal — see the Rust doc comment. */
+  settingsEnableStrictUnlocked: () =>
+    invoke<void>("settings_enable_strict_unlocked"),
   settingsDisableStrictUnlocked: () =>
     invoke<void>("settings_disable_strict_unlocked"),
   settingsAgentsTomlList: () =>
@@ -3761,6 +4796,7 @@ export const api = {
 
   // Agent provider registry (Stage 4A) — surfaced in the Agents tab.
   agentsList: () => invoke<AgentDescriptor[]>("agents_list"),
+  agentsInstallsGet: () => invoke<AgentInstallHealth[]>("agents_installs_get"),
   agentsReload: () => invoke<AgentDescriptor[]>("agents_reload"),
 
   // Memory + Sessions (5D) — direct fs reader/writer over .aura/memory.json
@@ -3817,6 +4853,19 @@ export const api = {
    *  `{ feature: "crew_run" }`). Props must be safe scalars only. */
   telemetryTrack: (event: string, props?: Record<string, unknown>) =>
     invoke<void>("telemetry_track", { event, props: props ?? null }),
+  /** Record an event at most once per install. `marker` is what's remembered
+   *  on disk; `event` is what PostHog receives — so a whole funnel can land
+   *  under one event name while each step still fires only once. */
+  telemetryTrackOnce: (
+    marker: string,
+    event: string,
+    props?: Record<string, unknown>,
+  ) =>
+    invoke<void>("telemetry_track_once", {
+      marker,
+      event,
+      props: props ?? null,
+    }),
 
   // PR workspace (Stage 7A) — `gh` CLI passthrough enriched with
   // matching .aura/reviews/*.json risk score so the PR card surfaces
@@ -4157,6 +5206,12 @@ export const api = {
       entries,
     }),
 
+  // Which plan you're on. Backs the sidebar's plan chip, so it runs on every
+  // window that has a sidebar — cheap, cached by the cloud, and failing it is
+  // not an error worth showing anyone: a chip with no plan word simply says
+  // less.
+  cloudBillingStatus: () => invoke<CloudBillingStatus>("cloud_billing_status"),
+
   // Per-developer LLM token spend (admin Team View). `scope` is "org" for
   // admins and "self" for regular members.
   cloudBillingUsageByMember: (month?: string) =>
@@ -4400,6 +5455,27 @@ export type BillingUsageByMember = {
   role: string;
   members: BillingMemberRow[];
   total_cost_usd: number;
+};
+
+/** Which plan the signed-in account's organization is on.
+ *
+ *  `plan` is what the org is subscribed to; `effective_plan` is what it can
+ *  actually use today, which differs while a free org is inside a trial. Read
+ *  `effective_plan` when showing someone their plan — the other one would tell
+ *  a trialling team they're on free.
+ *
+ *  Every field is optional because the cloud answers a caller who belongs to no
+ *  organization with `{ error }` and a 200. An absent plan is "we don't know",
+ *  never "free". */
+export type CloudBillingStatus = {
+  plan?: string | null;
+  effective_plan?: string | null;
+  org_slug?: string | null;
+  seat_count?: number | null;
+  has_billing?: boolean | null;
+  trial_active?: boolean | null;
+  trial_days_remaining?: number | null;
+  error?: string | null;
 };
 
 // ── plugin host (W0.3) ──────────────────────────────────────────────
@@ -4859,6 +5935,12 @@ export type PrDetail = {
    *  instead of a generic empty state. */
   diff_error?: string | null;
   aura_review: AuraReviewPayload | null;
+  /** Why `aura_review` is empty, or what had to be skipped to fill it —
+   *  an unreadable `.aura/reviews` directory, a file this build couldn't
+   *  parse. Same contract as `diff_error`: "no review on disk" is a claim
+   *  about a directory, and the pane may only make it when the read that
+   *  would disprove it actually came back. */
+  aura_review_error?: string | null;
   reviewers: PrReviewer[];
   /** Stage 8J — assignee logins from `gh pr view --json assignees`. */
   assignees: string[];
@@ -5141,6 +6223,27 @@ export type AgentDescriptor = {
   cost_per_1k: { input_usd: number; output_usd: number } | null;
 };
 
+/** One copy of an agent CLI found on disk. `on_path` false means the shell
+ *  cannot reach it at all, whatever version it holds. */
+export type AgentInstall = {
+  path: string;
+  raw_version: string | null;
+  version: string | null;
+  on_path: boolean;
+};
+
+/** What PATH actually resolves to for one agent — and what it hides.
+ *  `stale` is the endless-update-nag case: a newer copy exists on disk but
+ *  PATH runs an older one, so the CLI's own updater never appears to work. */
+export type AgentInstallHealth = {
+  agent_id: string;
+  bin: string;
+  running: AgentInstall | null;
+  shadowed: AgentInstall[];
+  stale: boolean;
+  newest_version: string | null;
+};
+
 export type ProjectEntry = {
   id: string;
   label: string;
@@ -5344,6 +6447,22 @@ export type ChatTurn = {
    *  `ChatTurn.input_tokens` / `ChatTurn.output_tokens`. */
   input_tokens?: number | null;
   output_tokens?: number | null;
+  /** The model id this turn actually ran on — the composer's override, else
+   *  the brain's default — as the backend resolved it for billing. Present
+   *  even when nothing could price it, so a card can name the model it has no
+   *  rate for rather than shrugging. Absent on CLI-wrapper turns and on
+   *  history persisted before the field. Mirrors the Rust `ChatTurn.model`. */
+  model?: string | null;
+  /** USD this turn billed, recorded when it settled — the very figure folded
+   *  into `~/.aura/api-spend.json`, not a re-derivation of it. Absent when the
+   *  brain wasn't on an API key, no tokens were billed, or no rate matched the
+   *  model; absent is the honest reading, never 0. Mirrors the Rust
+   *  `ChatTurn.cost_usd`. */
+  cost_usd?: number | null;
+  /** `cost_usd` came off a model-family rate rather than a published one, so
+   *  every surface showing it marks it `~`. Mirrors the Rust
+   *  `ChatTurn.cost_estimated`. */
+  cost_estimated?: boolean | null;
   /** Image attachments the user uploaded with this (user) turn. Persisted
    *  inline as base64 on the Rust `ChatTurn` so the bubble re-renders the
    *  thumbnails on reload — the same bytes the brain receives. Absent on
@@ -5802,6 +6921,11 @@ export type LoopTask = {
   /** "jira" etc. when the originating board card was externally imported. */
   external_source?: string | null;
   external_id?: string | null;
+  /** Which crew slice this node belongs to. `null`/absent is the default
+   *  "main" crew. The runner scopes a crew run by exactly this field
+   *  (`RunScope::matches` in aura-loop), so anything on this side that claims
+   *  to count a crew's work has to read it too — see `crewOf`. */
+  crew_id?: string | null;
   created_at: number;
   updated_at: number;
 };
@@ -5939,6 +7063,528 @@ export type RunnerProvision = {
   name: string;
 };
 
+/** One machine on the runner board, as the cloud registry knows it. `online` is
+ *  the server's verdict from heartbeat recency — we never re-derive it. A row
+ *  exists from the moment its token is minted, so `version`, `last_heartbeat_at`
+ *  and `current_task` are all null until the box first checks in. */
+/** The live state of one job on the cloud board, as the runner last left it. */
+export type CloudJobState = {
+  id: string;
+  status: string;
+  /** Why it failed, in the runner's words — only on a failure it could explain. */
+  error_message: string | null;
+  commit_sha: string | null;
+};
+
+/** One job this account handed to the cloud for a repo — in flight or finished,
+ *  on a branch or on none.
+ *
+ *  `CloudPlacement` answers "is this worktree row busy elsewhere right now",
+ *  so it is deliberately narrow. This answers the question the user asks after
+ *  pressing Send — *where did my work go?* — for which a queued job with no
+ *  branch and a job that already failed are both real answers, and both are
+ *  invisible to the placement view. */
+export type CloudJob = {
+  id: string;
+  status: string;
+  /** The agent CLI, without the `a2a:` transport prefix. */
+  agent: string;
+  /** Null for work started from the workspace composer: there is no local copy
+   *  of it on this disk, so there is no branch to name. */
+  branch: string | null;
+  /** What was asked for, verbatim. */
+  text: string | null;
+  /** The runner's reason for a failure — usually one `/login` from fixed. */
+  error_message: string | null;
+  commit_sha: string | null;
+  created_at: string | null;
+  /** The chat session that placed this job, when a chat placed it. Work minted
+   *  from the composer, the CLI or another machine has none. */
+  context_id: string | null;
+  /** Which project it belongs to, as `owner/name`. Null when the account-wide
+   *  read couldn't name the repo — the row still stands, unattributed. */
+  repo: string | null;
+  /** What the runner reported back, as text. Null until it finishes, and on
+   *  work that finished without saying anything. */
+  result: string | null;
+};
+
+/** A branch of this repo that is in flight on a machine that isn't this one.
+ *  Only unfinished work appears here, so a row carrying one of these is
+ *  running remotely *now* — which is the only thing a cloud badge may claim. */
+export type CloudPlacement = {
+  /** The branch it was sent on — how a worktree row matches itself to a job. */
+  branch: string;
+  id: string;
+  /** `submitted` (queued) or `working` (a machine has claimed it). */
+  status: string;
+  /** The agent CLI running it, without the `a2a:` transport prefix. */
+  agent: string;
+};
+
+export type CloudRunner = {
+  id: string;
+  /** Which org registered it. Rows are filtered to the org you are acting as
+   *  before they reach here; kept so a panel can say whose board this is. */
+  org_id?: string | null;
+  name: string;
+  agent_kinds: string[];
+  version: string | null;
+  status: string;
+  last_heartbeat_at: string | null;
+  current_task: string | null;
+  online: boolean;
+  /** The account that registered it, as a user id. The registry has always
+   *  carried this; it is resolved to a login against the org's member roster
+   *  before it reaches a row — see `PlaceRow.added_by`. */
+  created_by?: string | null;
+  created_at?: string | null;
+};
+
+/** Where a place on the one list came from.
+ *
+ *  `mine` — in this laptop's `0600` machine book, unknown to the org's board.
+ *  `both` — in the book AND on the board: you hold the address, the org holds
+ *           the place.
+ *  `org`  — on the board with no address here. Your team has a machine and this
+ *           laptop cannot dial it yet, which is the case the merged list
+ *           exists for: it used to be invisible. */
+export type PlaceSource = "mine" | "both" | "org";
+
+/** Whose place this is. A box only your book knows is yours; one the org's
+ *  board knows belongs to the org, whichever hat you wore when you saved it. */
+export type PlaceOwner = {
+  /** `"you"` | `"org"`. */
+  kind: string;
+  /** `"You"`, or the org's display name. */
+  label: string;
+  org_slug: string | null;
+};
+
+/** Who put it there — `"you"`, `"@ana"`, `"someone in Naridon"` when we hold an
+ *  id we cannot name, or `"not recorded"` when the server sent none. Never a
+ *  raw uuid: that is the same amount of screen and nobody can act on it. */
+export type PlaceAddedBy = { label: string; is_you: boolean };
+
+/** What you may do with a row, on this laptop. Deliberately the four verbs the
+ *  app actually offers — a right this list invented would be discovered by
+ *  whoever's click came back 403. */
+export type PlaceRights = {
+  /** Open a workspace here. Needs an address, so it is false for exactly the
+   *  org places this laptop has never connected. */
+  open: boolean;
+  /** Change what this laptop records — its key, its directory. */
+  edit: boolean;
+  /** Drop it from this laptop's book. Never touches the machine, never touches
+   *  the org's board. */
+  forget: boolean;
+  /** Give this laptop an address for it. */
+  connect: boolean;
+  /** The same thing in one sentence, written on the Rust side so the words
+   *  cannot drift from the flags. */
+  summary: string;
+};
+
+/** One row of the one list. */
+export type PlaceRow = {
+  /** The book's id, or the registry's behind a `runner:` prefix so two id
+   *  spaces cannot collide into one React key. */
+  id: string;
+  name: string;
+  source: PlaceSource;
+  owner: PlaceOwner;
+  added_by: PlaceAddedBy;
+  may: PlaceRights;
+  /** The book row, whole, when this laptop holds an address — and null when it
+   *  does not. Never a half-filled `Machine`: a blank host is a value some
+   *  later surface tries to ssh to. */
+  machine: Machine | null;
+  runner_id: string | null;
+  /** The board's verdict on liveness. `null` means nobody asked — a box only
+   *  your book knows has no board to be up on, and drawing that as "offline"
+   *  would call every personal machine dead. */
+  online: boolean | null;
+  agents: string[];
+  added_at: number;
+  last_used_at: number;
+};
+
+/** What happened when we asked the org for its places. Carried beside the rows
+ *  rather than thrown, because the local half is always answerable: the book is
+ *  a file on this disk. */
+export type PlaceOrgHalf = {
+  /** `"ok"` | `"signed_out"` | `"unreachable"`. */
+  status: string;
+  /** The server's own words when it went wrong, empty otherwise. */
+  detail: string;
+  slug: string | null;
+  name: string | null;
+  /** `"owner"` | `"admin"` | `"member"`, or null when the roster couldn't be
+   *  read. Not a right on any row — all four verbs are this laptop's own. */
+  my_role: string | null;
+};
+
+export type PlaceRoster = { places: PlaceRow[]; org: PlaceOrgHalf };
+
+/** One machine size, as it is offered. The list comes from the backend rather
+ *  than being spelled here so the picker cannot invent a fifth size, and so no
+ *  surface ever shows the substrate's own word for a shape. */
+export type PlaceSize = {
+  /** What to send back. Stable — rewording `title` never changes what is made. */
+  id: string;
+  title: string;
+  /** What fits on it, in one line. */
+  detail: string;
+  /** Pre-select this one. Exactly one size carries it. */
+  suggested: boolean;
+};
+
+/** Who in the org holds a cloud grant, at the moment we asked.
+ *
+ *  `status` is `"ok"` or `"unknown"`, and the difference matters: an empty
+ *  `members` under `"ok"` means only the admins can open what is about to be
+ *  made, which is actionable; under `"unknown"` it means we could not ask, and
+ *  drawing the two the same way tells a team they have no access when they may
+ *  have plenty. */
+export type PlaceEntitled = {
+  status: string;
+  detail: string;
+  /** GitHub logins, oldest grant first. */
+  members: string[];
+  /** Seats bought. `0` is unmetered, not full. */
+  seats: number;
+};
+
+/** What Aura can make here, and for whom.
+ *
+ *  Answers on every install, including one with no managed cloud set up and one
+ *  that is signed out — those are refusals with a reason, not errors. `sizes` is
+ *  always populated, because somebody who may not make a machine is still better
+ *  served by seeing what they would be asking an admin for. */
+export type PlaceMakeOffer = {
+  can_make: boolean;
+  /** `"ready"`, or `"not_offered"` | `"signed_out"` | `"no_org"` |
+   *  `"unknown_role"` | `"not_admin"`. */
+  reason: string;
+  /** The sentence to show when `can_make` is false. Empty otherwise. */
+  blocked: string;
+  /** What to call the team on screen; empty when we never got that far. */
+  org: string;
+  sizes: PlaceSize[];
+  /** Null on every refusal — there is no team to have asked about. */
+  entitled: PlaceEntitled | null;
+};
+
+/** A place that now exists. Carries no host, no login and no key: a managed
+ *  place's address lives on the org's board and its key is held by the server,
+ *  and the promise of the mode is that the member never handles either. */
+export type MadePlace = {
+  /** The org board row — the place id every other surface holds. */
+  place_id: string;
+  /** This laptop's book row, so it can be opened without a reload. Empty when
+   *  the book write failed, which `note` explains. */
+  machine_id: string;
+  name: string;
+  /** The one-time runner credential, the same one `runnerProvision` hands back
+   *  for a box you brought yourself. Recoverable nowhere else. */
+  runner_token: string;
+  entitled: PlaceEntitled;
+  /** Something that went wrong AFTER the place was already real, in words.
+   *  Empty on a clean run. Never a reason to tell somebody nothing was made. */
+  note: string;
+};
+
+/** A machine this laptop can open a workspace on — an address, not a secret.
+ *  `key_path` is a path on THIS disk; the key itself never leaves it. */
+export type Machine = {
+  /** `user@host:/repo` — lowercased through the host, then the box's own path
+   *  verbatim. One runner holding clones of several repos is several rows, so
+   *  connecting a second project no longer overwrites the first. Entries
+   *  written before projects were part of the key keep the bare `user@host`
+   *  form. Never print this; resolve it to `name` via `useMachineName`. */
+  id: string;
+  /** What it is called on the cloud runner board. */
+  name: string;
+  host: string;
+  user: string;
+  key_path: string;
+  /** `"mine"` | `"shared"` — on a shared box each member runs their own runner
+   *  under their own account, so sessions there are not interchangeable. */
+  box_kind: string;
+  /** Where the project lives ON THE BOX, when known. */
+  repo_path: string | null;
+  /** The local repo root this box is a cloud copy of — the same key the roster
+   *  files a project under, so the machine can sit with its project's own
+   *  copies instead of in a group of strangers. Null until something tells it:
+   *  the wizard on connect, or the workspace on the way in. */
+  project_root: string | null;
+  /** What is checked out in `repo_path` on the box, last time anything looked.
+   *  Cached in the machine book rather than asked for on render — the rail
+   *  draws constantly and `git rev-parse` over ssh is a round trip. Refreshed
+   *  free whenever a workspace lists the box's projects. Null before anything
+   *  has been there, or when the checkout has no branch to name. */
+  repo_branch: string | null;
+  /** The org this box was connected under. `null` means "nobody has said" —
+   *  every row written before orgs were a choice — and such a box stays
+   *  visible under every org rather than vanishing on the first switch. */
+  org_slug?: string | null;
+  /** May this box use the ssh agent on this laptop while it is connected?
+   *
+   *  Off unless the member turned it on for THIS box. It is not a convenience
+   *  toggle: while a connection is up, anything running as that login there can
+   *  ask your agent to sign with your key — it cannot read the key, but it can
+   *  use it, on any host your key opens. Optional here because a book written
+   *  before the field existed reads as off, which is the only safe way for a
+   *  decision nobody made to be recorded. Turn it on with `placeForwardSet`;
+   *  `machineSave` will neither grant nor withdraw it. */
+  forward_agent?: boolean;
+  /** The cloud's own name for this machine, for a box AURA MADE — and `null`
+   *  for one you brought.
+   *
+   *  That absence is what makes "Aura only stops machines it made" structural
+   *  rather than a rule somebody has to remember: with nothing to name, there is
+   *  no request to send. Never printed; it belongs to the substrate, not to a
+   *  person. */
+  instance_id?: string | null;
+  /** Unix seconds since Aura put this place to sleep; `0` or absent means it is
+   *  up.
+   *
+   *  Read this BEFORE concluding a machine is unreachable. A sleeping box
+   *  refuses every connection exactly the way a broken one does, and a surface
+   *  that finds out by dialling will draw the cheapest state Aura offers as the
+   *  most alarming one. `isAsleep` in `lib/place` is the one spelling. */
+  asleep_since?: number;
+  added_at: number;
+  last_used_at: number;
+};
+
+/** Whether a place is using the key on this laptop, and whether it could.
+ *
+ *  `supported: false` is this laptop: work here already runs beside your agent,
+ *  so there is nothing to forward. That is an answer, not a missing feature —
+ *  a surface renders one control and never asks what kind of place it holds. */
+export type Forwarding = {
+  /** What to call the place in a sentence. */
+  place: string;
+  supported: boolean;
+  on: boolean;
+  /** The state in the place's own words, so a surface does not keep its own
+   *  copy of three sentences in step with the engine's. */
+  note: string;
+};
+
+/** Whether a place is asleep, whether Aura could put it to sleep, and what is
+ *  keeping it up.
+ *
+ *  `state` is a word rather than a boolean called `online` on purpose: the bug
+ *  this whole feature is against is a third state being folded into a field with
+ *  room for two, so a machine Aura stopped to save money reads as a machine that
+ *  broke. */
+export type Sleeping = {
+  /** What to call the place in a sentence. */
+  place: string;
+  /** The machine book's key, or null for this laptop. */
+  machine_id: string | null;
+  state: "awake" | "asleep";
+  /** Unix seconds since Aura stopped it; 0 while it is up. */
+  asleep_since: number;
+  /** Could Aura stop this place at all? False for this laptop and for every box
+   *  you brought — Aura holds no account that could stop somebody else's
+   *  hardware. Render the refusal, never a disabled button with no reason. */
+  can_sleep: boolean;
+  /** Seconds since the last thing anything knows happened here. `0` is "nothing
+   *  recorded", which is not "just now". */
+  quiet_for: number;
+  /** The idle window in seconds, so a surface can draw how long is left without
+   *  keeping its own copy of the policy. */
+  idle_after: number;
+  /** One sentence about THIS place. */
+  note: string;
+  /** The policy itself, in one sentence — the same for every place. Shown
+   *  rather than re-written, so what a member reads and what the sweep does
+   *  cannot drift apart. */
+  policy: string;
+};
+
+/** Whether a place is being started right now, and how the wait is going.
+ *
+ *  Separate from {@link Sleeping} because the two are read at opposite moments:
+ *  sleeping is drawn onto a list of machines nobody is touching, this is polled
+ *  by one surface waiting on one machine. And because the state between the two
+ *  is the one neither of them has room for — a machine that is neither stopped
+ *  nor reachable, for the better part of a minute. */
+export type Waking = {
+  /** What to call the place in a sentence. */
+  place: string;
+  /** The machine book's key, or null for this laptop. */
+  machine_id: string | null;
+  /** `waking` is the state this type exists for. Folded into the other two, a
+   *  starting machine reads either as a broken one or as a reachable one. */
+  state: "awake" | "waking" | "asleep";
+  /** Unix seconds the wake started; 0 when nothing is starting. */
+  since: number;
+  /** How long a wake usually takes, in seconds — the engine's number, so a
+   *  progress bar and the sweep cannot disagree about it. */
+  usually: number;
+  /** Would reaching this place start it? False for this laptop and for a box
+   *  you brought. */
+  wakes_on_demand: boolean;
+  /** One sentence about what is happening to this place right now. */
+  note: string;
+};
+
+/** What the app sends to record a machine. The id and timestamps are derived. */
+export type MachineInput = {
+  name: string;
+  host: string;
+  user: string;
+  key_path: string;
+  box_kind: string;
+  repo_path?: string | null;
+  /** Omit to leave the filing alone. Omission is not a request to clear it —
+   *  the directory editor re-sends the whole record to change one path and has
+   *  no idea which project the box belongs to. */
+  project_root?: string | null;
+};
+
+/** A member's own account on a place, as it stands after Aura has asked for it.
+ *
+ *  Every field is what the machine said, not what was asked for: `created` is
+ *  whether THIS call made the account, `key` is what its `authorized_keys`
+ *  holds now. A screen that reported our intentions back would be reporting a
+ *  wish. */
+export type MemberAccount = {
+  /** The Unix login the member owns there. */
+  login: string;
+  /** Its home directory, as the box spells it. */
+  home: string;
+  /** Did this call create the account? */
+  created: boolean;
+  /** `installed` — the member's key was just added; `present` — it was already
+   *  there; `absent` — no key was offered, so this account can only be reached
+   *  by whoever can already become it. */
+  key: string;
+  /** `on` — the account's runner starts at boot with nobody logged in; `off` —
+   *  lingering was refused; `unavailable` — the box has no user units at all. */
+  linger: string;
+  /** Is the home directory closed to the other members (0700)? */
+  private: boolean;
+  /** Does its profile set `umask 077`, so what it writes later is its own too? */
+  umask: boolean;
+  /** Has the box got somewhere to swap to? `present` — it already had swap;
+   *  `added` — provisioning made a swapfile and turned it on; `none` — it has
+   *  none and could not be given any; `unavailable` — we could not tell.
+   *
+   *  A property of the machine rather than of the account, and the other half
+   *  of the per-member `MemoryMax` the runner installs: the ceiling stops one
+   *  member taking the whole box, and swap is what makes reaching it a slow
+   *  build instead of a killed one. `none` is the shape of the box that wedged
+   *  on 2026-08-04, which is why it is said out loud. */
+  swap: string;
+  /** The login the provisioning ran AS. Differs from `login` when somebody made
+   *  the account on the member's behalf. */
+  you: string;
+  /** Is the member the one already in this session? False means the wizard has
+   *  a shell belonging to somebody else and must hand it over before it writes
+   *  anything of the member's. */
+  is_you: boolean;
+};
+
+/** One live session on a box.
+ *
+ *  Never cached. The machine is the only thing that knows what is running on
+ *  it, and a row we kept believing in after it died is worse than no list:
+ *  you click it, a terminal opens on nothing, and the app looks like it lied. */
+export type BoxSession = {
+  /** The tmux session name — also the handle for attaching and stopping. */
+  name: string;
+  /** Absolute path ON THE BOX of the directory it works in: a project, or a
+   *  worktree of one. Empty for sessions started before Aura knew about any of
+   *  this, which we still list rather than hide. */
+  project: string;
+  /** `shell` | `agent` | `clone`. */
+  kind: string;
+  /** Which CLI is running, when one is. */
+  agent: string | null;
+  /** The branch it was given, when it was given its own. */
+  branch: string | null;
+  title: string;
+  /** Unix seconds. */
+  created_at: number;
+  /** Unix seconds of the last activity tmux saw — how you tell a session that
+   *  is thinking from one sitting at a prompt since Tuesday. */
+  activity_at: number;
+  /** Clients watching right now. More than one means someone is in here with
+   *  you. */
+  attached: number;
+};
+
+/** A project the box has a copy of. */
+export type BoxProject = {
+  /** Absolute path on the box. */
+  path: string;
+  /** The directory's own name — what to call it in a list. */
+  name: string;
+  /** Where it came from, when it has a remote. One with none can still be
+   *  worked in; it just can't be pushed anywhere. */
+  remote: string | null;
+  branch: string | null;
+  /** Modified or untracked files. Non-zero means somebody left work here. */
+  dirty: number;
+};
+
+/** A project the place holds and does not offer, with the reason. */
+export type WithheldProject = {
+  /** Absolute path on the place. Named rather than merely counted: whoever is
+   *  reading a shorter list is the person who knows the repo is there. */
+  path: string;
+  name: string;
+  /** One sentence, in the words somebody would use. Not a code. */
+  reason: string;
+};
+
+/** What a place offers, once the org it was opened as has had its say.
+ *
+ *  A box discovers projects box-wide — that is the right way to find them, and
+ *  it is why two repos somebody cloned by hand years ago are still visible. On a
+ *  shared runner it also means two orgs' work arrives in one listing, so the
+ *  backend narrows what came back before anyone draws it.
+ *
+ *  `narrowed: false` with a non-empty `notice` is the "we could not find out"
+ *  state — signed out, offline, an org server having a bad afternoon. A surface
+ *  must not draw it the same way as a clean filter: everything is being shown,
+ *  and the reason is worth saying. */
+export type PlaceProjects = {
+  /** The org slug the narrowing ran under, or null when none did. */
+  org: string | null;
+  /** What to call that org on screen. Falls back to the slug. */
+  org_name: string | null;
+  /** The projects this place offers. */
+  projects: BoxProject[];
+  /** The ones it holds and does not offer, each with its reason. */
+  withheld: WithheldProject[];
+  /** Whether the list was actually narrowed. */
+  narrowed: boolean;
+  /** The one sentence above the list, or "" when it needs no explaining. */
+  notice: string;
+};
+
+/** What to start on a box. The desktop fills this in; the box never invents one. */
+export type NewBoxSession = {
+  /** Absolute path ON THE BOX of the project to work in. */
+  project: string;
+  /** `shell` or `agent`. */
+  kind: string;
+  /** The CLI to run, for an agent session: `claude`, `codex`, `gemini`, … */
+  agent?: string | null;
+  title?: string | null;
+  /** Give it its own branch, in its own worktree, so two sessions on one
+   *  project can't edit the same files underneath each other. */
+  branch?: string | null;
+  /** The first thing to say to the agent. Omitted leaves it at its own prompt. */
+  prompt?: string | null;
+};
+
 export type LoopDispatchedNode = {
   node_id: string;
   lane_id: string;
@@ -6029,6 +7675,11 @@ export type ManagerSession = {
    *  a `ScoutCard` until findings consolidate, then `pending_scout`
    *  clears and `pending_plan` populates with the (annotated) draft. */
   pending_scout?: PendingScout | null;
+  /** The connected machine this conversation's *hands* are on. Absent — the
+   *  overwhelming default — means the code is on this disk. When set, the
+   *  brain still runs here; only its tools reach across, so the chat, its
+   *  transcript and its board are local either way. */
+  machine_id?: string | null;
   created_at: number;
   updated_at: number;
 };
@@ -6096,6 +7747,9 @@ export type ManagerSummary = {
   /** First project root this session is bound to, if any. `null` for
    *  workspace-agnostic scratch chats. */
   repo_root: string | null;
+  /** The connected machine this conversation's hands are on. `null`/absent —
+   *  the overwhelming default — means the code is on this disk. */
+  machine_id?: string | null;
 };
 
 export type ManagerSearchHit = {
@@ -6276,7 +7930,6 @@ export type AppSettings = {
     theme: string;
     /** default | modal | ember */
     variant: string;
-    ade_v2: boolean;
     font_size: number;
   };
   editor: {
@@ -6289,6 +7942,10 @@ export type AppSettings = {
     bell: boolean;
     cursor_blink: boolean;
     scrollback: number;
+    /** Type size in terminal panes, in px. `null` — never touched — means
+     *  this platform's terminal default (12 on macOS, 14 elsewhere), which
+     *  `Terminal.tsx` resolves. A number here is an explicit user choice. */
+    font_size: number | null;
   };
   flags: {
     intent_inspector: boolean;
@@ -6318,6 +7975,16 @@ export type AppSettings = {
     sidebar_height: number;
     /** Whether the desk-pet perches on the HUD pill and mirrors agent status. */
     pet: boolean;
+  };
+  /** What a freshly-made copy of a project opens into. */
+  workspace: {
+    /** `"code"` (open nothing — the default), `"chat"` (an Aura chat seeded
+     *  with the objective), or an agent CLI id (`"claude"`, `"codex"`, …) to
+     *  land in that CLI's terminal instead. Deliberately a loose string: a
+     *  value this build doesn't know — a newer setting, or an agent since
+     *  uninstalled — resolves back to `"code"` rather than failing to parse.
+     *  `resolveWorkspaceLanding` in `lib/workspaceLanding.ts` does that. */
+    open_in: string;
   };
 };
 
@@ -6471,14 +8138,21 @@ export type BlockEnvelope = {
   agent_id: string;
   started_at: number;
   finished_at: number | null;
-  /** Printable text only — ANSI sequences stripped. */
+  /** What the terminal is showing for this block, as text. Not the raw byte
+   *  stream: the backend replays the bytes through a real terminal grid, so a
+   *  repainted line reads once rather than once per frame. */
   text: string;
   exit_code: number | null;
 };
 
 export type BlockUpdate =
   | { op: "open"; block: BlockEnvelope }
-  | { op: "append"; block_id: string; text: string }
+  /** Rewrite the tail of a block: drop its last `drop_lines` lines, then put
+   *  `lines` in their place. A terminal is not append-only — spinners, progress
+   *  bars and status footers are all drawn over a line that is already on
+   *  screen — so an update has to be able to take something back. `drop_lines`
+   *  is 0 for ordinary streaming output, which is nearly every update. */
+  | { op: "reframe"; block_id: string; drop_lines: number; lines: string[] }
   | { op: "close"; block: BlockEnvelope };
 
 export type GitStatusEntry = {
@@ -6512,6 +8186,14 @@ export type IntentChangesetFile = {
    *  `git diff <base> -- <path>` (the file's whole change since the session
    *  began). Mutually exclusive with `commit`. */
   base?: string | null;
+  /** This file's change reached us over the team plane, not out of this clone's
+   *  git — a teammate's intent, whose commit may not be fetched here. We know
+   *  which file and which symbols moved; there is no patch to render.
+   *
+   *  Present → the diff view says so. Absent, such a file has no `commit` and
+   *  no `base`, so it falls through to `git diff HEAD -- <path>` and shows the
+   *  *viewer's own* uncommitted edits to that path under a teammate's name. */
+  remote_only?: boolean;
 };
 
 /** A bound changeset attached to an intent log row. `source` distinguishes
@@ -7066,6 +8748,31 @@ export type DiffStats = {
   removed: number;
 };
 
+/** One worktree's row inside a `gitDiffStatsBatch` answer. `stats` is null when
+ *  that worktree could not be read — most often a path removed under a roster
+ *  still holding the old list. Deliberately not a zeroed `DiffStats`: "+0 −0"
+ *  claims the tree is clean, and a failed read is not a clean tree. */
+export type BatchedDiffStats = {
+  repo_root: string;
+  stats: DiffStats | null;
+  error: string | null;
+};
+
+/** One way to run this project, with the file that justifies it. */
+export type RunCandidate = {
+  command: string;
+  /** e.g. `"package.json · dev"` — shown under the command so a wrong pick
+   *  is legible instead of magic. */
+  source: string;
+};
+
+/** What the repo says about running itself. `command` is null when nothing in
+ *  the checkout justified one — never a hopeful default. */
+export type RunSuggestion = {
+  command: string | null;
+  candidates: RunCandidate[];
+};
+
 export type FileDiffStat = {
   path: string;
   additions: number;
@@ -7280,7 +8987,35 @@ export type CloudAuthStatus = {
   connected: boolean;
   user?: string | null;
   org_slug?: string | null;
+  /** The active org's display name, when the app has learned it. The pairing
+   *  exchange only ever wrote the slug, so this stays null until the first
+   *  `cloudOrgs()` read fills it in. */
+  org_name?: string | null;
   cloud_url: string;
+};
+
+/** One org the signed-in account can act as.
+ *
+ *  Personal is an org of one: every signup already owns an org, so there is no
+ *  org-less state — an account always has at least this list of one. */
+export type CloudOrg = {
+  id: string;
+  slug: string;
+  /** Display name (`"ashiq team"`, `"Naridon"`), falling back to the slug. */
+  name: string;
+  /** Repos in it this account can see. `0` is a real answer, not a failure. */
+  repo_count: number;
+  /** Whether the app is acting as this one right now. Exactly one is true. */
+  current: boolean;
+};
+
+/** One project on the cloud, tagged with the org that owns it. */
+export type CloudRepo = {
+  id: string;
+  full_name: string;
+  org_id: string;
+  org_slug: string;
+  org_name: string;
 };
 
 // Scan-to-pair payload for the Aura mobile companion. `qr_payload` is the
@@ -7517,6 +9252,17 @@ export type ChatDoctorReport = {
   canonical_email?: string | null;
   alias_emails?: string[];
   identity_override_active?: boolean;
+  /** GitHub account signed in on this machine (`gh api user`), or null
+   *  when `gh` is missing or signed out. */
+  github_login?: string | null;
+  /** The roster seat that GitHub account is recorded on, when there is
+   *  one. This is *evidence the local user owns that seat* — unlike mere
+   *  roster membership, which travels with the repo and says nothing
+   *  about whoever cloned it. The identity picker offers a team name only
+   *  when one of these evidence fields backs it. */
+  github_member_handle?: string | null;
+  github_member_email?: string | null;
+  github_member_name?: string | null;
 };
 
 export type BlameLine = {
@@ -7525,6 +9271,23 @@ export type BlameLine = {
   author: string;
   ts: number;
   summary: string;
+};
+
+/**
+ * A project's cloud identity, as Rust resolves it (`repo_identity.rs`).
+ * Mirrors `cmd_repo_identity::RepoIdentityView`.
+ */
+export type RepoIdentity = {
+  /** The canonical name this project is filed under — always present. */
+  slug: string;
+  /** Name derived from its remote; null for a remote-less project. */
+  remote_slug: string | null;
+  /** The raw `origin` URL that was parsed, for showing the user. */
+  origin_url: string | null;
+  /** Org this project was explicitly bound to; null = cloud picks the default. */
+  org: string | null;
+  /** True when `slug` came from a human override rather than the remote. */
+  name_is_explicit: boolean;
 };
 
 export type OutlineNode = {
@@ -7784,6 +9547,25 @@ export type ClaudeUsageSnapshot = {
   age_secs: number;
   /** True while the reading is recent enough that the 5-hour figure is live. */
   fresh: boolean;
+};
+
+/** A slice of an agent's own append-only record, and where to resume reading
+ *  it. Codex's rollout and Kimi's wire are different files with different
+ *  vocabularies, but reading them is the same contract, so it is one type. */
+export type AgentRecordChunk = {
+  /** The file being read. Echo it back on the next call; when it comes back
+   *  different, the agent started a new session. */
+  path: string | null;
+  /** The engine's own id for this session (what its `resume` takes). */
+  session_id: string | null;
+  /** Byte offset to pass as `sinceOffset` next time. */
+  offset: number;
+  /** Complete JSONL records appended since `sinceOffset`, one per string. A
+   *  record the agent is still writing is held back until its newline lands,
+   *  so a caller never has to parse half an object. */
+  lines: string[];
+  /** What you accumulated is stale — start over from `lines`. */
+  reset: boolean;
 };
 
 export type ClaudeSession = {
@@ -8418,7 +10200,23 @@ export async function pageCommentsDelete(
 // (`#[serde(rename_all = "camelCase")]`) VERBATIM.
 
 export type MissionRunSource = "crew" | "automation" | "manual";
-export type MissionRunState = "working" | "queued" | "done" | "failed";
+/** `needsYou` is a run that has stopped and will not move again until a person
+ *  acts — it asked a question, or it needs a sign-in. It is deliberately not
+ *  folded into `queued`: a queued run is waiting on the machine and will start
+ *  itself, this one is waiting on the reader and never will.
+ *
+ *  `paused` is held for the same reason and must not be folded in either: a
+ *  paused run is one you stopped, and the crew will not take it. Mapping it to
+ *  `queued` put every paused task in the board's "ready to pick up" lane —
+ *  telling the reader the crew was about to run work they had deliberately
+ *  parked, and making that lane's count disagree with the plan's own. */
+export type MissionRunState =
+  | "working"
+  | "queued"
+  | "needsYou"
+  | "paused"
+  | "done"
+  | "failed";
 
 export type MissionRun = {
   id: string;

@@ -27,7 +27,7 @@ use async_stream::try_stream;
 use async_trait::async_trait;
 use aura_agents::{InvokeMode, InvokeRequest, canonical_agent_id, registry};
 use futures_util::stream::BoxStream;
-use serde_json::{Value, json};
+use serde_json::Value;
 use tokio::io::{AsyncBufReadExt, BufReader};
 
 use super::{
@@ -44,44 +44,6 @@ const PROVIDER_PREFIX: &str = "cli_wrapper:";
 /// the picker suffix, and the registry stay in lockstep.
 fn agent_id_for_suffix(suffix: &str) -> &str {
     canonical_agent_id(suffix)
-}
-
-/// Default model id the CLI uses internally. The CLI selects its model
-/// from its own auth/config; this value is informational — the picker
-/// UI surfaces it next to the provider name.
-fn default_model_for(suffix: &str) -> &'static str {
-    match suffix {
-        "claude_code" => "claude-sonnet-4-6",
-        "gemini" => "gemini-3-pro-preview",
-        "codex" => "gpt-5-codex",
-        "cursor" => "cursor-default",
-        "kimi" => "kimi-k2",
-        "opencode" => "opencode-default",
-        _ => "default",
-    }
-}
-
-/// Models the CLI is known to expose. Same caveat as `default_model_for`
-/// — informational only; the CLI picks for real.
-fn supported_models_for(suffix: &str) -> Value {
-    match suffix {
-        "claude_code" => json!([
-            "claude-opus-4-8",
-            "claude-sonnet-4-6",
-            "claude-haiku-4-5-20251001",
-        ]),
-        "gemini" => json!([
-            "gemini-3-pro-preview",
-            "gemini-3-flash-preview",
-            "gemini-2.5-pro",
-            "gemini-2.5-flash",
-        ]),
-        "codex" => json!(["gpt-5-codex", "gpt-5.5"]),
-        "cursor" => json!(["cursor-default"]),
-        "kimi" => json!(["kimi-k2"]),
-        "opencode" => json!(["opencode-default"]),
-        _ => json!([]),
-    }
 }
 
 /// One `Brain` impl per installed CLI. Constructed by `registry::build`
@@ -289,14 +251,28 @@ impl Brain for CliWrapperBrain {
         &self.provider_id
     }
 
+    /// No `DEFAULT_MODEL`, and no `SUPPORTED_MODELS`.
+    ///
+    /// Both were tables of model ids maintained by hand here, and a CLI
+    /// does not take a model from us — it picks one from its own auth and
+    /// config, and never tells us which. So the ids were a guess, and
+    /// [`settle_turn_cost`](crate::cmd_brain_chat) records `DEFAULT_MODEL`
+    /// on the cost card precisely so the card can name the model it has no
+    /// rate for. A guess there is a wrong label on a real turn: the card
+    /// read `claude-sonnet-5` for a session actually running Opus, and
+    /// `cursor-default` / `opencode-default` were not model ids at all.
+    ///
+    /// Saying nothing leaves the card blank unless the composer picked a
+    /// model, which is the one case we do know. The model *list* is
+    /// answered by `model_discovery`, which asks the engine.
     fn capabilities(&self) -> BrainCapabilities {
-        let suffix = self.suffix.as_str();
         BrainCapabilities::new()
             .with(cap_keys::SUPPORTS_STREAMING, true)
             .with(cap_keys::SUPPORTS_TOOL_USE, true)
-            .with(cap_keys::SUPPORTS_VISION, suffix == "claude_code")
-            .with(cap_keys::DEFAULT_MODEL, json!(default_model_for(suffix)))
-            .with(cap_keys::SUPPORTED_MODELS, supported_models_for(suffix))
+            .with(
+                cap_keys::SUPPORTS_VISION,
+                self.suffix.as_str() == "claude_code",
+            )
     }
 
     async fn chat(
@@ -363,6 +339,11 @@ impl Brain for CliWrapperBrain {
         })?;
         let stderr = child.stderr.take();
         let stream_json = invocation.stdout_is_stream_json;
+        // A plain-text CLI prints for a terminal, so its answer arrives wrapped
+        // in whatever that engine draws around a message (Kimi: a `• ` bullet
+        // block). Undo it as the lines come off stdout.
+        let mut transcript =
+            super::plain_cli_transcript::PlainCliTranscript::for_engine(&agent_id);
 
         let stream = try_stream! {
             // RAII guard ensures the child is reaped whether the stream
@@ -398,6 +379,7 @@ impl Brain for CliWrapperBrain {
                             tool_use_id,
                             name,
                             input,
+                            signature: None,
                         };
                         block_idx += 1;
                     }
@@ -421,10 +403,14 @@ impl Brain for CliWrapperBrain {
                         break;
                     }
                 } else {
-                    // Non-stream-json CLIs (cursor) → raw stdout, one
-                    // big text block.
-                    if !line.is_empty() {
-                        any_text = true;
+                    // Non-stream-json CLIs (cursor, kimi) → raw stdout, one
+                    // big text block, minus the engine's own decoration.
+                    let line = transcript.line(&line);
+                    // A blank line before any text is the CLI settling; once
+                    // text has started it is the model's paragraph break, and
+                    // dropping it glues its paragraphs and lists together.
+                    if any_text || !line.trim().is_empty() {
+                        any_text = any_text || !line.trim().is_empty();
                         yield ChatChunk::Text {
                             block_idx,
                             text: format!("{line}\n"),
@@ -544,6 +530,7 @@ fn parse_cli_stop_reason(v: &Value) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
 
     #[test]
     fn suffix_alias_maps_claude_code() {

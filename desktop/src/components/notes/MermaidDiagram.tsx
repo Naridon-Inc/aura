@@ -80,7 +80,7 @@ export function MermaidDiagram({ code, minHeight }: Props) {
         style={{ ...frame, color: "var(--color-text-2)" }}
       >
         <div
-          className="t-2xs t-ui uppercase mb-1"
+          className="section-label mb-1"
           style={{
             color: "var(--color-text-4)",
             letterSpacing: "0.12em",

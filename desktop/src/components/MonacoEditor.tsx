@@ -18,6 +18,7 @@ import { initVimMode } from "monaco-vim";
 
 import { installMonacoEnvironment } from "../lib/monacoEnv";
 import { monacoLanguageForPath, monacoLanguageId } from "../lib/monacoLanguage";
+import { rememberSelection } from "../lib/ideBridge/selection";
 import { configureMonacoDiagnostics } from "../lib/monacoDiagnostics";
 import { useResolvedTheme, useThemeVariant } from "../lib/themeStore";
 import { ensureAuraThemes } from "../lib/monacoTheme";
@@ -38,6 +39,7 @@ import {
 import type { WireDoc } from "../lib/vscodeExt/langFeatures";
 import { useInstalledExtensions } from "../lib/vscodeExt/vsixStore";
 import { useEditorPrefs, useFontSize } from "../lib/settingsStore";
+import { registerUndoTarget } from "../lib/undoRouter";
 import { api, type BlameLine } from "../lib/api";
 import {
   loadAtlasIndex,
@@ -45,6 +47,7 @@ import {
   lookupEntry,
   renderHoverMarkdown,
 } from "../lib/atlasHover";
+import { relativeAgeFromSecs } from "../lib/relativeTime";
 
 installMonacoEnvironment();
 
@@ -173,6 +176,22 @@ export function MonacoEditor({
     editorInstance.onDidChangeCursorPosition((e) => {
       setActiveLine(e.position.lineNumber);
       onCursor?.(e.position.lineNumber);
+    });
+
+    // Remember what's highlighted so an agent can be asked "what am I
+    // looking at?" from its own tab — by then this editor has lost focus,
+    // so the answer has to have been recorded while it still had it.
+    editorInstance.onDidChangeCursorSelection((e) => {
+      const model = editorInstance.getModel();
+      if (!model || !filePath) return;
+      rememberSelection({
+        filePath,
+        text: model.getValueInRange(e.selection),
+        startLine: e.selection.startLineNumber,
+        startColumn: e.selection.startColumn,
+        endLine: e.selection.endLineNumber,
+        endColumn: e.selection.endColumn,
+      });
     });
 
     // Cmd+Shift+S → "Share to chat…" with the current selection (or
@@ -337,6 +356,18 @@ export function MonacoEditor({
       if (uri) modelRepoRoot.delete(uri);
     };
   }, [mounted, repoRoot, filePath]);
+
+  // Claim ⌘Z while this editor has focus. Monaco keeps its own undo stack on
+  // the text model, which the OS-level `undo:` selector cannot see — so the
+  // Edit menu hands us the operation instead and we run Monaco's own command.
+  useEffect(() => {
+    if (!mounted) return;
+    return registerUndoTarget({
+      hasFocus: () => !!editorRef.current?.hasTextFocus(),
+      undo: () => editorRef.current?.trigger("aura.menu", "undo", null),
+      redo: () => editorRef.current?.trigger("aura.menu", "redo", null),
+    });
+  }, [mounted]);
 
   // Force a repaint when the open file changes. The editor instance is
   // REUSED across files (no key/path remount — that's deliberate, it keeps
@@ -540,7 +571,7 @@ export function MonacoEditor({
       {editorPrefs.vim && (
         <div
           ref={vimStatusRef}
-          className="shrink-0 h-5 px-2 flex items-center gap-2 text-[11px] font-mono text-text-3 bg-bg-1 border-t border-line-soft"
+          className="shrink-0 h-5 px-2 flex items-center gap-2 text-xs font-mono text-text-3 bg-bg-1 border-t border-line-soft"
         />
       )}
     </div>
@@ -549,13 +580,6 @@ export function MonacoEditor({
 
 // "2 days ago" style label off a unix timestamp (seconds).
 function relativeTime(ts: number): string {
-  const now = Math.floor(Date.now() / 1000);
-  const delta = Math.max(0, now - ts);
-  if (delta < 60) return "just now";
-  if (delta < 3600) return `${Math.floor(delta / 60)}m ago`;
-  if (delta < 86400) return `${Math.floor(delta / 3600)}h ago`;
-  if (delta < 86400 * 7) return `${Math.floor(delta / 86400)}d ago`;
-  if (delta < 86400 * 30) return `${Math.floor(delta / (86400 * 7))}w ago`;
-  if (delta < 86400 * 365) return `${Math.floor(delta / (86400 * 30))}mo ago`;
-  return `${Math.floor(delta / (86400 * 365))}y ago`;
+  // One ladder for the whole app — see lib/relativeTime.
+  return relativeAgeFromSecs(ts);
 }

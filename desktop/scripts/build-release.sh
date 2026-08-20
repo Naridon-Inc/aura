@@ -108,7 +108,30 @@ else
 fi
 
 echo "▸ building $ARCH ($TARGET)"
-bun run tauri build --target "$TARGET"
+# Via the wrapper, NOT `bun run tauri build` directly. The wrapper puts Apple's
+# xattr at the front of PATH and — the part that matters here — asks for
+# `--bundles app` only. tauri.conf.json sets `targets: all`, so the raw command
+# also runs tauri's own DMG and updater-tarball steps, and BOTH of those outputs
+# are thrown away downstream: aura-shell-mcp and the aura CLI are inserted into
+# Aura.app after this line, so the shipped image and tarball have to be rebuilt
+# from the re-signed, notarized, stapled bundle (sign-notarize.sh → make-dmg.sh).
+#
+# Asking for them anyway is not just wasted minutes. tauri's bundle_dmg.sh fails
+# here at its mount/Finder-layout stage and leaves its scratch image mounted
+# under /Volumes/dmg.* — which then makes the NEXT run fail too, so one failure
+# is sticky until someone ejects it by hand. The whole build dies there, after
+# the compile, the .app, the signing and a successful notarization have all
+# already succeeded, for an artifact nothing downstream wanted.
+#
+# Why that script fails is not pinned down, and deliberately so: its output is
+# discarded either way, so the answer would change nothing. make-dmg.sh does the
+# same job — including the AppleScript icon layout, which works fine when run
+# from here — with the layout treated as best-effort and time-boxed, so it still
+# ships a valid DMG on a machine where AppleScript can't run.
+#
+# package.json's app:build:* already went through this wrapper; this script was
+# the one path that didn't, which is why releases driven from here hit it.
+bash scripts/mac-tauri-build.sh "$TARGET"
 
 # Bundle MCP binary into the .app then re-sign + notarize.
 echo "▸ bundling aura-shell-mcp into .app"

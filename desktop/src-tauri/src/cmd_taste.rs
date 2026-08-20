@@ -27,7 +27,7 @@ pub async fn aura_taste_rules(repo_root: String) -> Result<serde_json::Value, St
         return Err(format!("repo root does not exist: {}", repo_root));
     }
 
-    let out = tokio::process::Command::new("aura")
+    let out = tokio::process::Command::new(crate::agent_event_listener::resolve_aura_bin())
         .args(["taste", "list", "--json"])
         .current_dir(&cwd)
         .output()

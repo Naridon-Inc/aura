@@ -40,6 +40,8 @@ import { Composer } from "./Composer";
 import { ChannelCanvasTab } from "./ChannelCanvasTab";
 import { ChannelCustomTab } from "./ChannelCustomTab";
 import { Button } from "../../ui/button";
+import { StripArrows, useStripOverflow } from "../../ui/stripOverflow";
+import { askForm } from "../../ui/ask";
 import {
   ChannelDetailsDialog,
   type ChannelDialogTab,
@@ -158,8 +160,30 @@ export function ConversationView({
             ? onSelectContext("details")
             : setChannelDialogTab("about")
         }
-        canvasOpen={contextTabs.includes("canvas")}
-        onToggleCanvas={() => onSelectContext("canvas")}
+        tabs={
+          <ConversationTabs
+            active={active}
+            activeTab={activeTab}
+            onSelect={setTab}
+            onAddCustomTab={
+              active.channel && active.kind !== "dm"
+                ? async () => {
+                    // One sheet, both halves — see ChannelDetailsDialog.
+                    const v = await askForm({
+                      title: "Pin a tab to this channel",
+                      submitLabel: "Pin tab",
+                      fields: [
+                        { name: "label", label: "Tab name", placeholder: "Runbook", required: true },
+                        { name: "url", label: "Link", value: "https://", required: true },
+                      ],
+                    });
+                    if (!v?.label.trim() || !v.url.trim()) return;
+                    await addChannelTab(active.channel!, v.label.trim(), v.url.trim());
+                  }
+                : undefined
+            }
+          />
+        }
         pinsOpen={contextTabs.includes("pinned")}
         onTogglePins={() => onSelectContext("pinned")}
         pinCount={topLevel.filter((m) => m.pinned).length}
@@ -175,22 +199,6 @@ export function ConversationView({
         inThisVoice={!!active.channel && myVoiceChannel === active.channel}
         onExpand={onExpand}
       />
-      <ConversationTabs
-        active={active}
-        activeTab={activeTab}
-        onSelect={setTab}
-        onAddCustomTab={
-          active.channel && active.kind !== "dm"
-            ? async () => {
-                const label = window.prompt("Tab name");
-                if (!label?.trim()) return;
-                const url = window.prompt("Tab URL");
-                if (!url?.trim()) return;
-                await addChannelTab(active.channel!, label.trim(), url.trim());
-              }
-            : undefined
-        }
-      />
       {activeTab.startsWith("custom:") ? (
         activeCustomTab ? (
           <ChannelCustomTab
@@ -202,17 +210,17 @@ export function ConversationView({
           />
         ) : (
           <div className="flex flex-1 flex-col items-center justify-center px-6 py-12 text-center">
-            <div className="text-text-1 text-[14px] font-medium">
+            <div className="text-text-1 text-md font-medium">
               This tab was removed
             </div>
-            <div className="mt-2 max-w-[360px] text-[11.5px] text-text-4 leading-snug">
+            <div className="mt-2 max-w-[360px] text-sm text-text-4 leading-snug">
               A teammate unpinned it from the channel.
             </div>
             <Button
               variant="secondary"
               size="sm"
               onClick={() => setTab("messages")}
-              className="mt-3 text-[11.5px]"
+              className="mt-3 text-sm"
             >
               Back to messages
             </Button>
@@ -276,14 +284,27 @@ export function ConversationView({
               (p) => active.channel && p.channel === active.channel,
             )}
           />
-          <Composer
-            conv={active}
-            repoRoot={repoRoot}
-            members={members}
-            onSend={(body, atts, files) =>
-              sendMessage(active, body, undefined, atts, files)
-            }
-          />
+          {active.kind === "project" ? (
+            // The project feed is a rendering of intents, snapshots and
+            // commits as they land — there is no send path for it, so
+            // `sendMessage` returned without doing anything. The composer
+            // still invited you to "Note for <project>…", took the text and
+            // dropped it on Send. Say what this surface is instead.
+            <div className="border-t border-line-soft px-4 py-2.5 text-xs text-text-4">
+              This is {active.name}'s activity as it happens. Intents,
+              snapshots and commits. To say something, pick a channel or a
+              teammate.
+            </div>
+          ) : (
+            <Composer
+              conv={active}
+              repoRoot={repoRoot}
+              members={members}
+              onSend={(body, atts, files) =>
+                sendMessage(active, body, undefined, atts, files)
+              }
+            />
+          )}
         </>
       ) : activeTab === "canvas" ? (
         <ChannelCanvasTab
@@ -323,6 +344,7 @@ export function ConversationView({
         <ChannelDetailsDialog
           conv={active}
           members={members}
+          repoRoot={repoRoot}
           initialTab={channelDialogTab}
           onTabChange={setChannelDialogTab}
           onClose={() => setChannelDialogTab(null)}
@@ -349,7 +371,7 @@ function ConversationTabs({
     icon: ReactNode;
   }> = [
     { value: "messages", label: "Messages", icon: <MessageCircle size={13} /> },
-    { value: "canvas", label: active.kind === "dm" ? "Canvas" : "Canvas", icon: <FileText size={13} /> },
+    { value: "canvas", label: "Canvas", icon: <FileText size={13} /> },
     { value: "files", label: "Files & links", icon: <Link2 size={13} /> },
     ...(active.kind === "dm"
       ? []
@@ -361,30 +383,48 @@ function ConversationTabs({
     })),
   ];
 
+  // Same strip, same rule as a surface's tabs: the cells don't shrink, so a
+  // header this row shares with a title, a facepile and four glyphs runs out
+  // of width long before the sections run out. Without the arrows a 1200px
+  // window showed `Messages | Canvas | Fil` and put "Add a tab" entirely past
+  // the edge, with nothing saying either was there.
+  const { ref, hidden, page } = useStripOverflow<HTMLElement>({
+    active: activeTab,
+    activeSelector: ".is-active",
+    count: tabs.length,
+  });
+
   return (
-    <nav className="slack-channel-tabs" aria-label="Conversation sections">
-      {tabs.map((tab) => (
-        <button
-          key={tab.value}
-          type="button"
-          className={activeTab === tab.value ? "is-active" : ""}
-          onClick={() => onSelect(tab.value)}
-        >
-          {tab.icon}
-          <span>{tab.label}</span>
-        </button>
-      ))}
-      {onAddCustomTab && (
-        <button
-          type="button"
-          className="slack-channel-tab-add"
-          onClick={onAddCustomTab}
-          title="Add a tab"
-          aria-label="Add a tab"
-        >
-          <Plus size={14} />
-        </button>
-      )}
-    </nav>
+    <div className="ade-strip-wrap slack-channel-tabs-wrap">
+      <nav
+        ref={ref}
+        className="slack-channel-tabs"
+        aria-label="Conversation sections"
+      >
+        {tabs.map((tab) => (
+          <button
+            key={tab.value}
+            type="button"
+            className={activeTab === tab.value ? "is-active" : ""}
+            onClick={() => onSelect(tab.value)}
+          >
+            {tab.icon}
+            <span>{tab.label}</span>
+          </button>
+        ))}
+        {onAddCustomTab && (
+          <button
+            type="button"
+            className="slack-channel-tab-add"
+            onClick={onAddCustomTab}
+            title="Add a tab"
+            aria-label="Add a tab"
+          >
+            <Plus size={14} />
+          </button>
+        )}
+      </nav>
+      <StripArrows hidden={hidden} page={page} noun="sections" />
+    </div>
   );
 }

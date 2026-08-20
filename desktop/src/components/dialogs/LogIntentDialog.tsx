@@ -12,6 +12,7 @@ import { Dialog } from "../Dialog";
 import { Button } from "../ui/button";
 import { AsciiSpinner } from "../ui/ascii-spinner";
 import { api, type GitStatusEntry, type IntentChangesetFile } from "../../lib/api";
+import { basename } from "../../lib/paths";
 
 type LogIntentDialogProps = {
   open: boolean;
@@ -30,11 +31,6 @@ type LogIntentDialogProps = {
   /** Optional agent block id this intent originated from (option 2 path). */
   blockId?: string;
 };
-
-function shortName(p: string): string {
-  const i = p.lastIndexOf("/");
-  return i >= 0 ? p.slice(i + 1) : p;
-}
 function dirNameOf(p: string): string {
   const i = p.lastIndexOf("/");
   return i > 0 ? p.slice(0, i) : "";
@@ -152,9 +148,9 @@ export function LogIntentDialog({
         </>
       }
     >
-      <div className="space-y-3 text-[11.5px]">
+      <div className="space-y-3 text-sm">
         <div>
-          <div className="text-text-4 text-[10.5px] uppercase tracking-wider mb-1">
+          <div className="section-label mb-1">
             What changed, and why?
           </div>
           <textarea
@@ -167,14 +163,14 @@ export function LogIntentDialog({
             onKeyDown={(e) => {
               if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) save();
             }}
-            className="w-full bg-bg-1 border border-line rounded px-2 py-1.5 text-text-1 text-[12px] outline-none focus:border-text-4 resize-y leading-relaxed"
+            className="w-full bg-bg-1 border border-line rounded px-2 py-1.5 text-text-1 text-sm outline-none focus:border-text-4 resize-y leading-relaxed"
             style={{ minHeight: 96 }}
           />
         </div>
 
         <div>
           <div className="flex items-center mb-1">
-            <span className="text-text-4 text-[10.5px] uppercase tracking-wider">
+            <span className="section-label">
               Files this note covers · {picked.size} of {dirty.length}
             </span>
             <div className="ml-auto flex items-center gap-1">
@@ -182,7 +178,7 @@ export function LogIntentDialog({
                 type="button"
                 onClick={pickAll}
                 disabled={dirty.length === 0 || busy || done}
-                className="text-[10.5px] text-text-3 hover:text-text-1 disabled:opacity-40"
+                className="text-xs text-text-3 hover:text-text-1 disabled:opacity-40"
               >
                 all
               </button>
@@ -191,7 +187,7 @@ export function LogIntentDialog({
                 type="button"
                 onClick={pickNone}
                 disabled={dirty.length === 0 || busy || done}
-                className="text-[10.5px] text-text-3 hover:text-text-1 disabled:opacity-40"
+                className="text-xs text-text-3 hover:text-text-1 disabled:opacity-40"
               >
                 none
               </button>
@@ -199,12 +195,12 @@ export function LogIntentDialog({
           </div>
           <div className="border border-line-soft rounded bg-bg-0 max-h-[180px] overflow-y-auto">
             {loadingDirty ? (
-              <div className="flex items-center gap-1.5 px-2 py-3 text-text-4 text-[11px]" role="status">
-                <AsciiSpinner className="text-[11px] leading-none" />
+              <div className="flex items-center gap-1.5 px-2 py-3 text-text-4 text-xs" role="status">
+                <AsciiSpinner className="text-xs leading-none" />
                 Looking for changes…
               </div>
             ) : dirty.length === 0 ? (
-              <div className="px-2 py-3 text-text-4 text-[11px]">no changes to cover right now</div>
+              <div className="px-2 py-3 text-text-4 text-xs">no changes to cover right now</div>
             ) : (
               dirty.map((e) => {
                 const checked = picked.has(e.path);
@@ -212,7 +208,7 @@ export function LogIntentDialog({
                 return (
                   <label
                     key={e.path}
-                    className={`flex items-center gap-2 px-2 py-1 text-[11.5px] cursor-pointer hover:bg-bg-2 ${
+                    className={`flex items-center gap-2 px-2 py-1 text-sm cursor-pointer hover:bg-state-hover ${
                       checked ? "" : "opacity-55"
                     }`}
                   >
@@ -223,11 +219,11 @@ export function LogIntentDialog({
                       disabled={busy || done}
                       className="accent-accent-green"
                     />
-                    <span className="w-3 text-[10px] font-mono text-text-4">{tag}</span>
+                    <span className="w-3 text-2xs font-mono text-text-4">{tag}</span>
                     <span className="text-text-1 truncate" title={e.path}>
-                      {shortName(e.path)}
+                      {basename(e.path)}
                     </span>
-                    <span className="ml-auto text-text-5 text-[10.5px] font-mono truncate">
+                    <span className="ml-auto text-text-5 text-xs font-mono truncate">
                       {dirNameOf(e.path)}
                     </span>
                   </label>
@@ -235,16 +231,16 @@ export function LogIntentDialog({
               })
             )}
           </div>
-          <div className="text-text-5 text-[10.5px] mt-1">
+          <div className="text-text-5 text-xs mt-1">
             The files you tick are the ones this note covers. Saving a version needs every changed
             file to have a note.
           </div>
         </div>
 
-        <div className="text-text-5 text-[10.5px]">
+        <div className="text-text-5 text-xs">
           Press ⌘↵ to save this note
         </div>
-        {err && <div role="alert" className="text-red text-[11px]">{err}</div>}
+        {err && <div role="alert" className="text-red text-xs">{err}</div>}
       </div>
     </Dialog>
   );

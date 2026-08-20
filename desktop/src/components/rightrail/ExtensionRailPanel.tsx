@@ -63,7 +63,7 @@ export function ExtensionRailPanel({ ext, onOpenManager }: Props) {
   return (
     <div className="flex h-full min-h-0 flex-col bg-bg-1">
       <header className="flex-shrink-0 flex items-center gap-2 px-3 h-9 border-b border-line-soft">
-        <span className="text-text-2 text-[11.5px] font-medium uppercase tracking-wider truncate">
+        <span className="section-label truncate">
           Extension
         </span>
         {onOpenManager && (
@@ -72,7 +72,7 @@ export function ExtensionRailPanel({ ext, onOpenManager }: Props) {
             onClick={onOpenManager}
             title="Open Extensions"
             aria-label="Open Extensions"
-            className="ml-auto flex items-center justify-center w-7 h-7 rounded-md text-text-3 hover:text-text-1 hover:bg-bg-3 transition-colors"
+            className="ml-auto flex items-center justify-center w-7 h-7 rounded-md text-text-3 hover:text-text-1 hover:bg-state-hover transition-colors"
           >
             <svg width="13" height="13" viewBox="0 0 24 24" fill="none" aria-hidden>
               <path
@@ -91,23 +91,23 @@ export function ExtensionRailPanel({ ext, onOpenManager }: Props) {
         {/* Identity + one honest overall verdict. */}
         <div className="flex flex-col gap-1">
           <div className="flex items-baseline gap-2">
-            <span className="text-text-1 text-[13px] font-medium truncate">
+            <span className="text-text-1 text-base font-medium truncate">
               {ext.displayName || ext.name}
             </span>
-            <span className="text-text-4 text-[11px] tabular-nums flex-shrink-0">
+            <span className="text-text-4 text-xs tabular-nums flex-shrink-0">
               v{ext.version}
             </span>
             {!ext.enabled && (
-              <span className="text-[10px] text-text-4 bg-bg-2 border border-line-soft rounded px-1.5 py-0.5">
+              <span className="text-2xs text-text-4 bg-bg-2 border border-line-soft rounded px-1.5 py-0.5">
                 off
               </span>
             )}
           </div>
-          <span className="text-text-4 text-[10.5px] font-mono truncate">
+          <span className="text-text-4 text-xs font-mono truncate">
             {ext.namespace}
           </span>
           {ext.description && (
-            <p className="text-text-3 text-[11.5px] leading-snug mt-0.5">
+            <p className="text-text-3 text-sm leading-snug mt-0.5">
               {ext.description}
             </p>
           )}
@@ -116,14 +116,14 @@ export function ExtensionRailPanel({ ext, onOpenManager }: Props) {
 
         {/* Per-kind breakdown, grouped by band. */}
         {groups.length === 0 ? (
-          <p className="text-text-4 text-[11.5px] leading-snug">
+          <p className="text-text-4 text-sm leading-snug">
             This extension doesn’t contribute anything Aura can read.
           </p>
         ) : (
           groups.map((g) => (
             <section key={g.band} className="flex flex-col gap-1.5">
               <h3
-                className={`text-[10px] font-medium uppercase tracking-wider ${bandTextClass(
+                className={`text-2xs font-medium ${bandTextClass(
                   g.band,
                 )}`}
               >
@@ -138,7 +138,7 @@ export function ExtensionRailPanel({ ext, onOpenManager }: Props) {
           ))
         )}
 
-        <p className="text-text-4 text-[10.5px] leading-relaxed border-t border-line-soft pt-2.5 mt-1">
+        <p className="text-text-4 text-xs leading-relaxed border-t border-line-soft pt-2.5 mt-1">
           Themes, language files, and snippets apply automatically. Kinds marked
           “coming soon” or “not yet” are recognised but Aura can’t run them here
           today. Everything comes from the open Open&nbsp;VSX gallery.
@@ -154,12 +154,12 @@ function OverallVerdict({ band }: { band: SupportBand | "none" }) {
     band === "active"
       ? "Working in Aura now"
       : band === "coming-soon"
-        ? "Recognised — support coming soon"
+        ? "Recognised. Support coming soon"
         : band === "not-yet"
-          ? "Recognised — Aura can’t run this kind yet"
+          ? "Recognised. Aura can’t run this kind yet"
           : "Nothing Aura can use";
   return (
-    <div className={`text-[11px] leading-snug mt-1 ${bandTextClass(band)}`}>
+    <div className={`text-xs leading-snug mt-1 ${bandTextClass(band)}`}>
       {text}
     </div>
   );
@@ -174,14 +174,14 @@ function KindRow({ label }: { label: KindLabel }) {
       className="flex items-start gap-2 rounded-md border border-line-soft bg-bg-2/40 px-2.5 py-2"
       title={label.tech}
     >
-      <span className={`flex-shrink-0 text-[12px] leading-5 ${bandTextClass(label.band)}`}>
+      <span className={`flex-shrink-0 text-sm leading-5 ${bandTextClass(label.band)}`}>
         {label.band === "active" ? "✓" : "•"}
       </span>
       <div className="min-w-0 flex-1">
-        <div className={`text-[12px] font-medium leading-snug ${bandTextClass(label.band)}`}>
+        <div className={`text-sm font-medium leading-snug ${bandTextClass(label.band)}`}>
           {label.title}
         </div>
-        <div className="text-text-3 text-[11px] leading-snug mt-0.5">
+        <div className="text-text-3 text-xs leading-snug mt-0.5">
           {label.detail}
         </div>
       </div>

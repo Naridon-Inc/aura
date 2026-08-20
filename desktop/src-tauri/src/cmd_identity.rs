@@ -23,6 +23,8 @@
 //     cmd_identity::identity_status_all,
 
 use crate::cmd_team::{read_team, team_identity};
+use crate::manager::brain::place::Place;
+use crate::manager::brain::place_author::Author;
 
 /// A roster member trimmed to exactly what the "pick someone else"
 /// chooser needs — never the full `TeamMember` (which carries presence,
@@ -185,4 +187,33 @@ pub async fn identity_status_all(
         }
     }
     Ok(out)
+}
+
+/// Set this repo's git author, so a signed-in team doesn't have to configure
+/// git identity by hand. The values come from the Aura account (the frontend's
+/// `gitIdentityFromAccount` derives them); this applies them.
+///
+/// Writes repo-LOCAL `user.name` / `user.email` — never `--global`, so adopting
+/// your Aura identity here can't silently change who you are in every other repo
+/// on the machine. Idempotent.
+///
+/// A THIN CALLER, deliberately. This used to shell `git config` in a local
+/// directory itself, which was correct and could not leave the laptop: the
+/// moment the work moved to a box the identity stayed behind and the commit came
+/// back authored by whoever the box thought it was. The writing now lives in
+/// [`crate::manager::brain::place_author`], which does it through `Place` and so
+/// does it the same way here and over a wire. Kept as its own command because
+/// the settings row that calls it is about *this repo on this disk*, and
+/// `Place::Here` is exactly that — not because the behaviour differs.
+#[tauri::command]
+pub async fn git_identity_set(
+    repo_root: String,
+    name: String,
+    email: String,
+) -> Result<(), String> {
+    let author = Author::new(&name, &email).map_err(|gap| gap.to_string())?;
+    Place::resolve(repo_root, None)
+        .adopt_author(&author)
+        .await
+        .map(|_| ())
 }

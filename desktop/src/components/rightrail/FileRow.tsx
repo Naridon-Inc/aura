@@ -70,7 +70,7 @@ function statusWord(status: string): string {
     case "R":
       return "renamed";
     case "?":
-      return "brand new — not tracked yet";
+      return "brand new, not tracked yet";
     default:
       return "changed";
   }
@@ -116,7 +116,7 @@ export function FileRow({
   const row = (
     <div
       className={`group w-full flex items-stretch gap-1 px-2 text-left rounded-sm cursor-pointer transition-colors ${
-        isSelected ? "bg-bg-2" : "hover:bg-bg-2/60"
+        isSelected ? "bg-state-selected" : "hover:bg-state-hover"
       }`}
     >
       {/* Leading caret — the secondary affordance: toggles the inline +/−
@@ -161,26 +161,26 @@ export function FileRow({
             className="flex items-center gap-1.5 flex-1 min-w-0 overflow-hidden py-1.5"
           >
             <span
-              className="shrink-0 w-4 h-4 rounded-sm flex items-center justify-center text-[10px] font-mono font-semibold bg-bg-1 text-text-3"
+              className="shrink-0 w-4 h-4 rounded-sm flex items-center justify-center text-2xs font-mono font-semibold bg-bg-1 text-text-3"
               title={statusWord(file.status)}
             >
               {statusGlyph(file.status)}
             </span>
             <span className="flex-1 min-w-0 flex items-center gap-1.5">
-              <span className="text-[12px] text-text-1 text-start truncate overflow-hidden text-ellipsis">
+              <span className="text-sm text-text-1 text-start truncate overflow-hidden text-ellipsis">
                 {name}
               </span>
               {showStats && (
                 <Churn
                   additions={file.additions}
                   deletions={file.deletions}
-                  className="text-[10.5px]"
+                  className="text-xs"
                 />
               )}
             </span>
           </button>
         </TooltipTrigger>
-        <TooltipContent side="left" className="text-[10.5px]">
+        <TooltipContent side="left" className="text-xs">
           <div className="font-medium mb-0.5 truncate max-w-[260px]">{file.path}</div>
           <div className="text-text-3 leading-snug">
             click: diff view &nbsp;·&nbsp; ⇧ click: new tab &nbsp;·&nbsp; ⌘ click: editor
@@ -308,7 +308,7 @@ function RowAction({
               ? "text-text-5"
               : destructive
                 ? "text-red hover:bg-red/15"
-                : "text-text-3 hover:text-text-1 hover:bg-bg-1"
+                : "text-text-3 hover:text-text-1 hover:bg-state-hover"
           }`}
         >
           {children}

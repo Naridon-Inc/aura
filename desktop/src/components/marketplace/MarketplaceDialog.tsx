@@ -8,9 +8,15 @@
 // Search runs server-side via `modes_search` to keep semantics
 // consistent with any future MCP exposure.
 
-import { useEffect, useMemo, useState } from "react";
-import { RefreshCw, Search } from "lucide-react";
+import { useCallback, useEffect, useMemo, useState } from "react";
+import { Boxes, RefreshCw, Search } from "lucide-react";
 import { AsciiSpinner } from "../ui/ascii-spinner";
+import {
+  EmptyState,
+  ErrorState,
+  FilteredEmptyState,
+  LoadingState,
+} from "../ui/state";
 
 import { Button } from "../ui/button";
 import { Input } from "../ui/input";
@@ -31,6 +37,7 @@ import {
   refreshUpdates,
   useModes,
 } from "../../lib/modesStore";
+import { modesEmptyCopy, tabCountLabel } from "../../lib/modesEmpty";
 
 type Tab = "all" | "installed" | "updates";
 
@@ -48,12 +55,18 @@ export function MarketplaceDialog({ open, onClose }: Props) {
   );
   const [installOpen, setInstallOpen] = useState(false);
 
-  useEffect(() => {
-    if (!open) return;
+  // Every read this dialog draws from, in one place: the mount, the toolbar
+  // button and the error state's "Try again" all mean the same thing.
+  const refreshAll = useCallback(() => {
     void refreshInstalledModes();
     void refreshMarketplace();
     void refreshUpdates();
-  }, [open]);
+  }, []);
+
+  useEffect(() => {
+    if (!open) return;
+    refreshAll();
+  }, [open, refreshAll]);
 
   const installedById = useMemo(() => {
     const m = new Map<string, (typeof store.installed)[number]>();
@@ -112,6 +125,22 @@ export function MarketplaceDialog({ open, onClose }: Props) {
     });
   }, [tab, query, allEntries, store.installed, store.updates]);
 
+  // What to say when the list is empty — and, just as important, when we
+  // haven't earned the right to say anything yet. See `modesEmptyCopy`.
+  const empty = modesEmptyCopy({
+    tab,
+    query: query.trim(),
+    installedLoading: store.installedLoading,
+    installedLoadedAt: store.installedLoadedAt,
+    installedError: store.installedError,
+    marketplaceLoading: store.marketplaceLoading,
+    marketplaceLoadedAt: store.marketplaceLoadedAt,
+    marketplaceError: store.marketplaceError,
+    updatesLoading: store.updatesLoading,
+    updatesLoadedAt: store.updatesLoadedAt,
+    updatesError: store.updatesError,
+  });
+
   const handleInstallMarketplace = (entry: MarketplaceIndexEntry) => {
     setInstallEntry(entry);
     setInstallOpen(true);
@@ -156,7 +185,7 @@ export function MarketplaceDialog({ open, onClose }: Props) {
                 value={query}
                 onChange={(e) => setQuery(e.target.value)}
                 placeholder="Search modes…"
-                className="h-8 pl-7 text-[12px]"
+                className="h-8 pl-7 text-sm"
               />
             </div>
             <div className="flex gap-1">
@@ -168,23 +197,25 @@ export function MarketplaceDialog({ open, onClose }: Props) {
                   onClick={() => setTab(t)}
                 >
                   {t === "all" && "All"}
-                  {t === "installed" && `Installed (${store.installed.length})`}
-                  {t === "updates" && `Updates (${store.updates.length})`}
+                  {t === "installed" &&
+                    tabCountLabel(
+                      "Installed",
+                      store.installed.length,
+                      store.installedLoadedAt,
+                    )}
+                  {t === "updates" &&
+                    tabCountLabel("Updates", store.updates.length, store.updatesLoadedAt)}
                 </Button>
               ))}
             </div>
             <Button
               variant="ghost"
               size="icon"
-              onClick={() => {
-                void refreshInstalledModes();
-                void refreshMarketplace();
-                void refreshUpdates();
-              }}
+              onClick={refreshAll}
               title="Refresh"
             >
               {store.marketplaceLoading ? (
-                <AsciiSpinner className="text-[12px] leading-none" />
+                <AsciiSpinner className="text-sm leading-none" />
               ) : (
                 <RefreshCw className="h-3.5 w-3.5" />
               )}
@@ -192,18 +223,36 @@ export function MarketplaceDialog({ open, onClose }: Props) {
           </div>
 
           <div className="max-h-[60vh] overflow-y-auto space-y-2 pr-1">
-            {store.marketplaceError && tab !== "installed" && (
-              <div className="text-[12px] text-red bg-red/10 rounded p-2">
+            {/* Rows arrived but the marketplace didn't: the list below is real
+                and worth showing, so this stays a band rather than taking the
+                surface over. When there are no rows the fold speaks instead —
+                one answer, not a banner stacked on a contradicting sentence. */}
+            {store.marketplaceError && tab !== "installed" && filtered.length > 0 && (
+              <div className="text-sm text-red bg-red/10 rounded p-2">
                 Marketplace unavailable: {store.marketplaceError}
               </div>
             )}
             {filtered.length === 0 ? (
-              <div className="text-[12px] text-text-4 text-center py-6">
-                {tab === "updates"
-                  ? "All modes are up to date."
-                  : query
-                    ? `No modes match "${query}".`
-                    : "No modes yet."}
+              <div className="py-6">
+                {empty.kind === "waiting" ? (
+                  <LoadingState size="md" label={empty.label} />
+                ) : empty.kind === "failed" ? (
+                  <ErrorState
+                    size="md"
+                    title={empty.title}
+                    message={empty.message}
+                    onRetry={refreshAll}
+                  />
+                ) : empty.kind === "filtered" ? (
+                  <FilteredEmptyState size="md" onClear={() => setQuery("")} />
+                ) : (
+                  <EmptyState
+                    size="md"
+                    icon={Boxes}
+                    title={empty.title}
+                    body={empty.body}
+                  />
+                )}
               </div>
             ) : (
               filtered.map((r) => (
@@ -229,7 +278,7 @@ export function MarketplaceDialog({ open, onClose }: Props) {
             )}
           </div>
 
-          <div className="flex items-center justify-between text-[10.5px] text-text-4">
+          <div className="flex items-center justify-between text-xs text-text-4">
             <span>
               {store.marketplaceLoadedAt
                 ? `Marketplace fetched ${new Date(

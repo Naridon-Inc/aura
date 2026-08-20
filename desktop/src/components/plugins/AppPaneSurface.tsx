@@ -37,8 +37,8 @@ function BuiltinAppSurface({ id }: { id: string }) {
   if (def?.id === "hackernews") return <HackerNewsApp />;
   return (
     <div className="flex-1 min-h-0 flex flex-col items-center justify-center gap-1 text-center px-6">
-      <div className="text-[13px] text-text-2">{def?.title ?? id}</div>
-      <div className="text-[11px] text-text-3">
+      <div className="text-base text-text-2">{def?.title ?? id}</div>
+      <div className="text-xs text-text-3">
         This builtin app isn’t available yet.
       </div>
     </div>
@@ -56,9 +56,9 @@ export function AppPaneSurface({ appKey }: Props) {
   if (!app) {
     return (
       <div className="flex-1 min-h-0 flex flex-col items-center justify-center gap-1 text-center px-6">
-        <div className="text-[13px] text-text-2">App unavailable</div>
-        <div className="text-[11px] text-text-3">
-          {appKey} — its plugin is disabled or no longer installed.
+        <div className="text-base text-text-2">App unavailable</div>
+        <div className="text-xs text-text-3">
+          {appKey}. Its plugin is disabled or no longer installed.
         </div>
       </div>
     );

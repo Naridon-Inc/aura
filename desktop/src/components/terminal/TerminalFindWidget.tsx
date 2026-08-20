@@ -99,9 +99,9 @@ export function TerminalFindWidget({ termId, onClose }: Props) {
         onChange={(e) => setQuery(e.target.value)}
         placeholder="Find"
         spellCheck={false}
-        className="h-6 w-44 rounded bg-bg-content px-2 text-[12px] text-text-1 placeholder:text-text-4 outline-none focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-accent/50"
+        className="h-6 w-44 rounded bg-bg-content px-2 text-sm text-text-1 placeholder:text-text-4 outline-none focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-accent/50"
       />
-      <span className="w-20 shrink-0 truncate text-center text-[11px] tabular-nums text-text-4">
+      <span className="w-20 shrink-0 truncate text-center text-xs tabular-nums text-text-4">
         {query ? (count ? `${count.index} of ${count.total}` : "No results") : ""}
       </span>
       <Toggle active={!!opts.caseSensitive} label="Match Case" onClick={() => setOpts((o) => ({ ...o, caseSensitive: !o.caseSensitive }))}>
@@ -141,7 +141,7 @@ function FindBtn({
       title={label}
       aria-label={label}
       onClick={onClick}
-      className="h-6 w-6 grid place-items-center rounded text-text-4 transition-colors hover:text-text-2 hover:bg-bg-hover"
+      className="h-6 w-6 grid place-items-center rounded text-text-4 transition-colors hover:text-text-2 hover:bg-state-hover"
     >
       {children}
     </button>
@@ -167,10 +167,10 @@ function Toggle({
       aria-pressed={active}
       onClick={onClick}
       className={[
-        "h-6 min-w-6 px-1 grid place-items-center rounded text-[11px] font-medium leading-none transition-colors",
+        "h-6 min-w-6 px-1 grid place-items-center rounded text-xs font-medium leading-none transition-colors",
         active
           ? "bg-accent/10 text-accent hover:bg-accent/15"
-          : "text-text-4 hover:text-text-2 hover:bg-bg-hover",
+          : "text-text-4 hover:text-text-2 hover:bg-state-hover",
       ].join(" ")}
     >
       {children}

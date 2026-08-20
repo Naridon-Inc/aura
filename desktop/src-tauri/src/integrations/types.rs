@@ -103,6 +103,18 @@ pub struct MirrorSummary {
 pub struct ConnectionStatus {
     pub kind: IntegrationKind,
     pub connected: bool,
+    /// Whether this machine has credentials for the provider at all —
+    /// i.e. whether `~/.aura/integrations.toml` carries its block. It is
+    /// a different question from `connected` (a signed-in user) and the
+    /// card needs both: without it the pane can only offer a Connect
+    /// button that looks live, opens nothing, and fails after the click
+    /// with an error the user could have been told up front.
+    ///
+    /// Defaults to `true` on deserialize so an older state file — or a
+    /// provider we haven't taught to answer yet — keeps today's
+    /// behaviour rather than silently disabling its own connect button.
+    #[serde(default = "yes")]
+    pub configured: bool,
     #[serde(default)]
     pub identity: Option<ExternalIdentity>,
     /// Populated for Jira (multi-site). Empty for Linear.
@@ -129,13 +141,22 @@ pub struct ConnectionStatus {
     pub auto_mirror_repo_root: Option<String>,
 }
 
+/// `#[serde(default = …)]` needs a function, and the default for
+/// `configured` is "assume yes" — see the field's own doc comment.
+fn yes() -> bool {
+    true
+}
+
 impl ConnectionStatus {
     /// Shorthand for the "not connected" state used by `_status` calls
-    /// that find no keychain entry.
+    /// that find no keychain entry. Says nothing about whether the
+    /// provider is configured on this machine — the caller sets that,
+    /// because only it has read the config file.
     pub fn disconnected(kind: IntegrationKind) -> Self {
         Self {
             kind,
             connected: false,
+            configured: true,
             identity: None,
             sites: Vec::new(),
             scopes: None,

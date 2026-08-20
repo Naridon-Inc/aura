@@ -67,6 +67,7 @@ import {
 import { DiffEditor, type DiffOnMount, type Monaco } from "@monaco-editor/react";
 import type { editor } from "monaco-editor";
 import ReactMarkdown from "react-markdown";
+import { monogram } from "../../lib/monogram";
 import remarkGfm from "remark-gfm";
 
 import { installMonacoEnvironment } from "../../lib/monacoEnv";
@@ -84,6 +85,8 @@ import { usePrThreadActive } from "./PrThreadColumn";
 import { AsciiSpinner } from "../ui/ascii-spinner";
 import { Button } from "../ui/button";
 import { FixWithAgentButton } from "../agent/FixWithAgentButton";
+import { relativeAgeFromIso } from "../../lib/relativeTime";
+import { useDismiss } from "../../lib/useDismiss";
 
 installMonacoEnvironment();
 
@@ -628,9 +631,9 @@ export function PrDiffBody({
     return (
       <div
         ref={placeholderRef}
-        className="w-full h-[240px] flex items-center justify-center gap-1.5 bg-bg-content text-[11.5px] text-text-4"
+        className="w-full h-[240px] flex items-center justify-center gap-1.5 bg-bg-content text-sm text-text-4"
       >
-        <AsciiSpinner className="text-[10px]" />
+        <AsciiSpinner className="text-2xs" />
         <span>Reading this change…</span>
       </div>
     );
@@ -654,10 +657,10 @@ export function PrDiffBody({
       <div className="flex w-full">
         <div className="flex-1 min-w-0 relative">
           {/* Per-file toolbar — render mode toggle + action bar */}
-          <div className="flex items-center gap-2 px-3 h-7 border-b border-line-soft/60 bg-bg-1/30 text-[11px]">
+          <div className="flex items-center gap-2 px-3 h-7 border-b border-line-soft/60 bg-bg-1/30 text-xs">
             <span className="font-mono text-text-3 truncate">{filePath}</span>
             {oneSidedFile ? (
-              <span className="ml-auto text-[10.5px] text-text-4 uppercase tracking-wider">
+              <span className="section-label ml-auto">
                 {sides.original.length === 0 ? "new file" : "deleted"}
               </span>
             ) : (
@@ -666,7 +669,7 @@ export function PrDiffBody({
                   variant={renderSideBySide ? "secondary" : "ghost"}
                   size="xs"
                   onClick={() => setRenderSideBySide(true)}
-                  className="h-5 rounded-none border-0 text-[10.5px]"
+                  className="h-5 rounded-none border-0 text-xs"
                   title="Side-by-side diff"
                 >
                   Split
@@ -676,7 +679,7 @@ export function PrDiffBody({
                   variant={!renderSideBySide ? "secondary" : "ghost"}
                   size="xs"
                   onClick={() => setRenderSideBySide(false)}
-                  className="h-5 rounded-none border-0 text-[10.5px]"
+                  className="h-5 rounded-none border-0 text-xs"
                   title="Unified (inline) diff"
                 >
                   Unified
@@ -694,7 +697,7 @@ export function PrDiffBody({
                   variant="subtle"
                   size="xs"
                   onClick={startComment}
-                  className="h-5 gap-1 text-[10.5px]"
+                  className="h-5 gap-1 text-xs"
                 >
                   <CommentIcon /> Comment
                 </Button>
@@ -702,7 +705,7 @@ export function PrDiffBody({
                   variant="subtle"
                   size="xs"
                   onClick={startSuggestion}
-                  className="h-5 gap-1 text-[10.5px]"
+                  className="h-5 gap-1 text-xs"
                 >
                   <SuggestIcon /> Suggest
                 </Button>
@@ -837,7 +840,7 @@ function ComposerHost({
   const target = start === end ? `line ${start}` : `lines ${start}–${end}`;
   return (
     <div className="border-t border-line-soft bg-bg-1 px-3 py-2.5 sticky bottom-0">
-      <div className="text-[10.5px] uppercase tracking-wider text-text-4 mb-1.5">
+      <div className="section-label mb-1.5">
         {kind === "suggestion"
           ? `Suggest a change on ${target}`
           : `Add a review comment on ${target}`}
@@ -885,7 +888,7 @@ function ComposerBody({
   return (
     <div className="space-y-1.5">
       {error ? (
-        <div className="rounded-md border border-red/40 bg-red/10 px-2.5 py-1.5 text-[11px] text-red font-mono whitespace-pre-wrap break-all">
+        <div className="rounded-md border border-red/40 bg-red/10 px-2.5 py-1.5 text-xs text-red font-mono whitespace-pre-wrap break-all">
           Post failed: {error}
         </div>
       ) : null}
@@ -903,14 +906,27 @@ function ComposerBody({
             : "Leave a review comment…"
         }
         onKeyDown={(e) => {
-          if ((e.metaKey || e.ctrlKey) && e.key === "Enter") {
+          const meta = e.metaKey || e.ctrlKey;
+          if (meta && e.key === "Enter") {
             e.preventDefault();
             void submit();
+            return;
+          }
+          // The toolbar above says "Bold (⌘B)" and "Italic (⌘I)". Until now
+          // neither key did that: ⌘I was unbound and ⌘B reached the global
+          // keymap, which collapsed the sidebar mid-sentence.
+          if (meta && !e.shiftKey && !e.altKey) {
+            const k = e.key.toLowerCase();
+            if (k === "b" || k === "i") {
+              e.preventDefault();
+              const mark = k === "b" ? "**" : "_";
+              wrap(ref.current, mark, mark, setText);
+            }
           }
         }}
-        className="w-full bg-bg-content border border-line-soft rounded-md p-2 text-[12px] text-text-1 placeholder:text-text-4 outline-none focus:ring-1 focus:ring-accent font-mono resize-y"
+        className="w-full bg-bg-content border border-line-soft rounded-md p-2 text-sm text-text-1 placeholder:text-text-4 outline-none focus:ring-1 focus:ring-accent font-mono resize-y"
       />
-      <div className="flex items-center gap-2 text-[10.5px] text-text-4">
+      <div className="flex items-center gap-2 text-xs text-text-4">
         <span>⌘ + Enter to submit · markdown supported</span>
         <div className="flex-1" />
         <Button variant="ghost" size="xs" onClick={onCancel}>
@@ -953,7 +969,7 @@ function Toolbar({
       type="button"
       onClick={onClick}
       title={title}
-      className="w-7 h-6 rounded text-text-3 hover:text-text-1 hover:bg-bg-2 flex items-center justify-center text-[12px]"
+      className="w-7 h-6 rounded text-text-3 hover:text-text-1 hover:bg-state-hover flex items-center justify-center text-sm"
     >
       {children}
     </button>
@@ -1271,7 +1287,7 @@ export function FloatingThreadCard({
         <button
           type="button"
           onClick={() => setRepliesOpen((v) => !v)}
-          className="w-full flex items-center gap-1.5 px-3 py-1 text-[11px] text-text-3 hover:text-text-1 hover:bg-bg-2/50 border-t border-line-soft/60"
+          className="w-full flex items-center gap-1.5 px-3 py-1 text-xs text-text-3 hover:text-text-1 hover:bg-state-hover border-t border-line-soft/60"
         >
           <ChevronGlyph open={repliesOpen} />
           {repliesOpen ? "Hide" : "Show"} {replyCount}{" "}
@@ -1303,7 +1319,7 @@ export function FloatingThreadCard({
                 void submitReply();
               }
             }}
-            className="w-full bg-bg-content border border-line-soft rounded p-2 text-[12px] text-text-1 placeholder:text-text-4 outline-none focus:ring-1 focus:ring-accent resize-y"
+            className="w-full bg-bg-content border border-line-soft rounded p-2 text-sm text-text-1 placeholder:text-text-4 outline-none focus:ring-1 focus:ring-accent resize-y"
           />
           <div className="flex items-center justify-end gap-2">
             <Button
@@ -1362,7 +1378,7 @@ function ThreadActions({
           onClick={onResolve}
           disabled={resolving}
           title={resolved ? "Unresolve thread" : "Resolve thread"}
-          className={`w-6 h-6 rounded flex items-center justify-center transition-colors disabled:opacity-40 hover:bg-bg-2 ${
+          className={`w-6 h-6 rounded flex items-center justify-center transition-colors disabled:opacity-40 hover:bg-state-hover ${
             resolved ? "" : "text-text-4 hover:text-text-1"
           }`}
           style={resolved ? { color: "var(--color-accent-green)" } : undefined}
@@ -1374,16 +1390,9 @@ function ThreadActions({
         type="button"
         onClick={onReply}
         title="Reply"
-        className="w-6 h-6 rounded flex items-center justify-center text-text-4 hover:text-text-1 hover:bg-bg-2 transition-colors"
+        className="w-6 h-6 rounded flex items-center justify-center text-text-4 hover:text-text-1 hover:bg-state-hover transition-colors"
       >
         <ReplyGlyph />
-      </button>
-      <button
-        type="button"
-        title="More actions"
-        className="w-6 h-6 rounded flex items-center justify-center text-text-4 hover:text-text-1 hover:bg-bg-2 transition-colors"
-      >
-        <span className="text-[14px] leading-none">⋯</span>
       </button>
     </div>
   );
@@ -1408,15 +1417,7 @@ function ReactionPickerButton({
 }) {
   const [open, setOpen] = useState(false);
   const wrapRef = useRef<HTMLDivElement | null>(null);
-  useEffect(() => {
-    if (!open) return;
-    const onDoc = (e: MouseEvent) => {
-      if (!wrapRef.current) return;
-      if (!wrapRef.current.contains(e.target as Node)) setOpen(false);
-    };
-    window.addEventListener("mousedown", onDoc);
-    return () => window.removeEventListener("mousedown", onDoc);
-  }, [open]);
+  useDismiss(open, () => setOpen(false), wrapRef);
   return (
     <div ref={wrapRef} className="relative">
       <button
@@ -1426,7 +1427,7 @@ function ReactionPickerButton({
           setOpen((v) => !v);
         }}
         title="Add reaction"
-        className="w-6 h-6 rounded flex items-center justify-center text-text-4 hover:text-text-1 hover:bg-bg-2 transition-colors"
+        className="w-6 h-6 rounded flex items-center justify-center text-text-4 hover:text-text-1 hover:bg-state-hover transition-colors"
       >
         <SmileyGlyph />
       </button>
@@ -1444,7 +1445,7 @@ function ReactionPickerButton({
                 setOpen(false);
               }}
               title={r.label}
-              className="w-7 h-7 rounded flex items-center justify-center text-[15px] hover:bg-bg-2 transition-colors"
+              className="w-7 h-7 rounded flex items-center justify-center text-lg hover:bg-state-hover transition-colors"
             >
               {r.emoji}
             </button>
@@ -1477,7 +1478,7 @@ function ReactionBar({
               onToggle(r.content);
             }}
             title={meta?.label ?? r.content}
-            className={`inline-flex items-center gap-1 h-5 px-1.5 rounded-full text-[10.5px] border transition-colors ${
+            className={`inline-flex items-center gap-1 h-5 px-1.5 rounded-full text-xs border transition-colors ${
               r.viewer_reacted
                 ? ""
                 : "bg-bg-2 border-line-soft text-text-2 hover:border-line-strong"
@@ -1494,7 +1495,7 @@ function ReactionBar({
                 : undefined
             }
           >
-            <span className="text-[12px] leading-none">
+            <span className="text-sm leading-none">
               {meta?.emoji ?? "?"}
             </span>
             <span className="font-medium tabular-nums">{r.count}</span>
@@ -1518,26 +1519,27 @@ function ThreadComment({
   onChanged?: () => void;
   onReact?: (content: ReactionContent) => void;
 }) {
-  const initial = (c.author || "?").charAt(0).toUpperCase();
+  // One monogram for the whole app — see lib/monogram.
+  const initial = monogram(c.author);
   return (
     <div
       className={`px-3 py-2.5 ${reply ? "border-t border-line-soft/50" : ""}`}
     >
       <div className="flex items-start gap-2 mb-1">
-        <span className="w-5 h-5 rounded-full bg-violet/30 text-violet flex items-center justify-center text-[10px] font-bold flex-shrink-0">
+        <span className="w-5 h-5 rounded-full bg-violet/30 text-violet flex items-center justify-center text-2xs font-bold flex-shrink-0">
           {initial}
         </span>
         <div className="flex items-baseline gap-2 min-w-0 flex-1">
-          <span className="text-[12px] font-semibold text-text-1 truncate">
+          <span className="text-sm font-semibold text-text-1 truncate">
             {c.author}
           </span>
-          <span className="text-[10.5px] text-text-4 flex-shrink-0">
+          <span className="text-xs text-text-4 flex-shrink-0">
             {relTime(c.created_at)}
           </span>
         </div>
         {actions}
       </div>
-      <div className="pl-7 text-[12px] text-text-2 leading-[1.55] break-words [&_p]:my-0 [&_p+p]:mt-2 [&_code]:px-1 [&_code]:py-0.5 [&_code]:rounded [&_code]:bg-bg-2 [&_code]:text-[11.5px] [&_pre]:my-1.5 [&_pre]:p-2 [&_pre]:rounded [&_pre]:bg-bg-2 [&_pre]:overflow-x-auto [&_pre_code]:bg-transparent [&_pre_code]:p-0 [&_strong]:text-text-1 [&_strong]:font-semibold [&_a]:text-accent [&_a:hover]:underline [&_ul]:list-disc [&_ul]:pl-4 [&_ol]:list-decimal [&_ol]:pl-4 [&_li]:my-0.5">
+      <div className="pl-7 text-sm text-text-2 leading-[1.55] break-words [&_p]:my-0 [&_p+p]:mt-2 [&_code]:px-1 [&_code]:py-0.5 [&_code]:rounded [&_code]:bg-bg-2 [&_code]:text-sm [&_pre]:my-1.5 [&_pre]:p-2 [&_pre]:rounded [&_pre]:bg-bg-2 [&_pre]:overflow-x-auto [&_pre_code]:bg-transparent [&_pre_code]:p-0 [&_strong]:text-text-1 [&_strong]:font-semibold [&_a]:text-accent [&_a:hover]:underline [&_ul]:list-disc [&_ul]:pl-4 [&_ol]:list-decimal [&_ol]:pl-4 [&_li]:my-0.5">
         <ReactMarkdown remarkPlugins={[remarkGfm]}>{c.body}</ReactMarkdown>
       </div>
       {onReact && <ReactionBar reactions={c.reactions} onToggle={onReact} />}
@@ -1604,12 +1606,6 @@ function SmileyGlyph() {
 }
 
 function relTime(iso: string): string {
-  const t = Date.parse(iso);
-  if (Number.isNaN(t)) return "";
-  const diff = Math.floor((Date.now() - t) / 1000);
-  if (diff < 60) return "now";
-  if (diff < 3600) return `${Math.floor(diff / 60)}m`;
-  if (diff < 86400) return `${Math.floor(diff / 3600)}h`;
-  if (diff < 2592000) return `${Math.floor(diff / 86400)}d`;
-  return `${Math.floor(diff / 2592000)}mo`;
+  // One ladder for the whole app — see lib/relativeTime.
+  return relativeAgeFromIso(iso, { style: "compact" });
 }

@@ -20,12 +20,13 @@
 // and fires `relay(target, kind, payload)` when one is picked.
 
 import { useEffect, useMemo, useRef, useState } from "react";
-import { api } from "../lib/api";
 import {
   relay,
   type RelayKind,
   type RelayPayloadByKind,
 } from "../lib/auraRelay";
+import { useDismiss } from "../lib/useDismiss";
+import { fetchTeam } from "../lib/teamCache";
 
 // ─── Channel discovery ───────────────────────────────────────────────
 //
@@ -44,7 +45,7 @@ type DiscoveredChannel = {
 
 async function discoverChannels(repoRoot: string): Promise<DiscoveredChannel[]> {
   try {
-    const manifest = await api.teamLoad(repoRoot);
+    const manifest = await fetchTeam(repoRoot);
     const slugs = manifest.channels ?? [];
     const set = new Set<string>([...DEFAULT_CHANNELS, ...slugs]);
     return [...set].sort().map((s) => ({ slug: s, label: s }));
@@ -109,22 +110,7 @@ export function AuraRelayMenu<K extends RelayKind>({
   }, [anchor]);
 
   // Close on outside click + escape.
-  useEffect(() => {
-    const onDoc = (ev: MouseEvent) => {
-      if (!ref.current) return;
-      if (ev.target instanceof Node && ref.current.contains(ev.target)) return;
-      onClose();
-    };
-    const onKey = (ev: KeyboardEvent) => {
-      if (ev.key === "Escape") onClose();
-    };
-    document.addEventListener("mousedown", onDoc);
-    document.addEventListener("keydown", onKey);
-    return () => {
-      document.removeEventListener("mousedown", onDoc);
-      document.removeEventListener("keydown", onKey);
-    };
-  }, [onClose]);
+  useDismiss(true, onClose, ref);
 
   const previewLabel = useMemo(() => kindPreviewLabel(kind, payload), [kind, payload]);
 
@@ -153,39 +139,39 @@ export function AuraRelayMenu<K extends RelayKind>({
       className="bg-bg-1 border border-line-soft rounded-md shadow-lg w-[260px] overflow-hidden"
     >
       <div className="px-2.5 py-1.5 border-b border-line-soft">
-        <div className="text-[9.5px] uppercase tracking-wider text-text-5 font-medium">
+        <div className="section-label">
           Share to channel
         </div>
-        <div className="text-text-2 text-[11.5px] truncate mt-0.5" title={previewLabel}>
+        <div className="text-text-2 text-sm truncate mt-0.5" title={previewLabel}>
           {previewLabel}
         </div>
       </div>
       <div className="max-h-[200px] overflow-y-auto py-1">
         {channels.length === 0 ? (
-          <div className="px-2.5 py-1.5 text-text-4 text-[11px]">Loading channels…</div>
+          <div className="px-2.5 py-1.5 text-text-4 text-xs">Loading channels…</div>
         ) : (
           channels.map((c) => (
             <button
               key={c.slug}
               type="button"
               onClick={() => setPicked(c.slug)}
-              className={`w-full text-left px-2.5 py-1 text-[12px] flex items-center gap-2 ${
+              className={`w-full text-left px-2.5 py-1 text-sm flex items-center gap-2 ${
                 picked === c.slug
                   ? "bg-bg-2 text-text-1"
-                  : "text-text-2 hover:bg-bg-2 hover:text-text-1"
+                  : "text-text-2 hover:bg-state-hover hover:text-text-1"
               }`}
             >
               <span className="text-text-4">#</span>
               <span className="truncate">{c.label}</span>
               {picked === c.slug ? (
-                <span className="ml-auto text-accent text-[10px]">selected</span>
+                <span className="ml-auto text-accent text-2xs">selected</span>
               ) : null}
             </button>
           ))
         )}
       </div>
       {error ? (
-        <div className="px-2.5 py-1 text-red-400 text-[10.5px] border-t border-line-soft">
+        <div className="px-2.5 py-1 text-red-400 text-xs border-t border-line-soft">
           {error}
         </div>
       ) : null}
@@ -193,7 +179,7 @@ export function AuraRelayMenu<K extends RelayKind>({
         <button
           type="button"
           onClick={onClose}
-          className="text-text-3 hover:text-text-1 text-[11px] px-2 py-0.5"
+          className="text-text-3 hover:text-text-1 text-xs px-2 py-0.5"
         >
           Cancel
         </button>
@@ -201,7 +187,7 @@ export function AuraRelayMenu<K extends RelayKind>({
           type="button"
           onClick={fire}
           disabled={!picked || busy}
-          className="ml-auto text-[11px] px-2.5 py-1 rounded disabled:opacity-40 disabled:cursor-not-allowed"
+          className="ml-auto text-xs px-2.5 py-1 rounded disabled:opacity-40 disabled:cursor-not-allowed"
           style={{ background: "var(--color-accent)", color: "var(--color-bg-deep)" }}
         >
           {busy ? "Sending…" : "Send"}

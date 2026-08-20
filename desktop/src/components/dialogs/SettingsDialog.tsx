@@ -5,10 +5,14 @@
 // shell" mental model. Reachable via gear icon (workspace rail bottom)
 // and ⌘, keybind.
 //
-// Each pane is small enough that splitting into separate files would
-// add more import noise than it saves; they're plain functions in this
-// file, sharing the SettingsView state hoisted up here so save-and-
-// reload-on-pane-switch flows work without extra plumbing.
+// Small panes stay here as plain functions, sharing the SettingsView
+// state hoisted up top so save-and-reload-on-pane-switch works without
+// extra plumbing. A pane that grows past roughly a screenful of its own
+// logic moves out to `components/settings/` — Brain, MCP Servers,
+// Agents, Local Models, Plugins, Team, Integrations and the repo /
+// worktree pane are all there. The line is the pane's own weight, not
+// its subject: this file used to carry an eight-thousand-line version
+// of the argument that they were each too small to bother.
 //
 // The panes intentionally don't surface fields the CLI exposes but the
 // shell can't safely manipulate over IPC — strict-mode passcode-set,
@@ -31,15 +35,12 @@ import {
   ChevronDown,
   Cloud,
   Cpu,
-  Download,
   ExternalLink,
   Eye,
-  EyeOff,
   FileCode2,
   FolderGit2,
   Gauge,
   Key,
-  Keyboard,
   LayoutDashboard,
   LifeBuoy,
   MessageCircle,
@@ -58,63 +59,26 @@ import {
   X,
 } from "lucide-react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
+import { beginWindowDrag } from "../../lib/windowDrag";
 import { AsciiSpinner } from "../ui/ascii-spinner";
 import { Button } from "../ui/button";
 import { Input } from "../ui/input";
 import { Select } from "../ui/select";
-import { Textarea } from "../ui/textarea";
-import { Field as FormField } from "../ui/field";
 import { Kbd } from "../ui/kbd";
-import { EmptyState, ErrorState, LoadingState } from "../ui/state";
-import {
-  MODAL_BACKDROP,
-  MODAL_FOOTER,
-  MODAL_HEADER,
-  MODAL_PANEL,
-  MODAL_TITLE,
-} from "../ui/modalSurface";
-import { FullscreenOverlay } from "../FullscreenOverlay";
-import { cn } from "../../lib/utils";
 import { useIsFullscreen } from "../../lib/useIsFullscreen";
 import {
   api,
-  type AgentConfigSyncStatus,
-  type AgentDescriptor,
   type AgentProfile,
-  type AgentsTomlEntry,
-  type AuraProQuota,
-  type AuraProSignInState,
-  type BillingUsageByMember,
-  type BrainDescriptor,
   type CaptureStatus,
-  type DiscoveredMcp,
   type GitProfile,
-  type McpServerEntry,
-  type McpServerToolList,
-  type OpenAiCompatProfile,
-  type OpenAiCompatTestResult,
-  type PluginRow,
-  type PluginSecretRow,
   type SettingsView,
   type TerminalProfile,
-  type TeamManifest,
-  type TeamMember,
-  type TeamIdentity,
-  type DuplicateSuggestion,
-  type ChannelMeta,
   type TelemetryView,
   type TelemetryConsent,
   type WorkspaceBinding,
 } from "../../lib/api";
-import { peekCache, writeCache } from "../../lib/resourceCache";
-import { DuplicatesBanner } from "../team/presentation/DuplicatesBanner";
-import { Avatar } from "../team/presentation/Avatar";
-import { avatarSrcForMember } from "../../lib/memberAvatar";
-import { pickPath } from "../../lib/nativeDialog";
-import { refreshPluginContributes } from "../../lib/pluginContributesStore";
-import { refreshMcpTools } from "../../lib/mcpToolsStore";
 import { setCaptureOptOut } from "../../lib/autoCapture";
-import { HELP_SHORTCUTS } from "../../lib/shortcuts";
+import { SHORTCUT_GROUPS, comboKeys } from "../../lib/shortcuts";
 import {
   setSidebarGlass,
   sidebarGlassAvailable,
@@ -126,17 +90,23 @@ import {
   playCompletionChime,
 } from "../../lib/completionChime";
 import { isChimeMuted, setChimeMuted, playChime } from "../../lib/chime";
-import { AgentIcon } from "../agent/AgentIcon";
 import { InstalledModesPane } from "../marketplace/InstalledModesPane";
 import { AuraWatchPanel } from "./AuraWatchSettingsDialog";
 import { IntegrationsTab } from "../settings/IntegrationsTab";
+import { McpServersTab } from "../settings/McpServersTab";
+import { AgentsTab } from "../settings/AgentsTab";
+import { BrainTab } from "../settings/BrainTab";
+import { LocalModelsTab } from "../settings/LocalModelsTab";
+import { PluginsTab } from "../settings/PluginsTab";
+import { TeamTab } from "../settings/TeamTab";
 import { MobileWaitlistTab } from "../mobile/MobileWaitlistTab";
 import { CloudRunnerPanel } from "../commons/crew/CloudRunnerPanel";
 import { IdentityPanel } from "../identity/IdentityPanel";
 import { RepoWorktreeSettingsPane } from "../settings/RepoWorktreeSettingsPane";
-import { StandupView } from "../standup/StandupView";
+import { WorkspaceLandingRow } from "../settings/WorkspaceLandingRow";
 import {
   setThemePreference,
+  isDarkOnlyVariant,
   setThemeVariant,
   useThemePreference,
   useThemeVariant,
@@ -161,12 +131,14 @@ import {
 } from "../../lib/vscodeExt/vsixStore";
 import { ensureExtensionThemesLoaded } from "../../lib/vscodeExt/applyContributes";
 import {
+  defaultTerminalFontSize,
   setEditorPref,
   setFlag,
   setFontSize,
   setHudPref,
   setScrollback,
   setTerminalBool,
+  setTerminalFontSize,
   useEditorPrefs,
   useFlagPrefs,
   useFontSize,
@@ -180,9 +152,9 @@ import {
   type FollowUpBehavior,
 } from "../../lib/followUpBehavior";
 import {
-  Card,
-  Field,
+  KeyValueTable,
   PaneHeader,
+  PaneIntro,
   Row,
   Section,
   SegControl,
@@ -190,6 +162,10 @@ import {
   Stepper,
   Toggle,
 } from "../settings/kit";
+import { onExternalAnchorClick } from "../../lib/openExternal";
+import { compactNumber } from "../../lib/compactNumber";
+import { shortPath } from "../../lib/paths";
+import { askConfirm, askNotice } from "../ui/ask";
 
 type PaneKey =
   | "appearance"
@@ -234,6 +210,11 @@ type PackDescriptor = {
   description: string;
   rule_count: number;
   category: string;
+  /** Whether every rule in this pack is already in the repo's
+   *  `production.aura.json` — answered by `aura policy list --json`, which
+   *  reads the file. The pane used to keep this in a Set it seeded empty, so
+   *  a fully-covered repo showed seven `install` buttons. */
+  installed: boolean;
 };
 
 type PaneItem = {
@@ -291,10 +272,20 @@ const PANE_GROUPS: PaneGroup[] = [
       { id: "keys", label: "API keys", icon: <Key className="h-4 w-4" />, keywords: ["anthropic", "openai", "gemini", "mercury", "secret", "key"] },
     ],
   },
+  // Team and "advanced" were one group, which the scope filter then split
+  // across two tabs: Organization got the heading "Team & advanced" over the
+  // single Team row, and Personal got the same heading over three rows with
+  // no team among them. A group label is the name of what is under it, so it
+  // has to be a group the tabs don't cut in half.
   {
-    label: "Team & advanced",
+    label: "Team",
     items: [
       { id: "team", label: "Team", icon: <Users className="h-4 w-4" />, keywords: ["team", "members", "admin", "standup", "activity", "tokens", "usage", "billing", "report", "rollup", "channels"] },
+    ],
+  },
+  {
+    label: "About Aura",
+    items: [
       { id: "experimental", label: "Experimental", icon: <Beaker className="h-4 w-4" />, keywords: ["flags", "preview", "lab"] },
       { id: "telemetry", label: "Usage data", icon: <Gauge className="h-4 w-4" />, keywords: ["usage", "anonymous", "metrics", "telemetry"] },
       { id: "help", label: "Help & support", icon: <LifeBuoy className="h-4 w-4" />, keywords: ["help", "support", "shortcuts", "keyboard", "docs", "documentation", "github", "issue", "bug", "report", "about", "version", "community", "discord"] },
@@ -337,6 +328,13 @@ function flattenPanes(): PaneItem[] {
   return PANE_GROUPS.flatMap((g) => g.items);
 }
 
+/** A pane's name, from the one place that holds it: the rail row that
+ *  navigates there. Panes used to declare their own title, and seven of them
+ *  declared a different one from the row you clicked to reach them. */
+function paneLabel(id: PaneKey): string {
+  return flattenPanes().find((it) => it.id === id)?.label ?? "Settings";
+}
+
 function defaultPane(): PaneKey {
   return flattenPanes()[0]?.id ?? "appearance";
 }
@@ -353,7 +351,7 @@ function handleHeaderDrag(e: React.MouseEvent) {
     getCurrentWindow().toggleMaximize().catch(() => {});
     return;
   }
-  getCurrentWindow().startDragging().catch(() => {});
+  beginWindowDrag();
 }
 
 /** Dedicated full-screen Settings page (formerly a modal Dialog).
@@ -466,13 +464,23 @@ export function SettingsDialog({
   // Scope keeps User panes and Repo panes on separate tabs; query matches
   // label + keyword bag so "vim" surfaces Behavior even though the visible
   // label doesn't contain it. Empty groups drop out.
+  // Browsing is scoped to the open tab; *searching* is not.
+  //
+  // The tabs file each pane under the thing it configures, which is right for
+  // browsing. But applying that filter to a search turns a question into a
+  // lie: type "cloud" from Personal and the answer was "No settings match" —
+  // when the Cloud machine pane exists, one tab over. A search that can only
+  // see a third of the settings is worse than no search, because the empty
+  // state reads as "this doesn't exist" rather than "not here".
+  //
+  // So a query searches every scope, and a hit outside the current tab is
+  // labelled with the tab it lives under. Clicking it goes there.
   const filteredGroups = useMemo(() => {
     const q = query.trim().toLowerCase();
     return PANE_GROUPS.map((g) => ({
       ...g,
       items: g.items.filter((it) => {
-        if (paneScope(it.id) !== scope) return false;
-        if (!q) return true;
+        if (!q) return paneScope(it.id) === scope;
         return (
           it.label.toLowerCase().includes(q) ||
           it.keywords.some((k) => k.includes(q))
@@ -531,7 +539,7 @@ export function SettingsDialog({
         <button
           type="button"
           onClick={onClose}
-          className="flex items-center gap-1.5 text-[12px] text-text-3 hover:text-text-1 transition-colors"
+          className="flex items-center gap-1.5 text-sm text-text-3 hover:text-text-1 transition-colors"
           title="Back (Esc)"
         >
           <ArrowLeft size={14} />
@@ -553,7 +561,7 @@ export function SettingsDialog({
                 disabled={disabled}
                 onClick={() => setScope(s)}
                 title={disabled ? "Open a project to configure it" : undefined}
-                className={`relative flex items-center px-1.5 text-[12px] transition-colors ${
+                className={`relative flex items-center px-1.5 text-sm transition-colors ${
                   disabled
                     ? "text-text-5 cursor-default"
                     : active
@@ -583,14 +591,14 @@ export function SettingsDialog({
             <button
               type="button"
               onClick={() => openSettingsToml()}
-              className="inline-flex items-center gap-1.5 h-7 pl-2.5 pr-2 text-[11.5px] text-text-2 hover:bg-white/[0.06] hover:text-text-1 transition-colors"
+              className="inline-flex items-center gap-1.5 h-7 pl-2.5 pr-2 text-sm text-text-2 hover:bg-white/[0.06] hover:text-text-1 transition-colors"
               style={{ borderColor: "var(--color-line-soft)" }}
               title={`Reveal ${scope === "repo" ? "this project's" : "your"} settings.toml in Finder`}
             >
               <FileCode2 size={13} />
               <span>
                 Open{" "}
-                <span className="font-mono text-[11px]">
+                <span className="font-mono text-xs">
                   {scope === "repo" ? "settings.local.toml" : "settings.toml"}
                 </span>
               </span>
@@ -628,11 +636,11 @@ export function SettingsDialog({
                     openSettingsToml("user");
                     setTomlMenu(false);
                   }}
-                  className="flex h-7 w-full items-center gap-2 px-3 text-left text-[12px] text-text-2 hover:bg-bg-2 hover:text-text-1 transition-colors"
+                  className="flex h-7 w-full items-center gap-2 px-3 text-left text-sm text-text-2 hover:bg-state-hover hover:text-text-1 transition-colors"
                 >
                   <FileCode2 size={13} className="text-text-4" />
                   <span>
-                    Your <span className="font-mono text-[11px]">settings.toml</span>
+                    Your <span className="font-mono text-xs">settings.toml</span>
                   </span>
                 </button>
                 {repoRoot && (
@@ -643,12 +651,12 @@ export function SettingsDialog({
                       openSettingsToml("repo");
                       setTomlMenu(false);
                     }}
-                    className="flex h-7 w-full items-center gap-2 px-3 text-left text-[12px] text-text-2 hover:bg-bg-2 hover:text-text-1 transition-colors"
+                    className="flex h-7 w-full items-center gap-2 px-3 text-left text-sm text-text-2 hover:bg-state-hover hover:text-text-1 transition-colors"
                   >
                     <FolderGit2 size={13} className="text-text-4" />
                     <span>
                       This project&rsquo;s{" "}
-                      <span className="font-mono text-[11px]">settings.toml</span>
+                      <span className="font-mono text-xs">settings.toml</span>
                     </span>
                   </button>
                 )}
@@ -658,12 +666,15 @@ export function SettingsDialog({
         </div>
       </header>
       <div className="flex flex-1 min-h-0">
-        {/* Sidebar — search on top, then grouped nav. Flat rows: quiet
-            neutral rounded fill on the active row, arctic-tinted active
-            icon (Aura's accent for the primary affordance), muted uppercase
-            group labels. 32-px rows. */}
+        {/* Sidebar — search on top, then grouped nav. The active row wore
+            two marks for one meaning: a neutral fill AND an accent-tinted
+            glyph. A neutral fill means "which part of the app" elsewhere in
+            the product; "which item you are on" is the accent tint the rail
+            rows, the Pages tree and the conversation tabs all use. One mark,
+            and it is that one. Group labels are sentence case at 11px, on
+            `.ade-sec-h`'s measurements. */}
         <aside
-          className="w-[248px] shrink-0 flex flex-col border-r"
+          className="w-[280px] shrink-0 flex flex-col border-r"
           style={{
             background: "var(--color-bg-1)",
             borderColor: "var(--color-line-soft)",
@@ -680,7 +691,7 @@ export function SettingsDialog({
                 value={query}
                 onChange={(e) => setQuery(e.target.value)}
                 placeholder="Search…"
-                className="h-7 pl-7 pr-7 text-[12px]"
+                className="h-7 pl-7 pr-7 text-sm"
               />
               {query && (
                 <button
@@ -702,10 +713,10 @@ export function SettingsDialog({
                 list that names what you're editing. */}
             {scope === "repo" && activeRepoRoot && identityRoots.length > 0 && (
               <div className="mt-1 mb-1">
-                <div className="text-[10px] font-semibold text-text-5 uppercase tracking-[0.1em] px-2 mb-1.5">
+                <div className="text-[11px] font-medium text-text-4 px-2 pt-2 pb-1.5">
                   Repositories
                 </div>
-                <nav className="flex flex-col gap-0.5">
+                <nav className="flex flex-col gap-1">
                   {identityRoots.map((r) => {
                     const active = r === activeRepoRoot;
                     const name = r.split("/").filter(Boolean).pop() || r;
@@ -715,10 +726,10 @@ export function SettingsDialog({
                         type="button"
                         onClick={() => setRepoPick(r)}
                         title={r}
-                        className={`group flex items-center gap-2 px-2 h-[30px] text-[12px] rounded-md text-left transition-colors ${
+                        className={`group flex items-center gap-2.5 px-2.5 h-9 text-sm rounded-md text-left transition-colors ${
                           active
-                            ? "bg-bg-2 text-text-1 font-medium"
-                            : "text-text-3 hover:text-text-1 hover:bg-bg-2/60"
+                            ? "row-selected font-medium"
+                            : "text-text-3 hover:text-text-1 hover:bg-state-hover"
                         }`}
                       >
                         <span
@@ -736,27 +747,42 @@ export function SettingsDialog({
               </div>
             )}
             {filteredGroups.length === 0 ? (
-              <div className="text-[11.5px] text-text-4 px-2 py-4">
+              <div className="text-sm text-text-4 px-2 py-4">
                 No settings match “{query}”.
               </div>
             ) : (
               filteredGroups.map((group, gi) => (
                 <div key={group.label} className={gi > 0 ? "mt-4" : "mt-1"}>
-                  <div className="text-[10px] font-semibold text-text-5 uppercase tracking-[0.1em] px-2 mb-1.5">
-                    {group.label}
-                  </div>
-                  <nav className="flex flex-col gap-0.5">
+                  {/* A heading whose only child repeats it says nothing —
+                      "Team" over one row called Team. Scope and search both
+                      thin groups down to one item, so this is decided per
+                      render, not per group. */}
+                  {!(group.items.length === 1 && group.items[0]!.label === group.label) && (
+                    <div className="text-[11px] font-medium text-text-4 px-2 pt-2 pb-1.5">
+                      {group.label}
+                    </div>
+                  )}
+                  <nav className="flex flex-col gap-1">
                     {group.items.map((it) => {
                       const active = pane === it.id;
+                      // Only ever set while searching, because that is the only
+                      // time a row from another tab can appear in this list.
+                      const itsScope = paneScope(it.id);
+                      const elsewhere = itsScope !== scope;
                       return (
                         <button
                           key={it.id}
                           type="button"
-                          onClick={() => setPane(it.id)}
-                          className={`group flex items-center gap-2 px-2 h-[30px] text-[12px] rounded-md text-left transition-colors ${
+                          onClick={() => {
+                            // Follow the result to its own tab, otherwise the
+                            // pane opens while the header still says Personal.
+                            if (elsewhere) setScope(itsScope);
+                            setPane(it.id);
+                          }}
+                          className={`group flex items-center gap-2.5 px-2.5 h-9 text-sm rounded-md text-left transition-colors ${
                             active
-                              ? "bg-bg-2 text-text-1 font-medium"
-                              : "text-text-3 hover:text-text-1 hover:bg-bg-2/60"
+                              ? "row-selected font-medium"
+                              : "text-text-3 hover:text-text-1 hover:bg-state-hover"
                           }`}
                         >
                           <span
@@ -767,6 +793,11 @@ export function SettingsDialog({
                             {it.icon}
                           </span>
                           <span className="flex-1 truncate">{it.label}</span>
+                          {elsewhere && (
+                            <span className="flex-shrink-0 text-[11px] text-text-4">
+                              {scopeLabel(itsScope)}
+                            </span>
+                          )}
                         </button>
                       );
                     })}
@@ -778,14 +809,29 @@ export function SettingsDialog({
         </aside>
 
         {/* Content pane — scrolls independently, padding tuned for full-
-            page rather than dialog density. */}
+            page rather than dialog density.
+
+            The pane is anchored by a real heading again. It was made
+            screen-reader-only on the reasoning that the lit rail row two
+            inches left already says where you are — true, but the rail is
+            chrome, and a column of settings with nothing at the top of it
+            starts mid-sentence. What that change actually fixed was seven
+            panes each declaring their OWN title and disagreeing with the row
+            you clicked. So the heading is back, and it is `paneLabel(pane)`:
+            the rail's own string, read from the rail's own table. One name
+            for one destination — visible now, and still impossible to
+            disagree with. Panes must not print their own.
+
+            When the pane opens with a `PaneIntro`, the heading tightens to
+            sit above it as one title-and-subtitle block. */}
         <div className="flex-1 min-w-0 overflow-y-auto">
           {error && (
-            <div className="text-[11.5px] text-red m-4" role="alert">
+            <div className="text-sm text-red m-4" role="alert">
               {error}
             </div>
           )}
-          <div className="max-w-[720px] px-8 py-6">
+          <div className="max-w-[722px] px-11 pb-16 pt-9">
+            <PaneHeader title={paneLabel(pane)} />
             {pane === "appearance" && <AppearanceTab />}
             {pane === "themes" && <EditorThemesTab />}
             {pane === "hud" && <HudTab />}
@@ -803,14 +849,22 @@ export function SettingsDialog({
             {pane === "agents" && <AgentsTab />}
             {pane === "local-models" && <LocalModelsTab />}
             {pane === "terminal" && <TerminalTab />}
-            {pane === "copies" &&
-              (activeRepoRoot ? (
-                <RepoWorktreeSettingsPane repoRoot={activeRepoRoot} />
-              ) : (
-                <div className="py-6 text-[12px] text-text-3">
-                  Open a project to configure its copies.
-                </div>
-              ))}
+            {pane === "copies" && (
+              <>
+                {/* Which tool a new copy opens into is a fact about the person,
+                    not the repo — so it sits above the project gate and can be
+                    set with nothing open. The scripts below it genuinely are
+                    per-project and stay behind it. */}
+                <WorkspaceLandingRow />
+                {activeRepoRoot ? (
+                  <RepoWorktreeSettingsPane repoRoot={activeRepoRoot} />
+                ) : (
+                  <div className="py-6 text-sm text-text-3">
+                    Open a project to configure its setup scripts.
+                  </div>
+                )}
+              </>
+            )}
             {pane === "plugins" && <PluginsTab />}
             {pane === "mcp" && <McpServersTab repoRoot={activeRepoRoot} />}
             {pane === "integrations" && <IntegrationsTab repoRoot={activeRepoRoot} />}
@@ -822,7 +876,7 @@ export function SettingsDialog({
               (activeRepoRoot ? (
                 <TeamTab repoRoot={activeRepoRoot} />
               ) : (
-                <div className="py-6 text-[12px] text-text-3">
+                <div className="py-6 text-sm text-text-3">
                   Open a project to see its team.
                 </div>
               ))}
@@ -842,44 +896,38 @@ function AppearanceTab() {
   const theme = useThemePreference();
   const variant = useThemeVariant();
   const fontSize = useFontSize();
-  // Modal and ember ship dark-only palettes — picking light/system would
-  // be a silent no-op (useResolvedTheme pins them to dark), so disable the
-  // color-scheme picker and say why instead of letting it lie.
-  const schemeDisabled =
-    variant === "modal" ||
-    variant === "ember" ||
-    variant === "amber" ||
-    variant === "emerald";
+  // Some packs ship dark-only palettes — picking light/system would be a
+  // silent no-op (useResolvedTheme pins them to dark), so disable the
+  // color-scheme picker and say why instead of letting it lie. Asked of
+  // themeStore rather than restated here: this list was hand-copied and had
+  // drifted to include Amber, which ships a real light palette — so light
+  // mode was unreachable on the one pack everybody is on.
+  const schemeDisabled = isDarkOnlyVariant(variant);
   return (
     <>
-      <PaneHeader
-        title="Appearance"
-        subtitle="Customize how Aura looks on your device."
-      />
+      <PaneIntro text="Customize how Aura looks on your device." />
       <Section title="Theme">
-        <Row label="Style">
+        <Row
+          label="Style"
+          description="The palette the whole app is painted from — window chrome, sidebar, chat and terminal all follow it."
+        >
           <SegControl<ThemeVariant>
             value={variant}
             options={[
-              { value: "default", label: "Default" },
+              // No "Default" row: it named the pre-redesign palette, and
+              // readVariant has resolved it to Amber for as long as there has
+              // been one shell — so picking it did nothing.
+              { value: "amber", label: "Amber" },
               { value: "emerald", label: "Aura emerald" },
               { value: "modal", label: "Modal" },
-              { value: "amber", label: "Amber" },
             ]}
             onChange={setThemeVariant}
           />
         </Row>
         <Row
-          label={
-            <span className="flex flex-col">
-              Color scheme
-              {schemeDisabled && (
-                <span className="text-[10.5px] text-text-4">
-                  This style ships dark-only.
-                </span>
-              )}
-            </span>
-          }
+          label="Color scheme"
+          description="Light or dark. System follows the one macOS is in, and switches with it."
+          hint={schemeDisabled ? "This style ships dark-only." : undefined}
         >
           <SegControl<ThemePreference>
             value={schemeDisabled ? "dark" : theme}
@@ -897,7 +945,10 @@ function AppearanceTab() {
         </Row>
       </Section>
       <Section title="Editor font">
-        <Row label="Font size">
+        <Row
+          label="Font size"
+          description="Type size in the code editor and in diffs. Terminals have their own, on the Terminal page."
+        >
           <Stepper
             value={fontSize}
             onChange={(n) => setFontSize(n)}
@@ -922,12 +973,15 @@ function HudTab() {
   const hud = useHudPrefs();
   // Opacity is stored as a 0.2–1.0 fraction but tuned as a friendlier percent.
   const opacityPct = Math.round(hud.opacity * 100);
+  // Everything past Availability shapes a window that, with the HUD off,
+  // cannot appear — the enable row says so itself: "⌘⇧A and the menu-bar
+  // icon do nothing and the HUD stays hidden". The Show HUD button was
+  // already gated on this; the pet, the presentation and the sizes were not,
+  // so the pane sat there taking settings for something that wasn't there.
+  const off = !hud.enabled;
   return (
     <>
-      <PaneHeader
-        title="Floating HUD"
-        subtitle="The always-on-top glance summoned with ⌘⇧A. Changes apply live."
-      />
+      <PaneIntro text="The always-on-top glance summoned with ⌘⇧A. Changes apply live." />
       <Section title="Availability">
         <Toggle
           label="Enable the floating HUD"
@@ -937,22 +991,22 @@ function HudTab() {
         />
         <Toggle
           label="Desk pet"
-          hint="A little companion perches on the HUD and reacts to what your agents are doing — reading while they think, working while they edit, a hop when a task finishes."
+          hint="A little companion perches on the HUD and reacts to what your agents are doing. Reading while they think, working while they edit, a hop when a task finishes."
           value={hud.pet}
           onChange={(v) => setHudPref("pet", v)}
+          disabled={off}
         />
+        {off && (
+          <div className="pb-4 text-xs text-text-4">
+            The HUD is off, so the rest of this page has nothing to change
+            yet. Turn it on to shape it.
+          </div>
+        )}
       </Section>
       <Section title="Shape">
         <Row
-          label={
-            <span className="flex flex-col">
-              Presentation
-              <span className="text-[10.5px] text-text-4">
-                Capsule sits bottom-center · Sidebar docks right as a panel ·
-                Minimal drops the glass.
-              </span>
-            </span>
-          }
+          label="Presentation"
+          description="Capsule sits bottom-center · Sidebar docks right as a panel · Minimal drops the glass."
         >
           <SegControl<HudPresentationMode>
             value={hud.mode as HudPresentationMode}
@@ -962,9 +1016,13 @@ function HudTab() {
               { value: "minimal", label: "Minimal" },
             ]}
             onChange={(next) => setHudPref("mode", next)}
+            disabled={off}
           />
         </Row>
-        <Row label="Opacity">
+        <Row
+          label="Opacity"
+          description="How much of the screen behind shows through. Below about half the HUD reads as a ghost."
+        >
           <Stepper
             value={opacityPct}
             onChange={(pct) => setHudPref("opacity", pct / 100)}
@@ -972,20 +1030,15 @@ function HudTab() {
             max={100}
             step={5}
             suffix="%"
+            disabled={off}
           />
         </Row>
       </Section>
       {hud.mode === "sidebar" && (
         <Section title="Sidebar size">
           <Row
-            label={
-              <span className="flex flex-col">
-                Width
-                <span className="text-[10.5px] text-text-4">
-                  Panel width when the sidebar is open.
-                </span>
-              </span>
-            }
+            label="Width"
+            description="Panel width when the sidebar is open."
           >
             <Stepper
               value={Math.round(hud.sidebar_width)}
@@ -994,9 +1047,13 @@ function HudTab() {
               max={480}
               step={10}
               suffix="px"
+              disabled={off}
             />
           </Row>
-          <Row label="Height">
+          <Row
+            label="Height"
+            description="How far down the screen edge the panel runs."
+          >
             <Stepper
               value={Math.round(hud.sidebar_height)}
               onChange={(px) => setHudPref("sidebar_height", px)}
@@ -1004,20 +1061,15 @@ function HudTab() {
               max={900}
               step={20}
               suffix="px"
+              disabled={off}
             />
           </Row>
         </Section>
       )}
       <Section title="Preview">
         <Row
-          label={
-            <span className="flex flex-col">
-              Show the HUD
-              <span className="text-[10.5px] text-text-4">
-                Summon it to see the current shape (also ⌘⇧A anytime).
-              </span>
-            </span>
-          }
+          label="Show the HUD"
+          description="Summon it to see the current shape (also ⌘⇧A anytime)."
         >
           <Button
             size="sm"
@@ -1044,6 +1096,12 @@ function HudTab() {
 /** A few representative colors from a converted theme, for the preview chips.
  *  Monaco rule foregrounds are stored without a leading `#`; re-add it.
  *  Accepts any `ConvertedTheme` (presets) or `StoredVsTheme` (imports). */
+/** Where "Find themes on the VS Code Marketplace" goes. Pre-filtered to the
+ *  Themes category and sorted by installs, because the thing this pane can
+ *  actually consume is a color theme's JSON, not any extension. */
+const MARKETPLACE_THEMES_URL =
+  "https://marketplace.visualstudio.com/search?target=VSCode&category=Themes&sortBy=Installs";
+
 function themeSwatches(t: ConvertedTheme): string[] {
   const colors = t.monaco.colors ?? {};
   const ruleColor = (token: string): string | undefined => {
@@ -1099,7 +1157,7 @@ function EditorThemesTab() {
     setNote(null);
     const trimmed = text.trim();
     if (!trimmed) {
-      setError("Nothing to import — pick a file or paste theme JSON.");
+      setError("Nothing to import. Pick a file or paste theme JSON.");
       return;
     }
     try {
@@ -1126,10 +1184,7 @@ function EditorThemesTab() {
 
   return (
     <>
-      <PaneHeader
-        title="Editor Themes"
-        subtitle="Import a VS Code color theme and apply it to the code editor."
-      />
+      <PaneIntro text="Import a VS Code color theme and apply it to the code editor." />
 
       <Section title="Import a theme">
         <div className="flex items-center gap-2 py-1">
@@ -1140,14 +1195,14 @@ function EditorThemesTab() {
               className="hidden"
               onChange={onFile}
             />
-            <span className="inline-flex items-center gap-1.5 rounded-md border border-line bg-bg-1 px-3 py-1.5 text-[12px] text-text-1 hover:bg-bg-2 transition-colors">
+            <span className="inline-flex items-center gap-1.5 rounded-md border border-line bg-bg-1 px-3 py-1.5 text-sm text-text-1 hover:bg-state-hover transition-colors">
               <Upload className="h-3.5 w-3.5" />
               Import theme file…
             </span>
           </label>
           <button
             type="button"
-            className="text-[11.5px] text-text-3 hover:text-text-1 transition-colors"
+            className="text-sm text-text-3 hover:text-text-1 transition-colors"
             onClick={() => setShowPaste((v) => !v)}
           >
             {showPaste ? "Hide paste" : "or paste JSON"}
@@ -1161,7 +1216,7 @@ function EditorThemesTab() {
               onChange={(e) => setPaste(e.target.value)}
               spellCheck={false}
               placeholder='Paste the contents of a *-color-theme.json here…'
-              className="w-full h-40 bg-bg-0 border border-line rounded-md px-3 py-2 text-[11.5px] font-mono text-text-1 resize-y"
+              className="w-full h-40 bg-bg-0 border border-line rounded-md px-3 py-2 text-sm font-mono text-text-1 resize-y"
             />
             <div>
               <Button onClick={() => doImport(paste)}>Import pasted theme</Button>
@@ -1170,29 +1225,41 @@ function EditorThemesTab() {
         )}
 
         {note && (
-          <div className="text-[11.5px] text-text-2 mt-2 flex items-center gap-1.5">
+          <div className="text-sm text-text-2 mt-2 flex items-center gap-1.5">
             <Check className="h-3.5 w-3.5 text-accent-green" />
             {note}
           </div>
         )}
         {error && (
-          <div className="text-[11.5px] text-red mt-2" role="alert">
+          <div className="text-sm text-red mt-2" role="alert">
             {error}
           </div>
         )}
-        <div className="text-[10.5px] text-text-4 mt-2 leading-relaxed">
+        <div className="text-xs text-text-4 mt-2 leading-relaxed">
           Find themes on the{" "}
-          <span className="text-text-2">VS Code Marketplace</span> or any
-          extension's <code className="text-text-2">themes/*.json</code>. Syntax
-          colors and editor chrome are mapped onto the editor; this matches the
-          common token scopes, not every grammar-specific rule.
+          {/* This was a `<span className="text-text-2">` — brighter than the
+              sentence around it, so it read as the link it wasn't, and
+              clicking it did nothing. Anything that leaves the app has to go
+              through `openExternal`; a bare `target="_blank"` is a no-op in
+              the webview. */}
+          <a
+            href={MARKETPLACE_THEMES_URL}
+            onClick={onExternalAnchorClick}
+            className="text-text-2 underline decoration-line hover:decoration-text-2 underline-offset-2"
+          >
+            VS Code Marketplace
+          </a>{" "}
+          or any extension's <code className="text-text-2">themes/*.json</code>.
+          Syntax colors and editor chrome are mapped onto the editor; this
+          matches the common token scopes, not every grammar-specific rule.
         </div>
       </Section>
 
       <Section title="Built-in presets">
-        <div className="text-[10.5px] text-text-4 mb-2 leading-relaxed">
-          Popular published palettes, ready to apply — no download needed. Each
-          is run through the same converter as an imported file.
+        <div className="text-xs text-text-4 mb-2 leading-relaxed">
+          Popular published palettes, ready to apply. No download needed. Each
+          is run through the same converter as an imported file, and applying
+          one adds it to your themes below.
         </div>
         <div className="grid grid-cols-2 gap-2">
           {THEME_PRESETS.map((p) => {
@@ -1210,13 +1277,13 @@ function EditorThemesTab() {
                 className={`flex items-center gap-2.5 py-2 px-2.5 rounded-md border text-left transition-colors ${
                   isActive
                     ? "border-accent bg-accent/5"
-                    : "border-line hover:bg-bg-1"
+                    : "border-line hover:bg-state-hover"
                 }`}
               >
                 <ThemeSwatchRow colors={themeSwatches(p)} />
                 <div className="flex-1 min-w-0">
-                  <div className="text-[12px] text-text-1 truncate">{p.name}</div>
-                  <div className="text-[10.5px] text-text-4">
+                  <div className="text-sm text-text-1 truncate">{p.name}</div>
+                  <div className="text-xs text-text-4">
                     {p.isDark ? "Dark" : "Light"}
                   </div>
                 </div>
@@ -1231,9 +1298,9 @@ function EditorThemesTab() {
 
       {extThemes.length > 0 && (
         <Section title="From your extensions">
-          <div className="text-[10.5px] text-text-4 mb-2 leading-relaxed">
+          <div className="text-xs text-text-4 mb-2 leading-relaxed">
             Color themes from the extensions you’ve installed. Pick one to apply
-            it — it joins your themes below.
+            it. It joins your themes below.
           </div>
           <div className="grid grid-cols-2 gap-2">
             {extThemes.map((t) => {
@@ -1251,15 +1318,15 @@ function EditorThemesTab() {
                   className={`flex items-center gap-2.5 py-2 px-2.5 rounded-md border text-left transition-colors ${
                     isActive
                       ? "border-accent bg-accent/5"
-                      : "border-line hover:bg-bg-1"
+                      : "border-line hover:bg-state-hover"
                   }`}
                 >
                   <ThemeSwatchRow colors={themeSwatches(t.converted)} />
                   <div className="flex-1 min-w-0">
-                    <div className="text-[12px] text-text-1 truncate">
+                    <div className="text-sm text-text-1 truncate">
                       {t.converted.name}
                     </div>
-                    <div className="text-[10.5px] text-text-4 truncate">
+                    <div className="text-xs text-text-4 truncate">
                       {t.extName} · {t.isDark ? "Dark" : "Light"}
                     </div>
                   </div>
@@ -1273,7 +1340,10 @@ function EditorThemesTab() {
         </Section>
       )}
 
-      <Section title="Active theme">
+      {/* Titled "Active theme" until it was read on screen: the heading sat
+          over eight rows, seven of them carrying an Activate button and a
+          delete. It is the library — one row of it happens to be active. */}
+      <Section title="Your themes">
         <ThemeChoiceRow
           name="Aura default"
           detail="GitHub-matched dark / light"
@@ -1293,7 +1363,7 @@ function EditorThemesTab() {
           />
         ))}
         {themes.length === 0 && (
-          <div className="text-[11.5px] text-text-4 py-2">
+          <div className="text-sm text-text-4 py-2">
             No imported themes yet. Import one above to get started.
           </div>
         )}
@@ -1302,24 +1372,24 @@ function EditorThemesTab() {
       <Section title="Scope">
         <Toggle
           label="Also reskin the whole app"
-          hint="Apply the active theme's palette to Aura's chrome — not just the code editor. Turn off to keep the editor themed but the app on its own colors."
+          hint="Apply the active theme's palette to Aura's chrome, not just the code editor. Turn off to keep the editor themed but the app on its own colors."
           value={applyChrome}
           onChange={setApplyChrome}
         />
         {applyChrome && active === null && (
-          <div className="text-[10.5px] text-text-4 mt-1">
+          <div className="text-xs text-text-4 mt-1">
             No imported theme is active, so this has no effect yet.
           </div>
         )}
       </Section>
 
       <Section title="VS Code compatibility">
-        <div className="text-[11.5px] text-text-3 leading-relaxed">
+        <div className="text-sm text-text-3 leading-relaxed">
           Color themes are the first slice of broader VS Code interop. Planned
           next: LSP-backed language features (hover, completion) and a growing{" "}
           <code className="text-text-2">vscode</code>-API subset so a portion of
           simple extensions run. Running an unmodified{" "}
-          <code className="text-text-2">.vsix</code> is an explicit non-goal —
+          <code className="text-text-2">.vsix</code> is an explicit non-goal. 
           Aura's own capability-sandboxed mini-apps are the path for richer
           surfaces.
         </div>
@@ -1348,16 +1418,16 @@ function ThemeChoiceRow({
       className={`flex items-center gap-3 py-2 px-2.5 rounded-md border transition-colors ${
         active
           ? "border-accent bg-accent/5"
-          : "border-transparent hover:bg-bg-1"
+          : "border-transparent hover:bg-state-hover"
       }`}
     >
       <ThemeSwatchRow colors={swatches} />
       <div className="flex-1 min-w-0">
-        <div className="text-[12px] text-text-1 truncate">{name}</div>
-        <div className="text-[10.5px] text-text-4">{detail}</div>
+        <div className="text-sm text-text-1 truncate">{name}</div>
+        <div className="text-xs text-text-4">{detail}</div>
       </div>
       {active ? (
-        <span className="inline-flex items-center gap-1 text-[11px] text-accent shrink-0">
+        <span className="inline-flex items-center gap-1 text-xs text-accent shrink-0">
           <Check className="h-3.5 w-3.5" />
           Active
         </span>
@@ -1414,8 +1484,18 @@ function CaptureTab({ repoRoot }: { repoRoot: string }) {
   const [mergeUnavailable, setMergeUnavailable] = useState<string | null>(
     null,
   );
+  // What the CLI actually said when the probe failed. The row used to
+  // throw this away and assert "aura CLI is too old" for every non-zero
+  // exit — a guess, printed as a fact, next to a disabled button. If the
+  // real reason was something else entirely (no repo, a broken install,
+  // a permissions error) nothing on screen could tell you.
+  const [mergeProbeDetail, setMergeProbeDetail] = useState<string | null>(null);
+  // Set when the installed CLI genuinely predates this feature, which is
+  // the one case the app can fix by itself.
+  const [mergeCliOutdated, setMergeCliOutdated] = useState(false);
   const [mergeBusy, setMergeBusy] = useState(false);
   const [mergeError, setMergeError] = useState<string | null>(null);
+  const [updatingCli, setUpdatingCli] = useState(false);
 
   const refresh = useCallback(async () => {
     try {
@@ -1435,18 +1515,54 @@ function CaptureTab({ repoRoot }: { repoRoot: string }) {
       if (res.status === 0) {
         setMerge(JSON.parse(res.stdout) as MergeDriverStatus);
         setMergeUnavailable(null);
-      } else {
-        // Installed CLI predates --status (clap usage error) — stay calm,
-        // just say the row needs a newer CLI rather than erroring out.
-        setMerge(null);
-        setMergeUnavailable("aura CLI is too old — update it to manage merges here");
+        setMergeProbeDetail(null);
+        setMergeCliOutdated(false);
+        return;
       }
-    } catch {
+      setMerge(null);
+      // A non-zero exit was being read as one thing — "too old" — because
+      // that is the likeliest cause, not because anything checked. Ask the
+      // question that has an answer: what version is actually installed?
+      const detail = (res.stderr || res.stdout || "").trim();
+      setMergeProbeDetail(detail || `aura merge-driver exited ${res.status}`);
+      let outdated = false;
+      try {
+        outdated = (await api.auraCliVersionCheck()).status === "outdated";
+      } catch {
+        // The version probe is a nicety. If it fails too, the row still
+        // shows the real stderr below — which is the part that matters.
+      }
+      setMergeCliOutdated(outdated);
+      setMergeUnavailable(
+        outdated
+          ? "The aura command on this computer is too old for smart merge"
+          : "Couldn't read the smart-merge setting",
+      );
+    } catch (e) {
       // Spawn failure: no `aura` on PATH at all.
       setMerge(null);
+      setMergeCliOutdated(false);
+      setMergeProbeDetail(e instanceof Error ? e.message : String(e));
       setMergeUnavailable("aura CLI not found");
     }
   }, [repoRoot]);
+
+  // The one repair the app can perform itself: drop the CLI this release
+  // ships with over the stale one on PATH. `interactive` authorizes the
+  // macOS admin prompt when the install dir is root-owned — this is an
+  // explicit click, so that is exactly right.
+  async function updateCli() {
+    setUpdatingCli(true);
+    setMergeError(null);
+    try {
+      await api.auraCliInstallBundled(true);
+    } catch (e) {
+      setMergeError(e instanceof Error ? e.message : String(e));
+    } finally {
+      await refreshMerge();
+      setUpdatingCli(false);
+    }
+  }
 
   useEffect(() => {
     void refresh();
@@ -1509,13 +1625,10 @@ function CaptureTab({ repoRoot }: { repoRoot: string }) {
 
   return (
     <>
-      <PaneHeader
-        title="Capture"
-        subtitle="Quietly record what changed and why in this project — no extra setup."
-      />
+      <PaneIntro text="Quietly record what changed and why in this project. No extra setup." />
 
       {status && !isGit && (
-        <div className="text-[12px] text-text-3 rounded-md border border-line-soft bg-bg-2 px-3 py-2.5">
+        <div className="text-sm text-text-3 rounded-md border border-line-soft bg-bg-2 px-3 py-2.5">
           This folder isn't a Git repository, so there's nothing to capture
           into yet. Initialize Git first, then enable capture here.
         </div>
@@ -1533,12 +1646,12 @@ function CaptureTab({ repoRoot }: { repoRoot: string }) {
               }}
             />
             <div className="flex-1">
-              <div className="text-[12px] text-text-1">
+              <div className="text-sm text-text-1">
                 {on ? "Capturing" : "Not capturing"}
               </div>
-              <div className="text-[11px] text-text-3 leading-relaxed">
+              <div className="text-xs text-text-3 leading-relaxed">
                 {on
-                  ? "Every time you save (commit), Aura records what changed, why, and which AI made it — right inside your project's history."
+                  ? "Every time you save (commit), Aura records what changed, why, and which AI made it. Right inside your project's history."
                   : "Turn on to record what changed and why on every save. It runs quietly alongside any existing Git hooks (Husky, Lefthook) without disturbing them."}
               </div>
             </div>
@@ -1548,7 +1661,7 @@ function CaptureTab({ repoRoot }: { repoRoot: string }) {
               onClick={() => toggle(!on)}
             >
               {busy ? (
-                <AsciiSpinner className="text-[12px] leading-none" />
+                <AsciiSpinner className="text-sm leading-none" />
               ) : on ? (
                 "Disable"
               ) : (
@@ -1558,13 +1671,13 @@ function CaptureTab({ repoRoot }: { repoRoot: string }) {
           </div>
 
           {status?.hooks_dir && (
-            <div className="text-[10.5px] text-text-4 mt-1 font-mono break-all">
+            <div className="text-xs text-text-4 mt-1 font-mono break-all">
               hooks: {status.hooks_dir}
             </div>
           )}
-          {note && <div className="text-[11px] text-text-3 mt-2">{note}</div>}
+          {note && <div className="text-xs text-text-3 mt-2">{note}</div>}
           {error && (
-            <div className="text-[11px] text-red mt-2" role="alert">
+            <div className="text-xs text-red mt-2" role="alert">
               {error}
             </div>
           )}
@@ -1583,45 +1696,74 @@ function CaptureTab({ repoRoot }: { repoRoot: string }) {
               }}
             />
             <div className="flex-1">
-              <div className="text-[12px] text-text-1">
+              <div className="text-sm text-text-1">
                 {mergeUnavailable ??
                   (merge?.installed
                     ? "Smart merge is on"
                     : "Smart merge is off")}
               </div>
-              <div className="text-[11px] text-text-3 leading-relaxed">
+              <div className="text-xs text-text-3 leading-relaxed">
                 When two AIs edit different functions in the same file, Aura
-                merges them cleanly — no conflicts to untangle by hand.
+                merges them cleanly. No conflicts to untangle by hand.
               </div>
             </div>
-            <Button
-              variant={merge?.installed ? "subtle" : "default"}
-              disabled={mergeBusy || mergeUnavailable !== null}
-              onClick={() => setMergeInstalled(!(merge?.installed ?? false))}
-            >
-              {mergeBusy ? (
-                <AsciiSpinner className="text-[12px] leading-none" />
-              ) : merge?.installed ? (
-                "Uninstall"
-              ) : (
-                "Install"
-              )}
-            </Button>
+            {/* A row that says "update it" and hands you a dead button is
+                worse than no button. When the CLI is the problem, the
+                control becomes the fix; when the reason is something else,
+                the way forward is to look again after changing whatever
+                the message below names. */}
+            {mergeCliOutdated ? (
+              <Button disabled={updatingCli} onClick={() => void updateCli()}>
+                {updatingCli ? (
+                  <AsciiSpinner className="text-sm leading-none" />
+                ) : (
+                  "Update aura"
+                )}
+              </Button>
+            ) : mergeUnavailable !== null ? (
+              <Button
+                variant="subtle"
+                disabled={mergeBusy}
+                onClick={() => void refreshMerge()}
+              >
+                Try again
+              </Button>
+            ) : (
+              <Button
+                variant={merge?.installed ? "subtle" : "default"}
+                disabled={mergeBusy}
+                onClick={() => setMergeInstalled(!(merge?.installed ?? false))}
+              >
+                {mergeBusy ? (
+                  <AsciiSpinner className="text-sm leading-none" />
+                ) : merge?.installed ? (
+                  "Uninstall"
+                ) : (
+                  "Install"
+                )}
+              </Button>
+            )}
           </div>
 
+          {mergeProbeDetail && (
+            <div className="mt-1.5 max-h-20 overflow-auto rounded border border-line-soft bg-bg-1 px-2 py-1 font-mono text-[11px] leading-snug text-text-4">
+              {mergeProbeDetail}
+            </div>
+          )}
+
           {merge?.installed && !merge.aura_on_path && (
-            <div className="text-[11px] text-text-3 mt-1">
-              The driver is configured but `aura` isn't on PATH — git falls
+            <div className="text-xs text-text-3 mt-1">
+              The driver is configured but `aura` isn't on PATH. Git falls
               back to its own merge until that's fixed.
             </div>
           )}
           {merge?.installed && merge.attributes_patterns.length > 0 && (
-            <div className="text-[10.5px] text-text-4 mt-1 font-mono break-all">
+            <div className="text-xs text-text-4 mt-1 font-mono break-all">
               {merge.attributes_patterns.join("   ")}
             </div>
           )}
           {mergeError && (
-            <div className="text-[11px] text-red mt-2" role="alert">
+            <div className="text-xs text-red mt-2" role="alert">
               {mergeError}
             </div>
           )}
@@ -1629,23 +1771,23 @@ function CaptureTab({ repoRoot }: { repoRoot: string }) {
       )}
 
       <Section title="What this does">
-        <ul className="text-[11.5px] text-text-3 leading-relaxed list-disc pl-4 space-y-1">
+        <ul className="text-sm text-text-3 leading-relaxed list-disc pl-4 space-y-1">
           <li>
             Installs Aura's Git hooks (pre-commit, commit-msg, post-commit,
-            post-merge, pre-push) — safe to run more than once, and they leave
+            post-merge, pre-push). Safe to run more than once, and they leave
             any existing hooks in place.
           </li>
           <li>
             Records what changed and why straight into Git. Nothing leaves your
-            machine — no cloud, no extra server.
+            machine. No cloud, no extra server.
           </li>
           <li>
-            Works with whatever coding agent you run — or none at all. Turning
+            Works with whatever coding agent you run, or none at all. Turning
             it off removes the hooks; the history already recorded in Git stays
             put.
           </li>
         </ul>
-        <div className="text-[11px] text-text-4 mt-2 leading-relaxed">
+        <div className="text-xs text-text-4 mt-2 leading-relaxed">
           Want the full interactive setup — API keys, baseline scan, MCP
           wiring? Run <code className="text-text-2">aura init</code> in this
           repo from a terminal.
@@ -1670,10 +1812,7 @@ function BehaviorTab() {
   const [followUp, setFollowUp] = useState<FollowUpBehavior>(readFollowUpBehavior);
   return (
     <>
-      <PaneHeader
-        title="Behavior"
-        subtitle="How the editor and chat behave."
-      />
+      <PaneIntro text="How the editor and chat behave." />
       <Section title="Editor">
         <Toggle
           label="Vim keybindings"
@@ -1705,7 +1844,7 @@ function BehaviorTab() {
           label="Follow-up behavior"
           description={
             followUp === "steer"
-              ? "Sending while the agent is working interrupts it and redirects the turn with your new message — it keeps everything it's done so far."
+              ? "Sending while the agent is working interrupts it and redirects the turn with your new message. It keeps everything it's done so far."
               : "Sending while the agent is working queues your message and it runs when the current turn finishes."
           }
           hint="Tip: ⌘↵ always steers, whichever option is set here."
@@ -1736,7 +1875,7 @@ function BehaviorTab() {
         />
         <Toggle
           label="Message & huddle sounds"
-          hint="Play a soft chime for new team messages and huddles — the in-app tone while Aura is focused, the OS notification sound when it isn't. Off mutes both."
+          hint="Play a soft chime for new team messages and huddles. The in-app tone while Aura is focused, the OS notification sound when it isn't. Off mutes both."
           value={msgSound}
           onChange={(v) => {
             setChimeMuted(!v);
@@ -1746,940 +1885,6 @@ function BehaviorTab() {
         />
       </Section>
     </>
-  );
-}
-
-// ── Brain ─────────────────────────────────────────────────────────────
-//
-// The Brain picker — replaces the old "set ANTHROPIC_API_KEY in env"
-// flow. Each Brain impl compiled into the build appears here with a
-// radio selector + an API-key field (when required). Keys land in the
-// OS keychain via `brain_keychain_set` — they never round-trip to the
-// frontend after the first save.
-
-// Map a brain `provider_id` (e.g. `brain_anthropic_native`,
-// `openai_compat:groq`) onto the slug AgentIcon knows so the row shows
-// the vendor's real colored mark. Order matters: `openai_compat` must
-// win before the bare `openai` test.
-function brainBrandSlug(providerId: string): string {
-  const id = providerId.toLowerCase();
-  if (id.includes("anthropic") || id.includes("claude")) return "claude";
-  if (id.includes("gemini") || id.includes("google")) return "gemini";
-  if (id.includes("openai_compat") || id.includes("openai-compat")) return "openai-compat";
-  if (id.includes("openai") || id.includes("codex")) return "codex";
-  if (id.includes("cursor")) return "cursor";
-  if (id.includes("kimi") || id.includes("moonshot")) return "kimi";
-  if (id.includes("aura")) return "aura-manager";
-  return providerId;
-}
-
-function BrainTab() {
-  const [descriptors, setDescriptors] = useState<BrainDescriptor[]>([]);
-  const [active, setActive] = useState<string | null>(null);
-  const [keyDrafts, setKeyDrafts] = useState<Record<string, string>>({});
-  const [busy, setBusy] = useState<string | null>(null);
-  const [msg, setMsg] = useState<string | null>(null);
-  const [err, setErr] = useState<string | null>(null);
-
-  const load = useCallback(async () => {
-    setErr(null);
-    try {
-      const [ds, settings] = await Promise.all([
-        api.brainListDescriptors(),
-        api.brainGetSettings(),
-      ]);
-      setDescriptors(ds);
-      setActive(settings.active_provider_id ?? null);
-    } catch (e) {
-      setErr(String(e));
-    }
-  }, []);
-
-  useEffect(() => {
-    void load();
-  }, [load]);
-
-  async function pick(providerId: string) {
-    setBusy(providerId);
-    setMsg(null);
-    setErr(null);
-    try {
-      await api.brainSetActive(providerId);
-      setActive(providerId);
-      setMsg(`Active brain: ${providerId}`);
-    } catch (e) {
-      setErr(String(e));
-    } finally {
-      setBusy(null);
-    }
-  }
-
-  async function saveKey(providerId: string) {
-    const draft = keyDrafts[providerId];
-    if (!draft) return;
-    setBusy(providerId);
-    setMsg(null);
-    setErr(null);
-    try {
-      await api.brainKeychainSet(providerId, draft);
-      setKeyDrafts((d) => ({ ...d, [providerId]: "" }));
-      setMsg(`Saved API key for ${providerId}`);
-      await load();
-    } catch (e) {
-      setErr(String(e));
-    } finally {
-      setBusy(null);
-    }
-  }
-
-  async function forgetKey(providerId: string) {
-    if (!confirm(`Forget the stored API key for ${providerId}?`)) return;
-    setBusy(providerId);
-    setMsg(null);
-    setErr(null);
-    try {
-      await api.brainKeychainDelete(providerId);
-      setMsg(`Forgot API key for ${providerId}`);
-      await load();
-    } catch (e) {
-      setErr(String(e));
-    } finally {
-      setBusy(null);
-    }
-  }
-
-  // Custom `openai_compat:<slug>` endpoints (Azure, OpenRouter, a local
-  // vLLM, …) are the only removable brains — the compiled-in ones stay.
-  async function removeProvider(providerId: string) {
-    if (!confirm(`Remove ${providerId}? Forgets its endpoint config and key.`))
-      return;
-    setBusy(providerId);
-    setMsg(null);
-    setErr(null);
-    try {
-      await api.brainRemoveProvider(providerId);
-      setMsg(`Removed ${providerId}`);
-      await load();
-    } catch (e) {
-      setErr(String(e));
-    } finally {
-      setBusy(null);
-    }
-  }
-
-  return (
-    <>
-      <PaneHeader
-        title="Brain"
-        subtitle="Pick the chat backend that powers the Manager. Subscribe to Aura Pro for zero-setup, or bring your own key for Anthropic / OpenAI / Gemini / any OpenAI-compatible endpoint. CLI wrappers reuse the login you already have for Claude Code / Gemini CLI / opencode / cursor."
-      />
-      <Section title="Available brains">
-        {err && (
-          <div className="text-[11.5px] text-red mb-2" role="alert">
-            {err}
-          </div>
-        )}
-        {msg && (
-          <div className="text-[11.5px] text-text-3 mb-2">{msg}</div>
-        )}
-        {descriptors.length === 0 ? (
-          <div className="text-[11.5px] text-text-4 italic">
-            No brains compiled into this build. Rebuild with at least one
-            of: <code>brain_anthropic_native</code>,{" "}
-            <code>brain_cli_wrapper</code>, <code>brain_openai_native</code>,
-            {" "}<code>brain_gemini_native</code>,{" "}
-            <code>brain_openai_compat</code>.
-          </div>
-        ) : (
-          <div className="flex flex-col gap-2">
-            {descriptors.map((d) => {
-              const isActive = active === d.provider_id;
-              const draft = keyDrafts[d.provider_id] ?? "";
-              const isAuraPro = d.provider_id === "aura_pro";
-              return (
-                <div
-                  key={d.provider_id}
-                  className={`rounded-md border p-3 ${
-                    isActive
-                      ? "border-accent/60 bg-bg-2/60"
-                      : "border-line-soft bg-bg-1/40"
-                  }`}
-                >
-                  <label className="flex items-start gap-3 cursor-pointer">
-                    <input
-                      type="radio"
-                      name="brain-active"
-                      checked={isActive}
-                      onChange={() => void pick(d.provider_id)}
-                      disabled={busy === d.provider_id}
-                      className="mt-0.5"
-                    />
-                    <span className="mt-px shrink-0">
-                      <AgentIcon
-                        agentId={brainBrandSlug(d.provider_id)}
-                        label={d.display_name}
-                        size={18}
-                      />
-                    </span>
-                    <div className="flex-1 min-w-0">
-                      <div className="flex items-baseline gap-2">
-                        <div className="text-[12.5px] font-medium text-text-1">
-                          {d.display_name}
-                        </div>
-                        <code className="text-[10.5px] text-text-4">
-                          {d.provider_id}
-                        </code>
-                        {d.requires_api_key && d.has_api_key && (
-                          <span className="text-[10.5px] text-green">
-                            ✓ key set
-                          </span>
-                        )}
-                        {d.provider_id.startsWith("openai_compat:") && (
-                          <button
-                            type="button"
-                            onClick={(e) => {
-                              e.preventDefault();
-                              e.stopPropagation();
-                              void removeProvider(d.provider_id);
-                            }}
-                            disabled={busy === d.provider_id}
-                            className="ml-auto text-text-4 hover:text-red disabled:opacity-40"
-                            title="Remove this provider"
-                          >
-                            <Trash2 size={12} />
-                          </button>
-                        )}
-                      </div>
-                      <div className="text-[11px] text-text-3 mt-0.5">
-                        {d.blurb}
-                      </div>
-                      {isAuraPro && <AuraProRow />}
-                      {d.requires_api_key && (
-                        <div className="mt-2 flex items-center gap-2">
-                          <Input
-                            type="password"
-                            placeholder={
-                              d.has_api_key
-                                ? "Replace stored API key…"
-                                : "API key"
-                            }
-                            value={draft}
-                            onChange={(e) =>
-                              setKeyDrafts((s) => ({
-                                ...s,
-                                [d.provider_id]: e.target.value,
-                              }))
-                            }
-                            className="h-7 text-[11px] flex-1"
-                          />
-                          <Button
-                            size="sm"
-                            variant="secondary"
-                            disabled={!draft || busy === d.provider_id}
-                            onClick={() => void saveKey(d.provider_id)}
-                          >
-                            Save
-                          </Button>
-                          {d.has_api_key && (
-                            <Button
-                              size="sm"
-                              variant="ghost"
-                              disabled={busy === d.provider_id}
-                              onClick={() => void forgetKey(d.provider_id)}
-                              title="Remove from OS keychain"
-                            >
-                              <Trash2 size={12} />
-                            </Button>
-                          )}
-                        </div>
-                      )}
-                    </div>
-                  </label>
-                </div>
-              );
-            })}
-          </div>
-        )}
-      </Section>
-      <CloudBrainForm descriptors={descriptors} onSaved={() => void load()} />
-      <CustomProviderForm onAdded={() => void load()} />
-    </>
-  );
-}
-
-// ── Cloud & custom providers (openai_compat:<slug>) ───────────────────
-//
-// Adds any OpenAI-compatible endpoint as a first-class brain via
-// `brain_upsert_provider`. Presets cover the common hosted routers plus
-// Azure OpenAI, which needs the `api-key:` header + an `api-version`
-// query param — both carried by the openai_compat AuthStyle/query plumbing
-// so the form just flips two knobs. New providers land in the "Available
-// brains" list above (radio-select + key field), and carry a Remove
-// affordance since — unlike the compiled-in brains — they're user state.
-
-const AZURE_API_VERSION_DEFAULT = "2024-08-01-preview";
-
-type CustomProviderPreset = {
-  id: string;
-  label: string;
-  base_url: string;
-  default_model: string;
-  needs_key: boolean;
-  /** Azure authenticates with `api-key:` rather than Bearer. */
-  auth_style?: "api_key";
-  /** Azure requires an `api-version` query param on every request. */
-  needs_api_version?: boolean;
-  hint: string;
-};
-
-const CUSTOM_PROVIDER_PRESETS: CustomProviderPreset[] = [
-  {
-    id: "azure",
-    label: "Azure OpenAI",
-    base_url:
-      "https://YOUR-RESOURCE.openai.azure.com/openai/deployments/YOUR-DEPLOYMENT",
-    default_model: "gpt-4o",
-    needs_key: true,
-    auth_style: "api_key",
-    needs_api_version: true,
-    hint: "Swap YOUR-RESOURCE and YOUR-DEPLOYMENT into the URL. Uses the api-key header + api-version query — no /chat/completions on the end.",
-  },
-  {
-    id: "openrouter",
-    label: "OpenRouter",
-    base_url: "https://openrouter.ai/api/v1",
-    default_model: "anthropic/claude-3.5-sonnet",
-    needs_key: true,
-    hint: "Multi-vendor router — paste your OpenRouter key.",
-  },
-  {
-    id: "xai",
-    label: "xAI",
-    base_url: "https://api.x.ai/v1",
-    default_model: "grok-4.5",
-    needs_key: true,
-    hint: "Grok models through xAI's OpenAI-compatible API.",
-  },
-  {
-    id: "groq",
-    label: "Groq",
-    base_url: "https://api.groq.com/openai/v1",
-    default_model: "llama-3.3-70b-versatile",
-    needs_key: true,
-    hint: "Fastest token throughput — paste your Groq key.",
-  },
-  {
-    id: "together",
-    label: "Together.ai",
-    base_url: "https://api.together.xyz/v1",
-    default_model: "meta-llama/Llama-3.3-70B-Instruct-Turbo",
-    needs_key: true,
-    hint: "Hosted open models — paste your Together key.",
-  },
-  {
-    id: "ollama",
-    label: "Ollama (local)",
-    base_url: "http://localhost:11434/v1",
-    default_model: "llama3.2",
-    needs_key: false,
-    hint: "Runs on your machine — no API key.",
-  },
-  {
-    id: "custom",
-    label: "Custom endpoint",
-    base_url: "",
-    default_model: "",
-    needs_key: true,
-    hint: "Any server that speaks /v1/chat/completions.",
-  },
-];
-
-function slugifyProvider(raw: string): string {
-  return raw
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, "-")
-    .replace(/^-+|-+$/g, "")
-    .slice(0, 48);
-}
-
-function CustomProviderForm({ onAdded }: { onAdded: () => void }) {
-  const [presetId, setPresetId] = useState<string>(
-    CUSTOM_PROVIDER_PRESETS[0]!.id,
-  );
-  const preset =
-    CUSTOM_PROVIDER_PRESETS.find((p) => p.id === presetId) ??
-    CUSTOM_PROVIDER_PRESETS[0]!;
-  const [name, setName] = useState("");
-  const [baseUrl, setBaseUrl] = useState(preset.base_url);
-  const [model, setModel] = useState(preset.default_model);
-  const [apiKey, setApiKey] = useState("");
-  const [apiVersion, setApiVersion] = useState(AZURE_API_VERSION_DEFAULT);
-  const [busy, setBusy] = useState(false);
-  const [err, setErr] = useState<string | null>(null);
-  const [ok, setOk] = useState<string | null>(null);
-
-  function choosePreset(id: string) {
-    const p = CUSTOM_PROVIDER_PRESETS.find((x) => x.id === id);
-    if (!p) return;
-    setPresetId(id);
-    setBaseUrl(p.base_url);
-    setModel(p.default_model);
-    setErr(null);
-    setOk(null);
-    // Prefill the name with the preset label unless the user already
-    // typed one, so the slug is never empty for the common case.
-    if (!name.trim() && p.id !== "custom") setName(p.label);
-  }
-
-  const slug = slugifyProvider(name.trim() || preset.id);
-  const disabled =
-    busy ||
-    !name.trim() ||
-    !baseUrl.trim() ||
-    !model.trim() ||
-    (preset.needs_key && !apiKey.trim());
-
-  async function submit() {
-    setBusy(true);
-    setErr(null);
-    setOk(null);
-    try {
-      const res = await api.brainUpsertProvider({
-        slug,
-        baseUrl: baseUrl.trim(),
-        model: model.trim(),
-        apiKey: apiKey.trim() || undefined,
-        authStyle: preset.auth_style,
-        apiVersion: preset.needs_api_version
-          ? apiVersion.trim() || AZURE_API_VERSION_DEFAULT
-          : undefined,
-        setActive: false,
-      });
-      setOk(`Added ${res.provider_id}. Select it above to make it active.`);
-      setName("");
-      setApiKey("");
-      onAdded();
-    } catch (e) {
-      setErr(String(e));
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  return (
-    <Section title="Cloud & custom providers">
-      <div className="py-1">
-        <div className="text-[11px] text-text-3 mb-3">
-          Add any OpenAI-compatible endpoint — Azure OpenAI, OpenRouter,
-          Groq, a local vLLM — as a selectable brain above.
-        </div>
-        {err && (
-          <div className="text-[11.5px] text-red mb-2" role="alert">
-            {err}
-          </div>
-        )}
-        {ok && <div className="text-[11.5px] text-green mb-2">{ok}</div>}
-        <div className="flex flex-col gap-2.5">
-          <label className="flex flex-col gap-1">
-            <span className="text-[11px] text-text-3">Provider</span>
-            <Select
-              value={presetId}
-              onChange={choosePreset}
-              options={CUSTOM_PROVIDER_PRESETS.map((p) => ({
-                value: p.id,
-                label: p.label,
-              }))}
-            />
-          </label>
-          <div className="text-[10.5px] text-text-4 -mt-1">{preset.hint}</div>
-          <label className="flex flex-col gap-1">
-            <span className="text-[11px] text-text-3">
-              Name{" "}
-              <code className="text-text-5">openai_compat:{slug || "…"}</code>
-            </span>
-            <Input
-              value={name}
-              onChange={(e) => setName(e.target.value)}
-              placeholder="My Azure GPT-4o"
-              className="h-7 text-[12px]"
-            />
-          </label>
-          <label className="flex flex-col gap-1">
-            <span className="text-[11px] text-text-3">Base URL</span>
-            <Input
-              value={baseUrl}
-              onChange={(e) => setBaseUrl(e.target.value)}
-              placeholder="https://api.example.com/v1"
-              className="h-7 text-[12px] font-mono"
-            />
-          </label>
-          <label className="flex flex-col gap-1">
-            <span className="text-[11px] text-text-3">Model</span>
-            <Input
-              value={model}
-              onChange={(e) => setModel(e.target.value)}
-              placeholder="gpt-4o"
-              className="h-7 text-[12px] font-mono"
-            />
-          </label>
-          {preset.needs_api_version && (
-            <label className="flex flex-col gap-1">
-              <span className="text-[11px] text-text-3">API version</span>
-              <Input
-                value={apiVersion}
-                onChange={(e) => setApiVersion(e.target.value)}
-                placeholder={AZURE_API_VERSION_DEFAULT}
-                className="h-7 text-[12px] font-mono"
-              />
-            </label>
-          )}
-          <label className="flex flex-col gap-1">
-            <span className="text-[11px] text-text-3">
-              API key{" "}
-              {!preset.needs_key && (
-                <span className="text-text-5">(optional)</span>
-              )}
-            </span>
-            <Input
-              type="password"
-              value={apiKey}
-              onChange={(e) => setApiKey(e.target.value)}
-              placeholder={preset.needs_key ? "sk-…" : "leave blank for local"}
-              className="h-7 text-[12px]"
-            />
-          </label>
-          <div className="flex items-center gap-2 pt-1">
-            <Button
-              size="sm"
-              variant="default"
-              disabled={disabled}
-              onClick={() => void submit()}
-            >
-              {busy ? "Adding…" : "Add provider"}
-            </Button>
-            <span className="text-[10.5px] text-text-4">
-              Keys go straight to your OS keychain — never to settings.
-            </span>
-          </div>
-        </div>
-      </div>
-    </Section>
-  );
-}
-
-// ── Cloud singletons (Bedrock / Vertex) ──────────────────────────────
-//
-// AWS Bedrock and Google Vertex AI both run Anthropic's Claude, but neither
-// authenticates with a single API key: Bedrock needs an access-key pair +
-// region and SigV4-signs each call; Vertex needs a project + location + a
-// service-account JSON it exchanges for an OAuth token. They're compiled-in
-// singletons (not openai_compat:<slug>), so instead of the one-key field in
-// the "Available brains" list, they get this multi-field form. Non-secret
-// fields land in brain_settings.json; the credential (AWS secret key / the
-// SA-JSON) goes straight to the OS keychain via `brain_configure_cloud`.
-
-type CloudField = {
-  key: string;
-  label: string;
-  placeholder: string;
-  mono?: boolean;
-  optional?: boolean;
-};
-
-type CloudBrainPreset = {
-  id: "bedrock" | "vertex";
-  label: string;
-  defaultModel: string;
-  fields: CloudField[];
-  secretLabel: string;
-  secretPlaceholder: string;
-  secretMultiline?: boolean;
-  hint: string;
-};
-
-const CLOUD_BRAIN_PRESETS: CloudBrainPreset[] = [
-  {
-    id: "bedrock",
-    label: "AWS Bedrock",
-    defaultModel: "anthropic.claude-3-5-sonnet-20241022-v2:0",
-    fields: [
-      { key: "region", label: "Region", placeholder: "us-east-1", mono: true },
-      {
-        key: "access_key_id",
-        label: "Access key ID",
-        placeholder: "AKIA…",
-        mono: true,
-      },
-      {
-        key: "session_token",
-        label: "Session token",
-        placeholder: "only for temporary STS credentials",
-        mono: true,
-        optional: true,
-      },
-    ],
-    secretLabel: "Secret access key",
-    secretPlaceholder: "AWS secret access key",
-    hint: "Runs Claude on your AWS account. Needs an IAM key pair with bedrock:InvokeModel and the model enabled in the region.",
-  },
-  {
-    id: "vertex",
-    label: "Google Vertex AI",
-    defaultModel: "claude-sonnet-4-5@20250929",
-    fields: [
-      {
-        key: "project_id",
-        label: "Project ID",
-        placeholder: "my-gcp-project",
-        mono: true,
-      },
-      {
-        key: "location",
-        label: "Location",
-        placeholder: "us-east5",
-        mono: true,
-      },
-    ],
-    secretLabel: "Service-account JSON",
-    secretPlaceholder:
-      '{ "type": "service_account", "client_email": "…", "private_key": "-----BEGIN PRIVATE KEY-----\\n…" }',
-    secretMultiline: true,
-    hint: "Runs Claude on your GCP project. Paste the JSON key for a service account that has the Vertex AI User role.",
-  },
-];
-
-function CloudBrainForm({
-  descriptors,
-  onSaved,
-}: {
-  descriptors: BrainDescriptor[];
-  onSaved: () => void;
-}) {
-  // Only offer the cloud singletons that were actually compiled into this
-  // build (feature-gated) — no point showing a form that can't resolve.
-  const presets = useMemo(
-    () =>
-      CLOUD_BRAIN_PRESETS.filter((p) =>
-        descriptors.some((d) => d.provider_id === p.id),
-      ),
-    [descriptors],
-  );
-  const [presetId, setPresetId] = useState<"bedrock" | "vertex">(
-    presets[0]?.id ?? "bedrock",
-  );
-  const preset =
-    presets.find((p) => p.id === presetId) ?? presets[0] ?? null;
-
-  const [model, setModel] = useState("");
-  const [extra, setExtra] = useState<Record<string, string>>({});
-  const [secret, setSecret] = useState("");
-  const [hasSecret, setHasSecret] = useState(false);
-  const [busy, setBusy] = useState(false);
-  const [err, setErr] = useState<string | null>(null);
-  const [ok, setOk] = useState<string | null>(null);
-
-  // Prefill from the saved config whenever the selected cloud brain changes.
-  // The credential itself never comes back — only whether one is stored.
-  const loadConfig = useCallback(async (id: "bedrock" | "vertex") => {
-    setErr(null);
-    setOk(null);
-    setSecret("");
-    try {
-      const cfg = await api.brainCloudConfigGet(id);
-      setModel(cfg.model ?? "");
-      setExtra(cfg.extra ?? {});
-      setHasSecret(cfg.has_secret);
-    } catch (e) {
-      setErr(String(e));
-    }
-  }, []);
-
-  useEffect(() => {
-    if (preset) void loadConfig(preset.id);
-  }, [preset, loadConfig]);
-
-  if (!preset) return null;
-
-  function choose(id: string) {
-    if (id === "bedrock" || id === "vertex") setPresetId(id);
-  }
-
-  const missingField = preset.fields.some(
-    (f) => !f.optional && !(extra[f.key] ?? "").trim(),
-  );
-  const disabled =
-    busy ||
-    !model.trim() ||
-    missingField ||
-    // Credential is required the first time; on re-save it may be left blank
-    // to keep the stored one.
-    (!hasSecret && !secret.trim());
-
-  async function submit() {
-    if (!preset) return;
-    setBusy(true);
-    setErr(null);
-    setOk(null);
-    try {
-      const cleanExtra: Record<string, string> = {};
-      for (const f of preset.fields) {
-        const v = (extra[f.key] ?? "").trim();
-        if (v) cleanExtra[f.key] = v;
-      }
-      await api.brainConfigureCloud({
-        providerId: preset.id,
-        model: model.trim(),
-        extra: cleanExtra,
-        // Omit → keep the stored credential; non-empty → replace it.
-        secret: secret.trim() ? secret.trim() : undefined,
-        setActive: false,
-      });
-      setSecret("");
-      setOk(`Saved ${preset.label}. Select it above to make it active.`);
-      await loadConfig(preset.id);
-      onSaved();
-    } catch (e) {
-      setErr(String(e));
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  return (
-    <Section title="Claude on your own cloud">
-      <div className="py-1">
-        <div className="text-[11px] text-text-3 mb-3">
-          Run Anthropic&apos;s Claude through your own AWS Bedrock or Google
-          Vertex account — billed on your cloud, no Anthropic key needed.
-        </div>
-        {err && (
-          <div className="text-[11.5px] text-red mb-2" role="alert">
-            {err}
-          </div>
-        )}
-        {ok && <div className="text-[11.5px] text-green mb-2">{ok}</div>}
-        <div className="flex flex-col gap-2.5">
-          <label className="flex flex-col gap-1">
-            <span className="text-[11px] text-text-3">Provider</span>
-            <Select
-              value={presetId}
-              onChange={choose}
-              options={presets.map((p) => ({ value: p.id, label: p.label }))}
-            />
-          </label>
-          <div className="text-[10.5px] text-text-4 -mt-1">{preset.hint}</div>
-          {preset.fields.map((f) => (
-            <label key={f.key} className="flex flex-col gap-1">
-              <span className="text-[11px] text-text-3">
-                {f.label}{" "}
-                {f.optional && (
-                  <span className="text-text-5">(optional)</span>
-                )}
-              </span>
-              <Input
-                value={extra[f.key] ?? ""}
-                onChange={(e) =>
-                  setExtra((s) => ({ ...s, [f.key]: e.target.value }))
-                }
-                placeholder={f.placeholder}
-                className={`h-7 text-[12px] ${f.mono ? "font-mono" : ""}`}
-              />
-            </label>
-          ))}
-          <label className="flex flex-col gap-1">
-            <span className="text-[11px] text-text-3">Model</span>
-            <Input
-              value={model}
-              onChange={(e) => setModel(e.target.value)}
-              placeholder={preset.defaultModel}
-              className="h-7 text-[12px] font-mono"
-            />
-          </label>
-          <label className="flex flex-col gap-1">
-            <span className="text-[11px] text-text-3">
-              {preset.secretLabel}{" "}
-              {hasSecret && (
-                <span className="text-green">
-                  ✓ stored — leave blank to keep
-                </span>
-              )}
-            </span>
-            {preset.secretMultiline ? (
-              <Textarea
-                value={secret}
-                onChange={(e) => setSecret(e.target.value)}
-                placeholder={
-                  hasSecret
-                    ? "Paste a new service-account JSON to replace…"
-                    : preset.secretPlaceholder
-                }
-                className="text-[11px] font-mono min-h-[96px]"
-              />
-            ) : (
-              <Input
-                type="password"
-                value={secret}
-                onChange={(e) => setSecret(e.target.value)}
-                placeholder={
-                  hasSecret ? "Replace stored secret…" : preset.secretPlaceholder
-                }
-                className="h-7 text-[12px]"
-              />
-            )}
-          </label>
-          <div className="flex items-center gap-2 pt-1">
-            <Button
-              size="sm"
-              variant="default"
-              disabled={disabled}
-              onClick={() => void submit()}
-            >
-              {busy ? "Saving…" : "Save"}
-            </Button>
-            <span className="text-[10.5px] text-text-4">
-              The credential goes straight to your OS keychain — never to
-              settings.
-            </span>
-          </div>
-        </div>
-      </div>
-    </Section>
-  );
-}
-
-// ── Aura Pro row ──────────────────────────────────────────────────────
-//
-// v0.2.31 task #352. Special-case panel rendered inside the Brain tab
-// when the descriptor is `aura_pro`. Unlike the BYOK rows, this brain
-// has no API-key field — it reuses the cloud token OnboardingDialog
-// already stashed. We show:
-//
-//   - "Signed in as <email>" or a "Sign in to Aura" button that fires
-//     the existing `aura:open-onboarding` window event the onboarding
-//     dialog already listens for.
-//   - "1,234,567 / 2,000,000 tokens used this period" (or "∞" for the
-//     unlimited tier), pulled from the cloud `/v1/brain/quota` endpoint
-//     via the `aura_pro_quota` tauri command. Refresh button alongside
-//     so the user can see the bucket move after a long session.
-
-function AuraProRow() {
-  const [signIn, setSignIn] = useState<AuraProSignInState | null>(null);
-  const [quota, setQuota] = useState<AuraProQuota | null>(null);
-  const [loading, setLoading] = useState(false);
-  const [err, setErr] = useState<string | null>(null);
-
-  const refresh = useCallback(async () => {
-    setLoading(true);
-    setErr(null);
-    try {
-      const state = await api.auraProIsSignedIn();
-      setSignIn(state);
-      if (state.signed_in) {
-        // Quota is only meaningful when signed in. Tolerate failure —
-        // a 5xx from the cloud shouldn't blank out the sign-in label.
-        try {
-          const q = await api.auraProQuota();
-          setQuota(q);
-        } catch (e) {
-          setQuota(null);
-          setErr(`quota: ${String(e)}`);
-        }
-      } else {
-        setQuota(null);
-      }
-    } catch (e) {
-      setErr(String(e));
-    } finally {
-      setLoading(false);
-    }
-  }, []);
-
-  useEffect(() => {
-    void refresh();
-    // Refresh on dialog reopen elsewhere — when the user signs in via
-    // the OnboardingDialog from another surface, the dialog dispatches
-    // `aura:onboarding-refresh` on completion. Cheap to listen.
-    const onRefresh = () => void refresh();
-    window.addEventListener("aura:onboarding-refresh", onRefresh);
-    return () =>
-      window.removeEventListener("aura:onboarding-refresh", onRefresh);
-  }, [refresh]);
-
-  function openSignIn() {
-    window.dispatchEvent(new CustomEvent("aura:open-onboarding"));
-  }
-
-  if (loading && !signIn) {
-    return (
-      <div className="mt-2 flex items-center gap-1.5 text-[11px] text-text-4" role="status">
-        <AsciiSpinner className="text-[11px] leading-none" />
-        Checking whether you're signed in…
-      </div>
-    );
-  }
-
-  if (!signIn?.signed_in) {
-    return (
-      <div className="mt-2 flex items-center gap-2">
-        <span className="text-[11px] text-text-3">Not signed in.</span>
-        <Button size="sm" variant="secondary" onClick={openSignIn}>
-          Sign in to Aura
-        </Button>
-        {err && (
-          <span className="text-[10.5px] text-red ml-1" title={err}>
-            (error)
-          </span>
-        )}
-      </div>
-    );
-  }
-
-  return (
-    <div className="mt-2 flex flex-col gap-1">
-      <div className="flex items-center gap-2 text-[11px]">
-        <span className="text-text-3">Signed in as</span>
-        <span className="text-text-1 font-medium">
-          {signIn.user ?? "(unknown user)"}
-        </span>
-        {signIn.cloud_origin && (
-          <code className="text-[10.5px] text-text-4">
-            {signIn.cloud_origin}
-          </code>
-        )}
-      </div>
-      <div className="flex items-center gap-2 text-[11px]">
-        <span className="text-text-3">Usage:</span>
-        {quota ? (
-          <span className="text-text-1">
-            {formatTokens(quota.tokens_used_current_period)} /{" "}
-            {quota.monthly_token_limit == null
-              ? "∞"
-              : formatTokens(quota.monthly_token_limit)}{" "}
-            tokens this period
-            <span className="text-text-4 ml-2">tier: {quota.tier}</span>
-            {!quota.active && (
-              <span className="text-red ml-2">subscription inactive</span>
-            )}
-          </span>
-        ) : (
-          <span className="text-text-4 italic">
-            {err ? "unavailable" : "loading…"}
-          </span>
-        )}
-        <Button
-          size="sm"
-          variant="ghost"
-          onClick={() => void refresh()}
-          disabled={loading}
-          title="Refresh sign-in + quota"
-        >
-          Refresh
-        </Button>
-      </div>
-      {err && quota && (
-        <div className="text-[10.5px] text-text-4">{err}</div>
-      )}
-    </div>
   );
 }
 
@@ -2712,26 +1917,51 @@ function TerminalTab() {
   }
   return (
     <>
-      <PaneHeader
-        title="Terminal"
-        subtitle="How terminal tabs behave. Changes apply to new tabs."
-      />
-      <Section title="Profile">
-        <Row label="Default profile">
+      <PaneIntro text="How terminal tabs behave. Changes apply to new tabs." />
+      {/* This said "Profile" / "Default profile" over a list of shells, and
+          the description under it already gave the game away by saying
+          "shell". The `+` menu that opens these has always called them
+          Shells and "Choose the Default Shell" — one list, two names, and
+          the losing name collides with three other things in this same
+          dialog: Accounts & profiles means a git identity and an agent HOME,
+          the launcher's Profile picker means that one too. `TerminalProfile`
+          stays the type's name; on screen it is a shell. */}
+      <Section title="Shell">
+        <Row
+          label="Default shell"
+          description="The shell every new terminal tab opens with."
+        >
           {profiles.length > 0 ? (
             <Select
               value={defaultProfileId ?? ""}
               onChange={selectDefault}
               options={profiles.map((p) => ({ value: p.id, label: p.name }))}
-              aria-label="Default profile"
+              aria-label="Default shell"
               className="w-auto min-w-[160px]"
             />
           ) : (
-            <span className="text-text-4 text-[12px]">No profiles found</span>
+            <span className="text-text-4 text-sm">No shells found</span>
           )}
         </Row>
       </Section>
       <Section title="Visual">
+        {/* Appearance's font-size row says "the terminal keeps its own
+            size", which was true and useless: the size was compiled in —
+            12 on mac, 14 elsewhere — with nowhere to change it. Every other
+            terminal ships this control; a pane that offers a bell and a
+            cursor blink but not the type size is picking the wrong two. */}
+        <Row
+          label="Text size"
+          description="Type size in terminal panes, including the ones agents run in."
+        >
+          <Stepper
+            value={terminal.font_size ?? defaultTerminalFontSize()}
+            onChange={(n) => setTerminalFontSize(n)}
+            min={9}
+            max={20}
+            suffix="px"
+          />
+        </Row>
         <Toggle
           label="Cursor blink"
           hint="Blink the cursor in terminal panes."
@@ -2746,13 +1976,16 @@ function TerminalTab() {
         />
       </Section>
       <Section title="History">
-        <Row label="Scrollback lines">
+        <Row
+          label="Scrollback lines"
+          description="How far back a terminal remembers. More history costs more memory per open tab."
+        >
           <Select
             value={String(terminal.scrollback)}
             onChange={(v) => setScrollback(Number(v))}
             options={[1000, 5000, 10000, 50000].map((n) => ({
               value: String(n),
-              label: n.toLocaleString(),
+              label: compactNumber(n),
             }))}
             aria-label="Scrollback lines"
             className="w-auto min-w-[120px]"
@@ -2763,2941 +1996,6 @@ function TerminalTab() {
   );
 }
 
-// ── Plugins ───────────────────────────────────────────────────────────
-//
-// Reads `~/.aura/plugins/<scope>/<name>/aura.{plugin,skill,mcp}.json`
-// via the Tauri `plugin_*` commands (cmd_plugin.rs). Three grouped
-// lists: native plugins, skills, MCP servers. Each row toggles
-// enabled state; the on-disk `.state.json` is the source of truth, so
-// `aura plugin enable/disable` from the CLI and a click here converge.
-
-function PluginsTab() {
-  const [rows, setRows] = useState<PluginRow[] | null>(null);
-  const [error, setError] = useState<string | null>(null);
-
-  const refresh = async () => {
-    try {
-      const list = await api.pluginList();
-      setRows(list);
-      setError(null);
-      // Keep slash-command + rail-tile catalog in lockstep with the
-      // enabled set the user is staring at.
-      void refreshPluginContributes();
-    } catch (e) {
-      setError(String(e));
-    }
-  };
-
-  useEffect(() => {
-    refresh();
-  }, []);
-
-  const rescan = async () => {
-    try {
-      const report = await api.pluginRescan();
-      await refresh();
-      if (report.rejected.length > 0) {
-        setError(
-          `${report.rejected.length} manifest(s) rejected — check ~/.aura/plugins`,
-        );
-      }
-    } catch (e) {
-      setError(String(e));
-    }
-  };
-
-  const setEnabled = async (
-    kind: PluginRow["kind"],
-    id: string,
-    next: boolean,
-  ) => {
-    try {
-      if (next) {
-        await api.pluginEnable(kind, id);
-      } else {
-        await api.pluginDisable(kind, id);
-      }
-      await refresh();
-    } catch (e) {
-      setError(String(e));
-    }
-  };
-
-  const groups = useMemo(() => {
-    const list = rows ?? [];
-    return {
-      plugin: list.filter((r) => r.kind === "plugin"),
-      skill: list.filter((r) => r.kind === "skill"),
-      mcp: list.filter((r) => r.kind === "mcp"),
-    };
-  }, [rows]);
-
-  // Secrets are bundle-scoped, but a bundle can ship several manifests
-  // (plugin + mcp). Render the secrets editor on exactly ONE row per
-  // bundle — the native plugin row when present (it carries the
-  // declared titles), else whichever row got there first.
-  const secretsOwners = useMemo(() => {
-    const byBundle = new Map<string, PluginRow>();
-    for (const r of rows ?? []) {
-      if (!r.bundle) continue;
-      const cur = byBundle.get(r.bundle);
-      if (!cur || (cur.kind !== "plugin" && r.kind === "plugin")) {
-        byBundle.set(r.bundle, r);
-      }
-    }
-    return new Set([...byBundle.values()].map((r) => `${r.kind}/${r.id}`));
-  }, [rows]);
-
-  return (
-    <>
-      <PaneHeader
-        title="Plugins"
-        subtitle="Plugins, skills, and MCP servers under ~/.aura/plugins. The shell rescans on disk changes; enable state persists to .state.json."
-      />
-      {error && (
-        <div className="text-[12px] text-red mb-3" role="alert">
-          {error}
-        </div>
-      )}
-      <div className="flex items-center justify-between mb-3">
-        <div className="flex items-center gap-1.5 text-[12px] text-text-3">
-          {rows === null ? (
-            <>
-              <AsciiSpinner className="text-[12px] leading-none" />
-              Looking for installed plugins…
-            </>
-          ) : (
-            `${rows.length} installed (${groups.plugin.length} plugin · ${groups.skill.length} skill · ${groups.mcp.length} mcp)`
-          )}
-        </div>
-        <Button size="sm" variant="ghost" onClick={rescan}>
-          Rescan
-        </Button>
-      </div>
-      {rows !== null && rows.length === 0 ? (
-        <EmptyState>
-          No plugins installed. Drop a manifest under
-          {" "}
-          <code className="text-text-3">
-            ~/.aura/plugins/&lt;scope&gt;/&lt;name&gt;/
-          </code>
-          {" "}and click Rescan.
-        </EmptyState>
-      ) : (
-        <>
-          <PluginGroup
-            title="Plugins"
-            entries={groups.plugin}
-            onToggle={setEnabled}
-            secretsOwners={secretsOwners}
-          />
-          <PluginGroup
-            title="Skills"
-            entries={groups.skill}
-            onToggle={setEnabled}
-            secretsOwners={secretsOwners}
-          />
-          <PluginGroup
-            title="MCP Servers"
-            entries={groups.mcp}
-            onToggle={setEnabled}
-            secretsOwners={secretsOwners}
-          />
-        </>
-      )}
-    </>
-  );
-}
-
-function PluginGroup({
-  title,
-  entries,
-  onToggle,
-  secretsOwners,
-}: {
-  title: string;
-  entries: PluginRow[];
-  onToggle: (kind: PluginRow["kind"], id: string, next: boolean) => void;
-  secretsOwners: Set<string>;
-}) {
-  if (entries.length === 0) return null;
-  return (
-    <Section title={title}>
-      <div className="flex flex-col gap-1">
-        {entries.map((row) => (
-          <div
-            key={`${row.kind}/${row.id}`}
-            className="flex items-start justify-between gap-3 py-2 border-b border-line-soft last:border-b-0"
-          >
-            <div className="flex-1 min-w-0">
-              <div className="flex items-baseline gap-2">
-                <span className="text-[12.5px] text-text-1 font-medium truncate">
-                  {row.id}
-                </span>
-                <span className="text-[11px] text-text-4">v{row.version}</span>
-                <span className="text-[10px] text-text-4 px-1.5 py-0.5 rounded bg-bg-1">
-                  {row.capabilities_count} cap
-                  {row.capabilities_count === 1 ? "" : "s"}
-                </span>
-                <SignatureBadge row={row} />
-              </div>
-              {row.description && (
-                <div className="text-[11.5px] text-text-3 mt-0.5 line-clamp-2">
-                  {row.description}
-                </div>
-              )}
-              <div className="text-[10.5px] text-text-4 mt-0.5 truncate">
-                {row.install_dir}
-              </div>
-              {row.bundle &&
-                secretsOwners.has(`${row.kind}/${row.id}`) && (
-                  <PluginSecretsEditor bundle={row.bundle} />
-                )}
-            </div>
-            <Toggle
-              label=""
-              value={row.enabled}
-              onChange={(next) => onToggle(row.kind, row.id, next)}
-            />
-          </div>
-        ))}
-      </div>
-    </Section>
-  );
-}
-
-// Signature verdict chip (P3). Verified = green check + publisher
-// (status color, per palette rules); unknown key = neutral
-// "unverified publisher" with the key id on hover; unsigned = dim
-// text. Tampered bundles never reach this list — the registry
-// rejects them at scan time.
-function SignatureBadge({ row }: { row: PluginRow }) {
-  if (row.signature === "verified") {
-    return (
-      <span
-        className="text-[10px] px-1.5 py-0.5 rounded bg-accent-green/10 text-accent-green whitespace-nowrap"
-        title={`Signed by ${row.signed_by ?? "unknown"} — bundle contents verified`}
-      >
-        ✓ {row.signed_by}
-      </span>
-    );
-  }
-  if (row.signature === "unknown_key") {
-    return (
-      <span
-        className="text-[10px] px-1.5 py-0.5 rounded bg-bg-1 text-text-4 whitespace-nowrap"
-        title={
-          row.signed_by
-            ? `Signed with key ${row.signed_by}, which is not in this machine's trust store`
-            : "Signed with a key that is not in this machine's trust store"
-        }
-      >
-        unverified publisher
-      </span>
-    );
-  }
-  return (
-    <span
-      className="text-[10px] text-text-4/70 whitespace-nowrap"
-      title="This bundle carries no publisher signature"
-    >
-      unsigned
-    </span>
-  );
-}
-
-// Bundle-scoped secrets editor (P2 secrets broker). Values are write-
-// only from here: they go straight into the OS keychain and only ever
-// resurface inside the MCP child's environment at spawn. The status
-// call reports existence, never values.
-function PluginSecretsEditor({ bundle }: { bundle: string }) {
-  const [rows, setRows] = useState<PluginSecretRow[] | null>(null);
-  const [drafts, setDrafts] = useState<Record<string, string>>({});
-  const [busy, setBusy] = useState<string | null>(null);
-  const [err, setErr] = useState<string | null>(null);
-
-  const refresh = async () => {
-    try {
-      setRows(await api.pluginSecretsStatus(bundle));
-      setErr(null);
-    } catch (e) {
-      // Unknown bundle / scan race — hide rather than alarm.
-      console.warn(`[plugins] secrets status failed for ${bundle}:`, e);
-      setRows([]);
-    }
-  };
-
-  useEffect(() => {
-    void refresh();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [bundle]);
-
-  if (!rows || rows.length === 0) return null;
-
-  const save = async (key: string) => {
-    const value = (drafts[key] ?? "").trim();
-    if (!value) return;
-    setBusy(key);
-    try {
-      await api.pluginSecretSet(bundle, key, value);
-      setDrafts((d) => ({ ...d, [key]: "" }));
-      setErr(null);
-      await refresh();
-      // Servers that failed their probe with "secret not set" can now
-      // spawn — refresh the cached tool catalog.
-      void refreshMcpTools();
-    } catch (e) {
-      setErr(String(e));
-    } finally {
-      setBusy(null);
-    }
-  };
-
-  const clear = async (key: string) => {
-    setBusy(key);
-    try {
-      await api.pluginSecretClear(bundle, key);
-      setErr(null);
-      await refresh();
-      void refreshMcpTools();
-    } catch (e) {
-      setErr(String(e));
-    } finally {
-      setBusy(null);
-    }
-  };
-
-  return (
-    <div className="mt-2 rounded border border-line-soft bg-bg-1/40 px-2.5 py-2">
-      <div className="text-[10.5px] uppercase tracking-wide text-text-4 mb-1.5">
-        Secrets
-      </div>
-      {err && (
-        <div className="text-[11px] text-red mb-1.5" role="alert">
-          {err}
-        </div>
-      )}
-      <div className="flex flex-col gap-1.5">
-        {rows.map((s) => (
-          <div key={s.key} className="flex items-center gap-2">
-            <span
-              className={`inline-block w-1.5 h-1.5 rounded-full shrink-0 ${
-                s.set ? "bg-accent-green" : "bg-text-4/40"
-              }`}
-              title={s.set ? "Stored in OS keychain" : "Not set"}
-            />
-            <span
-              className="text-[11.5px] text-text-2 w-[160px] truncate shrink-0"
-              title={s.key}
-            >
-              {s.title ?? s.key}
-            </span>
-            <Input
-              type="password"
-              autoComplete="off"
-              value={drafts[s.key] ?? ""}
-              onChange={(e) =>
-                setDrafts((d) => ({ ...d, [s.key]: e.target.value }))
-              }
-              onKeyDown={(e) => {
-                if (e.key === "Enter") void save(s.key);
-              }}
-              placeholder={s.set ? "••••••••  (replace)" : "paste value"}
-              className="flex-1 min-w-0"
-            />
-            <Button
-              size="sm"
-              variant="ghost"
-              disabled={busy === s.key || !(drafts[s.key] ?? "").trim()}
-              onClick={() => void save(s.key)}
-            >
-              Set
-            </Button>
-            {s.set && (
-              <Button
-                size="sm"
-                variant="ghost"
-                disabled={busy === s.key}
-                onClick={() => void clear(s.key)}
-              >
-                Clear
-              </Button>
-            )}
-            {s.url && (
-              <button
-                type="button"
-                title={`Open token page: ${s.url}`}
-                className="p-1 text-text-4 hover:text-text-1"
-                onClick={() => {
-                  void (async () => {
-                    const { openUrl } = await import(
-                      "@tauri-apps/plugin-opener"
-                    );
-                    await openUrl(s.url as string);
-                  })();
-                }}
-              >
-                <ExternalLink size={12} />
-              </button>
-            )}
-          </div>
-        ))}
-      </div>
-    </div>
-  );
-}
-
-// ── MCP Servers ───────────────────────────────────────────────────────
-//
-// Post-W4 pivot surface: rather than continue building the bespoke
-// worker-bridge plugin SDK, we let MCP servers BE the plugin system.
-// Configs live at `~/.aura/mcp/<name>.json`; this pane is the only UI
-// that mutates them. The Composer pulls the merged tool catalog from
-// `useMcpTools()` so add/remove here flows straight into the slash
-// palette + @-mention picker.
-
-type McpTemplate = {
-  id: string;
-  label: string;
-  description: string;
-  command: string;
-  args: string[];
-  envKeys: string[];
-  /** Per-key hint shown next to the field in the auth modal. */
-  envHints?: Record<string, string>;
-  /** Per-key sensitivity flag — true means render as password input. */
-  envSecret?: Record<string, boolean>;
-  /** Provider's token-issue page. The auth modal renders this as an
-   *  "Open token page" button that uses the system browser, so users
-   *  don't have to hunt for the right Settings panel. */
-  tokenPageUrl?: string;
-  /** Remote MCP endpoint. When set, Aura uses its native Streamable
-   *  HTTP transport + OAuth 2.1 PKCE flow rather than spawning a
-   *  stdio child. Mutually informative with `command`/`args` (a
-   *  template can be remote-only with empty command, or hybrid). */
-  serverUrl?: string;
-};
-
-const MCP_TEMPLATES: McpTemplate[] = [
-  {
-    id: "atlassian-remote",
-    label: "Atlassian (remote · native OAuth)",
-    description:
-      "Atlassian's hosted remote MCP — Aura authenticates via native OAuth 2.1 and calls it over Streamable HTTP.",
-    command: "",
-    args: [],
-    envKeys: [],
-    serverUrl: "https://mcp.atlassian.com/v1/sse",
-  },
-  {
-    id: "atlassian",
-    label: "Atlassian (Jira + Confluence)",
-    description:
-      "Atlassian's official MCP server. Needs ATLASSIAN_API_TOKEN + ATLASSIAN_EMAIL + ATLASSIAN_DOMAIN.",
-    command: "npx",
-    args: ["-y", "@atlassian/mcp-server"],
-    envKeys: ["ATLASSIAN_API_TOKEN", "ATLASSIAN_EMAIL", "ATLASSIAN_DOMAIN"],
-    envHints: {
-      ATLASSIAN_API_TOKEN: "Create at id.atlassian.com → Security → API tokens",
-      ATLASSIAN_EMAIL: "Your Atlassian account email",
-      ATLASSIAN_DOMAIN: "e.g. yourco.atlassian.net (no https://)",
-    },
-    envSecret: { ATLASSIAN_API_TOKEN: true },
-    tokenPageUrl:
-      "https://id.atlassian.com/manage-profile/security/api-tokens",
-  },
-  {
-    id: "linear",
-    label: "Linear",
-    description:
-      "Linear's MCP bridge. Needs a personal API key with read/write scopes (LINEAR_API_KEY).",
-    command: "npx",
-    args: ["-y", "@linear/mcp-server"],
-    envKeys: ["LINEAR_API_KEY"],
-    envHints: {
-      LINEAR_API_KEY: "Create at linear.app/settings/api",
-    },
-    envSecret: { LINEAR_API_KEY: true },
-    tokenPageUrl: "https://linear.app/settings/api",
-  },
-  {
-    id: "github",
-    label: "GitHub",
-    description:
-      "GitHub's MCP server. Needs a fine-grained personal access token (GITHUB_PERSONAL_ACCESS_TOKEN).",
-    command: "npx",
-    args: ["-y", "@modelcontextprotocol/server-github"],
-    envKeys: ["GITHUB_PERSONAL_ACCESS_TOKEN"],
-    envHints: {
-      GITHUB_PERSONAL_ACCESS_TOKEN:
-        "Use a fine-grained PAT with repo + issues scopes",
-    },
-    envSecret: { GITHUB_PERSONAL_ACCESS_TOKEN: true },
-    tokenPageUrl: "https://github.com/settings/tokens?type=beta",
-  },
-  {
-    id: "sentry",
-    label: "Sentry",
-    description:
-      "Sentry issue + event search. Needs SENTRY_AUTH_TOKEN and the org slug.",
-    command: "npx",
-    args: ["-y", "@sentry/mcp-server"],
-    envKeys: ["SENTRY_AUTH_TOKEN", "SENTRY_ORG"],
-    envHints: {
-      SENTRY_AUTH_TOKEN: "Create at sentry.io → Settings → Auth Tokens",
-      SENTRY_ORG: "Your org slug (visible in any Sentry URL)",
-    },
-    envSecret: { SENTRY_AUTH_TOKEN: true },
-    tokenPageUrl: "https://sentry.io/settings/account/api/auth-tokens/",
-  },
-];
-
-// Best-effort match from a configured server back to its template. Used
-// by the AuthSetupModal to know which env keys to prompt for. We match
-// on `id === name` first (the import flow keeps the template slug as
-// the server name); fall back to scanning args for the npm package
-// hint so renamed-but-otherwise-identical configs still snap into the
-// right template.
-function matchTemplate(
-  name: string,
-  args: string[] | undefined,
-): McpTemplate | null {
-  const byName = MCP_TEMPLATES.find((t) => t.id === name.toLowerCase());
-  if (byName) return byName;
-  const argBlob = (args ?? []).join(" ").toLowerCase();
-  for (const t of MCP_TEMPLATES) {
-    const pkgArg = t.args[t.args.length - 1] ?? "";
-    if (pkgArg && argBlob.includes(pkgArg.toLowerCase())) return t;
-  }
-  return null;
-}
-
-type AddFormState = {
-  name: string;
-  command: string;
-  args: string;
-  envText: string;
-  description: string;
-  /** Remote MCP endpoint. When non-empty the backend wires the native
-   *  Streamable HTTP transport and OAuth 2.1 PKCE flow; the stdio
-   *  command/args become optional (empty = pure-remote). */
-  serverUrl: string;
-};
-
-const EMPTY_FORM: AddFormState = {
-  name: "",
-  command: "",
-  args: "",
-  envText: "",
-  description: "",
-  serverUrl: "",
-};
-
-// Identity key for a discovered row. Used as the picker checkbox key so
-// the same server surfaced from multiple agents (Claude+Cursor+Windsurf
-// pointed at the same binary) collapses to one row, but configs that
-// diverge stay distinct.
-function discoveredKey(d: DiscoveredMcp): string {
-  return `${d.name}::${d.command}::${d.args.join(" ")}`;
-}
-
-function McpServersTab({ repoRoot }: { repoRoot: string }) {
-  const [rows, setRows] = useState<McpServerEntry[] | null>(null);
-  const [tools, setTools] = useState<McpServerToolList[] | null>(null);
-  const [error, setError] = useState<string | null>(null);
-  const [adding, setAdding] = useState(false);
-  const [form, setForm] = useState<AddFormState>(EMPTY_FORM);
-  const [busy, setBusy] = useState(false);
-  // QQ.2 — Discover-from-agents picker state. Lives next to the rest
-  // of the tab so an open discover panel doesn't survive a tab switch.
-  const [discoverOpen, setDiscoverOpen] = useState(false);
-  const [discovered, setDiscovered] = useState<DiscoveredMcp[] | null>(null);
-  const [discoverError, setDiscoverError] = useState<string | null>(null);
-  const [picked, setPicked] = useState<Set<string>>(new Set());
-  const [discovering, setDiscovering] = useState(false);
-  // Wave A — name of the server whose auth modal is currently open
-  // (null when closed). Only one modal at a time.
-  const [authTarget, setAuthTarget] = useState<string | null>(null);
-
-  const refresh = useCallback(async () => {
-    try {
-      const list = await api.mcpServersList();
-      setRows(list);
-      setError(null);
-    } catch (e) {
-      setError(String(e));
-    }
-  }, []);
-
-  // Best-effort tool-catalog read. Failures don't block the list —
-  // we surface them inline on the row so the user can fix the config.
-  const refreshTools = useCallback(async () => {
-    try {
-      const t = await api.mcpToolsList();
-      setTools(t);
-    } catch (e) {
-      console.warn("mcpToolsList failed:", e);
-    }
-  }, []);
-
-  useEffect(() => {
-    void refresh();
-    void refreshTools();
-  }, [refresh, refreshTools]);
-
-  const runDiscover = useCallback(async () => {
-    setDiscoverError(null);
-    setDiscovering(true);
-    setDiscoverOpen(true);
-    try {
-      const found = await api.mcpServersDiscoverAgents(repoRoot);
-      setDiscovered(found);
-      setPicked(
-        new Set(
-          found.filter((d) => !d.already_imported).map((d) => discoveredKey(d)),
-        ),
-      );
-    } catch (e) {
-      setDiscoverError(String(e));
-      setDiscovered([]);
-    } finally {
-      setDiscovering(false);
-    }
-  }, [repoRoot]);
-
-  const runImport = useCallback(async () => {
-    if (!discovered) return;
-    const chosen = discovered.filter(
-      (d) => !d.already_imported && picked.has(discoveredKey(d)),
-    );
-    if (chosen.length === 0) return;
-    setBusy(true);
-    try {
-      await api.mcpServersImportDiscovered(chosen);
-      setDiscovered(null);
-      setDiscoverOpen(false);
-      setPicked(new Set());
-      await refresh();
-      void refreshTools();
-      void refreshMcpTools();
-    } catch (e) {
-      setDiscoverError(String(e));
-    } finally {
-      setBusy(false);
-    }
-  }, [discovered, picked, refresh, refreshTools]);
-
-  const toolsByServer = useMemo(() => {
-    const m = new Map<string, McpServerToolList>();
-    for (const t of tools ?? []) m.set(t.server, t);
-    return m;
-  }, [tools]);
-
-  const onToggle = async (name: string, enabled: boolean) => {
-    setBusy(true);
-    try {
-      await api.mcpServersToggle(name, enabled);
-      await refresh();
-      void refreshMcpTools();
-    } catch (e) {
-      setError(String(e));
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  const onRemove = async (name: string) => {
-    if (!window.confirm(`Remove MCP server "${name}"?`)) return;
-    setBusy(true);
-    try {
-      await api.mcpServersRemove(name);
-      await refresh();
-      void refreshMcpTools();
-    } catch (e) {
-      setError(String(e));
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  const applyTemplate = (t: McpTemplate) => {
-    const env = t.envKeys.map((k) => `${k}=`).join("\n");
-    setForm({
-      name: t.id,
-      command: t.command,
-      args: t.args.join(" "),
-      envText: env,
-      description: t.label,
-      serverUrl: t.serverUrl ?? "",
-    });
-    setAdding(true);
-  };
-
-  const submitAdd = async () => {
-    setBusy(true);
-    try {
-      const env = parseEnvBlock(form.envText);
-      const newName = form.name.trim();
-      const serverUrl = form.serverUrl.trim();
-      await api.mcpServersAdd({
-        name: newName,
-        command: form.command.trim(),
-        args: form.args.trim() ? form.args.trim().split(/\s+/) : [],
-        env,
-        description: form.description.trim() || null,
-        serverUrl: serverUrl || undefined,
-      });
-      setForm(EMPTY_FORM);
-      setAdding(false);
-      await refresh();
-      void refreshMcpTools();
-      void refreshTools();
-      // When the new server is a remote/native-OAuth one, jump straight
-      // into the auth modal — otherwise the user would have to find the
-      // row and click Auth, which is exactly the friction we just fixed.
-      if (serverUrl) {
-        setAuthTarget(newName);
-      }
-    } catch (e) {
-      setError(String(e));
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  return (
-    <>
-      <PaneHeader
-        title="MCP Servers"
-        subtitle="External Model Context Protocol servers Aura spawns on demand for slash commands and @-mentions. Configs live in ~/.aura/mcp/."
-      />
-      {error && (
-        <div className="text-[12px] text-red mb-3" role="alert">
-          {error}
-        </div>
-      )}
-
-      <div className="flex items-center justify-between mb-3 gap-3">
-        <div className="flex items-center gap-1.5 text-[12px] text-text-3">
-          {rows === null ? (
-            <>
-              <AsciiSpinner className="text-[12px] leading-none" />
-              Looking for connected servers…
-            </>
-          ) : (
-            `${rows.length} configured · ${rows.filter((r) => r.enabled).length} enabled`
-          )}
-        </div>
-        <div className="flex items-center gap-2">
-          <Button
-            size="sm"
-            variant="ghost"
-            onClick={() => {
-              void refresh();
-              void refreshTools();
-              void refreshMcpTools();
-            }}
-            disabled={busy}
-          >
-            Refresh
-          </Button>
-          <Button
-            size="sm"
-            variant="ghost"
-            onClick={() => void runDiscover()}
-            disabled={busy || discovering}
-            title="Scan agent configs (Claude Code, Cursor, Windsurf, Cline, Zed, opencode, Gemini CLI, …) for MCP servers you already have authenticated"
-          >
-            {discovering ? "Scanning…" : "Import from agents"}
-          </Button>
-          {!adding && (
-            <Button size="sm" onClick={() => setAdding(true)} disabled={busy}>
-              Add server
-            </Button>
-          )}
-        </div>
-      </div>
-
-      {discoverOpen && (
-        <Section title="Discovered from your agents">
-          {discoverError && (
-            <div className="text-[12px] text-red mb-2" role="alert">
-              {discoverError}
-            </div>
-          )}
-          {discovered === null && discovering && (
-            <div className="text-[12px] text-text-3">
-              Scanning agent configs…
-            </div>
-          )}
-          {discovered !== null && discovered.length === 0 && !discovering && (
-            <EmptyState className="py-4">
-              Nothing new found. Aura scans Claude Code, Claude Desktop,
-              Cursor, Windsurf, Cline, Roo Cline, Zed, opencode, Gemini CLI,
-              Codex, and repo-local <code>.mcp.json</code>. Configure a server
-              in any of those and re-run.
-            </EmptyState>
-          )}
-          {discovered !== null && discovered.length > 0 && (
-            <div className="space-y-2">
-              <div className="flex items-center justify-between text-[11px] text-text-3 px-1">
-                <div>
-                  {discovered.length} server
-                  {discovered.length === 1 ? "" : "s"} found ·{" "}
-                  {discovered.filter((d) => !d.already_imported).length}{" "}
-                  importable
-                </div>
-                <div className="flex items-center gap-2">
-                  <button
-                    type="button"
-                    className="text-[11px] text-text-3 hover:text-text-1"
-                    onClick={() =>
-                      setPicked(
-                        new Set(
-                          discovered
-                            .filter((d) => !d.already_imported)
-                            .map((d) => discoveredKey(d)),
-                        ),
-                      )
-                    }
-                  >
-                    Select all
-                  </button>
-                  <button
-                    type="button"
-                    className="text-[11px] text-text-3 hover:text-text-1"
-                    onClick={() => setPicked(new Set())}
-                  >
-                    Clear
-                  </button>
-                </div>
-              </div>
-              <div className="max-h-[280px] overflow-y-auto rounded border border-line-soft divide-y divide-line-soft">
-                {discovered.map((d) => {
-                  const k = discoveredKey(d);
-                  const checked = picked.has(k);
-                  const disabled = d.already_imported;
-                  return (
-                    <label
-                      key={`${k}::${d.source}`}
-                      className={`flex items-start gap-2.5 px-2.5 py-2 ${disabled ? "opacity-50" : "cursor-pointer hover:bg-bg-1/40"}`}
-                    >
-                      <input
-                        type="checkbox"
-                        className="mt-0.5"
-                        checked={checked}
-                        disabled={disabled}
-                        onChange={() => {
-                          setPicked((prev) => {
-                            const next = new Set(prev);
-                            if (next.has(k)) next.delete(k);
-                            else next.add(k);
-                            return next;
-                          });
-                        }}
-                      />
-                      <div className="min-w-0 flex-1">
-                        <div className="flex items-center gap-2">
-                          <div className="text-[12.5px] font-medium text-text-1 truncate">
-                            {d.name}
-                          </div>
-                          <span className="text-[10px] uppercase tracking-wider text-text-4 px-1.5 py-0.5 rounded bg-bg-1 border border-line-soft">
-                            {d.source}
-                          </span>
-                          {disabled && (
-                            <span className="text-[10px] text-accent-green px-1.5 py-0.5 rounded border border-accent-green/40">
-                              already imported
-                            </span>
-                          )}
-                        </div>
-                        <div className="text-[10.5px] text-text-4 font-mono truncate mt-0.5">
-                          {d.command} {d.args.join(" ")}
-                        </div>
-                        {Object.keys(d.env).length > 0 && (
-                          <div className="text-[10px] text-text-4 mt-0.5">
-                            {Object.keys(d.env).length} env var
-                            {Object.keys(d.env).length === 1 ? "" : "s"}{" "}
-                            inherited
-                          </div>
-                        )}
-                      </div>
-                    </label>
-                  );
-                })}
-              </div>
-              <div className="flex items-center justify-end gap-2 pt-1">
-                <Button
-                  size="sm"
-                  variant="ghost"
-                  onClick={() => {
-                    setDiscoverOpen(false);
-                    setDiscovered(null);
-                    setPicked(new Set());
-                    setDiscoverError(null);
-                  }}
-                  disabled={busy}
-                >
-                  Cancel
-                </Button>
-                <Button
-                  size="sm"
-                  onClick={() => void runImport()}
-                  disabled={busy || picked.size === 0}
-                >
-                  Import {picked.size > 0 ? `(${picked.size})` : ""}
-                </Button>
-              </div>
-            </div>
-          )}
-        </Section>
-      )}
-
-      {rows !== null && rows.length === 0 && !adding && (
-        <EmptyState>
-          No MCP servers configured yet. Pick a template below to get started.
-        </EmptyState>
-      )}
-
-      <Section title="Pre-configured templates">
-        <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
-          {MCP_TEMPLATES.map((t) => (
-            <button
-              key={t.id}
-              type="button"
-              onClick={() => applyTemplate(t)}
-              className="text-left p-2.5 rounded border border-line-soft hover:border-text-4 transition-colors bg-bg-1/40"
-            >
-              <div className="text-[12.5px] font-medium text-text-1">
-                {t.label}
-              </div>
-              <div className="text-[11px] text-text-3 mt-1 line-clamp-2">
-                {t.description}
-              </div>
-              <div className="text-[10.5px] text-text-4 mt-1 font-mono truncate">
-                {t.command} {t.args.join(" ")}
-              </div>
-            </button>
-          ))}
-        </div>
-      </Section>
-
-      {adding && (
-        <Section title="Add server">
-          <div className="space-y-2.5">
-            <Field
-              label="Name"
-              hint="Becomes the file name under ~/.aura/mcp/. Letters, digits, dashes."
-            >
-              <Input
-                value={form.name}
-                onChange={(e) => setForm({ ...form, name: e.target.value })}
-                placeholder="atlassian"
-                className="h-8 text-[12px]"
-              />
-            </Field>
-            <Field
-              label="Remote URL"
-              hint="Optional. For hosted MCP servers — Aura uses its native Streamable HTTP transport and OAuth 2.1 PKCE flow. Leave blank for stdio-only servers."
-            >
-              <Input
-                value={form.serverUrl}
-                onChange={(e) =>
-                  setForm({ ...form, serverUrl: e.target.value })
-                }
-                placeholder="https://mcp.atlassian.com/v1/sse"
-                className="h-8 text-[12px]"
-              />
-            </Field>
-            <Field label="Command" hint="Executable Aura spawns. Usually 'npx'. Leave blank for pure-remote servers.">
-              <Input
-                value={form.command}
-                onChange={(e) => setForm({ ...form, command: e.target.value })}
-                placeholder="npx"
-                className="h-8 text-[12px]"
-              />
-            </Field>
-            <Field label="Arguments" hint="Space-separated argv passed after the command.">
-              <Input
-                value={form.args}
-                onChange={(e) => setForm({ ...form, args: e.target.value })}
-                placeholder="-y @atlassian/mcp-server"
-                className="h-8 text-[12px]"
-              />
-            </Field>
-            <Field
-              label="Environment"
-              hint="One KEY=VALUE per line. Leave blank to inherit the shell environment only."
-            >
-              <textarea
-                value={form.envText}
-                onChange={(e) => setForm({ ...form, envText: e.target.value })}
-                rows={4}
-                spellCheck={false}
-                placeholder={"ATLASSIAN_API_TOKEN=\nATLASSIAN_EMAIL="}
-                className="w-full bg-bg-1 border border-line rounded px-2 py-1.5 text-[11.5px] font-mono text-text-1 outline-none focus:border-text-4 resize-y"
-              />
-            </Field>
-            <Field label="Description" hint="Optional note shown next to the row.">
-              <Input
-                value={form.description}
-                onChange={(e) =>
-                  setForm({ ...form, description: e.target.value })
-                }
-                placeholder="Atlassian Jira + Confluence"
-                className="h-8 text-[12px]"
-              />
-            </Field>
-            <div className="flex items-center justify-end gap-2 pt-1">
-              <Button
-                size="sm"
-                variant="ghost"
-                onClick={() => {
-                  setAdding(false);
-                  setForm(EMPTY_FORM);
-                }}
-                disabled={busy}
-              >
-                Cancel
-              </Button>
-              <Button
-                size="sm"
-                onClick={() => void submitAdd()}
-                disabled={
-                  busy ||
-                  !form.name.trim() ||
-                  (!form.command.trim() && !form.serverUrl.trim())
-                }
-              >
-                Save
-              </Button>
-            </div>
-          </div>
-        </Section>
-      )}
-
-      {rows && rows.length > 0 && (
-        <Section title="Configured servers">
-          <div className="flex flex-col gap-1">
-            {rows.map((row) => {
-              const tl = toolsByServer.get(row.name);
-              return (
-                <McpServerRow
-                  key={row.name}
-                  row={row}
-                  toolList={tl}
-                  onToggle={(next) => void onToggle(row.name, next)}
-                  onRemove={() => void onRemove(row.name)}
-                  onAuth={() => setAuthTarget(row.name)}
-                  disabled={busy}
-                />
-              );
-            })}
-          </div>
-        </Section>
-      )}
-      {authTarget &&
-        (() => {
-          const target = rows?.find((r) => r.name === authTarget);
-          if (!target) return null;
-          return (
-            <AuthSetupModal
-              server={target}
-              onClose={() => setAuthTarget(null)}
-              onSaved={async () => {
-                setAuthTarget(null);
-                await refresh();
-                void refreshTools();
-                void refreshMcpTools();
-              }}
-            />
-          );
-        })()}
-    </>
-  );
-}
-
-function McpServerRow({
-  row,
-  toolList,
-  onToggle,
-  onRemove,
-  onAuth,
-  disabled,
-}: {
-  row: McpServerEntry;
-  toolList: McpServerToolList | undefined;
-  onToggle: (next: boolean) => void;
-  onRemove: () => void;
-  onAuth: () => void;
-  disabled: boolean;
-}) {
-  const probeOk = toolList?.ok ?? null;
-  const probeErr = toolList?.ok === false ? toolList.error : null;
-  const probeCount = toolList?.tools.length ?? null;
-  const statusLabel = !row.enabled
-    ? "disabled"
-    : probeOk === true
-      ? `${probeCount ?? 0} tools`
-      : probeOk === false
-        ? "error"
-        : "unknown";
-  const statusColor = !row.enabled
-    ? "text-text-4"
-    : probeOk === true
-      ? "text-accent-green"
-      : probeOk === false
-        ? "text-red"
-        : "text-text-3";
-
-  // Inline native-OAuth CTAs. We only surface these when we KNOW the
-  // user can act — `server_url` set means the backend will run native
-  // OAuth on click; otherwise the generic Auth button stays the only
-  // entry point. "Authenticate now" for first-time auth, escalating to
-  // amber "Re-authenticate" once the tools probe spits a 401/expired
-  // signal so the row reads as actionable, not just broken.
-  const hasRemote = Boolean(row.server_url);
-  const needsAuth = hasRemote && !row.has_oauth_token;
-  const errBlob = `${row.status ?? ""} ${probeErr ?? ""}`.toLowerCase();
-  const tokensRejected =
-    hasRemote &&
-    row.has_oauth_token &&
-    (errBlob.includes("401") ||
-      errBlob.includes("unauthor") ||
-      errBlob.includes("expired"));
-  return (
-    <div className="flex items-start justify-between gap-3 py-2 border-b border-line-soft last:border-b-0">
-      <div className="flex-1 min-w-0">
-        <div className="flex items-baseline gap-2 flex-wrap">
-          <span className="text-[12.5px] text-text-1 font-medium truncate">
-            {row.name}
-          </span>
-          <span className={`text-[10.5px] ${statusColor}`}>{statusLabel}</span>
-          {row.plugin_id && (
-            <span
-              className="text-[10.5px] px-[3px] py-[1.5px] rounded bg-bg-1 text-text-3 border border-line-soft"
-              title="Bundled by a plugin — env + secrets are managed in the Plugins pane"
-            >
-              plugin
-            </span>
-          )}
-          {row.server_url && (
-            <span
-              className="text-[10.5px] px-[3px] py-[1.5px] rounded bg-bg-1 text-text-3 border border-line-soft"
-              title={`Remote transport — uses HTTP/SSE to ${row.server_url}`}
-            >
-              remote
-            </span>
-          )}
-          {row.has_oauth_token && (
-            <span
-              className="text-[10.5px] px-[3px] py-[1.5px] rounded bg-accent-green/15 text-accent-green border border-accent-green/30"
-              title="OAuth tokens stored in OS keychain"
-            >
-              authenticated
-            </span>
-          )}
-        </div>
-        <div className="text-[10.5px] text-text-4 mt-0.5 truncate font-mono">
-          {row.command} {row.args.join(" ")}
-        </div>
-        {row.description && (
-          <div className="text-[11.5px] text-text-3 mt-0.5 line-clamp-2">
-            {row.description}
-          </div>
-        )}
-        {probeErr && (
-          <div
-            className="text-[10.5px] text-red mt-1 break-words"
-            title={probeErr}
-          >
-            {probeErr}
-          </div>
-        )}
-      </div>
-      <div className="flex items-center gap-1">
-        {(() => {
-          // ONE auth button per row — label + tone derived from state.
-          // Mirrors Claude Code's /mcp drill-in where a server flagged
-          // "needs authentication" gets a single Authenticate CTA.
-          // Plugin-bundled servers authenticate via the secrets broker
-          // in the Plugins pane — no env-edit modal here.
-          if (row.plugin_id) {
-            return null;
-          }
-          if (needsAuth) {
-            return (
-              <button
-                type="button"
-                onClick={onAuth}
-                disabled={disabled}
-                title="A browser window will open for authentication"
-                className="px-2 py-0.5 rounded text-[10.5px] font-medium border transition-colors text-text-2 border-line hover:bg-bg-2 disabled:opacity-40"
-              >
-                Authenticate
-              </button>
-            );
-          }
-          if (tokensRejected) {
-            return (
-              <button
-                type="button"
-                onClick={onAuth}
-                disabled={disabled}
-                title="Tokens rejected — refresh required"
-                className="px-2 py-0.5 rounded text-[10.5px] font-medium border transition-colors text-amber border-amber/40 hover:bg-amber/10 disabled:opacity-40"
-              >
-                Re-authenticate
-              </button>
-            );
-          }
-          if (probeOk === false || (!hasRemote && !row.has_oauth_token)) {
-            return (
-              <button
-                type="button"
-                onClick={onAuth}
-                disabled={disabled}
-                title="Set up auth — env or browser flow"
-                className={`px-2 py-0.5 rounded text-[10.5px] font-medium border transition-colors ${
-                  probeOk === false
-                    ? "text-amber border-amber/40 hover:bg-amber/10"
-                    : "text-text-3 border-line-soft hover:text-text-1 hover:border-text-4"
-                } disabled:opacity-40`}
-              >
-                Auth
-              </button>
-            );
-          }
-          return null;
-        })()}
-        <Toggle label="" value={row.enabled} onChange={onToggle} />
-        {!row.plugin_id && (
-          <button
-            type="button"
-            onClick={onRemove}
-            disabled={disabled}
-            title="Remove server"
-            className="p-1 text-text-4 hover:text-red disabled:opacity-40"
-          >
-            <Trash2 size={13} />
-          </button>
-        )}
-      </div>
-    </div>
-  );
-}
-
-// Wave A — Auth setup modal. For known providers (atlassian, linear,
-// github, sentry) it shows per-key labels + hints + a deep link to the
-// provider's token page. For unknown servers it falls back to a free-
-// form KEY=value textarea so power users aren't blocked.
-//
-// Wave B (OAuth via mcp-remote): when the configured command points at
-// `mcp-remote` or contains an `https://` arg, this modal also renders
-// an "Authenticate in browser" path that spawns the proxy interactively
-// and watches for the auth URL.
-function AuthSetupModal({
-  server,
-  onClose,
-  onSaved,
-}: {
-  server: McpServerEntry;
-  onClose: () => void;
-  onSaved: () => void | Promise<void>;
-}) {
-  const template = useMemo(
-    () => matchTemplate(server.name, server.args),
-    [server.name, server.args],
-  );
-  // For known templates we render one field per envKey. We never seed
-  // the input with the existing secret value (security — and stops
-  // accidental leakage if the user takes a screenshot of this dialog);
-  // an empty submission leaves prior values intact (handled backend-
-  // side via the merge semantics).
-  const [values, setValues] = useState<Record<string, string>>(() => {
-    const init: Record<string, string> = {};
-    for (const k of template?.envKeys ?? []) init[k] = "";
-    // Pre-fill non-secret fields (email, domain, org) from existing
-    // config — these aren't sensitive and saving the user a re-type is
-    // worth the small leakage risk. Secrets stay blank.
-    for (const k of template?.envKeys ?? []) {
-      if (template?.envSecret?.[k]) continue;
-      if (server.env[k]) init[k] = server.env[k];
-    }
-    return init;
-  });
-  const [reveal, setReveal] = useState<Record<string, boolean>>({});
-  const [freeform, setFreeform] = useState<string>(() => {
-    // Show existing env in the freeform editor for unknown templates.
-    if (template) return "";
-    return Object.entries(server.env)
-      .map(([k, v]) => `${k}=${v}`)
-      .join("\n");
-  });
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-
-  const remote = useMemo(() => detectRemote(server), [server]);
-
-  // Wave B — OAuth-via-mcp-remote flow state. Lives alongside the
-  // env-paste state so a remote-OAuth server can ALSO have env vars
-  // (the proxy itself reads no env, but custom transports might).
-  const [authBusy, setAuthBusy] = useState(false);
-  const [authLog, setAuthLog] = useState<string[]>([]);
-  const [authResult, setAuthResult] = useState<{
-    ok: boolean;
-    text: string;
-  } | null>(null);
-
-  // Native OAuth 2.1 + PKCE state. Shares the per-server
-  // `mcp:auth_log:<name>` topic with the mcp-remote piggyback so a
-  // single log view shows whichever flow the user kicked off.
-  const [nativeBusy, setNativeBusy] = useState(false);
-  const [nativeResult, setNativeResult] = useState<{
-    ok: boolean;
-    text: string;
-  } | null>(null);
-
-  const runBrowserAuth = useCallback(async () => {
-    setAuthBusy(true);
-    setAuthLog([]);
-    setAuthResult(null);
-    setError(null);
-    // Subscribe to per-server log + url topics. We unsubscribe in the
-    // finally block so a second auth attempt doesn't double-fire.
-    const { listen } = await import("@tauri-apps/api/event");
-    const { openUrl } = await import("@tauri-apps/plugin-opener");
-    let urlOpened = false;
-    const unlistenLog = await listen<string>(
-      `mcp:auth_log:${server.name}`,
-      (e) => {
-        setAuthLog((prev) => {
-          const next = [...prev, e.payload];
-          // Cap to last 200 lines so a runaway proxy doesn't blow the
-          // React tree.
-          return next.length > 200 ? next.slice(-200) : next;
-        });
-      },
-    );
-    const unlistenUrl = await listen<string>(
-      `mcp:auth_url:${server.name}`,
-      (e) => {
-        if (urlOpened) return;
-        urlOpened = true;
-        void openUrl(e.payload).catch((err) => {
-          console.warn("openUrl failed:", err);
-        });
-      },
-    );
-    try {
-      const res = await api.mcpServersAuthRun(server.name);
-      if (res.timed_out) {
-        setAuthResult({
-          ok: false,
-          text: "Timed out after 5 minutes. If you completed the browser flow, the token may still be cached — try Save & retry. Otherwise re-run Authenticate.",
-        });
-      } else if (res.exit_code === 0) {
-        setAuthResult({
-          ok: true,
-          text: "Auth succeeded. Token cached — close this dialog and the server will probe green.",
-        });
-      } else {
-        setAuthResult({
-          ok: false,
-          text: `Proxy exited with code ${res.exit_code ?? "unknown"}. Check the log for details.`,
-        });
-      }
-    } catch (e) {
-      setError(String(e));
-    } finally {
-      unlistenLog();
-      unlistenUrl();
-      setAuthBusy(false);
-    }
-  }, [server.name]);
-
-  const runNativeOAuth = useCallback(async () => {
-    setNativeBusy(true);
-    setAuthLog([]);
-    setNativeResult(null);
-    setError(null);
-    const { listen } = await import("@tauri-apps/api/event");
-    // The backend opens the browser itself via tauri-plugin-opener,
-    // but we still subscribe to `mcp:auth_url` so the log shows the
-    // URL inline as a fallback for users who don't see the browser
-    // pop (corporate "always-on-top app" / browser sandbox edge case).
-    const unlistenLog = await listen<string>(
-      `mcp:auth_log:${server.name}`,
-      (e) => {
-        setAuthLog((prev) => {
-          const next = [...prev, e.payload];
-          return next.length > 200 ? next.slice(-200) : next;
-        });
-      },
-    );
-    const unlistenUrl = await listen<string>(
-      `mcp:auth_url:${server.name}`,
-      (e) => {
-        setAuthLog((prev) => {
-          const next = [...prev, `[link] ${e.payload}`];
-          return next.length > 200 ? next.slice(-200) : next;
-        });
-      },
-    );
-    try {
-      await api.mcpServersOauthStart(server.name);
-      setNativeResult({
-        ok: true,
-        text: "Tokens stored. Aura now holds the OAuth credentials for this server.",
-      });
-      await onSaved();
-    } catch (e) {
-      setNativeResult({ ok: false, text: String(e) });
-    } finally {
-      unlistenLog();
-      unlistenUrl();
-      setNativeBusy(false);
-    }
-  }, [server.name, onSaved]);
-
-  const clearOAuthTokens = useCallback(async () => {
-    setError(null);
-    try {
-      await api.mcpServersOauthClear(server.name);
-      await onSaved();
-    } catch (e) {
-      setError(String(e));
-    }
-  }, [server.name, onSaved]);
-
-  const submit = async () => {
-    setBusy(true);
-    setError(null);
-    try {
-      const env: Record<string, string> = template
-        ? { ...values }
-        : parseEnvBlock(freeform);
-      // Drop empty strings — backend treats them as "clear this key",
-      // which would wipe pre-existing values the user didn't intend to
-      // touch. Only submit fields the user actually typed into.
-      for (const k of Object.keys(env)) {
-        if (env[k] === "") delete env[k];
-      }
-      if (Object.keys(env).length === 0 && template) {
-        setError("Paste at least one value, or close the dialog");
-        setBusy(false);
-        return;
-      }
-      await api.mcpServersUpdateEnv(server.name, env);
-      await onSaved();
-    } catch (e) {
-      setError(String(e));
-      setBusy(false);
-    }
-  };
-
-  const openTokenPage = async () => {
-    if (!template?.tokenPageUrl) return;
-    try {
-      const { openUrl } = await import("@tauri-apps/plugin-opener");
-      await openUrl(template.tokenPageUrl);
-    } catch (e) {
-      console.warn("openUrl failed:", e);
-      window.open(template.tokenPageUrl, "_blank", "noopener");
-    }
-  };
-
-  return (
-    <div
-      className={cn(MODAL_BACKDROP, "z-[10000] flex items-center justify-center")}
-      onClick={onClose}
-      onKeyDown={(e) => {
-        if (e.key === "Escape") {
-          e.stopPropagation();
-          onClose();
-        }
-      }}
-      role="dialog"
-      aria-modal="true"
-      aria-label={server.name}
-    >
-      <div
-        className={cn(MODAL_PANEL, "max-w-lg max-h-[80vh] flex flex-col")}
-        onClick={(e) => e.stopPropagation()}
-      >
-        {/* Header */}
-        <div className={cn(MODAL_HEADER, "items-start justify-between gap-3")}>
-          <div className="min-w-0">
-            <div className={MODAL_TITLE}>{server.name}</div>
-            {server.server_url ? (
-              <div className="text-text-4 text-[11.5px] mt-0.5 truncate font-mono">
-                {server.server_url}
-              </div>
-            ) : (
-              <div className="text-text-4 text-[11.5px] mt-0.5 truncate font-mono">
-                {server.command} {server.args.join(" ")}
-              </div>
-            )}
-          </div>
-          <button
-            type="button"
-            onClick={onClose}
-            className="w-7 h-7 flex items-center justify-center rounded text-text-4 hover:text-text-1 hover:bg-bg-2"
-            aria-label="Close"
-          >
-            <X className="w-4 h-4" strokeWidth={1.75} />
-          </button>
-        </div>
-
-        {/* Body */}
-        <div className="flex-1 min-h-0 overflow-y-auto px-4 py-3 space-y-3">
-          {(() => {
-            // Pick ONE flow. Mirror Claude Code's UX: native OAuth is the
-            // primary path when we have a remote URL; mcp-remote
-            // piggyback covers servers whose discovered config wraps a
-            // URL we haven't promoted to `server_url` yet; env paste is
-            // only for stdio templates that take an API token.
-            const useNative = !!server.server_url;
-            const useBrowserPiggyback =
-              !useNative && remote.kind !== "none";
-            const remoteFlow = useNative || useBrowserPiggyback;
-            if (!remoteFlow) return null;
-            const busy = useNative ? nativeBusy : authBusy;
-            const result = useNative ? nativeResult : authResult;
-            const onAuth = useNative ? runNativeOAuth : runBrowserAuth;
-            const label = busy
-              ? `Authenticating with ${server.name}…`
-              : server.has_oauth_token
-                ? "Re-authenticate"
-                : "Authenticate";
-            return (
-              <div className="space-y-3">
-                <Button
-                  type="button"
-                  size="lg"
-                  onClick={() => void onAuth()}
-                  disabled={busy}
-                  className="w-full"
-                >
-                  {busy ? (
-                    <AsciiSpinner className="text-[12px] leading-none" />
-                  ) : (
-                    <ExternalLink aria-hidden />
-                  )}
-                  {label}
-                </Button>
-                <div className="text-text-3 text-[12px] leading-relaxed">
-                  {busy ? (
-                    <>
-                      A browser window will open for authentication.
-                      <br />
-                      Return here after authenticating in your browser.
-                    </>
-                  ) : (
-                    <>
-                      Clicking Authenticate opens a browser window. Approve
-                      the request and Aura will store the tokens in your
-                      OS keychain.
-                    </>
-                  )}
-                </div>
-                {server.has_oauth_token && !busy && (
-                  <button
-                    type="button"
-                    onClick={() => void clearOAuthTokens()}
-                    className="inline-flex items-center gap-1.5 text-[11.5px] text-text-4 hover:text-red"
-                    title="Delete stored tokens from the OS keychain"
-                  >
-                    Disconnect
-                  </button>
-                )}
-                {authLog.length > 0 && busy && (
-                  <div className="font-mono text-[10.5px] text-text-4 bg-bg-1/40 border border-line-soft rounded max-h-28 overflow-y-auto p-2 leading-relaxed">
-                    {authLog.slice(-30).map((line, i) => (
-                      <div key={i} className="break-all">
-                        {line}
-                      </div>
-                    ))}
-                  </div>
-                )}
-                {result && (
-                  <div
-                    className={
-                      result.ok
-                        ? "text-accent-green text-[11.5px]"
-                        : "text-amber text-[11.5px]"
-                    }
-                  >
-                    {result.text}
-                  </div>
-                )}
-              </div>
-            );
-          })()}
-
-          {template && template.envKeys.length > 0 && !server.server_url ? (
-            <>
-              <div className="text-text-3 text-[11.5px] leading-relaxed">
-                {template.description}
-              </div>
-              {template.tokenPageUrl && (
-                <button
-                  type="button"
-                  onClick={() => void openTokenPage()}
-                  className="inline-flex items-center gap-1.5 text-[11.5px] text-text-2 hover:text-text-1 hover:underline"
-                >
-                  <ExternalLink className="w-3.5 h-3.5" aria-hidden />
-                  Open token page
-                </button>
-              )}
-              {template.envKeys.map((k) => {
-                const isSecret = !!template.envSecret?.[k];
-                const isRevealed = !!reveal[k];
-                const hasExisting = !!server.env[k];
-                return (
-                  <Field
-                    key={k}
-                    label={k}
-                    hint={template.envHints?.[k]}
-                  >
-                    <div className="relative">
-                      <Input
-                        type={
-                          isSecret && !isRevealed ? "password" : "text"
-                        }
-                        value={values[k] ?? ""}
-                        onChange={(e) =>
-                          setValues((prev) => ({
-                            ...prev,
-                            [k]: e.target.value,
-                          }))
-                        }
-                        placeholder={
-                          isSecret && hasExisting
-                            ? "(saved — leave blank to keep)"
-                            : ""
-                        }
-                        className="pr-8"
-                      />
-                      {isSecret && (
-                        <button
-                          type="button"
-                          onClick={() =>
-                            setReveal((prev) => ({
-                              ...prev,
-                              [k]: !prev[k],
-                            }))
-                          }
-                          className="absolute right-1 top-1/2 -translate-y-1/2 p-1.5 text-text-4 hover:text-text-1"
-                          title={isRevealed ? "Hide" : "Reveal"}
-                        >
-                          {isRevealed ? (
-                            <EyeOff className="w-3.5 h-3.5" aria-hidden />
-                          ) : (
-                            <Eye className="w-3.5 h-3.5" aria-hidden />
-                          )}
-                        </button>
-                      )}
-                    </div>
-                  </Field>
-                );
-              })}
-            </>
-          ) : !server.server_url && remote.kind === "none" ? (
-            <>
-              <div className="text-text-3 text-[11.5px] leading-relaxed">
-                This server isn't a known template. Paste any env vars it
-                needs as <code>KEY=value</code>, one per line.
-              </div>
-              <Field
-                label="Environment"
-                hint="One KEY=value per line. Values are stored as-is at ~/.aura/mcp/<name>.json."
-              >
-                <textarea
-                  value={freeform}
-                  onChange={(e) => setFreeform(e.target.value)}
-                  rows={6}
-                  className="w-full bg-bg-1 border border-line-soft rounded px-2 py-1.5 text-[12px] text-text-1 font-mono"
-                  placeholder="ATLASSIAN_API_TOKEN=…"
-                />
-              </Field>
-            </>
-          ) : null}
-
-          {error && (
-            <div className="text-red text-[11.5px]" role="alert">
-              {error}
-            </div>
-          )}
-        </div>
-
-        {/* Footer */}
-        <div className={MODAL_FOOTER}>
-          <Button
-            size="xs"
-            variant="ghost"
-            onClick={onClose}
-            disabled={busy}
-          >
-            {server.server_url || remote.kind !== "none" ? "Close" : "Cancel"}
-          </Button>
-          {!(server.server_url || remote.kind !== "none") &&
-            template &&
-            template.envKeys.length > 0 && (
-              <Button
-                size="xs"
-                onClick={() => void submit()}
-                disabled={busy}
-              >
-                {busy && (
-                  <AsciiSpinner className="text-[12px] leading-none mr-1.5" />
-                )}
-                Save & retry
-              </Button>
-            )}
-          {!(server.server_url || remote.kind !== "none") &&
-            !template && (
-              <Button
-                size="xs"
-                onClick={() => void submit()}
-                disabled={busy}
-              >
-                {busy && (
-                  <AsciiSpinner className="text-[12px] leading-none mr-1.5" />
-                )}
-                Save & retry
-              </Button>
-            )}
-        </div>
-      </div>
-    </div>
-  );
-}
-
-// Wave B helper — classifies an MCP server as a remote-OAuth flavour
-// based on command shape. `mcp-remote` is the canonical npm proxy
-// shipped by Anthropic for browser-OAuth-gated remote MCPs (Atlassian
-// remote, Notion remote, etc); plain `https://` first-arg matches the
-// MCP-spec native remote transport. `none` means stdio with env vars
-// only — the env-paste path is the right one.
-function detectRemote(
-  server: McpServerEntry,
-): { kind: "none" | "mcp-remote" | "remote-url"; url?: string } {
-  const allArgs = server.args.join(" ").toLowerCase();
-  if (allArgs.includes("mcp-remote")) {
-    const httpsArg = server.args.find((a) => a.startsWith("https://"));
-    return { kind: "mcp-remote", url: httpsArg };
-  }
-  const remoteArg = server.args.find((a) => a.startsWith("https://"));
-  if (remoteArg) return { kind: "remote-url", url: remoteArg };
-  return { kind: "none" };
-}
-
-/** Parse "KEY=value" lines from the textarea into a string-string map.
- *  Blank lines + lines without `=` are skipped; values keep their literal
- *  text (no shell expansion). */
-function parseEnvBlock(text: string): Record<string, string> {
-  const out: Record<string, string> = {};
-  for (const raw of text.split(/\r?\n/)) {
-    const line = raw.trim();
-    if (!line || line.startsWith("#")) continue;
-    const eq = line.indexOf("=");
-    if (eq <= 0) continue;
-    const key = line.slice(0, eq).trim();
-    const value = line.slice(eq + 1);
-    if (key) out[key] = value;
-  }
-  return out;
-}
-
-// ── Team ──────────────────────────────────────────────────────────────
-//
-// Admin pane: roster (Members), per-member daily intent rollup
-// (Activity), and per-member token spend (Usage). Members tab loads
-// from `team_load`; Activity embeds StandupView; Usage hits the cloud
-// `/api/v1/billing/usage/by_member` endpoint (admin sees all, member
-// sees self only — enforced server-side).
-
-type TeamSubTab = "members" | "channels" | "activity" | "usage";
-
-function TeamTab({ repoRoot }: { repoRoot: string }) {
-  const [sub, setSub] = useState<TeamSubTab>("members");
-  return (
-    <div className="space-y-3">
-      <div className="flex items-center gap-3 border-b border-line-soft pb-2">
-        <SubTabButton
-          active={sub === "members"}
-          onClick={() => setSub("members")}
-          label="Members"
-        />
-        <SubTabButton
-          active={sub === "channels"}
-          onClick={() => setSub("channels")}
-          label="Channels"
-        />
-        <SubTabButton
-          active={sub === "activity"}
-          onClick={() => setSub("activity")}
-          label="Activity"
-        />
-        <SubTabButton
-          active={sub === "usage"}
-          onClick={() => setSub("usage")}
-          label="Usage"
-        />
-      </div>
-      {sub === "members" && <TeamMembersPane repoRoot={repoRoot} />}
-      {sub === "channels" && <TeamChannelsPane repoRoot={repoRoot} />}
-      {sub === "activity" && <TeamActivityPane repoRoot={repoRoot} />}
-      {sub === "usage" && <TeamUsagePane repoRoot={repoRoot} />}
-    </div>
-  );
-}
-
-function SubTabButton({
-  active,
-  onClick,
-  label,
-}: {
-  active: boolean;
-  onClick: () => void;
-  label: string;
-}) {
-  return (
-    <button
-      type="button"
-      onClick={onClick}
-      className={`text-[12px] px-2 py-1 rounded transition-colors ${
-        active
-          ? "bg-bg-2 text-text-1 font-medium"
-          : "text-text-3 hover:text-text-1 hover:bg-bg-2/60"
-      }`}
-    >
-      {label}
-    </button>
-  );
-}
-
-// Team roles admin panel. Built on Aura's own git-derived roster: the
-// `admin` flag in team.json is advisory (git gives everyone equal write
-// access), so this gates the in-app affordances rather than git itself.
-// A vacant admin seat can be *claimed* by any member; an existing admin
-// can *promote* others or *transfer* the role and step down. Harder,
-// cloud-enforced "super controls" are a later opt-in (Aura-account login)
-// — this is the honour-system default any team can use as-is.
-// The roster + identity + duplicate hunches, cached per repo so reopening
-// Settings → Team paints instantly instead of flashing "Loading…". SWR-style:
-// seed from the cache, refetch in the background, write the fresh bundle back.
-type CachedTeam = {
-  members: TeamMember[];
-  identity: TeamIdentity | null;
-  dups: DuplicateSuggestion[];
-  /** Self-picked profile photos, email→data-URL. Resolved ahead of the GitHub
-   *  avatar and the animal monogram. */
-  avatars: Record<string, string>;
-};
-
-function TeamMembersPane({ repoRoot }: { repoRoot: string }) {
-  const cacheKey = `settings-team-members:${repoRoot}`;
-  const [members, setMembers] = useState<TeamMember[] | null>(
-    () => peekCache<CachedTeam>(cacheKey)?.members ?? null,
-  );
-  const [identity, setIdentity] = useState<TeamIdentity | null>(
-    () => peekCache<CachedTeam>(cacheKey)?.identity ?? null,
-  );
-  const [dups, setDups] = useState<DuplicateSuggestion[]>(
-    () => peekCache<CachedTeam>(cacheKey)?.dups ?? [],
-  );
-  const [avatars, setAvatars] = useState<Record<string, string>>(
-    () => peekCache<CachedTeam>(cacheKey)?.avatars ?? {},
-  );
-  const [err, setErr] = useState<string | null>(null);
-  const [actionErr, setActionErr] = useState<string | null>(null);
-  // Email currently mid-mutation — disables that row's buttons.
-  const [busyEmail, setBusyEmail] = useState<string | null>(null);
-  // Row whose "Merge…" picker is open (by primary email), or null.
-  const [mergePickFor, setMergePickFor] = useState<string | null>(null);
-
-  // Dismiss the merge picker on an outside click or Escape. All rows share one
-  // open-state, so we key off a `data-merge-pick` marker rather than a per-row
-  // ref: a mousedown inside any picker is ignored, anything else closes it.
-  useEffect(() => {
-    if (!mergePickFor) return;
-    const onDown = (e: MouseEvent) => {
-      const t = e.target as HTMLElement | null;
-      if (t && t.closest("[data-merge-pick]")) return;
-      setMergePickFor(null);
-    };
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") setMergePickFor(null);
-    };
-    window.addEventListener("mousedown", onDown);
-    window.addEventListener("keydown", onKey);
-    return () => {
-      window.removeEventListener("mousedown", onDown);
-      window.removeEventListener("keydown", onKey);
-    };
-  }, [mergePickFor]);
-
-  const load = useCallback(async () => {
-    setErr(null);
-    const [t, id, d, av] = await Promise.all([
-      api.teamLoad(repoRoot),
-      api.teamIdentity(repoRoot).catch(() => null),
-      api.teamIdentitySuggestDuplicates(repoRoot).catch(() => []),
-      api.identityAvatarsGet().catch(() => ({}) as Record<string, string>),
-    ]);
-    const nextMembers = t?.members ?? [];
-    setMembers(nextMembers);
-    setIdentity(id);
-    setDups(d);
-    setAvatars(av);
-    writeCache<CachedTeam>(cacheKey, {
-      members: nextMembers,
-      identity: id,
-      dups: d,
-      avatars: av,
-    });
-  }, [repoRoot, cacheKey]);
-
-  useEffect(() => {
-    let cancelled = false;
-    // Paint instantly from the last load for this repo (no null flash), then
-    // refresh in the background. On a cold cache these seed to the empty
-    // defaults and the spinner shows once, as before.
-    const cached = peekCache<CachedTeam>(cacheKey);
-    setMembers(cached?.members ?? null);
-    setIdentity(cached?.identity ?? null);
-    setDups(cached?.dups ?? []);
-    setAvatars(cached?.avatars ?? {});
-    setActionErr(null);
-    load().catch((e) => {
-      if (!cancelled) setErr(String(e));
-    });
-    return () => {
-      cancelled = true;
-    };
-  }, [repoRoot, load, cacheKey]);
-
-  const run = useCallback(
-    async (email: string, fn: () => Promise<TeamManifest>) => {
-      setBusyEmail(email);
-      setActionErr(null);
-      try {
-        const m = await fn();
-        setMembers(m?.members ?? []);
-        // Admin status of the local user may have changed (e.g. transfer
-        // step-down) — refresh identity so the controls regate.
-        const id = await api.teamIdentity(repoRoot).catch(() => null);
-        setIdentity(id);
-      } catch (e) {
-        setActionErr(humanizeErr(e));
-      } finally {
-        setBusyEmail(null);
-      }
-    },
-    [repoRoot],
-  );
-
-  // Merge / keep-separate for the duplicate hunches — the same review the team
-  // chat roster offers, now here in Settings. Both fold aliases through the
-  // shared identity backend; a full reload after picks up the new roster.
-  const confirmDup = useCallback(
-    async (survivorEmail: string, mergedEmails: string[]) => {
-      await api.teamIdentityConfirmDuplicate(repoRoot, survivorEmail, mergedEmails);
-      await load();
-    },
-    [repoRoot, load],
-  );
-  const rejectDup = useCallback(
-    async (emailA: string, emailB: string) => {
-      await api.teamIdentityRejectDuplicate(repoRoot, emailA, emailB);
-      await load();
-    },
-    [repoRoot, load],
-  );
-
-  // Split a folded-in identity back out into its own person. This is the
-  // inverse of "Same person": a member that ended up with several git emails
-  // (auto-linked, or a merge that grabbed one email too many) can be pulled
-  // apart here. We drop the alias off this member; the email re-derives as its
-  // own row from git log on reload. Only offered on your own card or, for an
-  // admin, on anyone's — the backend enforces the same rule.
-  const separateAlias = useCallback(
-    async (targetHandle: string, aliasEmail: string) => {
-      setBusyEmail(aliasEmail);
-      setActionErr(null);
-      try {
-        const m = await api.teamAliasRemove(repoRoot, targetHandle, aliasEmail);
-        setMembers(m?.members ?? []);
-        await load();
-      } catch (e) {
-        setActionErr(humanizeErr(e));
-      } finally {
-        setBusyEmail(null);
-      }
-    },
-    [repoRoot, load],
-  );
-
-  // Manually declare two people the same — the escape hatch for when the auto
-  // suggester never proposed the pair (e.g. a GitHub-handle committer and a
-  // personal Gmail with nothing textually in common: "droidnoob" ↔ their real
-  // name). Folds the picked member into this row through the same confirm path
-  // the suggestions use; `identity_merges` on the backend makes the decision
-  // stick across every git re-derive so it can't "come back".
-  const mergeWith = useCallback(
-    async (survivorEmail: string, mergedEmail: string) => {
-      setMergePickFor(null);
-      setBusyEmail(survivorEmail);
-      setActionErr(null);
-      try {
-        const mani = await api.teamIdentityConfirmDuplicate(repoRoot, survivorEmail, [
-          mergedEmail,
-        ]);
-        setMembers(mani?.members ?? []);
-        await load();
-      } catch (e) {
-        setActionErr(humanizeErr(e));
-      } finally {
-        setBusyEmail(null);
-      }
-    },
-    [repoRoot, load],
-  );
-
-  // Pick a profile photo for a person and store it locally (email-keyed). We
-  // update the map in place so the new face shows the instant the picker
-  // returns, without waiting on a full roster reload.
-  const pickPhoto = useCallback(async (email: string) => {
-    setActionErr(null);
-    let path: string | string[] | null;
-    try {
-      path = await pickPath({
-        title: "Choose a profile photo",
-      });
-    } catch (e) {
-      setActionErr(humanizeErr(e));
-      return;
-    }
-    if (!path || Array.isArray(path)) return; // cancelled
-    setBusyEmail(email);
-    try {
-      const dataUrl = await api.identityAvatarSetFromPath(email, path);
-      setAvatars((prev) => ({ ...prev, [email.toLowerCase()]: dataUrl }));
-    } catch (e) {
-      setActionErr(humanizeErr(e));
-    } finally {
-      setBusyEmail(null);
-    }
-  }, []);
-
-  const clearPhoto = useCallback(async (email: string) => {
-    setBusyEmail(email);
-    setActionErr(null);
-    try {
-      await api.identityAvatarClear(email);
-      setAvatars((prev) => {
-        const next = { ...prev };
-        delete next[email.toLowerCase()];
-        return next;
-      });
-    } catch (e) {
-      setActionErr(humanizeErr(e));
-    } finally {
-      setBusyEmail(null);
-    }
-  }, []);
-
-  if (err) return <ErrorState>{err}</ErrorState>;
-  if (!members) return <LoadingState label="Loading your team…" />;
-  if (members.length === 0) {
-    return (
-      <div className="text-[11.5px] text-text-3">
-        No team members yet. Run a few commits in this repo and they'll
-        appear here automatically (auto-derived from git log).
-      </div>
-    );
-  }
-
-  const iAmAdmin = identity?.admin ?? false;
-  const myEmail = (identity?.email ?? "").toLowerCase();
-  const hasAdmin = members.some((m) => m.admin);
-  const adminCount = members.filter((m) => m.admin).length;
-
-  return (
-    <div className="space-y-1.5">
-      <div className="flex items-center justify-between gap-2 mb-0.5">
-        <div className="text-[10.5px] uppercase tracking-wider text-text-4">
-          {members.length} member{members.length === 1 ? "" : "s"}
-          {hasAdmin && (
-            <span className="text-text-5">
-              {" · "}
-              {adminCount} admin{adminCount === 1 ? "" : "s"}
-            </span>
-          )}
-        </div>
-        {!hasAdmin && (
-          <button
-            type="button"
-            disabled={busyEmail !== null}
-            onClick={() => run(myEmail || "self", () => api.teamClaim(repoRoot))}
-            className="text-[11px] font-medium px-2 py-1 rounded transition-colors text-bg-deep disabled:opacity-50"
-            style={{ background: "var(--color-accent)" }}
-            title="No admin yet — claim the admin seat for this team"
-          >
-            Claim admin
-          </button>
-        )}
-      </div>
-
-      {!hasAdmin && (
-        <div className="text-[10.5px] text-text-4 leading-snug px-0.5 pb-1">
-          This team has no admin yet. Any member can claim it; the admin can
-          later transfer the role or promote others.
-        </div>
-      )}
-      {actionErr && (
-        <div
-          className="text-[10.5px] rounded px-2 py-1 leading-snug"
-          style={{
-            color: "var(--color-red)",
-            background: "color-mix(in srgb, var(--color-red) 12%, transparent)",
-            border: "1px solid color-mix(in srgb, var(--color-red) 30%, transparent)",
-          }}
-        >
-          {actionErr}
-        </div>
-      )}
-
-      {/* Possible-duplicate review — the same "same person / different people"
-          merge the team chat roster offers, surfaced here so people management
-          and de-duping live in one place. Renders nothing when there's nothing
-          to review. */}
-      <DuplicatesBanner
-        suggestions={dups}
-        onConfirm={confirmDup}
-        onReject={rejectDup}
-      />
-
-      {members.map((m) => {
-        const isMe = m.email.toLowerCase() === myEmail;
-        const rowBusy = busyEmail === m.email;
-        return (
-          <div
-            key={m.email}
-            className="flex items-center gap-3 px-2 py-1.5 rounded hover:bg-bg-2/60"
-          >
-            <Avatar
-              name={m.name || m.handle || m.email}
-              size={30}
-              src={avatarSrcForMember(m, avatars)}
-              title={m.name || m.handle}
-            />
-            <div className="flex-1 min-w-0">
-              <div className="flex items-center gap-2">
-                <span className="text-[12px] text-text-1 font-medium truncate">
-                  {m.name || m.handle}
-                </span>
-                {m.admin && (
-                  <span
-                    className="text-[9.5px] uppercase tracking-wider px-1.5 py-0.5 rounded"
-                    style={{
-                      color: "var(--color-amber)",
-                      background:
-                        "color-mix(in srgb, var(--color-amber) 14%, transparent)",
-                      border:
-                        "1px solid color-mix(in srgb, var(--color-amber) 30%, transparent)",
-                    }}
-                  >
-                    admin
-                  </span>
-                )}
-                {isMe && (
-                  <span className="text-[9.5px] uppercase tracking-wider px-1.5 py-0.5 rounded bg-bg-3 text-text-3">
-                    you
-                  </span>
-                )}
-                {m.status_emoji && (
-                  <span className="text-[12px]">{m.status_emoji}</span>
-                )}
-              </div>
-              <div className="text-[10.5px] text-text-4 truncate">
-                {m.email}
-                {m.activity_text ? ` · ${m.activity_text}` : ""}
-              </div>
-
-              {/* Folded-in identities — the other git emails treated as this
-                  same person. Each can be pulled back out into its own row.
-                  Only actionable on your own card or by an admin (the backend
-                  enforces the same); otherwise it's shown read-only so people
-                  can still see who's grouped together. */}
-              {m.also_emails && m.also_emails.length > 0 && (
-                <div className="mt-1 flex flex-col gap-0.5">
-                  {m.also_emails.map((alias) => {
-                    const aliasBusy = busyEmail === alias;
-                    const canSeparate = isMe || iAmAdmin;
-                    return (
-                      <div
-                        key={alias}
-                        className="flex items-center gap-1.5 text-[10px] text-text-4"
-                      >
-                        <Avatar name={alias} size={16} title={alias} />
-                        <span className="truncate">
-                          <span className="text-text-5">also </span>
-                          {alias}
-                        </span>
-                        {canSeparate && (
-                          <button
-                            type="button"
-                            disabled={aliasBusy}
-                            onClick={() => separateAlias(m.handle, alias)}
-                            title={`Pull ${alias} out into its own person`}
-                            className="ml-1 flex-shrink-0 rounded border border-line-soft px-1 py-0.5 text-[9.5px] leading-none text-text-4 hover:text-text-1 hover:bg-bg-2 disabled:opacity-50"
-                          >
-                            {aliasBusy ? "…" : "Not the same person"}
-                          </button>
-                        )}
-                      </div>
-                    );
-                  })}
-                </div>
-              )}
-            </div>
-
-            {/* Manual "these two are the same person" — the escape hatch when
-                the auto-suggester never proposed the pair. Offered to an admin
-                (on anyone) and to you (on your own card); the backend enforces
-                the same rule. Picks a target from the rest of the roster and
-                folds it in durably. */}
-            {(iAmAdmin || isMe) && members.length > 1 && (
-              <div className="relative flex-shrink-0" data-merge-pick>
-                <RoleBtn
-                  label="Merge…"
-                  busy={rowBusy}
-                  title="Mark another member as the same person and fold them in"
-                  onClick={() =>
-                    setMergePickFor((cur) => (cur === m.email ? null : m.email))
-                  }
-                />
-                {mergePickFor === m.email && (
-                  <div className="absolute right-0 top-full mt-1 z-20 w-60 max-h-64 overflow-y-auto rounded-md border border-line-soft bg-bg-1 shadow-lg py-1">
-                    <div className="px-2 py-1 text-[9.5px] uppercase tracking-wider text-text-5">
-                      Same person as {m.name || m.handle}?
-                    </div>
-                    {members
-                      .filter(
-                        (o) => o.email.toLowerCase() !== m.email.toLowerCase(),
-                      )
-                      .map((o) => (
-                        <button
-                          key={o.email}
-                          type="button"
-                          disabled={busyEmail !== null}
-                          onClick={() => mergeWith(m.email, o.email)}
-                          className="w-full flex items-center gap-2 px-2 py-1 text-left hover:bg-bg-2 disabled:opacity-50"
-                        >
-                          <Avatar
-                            name={o.name || o.handle || o.email}
-                            size={18}
-                            src={avatarSrcForMember(o, avatars)}
-                            title={o.name || o.handle}
-                          />
-                          <span className="flex-1 min-w-0">
-                            <span className="block text-[11px] text-text-1 truncate">
-                              {o.name || o.handle}
-                            </span>
-                            <span className="block text-[9.5px] text-text-4 truncate">
-                              {o.email}
-                            </span>
-                          </span>
-                        </button>
-                      ))}
-                  </div>
-                )}
-              </div>
-            )}
-
-            {iAmAdmin && !isMe ? (
-              <div className="flex items-center gap-1 flex-shrink-0">
-                {m.admin ? (
-                  <RoleBtn
-                    label="Remove admin"
-                    busy={rowBusy}
-                    onClick={() =>
-                      run(m.email, () =>
-                        api.teamSetAdmin(repoRoot, m.email, false),
-                      )
-                    }
-                  />
-                ) : (
-                  <>
-                    <RoleBtn
-                      label="Make admin"
-                      busy={rowBusy}
-                      onClick={() =>
-                        run(m.email, () =>
-                          api.teamSetAdmin(repoRoot, m.email, true),
-                        )
-                      }
-                    />
-                    <RoleBtn
-                      label="Transfer"
-                      busy={rowBusy}
-                      accent
-                      title="Make this member admin and step down to member"
-                      onClick={() => {
-                        if (
-                          window.confirm(
-                            `Transfer admin to ${m.name || m.handle}? You'll step down to a regular member.`,
-                          )
-                        ) {
-                          run(m.email, () =>
-                            api.teamTransferAdmin(repoRoot, m.email),
-                          );
-                        }
-                      }}
-                    />
-                  </>
-                )}
-              </div>
-            ) : (
-              <>
-                {/* Your own card gets the photo control — pick a picture, or
-                    drop back to your GitHub avatar / animal monogram. Set for
-                    yourself only; everyone else falls back automatically. */}
-                {isMe && (
-                  <div className="flex items-center gap-1 flex-shrink-0">
-                    <RoleBtn
-                      label={
-                        avatars[m.email.toLowerCase()] ? "Change photo" : "Set photo"
-                      }
-                      busy={rowBusy}
-                      onClick={() => pickPhoto(m.email)}
-                    />
-                    {avatars[m.email.toLowerCase()] && (
-                      <button
-                        type="button"
-                        disabled={rowBusy}
-                        onClick={() => clearPhoto(m.email)}
-                        title="Remove your photo"
-                        className="rounded border border-line-soft px-1 py-0.5 text-[10.5px] leading-none text-text-4 hover:text-text-1 hover:bg-bg-2 disabled:opacity-50"
-                      >
-                        {rowBusy ? "…" : "Remove"}
-                      </button>
-                    )}
-                  </div>
-                )}
-                <div className="text-[10.5px] text-text-4 tabular-nums">
-                  {m.commits} commit{m.commits === 1 ? "" : "s"}
-                </div>
-                <div className="text-[10.5px] text-text-4 tabular-nums w-16 text-right">
-                  {relAge(m.last_seen)}
-                </div>
-              </>
-            )}
-          </div>
-        );
-      })}
-    </div>
-  );
-}
-
-function RoleBtn({
-  label,
-  busy,
-  accent,
-  title,
-  onClick,
-}: {
-  label: string;
-  busy: boolean;
-  accent?: boolean;
-  title?: string;
-  onClick: () => void;
-}) {
-  return (
-    <button
-      type="button"
-      disabled={busy}
-      onClick={onClick}
-      title={title}
-      className={`text-[10.5px] px-1.5 py-0.5 rounded border transition-colors disabled:opacity-50 ${
-        accent
-          ? "border-line-soft text-text-2 hover:text-text-1 hover:border-line"
-          : "border-line-soft text-text-3 hover:text-text-1 hover:bg-bg-2"
-      }`}
-      style={
-        accent
-          ? { color: "var(--color-accent)", borderColor: "color-mix(in srgb, var(--color-accent) 35%, transparent)" }
-          : undefined
-      }
-    >
-      {busy ? "…" : label}
-    </button>
-  );
-}
-
-// Strip Rust's "Err(...)" wrapper noise so the panel surfaces just the
-// human-readable reason a role change was refused.
-function humanizeErr(e: unknown): string {
-  const s = String((e as { message?: string })?.message ?? e ?? "").trim();
-  return s.replace(/^Error:\s*/i, "") || "Something went wrong";
-}
-
-// Channels admin panel. Channels are advisory-private: the `visibility`
-// flag governs what the rail surfaces, not cryptographic access (anyone
-// with the clone can read the JSONL). Team admins (and per-channel
-// admins) can create open/private channels, manage membership, set a
-// topic, and delete non-core channels. Built-in channels are protected.
-const CORE_CHANNEL_SLUGS = ["general", "agents", "sentinel", "pull-requests"];
-
-function TeamChannelsPane({ repoRoot }: { repoRoot: string }) {
-  // Cached per repo (SWR) so reopening Settings → Team → Channels paints from
-  // the last load instead of blanking to "Loading…" every time.
-  const cacheKey = `settings-team-channels:${repoRoot}`;
-  const [manifest, setManifest] = useState<TeamManifest | null>(
-    () => peekCache<{ manifest: TeamManifest | null; identity: TeamIdentity | null }>(cacheKey)?.manifest ?? null,
-  );
-  const [identity, setIdentity] = useState<TeamIdentity | null>(
-    () => peekCache<{ manifest: TeamManifest | null; identity: TeamIdentity | null }>(cacheKey)?.identity ?? null,
-  );
-  const [err, setErr] = useState<string | null>(null);
-  const [actionErr, setActionErr] = useState<string | null>(null);
-  const [busy, setBusy] = useState<string | null>(null);
-  const [newName, setNewName] = useState("");
-  const [newVisibility, setNewVisibility] = useState<"open" | "private">("open");
-  const [expanded, setExpanded] = useState<string | null>(null);
-
-  const load = useCallback(async () => {
-    setErr(null);
-    const [t, id] = await Promise.all([
-      api.teamLoad(repoRoot),
-      api.teamIdentity(repoRoot).catch(() => null),
-    ]);
-    setManifest(t);
-    setIdentity(id);
-    writeCache(cacheKey, { manifest: t, identity: id });
-  }, [repoRoot, cacheKey]);
-
-  useEffect(() => {
-    let cancelled = false;
-    const cached = peekCache<{ manifest: TeamManifest | null; identity: TeamIdentity | null }>(cacheKey);
-    setManifest(cached?.manifest ?? null);
-    setIdentity(cached?.identity ?? null);
-    setActionErr(null);
-    load().catch((e) => {
-      if (!cancelled) setErr(String(e));
-    });
-    return () => {
-      cancelled = true;
-    };
-  }, [repoRoot, load, cacheKey]);
-
-  const run = useCallback(
-    async (key: string, fn: () => Promise<TeamManifest>) => {
-      setBusy(key);
-      setActionErr(null);
-      try {
-        const m = await fn();
-        setManifest(m);
-        const id = await api.teamIdentity(repoRoot).catch(() => null);
-        setIdentity(id);
-      } catch (e) {
-        setActionErr(humanizeErr(e));
-      } finally {
-        setBusy(null);
-      }
-    },
-    [repoRoot],
-  );
-
-  if (err) return <ErrorState>{err}</ErrorState>;
-  if (!manifest) return <LoadingState label="Loading your team settings…" />;
-
-  const iAmAdmin = identity?.admin ?? false;
-  const myEmail = (identity?.email ?? "").toLowerCase();
-  const members = manifest.members ?? [];
-  const metaBySlug = new Map<string, ChannelMeta>(
-    (manifest.channel_meta ?? []).map((c) => [c.slug, c]),
-  );
-  // Stable ordering: core channels first (in canonical order), then the
-  // rest alphabetically — mirrors how the chat rail groups them.
-  const channels = [...(manifest.channels ?? [])].sort((a, b) => {
-    const ai = CORE_CHANNEL_SLUGS.indexOf(a);
-    const bi = CORE_CHANNEL_SLUGS.indexOf(b);
-    if (ai !== -1 || bi !== -1) {
-      if (ai === -1) return 1;
-      if (bi === -1) return -1;
-      return ai - bi;
-    }
-    return a.localeCompare(b);
-  });
-
-  const canAdminChannel = (slug: string) =>
-    iAmAdmin ||
-    (metaBySlug.get(slug)?.admins ?? []).some(
-      (a) => a.toLowerCase() === myEmail,
-    );
-
-  const createChannel = () => {
-    const name = newName.trim();
-    if (!name) return;
-    run("__create__", () =>
-      api.teamChannelCreate(
-        repoRoot,
-        name,
-        newVisibility === "private"
-          ? { visibility: "private", members: [] }
-          : undefined,
-      ),
-    ).then(() => {
-      setNewName("");
-      if (newVisibility === "private") {
-        setExpanded(slugify(name));
-      }
-      setNewVisibility("open");
-    });
-  };
-
-  return (
-    <div className="space-y-2">
-      <div className="text-[10.5px] uppercase tracking-wider text-text-4">
-        {channels.length} channel{channels.length === 1 ? "" : "s"}
-      </div>
-
-      {/* Create row */}
-      <div className="flex items-center gap-1.5">
-        <span className="text-text-4 text-[13px] pl-0.5">#</span>
-        <Input
-          value={newName}
-          onChange={(e) => setNewName(e.target.value)}
-          onKeyDown={(e) => {
-            if (e.key === "Enter") createChannel();
-          }}
-          placeholder="new-channel"
-          className="flex-1 min-w-0"
-        />
-        <Select
-          value={newVisibility}
-          onChange={(v) => setNewVisibility(v as "open" | "private")}
-          options={[
-            { value: "open", label: "Open" },
-            { value: "private", label: "Private" },
-          ]}
-          aria-label="Channel visibility"
-          className="w-auto min-w-[110px]"
-        />
-        <button
-          type="button"
-          disabled={busy === "__create__" || !newName.trim()}
-          onClick={createChannel}
-          className="text-[11.5px] font-medium px-2 py-1 rounded text-bg-deep disabled:opacity-40"
-          style={{ background: "var(--color-accent)" }}
-        >
-          {busy === "__create__" ? "…" : "Create"}
-        </button>
-      </div>
-
-      {actionErr && (
-        <div
-          className="text-[10.5px] rounded px-2 py-1 leading-snug"
-          style={{
-            color: "var(--color-red)",
-            background: "color-mix(in srgb, var(--color-red) 12%, transparent)",
-            border:
-              "1px solid color-mix(in srgb, var(--color-red) 30%, transparent)",
-          }}
-        >
-          {actionErr}
-        </div>
-      )}
-
-      <div className="space-y-0.5">
-        {channels.map((slug) => {
-          const meta = metaBySlug.get(slug);
-          const isPrivate = (meta?.visibility ?? "open") === "private";
-          const isCore = CORE_CHANNEL_SLUGS.includes(slug);
-          const admin = canAdminChannel(slug);
-          const rowBusy = busy === slug;
-          const memberCount = meta?.members?.length ?? 0;
-          const isOpen = expanded === slug;
-          return (
-            <div
-              key={slug}
-              className="rounded border border-transparent hover:border-line-soft hover:bg-bg-2/40 transition-colors"
-            >
-              <div className="flex items-center gap-2 px-2 py-1.5">
-                <span className="text-text-4 flex-shrink-0">
-                  {isPrivate ? <LockGlyph /> : <span className="text-[13px]">#</span>}
-                </span>
-                <div className="flex-1 min-w-0">
-                  <div className="flex items-center gap-2">
-                    <span className="text-[12px] text-text-1 font-medium truncate">
-                      {slug}
-                    </span>
-                    {isCore && (
-                      <span className="text-[9px] uppercase tracking-wider px-1 py-0.5 rounded bg-bg-3 text-text-4">
-                        built-in
-                      </span>
-                    )}
-                    {isPrivate && (
-                      <span className="text-[10px] text-text-4">
-                        {memberCount} member{memberCount === 1 ? "" : "s"}
-                      </span>
-                    )}
-                  </div>
-                  {meta?.topic && (
-                    <div className="text-[10.5px] text-text-4 truncate italic">
-                      {meta.topic}
-                    </div>
-                  )}
-                </div>
-
-                {admin && (
-                  <div className="flex items-center gap-1 flex-shrink-0">
-                    <RoleBtn
-                      label={isPrivate ? "Make open" : "Make private"}
-                      busy={rowBusy}
-                      onClick={() =>
-                        run(slug, () =>
-                          api.teamChannelUpdate(repoRoot, slug, {
-                            visibility: isPrivate ? "open" : "private",
-                          }),
-                        )
-                      }
-                    />
-                    <RoleBtn
-                      label="Topic"
-                      busy={rowBusy}
-                      onClick={() => {
-                        const t = window.prompt(
-                          `Topic for #${slug}`,
-                          meta?.topic ?? "",
-                        );
-                        if (t !== null) {
-                          run(slug, () =>
-                            api.teamChannelUpdate(repoRoot, slug, { topic: t }),
-                          );
-                        }
-                      }}
-                    />
-                    {isPrivate && (
-                      <RoleBtn
-                        label={isOpen ? "Done" : "Members"}
-                        busy={false}
-                        onClick={() => setExpanded(isOpen ? null : slug)}
-                      />
-                    )}
-                    {!isCore && (
-                      <RoleBtn
-                        label="Delete"
-                        busy={rowBusy}
-                        onClick={() => {
-                          if (
-                            window.confirm(`Delete #${slug}? This can't be undone.`)
-                          ) {
-                            run(slug, () => api.teamChannelDelete(repoRoot, slug));
-                          }
-                        }}
-                      />
-                    )}
-                  </div>
-                )}
-              </div>
-
-              {isOpen && isPrivate && admin && (
-                <div className="px-2 pb-2 pt-0.5 ml-6 space-y-0.5 border-t border-line-soft mt-0.5">
-                  <div className="text-[10px] uppercase tracking-wider text-text-5 pt-1.5 pb-0.5">
-                    Who's in #{slug}
-                  </div>
-                  {members.map((m) => {
-                    const inChannel = (meta?.members ?? []).some(
-                      (e) => e.toLowerCase() === m.email.toLowerCase(),
-                    );
-                    const isChAdmin = (meta?.admins ?? []).some(
-                      (e) => e.toLowerCase() === m.email.toLowerCase(),
-                    );
-                    return (
-                      <div key={m.email} className="flex items-center gap-1">
-                        <button
-                          type="button"
-                          disabled={rowBusy}
-                          onClick={() =>
-                            run(slug, () =>
-                              inChannel
-                                ? api.teamChannelMemberRemove(repoRoot, slug, m.email)
-                                : api.teamChannelMemberAdd(repoRoot, slug, m.email),
-                            )
-                          }
-                          className="flex-1 min-w-0 flex items-center gap-2 px-1.5 py-1 rounded text-left hover:bg-bg-2 transition-colors disabled:opacity-50"
-                        >
-                          <span
-                            className="w-3.5 h-3.5 rounded-sm border flex items-center justify-center flex-shrink-0"
-                            style={{
-                              borderColor: inChannel
-                                ? "var(--color-accent)"
-                                : "var(--color-line)",
-                              background: inChannel
-                                ? "var(--color-accent)"
-                                : "transparent",
-                            }}
-                          >
-                            {inChannel && (
-                              <svg width="9" height="9" viewBox="0 0 16 16" fill="none">
-                                <path
-                                  d="M3.5 8.5l3 3 6-7"
-                                  stroke="var(--color-bg-deep)"
-                                  strokeWidth="2"
-                                  strokeLinecap="round"
-                                  strokeLinejoin="round"
-                                />
-                              </svg>
-                            )}
-                          </span>
-                          <span className="text-[11.5px] text-text-2 truncate">
-                            {m.name || m.handle}
-                          </span>
-                          <span className="text-[10px] text-text-5 truncate">
-                            {m.email}
-                          </span>
-                        </button>
-                        <button
-                          type="button"
-                          disabled={rowBusy || !inChannel}
-                          title={
-                            isChAdmin
-                              ? "Channel admin — click to demote"
-                              : inChannel
-                                ? "Make channel admin"
-                                : "Add as member first"
-                          }
-                          onClick={() =>
-                            run(slug, () =>
-                              api.teamChannelAdminSet(
-                                repoRoot,
-                                slug,
-                                m.email,
-                                !isChAdmin,
-                              ),
-                            )
-                          }
-                          className="flex-shrink-0 w-6 h-6 rounded flex items-center justify-center hover:bg-bg-2 disabled:opacity-30 transition-colors"
-                          style={{
-                            color: isChAdmin
-                              ? "var(--color-amber)"
-                              : "var(--color-text-5)",
-                          }}
-                        >
-                          <StarGlyph filled={isChAdmin} />
-                        </button>
-                      </div>
-                    );
-                  })}
-                </div>
-              )}
-            </div>
-          );
-        })}
-      </div>
-
-      {!iAmAdmin && (
-        <div className="text-[10.5px] text-text-4 leading-snug pt-1">
-          You can create channels. Managing visibility, membership, topics
-          and deletion needs team-admin (or channel-admin) rights.
-        </div>
-      )}
-    </div>
-  );
-}
-
-function LockGlyph() {
-  return (
-    <svg width="12" height="12" viewBox="0 0 16 16" fill="none">
-      <rect
-        x="3.5"
-        y="7"
-        width="9"
-        height="6.5"
-        rx="1.2"
-        stroke="currentColor"
-        strokeWidth="1.3"
-      />
-      <path
-        d="M5.5 7V5a2.5 2.5 0 0 1 5 0v2"
-        stroke="currentColor"
-        strokeWidth="1.3"
-        strokeLinecap="round"
-      />
-    </svg>
-  );
-}
-
-// Star marking a channel-level admin — filled when active, outline when
-// the member is just a regular channel member.
-function StarGlyph({ filled }: { filled: boolean }) {
-  return (
-    <svg
-      width="13"
-      height="13"
-      viewBox="0 0 16 16"
-      fill={filled ? "currentColor" : "none"}
-      stroke="currentColor"
-      strokeWidth="1.2"
-      strokeLinejoin="round"
-    >
-      <path d="M8 1.8l1.8 3.9 4.2.5-3.1 2.9.8 4.2L8 11.9 4.3 14l.8-4.2L2 6.9l4.2-.5z" />
-    </svg>
-  );
-}
-
-// Local slugify mirroring the Rust `slugify_channel` for optimistic UI
-// (auto-expanding the just-created private channel's member manager).
-function slugify(name: string): string {
-  return name
-    .trim()
-    .replace(/^#+/, "")
-    .toLowerCase()
-    .replace(/[^a-z0-9_-]/g, "-");
-}
-
-function TeamActivityPane({ repoRoot }: { repoRoot: string }) {
-  return <StandupView repoRoot={repoRoot} />;
-}
-
-function TeamUsagePane({ repoRoot: _repoRoot }: { repoRoot: string }) {
-  const [data, setData] = useState<BillingUsageByMember | null>(null);
-  const [error, setError] = useState<string | null>(null);
-  const [loading, setLoading] = useState(true);
-
-  useEffect(() => {
-    let alive = true;
-    setLoading(true);
-    setError(null);
-    api
-      .cloudBillingUsageByMember()
-      .then((r) => {
-        if (alive) setData(r);
-      })
-      .catch((e) => {
-        if (alive) setError(String(e?.message ?? e));
-      })
-      .finally(() => {
-        if (alive) setLoading(false);
-      });
-    return () => {
-      alive = false;
-    };
-  }, []);
-
-  if (loading) {
-    return (
-      <div className="text-[11.5px] text-text-3 px-1 py-2">
-        Loading token usage…
-      </div>
-    );
-  }
-
-  if (error) {
-    return (
-      <div className="space-y-2 text-[11.5px] text-text-3 leading-relaxed">
-        <div className="text-[12px] text-text-1 font-medium">Token spend</div>
-        <div className="rounded border border-amber/40 bg-amber/15 px-2 py-1.5 text-amber">
-          Couldn't load token usage:{" "}
-          <span className="font-mono break-all">{error}</span>
-        </div>
-        <p className="text-[10.5px] text-text-4">
-          Sign in to the cloud (Onboarding → Cloud) to see per-member
-          spend. Until then, <span className="font-mono">aura usage</span>{" "}
-          in the terminal shows per-machine totals.
-        </p>
-      </div>
-    );
-  }
-
-  const members = data?.members ?? [];
-  const scope = data?.scope ?? "self";
-  const month = data?.month ?? "—";
-  const total = data?.total_cost_usd ?? 0;
-
-  return (
-    <div className="space-y-3 text-[11.5px] text-text-3 leading-relaxed">
-      <div className="flex items-baseline justify-between gap-2">
-        <div className="text-[12px] text-text-1 font-medium">
-          Token spend · {month}
-        </div>
-        <div className="text-[10.5px] text-text-4">
-          {scope === "org" ? "All members" : "Your usage"} · total{" "}
-          <span className="font-mono">${total.toFixed(2)}</span>
-        </div>
-      </div>
-
-      {members.length === 0 ? (
-        <div className="rounded border border-bg-3 bg-bg-1/50 px-2 py-2 text-text-4">
-          No LLM activity recorded for{" "}
-          <span className="font-mono">{month}</span> yet. As soon as an
-          agent in this org calls a model through the Aura proxy, its
-          tokens land here.
-        </div>
-      ) : (
-        <div className="rounded border border-bg-3 overflow-hidden">
-          <div className="grid grid-cols-[1fr_80px_80px_70px] gap-2 px-2 py-1.5 text-[10.5px] text-text-4 bg-bg-1/60 border-b border-bg-3">
-            <span>Member</span>
-            <span className="text-right">In</span>
-            <span className="text-right">Out</span>
-            <span className="text-right">USD</span>
-          </div>
-          {members.map((m) => (
-            <div
-              key={m.developer_id}
-              className="grid grid-cols-[1fr_80px_80px_70px] gap-2 px-2 py-1.5 border-b border-bg-3 last:border-b-0 hover:bg-bg-2/40"
-            >
-              <div className="min-w-0">
-                <div className="text-text-1 truncate">
-                  {m.display_name || m.github_login}
-                </div>
-                {m.display_name && (
-                  <div className="text-[10px] text-text-4 truncate">
-                    @{m.github_login}
-                  </div>
-                )}
-              </div>
-              <span className="text-right font-mono tabular-nums">
-                {formatTokens(m.tokens_in)}
-              </span>
-              <span className="text-right font-mono tabular-nums">
-                {formatTokens(m.tokens_out)}
-              </span>
-              <span className="text-right font-mono tabular-nums">
-                ${m.cost_usd.toFixed(2)}
-              </span>
-            </div>
-          ))}
-        </div>
-      )}
-
-      <p className="text-[10.5px] text-text-4">
-        Captured per-call from the cloud LLM proxy. Members who run
-        their own keys outside the proxy don't show up here.
-      </p>
-    </div>
-  );
-}
-
-function formatTokens(n: number): string {
-  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
-  if (n >= 1_000) return `${(n / 1_000).toFixed(1)}k`;
-  return String(n);
-}
-
-function relAge(unixSecs: number): string {
-  if (!unixSecs) return "—";
-  const ageS = Math.max(0, Math.floor(Date.now() / 1000 - unixSecs));
-  if (ageS < 60) return `${ageS}s ago`;
-  if (ageS < 3600) return `${Math.floor(ageS / 60)}m ago`;
-  if (ageS < 86400) return `${Math.floor(ageS / 3600)}h ago`;
-  return `${Math.floor(ageS / 86400)}d ago`;
-}
-
 // ── Experimental ──────────────────────────────────────────────────────
 
 function ExperimentalTab() {
@@ -5705,10 +2003,7 @@ function ExperimentalTab() {
   const [glass, setGlass] = useState(sidebarGlassEnabled);
   return (
     <>
-      <PaneHeader
-        title="Experimental"
-        subtitle="Preview features. May change or be removed without notice."
-      />
+      <PaneIntro text="Preview features. May change or be removed without notice." />
       {sidebarGlassAvailable() ? (
         <Section title="Appearance">
           <Toggle
@@ -5771,7 +2066,7 @@ function KeysTab({
 }) {
   return (
     <Section title="Provider API keys">
-      <p className="text-[11.5px] text-text-3 mb-2">
+      <p className="text-sm text-text-3 mb-2">
         Stored in <code>~/.aura/credentials.json</code> (mode 0600). Cleared
         keys also clear the env-var fallback from <code>aura</code>'s point
         of view.
@@ -5855,7 +2150,7 @@ function KeyRow({
   };
   return (
     <div className="flex items-center gap-2 py-1.5 border-b border-line-soft">
-      <div className="w-24 text-[12px] text-text-2">{label}</div>
+      <div className="w-24 text-sm text-text-2">{label}</div>
       <div className="flex-1 min-w-0">
         {editing ? (
           <div className="flex items-center gap-1.5">
@@ -5878,7 +2173,7 @@ function KeyRow({
               type="button"
               onClick={save}
               disabled={!value.trim() || busy}
-              className="text-[11.5px] px-2 py-1 rounded bg-accent-green text-bg-deep disabled:opacity-40"
+              className="text-sm px-2 py-1 rounded bg-accent-green text-bg-deep disabled:opacity-40"
             >
               save
             </button>
@@ -5888,18 +2183,18 @@ function KeyRow({
                 setEditing(false);
                 setValue("");
               }}
-              className="text-[11.5px] px-2 py-1 rounded text-text-3 hover:text-text-1"
+              className="text-sm px-2 py-1 rounded text-text-3 hover:text-text-1"
             >
               cancel
             </button>
           </div>
         ) : (
-          <div className="flex items-center gap-2 text-[12px]">
+          <div className="flex items-center gap-2 text-sm">
             <span className="font-mono text-text-3">
               {last4 ? `••••${last4}` : "—"}
             </span>
             {active && (
-              <span className="text-[10px] text-accent-green border border-accent-green/40 rounded px-1.5 py-0.5">
+              <span className="text-2xs text-accent-green border border-accent-green/40 rounded px-1.5 py-0.5">
                 active
               </span>
             )}
@@ -5960,14 +2255,36 @@ function PolicyTab({
   const locked = view.strict_mode_locked;
   const disable = async () => {
     if (locked) return;
-    if (!window.confirm("Disable strict mode? Pre-commit guard will stop blocking risky AST changes.")) {
+    if (
+      !(await askConfirm({
+        title: "Turn strict mode off?",
+        body: "The pre-commit guard stops blocking risky changes. An agent could then delete code without accounting for it.",
+        confirmLabel: "Turn it off",
+        tone: "danger",
+      }))
+    ) {
       return;
     }
     try {
       await api.settingsDisableStrictUnlocked();
       onChanged();
     } catch (e) {
-      alert(String(e));
+      await askNotice({ title: "Couldn't change strict mode", body: String(e) });
+    }
+  };
+  // The one direction this pane couldn't go. Turning the guard off was a
+  // click; turning it on was `aura config set strict-mode true` in a
+  // terminal — which also refuses outside an interactive TTY and demands a
+  // passcode, so the sentence's "(with a passcode, recommended)" was not
+  // optional either. Easy to remove the protection, hard to add it, on the
+  // setting the whole product is about. No confirm: switching a guard on is
+  // never the dangerous direction, and it's one click back.
+  const enable = async () => {
+    try {
+      await api.settingsEnableStrictUnlocked();
+      onChanged();
+    } catch (e) {
+      await askNotice({ title: "Couldn't change strict mode", body: String(e) });
     }
   };
   return (
@@ -5990,8 +2307,54 @@ function PolicyTab({
               />
             </>
           }
+          // What strict mode is doing right now, said in the row it belongs to
+          // rather than in a loose paragraph hung underneath the section. Out
+          // there it sat outside the divided list, so it read as a footnote
+          // about the section instead of the description of this setting, and
+          // it took the row's own bottom hairline with it.
+          description={
+            <>
+              {locked ? (
+                <>
+                  Strict mode is passcode-locked. Only a human at a real
+                  terminal can turn it off. Run{" "}
+                  <code className="text-text-2">aura config reset-passcode</code>{" "}
+                  from a real terminal.
+                </>
+              ) : strict ? (
+                <>
+                  Strict mode is on. Before every commit, Aura checks the AI
+                  didn't quietly delete working code or do something different
+                  from what it said, and stops the commit if it did. Anything on
+                  this machine can still switch it back off — to lock it behind
+                  a passcode, run{" "}
+                  <code className="text-text-2">
+                    aura config set strict-mode true
+                  </code>{" "}
+                  from a real terminal.
+                </>
+              ) : (
+                <>
+                  Strict mode is off. Turn it on and Aura stops any commit where
+                  the AI deleted working code without accounting for it, or did
+                  something different from what it promised. To also lock it, so
+                  nothing on this machine — an agent included — can switch it
+                  back off, run{" "}
+                  <code className="text-text-2">
+                    aura config set strict-mode true
+                  </code>{" "}
+                  from a real terminal and set a passcode.
+                </>
+              )}
+            </>
+          }
         >
           <div className="flex items-center gap-1.5">
+            {!strict && !locked && (
+              <Button variant="accentSoft" size="xs" onClick={enable}>
+                Turn on
+              </Button>
+            )}
             {strict && !locked && (
               <Button
                 variant="ghost"
@@ -6004,36 +2367,40 @@ function PolicyTab({
             )}
           </div>
         </Row>
-        <p className="text-[11.5px] text-text-3 mt-1.5 leading-relaxed">
-          {locked
-            ? "Strict mode is passcode-locked — only a human at a real terminal can turn it off. Run "
-            : strict
-              ? "Strict mode is on. Before every commit, Aura checks the AI didn't quietly delete working code or do something different from what it said — and stops the commit if it did. "
-              : "Strict mode is off. Turn it on (with a passcode, recommended) so Aura stops any commit where the AI deletes working code or strays from what it promised: run "}
-          {!locked && (
-            <code className="text-text-2">aura config set strict-mode true</code>
-          )}
-          {locked && (
-            <code className="text-text-2">aura config reset-passcode</code>
-          )}
-          {locked && " from a real terminal."}
-        </p>
       </Section>
-      <Section title="Telemetry">
+      {/* There used to be a second telemetry switch here — "Anonymous
+          telemetry", hinted "Per-command usage counts." It was the SAME
+          boolean as Telemetry → Usage analytics: `settings_set_telemetry`
+          and `telemetry_set_consent` both write `telemetry_enabled` into
+          ~/.aura/credentials.json. Two rows, two names, two descriptions,
+          one value — and neither read the other, so flipping this one left
+          the other still reading ON until its own fetch reran. On a privacy
+          control that is the worst possible failure: you turn it off, you
+          see something that looks like it's still on, and you can't tell
+          which is true. telemetry.rs already knew, in a comment: "the
+          Settings → Privacy toggle, which wrote `telemetry_enabled` alone".
+          It self-healed the consent marker and left the second switch.
+
+          One switch now, in the Telemetry tab, beside the crash-report
+          switch it shares a decision with and above the counts view that
+          shows what's been recorded. */}
+      {/* Both of these described themselves in terms of the machinery rather
+          than the consequence, and both descriptions were wrong about the
+          consequence — see each hint. Checked against the code that reads the
+          flags: aura-cli/src/embeddings.rs and, for dev mode,
+          security.rs + main.rs (secret guard, taste gate) + ci.rs. */}
+      <Section title="Advanced">
         <Toggle
-          label="Anonymous telemetry"
-          hint="Per-command usage counts. No content, paths, or identities are sent."
-          value={view.telemetry_enabled}
-          onChange={async (v) => {
-            await api.settingsSetTelemetry(v);
-            onChanged();
-          }}
-        />
-      </Section>
-      <Section title="Engine flags">
-        <Toggle
-          label="Local embeddings"
-          hint="Force 100% offline embeddings (slower; requires sovereign embedding daemon)."
+          label="Keep search on this machine"
+          /* Was: "Force 100% offline embeddings (slower; requires sovereign
+             embedding daemon)." Both parenthetical claims were false. The
+             local path is `embed_local` — a trigram feature hash running
+             in-process, so there is no daemon to require, and it is not
+             slower than an HTTPS round trip with an 8-second timeout. It
+             tells you a privacy control costs speed and needs infrastructure
+             you don't have, which are two reasons not to turn on the private
+             option. What it actually trades is precision. */
+          hint="To search by meaning, Aura sends your text to OpenAI or Gemini to read. Turn this on and it never leaves this machine. Aura matches with its own built-in method instead, which is less precise but sends nothing anywhere."
           value={view.use_local_embeddings}
           onChange={async (v) => {
             await api.settingsSetLocalEmbeddings(v);
@@ -6042,7 +2409,14 @@ function PolicyTab({
         />
         <Toggle
           label="Dev mode"
-          hint="Bypass heavy infrastructure for local development. Off in production."
+          /* Was: "Bypass heavy infrastructure for local development. Off in
+             production." There is no production — this is an app on your
+             desk — and "heavy infrastructure" is three specific guards, one
+             of which is the thing that stops you committing an API key.
+             A switch that turns off a secret guard has to say so. The name
+             stays "Dev mode" because that's what the CLI calls it, and one
+             more name for one thing is what the last two commits were for. */
+          hint="Trades Aura's checks for speed on a machine only you use. Aura stops blocking commits that look like they contain a secret, skips the house-style check, and sets up one local key instead of the full recovery-key set."
           value={view.dev_mode}
           onChange={async (v) => {
             await api.settingsSetDevMode(v);
@@ -6097,10 +2471,13 @@ function WorktreesSection({
   }
   return (
     <Section title="Parallel copies">
-      <Row label="Base folder">
+      <Row
+        label="Base folder"
+        description="Where Aura keeps your parallel copies. Each task gets its own folder here, so agents can work side by side without stepping on each other. Pick any folder you can write to — Aura creates it the first time it’s needed."
+      >
         <div className="flex items-center gap-1.5">
           <code
-            className="text-[11.5px] text-text-2 truncate max-w-[260px]"
+            className="text-sm text-text-2 truncate max-w-[260px]"
             title={current ?? "~/.aura/worktrees"}
           >
             {current ?? "~/.aura/worktrees (default)"}
@@ -6115,12 +2492,6 @@ function WorktreesSection({
           )}
         </div>
       </Row>
-      <p className="text-[11.5px] text-text-3 mt-1.5 leading-relaxed">
-        Where Aura keeps your parallel copies. Each task gets its own folder
-        here, so agents can work side by side without stepping on each other.
-        Pick any folder you can write to — Aura creates it the first time it&rsquo;s
-        needed.
-      </p>
     </Section>
   );
 }
@@ -6132,27 +2503,32 @@ function WorktreesSection({
 function TemplatesSection({ repoRoot }: { repoRoot: string }) {
   const [packs, setPacks] = useState<PackDescriptor[] | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
-  const [installed, setInstalled] = useState<Set<string>>(new Set());
   const [error, setError] = useState<string | null>(null);
   const [toast, setToast] = useState<string | null>(null);
 
-  useEffect(() => {
-    const load = async () => {
-      try {
-        const res = await api.auraCli(repoRoot, ["policy", "list", "--json"]);
-        const out = res.stdout.trim();
-        if (!out) {
-          setError(res.stderr.trim() || `exit ${res.status}`);
-          return;
-        }
-        const parsed = JSON.parse(out) as PackDescriptor[];
-        setPacks(parsed);
-      } catch (e) {
-        setError(String(e));
+  // Which packs this repo already has is read off `production.aura.json` by
+  // the CLI, not remembered here — a Set seeded empty made every pack look
+  // uninstalled on open, however many were already merged.
+  const load = useCallback(async () => {
+    try {
+      const res = await api.auraCli(repoRoot, ["policy", "list", "--json"]);
+      const out = res.stdout.trim();
+      if (!out) {
+        setError(res.stderr.trim() || `exit ${res.status}`);
+        // Otherwise the spinner runs under the error message forever.
+        setPacks([]);
+        return;
       }
-    };
-    load();
+      setPacks(JSON.parse(out) as PackDescriptor[]);
+    } catch (e) {
+      setError(String(e));
+      setPacks([]);
+    }
   }, [repoRoot]);
+
+  useEffect(() => {
+    void load();
+  }, [load]);
 
   const install = async (pack: PackDescriptor) => {
     setBusy(pack.id);
@@ -6163,9 +2539,11 @@ function TemplatesSection({ repoRoot }: { repoRoot: string }) {
       if (res.status !== 0) {
         setError(res.stderr.trim() || `exit ${res.status}`);
       } else {
-        setInstalled((prev) => new Set(prev).add(pack.id));
         setToast(`${pack.label} merged into production.aura.json`);
         setTimeout(() => setToast(null), 3000);
+        // Re-read rather than assume: `policy add` can no-op on an unknown
+        // id, and the file is the authority on what this repo enforces.
+        await load();
       }
     } catch (e) {
       setError(String(e));
@@ -6176,16 +2554,16 @@ function TemplatesSection({ repoRoot }: { repoRoot: string }) {
 
   return (
     <Section title="Rule template library">
-      <p className="text-[11.5px] text-text-3 mb-2 leading-relaxed">
+      <p className="text-sm text-text-3 mb-2 leading-relaxed">
         Pre-built invariant packs. Install merges into{" "}
         <code className="text-text-2">production.aura.json</code> at the repo
-        root. Layered packs additively — install several to compose.
+        root. Layered packs additively. Install several to compose.
       </p>
-      {error && <div role="alert" className="text-[11.5px] text-red mb-2">{error}</div>}
-      {toast && <div className="text-[11.5px] text-accent-green mb-2">✓ {toast}</div>}
+      {error && <div role="alert" className="text-sm text-red mb-2">{error}</div>}
+      {toast && <div className="text-sm text-accent-green mb-2">✓ {toast}</div>}
       {packs === null ? (
-        <div className="flex items-center gap-1.5 text-[11.5px] text-text-4 py-2" role="status">
-          <AsciiSpinner className="text-[11.5px] leading-none" />
+        <div className="flex items-center gap-1.5 text-sm text-text-4 py-2" role="status">
+          <AsciiSpinner className="text-sm leading-none" />
           Loading rule packs…
         </div>
       ) : (
@@ -6197,1042 +2575,44 @@ function TemplatesSection({ repoRoot }: { repoRoot: string }) {
             >
               <div className="flex-1 min-w-0">
                 <div className="flex items-center gap-2 mb-0.5">
-                  <span className="text-[12px] text-text-1 font-medium">
+                  <span className="text-sm text-text-1 font-medium">
                     {p.label}
                   </span>
-                  <span className="text-[10px] uppercase tracking-wide px-1.5 py-0.5 rounded bg-bg-2 text-text-3">
+                  <span className="text-2xs px-1.5 py-0.5 rounded bg-bg-2 text-text-3">
                     {p.category}
                   </span>
-                  <span className="text-[10px] text-text-4">
+                  <span className="text-2xs text-text-4">
                     {p.rule_count} rules
                   </span>
                 </div>
-                <div className="text-[11px] text-text-3 leading-relaxed">
+                <div className="text-xs text-text-3 leading-relaxed">
                   {p.description}
                 </div>
               </div>
-              <Button
-                variant="ghost"
-                size="xs"
-                disabled={busy === p.id}
-                onClick={() => install(p)}
-                title={`aura policy add ${p.id}`}
-              >
-                {busy === p.id
-                  ? "installing…"
-                  : installed.has(p.id)
-                    ? "re-install"
-                    : "install"}
-              </Button>
+              {p.installed ? (
+                // Not a button. Installing a pack that's already in full is a
+                // no-op now that the merge dedupes, so offering "re-install"
+                // was offering nothing — and it was offered because the pane
+                // had no idea the pack was there.
+                <span className="text-xs text-accent-green shrink-0 py-0.5">
+                  ✓ installed
+                </span>
+              ) : (
+                <Button
+                  variant="ghost"
+                  size="xs"
+                  disabled={busy === p.id}
+                  onClick={() => install(p)}
+                  title={`aura policy add ${p.id}`}
+                >
+                  {busy === p.id ? "installing…" : "install"}
+                </Button>
+              )}
             </li>
           ))}
         </ul>
       )}
     </Section>
-  );
-}
-
-// ── Agents ────────────────────────────────────────────────────────────
-
-function AgentsTab() {
-  const [registry, setRegistry] = useState<AgentDescriptor[]>([]);
-  const [tomlEntries, setTomlEntries] = useState<AgentsTomlEntry[]>([]);
-  const [editing, setEditing] = useState<AgentsTomlEntry | null>(null);
-  const [busy, setBusy] = useState(false);
-  const [syncStatus, setSyncStatus] = useState<AgentConfigSyncStatus | null>(null);
-  const [syncBusy, setSyncBusy] = useState<"push" | "pull" | null>(null);
-  const [syncMessage, setSyncMessage] = useState<string | null>(null);
-  const [syncError, setSyncError] = useState<string | null>(null);
-  const reload = async () => {
-    setBusy(true);
-    try {
-      const [reg, toml] = await Promise.all([
-        api.agentsList(),
-        api.settingsAgentsTomlList(),
-      ]);
-      setRegistry(reg);
-      setTomlEntries(toml);
-    } finally {
-      setBusy(false);
-    }
-  };
-  useEffect(() => {
-    reload();
-    void refreshSyncStatus();
-  }, []);
-
-  async function refreshSyncStatus() {
-    try {
-      const status = await api.settingsAgentConfigsStatus();
-      setSyncStatus(status);
-      setSyncError(status.error);
-    } catch (e) {
-      setSyncError(String(e));
-    }
-  }
-
-  async function pushAgentConfigs() {
-    setSyncBusy("push");
-    setSyncError(null);
-    setSyncMessage(null);
-    try {
-      const status = await api.settingsAgentConfigsPush();
-      setSyncStatus(status);
-      const suffix = status.remoteFiles.length === 1 ? "" : "s";
-      setSyncMessage(
-        status.remoteFiles.length > 0
-          ? `Uploaded ${status.remoteFiles.length} redacted configuration file${suffix}.`
-          : "Uploaded an empty configuration bundle; no supported local files were found.",
-      );
-    } catch (e) {
-      setSyncError(String(e));
-    } finally {
-      setSyncBusy(null);
-    }
-  }
-
-  async function pullAgentConfigs() {
-    if (
-      !window.confirm(
-        "Apply the cloud copy on this machine? Aura will back up every existing file beside the original before replacing it.",
-      )
-    ) {
-      return;
-    }
-    setSyncBusy("pull");
-    setSyncError(null);
-    setSyncMessage(null);
-    try {
-      const result = await api.settingsAgentConfigsPull();
-      setSyncStatus(result.status);
-      const fileSuffix = result.applied.length === 1 ? "" : "s";
-      const backupSuffix = result.backups.length === 1 ? "" : "s";
-      setSyncMessage(
-        `Applied ${result.applied.length} configuration file${fileSuffix}${
-          result.backups.length > 0
-            ? ` and created ${result.backups.length} backup${backupSuffix}`
-            : ""
-        }.`,
-      );
-    } catch (e) {
-      setSyncError(String(e));
-    } finally {
-      setSyncBusy(null);
-    }
-  }
-
-  const reloadProviders = async () => {
-    setBusy(true);
-    try {
-      const reg = await api.agentsReload();
-      setRegistry(reg);
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  // Distinguish compiled-in vs TOML-declared so the user knows which
-  // they can edit. TOML ids show up in `tomlEntries`; everything else
-  // is compiled in (claude / gemini / codex / cursor / kimi).
-  const tomlIds = useMemo(() => new Set(tomlEntries.map((e) => e.id)), [
-    tomlEntries,
-  ]);
-
-  return (
-    <>
-      <PaneHeader
-        title="Coding agents"
-        subtitle="The command-line coding agents Aura can drive. Compiled-in providers plus any overrides you declare in ~/.aura/agents.toml."
-      />
-      <div className="mb-3.5 flex items-center gap-1.5">
-        <Button
-          variant="ghost"
-          size="xs"
-          onClick={() =>
-            window.dispatchEvent(new CustomEvent("aura:open-onboarding"))
-          }
-        >
-          Replay onboarding
-        </Button>
-        <Button
-          variant="ghost"
-          size="xs"
-          onClick={reloadProviders}
-          disabled={busy}
-        >
-          Reload
-        </Button>
-        <div className="flex-1" />
-        <Button
-          variant="default"
-          size="xs"
-          onClick={() => setEditing(blankEntry())}
-        >
-          + Add provider
-        </Button>
-      </div>
-      <Card>
-        {registry.map((p) => (
-          <AgentRow
-            key={p.id}
-            descriptor={p}
-            isTomlDeclared={tomlIds.has(p.id)}
-            tomlEntry={tomlEntries.find((e) => e.id === p.id)}
-            onEdit={(e) => setEditing(e)}
-            onRemove={async () => {
-              if (!window.confirm(`Remove TOML override for ${p.id}?`)) return;
-              await api.settingsAgentsTomlRemove(p.id);
-              await reload();
-              await reloadProviders();
-            }}
-          />
-        ))}
-        {tomlEntries
-          .filter((e) => !registry.some((r) => r.id === e.id))
-          .map((e) => (
-            <div
-              key={e.id}
-              className="py-3 text-[11.5px] text-amber"
-            >
-              {e.id} — declared in TOML but not loaded; click Reload above.
-            </div>
-          ))}
-      </Card>
-      <Section title="Cross-machine configuration">
-        <div className="text-[11px] leading-relaxed text-text-3">
-          Carry Claude Code, Codex, and Gemini CLI preferences through your
-          Aura account. Only <code>settings.json</code> and{" "}
-          <code>config.toml</code> are eligible; API keys, tokens, passwords,
-          OAuth state, and authentication files are stripped or never read.
-        </div>
-        <div className="mt-3 rounded-md border border-line-soft bg-bg-1/40 px-3 py-2.5">
-          <div className="flex items-center justify-between gap-3 text-[11px]">
-            <span className="text-text-3">This machine</span>
-            <span className="font-mono text-right text-text-2">
-              {syncStatus?.localFiles.length
-                ? syncStatus.localFiles.join(" · ")
-                : "No supported config files found"}
-            </span>
-          </div>
-          <div className="mt-2 flex items-center justify-between gap-3 border-t border-line-soft pt-2 text-[11px]">
-            <span className="text-text-3">Cloud copy</span>
-            <span className="text-right text-text-2">
-              {!syncStatus?.signedIn
-                ? "Sign in to Aura Cloud to sync"
-                : syncStatus.remoteUpdatedAt
-                  ? `${syncStatus.remoteFiles.length} file${
-                      syncStatus.remoteFiles.length === 1 ? "" : "s"
-                    } · ${syncStatus.remoteSourceDevice ?? "unknown device"} · ${new Date(
-                      syncStatus.remoteUpdatedAt,
-                    ).toLocaleString()}`
-                  : "Not uploaded yet"}
-            </span>
-          </div>
-        </div>
-        {syncError && (
-          <div className="mt-2 text-[11px] text-red" role="alert">
-            {syncError}
-          </div>
-        )}
-        {syncMessage && (
-          <div className="mt-2 text-[11px] text-green">{syncMessage}</div>
-        )}
-        <div className="mt-3 flex items-center gap-2">
-          <Button
-            variant="secondary"
-            size="xs"
-            disabled={!syncStatus?.signedIn || syncBusy !== null}
-            onClick={() => void pushAgentConfigs()}
-          >
-            {syncBusy === "push" ? (
-              <AsciiSpinner className="text-[11px] leading-none" />
-            ) : (
-              <Upload size={12} />
-            )}
-            Upload this machine
-          </Button>
-          <Button
-            variant="secondary"
-            size="xs"
-            disabled={
-              !syncStatus?.signedIn ||
-              !syncStatus.remoteUpdatedAt ||
-              syncBusy !== null
-            }
-            onClick={() => void pullAgentConfigs()}
-          >
-            {syncBusy === "pull" ? (
-              <AsciiSpinner className="text-[11px] leading-none" />
-            ) : (
-              <Download size={12} />
-            )}
-            Apply cloud copy
-          </Button>
-        </div>
-      </Section>
-      {editing && (
-        <AgentEditor
-          entry={editing}
-          onCancel={() => setEditing(null)}
-          onSave={async (entry) => {
-            await api.settingsAgentsTomlUpsert(entry);
-            setEditing(null);
-            await reload();
-            await reloadProviders();
-          }}
-        />
-      )}
-    </>
-  );
-}
-
-function AgentRow({
-  descriptor,
-  isTomlDeclared,
-  tomlEntry,
-  onEdit,
-  onRemove,
-}: {
-  descriptor: AgentDescriptor;
-  isTomlDeclared: boolean;
-  tomlEntry: AgentsTomlEntry | undefined;
-  onEdit: (entry: AgentsTomlEntry) => void;
-  onRemove: () => void;
-}) {
-  const caps = [
-    descriptor.capabilities.stream && "stream",
-    descriptor.capabilities.pty && "pty",
-    descriptor.capabilities.resume && "resume",
-  ].filter(Boolean);
-  return (
-    <div className="flex items-center gap-2.5 py-3">
-      <span
-        className="relative grid h-[22px] w-[22px] shrink-0 place-items-center"
-        title={descriptor.available ? "Available on this machine" : "Not found on PATH"}
-      >
-        <AgentIcon agentId={descriptor.id} label={descriptor.label} size={22} />
-        <span
-          className={`absolute -bottom-0.5 -right-0.5 h-2 w-2 rounded-full ring-2 ring-[var(--color-bg-content)] ${
-            descriptor.available ? "bg-accent-green" : "bg-text-4"
-          }`}
-        />
-      </span>
-      <div className="flex-1 min-w-0">
-        <div className="flex items-center gap-2">
-          <span className="text-[12.5px] text-text-1">{descriptor.label}</span>
-          <span className="text-[10.5px] text-text-4 font-mono">
-            {descriptor.id}
-          </span>
-          {isTomlDeclared && (
-            <span className="text-[9.5px] text-accent border border-accent/40 rounded px-1 py-0.5 uppercase tracking-wider">
-              toml
-            </span>
-          )}
-        </div>
-        <div className="mt-0.5 text-[10.5px] text-text-4 font-mono truncate">
-          {descriptor.bin}
-          {descriptor.version && ` · ${descriptor.version}`}
-          {caps.length > 0 && ` · ${caps.join(" · ")}`}
-        </div>
-      </div>
-      {isTomlDeclared && tomlEntry && (
-        <div className="flex shrink-0 items-center gap-1">
-          <Button
-            variant="ghost"
-            size="xs"
-            onClick={() => onEdit(tomlEntry)}
-          >
-            Edit
-          </Button>
-          <Button
-            variant="ghost"
-            size="xs"
-            onClick={onRemove}
-            className="text-red hover:text-red"
-          >
-            Remove
-          </Button>
-        </div>
-      )}
-    </div>
-  );
-}
-
-function AgentEditor({
-  entry,
-  onCancel,
-  onSave,
-}: {
-  entry: AgentsTomlEntry;
-  onCancel: () => void;
-  onSave: (entry: AgentsTomlEntry) => void;
-}) {
-  const [draft, setDraft] = useState<AgentsTomlEntry>(entry);
-  const [argsText, setArgsText] = useState(
-    (draft.args ?? []).join(" "),
-  );
-  const isNew = !entry.id;
-  const apply = () => {
-    onSave({
-      ...draft,
-      args: tokenize(argsText),
-      supports_stream: !!draft.supports_stream,
-      supports_pty: !!draft.supports_pty,
-      supports_resume: !!draft.supports_resume,
-    });
-  };
-  const saveDisabled = !draft.id.trim() || !draft.bin.trim();
-  return (
-    <FullscreenOverlay
-      onClose={onCancel}
-      contentClassName="overflow-y-auto"
-      footer={
-        <>
-          <Button variant="secondary" size="sm" onClick={onCancel}>
-            Cancel
-          </Button>
-          <Button
-            variant="accentSoft"
-            size="sm"
-            onClick={apply}
-            disabled={saveDisabled}
-          >
-            {isNew ? "Add agent" : "Save changes"}
-          </Button>
-        </>
-      }
-    >
-      <div className="flex w-full flex-col items-center px-6 py-12 sm:py-16">
-        <div className="flex w-full max-w-[640px] flex-col gap-8">
-          <div>
-            <h1 className="text-[18px] font-medium leading-7 text-text-1">
-              {isNew ? "New coding agent" : `Edit ${entry.label || entry.id}`}
-            </h1>
-            <p className="mt-1.5 text-[13px] leading-relaxed text-text-3">
-              Declare a command-line coding agent Aura can drive. Saved to{" "}
-              <code className="font-mono text-text-2">~/.aura/agents.toml</code>{" "}
-              — Aura launches it exactly like the built-in providers.
-            </p>
-          </div>
-
-          <div className="flex flex-col gap-6">
-            <div className="grid grid-cols-1 gap-6 sm:grid-cols-2">
-              <FormField
-                label="ID"
-                htmlFor="ae-id"
-                description="Stable, lowercase. Examples: kimi, devstral."
-              >
-                <Input
-                  id="ae-id"
-                  value={draft.id}
-                  onChange={(e) => setDraft({ ...draft, id: e.target.value })}
-                  disabled={!isNew}
-                  placeholder="kimi"
-                  className="font-mono"
-                />
-              </FormField>
-              <FormField
-                label="Label"
-                htmlFor="ae-label"
-                description="The friendly name shown in the agent picker."
-              >
-                <Input
-                  id="ae-label"
-                  value={draft.label}
-                  onChange={(e) => setDraft({ ...draft, label: e.target.value })}
-                  placeholder="Kimi"
-                />
-              </FormField>
-            </div>
-
-            <FormField
-              label="Binary"
-              htmlFor="ae-bin"
-              description="Path or PATH-resolvable name — e.g. /opt/kimi or just kimi."
-            >
-              <Input
-                id="ae-bin"
-                value={draft.bin}
-                onChange={(e) => setDraft({ ...draft, bin: e.target.value })}
-                placeholder="kimi"
-                className="font-mono"
-              />
-            </FormField>
-
-            <FormField
-              label="Args"
-              htmlFor="ae-args"
-              description="Tokens, space-separated. Use {prompt} for the message and optional {resume} for a session id."
-            >
-              <Input
-                id="ae-args"
-                value={argsText}
-                onChange={(e) => setArgsText(e.target.value)}
-                placeholder="chat --prompt {prompt}"
-                className="font-mono"
-              />
-            </FormField>
-
-            <FormField
-              label="Capabilities"
-              description="What this agent's CLI supports — Aura adapts how it drives the process."
-            >
-              <div className="divide-y divide-line-soft rounded-lg bg-bg-content px-3.5 shadow-[var(--shadow-field)]">
-                <Toggle
-                  label="Streaming output"
-                  hint="The CLI streams tokens as it generates, instead of one final block."
-                  value={!!draft.supports_stream}
-                  onChange={(v) => setDraft({ ...draft, supports_stream: v })}
-                />
-                <Toggle
-                  label="Interactive terminal (PTY)"
-                  hint="Runs as a full TUI inside a pseudo-terminal."
-                  value={!!draft.supports_pty}
-                  onChange={(v) => setDraft({ ...draft, supports_pty: v })}
-                />
-                <Toggle
-                  label="Resume sessions"
-                  hint="Can pick up a previous session by id."
-                  value={!!draft.supports_resume}
-                  onChange={(v) => setDraft({ ...draft, supports_resume: v })}
-                />
-              </div>
-            </FormField>
-          </div>
-        </div>
-      </div>
-    </FullscreenOverlay>
-  );
-}
-
-function blankEntry(): AgentsTomlEntry {
-  return {
-    id: "",
-    label: "",
-    bin: "",
-    args: [],
-    supports_stream: false,
-    supports_pty: true,
-    supports_resume: false,
-  };
-}
-
-function tokenize(s: string): string[] {
-  return s
-    .split(/\s+/)
-    .map((t) => t.trim())
-    .filter(Boolean);
-}
-
-// ── Local & Custom Models ─────────────────────────────────────────────
-//
-// Profile editor + connection tester for the `openai-compat` agent
-// kind. Anything that speaks OpenAI's `/v1/chat/completions` (Ollama,
-// HuggingFace TGI, Together, Groq, OpenRouter, vLLM, …) plugs in here.
-// Profiles persist to `~/.aura/agents/openai-compat.json` via
-// `cmd_openai_compat.rs`; the agent picker in EmptyPanePicker reads the
-// same list so launching one of these is exactly like launching Claude.
-
-type OpenAiCompatPreset = {
-  id: string;
-  label: string;
-  base_url: string;
-  default_model: string;
-  needs_key: boolean;
-  hint: string;
-};
-
-const OPENAI_COMPAT_PRESETS: OpenAiCompatPreset[] = [
-  {
-    id: "ollama",
-    label: "Ollama (localhost)",
-    base_url: "http://localhost:11434/v1",
-    default_model: "llama3.2",
-    needs_key: false,
-    hint: "Local — runs models on your machine. No API key required.",
-  },
-  {
-    id: "huggingface",
-    label: "HuggingFace Inference",
-    base_url: "https://api-inference.huggingface.co/v1",
-    default_model: "meta-llama/Llama-3.3-70B-Instruct",
-    needs_key: true,
-    hint: "Hosted — paste an HF Inference API token as the API key.",
-  },
-  {
-    id: "together",
-    label: "Together.ai",
-    base_url: "https://api.together.xyz/v1",
-    default_model: "meta-llama/Llama-3.3-70B-Instruct-Turbo",
-    needs_key: true,
-    hint: "Hosted — sign up at together.ai and paste your key.",
-  },
-  {
-    id: "groq",
-    label: "Groq",
-    base_url: "https://api.groq.com/openai/v1",
-    default_model: "llama-3.3-70b-versatile",
-    needs_key: true,
-    hint: "Hosted — fastest token throughput; paste your Groq API key.",
-  },
-  {
-    id: "openrouter",
-    label: "OpenRouter",
-    base_url: "https://openrouter.ai/api/v1",
-    default_model: "meta-llama/llama-3.3-70b-instruct",
-    needs_key: true,
-    hint: "Hosted — multi-vendor router; paste your OpenRouter key.",
-  },
-];
-
-function blankOpenAiCompatProfile(): OpenAiCompatProfile {
-  return {
-    name: "",
-    base_url: "",
-    model: "",
-    api_key: "",
-    headers: {},
-    temperature: null,
-    description: "",
-    created_at: null,
-  };
-}
-
-function LocalModelsTab() {
-  const [profiles, setProfiles] = useState<OpenAiCompatProfile[]>([]);
-  const [editing, setEditing] = useState<OpenAiCompatProfile | null>(null);
-  const [loadError, setLoadError] = useState<string | null>(null);
-  const [testResults, setTestResults] = useState<
-    Record<string, { running: boolean; result?: OpenAiCompatTestResult; error?: string }>
-  >({});
-
-  const reload = useCallback(async () => {
-    try {
-      const list = await api.openaiCompatProfilesList();
-      setProfiles(list);
-      setLoadError(null);
-    } catch (e) {
-      setLoadError(String(e));
-    }
-  }, []);
-  useEffect(() => {
-    void reload();
-  }, [reload]);
-
-  async function test(name: string) {
-    setTestResults((prev) => ({ ...prev, [name]: { running: true } }));
-    try {
-      const result = await api.openaiCompatTest(name);
-      setTestResults((prev) => ({ ...prev, [name]: { running: false, result } }));
-    } catch (e) {
-      setTestResults((prev) => ({
-        ...prev,
-        [name]: { running: false, error: String(e) },
-      }));
-    }
-  }
-
-  async function remove(name: string) {
-    if (!window.confirm(`Remove the "${name}" profile?`)) return;
-    try {
-      const next = await api.openaiCompatProfileRemove(name);
-      setProfiles(next);
-    } catch (e) {
-      setLoadError(String(e));
-    }
-  }
-
-  return (
-    <>
-      <PaneHeader
-        title="Local & Custom Models"
-        subtitle="OpenAI-compatible endpoints — Ollama, HuggingFace, Together, Groq, OpenRouter, vLLM, anything that speaks /v1/chat/completions."
-      />
-      {loadError && (
-        <div className="text-[11.5px] text-red mb-3" role="alert">
-          {loadError}
-        </div>
-      )}
-      <div className="mb-3.5 flex items-center gap-2">
-        <span className="text-[11.5px] text-text-3 flex-1">
-          {profiles.length === 0
-            ? "No profiles yet. Add one to chat with a local or hosted model."
-            : `${profiles.length} profile${profiles.length === 1 ? "" : "s"} configured.`}
-        </span>
-        <Button
-          variant="default"
-          size="xs"
-          onClick={() => setEditing(blankOpenAiCompatProfile())}
-        >
-          + Add profile
-        </Button>
-      </div>
-      {profiles.length > 0 && (
-        <Card>
-          {profiles.map((p) => {
-            const status = testResults[p.name];
-            return (
-              <div key={p.name} className="flex items-center gap-2.5 py-3">
-                <span className="mt-px shrink-0 self-start">
-                  <AgentIcon agentId="openai-compat" label={p.name} size={18} />
-                </span>
-                <div className="flex-1 min-w-0">
-                  <div className="flex items-center gap-2">
-                    <span className="text-[12.5px] text-text-1">{p.name}</span>
-                    <span className="text-[10.5px] text-text-4 font-mono">
-                      {p.model}
-                    </span>
-                    {!p.api_key && (
-                      <span className="text-[9.5px] text-text-4 border border-line-soft rounded px-1 py-0.5 uppercase tracking-wider">
-                        no-key
-                      </span>
-                    )}
-                  </div>
-                  <div className="mt-0.5 text-[10.5px] text-text-4 font-mono truncate">
-                    {p.base_url}
-                  </div>
-                  {status?.running && (
-                    <div className="mt-0.5 text-[10.5px] text-text-4">
-                      Testing…
-                    </div>
-                  )}
-                  {status?.result && (
-                    <div
-                      className="mt-0.5 text-[10.5px]"
-                      style={{
-                        color: status.result.ok
-                          ? "var(--color-accent-green)"
-                          : "var(--color-red)",
-                      }}
-                    >
-                      {status.result.message}
-                    </div>
-                  )}
-                  {status?.error && (
-                    <div className="mt-0.5 text-[10.5px] text-red">
-                      {status.error}
-                    </div>
-                  )}
-                </div>
-                <div className="flex shrink-0 items-center gap-1">
-                  <Button
-                    variant="ghost"
-                    size="xs"
-                    onClick={() => void test(p.name)}
-                    disabled={status?.running}
-                    title="Hit the endpoint with a 1-token ping to verify connectivity"
-                  >
-                    Test
-                  </Button>
-                  <Button
-                    variant="ghost"
-                    size="xs"
-                    onClick={() => setEditing(p)}
-                  >
-                    Edit
-                  </Button>
-                  <Button
-                    variant="ghost"
-                    size="xs"
-                    onClick={() => void remove(p.name)}
-                    className="text-red hover:text-red"
-                  >
-                    Remove
-                  </Button>
-                </div>
-              </div>
-            );
-          })}
-        </Card>
-      )}
-      {editing && (
-        <OpenAiCompatEditor
-          entry={editing}
-          existingNames={profiles.map((p) => p.name)}
-          onCancel={() => setEditing(null)}
-          onSave={async (next) => {
-            try {
-              const list = await api.openaiCompatProfileSave(next);
-              setProfiles(list);
-              setEditing(null);
-            } catch (e) {
-              setLoadError(String(e));
-            }
-          }}
-        />
-      )}
-    </>
-  );
-}
-
-function OpenAiCompatEditor({
-  entry,
-  existingNames,
-  onCancel,
-  onSave,
-}: {
-  entry: OpenAiCompatProfile;
-  existingNames: string[];
-  onCancel: () => void;
-  onSave: (entry: OpenAiCompatProfile) => void;
-}) {
-  const [draft, setDraft] = useState<OpenAiCompatProfile>({
-    ...entry,
-    headers: entry.headers ?? {},
-  });
-  // Headers as a single textarea — `Key: Value` per line. Keeps the
-  // editor simple; advanced users (HF dedicated endpoints with
-  // multi-header auth) just paste a block.
-  const [headersText, setHeadersText] = useState<string>(() => {
-    const h = entry.headers ?? {};
-    return Object.entries(h)
-      .map(([k, v]) => `${k}: ${v}`)
-      .join("\n");
-  });
-
-  const isNew = !entry.created_at;
-  const nameTaken =
-    isNew &&
-    existingNames.some(
-      (n) => n.toLowerCase() === draft.name.trim().toLowerCase(),
-    );
-
-  function applyPreset(preset: OpenAiCompatPreset) {
-    setDraft((prev) => ({
-      ...prev,
-      base_url: preset.base_url,
-      model: prev.model || preset.default_model,
-      description: prev.description || preset.hint,
-    }));
-  }
-
-  function parseHeaders(): Record<string, string> {
-    const out: Record<string, string> = {};
-    for (const raw of headersText.split("\n")) {
-      const line = raw.trim();
-      if (!line || line.startsWith("#")) continue;
-      const i = line.indexOf(":");
-      if (i <= 0) continue;
-      const key = line.slice(0, i).trim();
-      const value = line.slice(i + 1).trim();
-      if (key) out[key] = value;
-    }
-    return out;
-  }
-
-  function save() {
-    const headers = parseHeaders();
-    onSave({
-      ...draft,
-      name: draft.name.trim(),
-      base_url: draft.base_url.trim(),
-      model: draft.model.trim(),
-      api_key: draft.api_key?.trim() || null,
-      headers,
-      temperature:
-        typeof draft.temperature === "number" && !Number.isNaN(draft.temperature)
-          ? draft.temperature
-          : null,
-      description: draft.description?.trim() || null,
-    });
-  }
-
-  const saveDisabled =
-    !draft.name.trim() ||
-    !draft.base_url.trim() ||
-    !draft.model.trim() ||
-    nameTaken;
-
-  return (
-    <FullscreenOverlay
-      onClose={onCancel}
-      contentClassName="overflow-y-auto"
-      footer={
-        <>
-          <Button variant="secondary" size="sm" onClick={onCancel}>
-            Cancel
-          </Button>
-          <Button
-            variant="accentSoft"
-            size="sm"
-            onClick={save}
-            disabled={saveDisabled}
-          >
-            {isNew ? "Add profile" : "Save changes"}
-          </Button>
-        </>
-      }
-    >
-      <div className="flex w-full flex-col items-center px-6 py-12 sm:py-16">
-        <div className="flex w-full max-w-[640px] flex-col gap-8">
-          <div>
-            <h1 className="text-[18px] font-medium leading-7 text-text-1">
-              {isNew ? "New local-model profile" : `Edit ${entry.name}`}
-            </h1>
-            <p className="mt-1.5 text-[13px] leading-relaxed text-text-3">
-              Connect any OpenAI-compatible endpoint — Ollama, HuggingFace,
-              Together, Groq, OpenRouter, vLLM — and chat with it just like a
-              built-in model.
-            </p>
-          </div>
-
-          <FormField
-            label="Quick presets"
-            description="Pre-fill the base URL and a sensible default model. You can still edit everything below."
-          >
-            <div className="flex flex-wrap gap-1.5">
-              {OPENAI_COMPAT_PRESETS.map((p) => (
-                <button
-                  key={p.id}
-                  type="button"
-                  onClick={() => applyPreset(p)}
-                  className="h-8 rounded-md bg-bg-content px-3 text-[12.5px] font-medium text-text-2 shadow-[var(--shadow-field)] transition-colors hover:text-text-1"
-                  title={p.hint}
-                >
-                  {p.label}
-                </button>
-              ))}
-            </div>
-          </FormField>
-
-          <div className="flex flex-col gap-6">
-            <FormField
-              label="Name"
-              htmlFor="oac-name"
-              description="Display label — also the row id. Letters, digits, spaces."
-              error={
-                nameTaken ? "A profile with this name already exists." : undefined
-              }
-            >
-              <Input
-                id="oac-name"
-                value={draft.name}
-                onChange={(e) => setDraft({ ...draft, name: e.target.value })}
-                disabled={!isNew}
-                placeholder="Llama 3 (local)"
-                invalid={nameTaken}
-              />
-            </FormField>
-
-            <FormField
-              label="Base URL"
-              htmlFor="oac-url"
-              description="Endpoint root — typically ends in /v1. Aura appends /chat/completions and /models."
-            >
-              <Input
-                id="oac-url"
-                value={draft.base_url}
-                onChange={(e) =>
-                  setDraft({ ...draft, base_url: e.target.value })
-                }
-                placeholder="http://localhost:11434/v1"
-                className="font-mono"
-              />
-            </FormField>
-
-            <FormField
-              label="Model"
-              htmlFor="oac-model"
-              description="Whatever model id the endpoint exposes — Ollama tag, HF repo path, vendor model name."
-            >
-              <Input
-                id="oac-model"
-                value={draft.model}
-                onChange={(e) => setDraft({ ...draft, model: e.target.value })}
-                placeholder="llama3.2 / qwen2.5-coder:7b / meta-llama/Llama-3.3-70B-Instruct"
-                className="font-mono"
-              />
-            </FormField>
-
-            <div className="grid grid-cols-1 gap-6 sm:grid-cols-2">
-              <FormField
-                label="API key"
-                htmlFor="oac-key"
-                optional
-                description="Sent as Authorization: Bearer. Leave blank for Ollama or other unauthenticated local servers."
-              >
-                <Input
-                  id="oac-key"
-                  type="password"
-                  value={draft.api_key ?? ""}
-                  onChange={(e) =>
-                    setDraft({ ...draft, api_key: e.target.value })
-                  }
-                  placeholder="sk-… / hf_…"
-                  className="font-mono"
-                  autoComplete="off"
-                />
-              </FormField>
-              <FormField
-                label="Temperature"
-                htmlFor="oac-temp"
-                optional
-                description="0.0 = deterministic, 1.0 = creative. Blank leaves the server default."
-              >
-                <Input
-                  id="oac-temp"
-                  type="number"
-                  step="0.05"
-                  min="0"
-                  max="2"
-                  value={
-                    typeof draft.temperature === "number" ? draft.temperature : ""
-                  }
-                  onChange={(e) =>
-                    setDraft({
-                      ...draft,
-                      temperature:
-                        e.target.value === "" ? null : Number(e.target.value),
-                    })
-                  }
-                  placeholder="0.7"
-                  className="font-mono"
-                />
-              </FormField>
-            </div>
-
-            <FormField
-              label="Extra headers"
-              htmlFor="oac-headers"
-              optional
-              description="One header per line — Name: Value. Useful for HF dedicated endpoints, OpenRouter routing hints, etc."
-            >
-              <Textarea
-                id="oac-headers"
-                value={headersText}
-                onChange={(e) => setHeadersText(e.target.value)}
-                rows={3}
-                placeholder={"X-HF-Endpoint: my-endpoint\nHTTP-Referer: https://example.com"}
-                className="font-mono"
-              />
-            </FormField>
-
-            <FormField
-              label="Description"
-              htmlFor="oac-desc"
-              optional
-              description="Shown under the row in the model picker."
-            >
-              <Input
-                id="oac-desc"
-                value={draft.description ?? ""}
-                onChange={(e) =>
-                  setDraft({ ...draft, description: e.target.value })
-                }
-                placeholder="Local Llama 3 via Ollama"
-              />
-            </FormField>
-
-            <div className="rounded-lg border border-accent-amber/25 bg-accent-amber/8 px-3.5 py-2.5 text-[12px] leading-relaxed text-accent-amber">
-              API keys are stored in plaintext at{" "}
-              <code className="font-mono">~/.aura/agents/openai-compat.json</code>{" "}
-              for this iteration. We&apos;ll move them to the OS keychain in a
-              follow-up.
-            </div>
-          </div>
-        </div>
-      </div>
-    </FullscreenOverlay>
   );
 }
 
@@ -7278,8 +2658,8 @@ function TelemetrySharingSection() {
   };
   return (
     <Section title="Share with Aura">
-      <p className="text-[11.5px] text-text-3 mb-2">
-        Anonymous only — never your code, files, what you type, or your name. We
+      <p className="text-sm text-text-3 mb-2">
+        Anonymous only, never your code, files, what you type, or your name. We
         use it to see which features help and to fix crashes. Change it anytime.
       </p>
       <Toggle
@@ -7288,9 +2668,14 @@ function TelemetrySharingSection() {
         value={consent?.crash ?? true}
         onChange={(v) => apply(consent?.product ?? true, v)}
       />
+      {/* This one switch is the whole of it. It gates the desktop's PostHog
+          events AND the `aura` command-line tool's own ping — `track_event`
+          in aura-cli/src/main.rs reads the same `telemetry_enabled` out of
+          the same credentials.json — so the hint has to name both, or
+          turning it off looks narrower than it is. */}
       <Toggle
         label="Usage analytics"
-        hint="Anonymous counts of which features get opened. No content of any kind."
+        hint="Counts of which features get opened, and which commands the aura command-line tool runs. Counts only, never your code, file paths, or anything you type. Sent with a fixed anonymous ID, not your name."
         value={consent?.product ?? true}
         onChange={(v) => apply(v, consent?.crash ?? true)}
       />
@@ -7317,7 +2702,7 @@ function TelemetryLocalCounts({
   }, [view]);
   return (
     <Section title="Anonymous usage">
-      {error && <div role="alert" className="text-[11.5px] text-red mb-2">{error}</div>}
+      {error && <div role="alert" className="text-sm text-red mb-2">{error}</div>}
       {view ? (
         view.enabled ? (
           <>
@@ -7326,13 +2711,13 @@ function TelemetryLocalCounts({
             </Row>
             {view.last_updated && (
               <Row label="Last updated">
-                <span className="text-[11.5px] text-text-3">
+                <span className="text-sm text-text-3">
                   {new Date(view.last_updated * 1000).toLocaleString()}
                 </span>
               </Row>
             )}
             {sorted.length > 0 ? (
-              <ul className="text-[11.5px] font-mono mt-2 max-h-64 overflow-auto">
+              <ul className="text-sm font-mono mt-2 max-h-64 overflow-auto">
                 {sorted.map(([k, v]) => (
                   <li
                     key={k}
@@ -7344,7 +2729,7 @@ function TelemetryLocalCounts({
                 ))}
               </ul>
             ) : (
-              <p className="text-[11.5px] text-text-4 mt-2">
+              <p className="text-sm text-text-4 mt-2">
                 No events recorded yet.
               </p>
             )}
@@ -7353,7 +2738,15 @@ function TelemetryLocalCounts({
                 variant="ghost"
                 size="xs"
                 onClick={async () => {
-                  if (!window.confirm("Clear local telemetry counters?")) return;
+                  if (
+                    !(await askConfirm({
+                      title: "Clear local telemetry counters?",
+                      body: "The counts Aura keeps on this machine go back to zero.",
+                      confirmLabel: "Clear",
+                      tone: "danger",
+                    }))
+                  )
+                    return;
                   await api.settingsTelemetryClear();
                   reload();
                 }}
@@ -7364,13 +2757,13 @@ function TelemetryLocalCounts({
             </div>
           </>
         ) : (
-          <p className="text-[11.5px] text-text-3">
+          <p className="text-sm text-text-3">
             Telemetry is disabled. Toggle it on under <em>Policy &rarr; Telemetry</em>.
           </p>
         )
       ) : (
-        <div className="flex items-center gap-1.5 text-[11.5px] text-text-4" role="status">
-          <AsciiSpinner className="text-[11.5px] leading-none" />
+        <div className="flex items-center gap-1.5 text-sm text-text-4" role="status">
+          <AsciiSpinner className="text-sm leading-none" />
           Loading what Aura has sent…
         </div>
       )}
@@ -7399,7 +2792,7 @@ const HELP_LINKS: Array<{
   },
   {
     label: "Source on GitHub",
-    hint: "github.com/Naridon-Inc/aura — fully open source",
+    hint: "github.com/Naridon-Inc/aura. Fully open source",
     url: "https://github.com/Naridon-Inc/aura",
     icon: <ExternalLink className="h-4 w-4" aria-hidden />,
   },
@@ -7426,13 +2819,19 @@ async function openHelpUrl(url: string) {
   }
 }
 
-// A shortcut combo split into per-glyph key caps, each our shared `Kbd`
-// primitive (the `@nari/ui` Medusa-kit key cap) so every hint reads identically.
+// A shortcut combo split into key caps, each our shared `Kbd` so every hint in
+// the app reads identically.
+//
+// The split is `comboKeys`, beside the shortcut map. It used to be `[...combo]`
+// right here — one cap per code point, which is fine for an alphabet of single
+// letters and wrong the moment a combo names a whole key: "⌘⇧Enter" came out as
+// seven boxes spelling ⌘ ⇧ E n t e r. There were three copies of that split in
+// the tree; this was one of them.
 function KbdCombo({ combo }: { combo: string }) {
   return (
     <span className="inline-flex items-center gap-0.5">
-      {[...combo].map((glyph, i) => (
-        <Kbd key={i}>{glyph}</Kbd>
+      {comboKeys(combo).map((cap, i) => (
+        <Kbd key={i}>{cap}</Kbd>
       ))}
     </span>
   );
@@ -7466,16 +2865,16 @@ function HelpTab({ onClose }: { onClose: () => void }) {
             onClose();
             window.dispatchEvent(new Event("aura:start-tour"));
           }}
-          className="group flex w-full items-center gap-3 rounded-md px-2 py-2 text-left hover:bg-bg-2 transition-colors"
+          className="group flex w-full items-center gap-3 rounded-md px-2 py-2 text-left hover:bg-state-hover transition-colors"
         >
           <span className="shrink-0 text-accent">
             <Sparkles className="h-4 w-4" aria-hidden />
           </span>
           <span className="flex-1 min-w-0">
-            <span className="block text-[12.5px] text-text-1">
+            <span className="block text-base text-text-1">
               Take the tour
             </span>
-            <span className="block text-[11px] text-text-4 truncate">
+            <span className="block text-xs text-text-4 truncate">
               A 60-second walkthrough of what Aura does and where things live.
             </span>
           </span>
@@ -7483,21 +2882,33 @@ function HelpTab({ onClose }: { onClose: () => void }) {
       </Section>
 
       <Section title="Keyboard shortcuts">
-        <div className="grid grid-cols-1 sm:grid-cols-2 gap-x-6">
-          {HELP_SHORTCUTS.map((s) => (
-            <div
-              key={s.label}
-              className="flex items-center justify-between gap-3 py-1.5 border-b border-line-soft/40 last:border-b-0"
-            >
-              <span className="text-[12px] text-text-2 flex items-center gap-2">
-                <Keyboard className="h-3.5 w-3.5 text-text-4" aria-hidden />
-                {s.label}
-              </span>
-              <KbdCombo combo={s.keys} />
-            </div>
+        {/* Grouped, and the groups carry their scope. This was one flat list
+            of every binding in the app, which read fine while every binding
+            was global. It isn't any more: `Enter` opens a task on a focused
+            card and builds a plan on a plan card, and printed side by side
+            with no heading they look like a contradiction. So the same
+            shape the ⌘/ sheet uses — heading, scope note, rows. */}
+        <div className="grid grid-cols-1 gap-x-8 gap-y-4 sm:grid-cols-2">
+          {SHORTCUT_GROUPS.map((group) => (
+            <section key={group.title} className="flex flex-col">
+              <h4 className="section-label pb-1">{group.title}</h4>
+              {group.note ? (
+                <p className="-mt-0.5 pb-1 text-xs text-text-4">{group.note}</p>
+              ) : null}
+              {group.items.map((s) => (
+                // Keyed by label: two groups bind Enter, two bind Esc.
+                <div
+                  key={s.label}
+                  className="flex items-center justify-between gap-3 border-b border-line-soft/40 py-1.5 last:border-b-0"
+                >
+                  <span className="text-sm text-text-2">{s.label}</span>
+                  <KbdCombo combo={s.keys} />
+                </div>
+              ))}
+            </section>
           ))}
         </div>
-        <p className="mt-2 text-[10.5px] text-text-4">
+        <p className="mt-2 text-xs text-text-4">
           Press <KbdCombo combo="⌘K" /> any time to search every command, file,
           and agent action.
         </p>
@@ -7510,16 +2921,16 @@ function HelpTab({ onClose }: { onClose: () => void }) {
               key={l.label}
               type="button"
               onClick={() => void openHelpUrl(l.url)}
-              className="group flex items-center gap-3 rounded-md px-2 py-2 text-left hover:bg-bg-2 transition-colors"
+              className="group flex items-center gap-3 rounded-md px-2 py-2 text-left hover:bg-state-hover transition-colors"
             >
               <span className="shrink-0 text-text-3 group-hover:text-accent">
                 {l.icon}
               </span>
               <span className="flex-1 min-w-0">
-                <span className="block text-[12.5px] text-text-1">
+                <span className="block text-base text-text-1">
                   {l.label}
                 </span>
-                <span className="block text-[11px] text-text-4 truncate">
+                <span className="block text-xs text-text-4 truncate">
                   {l.hint}
                 </span>
               </span>
@@ -7532,22 +2943,28 @@ function HelpTab({ onClose }: { onClose: () => void }) {
         </div>
       </Section>
 
+      {/* Facts, not settings. These were two setting rows — a hundred pixels
+          of air each to carry one version number and three words — which said
+          "there is something here to change" about the only part of this pane
+          you can't. A key/value table states them in the space they're worth
+          and keeps the row rhythm meaning what it means everywhere else. */}
       <Section title="About">
-        <Row label="Aura">
-          <span className="text-[12px] text-text-2 tabular-nums">
-            {version ? `v${version}` : "—"}
-          </span>
-        </Row>
-        <Row label="Semantic version control">
-          <span className="text-[11px] text-text-4">
-            CLI · Desktop · Cloud
-          </span>
-        </Row>
-        <p className="mt-2 text-[10.5px] text-text-4 leading-relaxed">
-          Aura watches every change the way a careful teammate would — it sees
+        <KeyValueTable
+          rows={[
+            {
+              key: "version",
+              label: "Version",
+              value: version ? `v${version}` : "—",
+              mono: true,
+            },
+            { key: "surfaces", label: "Runs on", value: "CLI · Desktop · Cloud" },
+            { key: "licence", label: "Licence", value: "Open source, under the Naridon umbrella" },
+          ]}
+        />
+        <p className="mt-3 max-w-[520px] text-[13px] leading-relaxed text-text-4">
+          Aura watches every change the way a careful teammate would. It sees
           what each edit means, checks it still matches what you asked for, and
-          lets you bring back a single piece if something breaks. Open source
-          under the Naridon umbrella.
+          lets you bring back a single piece if something breaks.
         </p>
       </Section>
     </div>
@@ -7616,9 +3033,12 @@ function ProfilesTab({ repoRoot }: { repoRoot: string }) {
 
   async function deleteAgentProfile(name: string) {
     if (
-      !confirm(
-        `Delete profile "${name}"? This removes ~/.aura/agent-profiles/${name}/ — any agent CLI login state inside (Claude tokens, Gemini config, etc.) is GONE.`,
-      )
+      !(await askConfirm({
+        title: `Delete profile "${name}"?`,
+        body: `This removes ~/.aura/agent-profiles/${name}/. Every agent sign-in kept inside it (Claude tokens, Gemini config, and the rest) goes with it. You'll have to sign those agents in again.`,
+        confirmLabel: "Delete profile",
+        tone: "danger",
+      }))
     )
       return;
     setBusy(true);
@@ -7647,7 +3067,15 @@ function ProfilesTab({ repoRoot }: { repoRoot: string }) {
   }
 
   async function deleteGitProfile(id: string) {
-    if (!confirm(`Delete git profile "${id}"?`)) return;
+    if (
+      !(await askConfirm({
+        title: `Delete git profile "${id}"?`,
+        body: "The name and email it commits under are forgotten. This can't be undone.",
+        confirmLabel: "Delete profile",
+        tone: "danger",
+      }))
+    )
+      return;
     setBusy(true);
     try {
       await api.gitProfileDelete(id);
@@ -7675,10 +3103,7 @@ function ProfilesTab({ repoRoot }: { repoRoot: string }) {
 
   return (
     <>
-      <PaneHeader
-        title="Profiles"
-        subtitle="Isolated agent logins and per-workspace git identities."
-      />
+      <PaneIntro text="Isolated agent logins and per-workspace git identities." />
       {error && (
         <div className="text-red text-xs px-3 py-2 bg-red/10 rounded border border-red/30">
           {error}
@@ -7688,7 +3113,7 @@ function ProfilesTab({ repoRoot }: { repoRoot: string }) {
       <Section
         title={
           repoRoot
-            ? `This workspace — ${shortRepoLabel(repoRoot)}`
+            ? `This workspace · ${shortPath(repoRoot)}`
             : "This workspace"
         }
       >
@@ -7704,10 +3129,16 @@ function ProfilesTab({ repoRoot }: { repoRoot: string }) {
                   })
                 }
                 options={[
-                  { value: "__none__", label: "(none — use system default)" },
+                  {
+                    value: "__none__",
+                    // Was "(none. Use system default)" — "system default"
+                    // is the name of the mechanism, not of the thing that
+                    // ends up on your commits.
+                    label: "This computer's git identity",
+                  },
                   ...gitProfiles.map((p) => ({
                     value: p.id,
-                    label: `${p.label} — ${p.user_email}`,
+                    label: `${p.label} · ${p.user_email}`,
                   })),
                 ]}
                 aria-label="Git identity"
@@ -7724,7 +3155,13 @@ function ProfilesTab({ repoRoot }: { repoRoot: string }) {
                   })
                 }
                 options={[
-                  { value: "__none__", label: "(none — inherit system HOME)" },
+                  {
+                    value: "__none__",
+                    // "(none. Inherit system HOME)" describes an environment
+                    // variable. What it means to the reader is that agents
+                    // sign in as they already are.
+                    label: "Your normal agent logins",
+                  },
                   ...agentProfiles.map((p) => ({
                     value: p.name,
                     label: p.label ?? p.name,
@@ -7735,32 +3172,46 @@ function ProfilesTab({ repoRoot }: { repoRoot: string }) {
               />
             </LabeledRow>
             <LabeledRow label="Where to save">
-              <div className="flex items-center gap-2 text-[11.5px]">
-                <label className="flex items-center gap-1 cursor-pointer">
+              {/* The choice is real and worth making — one answer travels to
+                  your teammates in the repo, the other never leaves this
+                  machine. It was written as "Repo file (.aura/profile.json)"
+                  vs "Global path map", which names the two files and says
+                  nothing about the consequence. And both radios drew in the
+                  OS blue because they were bare inputs; every other choice
+                  control in the app is brand green. */}
+              <div className="flex items-center gap-3 text-sm">
+                <label className="flex items-center gap-1.5 cursor-pointer">
                   <input
                     type="radio"
                     name="bindscope"
+                    className="accent-accent"
                     checked={bindingScope === "repo"}
                     onChange={() => setBindingScope("repo")}
                   />
-                  Repo file (.aura/profile.json)
+                  With the project
                 </label>
-                <label className="flex items-center gap-1 cursor-pointer">
+                <label className="flex items-center gap-1.5 cursor-pointer">
                   <input
                     type="radio"
                     name="bindscope"
+                    className="accent-accent"
                     checked={bindingScope === "global"}
                     onChange={() => setBindingScope("global")}
                   />
-                  Global path map
+                  Only on this computer
                 </label>
-                {binding.source && (
-                  <span className="text-text-4 ml-2">
-                    (loaded from {binding.source})
-                  </span>
-                )}
               </div>
             </LabeledRow>
+            {/* "(loaded from repo)" sat inline with the radios, so the word
+                naming a file competed with the two choices. It belongs under
+                them, and it should say what saving there means. */}
+            <p className="text-[13px] text-text-4 leading-relaxed">
+              {binding.source === "repo"
+                ? "Saved with the project, so it travels to anyone who clones it."
+                : binding.source === "global"
+                  ? "Saved on this computer only. Your teammates keep their own."
+                  : "Nothing saved for this project yet."}
+            </p>
           </div>
         )}
       </Section>
@@ -7768,24 +3219,24 @@ function ProfilesTab({ repoRoot }: { repoRoot: string }) {
       <Section title="Agent profiles">
         <div className="flex flex-col gap-1.5">
           {agentProfiles.length === 0 && (
-            <div className="text-[11.5px] text-text-4">No profiles yet.</div>
+            <div className="text-sm text-text-4">No profiles yet.</div>
           )}
           {agentProfiles.map((p) => (
             <div
               key={p.name}
               className="flex items-center gap-2 px-2.5 py-1.5 rounded border border-line-soft bg-bg-2"
             >
-              <span className="font-medium text-[12.5px] text-text-1">
+              <span className="font-medium text-base text-text-1">
                 {p.label ?? p.name}
               </span>
-              <span className="text-[11px] text-text-4 font-mono">
+              <span className="text-xs text-text-4 font-mono">
                 ~/.aura/agent-profiles/{p.name}
               </span>
               <button
                 type="button"
                 onClick={() => void deleteAgentProfile(p.name)}
                 disabled={busy}
-                className="ml-auto h-6 px-2 rounded text-[11px] text-red hover:bg-red/10 transition-colors"
+                className="ml-auto h-6 px-2 rounded text-xs text-red hover:bg-red/10 transition-colors"
               >
                 Delete
               </button>
@@ -7796,7 +3247,10 @@ function ProfilesTab({ repoRoot }: { repoRoot: string }) {
           <Input
             value={newAgentName}
             onChange={(e) => setNewAgentName(e.target.value)}
-            placeholder="new-profile-name"
+            // A placeholder is the one chance to say what belongs here.
+            // "new-profile-name" restates the field's own name and its
+            // hyphens read as a format requirement.
+            placeholder="work, personal, a client's name…"
             onKeyDown={(e) => {
               if (e.key === "Enter") void createAgentProfile();
             }}
@@ -7815,7 +3269,7 @@ function ProfilesTab({ repoRoot }: { repoRoot: string }) {
       <Section title="Git identities">
         <div className="flex flex-col gap-1.5">
           {gitProfiles.length === 0 && (
-            <div className="text-[11.5px] text-text-4">No git profiles yet.</div>
+            <div className="text-sm text-text-4">No git profiles yet.</div>
           )}
           {gitProfiles.map((p) => (
             <div
@@ -7823,10 +3277,10 @@ function ProfilesTab({ repoRoot }: { repoRoot: string }) {
               className="flex items-center gap-2 px-2.5 py-1.5 rounded border border-line-soft bg-bg-2"
             >
               <div className="flex flex-col">
-                <span className="font-medium text-[12.5px] text-text-1">
+                <span className="font-medium text-base text-text-1">
                   {p.label}
                 </span>
-                <span className="text-[11px] text-text-4">
+                <span className="text-xs text-text-4">
                   {p.user_name} &lt;{p.user_email}&gt;
                   {p.signing_key && (
                     <span className="ml-2 font-mono">key: {p.signing_key}</span>
@@ -7837,7 +3291,7 @@ function ProfilesTab({ repoRoot }: { repoRoot: string }) {
                 <button
                   type="button"
                   onClick={() => setEditingGit(p)}
-                  className="h-6 px-2 rounded text-[11px] text-text-2 hover:bg-bg-3"
+                  className="h-6 px-2 rounded text-xs text-text-2 hover:bg-state-hover"
                 >
                   Edit
                 </button>
@@ -7845,7 +3299,7 @@ function ProfilesTab({ repoRoot }: { repoRoot: string }) {
                   type="button"
                   onClick={() => void deleteGitProfile(p.id)}
                   disabled={busy}
-                  className="h-6 px-2 rounded text-[11px] text-red hover:bg-red/10"
+                  className="h-6 px-2 rounded text-xs text-red hover:bg-red/10"
                 >
                   Delete
                 </button>
@@ -7882,12 +3336,6 @@ function ProfilesTab({ repoRoot }: { repoRoot: string }) {
     </>
   );
 }
-
-function shortRepoLabel(repoRoot: string): string {
-  const parts = repoRoot.split("/").filter(Boolean);
-  return parts.slice(-2).join("/") || repoRoot;
-}
-
 // ── Identity tab (II.9) ───────────────────────────────────────────────
 //
 // Surfaces the per-repo identity override map + the alias-augmented
@@ -7912,7 +3360,12 @@ function IdentityTab({ repoRoots }: { repoRoots: string[] }) {
   // Each open git project gets one calm row; the user confirms who they
   // are per repo (a different git email per project is common). Never a
   // silent merge, always one click. Replaces the old single-repo form.
-  return <IdentityPanel repoRoots={repoRoots} />;
+  return (
+    <>
+      <PaneIntro text="Each project can use a different git email. Confirm who you are in each." />
+      <IdentityPanel repoRoots={repoRoots} />
+    </>
+  );
 }
 
 function LabeledRow({
@@ -7924,7 +3377,7 @@ function LabeledRow({
 }) {
   return (
     <div className="flex items-center gap-3">
-      <span className="text-[11.5px] text-text-2 min-w-[140px]">{label}</span>
+      <span className="text-sm text-text-2 min-w-[140px]">{label}</span>
       {children}
     </div>
   );
@@ -7966,7 +3419,7 @@ function GitProfileEditor({
           className="max-w-[260px]"
         />
         {idCollision && (
-          <span className="text-red text-[11px] ml-2">
+          <span className="text-red text-xs ml-2">
             id already in use
           </span>
         )}
@@ -7975,7 +3428,7 @@ function GitProfileEditor({
         <Input
           value={draft.label}
           onChange={(e) => setDraft({ ...draft, label: e.target.value })}
-          placeholder="Work — TouchStage"
+          placeholder="Work. TouchStage"
           className="max-w-[320px]"
         />
       </LabeledRow>

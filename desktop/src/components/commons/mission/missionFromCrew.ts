@@ -39,11 +39,36 @@ function proofFor(
   return { verdict: best.verdict, ok: best.ok, total: best.total };
 }
 
-/** True when a catch-all ("other") node represents a run that couldn't finish,
- *  vs one that simply completed by another path. */
+/** True when a catch-all ("other") node represents a run that couldn't finish.
+ *  `reject` counts: a rejected node is as terminal as a failed one, and leaving
+ *  it out of this test is what used to make rejected runs disappear. */
 function isFailed(task: LoopTask): boolean {
   const s = (task.status || "").toLowerCase();
-  return !!task.error_message || /fail|error|cancel/.test(s);
+  return !!task.error_message || /fail|error|cancel|reject/.test(s);
+}
+
+/** Where a catch-all ("other") node belongs, and what it is waiting for.
+ *
+ *  The crew parks five very different things in one bucket — failed, canceled,
+ *  rejected, input-required, auth-required — and the Mission views used to
+ *  render only the ones that matched a failure pattern. So a run that had
+ *  stopped to ask you a question, or to ask you to sign in, was dropped from
+ *  every view: the board showed nothing to answer, and the run sat stopped
+ *  indefinitely because the one person who could restart it never saw it.
+ *
+ *  Every node gets a lane now. An unrecognised status lands in "needs you"
+ *  rather than "failed": we know the machine has stopped moving it, and that a
+ *  person should look — we do not know that anything went wrong, and saying so
+ *  would be inventing a failure. */
+function otherLane(task: LoopTask): {
+  state: MissionRun["state"];
+  waitingOn: string[];
+} {
+  const s = (task.status || "").toLowerCase();
+  if (s === "input-required") return { state: "needsYou", waitingOn: ["your answer"] };
+  if (s === "auth-required") return { state: "needsYou", waitingOn: ["you to sign in"] };
+  if (isFailed(task)) return { state: "failed", waitingOn: [] };
+  return { state: "needsYou", waitingOn: ["you to take a look"] };
 }
 
 /** Map one crew node → one Mission run. `state` is decided by the caller (which
@@ -80,10 +105,11 @@ function toRun(
 }
 
 /** Turn the unified ready-view + proof ledger into the MissionState the Board
- *  and Activity views consume. live = working; queued = ready + blocked (with
- *  their unmet deps resolved to titles) + paused; recent = done + the failed
- *  catch-alls, newest first. Triggers/host stay empty here — the Automations
- *  tab owns triggers, and the Control tab owns the runner. */
+ *  and Activity views consume. live = working; queued = the catch-alls stopped
+ *  on a human + ready + blocked (with their unmet deps resolved to titles) +
+ *  the ones you paused; recent = done + the catch-alls that ended badly,
+ *  newest first. Every node the crew hands us lands in exactly one lane. Triggers/host stay empty
+ *  here — the Automations tab owns triggers, the Control tab owns the runner. */
 export function readyViewToMission(
   view: ReadyViewDto,
   proof: Map<string, CrewProof[]>,
@@ -105,7 +131,18 @@ export function readyViewToMission(
     toRun(t, "working", [], project, projectName, proof),
   );
 
+  // Every catch-all node, sorted into the lane it actually belongs in. Nothing
+  // in `other` is discarded — see `otherLane`.
+  const other = view.other.map((t) => ({ task: t, lane: otherLane(t) }));
+  const needsYou = other.filter((o) => o.lane.state === "needsYou");
+  const failed = other.filter((o) => o.lane.state === "failed");
+
   const queued: MissionRun[] = [
+    // Stopped-on-a-human first: these are the only runs on the board that
+    // cannot start themselves, so they lead the queue rather than trail it.
+    ...needsYou.map((o) =>
+      toRun(o.task, "needsYou", o.lane.waitingOn, project, projectName, proof),
+    ),
     ...view.ready.map((t) =>
       toRun(t, "queued", [], project, projectName, proof),
     ),
@@ -119,15 +156,20 @@ export function readyViewToMission(
         proof,
       ),
     ),
+    // Paused is its own lane, NOT part of the queue. It used to map to
+    // "queued" with nothing to wait on, which `deriveStage` reads as ready —
+    // so work you had deliberately parked was displayed in the lane labelled
+    // "the crew picks these up next", and inflated its count.
     ...view.paused.map((t) =>
-      toRun(t, "queued", [], project, projectName, proof),
+      toRun(t, "paused", [], project, projectName, proof),
     ),
   ];
 
-  const failed = view.other.filter(isFailed);
   const recent: MissionRun[] = [
     ...view.done.map((t) => toRun(t, "done", [], project, projectName, proof)),
-    ...failed.map((t) => toRun(t, "failed", [], project, projectName, proof)),
+    ...failed.map((o) =>
+      toRun(o.task, "failed", [], project, projectName, proof),
+    ),
   ].sort((a, b) => (b.endedAtMs ?? 0) - (a.endedAtMs ?? 0));
 
   return {

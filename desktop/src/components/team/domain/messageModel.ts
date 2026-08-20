@@ -17,6 +17,7 @@ import type {
 import type { ActivityPayload, Msg } from "./types";
 import { isSelfSender, norm, type SelfKeys } from "./identity";
 import { dmOtherSide } from "./channels";
+import { truncate } from "../../../lib/truncate";
 
 /** The conversation bucket a message belongs to.
  *
@@ -245,6 +246,9 @@ function intentRowToMsg(r: IntentRow, id: string, threadParent?: string): Msg {
     fromMe: false,
     kind: "msg",
     is_agent: true,
+    // Read out of the work log, not sent to anyone — the `thread_parent`
+    // below groups a session's intents, it does not mean someone replied.
+    derived: true,
     thread_parent: threadParent,
   };
 }
@@ -362,5 +366,5 @@ export function hasMoreThanFirstLine(s: string): boolean {
 // runaway intent doesn't blow out the row height when collapsed.
 export function firstLine(s: string): string {
   const line = (s || "").split(/\r?\n/).find((l) => l.trim().length > 0) ?? "";
-  return line.length > 240 ? line.slice(0, 237) + "…" : line;
+  return truncate(line, 240);
 }

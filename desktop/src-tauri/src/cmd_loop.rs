@@ -332,6 +332,9 @@ pub async fn loop_sync_board(repo_root: String) -> Result<LoopSyncResult, String
                 .assignee
                 .clone()
                 .or_else(|| t.assignee_ids.first().cloned()),
+            // The crew the card belongs to — carried onto the node so the crew
+            // graph can group and scope it. `None` leaves the node's crew as-is.
+            crew_id: t.crew_id.clone(),
         };
         let (node, kind) = graph
             .upsert_from_board(proj)
@@ -1181,10 +1184,13 @@ pub async fn loop_review(
     repo_root: String,
     commits: Option<usize>,
 ) -> Result<Vec<aura_loop::planning::TaskFlag>, String> {
-    let graph = LoopGraph::at(Path::new(&repo_root));
-    let all = graph.list();
-    let done_titles = recent_commit_subjects(&repo_root, commits.unwrap_or(40));
-    Ok(aura_loop::planning::review_tasks(&all, &done_titles))
+    crate::blocking::run(move || {
+        let graph = LoopGraph::at(Path::new(&repo_root));
+        let all = graph.list();
+        let done_titles = recent_commit_subjects(&repo_root, commits.unwrap_or(40));
+        Ok(aura_loop::planning::review_tasks(&all, &done_titles))
+    })
+    .await
 }
 
 /// A tail step of an attach target, resolved to its title for the picker and
@@ -1982,7 +1988,7 @@ pub struct CloudSendResult {
 /// `owner/repo` from the repo's `origin` remote, or None for a non-GitHub /
 /// missing remote (then the cloud legs run org-wide). Kept deliberately small —
 /// enough to keep send + sync scoped to the same repo.
-fn origin_full_name(repo_root: &str) -> Option<String> {
+pub(crate) fn origin_full_name(repo_root: &str) -> Option<String> {
     let out = std::process::Command::new("git")
         .args(["-C", repo_root, "remote", "get-url", "origin"])
         .output()
@@ -2060,12 +2066,19 @@ pub async fn loop_cloud_sync(
 /// Send a job to the always-on cloud runner. `agent` is the bare provider id
 /// (e.g. "claude"); the cloud board namespaces it as `a2a:<agent>`. An optional
 /// acceptance line makes it a provable task. Returns the cloud task id + status.
+///
+/// `context_id` is what makes a series of sends one conversation rather than a
+/// pile of unrelated rows. A2A groups tasks by context, so a reply to work the
+/// machine already did is a new task carrying the same context — which is how a
+/// cloud job reads as a thread you can answer instead of a fire-and-forget.
+/// Absent for a first send from a caller that doesn't thread.
 #[tauri::command]
 pub async fn loop_cloud_send(
     repo_root: String,
     text: String,
     agent: String,
     acceptance: Option<String>,
+    context_id: Option<String>,
 ) -> Result<CloudSendResult, String> {
     let text = text.trim();
     if text.is_empty() {
@@ -2080,6 +2093,8 @@ pub async fn loop_cloud_send(
         }
     };
     let agent_kind = format!("a2a:{agent}");
+    let origin_root = repo_root.clone();
+    let origin = crate::blocking::run(move || origin_full_name(&origin_root)).await;
     let bin = crate::agent_event_listener::resolve_aura_bin();
     let mut cmd = tokio::process::Command::new(&bin);
     cmd.arg("a2a-task")
@@ -2088,8 +2103,19 @@ pub async fn loop_cloud_send(
         .arg(&agent_kind)
         .arg("--input")
         .arg(text);
-    if let Some(fullname) = origin_full_name(&repo_root) {
+    if let Some(fullname) = origin {
         cmd.arg("--repo").arg(fullname);
+    }
+    // The thread this send belongs to. Trimmed and dropped when empty so a
+    // caller passing "" starts a fresh thread rather than minting a row whose
+    // context is the empty string — which would gather every such row into one
+    // bogus conversation.
+    if let Some(ctx) = context_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        cmd.arg("--context-id").arg(ctx);
     }
     if let Some(ac) = acceptance
         .as_deref()

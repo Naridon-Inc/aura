@@ -98,13 +98,13 @@ export function RailBrowserAgent({
     <div className="flex flex-col border-t border-line-soft bg-bg-1 flex-shrink-0 max-h-[55%] min-h-0">
       <div className="flex items-center gap-1.5 h-8 px-2 flex-shrink-0">
         <Sparkles className="h-3.5 w-3.5 text-accent" />
-        <span className="text-[11px] font-medium text-text-2">Browse for me</span>
+        <span className="text-xs font-medium text-text-2">Browse for me</span>
         <button
           type="button"
           onClick={onClose}
           title="Close agent"
           aria-label="Close agent"
-          className="ml-auto flex items-center justify-center w-5 h-5 rounded text-text-4 hover:text-text-1 hover:bg-bg-3 transition-colors"
+          className="ml-auto flex items-center justify-center w-5 h-5 rounded text-text-4 hover:text-text-1 hover:bg-state-hover transition-colors"
         >
           <X className="h-3.5 w-3.5" />
         </button>
@@ -119,19 +119,19 @@ export function RailBrowserAgent({
               </div>
               <div className="min-w-0 flex-1">
                 {s.thought && (
-                  <div className="text-[11px] text-text-2 leading-snug">{s.thought}</div>
+                  <div className="text-xs text-text-2 leading-snug">{s.thought}</div>
                 )}
-                <div className="text-[11px] text-text-4 truncate">{s.detail}</div>
+                <div className="text-xs text-text-4 truncate">{s.detail}</div>
               </div>
             </div>
           ))}
           {answer && (
-            <div className="rounded-md bg-bg-2 border border-line-soft p-2 text-[12px] text-text-1 leading-relaxed whitespace-pre-wrap">
+            <div className="rounded-md bg-bg-2 border border-line-soft p-2 text-sm text-text-1 leading-relaxed whitespace-pre-wrap">
               {answer}
             </div>
           )}
           {error && (
-            <div className="flex items-center gap-1.5 text-[11px] text-text-3">
+            <div className="flex items-center gap-1.5 text-xs text-text-3">
               <AlertTriangle className="h-3.5 w-3.5 flex-shrink-0" />
               <span className="truncate">{error}</span>
             </div>
@@ -146,7 +146,7 @@ export function RailBrowserAgent({
           placeholder="What should I find or do?"
           spellCheck={false}
           disabled={running}
-          className="flex-1 min-w-0 h-7 px-2.5 rounded-full bg-bg-2 text-[12px] text-text-1 placeholder:text-text-4 outline-none focus:ring-1 focus:ring-accent disabled:opacity-60"
+          className="flex-1 min-w-0 h-7 px-2.5 rounded-full bg-bg-2 text-sm text-text-1 placeholder:text-text-4 outline-none focus:ring-1 focus:ring-accent disabled:opacity-60"
         />
         <button
           type="submit"

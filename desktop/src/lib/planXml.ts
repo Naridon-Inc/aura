@@ -1,3 +1,5 @@
+import { truncate } from "./truncate";
+
 // Parser for `.aura/plans/ACTIVE_MILESTONE.xml` — the wave/task DAG
 // `aura plan` writes after the discovery pass. The CLI's own runner
 // (gsd::execute_wave) reads the same shape; we just render it.
@@ -111,7 +113,7 @@ function parseLegacy(xml: string): ParsedPlan {
     waveIdx += 1;
     waves.push({
       id: `wave-${waveIdx}`,
-      name: action.length > 60 ? action.slice(0, 60) + "…" : action,
+      name: truncate(action, 60),
       tasks: [
         {
           id: `task-${waveIdx}.1`,

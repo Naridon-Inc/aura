@@ -5,10 +5,19 @@
 // glyph (dotted = not started, half-solid = in progress, solid-check = done).
 // Click-to-jump is gated by `canJump`. Generic so any multi-step flow (not
 // just task-create) can reuse it.
+//
+// `WizardStepTabs` also answered to `variant="tabs"`, which was a plain view
+// switch wearing the wizard's clothes: no progress, no gate, nothing
+// sequential about it, but 52px cells that stretched to fill the bar. That is
+// `ViewTabs`' job and it draws 44px cells that keep their label's width, so
+// the detail panes that asked for `variant="tabs"` were the only surfaces in
+// the app whose header was a different height. It now delegates rather than
+// re-draws; only the sequential half is still implemented here.
 
 import * as React from "react";
 
 import { cn } from "../../lib/utils";
+import { ViewTabs } from "./tabs";
 
 export interface WizardStepMeta {
   id: string;
@@ -55,10 +64,9 @@ export interface WizardStepTabsProps {
   /** Whether step `i` is finished (shows the solid check glyph). */
   isComplete?: (i: number) => boolean;
   /** "steps" (default) shows the dotted/half/check progress glyph for a
-   *  sequential flow; "tabs" drops the glyph for a non-sequential tab strip
-   *  (e.g. the PR detail view's Overview / Files), marking the active cell
-   *  with an accent underline instead. Both share the same full-height
-   *  Medusa cell shape so every overlay's header reads identically. */
+   *  sequential flow. "tabs" is a non-sequential view switch (the PR detail
+   *  view's Overview / Files, and its kind) and is rendered by `ViewTabs`,
+   *  the app's one tab strip — see the delegation below. */
   variant?: "steps" | "tabs";
 }
 
@@ -73,13 +81,43 @@ export function WizardStepTabs({
   variant = "steps",
 }: WizardStepTabsProps) {
   const isTabs = variant === "tabs";
+
+  // A "tab" here is the same job `ViewTabs` does on Tasks, Trace and
+  // Workspaces: which drawing of this thing am I reading. It was drawn
+  // separately, and separately meant differently — 52px cells that stretched
+  // to fill, against the shared strip's 44px cells that keep their label's
+  // width. So the Session, PR and Task detail panes wore a header 8px taller
+  // than every other surface, with the tab underneath jumping as you moved
+  // between them.
+  //
+  // Only the tabs half delegates. `steps` is not the same control wearing a
+  // different skin: it is a sequential flow with a progress glyph per cell and
+  // a gate on which of them you may jump to, and none of that has a meaning in
+  // a tab strip.
+  if (isTabs) {
+    return (
+      <ViewTabs
+        value={steps[index]?.id ?? steps[0]?.id ?? ""}
+        onChange={(id) => {
+          const i = steps.findIndex((s) => s.id === id);
+          if (i >= 0) onJump(i);
+        }}
+        options={steps.map((s) => ({
+          value: s.id,
+          label: s.label,
+          icon: s.icon,
+        }))}
+        className="w-full"
+      />
+    );
+  }
+
   return (
     <div role="tablist" className="flex w-full items-stretch border-l border-line">
       {steps.map((s, i) => {
         const active = i === index;
         const done = (isComplete?.(i) ?? false) && !active;
-        // Non-sequential tabs are always reachable; steps gate on canJump.
-        const jumpable = isTabs ? true : (canJump?.(i) ?? true);
+        const jumpable = canJump?.(i) ?? true;
         const status: StepStatus = active
           ? "in-progress"
           : done
@@ -94,43 +132,21 @@ export function WizardStepTabs({
             disabled={!jumpable && !active}
             onClick={() => (jumpable || active) && onJump(i)}
             className={cn(
-              "relative inline-flex h-[52px] max-w-[200px] flex-1 items-center gap-2 border-r border-line px-4 text-left text-[13px] font-medium leading-5 transition-colors",
+              "relative inline-flex h-[52px] max-w-[200px] flex-1 items-center gap-2 border-r border-line px-4 text-left text-base font-medium leading-5 transition-colors",
               "overflow-hidden text-ellipsis whitespace-nowrap outline-none",
               "focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-ring",
               active
                 ? "bg-bg-content text-text-1"
                 : jumpable
-                  ? "bg-bg-1 text-text-4 hover:bg-bg-2 hover:text-text-2"
+                  ? "bg-bg-1 text-text-4 hover:bg-state-hover hover:text-text-2"
                   : "bg-bg-1 text-text-5 cursor-not-allowed",
             )}
           >
-            {!isTabs ? (
-              <StepIndicator
-                status={status}
-                className={cn("shrink-0", active ? "text-accent" : "text-text-4")}
-              />
-            ) : (
-              s.icon && (
-                <span
-                  className={cn(
-                    "shrink-0 inline-flex items-center justify-center",
-                    active ? "text-accent" : "text-text-4",
-                  )}
-                  aria-hidden
-                >
-                  {s.icon}
-                </span>
-              )
-            )}
+            <StepIndicator
+              status={status}
+              className={cn("shrink-0", active ? "text-accent" : "text-text-4")}
+            />
             <span className="truncate">{s.label}</span>
-            {/* Active-cell underline — the tab-mode affordance in place of the
-                step glyph. */}
-            {isTabs && active && (
-              <span
-                className="absolute inset-x-0 bottom-0 h-0.5 bg-accent"
-                aria-hidden
-              />
-            )}
           </button>
         );
       })}

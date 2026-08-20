@@ -11,10 +11,12 @@ import { Check, ChevronRight, Circle } from "lucide-react";
 import { cn } from "../../lib/utils";
 import {
   MENU_ANIM,
+  MENU_INDICATOR,
   MENU_LABEL,
   MENU_PANEL,
   MENU_ROW,
   MENU_ROW_DANGER,
+  MENU_ROW_INDICATED,
   MENU_SEP,
   MENU_SHORTCUT,
 } from "./menuSurface";
@@ -39,7 +41,7 @@ const ContextMenuSubTrigger = React.forwardRef<
     className={cn(
       MENU_ROW,
       "data-[state=open]:bg-bg-2 data-[state=open]:text-text-1",
-      inset && "pl-8",
+      inset && MENU_ROW_INDICATED,
       className,
     )}
     {...props}
@@ -88,7 +90,7 @@ const ContextMenuItem = React.forwardRef<
     data-variant={variant}
     className={cn(
       MENU_ROW,
-      inset && "pl-8",
+      inset && MENU_ROW_INDICATED,
       variant === "destructive" && MENU_ROW_DANGER,
       className,
     )}
@@ -103,11 +105,11 @@ const ContextMenuCheckboxItem = React.forwardRef<
 >(({ className, children, checked, ...props }, ref) => (
   <ContextMenuPrimitive.CheckboxItem
     ref={ref}
-    className={cn(MENU_ROW, "py-1.5 pl-8 pr-2", className)}
+    className={cn(MENU_ROW, MENU_ROW_INDICATED, className)}
     checked={checked}
     {...props}
   >
-    <span className="absolute left-2 flex h-3.5 w-3.5 items-center justify-center">
+    <span className={MENU_INDICATOR}>
       <ContextMenuPrimitive.ItemIndicator>
         <Check className="h-4 w-4 text-accent" strokeWidth={2.5} />
       </ContextMenuPrimitive.ItemIndicator>
@@ -123,10 +125,10 @@ const ContextMenuRadioItem = React.forwardRef<
 >(({ className, children, ...props }, ref) => (
   <ContextMenuPrimitive.RadioItem
     ref={ref}
-    className={cn(MENU_ROW, "py-1.5 pl-8 pr-2", className)}
+    className={cn(MENU_ROW, MENU_ROW_INDICATED, className)}
     {...props}
   >
-    <span className="absolute left-2 flex h-3.5 w-3.5 items-center justify-center">
+    <span className={MENU_INDICATOR}>
       <ContextMenuPrimitive.ItemIndicator>
         <Circle className="h-2 w-2 fill-current text-accent" />
       </ContextMenuPrimitive.ItemIndicator>

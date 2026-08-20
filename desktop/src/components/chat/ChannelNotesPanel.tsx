@@ -19,7 +19,14 @@ import { forwardRef, useCallback, useEffect, useMemo, useRef, useState } from "r
 import { MonacoEditor } from "../MonacoEditor";
 import { TiptapEditor } from "../notes/TiptapEditor";
 import { api, type NoteDoc, type NoteEntry, type TeamIdentity, type TeamMember } from "../../lib/api";
+import { monogram } from "../../lib/monogram";
+import { NotebookPen } from "lucide-react";
 import { AsciiSpinner } from "../ui/ascii-spinner";
+import { Segment } from "../ui/segment";
+import { EmptyState } from "../ui/state";
+import { relativeAgeFromDelta } from "../../lib/relativeTime";
+import { shortDateFromSecs } from "../../lib/calendarDate";
+import { fetchTeam, fetchIdentity } from "../../lib/teamCache";
 
 type Mode = "feed" | "canvas";
 type CanvasView = "rendered" | "source";
@@ -44,14 +51,10 @@ function canvasPath(target: CanvasTarget): string {
 
 function relativeTime(secs: number): string {
   if (!secs) return "never";
-  const now = Math.floor(Date.now() / 1000);
-  const delta = Math.max(0, now - secs);
-  if (delta < 10) return "just now";
-  if (delta < 60) return `${delta}s ago`;
-  if (delta < 3600) return `${Math.floor(delta / 60)}m ago`;
-  if (delta < 86400) return `${Math.floor(delta / 3600)}h ago`;
-  if (delta < 86400 * 7) return `${Math.floor(delta / 86400)}d ago`;
-  return new Date(secs * 1000).toLocaleDateString();
+  // One ladder for the whole app — see lib/relativeTime.
+  const delta = Math.max(0, Math.floor(Date.now() / 1000) - secs);
+  if (delta >= 86400 * 7) return shortDateFromSecs(secs);
+  return relativeAgeFromDelta(delta);
 }
 
 // Scope → backend wire form
@@ -131,8 +134,9 @@ export function ChannelNotesPanel({ repoRoot }: Props) {
   const [saving, setSaving] = useState(false);
   const [canvasLoading, setCanvasLoading] = useState(false);
   const [canvasError, setCanvasError] = useState<string | null>(null);
-  // "rendered" is the Slack-style canvas view; "source" is the raw
-  // markdown editor for power users. Defaults to rendered.
+  // "rendered" lays the note out — headings, lists, checkboxes; "source" is
+  // the raw Markdown behind it. Defaults to rendered: the laid-out note is
+  // what almost everyone wants, and Markdown is the escape hatch.
   const [canvasView, setCanvasView] = useState<CanvasView>("rendered");
 
   // misc
@@ -161,13 +165,13 @@ export function ChannelNotesPanel({ repoRoot }: Props) {
   const titleLabel = useMemo(() => {
     if (mode === "canvas") {
       return canvasTarget.kind === "team"
-        ? "Notes — team canvas"
-        : `Notes — #${canvasTarget.channel} canvas`;
+        ? "Notes. Team canvas"
+        : `Notes. #${canvasTarget.channel} canvas`;
     }
-    if (feedScope === "team") return "Notes — team feed";
-    if (feedScope === "user") return "Notes — your private feed";
-    if (!channel || channel === TEAM_SENTINEL) return "Notes — team feed";
-    return `Notes — #${channel} feed`;
+    if (feedScope === "team") return "Notes. Team feed";
+    if (feedScope === "user") return "Notes. Your private feed";
+    if (!channel || channel === TEAM_SENTINEL) return "Notes. Team feed";
+    return `Notes. #${channel} feed`;
   }, [mode, feedScope, channel, canvasTarget]);
 
   // ── open / close ────────────────────────────────────────────────────
@@ -219,8 +223,8 @@ export function ChannelNotesPanel({ repoRoot }: Props) {
     void (async () => {
       try {
         const [id, man] = await Promise.all([
-          api.teamIdentity(repoRoot),
-          api.teamLoad(repoRoot),
+          fetchIdentity(repoRoot),
+          fetchTeam(repoRoot),
         ]);
         if (cancelled) return;
         setIdentity(id);
@@ -505,7 +509,7 @@ export function ChannelNotesPanel({ repoRoot }: Props) {
             <div className="truncate text-sm font-medium text-text-1">
               {titleLabel}
             </div>
-            <div className="flex items-center gap-2 text-[11px] text-text-4">
+            <div className="flex items-center gap-2 text-xs text-text-4">
               {mode === "canvas" ? (
                 <>
                   {canvasLoading ? (
@@ -544,7 +548,7 @@ export function ChannelNotesPanel({ repoRoot }: Props) {
                     </span>
                   )}
                   {feedScope === "user" && (
-                    <span className="rounded bg-bg-2 px-1 text-[10px] uppercase tracking-wide text-text-3">
+                    <span className="meta-tag">
                       local-only
                     </span>
                   )}
@@ -559,39 +563,28 @@ export function ChannelNotesPanel({ repoRoot }: Props) {
           </div>
           {mode === "canvas" && (
             <>
-              <div
-                className="mr-1 flex items-center rounded border border-line-soft bg-bg-1 p-0.5 text-[10px]"
-                role="group"
-                aria-label="Canvas view"
-              >
-                <button
-                  type="button"
-                  onClick={() => setCanvasView("rendered")}
-                  className={`rounded px-1.5 py-0.5 transition-colors ${
-                    canvasView === "rendered"
-                      ? "bg-bg-2 text-text-1"
-                      : "text-text-3 hover:text-text-1"
-                  }`}
-                  title="Slack-style canvas view"
-                >
-                  Canvas
-                </button>
-                <button
-                  type="button"
-                  onClick={() => setCanvasView("source")}
-                  className={`rounded px-1.5 py-0.5 transition-colors ${
-                    canvasView === "source"
-                      ? "bg-bg-2 text-text-1"
-                      : "text-text-3 hover:text-text-1"
-                  }`}
-                  title="Raw markdown source"
-                >
-                  Source
-                </button>
-              </div>
+              <Segment
+                value={canvasView}
+                onChange={setCanvasView}
+                size="xs"
+                ariaLabel="How to show this note"
+                className="mr-1"
+                options={[
+                  {
+                    value: "rendered",
+                    label: "Canvas",
+                    title: "The note laid out. Headings, lists, checkboxes",
+                  },
+                  {
+                    value: "source",
+                    label: "Markdown",
+                    title: "The note's plain Markdown text, exactly as stored",
+                  },
+                ]}
+              />
               <button
                 type="button"
-                className="flex h-7 w-7 items-center justify-center rounded text-text-3 hover:bg-bg-2 hover:text-text-1"
+                className="flex h-7 w-7 items-center justify-center rounded text-text-3 hover:bg-state-hover hover:text-text-1"
                 onClick={() => {
                   window.dispatchEvent(
                     new CustomEvent("aura:open-file", {
@@ -609,7 +602,7 @@ export function ChannelNotesPanel({ repoRoot }: Props) {
           )}
           <button
             type="button"
-            className="flex h-7 w-7 items-center justify-center rounded text-text-3 hover:bg-bg-2 hover:text-text-1"
+            className="flex h-7 w-7 items-center justify-center rounded text-text-3 hover:bg-state-hover hover:text-text-1"
             onClick={closePanel}
             title="Close"
             aria-label="Close"
@@ -635,8 +628,8 @@ export function ChannelNotesPanel({ repoRoot }: Props) {
               bare
               placeholder={
                 canvasTarget.kind === "team"
-                  ? "Team-wide canvas — start typing."
-                  : `Canvas for #${canvasTarget.channel} — start typing.`
+                  ? "Team-wide canvas. Start typing."
+                  : `Canvas for #${canvasTarget.channel}. Start typing.`
               }
             />
           )}
@@ -666,10 +659,10 @@ export function _ModeTab({
     <button
       type="button"
       onClick={onClick}
-      className={`rounded px-2 py-1 text-[12px] transition-colors ${
+      className={`rounded px-2 py-1 text-sm transition-colors ${
         active
           ? "bg-bg-2 text-text-1"
-          : "text-text-3 hover:bg-bg-2/60 hover:text-text-1"
+          : "text-text-3 hover:bg-state-hover hover:text-text-1"
       }`}
     >
       {children}
@@ -696,12 +689,12 @@ export function _ScopeTab({
       onClick={disabled ? undefined : onClick}
       title={title}
       disabled={disabled}
-      className={`rounded px-2 py-1 text-[11px] transition-colors ${
+      className={`rounded px-2 py-1 text-xs transition-colors ${
         active
           ? "bg-accent-blue/20 text-text-1"
           : disabled
             ? "cursor-not-allowed text-text-4"
-            : "text-text-3 hover:bg-bg-2/60 hover:text-text-1"
+            : "text-text-3 hover:bg-state-hover hover:text-text-1"
       }`}
     >
       {children}
@@ -710,15 +703,22 @@ export function _ScopeTab({
 }
 
 export function _EmptyState({ scope, channel }: { scope: FeedScope; channel: string | null }) {
+  // Who can read this is the one thing worth saying on an empty notes feed —
+  // people don't write anything down until they know where it goes.
   let line: string;
-  if (scope === "user") line = "Your private scratchpad — only stored on this machine.";
-  else if (scope === "team") line = "Team-wide running log. Committed via git.";
-  else if (channel && channel !== TEAM_SENTINEL) line = `Channel log for #${channel}. Committed via git.`;
-  else line = "Open notes from a channel header to post here.";
+  if (scope === "user") line = "Only you can see these, and they never leave this machine.";
+  else if (scope === "team") line = "Everyone on the project sees these, and they're saved alongside the code.";
+  else if (channel && channel !== TEAM_SENTINEL)
+    line = `Everyone in #${channel} sees these, and they're saved alongside the code.`;
+  else line = "Open notes from a channel to start one.";
   return (
-    <div className="m-auto max-w-[320px] text-center text-xs text-text-4">
-      <div className="mb-1 text-text-3">No notes yet.</div>
-      <div>{line}</div>
+    <div className="m-auto">
+      <EmptyState
+        icon={NotebookPen}
+        title="No notes yet"
+        body={`Notes are the running log beside the conversation. A decision you want to remember, a link, something to pick up tomorrow. ${line}`}
+        size="sm"
+      />
     </div>
   );
 }
@@ -735,20 +735,19 @@ export function _FeedRow({
   onDelete: () => void;
 }) {
   const chunks = useMemo(() => chunkBody(entry.body), [entry.body]);
-  const initials = useMemo(() => {
-    const src = entry.author_name || entry.author_handle || "?";
-    const parts = src.trim().split(/\s+/);
-    if (parts.length === 1) return parts[0].slice(0, 2).toUpperCase();
-    return (parts[0][0] + parts[parts.length - 1][0]).toUpperCase();
-  }, [entry.author_name, entry.author_handle]);
+  // One monogram for the whole app — see lib/monogram.
+  const initials = useMemo(
+    () => monogram(entry.author_name || entry.author_handle),
+    [entry.author_name, entry.author_handle],
+  );
 
   return (
-    <div className="group flex gap-2 rounded px-1 py-1 hover:bg-bg-2/40">
-      <div className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-bg-2 text-[10px] font-medium text-text-1">
+    <div className="group flex gap-2 rounded px-1 py-1 hover:bg-state-hover">
+      <div className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-bg-2 text-2xs font-medium text-text-1">
         {initials}
       </div>
       <div className="min-w-0 flex-1">
-        <div className="flex items-baseline gap-1.5 text-[12px]">
+        <div className="flex items-baseline gap-1.5 text-sm">
           <span className="font-medium text-text-1">{entry.author_name || entry.author_handle}</span>
           <span className="text-text-4">@{entry.author_handle}</span>
           <span className="text-text-4">·</span>
@@ -766,7 +765,7 @@ export function _FeedRow({
             </button>
           )}
         </div>
-        <div className="whitespace-pre-wrap break-words text-[13px] leading-snug text-text-1">
+        <div className="whitespace-pre-wrap break-words text-base leading-snug text-text-1">
           {chunks.map((c, i) =>
             c.kind === "text" ? (
               <span key={i}>{c.value}</span>
@@ -816,7 +815,7 @@ export const _FeedComposer = forwardRef<HTMLTextAreaElement, FeedComposerProps>(
                   e.preventDefault();
                   onInsertMention(m.handle);
                 }}
-                className="flex w-full items-center gap-2 px-2 py-1 text-left text-[12px] hover:bg-bg-2"
+                className="flex w-full items-center gap-2 px-2 py-1 text-left text-sm hover:bg-state-hover"
               >
                 <span className="font-medium text-text-1">@{m.handle}</span>
                 {m.name && m.name !== m.handle && (
@@ -841,15 +840,15 @@ export const _FeedComposer = forwardRef<HTMLTextAreaElement, FeedComposerProps>(
               if (!disabled && value.trim()) onSubmit();
             }
           }}
-          className="w-full resize-none rounded border border-line-soft bg-bg-1 px-2 py-1.5 text-[13px] leading-snug text-text-1 placeholder:text-text-4 focus:border-accent-blue focus:outline-none disabled:opacity-50"
+          className="w-full resize-none rounded border border-line-soft bg-bg-1 px-2 py-1.5 text-base leading-snug text-text-1 placeholder:text-text-4 focus:border-accent-blue focus:outline-none disabled:opacity-50"
         />
-        <div className="mt-1 flex items-center justify-between text-[10px] text-text-4">
+        <div className="mt-1 flex items-center justify-between text-2xs text-text-4">
           <span>Enter to post · Shift+Enter for newline · @ to mention</span>
           <button
             type="button"
             onClick={onSubmit}
             disabled={disabled || !value.trim()}
-            className="rounded bg-accent-blue px-2 py-0.5 text-[11px] font-medium text-white disabled:cursor-not-allowed disabled:opacity-50"
+            className="rounded bg-accent-blue px-2 py-0.5 text-xs font-medium text-white disabled:cursor-not-allowed disabled:opacity-50"
           >
             Post
           </button>

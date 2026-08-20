@@ -6,7 +6,8 @@
 // arctic-blue for the one primary action, no jargon walls.
 
 import { useCallback, useEffect, useState, type ReactNode } from "react";
-import { AsciiSpinner } from "../../ui/ascii-spinner";
+import type { LucideIcon } from "lucide-react";
+import { EmptyState, LoadingState } from "../../ui/state";
 
 import {
   api,
@@ -133,8 +134,8 @@ export function PaneIntro({
   return (
     <div className="mb-5 flex items-start justify-between gap-4">
       <div className="min-w-0">
-        <h2 className="text-[16px] font-semibold text-text-1">{title}</h2>
-        <p className="mt-1 text-[12.5px] leading-relaxed text-text-3">{blurb}</p>
+        <h2 className="text-lg font-semibold text-text-1">{title}</h2>
+        <p className="mt-1 text-base leading-relaxed text-text-3">{blurb}</p>
       </div>
       {action ? <div className="shrink-0">{action}</div> : null}
     </div>
@@ -161,44 +162,35 @@ export function Card({
 /** A calm count chip (e.g. "3 installed"). Neutral by default. */
 export function CountPill({ children }: { children: ReactNode }) {
   return (
-    <span className="rounded-full bg-bg-2 px-2 py-0.5 text-[10.5px] font-medium text-text-3">
+    <span className="rounded-full bg-bg-2 px-2 py-0.5 text-xs font-medium text-text-3">
       {children}
     </span>
   );
 }
 
-/** Centered empty/loading state — icon, line, optional supporting text. */
+/**
+ * The empty state these panes render. Nothing but a name of its own now — the
+ * shape, the spacing and the copy rules are the app's, in `ui/state`.
+ *
+ * It used to draw its own dashed-border box, which is the one empty-state
+ * variant this app doesn't want: a box around nothing is still a box, and the
+ * rule here is no bulky cards.
+ */
 export function EmptyHint({
   icon,
   title,
   body,
   action,
 }: {
-  icon?: ReactNode;
+  icon: LucideIcon;
   title: string;
   body?: string;
-  action?: ReactNode;
+  action?: { label: string; onClick: () => void; icon?: LucideIcon };
 }) {
-  return (
-    <div className="flex flex-col items-center justify-center gap-2 rounded-lg border border-dashed border-line-soft px-6 py-10 text-center">
-      {icon ? <div className="text-text-4">{icon}</div> : null}
-      <div className="text-[13px] font-medium text-text-2">{title}</div>
-      {body ? (
-        <div className="max-w-sm text-[12px] leading-relaxed text-text-4">
-          {body}
-        </div>
-      ) : null}
-      {action ? <div className="mt-1">{action}</div> : null}
-    </div>
-  );
+  return <EmptyState icon={icon} title={title} body={body} action={action} />;
 }
 
-/** Small inline spinner reused across panes while a store loads. */
+/** Named for these panes, but the app's one loading state underneath. */
 export function PaneSpinner({ label = "Loading…" }: { label?: string }) {
-  return (
-    <div className="flex items-center gap-2 px-1 py-6 text-[12px] text-text-4">
-      <AsciiSpinner />
-      {label}
-    </div>
-  );
+  return <LoadingState label={label} />;
 }

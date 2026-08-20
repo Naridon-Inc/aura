@@ -58,7 +58,10 @@ export function CompareWorktreesDialog({ open, repoRoot, onClose }: Props) {
         const main = rows.find((r) => r.is_main);
         if (main && main.branch) setBaseRef(main.branch);
       })
-      .catch(() => setWorktrees([]))
+      // An empty list here would claim the project has no worktrees to
+      // compare. It might have several — we just couldn't ask. Keep whatever
+      // was last known and surface the reason instead of inventing "none".
+      .catch((e) => setMergeErr(`Could not list worktrees: ${e}`))
       .finally(() => setBusy(false));
   }, [open, repoRoot]);
 
@@ -118,7 +121,7 @@ export function CompareWorktreesDialog({ open, repoRoot, onClose }: Props) {
         </Button>
       }
     >
-      <div className="space-y-3 text-[11.5px]">
+      <div className="space-y-3 text-sm">
         <div className="flex items-center gap-2">
           <span className="text-text-3">Compare against</span>
           <Select
@@ -135,7 +138,7 @@ export function CompareWorktreesDialog({ open, repoRoot, onClose }: Props) {
 
         {busy ? (
           <div className="flex items-center gap-1.5 text-text-4" role="status">
-            <AsciiSpinner className="text-[11px] leading-none" />
+            <AsciiSpinner className="text-xs leading-none" />
             Looking for parallel copies…
           </div>
         ) : candidates.length === 0 ? (
@@ -157,7 +160,7 @@ export function CompareWorktreesDialog({ open, repoRoot, onClose }: Props) {
                       ? "bg-bg-3 border-line"
                       : disabled
                         ? "bg-bg-1 border-line-soft opacity-50 cursor-not-allowed"
-                        : "bg-bg-1 border-line-soft hover:bg-bg-2"
+                        : "bg-bg-1 border-line-soft hover:bg-state-hover"
                   }`}
                   title={w.path}
                 >
@@ -172,7 +175,7 @@ export function CompareWorktreesDialog({ open, repoRoot, onClose }: Props) {
                   <span className="font-mono text-text-1 truncate">
                     {w.branch}
                   </span>
-                  <span className="text-text-4 font-mono text-[10px] ml-auto">
+                  <span className="text-text-4 font-mono text-2xs ml-auto">
                     {w.head.slice(0, 7)}
                   </span>
                 </li>
@@ -202,12 +205,12 @@ export function CompareWorktreesDialog({ open, repoRoot, onClose }: Props) {
         )}
 
         {mergeMsg && (
-          <pre className="bg-bg-1 border border-line-soft rounded px-2 py-1.5 text-[10.5px] text-text-2 whitespace-pre-wrap max-h-32 overflow-auto">
+          <pre className="bg-bg-1 border border-line-soft rounded px-2 py-1.5 text-xs text-text-2 whitespace-pre-wrap max-h-32 overflow-auto">
             {mergeMsg}
           </pre>
         )}
         {mergeErr && (
-          <pre className="bg-red/10 border border-red/40 rounded px-2 py-1.5 text-[10.5px] text-red whitespace-pre-wrap max-h-32 overflow-auto">
+          <pre className="bg-red/10 border border-red/40 rounded px-2 py-1.5 text-xs text-red whitespace-pre-wrap max-h-32 overflow-auto">
             {mergeErr}
           </pre>
         )}
@@ -278,15 +281,15 @@ function ComparePane({
         <span className="font-mono text-text-1 truncate flex-1" title={headRef}>
           {headRef}
         </span>
-        <span className="text-accent-green font-mono text-[10px]">
+        <span className="text-accent-green font-mono text-2xs">
           +{totals.add}
         </span>
-        <span className="text-red font-mono text-[10px]">−{totals.del}</span>
+        <span className="text-red font-mono text-2xs">−{totals.del}</span>
       </div>
       <div className="overflow-y-auto" style={{ maxHeight: 300 }}>
         {loading ? (
           <div className="flex items-center gap-1.5 px-2 py-2 text-text-4" role="status">
-            <AsciiSpinner className="text-[11px] leading-none" />
+            <AsciiSpinner className="text-xs leading-none" />
             Comparing the two copies…
           </div>
         ) : files.length === 0 ? (
@@ -300,7 +303,7 @@ function ComparePane({
                   onClick={() =>
                     setOpenFile((cur) => (cur === f.path ? null : f.path))
                   }
-                  className={`w-full text-left flex items-center gap-2 px-2 py-1 font-mono text-[10.5px] hover:bg-bg-2 ${
+                  className={`w-full text-left flex items-center gap-2 px-2 py-1 font-mono text-xs hover:bg-state-hover ${
                     openFile === f.path ? "bg-bg-3" : ""
                   }`}
                 >
@@ -315,7 +318,7 @@ function ComparePane({
                   <span className="text-red">−{f.deletions}</span>
                 </button>
                 {openFile === f.path && (
-                  <pre className="bg-bg-0 border-y border-line-soft px-2 py-1.5 text-[10px] font-mono whitespace-pre overflow-x-auto max-h-64 leading-snug">
+                  <pre className="bg-bg-0 border-y border-line-soft px-2 py-1.5 text-2xs font-mono whitespace-pre overflow-x-auto max-h-64 leading-snug">
                     {colorizeDiff(diffText)}
                   </pre>
                 )}

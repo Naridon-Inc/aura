@@ -16,6 +16,8 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { InFlightEntry } from "../../lib/workspaceInFlightStore";
 import { AsciiSpinner } from "../ui/ascii-spinner";
+import { agentName } from "../../lib/agentNames";
+import { truncate } from "../../lib/truncate";
 
 type Props = {
   entry: InFlightEntry;
@@ -33,37 +35,22 @@ const HANDOFF_MS = 700;
 
 type StepState = "pending" | "active" | "done";
 
-function labelForAgent(id: string): string {
-  switch (id) {
-    case "claude":
-      return "Claude";
-    case "gemini":
-      return "Gemini";
-    case "codex":
-      return "Codex";
-    case "cursor":
-      return "Cursor";
-    case "kimi":
-      return "Kimi";
-    case "qwen":
-      return "Qwen";
-    default:
-      return id.charAt(0).toUpperCase() + id.slice(1);
-  }
-}
-
 /** "origin/main" / "HEAD" / a branch name — trimmed of the noisy `refs/heads/`
  *  prefix and clamped so a long ref doesn't blow the line width. */
 function prettyRef(ref: string | undefined): string {
   if (!ref || ref === "HEAD") return "the latest commit";
   const trimmed = ref.replace(/^refs\/(heads|remotes)\//, "");
-  return trimmed.length > 32 ? trimmed.slice(0, 31) + "…" : trimmed;
+  return truncate(trimmed, 32);
 }
 
 export function WorkspaceSetupFeed({ entry, projectName, onEnter }: Props) {
   const agentSummary = useMemo(() => {
-    const labels = entry.agents.map(labelForAgent);
-    if (labels.length === 0) return "your workspace";
+    const labels = entry.agents.map((id) => agentName(id));
+    // No agents in the launch means the workspace opens in Aura chat — which
+    // is what the "start something new" card does now. Name it: the old
+    // fallback read "Starting your workspace", which told the user nothing
+    // about where they were about to land.
+    if (labels.length === 0) return "Aura";
     if (labels.length === 1) return labels[0];
     if (labels.length === 2) return `${labels[0]} and ${labels[1]}`;
     return `${labels.slice(0, -1).join(", ")} and ${labels[labels.length - 1]}`;
@@ -84,7 +71,7 @@ export function WorkspaceSetupFeed({ entry, projectName, onEnter }: Props) {
       {
         key: "files",
         label: "Copied your files into the new workspace",
-        sub: "a private, full checkout — edit freely",
+        sub: "a private, full checkout. Edit freely",
       },
       {
         key: "agents",
@@ -141,14 +128,14 @@ export function WorkspaceSetupFeed({ entry, projectName, onEnter }: Props) {
       <div className="w-full max-w-[440px] flex flex-col">
         {/* Header — Conductor's "you're in a new copy" framing. */}
         <div className="mb-7">
-          <div className="text-[11px] uppercase tracking-[0.14em] text-text-4 mb-1.5">
+          <div className="section-label mb-1.5">
             {isError
               ? "Setup failed"
               : allDone
                 ? "Workspace ready"
                 : "Setting up your workspace"}
           </div>
-          <h1 className="text-[17px] font-medium text-text-1 leading-snug">
+          <h1 className="text-lg font-medium text-text-1 leading-snug">
             {isError
               ? `Couldn't finish setting up ${projectName}`
               : `You're in a new copy of ${projectName}`}
@@ -157,13 +144,13 @@ export function WorkspaceSetupFeed({ entry, projectName, onEnter }: Props) {
 
         {isError ? (
           <div className="flex flex-col gap-3">
-            <div className="rounded-md border border-red/30 bg-red/5 px-3.5 py-3 text-[12px] text-text-2 leading-relaxed">
+            <div className="rounded-md border border-red/30 bg-red/5 px-3.5 py-3 text-sm text-text-2 leading-relaxed">
               {entry.error || "The workspace couldn't be created."}
             </div>
             <button
               type="button"
               onClick={onEnter}
-              className="self-start h-8 px-3 rounded-md text-[12px] text-text-2 hover:text-text-1 border border-line-soft hover:bg-bg-2 transition-colors"
+              className="self-start h-8 px-3 rounded-md text-sm text-text-2 hover:text-text-1 border border-line-soft hover:bg-state-hover transition-colors"
             >
               Dismiss
             </button>
@@ -199,7 +186,7 @@ export function WorkspaceSetupFeed({ entry, projectName, onEnter }: Props) {
                   {/* Copy. */}
                   <div className={`pb-3 ${isLast ? "" : ""}`}>
                     <div
-                      className={`text-[13px] leading-tight transition-colors ${
+                      className={`text-base leading-tight transition-colors ${
                         st === "pending"
                           ? "text-text-4"
                           : st === "active"
@@ -210,7 +197,7 @@ export function WorkspaceSetupFeed({ entry, projectName, onEnter }: Props) {
                       {label}
                     </div>
                     {"sub" in step && step.sub && st !== "pending" && (
-                      <div className="text-[11px] text-text-4 mt-0.5 leading-snug">
+                      <div className="text-xs text-text-4 mt-0.5 leading-snug">
                         {step.sub}
                       </div>
                     )}
@@ -250,7 +237,7 @@ function StepGlyph({ state }: { state: StepState }) {
         className="flex items-center justify-center"
         style={{ width: 18, height: 18 }}
       >
-        <AsciiSpinner className="text-[12px]" />
+        <AsciiSpinner className="text-sm" />
       </span>
     );
   }

@@ -115,10 +115,10 @@ export function StatusPills({
         // unmounted); click to jump back to the conversation.
         <Pill
           tone="ok"
-          title="Aura is working in this project — click to open the chat"
+          title="Aura is working in this project. Click to open the chat"
           onClick={onFocusChat}
         >
-          <AsciiSpinner className="text-[11px]" />
+          <AsciiSpinner className="text-xs" />
           <span>Aura</span>
         </Pill>
       )}
@@ -129,7 +129,7 @@ export function StatusPills({
         // a one-time on-ramp, never persistent chrome.
         <Pill
           tone="info"
-          title="Aura isn't recording changes in this project yet — click to turn it on"
+          title="Aura isn't recording changes in this project yet. Click to turn it on"
           onClick={onOpenCapture ?? onOpenSettings}
         >
           <ShieldGlyph />
@@ -139,7 +139,7 @@ export function StatusPills({
       {state.strict && (
         <Pill
           tone="warn"
-          title="Strict mode is on — open Security & Policy"
+          title="Strict mode is on. Open Security & Policy"
           onClick={onOpenStrict ?? onOpenSettings}
         >
           <LockGlyph />
@@ -168,16 +168,16 @@ function Pill({
   // just inks a touch brighter.
   const toneCls =
     tone === "warn"
-      ? "border-line text-text-1 hover:bg-bg-2"
+      ? "border-line text-text-1 hover:bg-state-hover"
       : tone === "neutral"
-        ? "border-line/40 text-text-3 hover:bg-bg-2"
-        : "border-line/60 text-text-2 hover:bg-bg-2";
+        ? "border-line/40 text-text-3 hover:bg-state-hover"
+        : "border-line/60 text-text-2 hover:bg-state-hover";
   return (
     <button
       type="button"
       title={title}
       onClick={onClick}
-      className={`h-[20px] px-2 flex items-center gap-1.5 text-[11px] rounded-[6px] border bg-bg-1 transition-colors ${toneCls}`}
+      className={`h-[20px] px-2 flex items-center gap-1.5 text-xs rounded-[6px] border bg-bg-1 transition-colors ${toneCls}`}
     >
       {children}
     </button>

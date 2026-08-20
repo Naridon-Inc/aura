@@ -13,35 +13,33 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
-  api,
   type ClaudeSession,
   type IntentRow,
   type ManagerSummary,
 } from "../../lib/api";
+import { fetchManagerList } from "../../lib/managerCache";
+import { fetchSessions } from "../../lib/sessionsCache";
+import { fetchIntentRows } from "../../lib/intentCache";
+import { History } from "lucide-react";
+import { relativeAgeFromDelta } from "../../lib/relativeTime";
+import { intentTypeChip } from "../../lib/intentTypeLabels";
 import * as Icons from "../Icons";
 import { AgentBadge } from "../agent/AgentBadge";
 import { Button } from "../ui/button";
+import { EmptyState, ErrorState, LoadingState } from "../ui/state";
 import {
   collapseAutoStubSessions,
+  provenanceTag,
   sessionDisplayTitle,
+  titleProvenance,
   type SessionDisplayRow,
 } from "../../lib/sessionMeta";
 
-/** Relative time from a "seconds ago" delta — "just now", "2h", "3d". */
+/** Relative time from a "seconds ago" delta — "now", "2h", "3d". */
 function relTime(secsAgo: number): string {
-  if (!Number.isFinite(secsAgo) || secsAgo < 0) return "just now";
-  if (secsAgo < 45) return "just now";
-  const mins = Math.floor(secsAgo / 60);
-  if (mins < 60) return `${mins}m`;
-  const hours = Math.floor(secsAgo / 3600);
-  if (hours < 24) return `${hours}h`;
-  const days = Math.floor(secsAgo / 86400);
-  if (days < 7) return `${days}d`;
-  const weeks = Math.floor(days / 7);
-  if (weeks < 5) return `${weeks}w`;
-  const months = Math.floor(days / 30);
-  if (months < 12) return `${months}mo`;
-  return `${Math.floor(days / 365)}y`;
+  // One ladder for the whole app — see lib/relativeTime. This copy skipped the
+  // seconds rung, so 45s through 59s printed "0m".
+  return relativeAgeFromDelta(secsAgo, { style: "compact" });
 }
 
 const WEEKDAYS = [
@@ -192,6 +190,10 @@ function SessionRow({
   const rel = relTime(nowSecs - row.timestamp);
   const signed = !!row.signed_block_id;
   const title = sessionDisplayTitle(row, sessions);
+  // A line Aura's own model wrote from the diff reads, on this list, exactly
+  // like a reason somebody gave — same place, same weight, same voice. The
+  // detail pane now says which is which; a list you scan needs the one bit.
+  const provTag = provenanceTag(titleProvenance(row, sessions));
   // A halted attempt Aura refused to let land — the honest record of a guard
   // catch. It reads as an error-class event, so it gets the red marker and a
   // "Blocked" badge in place of the neutral verdict dot / intent-type chip.
@@ -201,35 +203,46 @@ function SessionRow({
     <button
       type="button"
       onClick={() => onOpen(row)}
-      className="group flex w-full items-start gap-2.5 px-3 py-2 text-left hover:bg-bg-2"
+      className="group flex w-full items-start gap-2.5 px-3 py-2 text-left hover:bg-state-hover"
     >
-      {/* status dot — red when Aura blocked this change, neutral grey when
-          there's simply no verdict on the run yet */}
+      {/* Status dot — red ONLY when Aura blocked this change. Every other run
+          keeps the gutter but draws nothing: a grey dot on all 119 rows,
+          captioned "No verdict yet", is a mark that never varies and so says
+          nothing — it reads as a bullet while claiming to be a status. The
+          space stays so titles stay aligned with the blocked ones. */}
       <span
         className={`mt-[5px] h-2 w-2 shrink-0 rounded-full ${
-          isBlocked ? "bg-red" : "bg-text-4"
+          isBlocked ? "bg-red" : ""
         }`}
-        title={isBlocked ? "Blocked — Aura halted this change" : "No verdict yet"}
+        title={isBlocked ? "Blocked. Aura halted this change" : undefined}
         aria-hidden="true"
       />
 
       <span className="min-w-0 flex-1">
         <span className="flex min-w-0 items-center gap-1.5">
-          <span className="truncate text-[12px] leading-snug text-text-1">
+          <span className="truncate text-sm leading-snug text-text-1">
             {title}
           </span>
           {signed ? (
             <span
               className="shrink-0 text-text-4"
-              title="Sealed — this record is locked and can’t be altered"
+              title="Sealed. This record is locked and can’t be altered"
             >
               <LockIcon />
             </span>
           ) : null}
         </span>
 
-        <span className="mt-1 flex min-w-0 flex-wrap items-center gap-x-2 gap-y-0.5 text-[11px] text-text-3">
+        <span className="mt-1 flex min-w-0 flex-wrap items-center gap-x-2 gap-y-0.5 text-xs text-text-3">
           <AgentBadge agentId={row.agent_id} />
+          {provTag ? (
+            <span
+              className="text-text-4"
+              title="Nobody wrote a reason for this change, so Aura read the diff and wrote the line above. It describes what happened. Open it for the detail."
+            >
+              {provTag}
+            </span>
+          ) : null}
           <span className="text-text-4">{rel}</span>
           {row.changeset ? (
             <>
@@ -238,7 +251,7 @@ function SessionRow({
                 {churn.files} {churn.files === 1 ? "file" : "files"}
               </span>
               {churn.hasChurn ? (
-                <span className="font-mono text-[10px]">
+                <span className="font-mono text-2xs">
                   <span className="text-accent-green">+{churn.adds}</span>
                   <span className="text-text-4"> / </span>
                   <span className="text-text-3">−{churn.dels}</span>
@@ -258,12 +271,13 @@ function SessionRow({
             </>
           ) : null}
           {isBlocked ? (
-            <span className="rounded border border-red px-1.5 py-px text-[10px] font-medium text-red">
+            <span className="rounded border border-red px-1.5 py-px text-2xs font-medium text-red">
               Blocked
             </span>
           ) : row.intent_type ? (
-            <span className="rounded border border-line-soft px-1.5 py-px text-[10px] text-text-4">
-              {row.intent_type}
+            // Plain words, not the raw CamelCase enum ("FeatureAdd").
+            <span className="rounded border border-line-soft px-1.5 py-px text-2xs text-text-4">
+              {intentTypeChip(row.intent_type)}
             </span>
           ) : null}
         </span>
@@ -292,22 +306,21 @@ function ManagerSessionRow({
     <button
       type="button"
       onClick={() => onOpen(managerRowToIntent(summary))}
-      className="group flex w-full items-start gap-2.5 px-3 py-2 text-left hover:bg-bg-2"
+      className="group flex w-full items-start gap-2.5 px-3 py-2 text-left hover:bg-state-hover"
     >
-      <span
-        className="mt-[5px] h-2 w-2 shrink-0 rounded-full bg-text-4"
-        title="No verdict yet"
-        aria-hidden="true"
-      />
+      {/* Empty gutter, matching the intent rows: their dot only draws when
+          Aura blocked a change, and a chat with the manager can't be blocked.
+          The space stays so every title in the list lines up. */}
+      <span className="mt-[5px] h-2 w-2 shrink-0" aria-hidden="true" />
 
       <span className="min-w-0 flex-1">
         <span className="flex min-w-0 items-center gap-1.5">
-          <span className="truncate text-[12px] leading-snug text-text-1">
+          <span className="truncate text-sm leading-snug text-text-1">
             {title}
           </span>
         </span>
 
-        <span className="mt-1 flex min-w-0 flex-wrap items-center gap-x-2 gap-y-0.5 text-[11px] text-text-3">
+        <span className="mt-1 flex min-w-0 flex-wrap items-center gap-x-2 gap-y-0.5 text-xs text-text-3">
           <AgentBadge agentId="aura-manager" />
           <span className="text-text-4">{rel}</span>
           {hasTasks ? (
@@ -318,7 +331,7 @@ function ManagerSessionRow({
               </span>
             </>
           ) : null}
-          <span className="rounded border border-line-soft px-1.5 py-px text-[10px] text-text-4">
+          <span className="rounded border border-line-soft px-1.5 py-px text-2xs text-text-4">
             chat
           </span>
         </span>
@@ -407,9 +420,9 @@ export function SessionsPane({
       // populate. `managerList(repoRoot)` is workspace-scoped so chats from
       // other workspaces don't leak in.
       const [data, sessions, managers] = await Promise.all([
-        api.auraIntentRecent(repoRoot, 100),
-        api.claudeListSessions(repoRoot).catch(() => [] as ClaudeSession[]),
-        api.managerList(repoRoot).catch(() => [] as ManagerSummary[]),
+        fetchIntentRows(repoRoot, 100),
+        fetchSessions(repoRoot).catch(() => [] as ClaudeSession[]),
+        fetchManagerList(repoRoot).catch(() => [] as ManagerSummary[]),
       ]);
       if (!aliveRef.current) return;
       const snap: SessionsSnapshot = {
@@ -495,11 +508,23 @@ export function SessionsPane({
     <div className="flex h-full min-h-0 flex-col bg-bg-content">
       {/* Header */}
       <div className="flex shrink-0 items-center justify-between border-b border-line-soft px-3 py-2.5">
+        {/* The count, not the name. "My sessions" was already written twice on
+            screen — the sidebar row you clicked and the tab it opened — and a
+            third copy 8px below them taught nothing. The number is the one
+            thing here the reader can't get from the chrome, so it says its own
+            noun now and stands alone.
+
+            No count until we've actually read them: on a cold open this
+            printed "0" for the several seconds the list took to load, a flat
+            claim that you have none, contradicted moments later by 119 rows. */}
         <div className="flex items-baseline gap-2">
-          <span className="text-[13px] font-medium text-text-1">Sessions</span>
-          <span className="text-[11px] text-text-4">
-            {total} {total === 1 ? "session" : "sessions"}
-          </span>
+          {loading && total === 0 ? (
+            <span />
+          ) : (
+            <span className="text-xs text-text-4">
+              {total} {total === 1 ? "session" : "sessions"}
+            </span>
+          )}
         </div>
         <Button
           variant="ghost"
@@ -518,21 +543,20 @@ export function SessionsPane({
       {/* List */}
       <div className="min-h-0 flex-1 overflow-y-auto">
         {error ? (
-          <div className="px-3 py-3 text-[12px] text-text-3">
-            Couldn&rsquo;t load sessions.
-            <span className="mt-1 block font-mono text-[11px] text-text-4">
-              {error}
-            </span>
-          </div>
+          <ErrorState
+            title="Couldn’t load your sessions"
+            message={error}
+            onRetry={() => void load()}
+            size="sm"
+          />
         ) : loading && total === 0 ? (
-          <div className="px-3 py-3 text-[12px] text-text-4">Loading…</div>
+          <LoadingState label="Reading your sessions…" />
         ) : total === 0 ? (
-          <div className="flex h-full flex-col items-center justify-center px-6 text-center">
-            <span className="text-[13px] text-text-3">No sessions yet.</span>
-            <span className="mt-1 max-w-[18rem] text-[12px] text-text-4">
-              Runs you and your agents make will show up here.
-            </span>
-          </div>
+          <EmptyState
+            icon={History}
+            title="No sessions yet"
+            body="Every run you or an agent makes is kept here. What was asked, what changed, and why. Nothing is written down until the first one happens."
+          />
         ) : (
           groups.map((group) => {
             const isCollapsed = !!collapsed[group.key];
@@ -545,18 +569,18 @@ export function SessionsPane({
                     setCollapsed((m) => ({ ...m, [group.key]: !m[group.key] }))
                   }
                   aria-expanded={!isCollapsed}
-                  className="sticky top-0 z-10 flex w-full items-center justify-between bg-bg-content px-3 py-1.5 text-left hover:bg-bg-2"
+                  className="sticky top-0 z-10 flex w-full items-center justify-between bg-bg-content px-3 py-1.5 text-left hover:bg-state-hover"
                 >
                   <span className="flex items-center gap-1.5">
                     <Icons.ChevronDown
                       size={14}
                       className={`chev text-text-4${isCollapsed ? "" : " open"}`}
                     />
-                    <span className="text-[11px] uppercase tracking-wide text-text-4">
+                    <span className="section-label">
                       {group.label}
                     </span>
                   </span>
-                  <span className="text-[11px] text-text-4">
+                  <span className="text-xs text-text-4">
                     {group.rows.length}{" "}
                     {group.rows.length === 1 ? "session" : "sessions"}
                   </span>

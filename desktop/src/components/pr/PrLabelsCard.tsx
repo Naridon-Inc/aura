@@ -16,6 +16,7 @@ import { invalidatePrDetail } from "../../lib/prDetailCache";
 import { Button } from "../ui/button";
 import { Input } from "../ui/input";
 import { AsciiSpinner } from "../ui/ascii-spinner";
+import { useDismiss } from "../../lib/useDismiss";
 
 type Props = {
   repoRoot: string;
@@ -88,15 +89,15 @@ export function PrLabelsCard({
             />
           </svg>
         </button>
-        <span className="text-[12.5px] font-semibold text-text-1">Labels</span>
-        <span className="text-[11.5px] text-text-4 tabular-nums">
+        <span className="text-base font-semibold text-text-1">Labels</span>
+        <span className="text-sm text-text-4 tabular-nums">
           {labels.length}
         </span>
         <Button
           variant="ghost"
           size="icon-sm"
           onClick={() => setPickerOpen(true)}
-          className="ml-auto w-5 h-5 text-text-4 hover:text-text-1 text-[12px]"
+          className="ml-auto w-5 h-5 text-text-4 hover:text-text-1 text-sm"
           title="Add label"
         >
           +
@@ -109,7 +110,7 @@ export function PrLabelsCard({
               variant="link"
               size="xs"
               onClick={() => setPickerOpen(true)}
-              className="h-auto px-0 text-[11.5px] text-text-4 hover:text-text-1 no-underline hover:no-underline"
+              className="h-auto px-0 text-sm text-text-4 hover:text-text-1 no-underline hover:no-underline"
             >
               add a label
             </Button>
@@ -139,7 +140,7 @@ export function LabelChip({ label }: { label: PrLabel }) {
   const fg = labelColor(label.color, 1.0);
   return (
     <span
-      className="inline-flex items-center gap-1 px-2 h-5 rounded-full text-[10.5px] font-medium border"
+      className="inline-flex items-center gap-1 px-2 h-5 rounded-full text-xs font-medium border"
       style={{
         backgroundColor: bg,
         borderColor: bg,
@@ -190,13 +191,7 @@ function LabelPicker({
   }, [repoRoot]);
 
   // Click-outside to close.
-  useEffect(() => {
-    function onDoc(e: MouseEvent) {
-      if (ref.current && !ref.current.contains(e.target as Node)) onClose();
-    }
-    document.addEventListener("mousedown", onDoc);
-    return () => document.removeEventListener("mousedown", onDoc);
-  }, [onClose]);
+  useDismiss(true, onClose, ref);
 
   const matches = all.filter((l) =>
     l.name.toLowerCase().includes(filter.toLowerCase()),
@@ -221,17 +216,17 @@ function LabelPicker({
           placeholder="Filter labels…"
           value={filter}
           onChange={(e) => setFilter(e.target.value)}
-          className="h-7 text-[12px]"
+          className="h-7 text-sm"
         />
       </div>
       <div className="max-h-64 overflow-y-auto">
         {loading ? (
-          <div className="flex items-center gap-1.5 text-text-4 text-[11.5px] px-3 py-3">
-            <AsciiSpinner className="text-[10px]" />
+          <div className="flex items-center gap-1.5 text-text-4 text-sm px-3 py-3">
+            <AsciiSpinner className="text-2xs" />
             <span>Loading labels…</span>
           </div>
         ) : matches.length === 0 ? (
-          <div className="text-text-4 text-[11.5px] px-3 py-3">
+          <div className="text-text-4 text-sm px-3 py-3">
             No labels match that.
           </div>
         ) : (
@@ -240,7 +235,7 @@ function LabelPicker({
               key={l.name}
               type="button"
               onClick={() => toggle(l.name)}
-              className="w-full flex items-center gap-2 px-3 py-1.5 text-left hover:bg-bg-2 transition-colors"
+              className="w-full flex items-center gap-2 px-3 py-1.5 text-left hover:bg-state-hover transition-colors"
             >
               <input
                 type="checkbox"
@@ -250,7 +245,7 @@ function LabelPicker({
               />
               <LabelChip label={l} />
               {l.description && (
-                <span className="ml-auto text-[10.5px] text-text-4 truncate max-w-[120px]">
+                <span className="ml-auto text-xs text-text-4 truncate max-w-[120px]">
                   {l.description}
                 </span>
               )}

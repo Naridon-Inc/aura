@@ -154,7 +154,7 @@ export function ZonesSection({
         />
       )}
       {error && (
-        <div className="px-3 py-1 text-[10.5px] bg-red/10 text-red border-b border-line-soft">
+        <div className="px-3 py-1 text-xs bg-red/10 text-red border-b border-line-soft">
           {error}
         </div>
       )}
@@ -170,7 +170,7 @@ export function ZonesSection({
           return (
             <div
               key={z.zone_id}
-              className="group/zone w-full flex items-center gap-2 px-2 py-1.5 rounded-sm hover:bg-bg-2/60 transition-colors min-w-0"
+              className="group/zone w-full flex items-center gap-2 px-2 py-1.5 rounded-sm hover:bg-state-hover transition-colors min-w-0"
               title={`${z.zone_id} · claimed by ${
                 mine ? "this desktop" : z.session_id
               }\n${z.patterns.join("\n")}`}
@@ -182,11 +182,11 @@ export function ZonesSection({
               />
               <span className="flex-1 min-w-0">
                 <span className="flex items-center gap-1.5 min-w-0">
-                  <span className="text-[11px] text-text-1 font-mono truncate">
+                  <span className="text-xs text-text-1 font-mono truncate">
                     {z.patterns.join(", ")}
                   </span>
                   <span
-                    className="shrink-0 text-[9px] font-medium uppercase tracking-wider px-1 rounded"
+                    className="shrink-0 text-2xs font-medium px-1 rounded"
                     style={{
                       color: block ? BLOCK_COLOR : WARN_COLOR,
                       background: `color-mix(in oklab, ${
@@ -197,7 +197,7 @@ export function ZonesSection({
                     {block ? "locked" : "announced"}
                   </span>
                 </span>
-                <span className="block text-[10px] text-text-4 truncate">
+                <span className="block text-2xs text-text-4 truncate">
                   {ownerLabel(z)}
                   {z.label ? ` · ${z.label}` : ""}
                   {z.mtime > 0 ? ` · ${agoFromTs(z.mtime * 1000)}` : ""}
@@ -208,11 +208,11 @@ export function ZonesSection({
                   type="button"
                   disabled={busy}
                   onClick={() => changeMode(z, block ? "warn" : "block")}
-                  className="h-5 px-1.5 rounded text-[9.5px] text-text-3 hover:text-text-1 hover:bg-bg-hover disabled:opacity-50 transition-colors"
+                  className="h-5 px-1.5 rounded text-2xs text-text-3 hover:text-text-1 hover:bg-state-hover disabled:opacity-50 transition-colors"
                   title={
                     block
-                      ? "Unlock — back to announced; colliding edits get flagged, not rejected"
-                      : "Lock — colliding edits are actively rejected"
+                      ? "Unlock. Back to announced; colliding edits get flagged, not rejected"
+                      : "Lock. Colliding edits are actively rejected"
                   }
                 >
                   {block ? "unlock" : "lock"}
@@ -221,7 +221,7 @@ export function ZonesSection({
                   type="button"
                   disabled={busy}
                   onClick={() => release(z)}
-                  className="w-5 h-5 flex items-center justify-center rounded text-text-4 hover:text-text-1 hover:bg-bg-hover disabled:opacity-50"
+                  className="w-5 h-5 flex items-center justify-center rounded text-text-4 hover:text-text-1 hover:bg-state-hover disabled:opacity-50"
                   title={`Release zone${mine ? "" : ` (claimed by ${z.session_id})`}`}
                 >
                   ×
@@ -273,7 +273,7 @@ function ZoneClaimComposer({
         }}
         placeholder="src/auth/, src/middleware/auth.ts"
         autoFocus
-        className="h-6 text-[11px] font-mono"
+        className="h-6 text-xs font-mono"
       />
       <Input
         value={label}
@@ -282,33 +282,33 @@ function ZoneClaimComposer({
           if (e.key === "Enter") submit();
           if (e.key === "Escape") onCancel();
         }}
-        placeholder="why (optional) — auth refactor"
-        className="h-6 text-[11px]"
+        placeholder="why (optional). Auth refactor"
+        className="h-6 text-xs"
       />
       <div className="flex items-center gap-1.5">
         <div className="flex items-center rounded border border-line-soft overflow-hidden">
           <button
             type="button"
             onClick={() => setMode("warn")}
-            className={`h-5 px-2 text-[9.5px] uppercase tracking-wider transition-colors ${
+            className={`h-5 px-2 text-2xs transition-colors ${
               mode === "warn"
                 ? "bg-bg-2 text-text-1 font-medium"
                 : "text-text-4 hover:text-text-2"
             }`}
-            title="Announce — a heads-up; colliding edits get flagged"
+            title="Announce. A heads-up; colliding edits get flagged"
           >
             announced
           </button>
           <button
             type="button"
             onClick={() => setMode("block")}
-            className={`h-5 px-2 text-[9.5px] uppercase tracking-wider transition-colors ${
+            className={`h-5 px-2 text-2xs transition-colors ${
               mode === "block"
                 ? "bg-bg-2 font-medium"
                 : "text-text-4 hover:text-text-2"
             }`}
             style={mode === "block" ? { color: BLOCK_COLOR } : undefined}
-            title="Lock — colliding edits are rejected"
+            title="Lock. Colliding edits are rejected"
           >
             locked
           </button>
@@ -317,14 +317,14 @@ function ZoneClaimComposer({
           type="button"
           onClick={submit}
           disabled={parsed.length === 0 || busy}
-          className="ml-auto h-5 px-2 rounded bg-bg-2 hover:bg-bg-1 text-text-1 text-[10px] font-medium border border-line-soft disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+          className="ml-auto h-5 px-2 rounded bg-bg-2 hover:bg-bg-3 text-text-1 text-2xs font-medium border border-line-soft disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
         >
           Claim
         </button>
         <button
           type="button"
           onClick={onCancel}
-          className="h-5 px-2 rounded text-text-3 hover:text-text-1 text-[10px] transition-colors"
+          className="h-5 px-2 rounded text-text-3 hover:text-text-1 text-2xs transition-colors"
         >
           Cancel
         </button>

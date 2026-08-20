@@ -7,23 +7,17 @@
  */
 
 import { useMemo, useState, type ReactNode } from "react";
-import {
-  AtSign,
-  Bookmark,
-  ChevronDown,
-  FilePenLine,
-  ListTodo,
-  MessageSquare,
-  MoreHorizontal,
-  Plus,
-  Send,
-  Sparkles,
-} from "lucide-react";
+import { Plus, Search } from "lucide-react";
 
 import type { TeamChatModel } from "../application/useTeamChat";
 import type { TeamWorkspaceView } from "../application/TeamChatContext";
 import type { Conversation } from "../domain";
-import { AURA_CONV_ID, prettyName, railLabel } from "../domain";
+import {
+  AURA_CONV_ID,
+  prettyName,
+  railLabel,
+  presenceForConversation,
+} from "../domain";
 import { VoiceDockPanel } from "../../chat/VoiceDockPanel";
 import { VoiceCountChip } from "../../chat/VoiceRoster";
 import { Avatar, type Presence } from "./Avatar";
@@ -33,34 +27,61 @@ import {
   RailLockIcon,
 } from "./icons";
 import { TeamHeader } from "./TeamHeader";
-import { TasksSidebar } from "../../workpanes/TasksSidebar";
-import { Segment } from "../../ui/segment";
+import {
+  PlaceRailGroup,
+  PlaceRailScope,
+  PlaceRailScopeRow,
+} from "../../places/PlaceRail";
+import { setProjectScope, useKnownProjects } from "../../../lib/projectRoots";
 
 type ConversationListProps = {
   chat: TeamChatModel;
   repoRoot: string;
-  projectName: string;
   workspaceView: TeamWorkspaceView;
   onWorkspaceViewChange: (view: TeamWorkspaceView) => void;
   onNavigate?: () => void;
   width?: number | "full";
+  /** Render as the surface itself rather than a column of it — the state
+   *  where nothing is open yet, so the list has the whole page. Caps its
+   *  measure and drops the divider it would otherwise draw against a
+   *  neighbour it doesn't have. */
+  asPage?: boolean;
+  /** Render as the place's own rail — the right-hand panel `PlacePage` gives
+   *  Pages and Tasks. It supplies the 220px box and the hairline on the side
+   *  facing the page, so this drops the divider it would otherwise draw
+   *  against a neighbour on its left and stands on the page's ground. */
+  asRail?: boolean;
+  /** Show the project picker at the top of the rail. Only the Team page mounts
+   *  through the shared place scope, so only the page offers the control that
+   *  writes it — a picker in the editor's Team pane would change a project the
+   *  pane it sits in isn't reading. */
+  showScope?: boolean;
 };
 
 export function ConversationList({
   chat,
   repoRoot,
-  projectName,
   workspaceView,
   onWorkspaceViewChange,
   onNavigate,
   width,
+  asPage = false,
+  asRail = false,
+  showScope = false,
 }: ConversationListProps) {
+  const [filtering, setFiltering] = useState(false);
+  // Conversations, channels and people belong to a project. The rail used to
+  // show whichever one the app had open, with no way to say "the other one".
+  const projects = useKnownProjects(repoRoot);
   const {
     identity,
     manifest,
     claim,
+    search,
+    setSearch,
     cloudConnected,
     identityBannerVisible,
+    identityBannerKind,
     doctorReport,
     setIdentityPickerOpen,
     railFilter,
@@ -95,7 +116,15 @@ export function ConversationList({
 
   const sizing =
     width === "full"
-      ? { width: undefined, flex: "1 1 auto" }
+      ? {
+          width: undefined,
+          flex: "1 1 auto",
+          // A conversation list stretched across 1800px is a line of text
+          // with an avatar and 1600px of nothing after it.
+          ...(asPage
+            ? { maxWidth: 760, marginInline: "auto" as const }
+            : null),
+        }
       : width !== undefined
         ? { width, flex: `0 0 ${width}px` }
         : {
@@ -108,97 +137,160 @@ export function ConversationList({
     [channelRows, customRows],
   );
 
-  // The two persistent Team tabs. "Tasks" reuses the "tasks" workspace view;
-  // everything else (conversation / unreads / recap / threads / drafts) reads
-  // as the "Chats" tab.
-  const onTasks = workspaceView === "tasks";
+  // Everything that isn't the open conversation — unreads, recap, threads,
+  // drafts & sent — is one screen, and shares one lit row below.
+  const onCatchUp = workspaceView !== "conversation";
+
+  const openFilter = () => {
+    // Looking for someone means looking through everyone. Catch up narrows
+    // this rail to unread-only; a name typed into the filter would otherwise
+    // come back empty for a person who is sitting right there.
+    setRailFilter("all");
+    setFiltering(true);
+  };
+  const closeFilter = () => {
+    setSearch("");
+    setFiltering(false);
+  };
 
   return (
-    <aside className="ade-team-list slack-team-sidebar" style={sizing}>
-      <TeamHeader
-        identity={identity}
-        manifest={manifest}
-        onClaim={claim}
-        repoRoot={repoRoot}
-        label={projectName || "Aura Team"}
-      />
+    <aside
+      className={`ade-team-list slack-team-sidebar${asPage ? " is-page" : ""}${
+        asRail ? " is-rail" : ""
+      }`}
+      style={sizing}
+    >
+      {/* One band, and the same one every other place rail draws: which
+          project on the left, this rail's own controls on the right.
 
-      {/* Chats | Tasks — a persistent segmented control directly under the
-          project name (the app's shared `Segment`, same as everywhere). Chats
-          is the conversation surface; Tasks swaps the sidebar to the board's
-          filter nav (and opens the board pane). The same sidebar shell hosts
-          both, so the structure is reused. */}
-      <div className="team-nav-tabs">
-        <Segment<"chats" | "tasks">
-          size="sm"
-          stretch
-          className="w-full"
-          ariaLabel="Team views"
-          value={onTasks ? "tasks" : "chats"}
-          onChange={(next) =>
-            next === "tasks"
-              ? selectUtility("tasks")
-              : onWorkspaceViewChange("conversation")
-          }
-          options={[
-            { value: "chats", label: "Chats", icon: <MessageSquare /> },
-            { value: "tasks", label: "Tasks", icon: <ListTodo /> },
-          ]}
-        />
-      </div>
+          There were two. The second led with a `Chats | Tasks` segment, and
+          "Tasks" mounted the entire Tasks page inside Team — the board in the
+          centre, the board's own filter rail in this column — while the Tasks
+          row in the nav stayed dark. Two doors onto one room, and the door
+          didn't light the room it led to. Tasks is a destination of its own,
+          with its own project picker; Team is the team.
 
-      {onTasks ? (
-        // Tasks tab — the board's filter nav lives in the sidebar; picking a
-        // filter (or the tab itself) opens/focuses the board center pane.
-        <TasksSidebar
-          repoRoot={repoRoot}
-          currentHandle={chat.selfHandle}
-          onActivate={onNavigate}
-        />
-      ) : (
-        <>
+          What was left of that second band was a rule holding two 13px
+          glyphs, so the glyphs moved up here: the picker keeps the space it
+          needs, the filter and the identity actions ride the trailing edge. */}
+      <PlaceRailScopeRow>
+        <div className="flex items-center gap-1">
+          <div className="min-w-0 flex-1">
+            {showScope && (
+              <PlaceRailScope
+                value={repoRoot}
+                onChange={setProjectScope}
+                projects={projects}
+              />
+            )}
+          </div>
+          <button
+            type="button"
+            onClick={() => (filtering ? closeFilter() : openFilter())}
+            className="flex h-6 w-6 flex-none items-center justify-center rounded-md text-text-3 transition-colors hover:bg-state-hover hover:text-text-1"
+            title="Filter chats and people"
+            aria-label="Filter chats and people"
+            aria-pressed={filtering}
+          >
+            <Search size={13} />
+          </button>
+          <TeamHeader
+            identity={identity}
+            manifest={manifest}
+            onClaim={claim}
+            repoRoot={repoRoot}
+          />
+        </div>
+      </PlaceRailScopeRow>
+
+      {/* Opens only when you ask for it. This was a permanent 40px band at
+          the very top of the rail whose placeholder read "Search <project>" —
+          the same words as the sidebar's own magnifier two hundred pixels
+          above it, for a control that searches nothing and filters this list.
+          One promise, one control, and no band at rest. */}
+      {filtering && (
+        <div className="team-rail-filter">
+          <Search size={13} aria-hidden />
+          <input
+            autoFocus
+            autoComplete="off"
+            autoCorrect="off"
+            spellCheck={false}
+            value={search}
+            onChange={(event) => setSearch(event.target.value)}
+            onKeyDown={(event) => {
+              if (event.key === "Escape") closeFilter();
+            }}
+            placeholder="Filter chats and people"
+            aria-label="Filter chats and people"
+          />
+        </div>
+      )}
+
       <VoiceDockPanel currentRepoRoot={repoRoot} />
 
-      <nav className="slack-sidebar-shortcuts" aria-label="Workspace views">
+      {/* One row, not four. Unreads / Recap / Threads / Drafts & sent each
+          had a row here, stacked above the conversations they summarise, in
+          a row treatment used nowhere else in this sidebar — so the column
+          read as ten navigation rows with a search box wedged in the middle.
+          They are four lenses on one screen; the screen carries the switch
+          (SlackUtilityView) and the rail carries the only part of it that is
+          an ask: how much is waiting on you. */}
+      <nav className="slack-sidebar-shortcuts" aria-label="Catch up">
         <ShortcutRow
           icon={<UnreadGlyph />}
-          label="Unreads"
-          active={workspaceView === "unreads"}
+          label="Catch up"
+          title="What's unread, a recap of it, replies aimed at you, and what you sent"
+          active={onCatchUp}
           badge={totalUnread}
           onClick={() => selectUtility("unreads")}
         />
-        <ShortcutRow
-          icon={<Sparkles size={17} />}
-          label="Recap"
-          active={workspaceView === "recap"}
-          onClick={() => selectUtility("recap")}
-        />
-        <ShortcutRow
-          icon={<AtSign size={17} />}
-          label="Threads"
-          active={workspaceView === "threads"}
-          onClick={() => selectUtility("threads")}
-        />
-        <ShortcutRow
-          icon={<Send size={17} />}
-          label="Drafts & Sent"
-          active={workspaceView === "drafts"}
-          onClick={() => selectUtility("drafts")}
-        />
       </nav>
 
-      {identity !== null && (identity.email ?? "") === "" && (
-        <SidebarNotice title="Set your git email">
-          Chat needs an identity before messages can be attributed.
-        </SidebarNotice>
-      )}
-      {cloudConnected === false && (
-        <SidebarNotice title="Working locally">
-          Sign in from Settings to reach teammates online.
-        </SidebarNotice>
-      )}
-      {identityBannerVisible && doctorReport && (
-        <SidebarNotice title="Identity needs attention">
+      {/* One notice, not three. These three conditions are all true on a fresh
+          install with no git email and no sign-in, and they used to stack: a
+          third of the rail spent on cards, two of them saying the same thing
+          in different words before the list of people even started. Nobody
+          decided that — they were added one at a time.
+
+          So: the one you can act on, and only that one. Both identity notices
+          are the same subject and the same repair — the picker sets who you
+          send as, which is what "no git email" means — so they are one card
+          with one button, never two statements. Working locally comes after,
+          because it explains a limit rather than asking for something, and
+          once you know who you are it is the next thing you'd want told. */}
+      {identityBannerVisible && doctorReport ? (
+        // Two different problems, so two different sentences. "setup" means
+        // this computer has no name at all; "choose" means it has one and
+        // also has a team name it can prove is the same person. The old
+        // single wording ("your identity needs attention") was shown to
+        // people whose only problem was that somebody else was on the
+        // roster, which is not a problem they have.
+        identityBannerKind === "setup" ? (
+          <SidebarNotice title="Aura doesn't know who you are">
+            Your messages can't carry your name yet.{" "}
+            <button
+              type="button"
+              onClick={() => setIdentityPickerOpen(true)}
+              className="slack-sidebar-notice-link"
+            >
+              Tell Aura who you are
+            </button>
+          </SidebarNotice>
+        ) : (
+          <SidebarNotice title="You go by two names here">
+            <button
+              type="button"
+              onClick={() => setIdentityPickerOpen(true)}
+              className="slack-sidebar-notice-link"
+            >
+              Pick the one teammates see
+            </button>
+          </SidebarNotice>
+        )
+      ) : identity !== null && (identity.email ?? "") === "" ? (
+        <SidebarNotice title="Aura doesn't know who you are">
+          Your messages can't carry your name yet.{" "}
           <button
             type="button"
             onClick={() => setIdentityPickerOpen(true)}
@@ -207,10 +299,19 @@ export function ConversationList({
             Choose who you send as
           </button>
         </SidebarNotice>
-      )}
+      ) : cloudConnected === false ? (
+        <SidebarNotice title="Working locally">
+          Sign in from Settings to reach teammates online.
+        </SidebarNotice>
+      ) : null}
 
       <div className="slack-sidebar-scroll">
-        <SidebarGroup label="Direct Messages" defaultOpen>
+        <SidebarGroup
+          label="Direct messages"
+          count={dmRows.length}
+          defaultOpen
+          empty={<SidebarEmpty icon={<Plus size={14} />} label="Add coworkers" />}
+        >
           {dmRows.map((conv) => (
             <ConversationRow
               key={conv.id}
@@ -221,14 +322,19 @@ export function ConversationList({
               onClick={() => select(conv.id)}
             />
           ))}
-          {dmRows.length === 0 && (
-            <SidebarEmpty icon={<Plus size={14} />} label="Add coworkers" />
-          )}
         </SidebarGroup>
 
         <SidebarGroup
           label="Channels"
+          count={allChannels.length}
           defaultOpen
+          empty={
+            <SidebarEmpty
+              icon={<Plus size={14} />}
+              label={railFilter === "all" ? "Add channels" : "No unread channels"}
+              onClick={railFilter === "all" ? promptCreateChannel : undefined}
+            />
+          }
           action={
             <button
               type="button"
@@ -250,26 +356,18 @@ export function ConversationList({
               onClick={() => select(conv.id)}
             />
           ))}
-          {allChannels.length === 0 && (
-            <SidebarEmpty
-              icon={<Plus size={14} />}
-              label={railFilter === "all" ? "Add channels" : "No unread channels"}
-              onClick={railFilter === "all" ? promptCreateChannel : undefined}
-            />
-          )}
         </SidebarGroup>
 
-        <SidebarGroup label="Apps" defaultOpen>
-          <AppRow icon={<FilePenLine size={15} />} label="Pages" />
-          <AppRow
-            icon={<Bookmark size={15} />}
-            label="Saved items"
-            onClick={() => onWorkspaceViewChange("drafts")}
-          />
-        </SidebarGroup>
+        {/* An "Apps" group used to close the rail, holding one row: Pages.
+            The row had no `onClick` at all — it highlighted on hover, took
+            the click and did nothing — and it carried a "···" that looked
+            like an overflow menu but was a decorative glyph inside the
+            same button. Pages is a footer destination, always one click
+            away, so this was a second door to it that never opened.
+            "Saved items" left this group earlier for the same reason: one
+            door is enough, and a door that doesn't open is worse than
+            none. */}
       </div>
-        </>
-      )}
     </aside>
   );
 }
@@ -277,12 +375,14 @@ export function ConversationList({
 function ShortcutRow({
   icon,
   label,
+  title,
   active,
   badge,
   onClick,
 }: {
   icon: ReactNode;
   label: string;
+  title?: string;
   active: boolean;
   badge?: number;
   onClick: () => void;
@@ -291,6 +391,7 @@ function ShortcutRow({
     <button
       type="button"
       onClick={onClick}
+      title={title}
       className={`slack-sidebar-shortcut ${active ? "is-active" : ""}`}
     >
       <span className="slack-sidebar-shortcut-icon">{icon}</span>
@@ -327,34 +428,36 @@ function SidebarNotice({
   );
 }
 
+// Team's rail groups ARE the app's rail group — `places/PlaceRailGroup`, the
+// one the Changes panel, the Tasks rail and the Pages rail all render. This
+// was the last hand-drawn one: its own chevron, its own header rule, its
+// always-visible action, and no count, in a column that sits beside three
+// rails that have all four the other way round.
 function SidebarGroup({
   label,
+  count,
   defaultOpen,
   action,
+  empty,
   children,
 }: {
   label: string;
+  count: number;
   defaultOpen?: boolean;
   action?: ReactNode;
+  empty?: ReactNode;
   children: ReactNode;
 }) {
-  const [open, setOpen] = useState(defaultOpen ?? true);
   return (
-    <section className="slack-sidebar-group">
-      <div className="slack-sidebar-group-header">
-        <button
-          type="button"
-          onClick={() => setOpen((value) => !value)}
-          className="slack-sidebar-group-toggle"
-          aria-expanded={open}
-        >
-          <ChevronDown size={13} className={open ? "" : "is-collapsed"} />
-          <span>{label}</span>
-        </button>
-        {action}
-      </div>
-      {open && <div className="slack-sidebar-group-rows">{children}</div>}
-    </section>
+    <PlaceRailGroup
+      title={label}
+      count={count}
+      defaultOpen={defaultOpen}
+      actions={action}
+      empty={empty}
+    >
+      <div className="slack-sidebar-group-rows">{children}</div>
+    </PlaceRailGroup>
   );
 }
 
@@ -396,7 +499,11 @@ function ConversationRow({
   );
 }
 
-function ConversationGlyph({
+/** The mark in front of a conversation. Exported because the utility views
+ *  (unreads, recap, threads, drafts) list the same conversations, and a
+ *  conversation that looks like a channel in one list and a project in
+ *  another is two different things to the person reading. */
+export function ConversationGlyph({
   conv,
   presence,
   avatarUrl,
@@ -406,7 +513,7 @@ function ConversationGlyph({
   avatarUrl?: string | null;
 }) {
   if (conv.kind === "dm") {
-    return <Avatar name={conv.name} size={20} presence={presence} src={avatarUrl} />;
+    return <Avatar name={conv.name} size={16} presence={presence} src={avatarUrl} />;
   }
   if (conv.id === AURA_CONV_ID) return <span className="slack-channel-glyph"><AuraMarkIcon /></span>;
   if (conv.kind === "project") return <span className="slack-channel-glyph">✦</span>;
@@ -420,7 +527,9 @@ function avatarUrlForConversation(
   members: TeamChatModel["members"],
 ) {
   if (conv.kind !== "dm") return null;
-  const needle = conv.name.toLowerCase();
+  // Match on the handle when we have one: a display name can belong to two
+  // seats, and picking the first would hang one colleague's photo on another.
+  const needle = (conv.handle ?? conv.name).toLowerCase();
   const member = members.find(
     (entry) =>
       entry.handle.toLowerCase() === needle || entry.name.toLowerCase() === needle,
@@ -430,22 +539,6 @@ function avatarUrlForConversation(
     : null;
 }
 
-function presenceForConversation(
-  conv: Conversation,
-  members: TeamChatModel["members"],
-): Presence | null {
-  if (conv.kind !== "dm") return null;
-  const needle = conv.name.toLowerCase();
-  const member = members.find(
-    (entry) =>
-      entry.handle.toLowerCase() === needle || entry.name.toLowerCase() === needle,
-  );
-  if (!member) return "offline";
-  const age = Math.floor(Date.now() / 1000) - member.last_seen;
-  if (member.last_seen > 0 && age <= 90) return "online";
-  if (member.last_seen > 0 && age <= 900) return "idle";
-  return "offline";
-}
 
 function SidebarEmpty({
   icon,
@@ -469,20 +562,3 @@ function SidebarEmpty({
   );
 }
 
-function AppRow({
-  icon,
-  label,
-  onClick,
-}: {
-  icon: ReactNode;
-  label: string;
-  onClick?: () => void;
-}) {
-  return (
-    <button type="button" onClick={onClick} className="slack-conversation-row slack-app-row">
-      <span className="slack-app-icon">{icon}</span>
-      <span className="slack-conversation-name">{label}</span>
-      <MoreHorizontal size={14} className="slack-app-more" />
-    </button>
-  );
-}

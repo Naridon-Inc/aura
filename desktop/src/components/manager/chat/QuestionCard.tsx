@@ -30,6 +30,7 @@ import { api, type PendingQuestion, type QuestionItem } from "../../../lib/api";
 import { Button } from "../../ui/button";
 import { Checkbox } from "../../ui/checkbox";
 import { Kbd } from "../../ui/kbd";
+import { relativeAgeFromSecs } from "../../../lib/relativeTime";
 
 /** A..Z then AA, AB, … — kept exported for the inline transcript record and
  *  any other surface that still labels options by letter. */
@@ -107,6 +108,9 @@ export function KbdHint({ label }: { label: string }) {
  *  the card has a submittable selection. */
 export function ContinueArrowKbd({ active }: { active: boolean }) {
   return (
+    // Deliberately not the shared `Kbd`: this rides inside the filled primary
+    // CTA, so it mixes against `--color-bg-0` to invert on that fill. The
+    // shared cap paints for the page ground and would disappear here.
     <kbd
       className="font-mono t-2xs px-1 py-0.5 ml-1.5 inline-flex items-center"
       style={{
@@ -126,18 +130,11 @@ export function ContinueArrowKbd({ active }: { active: boolean }) {
 }
 
 // Inventory blocker #3 — "Approved by @handle · 2h ago" timestamp.
-// Backend stamps `approved_at` as unix-seconds, matching the rest of
-// the PendingPlan struct's time fields. Mirrors the inline helpers in
-// MonacoEditor / FileInsightStrip rather than pulling a dep just for
-// one row, but caps at days because plans typically resolve same-day.
+// Backend stamps `approved_at` as unix-seconds, matching the rest of the
+// PendingPlan struct's time fields.
 export function formatRelativeApprovalTime(approvedAtSecs: number): string {
-  const nowSecs = Math.floor(Date.now() / 1000);
-  const delta = Math.max(0, nowSecs - approvedAtSecs);
-  if (delta < 5) return "just now";
-  if (delta < 60) return `${delta}s ago`;
-  if (delta < 3600) return `${Math.floor(delta / 60)}m ago`;
-  if (delta < 86400) return `${Math.floor(delta / 3600)}h ago`;
-  return `${Math.floor(delta / 86400)}d ago`;
+  // One ladder for the whole app — see lib/relativeTime.
+  return relativeAgeFromSecs(approvedAtSecs);
 }
 
 /** Per-question working state inside the card. One of these per item in the
@@ -418,7 +415,7 @@ export function QuestionCard({
                   <div className="min-w-0 flex-1 flex flex-col gap-0.5">
                     {item.header && item.header.trim() && (
                       <div
-                        className="t-2xs t-ui uppercase tracking-wide"
+                        className="section-label"
                         style={{ color: "var(--color-text-3)" }}
                       >
                         {item.header}

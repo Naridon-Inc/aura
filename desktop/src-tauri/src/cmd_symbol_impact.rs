@@ -24,33 +24,36 @@ pub async fn aura_symbol_impact(
     symbol: String,
     file: String,
 ) -> Result<serde_json::Value, String> {
-    let cwd = PathBuf::from(&repo_root);
-    if !cwd.is_dir() {
-        return Err(format!("repo root does not exist: {}", repo_root));
-    }
-    if symbol.trim().is_empty() {
-        return Err("symbol is required".to_string());
-    }
-    if file.trim().is_empty() {
-        return Err("file is required".to_string());
-    }
+    crate::blocking::run(move || {
+        let cwd = PathBuf::from(&repo_root);
+        if !cwd.is_dir() {
+            return Err(format!("repo root does not exist: {}", repo_root));
+        }
+        if symbol.trim().is_empty() {
+            return Err("symbol is required".to_string());
+        }
+        if file.trim().is_empty() {
+            return Err("file is required".to_string());
+        }
 
-    let out = Command::new("aura")
-        .args(["impact", &symbol, &file, "--json"])
-        .current_dir(&cwd)
-        .output()
-        .map_err(|e| format!("failed to spawn aura impact: {}", e))?;
+        let out = Command::new(crate::agent_event_listener::resolve_aura_bin())
+            .args(["impact", &symbol, &file, "--json"])
+            .current_dir(&cwd)
+            .output()
+            .map_err(|e| format!("failed to spawn aura impact: {}", e))?;
 
-    if !out.status.success() {
-        let stderr = String::from_utf8_lossy(&out.stderr);
-        return Err(format!(
-            "aura impact exited with {}: {}",
-            out.status.code().unwrap_or(-1),
-            stderr.trim()
-        ));
-    }
+        if !out.status.success() {
+            let stderr = String::from_utf8_lossy(&out.stderr);
+            return Err(format!(
+                "aura impact exited with {}: {}",
+                out.status.code().unwrap_or(-1),
+                stderr.trim()
+            ));
+        }
 
-    let stdout = String::from_utf8_lossy(&out.stdout);
-    serde_json::from_str(&stdout)
-        .map_err(|e| format!("failed to parse impact JSON: {}", e))
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        serde_json::from_str(&stdout)
+            .map_err(|e| format!("failed to parse impact JSON: {}", e))
+    })
+    .await
 }

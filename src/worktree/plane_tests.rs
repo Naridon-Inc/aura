@@ -15,7 +15,7 @@ use super::testing::{fake_repo, CwdGuard};
 use super::paths;
 use crate::awareness::emit::EmitInput;
 use crate::awareness::{emit, store, AwarenessKind};
-use crate::sentinel::{SentinelManager, ZoneMode};
+use crate::sentinel::{claim_label, SentinelManager, ZoneMode, WHOLE_FILE};
 
 /// Our own pid, so the claim survives `cleanup_stale`.
 fn live_pid() -> u32 {
@@ -75,6 +75,46 @@ fn absolute_paths_from_different_checkouts_key_to_the_same_file() {
         hit[0].file_path, "src/auth.rs",
         "claims are stored repo-relative"
     );
+}
+
+/// A file the parser can't name symbols in — a stylesheet, a config, a language
+/// we don't read — is claimed whole. That marker used to carry the absolute
+/// path inside the symbol name, which quietly reintroduced the bug the test
+/// above fixed: one file looked like a different symbol from every checkout, so
+/// two agents editing it never heard about each other.
+#[test]
+fn a_whole_file_claim_collides_across_checkouts_too() {
+    let _lock = crate::TEST_CWD_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _cwd = CwdGuard::enter();
+    let repo = fake_repo(&["barcelona", "granada"]);
+
+    repo.enter("barcelona");
+    let abs = repo.worktree("barcelona").join("src/theme.css");
+    claim("s-bcn", "claude", &abs.to_string_lossy(), WHOLE_FILE);
+
+    repo.enter("granada");
+    let abs_here = repo.worktree("granada").join("src/theme.css");
+    let hit = claim("s-gra", "gemini", &abs_here.to_string_lossy(), WHOLE_FILE);
+
+    assert_eq!(hit.len(), 1, "the whole-file claim must be visible too");
+    assert_eq!(hit[0].held_by_worktree.as_deref(), Some("barcelona"));
+}
+
+/// What a person is shown for a claim. The marker is ours; the file name is
+/// theirs.
+#[test]
+fn a_whole_file_claim_reads_as_the_file_not_as_a_marker() {
+    assert_eq!(
+        claim_label(WHOLE_FILE, "aura-shell/src/styles.css"),
+        "styles.css (whole file)"
+    );
+    // Claims written before the marker was path-free still say something.
+    assert_eq!(
+        claim_label("__file__/Users/someone/checkout/styles.css", ""),
+        "styles.css (whole file)"
+    );
+    // An ordinary symbol is left exactly as it is.
+    assert_eq!(claim_label("zone_is_live", "src/sentinel.rs"), "zone_is_live");
 }
 
 /// Contention within one checkout is still contention — the split must not
@@ -218,6 +258,115 @@ fn a_zone_declared_in_one_checkout_is_enforced_in_another() {
     // Your own zone never blocks you, wherever you read it from.
     repo.enter("barcelona");
     assert!(SentinelManager::check_zone("s-bcn", "aura-cli/src/main.rs").is_none());
+}
+
+/// Backdate a zone on disk, the way a zone claimed months ago looks today.
+fn age_zone(zone_id: &str, secs: u64) {
+    let path = format!(
+        "{}/{}.json",
+        paths::shared_aura_path("sentinel/zones"),
+        zone_id
+    );
+    let body = std::fs::read_to_string(&path).expect("zone file");
+    let mut zone: serde_json::Value = serde_json::from_str(&body).expect("zone json");
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    zone["claimed_at"] = serde_json::json!(now.saturating_sub(secs));
+    std::fs::write(&path, serde_json::to_string_pretty(&zone).unwrap()).expect("write zone");
+}
+
+/// The bug this closes: a zone claimed in May was still warning in August, from
+/// a session that no longer existed, on every snapshot of a quarter of the
+/// repo. A warning that never clears is one people learn to ignore.
+#[test]
+fn a_zone_outlives_neither_its_session_nor_the_day_it_was_claimed() {
+    let _lock = crate::TEST_CWD_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _cwd = CwdGuard::enter();
+    let repo = fake_repo(&["barcelona", "granada"]);
+
+    repo.enter("barcelona");
+    let zone = SentinelManager::create_zone("s-may", vec!["aura-cli/".to_string()], ZoneMode::Warn);
+
+    // Fresh, and its owner never claimed a function — the ordinary case a
+    // moment after `aura team zones claim`. It must bind.
+    repo.enter("granada");
+    assert!(
+        SentinelManager::check_zone("s-gra", "aura-cli/src/main.rs").is_some(),
+        "a zone claimed seconds ago must be enforced even with no claim file"
+    );
+
+    // Three months later, same session, still no claim file anywhere.
+    age_zone(&zone.zone_id, 90 * 24 * 3600);
+    assert!(
+        SentinelManager::check_zone("s-gra", "aura-cli/src/main.rs").is_none(),
+        "a zone whose session left months ago must stop binding"
+    );
+}
+
+/// A live session keeps its zone regardless of age — the age rule is only for
+/// owners that are not on record at all.
+#[test]
+fn a_zone_belonging_to_a_working_session_is_kept_however_old_it_is() {
+    let _lock = crate::TEST_CWD_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _cwd = CwdGuard::enter();
+    let repo = fake_repo(&["barcelona", "granada"]);
+
+    repo.enter("barcelona");
+    let zone = SentinelManager::create_zone("s-bcn", vec!["aura-cli/".to_string()], ZoneMode::Block);
+    // Same session is demonstrably working: a claim under our own live pid.
+    claim("s-bcn", "claude", "aura-cli/src/main.rs", "main");
+    age_zone(&zone.zone_id, 90 * 24 * 3600);
+
+    repo.enter("granada");
+    assert!(
+        SentinelManager::check_zone("s-gra", "aura-cli/src/main.rs").is_some(),
+        "an old zone whose owner is still working must keep binding"
+    );
+}
+
+/// Listing has to show the expired one *and* say it expired. Someone asking
+/// "why was I warned about this yesterday and not today" needs an answer, not
+/// a row that quietly vanished.
+#[test]
+fn listing_shows_an_expired_zone_and_pruning_removes_it() {
+    let _lock = crate::TEST_CWD_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _cwd = CwdGuard::enter();
+    let repo = fake_repo(&["barcelona"]);
+
+    repo.enter("barcelona");
+    let dead = SentinelManager::create_zone("s-old", vec!["aura-cli/".to_string()], ZoneMode::Warn);
+    let live = SentinelManager::create_zone("s-new", vec!["aura-web/".to_string()], ZoneMode::Warn);
+    age_zone(&dead.zone_id, 90 * 24 * 3600);
+
+    let views = SentinelManager::list_zone_views();
+    assert_eq!(views.len(), 2, "both zones are listed");
+    let dead_view = views.iter().find(|v| v.zone.zone_id == dead.zone_id).unwrap();
+    let live_view = views.iter().find(|v| v.zone.zone_id == live.zone_id).unwrap();
+    assert!(!dead_view.live, "the old zone is shown as no longer in force");
+    assert!(live_view.live, "the fresh zone is shown as in force");
+    assert!(dead_view.age_secs > 80 * 24 * 3600, "and it says how old it is");
+
+    assert_eq!(SentinelManager::prune_dead_zones(), 1);
+    let after = SentinelManager::list_zone_views();
+    assert_eq!(after.len(), 1);
+    assert_eq!(after[0].zone.zone_id, live.zone_id);
+}
+
+/// Releasing by id is the escape hatch, and it has to report honestly when
+/// there is nothing to release — the old command reported success either way.
+#[test]
+fn releasing_a_zone_says_whether_anything_was_released() {
+    let _lock = crate::TEST_CWD_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _cwd = CwdGuard::enter();
+    let repo = fake_repo(&["barcelona"]);
+
+    repo.enter("barcelona");
+    let zone = SentinelManager::create_zone("s-bcn", vec!["aura-cli/".to_string()], ZoneMode::Warn);
+    assert!(SentinelManager::release_zone(&zone.zone_id));
+    assert!(SentinelManager::list_zones().is_empty());
+    assert!(!SentinelManager::release_zone(&zone.zone_id), "a second release is not a success");
 }
 
 /// Awareness events are the "what is everyone doing right now" feed. They are

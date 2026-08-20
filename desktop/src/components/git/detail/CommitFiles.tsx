@@ -62,18 +62,18 @@ export function CommitFiles({
   }, [repoRoot, sha]);
 
   if (state === "loading") {
-    return <div className="px-1 py-2 text-[12px] text-text-4">Reading the files…</div>;
+    return <div className="px-1 py-2 text-sm text-text-4">Reading the files…</div>;
   }
   if (state === "error") {
     return (
-      <div className="px-1 py-2 text-[12px] text-text-4">
+      <div className="px-1 py-2 text-sm text-text-4">
         Couldn’t read the files for this version.
       </div>
     );
   }
   if (files.length === 0) {
     return (
-      <div className="px-1 py-2 text-[12px] text-text-4">
+      <div className="px-1 py-2 text-sm text-text-4">
         This version recorded no file changes (it may be a merge or an empty
         commit).
       </div>
@@ -96,12 +96,12 @@ export function CommitFiles({
             title={f.path}
             className={
               "flex w-full items-center gap-2.5 rounded-md px-2 py-1.5 text-left transition-colors " +
-              (isSel ? "bg-bg-card" : "hover:bg-bg-2")
+              (isSel ? "bg-bg-card" : "hover:bg-state-hover")
             }
           >
             <FileText size={13} className="shrink-0 text-text-4" />
             <span
-              className="w-3 shrink-0 text-center font-mono text-[10px] text-text-3"
+              className="w-3 shrink-0 text-center font-mono text-2xs text-text-3"
               title={meta.word}
             >
               {meta.letter}
@@ -109,23 +109,23 @@ export function CommitFiles({
             <span className="flex min-w-0 flex-1 items-baseline gap-1.5">
               <span
                 className={
-                  "truncate text-[12.5px] " +
+                  "truncate text-base " +
                   (isSel ? "font-medium text-text-1" : "text-text-1")
                 }
               >
                 {name}
               </span>
               {dir && (
-                <span className="truncate text-[10px] text-text-4">{dir}</span>
+                <span className="truncate text-2xs text-text-4">{dir}</span>
               )}
             </span>
             {binary ? (
-              <span className="shrink-0 text-[10px] text-text-4">binary</span>
+              <span className="shrink-0 text-2xs text-text-4">binary</span>
             ) : (
               <Churn
                 additions={f.added}
                 deletions={f.deleted}
-                className="text-[10.5px]"
+                className="text-xs"
               />
             )}
           </button>

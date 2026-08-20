@@ -285,7 +285,7 @@ function applyChromeVars(theme: StoredVsTheme | null, on: boolean) {
     if (on && theme && !chromeIsReadable(theme)) {
       // Surface why nothing reskinned, instead of silently doing nothing.
       console.warn(
-        `[theme] "${theme.name}" was not applied to the app chrome — its background and text are too low-contrast to stay readable. The editor still uses it.`,
+        `[theme] "${theme.name}" was not applied to the app chrome. Its background and text are too low-contrast to stay readable. The editor still uses it.`,
       );
     }
     for (const v of CHROME_VAR_KEYS) root.style.removeProperty(v);

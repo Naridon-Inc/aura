@@ -22,6 +22,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { ArrowRight, RotateCcw } from "lucide-react";
 
 import { api, type LoopTask, type ReadyViewDto } from "../../lib/api";
+import { fetchReadyView } from "../../lib/loopCache";
 import { Button } from "../ui/button";
 import { StatusChip, type ChipTone } from "../ui/statusChip";
 import {
@@ -47,7 +48,7 @@ const LIFECYCLE_CHIP: Record<Lifecycle, { tone: ChipTone; label: string }> = {
   ready: { tone: "blue", label: "Ready for an agent" },
   working: { tone: "amber", label: "An agent is on it" },
   blocked: { tone: "neutral", label: "Waiting on earlier work" },
-  paused: { tone: "neutral", label: "Paused — held back" },
+  paused: { tone: "neutral", label: "Paused. Held back" },
   done: { tone: "green", label: "Done" },
   failed: { tone: "red", label: "Needs another try" },
 };
@@ -97,7 +98,7 @@ export function TaskCrewActivity({
     // Both reads are best-effort: a repo with no crew graph / no goals ledger
     // simply yields empty state, which renders as "Not handed to a crew yet".
     const [view, proofMap] = await Promise.all([
-      api.loopReadyView(repoRoot).catch(() => null),
+      fetchReadyView(repoRoot).catch(() => null),
       // Best-effort: a missing goals ledger yields an empty proof map.
       loadCrewProof(repoRoot).catch(() => new Map<string, CrewProof[]>()),
     ]);
@@ -165,14 +166,14 @@ export function TaskCrewActivity({
 
   // Header is constant so the section never flickers between states.
   const Header = (
-    <h3 className="text-[13px] font-semibold text-text-1 mb-3">Agents on this</h3>
+    <h3 className="text-base font-semibold text-text-1 mb-3">Agents on this</h3>
   );
 
   if (!loaded) {
     return (
       <section aria-label="Agents on this task">
         {Header}
-        <div className="text-[12px] text-text-5">Checking the crew…</div>
+        <div className="text-sm text-text-5">Checking the crew…</div>
       </section>
     );
   }
@@ -181,8 +182,8 @@ export function TaskCrewActivity({
     return (
       <section aria-label="Agents on this task">
         {Header}
-        <div className="text-[12px] text-text-4">
-          Not handed to a crew yet — no agent has picked this up.
+        <div className="text-sm text-text-4">
+          Not handed to a crew yet. No agent has picked this up.
         </div>
       </section>
     );
@@ -210,11 +211,11 @@ export function TaskCrewActivity({
   } else if (life === "blocked") {
     statusLine = "Waiting for earlier work to finish before an agent can start";
   } else if (life === "paused") {
-    statusLine = "Held back for now — resume it from the crew to continue";
+    statusLine = "Held back for now. Resume it from the crew to continue";
   } else if (life === "ready") {
     statusLine = agentName
       ? `Lined up for ${agentName}`
-      : "Lined up — the next free agent will pick it up";
+      : "Lined up. The next free agent will pick it up";
   } else if (life === "failed") {
     statusLine = stamp ? `The last attempt stopped ${stamp}` : null;
   }
@@ -233,7 +234,7 @@ export function TaskCrewActivity({
           </StatusChip>
           {(life === "working" || life === "ready" || life === "done") &&
           node.agent_kind ? (
-            <span className="inline-flex items-center gap-1.5 text-[11px] text-text-3">
+            <span className="inline-flex items-center gap-1.5 text-xs text-text-3">
               <AgentBit agentKind={node.agent_kind} size={16} />
               {agentName}
             </span>
@@ -247,18 +248,18 @@ export function TaskCrewActivity({
         </div>
 
         {statusLine ? (
-          <p className="mt-2 text-[12px] text-text-3 leading-snug">{statusLine}</p>
+          <p className="mt-2 text-sm text-text-3 leading-snug">{statusLine}</p>
         ) : null}
 
         {/* When it finished but the checks didn't all pass — say so plainly. */}
         {life === "done" && best && best.verdict !== "verified" ? (
-          <p className="mt-1.5 text-[11.5px] text-text-4 leading-snug">
+          <p className="mt-1.5 text-sm text-text-4 leading-snug">
             The code landed but {best.total - best.ok} of {best.total} checks
-            didn't pass — open the commit to see what's left.
+            didn't pass. Open the commit to see what's left.
           </p>
         ) : null}
         {life === "done" && !best ? (
-          <p className="mt-1.5 text-[11.5px] text-text-4 leading-snug">
+          <p className="mt-1.5 text-sm text-text-4 leading-snug">
             Delivered, but it wasn't checked against a goal.
           </p>
         ) : null}
@@ -267,7 +268,7 @@ export function TaskCrewActivity({
         {life === "failed" ? (
           <div className="mt-2">
             {(node.error_message ?? "").trim() ? (
-              <p className="text-[11.5px] text-red leading-snug whitespace-pre-wrap">
+              <p className="text-sm text-red leading-snug whitespace-pre-wrap">
                 {node.error_message?.trim()}
               </p>
             ) : null}
@@ -276,7 +277,7 @@ export function TaskCrewActivity({
               size="xs"
               onClick={() => void reArm()}
               disabled={arming}
-              className="mt-2 text-[11.5px] text-text-2 hover:text-text-1"
+              className="mt-2 text-sm text-text-2 hover:text-text-1"
             >
               <RotateCcw className="w-3 h-3" strokeWidth={1.75} aria-hidden />
               {arming ? "Putting it back…" : "Try it again"}
@@ -325,7 +326,7 @@ function DepRow({
   byId: Map<string, LoopTask>;
 }) {
   return (
-    <div className="flex items-start gap-2 text-[11.5px]">
+    <div className="flex items-start gap-2 text-sm">
       <span className="shrink-0 text-text-5 pt-0.5 inline-flex items-center gap-1">
         {label === "Unblocks" ? (
           <ArrowRight className="w-3 h-3" strokeWidth={1.75} aria-hidden />

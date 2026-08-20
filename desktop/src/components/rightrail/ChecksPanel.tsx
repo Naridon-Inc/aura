@@ -8,10 +8,17 @@
 //          its own tab), so "Checks" and "PRs" live in one place.
 //
 // The split between the two is draggable (useVerticalSplit) and the ratio is
-// remembered. Every actionable row hands its work to the ambient Aura chat
-// rather than running git silently or popping a separate trace tab — the review,
-// the prove, the attestations and the git moves all surface as agent tool calls
-// you can watch, keeping the whole flow inside the Aura conversation.
+// remembered. Every actionable row hands its work to Aura rather than running
+// git silently — the review, the prove, the attestations and the git moves are
+// all real agent runs you can read, not fake progress bars.
+//
+// They run as BACKGROUND JOBS (lib/auraJob): each click mints its own session
+// instead of writing a synthetic user turn into whatever conversation you're
+// currently having. Clicking "Safety check" mid-chat used to splice a paragraph
+// of instructions into your thread and yank the rail onto it. Now the row spins
+// while the job runs, a toast offers the transcript when it lands, and your
+// conversation is left alone. The two "Add to chat" affordances are the
+// deliberate exception — putting a comment IN the chat is the whole point.
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
@@ -21,21 +28,32 @@ import {
   type PrDetail,
   type PrSummary,
 } from "../../lib/api";
+import { fetchAheadBehind, fetchDiffStats } from "../../lib/gitStateCache";
+import { fetchPrDetail } from "../../lib/prDetailCache";
+import { fetchPrComments } from "../../lib/prCommentsCache";
 import {
   fetchPrList,
   getPrListCached,
   invalidatePrList,
+  pickBranchPr,
   subscribePrList,
 } from "../../lib/prsCache";
+import { branchStateDetail, branchStateLabel } from "./reviewState";
+import { monogram } from "../../lib/monogram";
 import { useDocumentVisibility } from "../../lib/useDocumentVisibility";
 import { useVerticalSplit } from "../../lib/useVerticalSplit";
 import { useEditorStore } from "../../lib/editorStore";
+import { startAuraJob, useAuraJobs } from "../../lib/auraJob";
 import { sendToAmbientManager } from "../../lib/focusManager";
 import {
   safetyCheckPrompt,
   proveGoalsPrompt,
   attestPrompt,
+  createPrPrompt,
   resolveConflictsPrompt,
+  updatePrJobId,
+  updatePrPrompt,
+  UPDATE_PR_HINT,
 } from "../../lib/worktreeActions";
 import { MarkdownInline } from "../MarkdownView";
 import { PrRailPanel } from "./PrRailPanel";
@@ -54,29 +72,22 @@ type Props = {
 
 export function ChecksPanel({ repoRoot, conflictsCount }: Props) {
   const editor = useEditorStore();
-  const [ab, setAb] = useState<AheadBehind>({
-    ahead: 0,
-    behind: 0,
-    has_upstream: false,
-    branch: null,
-  });
+  // `null` until a read lands. The seed used to be `{0, 0, has_upstream:
+  // false}` — a perfectly valid answer meaning "this branch was never
+  // published" — so the Status section's first frame drew "Nobody else can
+  // see this yet" with a Publish action, having read nothing. `catch` kept
+  // that seed for the whole session whenever git failed.
+  const [ab, setAb] = useState<AheadBehind | null>(null);
+  const [readErr, setReadErr] = useState<string>("");
   const [changedCount, setChangedCount] = useState(0);
   const [prs, setPrs] = useState<PrSummary[]>(() => getPrListCached(repoRoot) ?? []);
   const [detail, setDetail] = useState<PrDetail | null>(null);
   const [comments, setComments] = useState<PrComment[]>([]);
-  const [updateSent, setUpdateSent] = useState(false);
-  // Flash for the no-PR "Draft it with Aura" action (mirrors updateSent).
-  const [draftSent, setDraftSent] = useState(false);
-  // The row whose work is ACTUALLY running in the ambient chat right now, so it
-  // shows a live amber spinner until the brain settles — not just a 2s "Asked ✓"
-  // flash that vanishes while the review is still churning. `sid` is "" until
-  // sendToAmbientManager resolves the session id that drives the poll.
-  const [runningAction, setRunningAction] = useState<{
-    id: string;
-    sid: string;
-  } | null>(null);
-  // Brief "Done ✓" flash on the row after its run settles, keyed by row id.
-  const [doneAction, setDoneAction] = useState<string | null>(null);
+  // Live background jobs for this repo, keyed by the row that fired them. A row
+  // shows an amber spinner for as long as its job is actually running — not a
+  // 2-second "Asked ✓" flash that lied about work still in flight — then a
+  // brief "Done ✓" while the finished job lingers in the store.
+  const job = useAuraJobs(repoRoot);
   const [tick, setTick] = useState(0);
   // Locally-dismissed review comments (the per-comment "Hide" action). Keyed by
   // comment id; resets when the PR changes.
@@ -124,14 +135,19 @@ export function ChecksPanel({ repoRoot, conflictsCount }: Props) {
         // count (vs HEAD), so "N uncommitted changes" reflects reality, not
         // just the Aura checks.
         const [a, d] = await Promise.all([
-          api.gitAheadBehind(repoRoot),
-          api.gitDiffStats(repoRoot).catch(() => null),
+          fetchAheadBehind(repoRoot),
+          fetchDiffStats(repoRoot).catch(() => null),
         ]);
         if (cancelled) return;
         setAb(a);
+        setReadErr("");
         if (d) setChangedCount(d.changed_files);
-      } catch {
-        /* transient */
+      } catch (e) {
+        // A failed read is its own state. Leaving `ab` at a zeroed struct is
+        // what made "unpublished" the resting state of every git failure, and
+        // the rows below say so out loud rather than inventing a verdict.
+        if (cancelled) return;
+        setReadErr(String(e).replace(/^Error:\s*/i, "").split("\n")[0]);
       }
     }
     void poll();
@@ -166,11 +182,12 @@ export function ChecksPanel({ repoRoot, conflictsCount }: Props) {
     };
   }, []);
 
-  const branch = ab.branch;
-  const pr = useMemo(
-    () => (branch ? (prs.find((p) => p.head_ref === branch) ?? null) : null),
-    [prs, branch],
-  );
+  const branch = ab?.branch ?? null;
+  // The OPEN pull request for this branch wins — see `pickBranchPr`. This whole
+  // panel is that PR's document: its title is editable here, "Update with Aura"
+  // rewrites its description. Landing on a superseded closed PR meant editing
+  // the wrong one while the live PR sat in the list below.
+  const pr = useMemo(() => pickBranchPr(prs, branch), [prs, branch]);
   const prState = pr?.state.toLowerCase() ?? null;
 
   // Load the PR body prose once per PR (for the description document).
@@ -180,8 +197,7 @@ export function ChecksPanel({ repoRoot, conflictsCount }: Props) {
       return;
     }
     let alive = true;
-    void api
-      .prDetail(repoRoot, pr.number)
+    void fetchPrDetail(repoRoot, pr.number)
       .then((d) => alive && setDetail(d))
       .catch(() => {});
     return () => {
@@ -197,8 +213,7 @@ export function ChecksPanel({ repoRoot, conflictsCount }: Props) {
     }
     setHidden(new Set());
     let alive = true;
-    void api
-      .prCommentsList(repoRoot, pr.number)
+    void fetchPrComments(repoRoot, pr.number)
       .then((c) => alive && setComments(c))
       .catch(() => {});
     return () => {
@@ -214,90 +229,31 @@ export function ChecksPanel({ repoRoot, conflictsCount }: Props) {
     [comments, hidden],
   );
 
-  // Send a message into the project's ambient Aura chat and drive a live
-  // spinner on the row that fired it. The spinner shows immediately on click,
-  // then the returned session id feeds the poll below that clears it when the
-  // brain actually finishes — so the row reflects real progress, not a fixed
-  // 2-second flash that lied about work still in flight.
+  // Run a row's work as a background job. Nothing is written into the chat the
+  // user may be in the middle of, and the rail doesn't jump — the row's own
+  // spinner and the completion toast carry the whole story.
   const askAura = useCallback(
-    (id: string, text: string) => {
-      setDoneAction((cur) => (cur === id ? null : cur));
-      // Spinner on now; the sid arrives a beat later once the session exists.
-      setRunningAction({ id, sid: "" });
-      void sendToAmbientManager(repoRoot, text)
-        .then((sid) => {
-          setRunningAction((cur) => (cur && cur.id === id ? { id, sid } : cur));
-        })
-        .catch(() => {
-          // Session never started — drop the spinner rather than spin forever.
-          setRunningAction((cur) => (cur && cur.id === id ? null : cur));
-        });
+    (id: string, title: string, text: string) => {
+      startAuraJob({ repoRoot, id, title, text });
     },
     [repoRoot],
   );
 
-  // While a row's work runs, poll the ambient session until the brain leaves
-  // "running" (or the session vanishes / a safety timeout trips), then flash a
-  // brief "Done ✓". A short grace before the first observed "running" avoids
-  // clearing the spinner before the CLI brain has spun up.
-  useEffect(() => {
-    const active = runningAction;
-    if (!active || !active.sid) return;
-    const { id, sid } = active;
-    let alive = true;
-    let sawRunning = false;
-    const startedAt = Date.now();
-    const settle = () => {
-      if (!alive) return;
-      setRunningAction((cur) => (cur && cur.id === id ? null : cur));
-      setDoneAction(id);
-      window.setTimeout(
-        () => setDoneAction((cur) => (cur === id ? null : cur)),
-        2500,
-      );
-    };
-    const timer = window.setInterval(() => {
-      void api
-        .managerStatus(sid)
-        .then((s) => {
-          if (!alive) return;
-          // Match ManagerSurface's live signal: the session is working when its
-          // status is "running" OR any of its tasks are still running.
-          const busy =
-            s.status === "running" ||
-            s.tasks.some((t) => t.status === "running");
-          if (busy) sawRunning = true;
-          const terminal =
-            (s.status === "completed" || s.status === "cancelled") && !busy;
-          const elapsed = Date.now() - startedAt;
-          const settled =
-            terminal ||
-            elapsed > 180_000 ||
-            (!busy && (sawRunning || elapsed > 6_000));
-          if (settled) {
-            window.clearInterval(timer);
-            settle();
-          }
-        })
-        .catch(() => {
-          // Session gone — treat as settled so the spinner never hangs.
-          if (!alive) return;
-          window.clearInterval(timer);
-          settle();
-        });
-    }, 1200);
-    return () => {
-      alive = false;
-      window.clearInterval(timer);
-    };
-  }, [runningAction]);
-
   // The right-hand action label for a row: its default verb, or a brief
-  // "Done ✓" right after its run settles. The live "Working…" state is rendered
-  // by <Row running> and takes over the whole action slot while it runs.
+  // "Done ✓" while the finished job lingers. The live "Working…" state is
+  // rendered by <Row running> and takes over the whole action slot.
   const actionText = useCallback(
-    (id: string, label: string) => (doneAction === id ? "Done ✓" : label),
-    [doneAction],
+    (id: string, label: string) => {
+      const status = job(id)?.status;
+      if (status === "done") return "Done ✓";
+      if (status === "failed") return "Try again";
+      return label;
+    },
+    [job],
+  );
+  const isRunning = useCallback(
+    (id: string) => job(id)?.status === "running",
+    [job],
   );
 
   // Hand the whole review thread to the ambient Aura session so it can read
@@ -364,42 +320,57 @@ export function ChecksPanel({ repoRoot, conflictsCount }: Props) {
     void saveField({ body: bodyDraft });
   }, [bodyDraft, detail, pr, saveField]);
 
-  // Aura keeps the PR properly written as work lands: we already track the
-  // intent log, the commits, and the diff — so ask the agent to reconcile the
-  // title + description with what actually shipped and update the PR.
+  // Re-write the PR from what's on the branch NOW — on request. We already
+  // track the intent log, the commits and the diff, so Aura has everything it
+  // needs; what it doesn't have is a trigger. This is the trigger, and it is a
+  // person pressing a button. (The comment here used to open "Aura keeps the PR
+  // properly written as work lands", which is how the empty state below came to
+  // promise the same thing. It isn't automatic and never was.)
+  //
+  // The job id is shared with the header's "Update PR" button and the PR tab's
+  // own action (`updatePrJobId`), so all three show the one run for the one PR.
+  // There used to be a `pr ? updatePrJobId(pr.number) : "update-pr"` alias here
+  // for the two reads below. Both live inside `{pr ? … }`, so the fallback was
+  // unreachable — and a bare "update-pr" in the source is the exact shape of
+  // the bug `updatePrJobId` exists to prevent, sitting where the next person to
+  // copy a line from this file would find it.
   const updateWithAura = useCallback(() => {
     if (!pr) return;
-    const text =
-      `Review everything that changed on branch "${pr.head_ref}" for PR #${pr.number} — ` +
-      `the intent log, the commits, and the diff — then rewrite the PR title and ` +
-      `description so they accurately describe what actually shipped and why, and ` +
-      `update the pull request.`;
-    void sendToAmbientManager(repoRoot, text);
-    setUpdateSent(true);
-    window.setTimeout(() => setUpdateSent(false), 2200);
-  }, [pr, repoRoot]);
+    askAura(
+      updatePrJobId(pr.number),
+      `Update pull request #${pr.number}`,
+      updatePrPrompt(pr.head_ref, pr.number),
+    );
+  }, [askAura, pr]);
 
-  // No PR yet: hand the whole "open a pull request" job to the ambient Aura
-  // chat. The auto-written description only appears once a PR exists (it's the
-  // top document above), so without this affordance the panel just reads "no PR"
+  // No PR yet: hand the whole "open a pull request" job to Aura. The
+  // auto-written description only appears once a PR exists (it's the top
+  // document above), so without this affordance the panel just reads "no PR"
   // and the writing never kicks in — which is exactly the "it shows nothing"
-  // gap. This tells the agent to get the branch ready (commit + push if needed)
-  // and open the PR with an accurate, auto-written title + description.
+  // gap. `createPrPrompt` is the same full sequence the header's Create PR
+  // button runs: look at the working tree and the diff, commit what belongs,
+  // run the checks, then open the PR.
   const draftWithAura = useCallback(() => {
-    const text =
-      `Open a pull request for the "${branch ?? "current"}" branch. First make ` +
-      `sure everything is committed and the branch is pushed to the remote, then ` +
-      `create the PR — read the intent log, the commits, and the diff and write a ` +
-      `clear, accurate title and description that explain what changed and why. If ` +
-      `a pull request already exists for this branch, update it instead of opening ` +
-      `a new one.`;
-    void sendToAmbientManager(repoRoot, text);
-    setDraftSent(true);
-    window.setTimeout(() => setDraftSent(false), 2200);
-  }, [branch, repoRoot]);
+    askAura(
+      "create-pr",
+      "Open the pull request",
+      createPrPrompt(branch ?? "the current branch", ""),
+    );
+  }, [askAura, branch]);
 
   const approved = pr?.review_decision === "APPROVED";
-  const inSync = ab.has_upstream && ab.ahead === 0 && ab.behind === 0;
+  // The row this gates says "Up to date", and its hover — shared with the bar
+  // at the top of the rail — reads "In sync with the upstream branch, **and
+  // nothing uncommitted**". The second half was never checked here: `inSync`
+  // only ever looked at ahead/behind, so a branch level with the remote drew
+  // a green tick claiming nothing was uncommitted directly under a row
+  // counting fifteen changed files.
+  const inSync =
+    ab !== null &&
+    ab.has_upstream &&
+    ab.ahead === 0 &&
+    ab.behind === 0 &&
+    changedCount === 0;
   const body = pr && detail ? detail.body.trim() : "";
 
   // Grow the borderless body editor to fit its content as you type.
@@ -438,7 +409,7 @@ export function ChecksPanel({ repoRoot, conflictsCount }: Props) {
                   }
                 }}
                 onBlur={commitTitle}
-                className="w-full bg-transparent px-1 -mx-1 py-0.5 text-[14px] font-semibold text-text-1 leading-snug outline-none border-b border-accent/50"
+                className="w-full bg-transparent px-1 -mx-1 py-0.5 text-md font-semibold text-text-1 leading-snug outline-none border-b border-accent/50"
               />
             ) : (
               <button
@@ -448,17 +419,17 @@ export function ChecksPanel({ repoRoot, conflictsCount }: Props) {
                   setEditingTitle(true);
                 }}
                 title="Click to edit the PR title"
-                className="w-full text-left text-[14px] font-semibold text-text-1 leading-snug rounded px-1 -mx-1 hover:bg-bg-2/40 transition-colors"
+                className="w-full text-left text-md font-semibold text-text-1 leading-snug rounded px-1 -mx-1 hover:bg-state-hover transition-colors"
               >
                 {pr.title}
               </button>
             )
           ) : (
-            <div className="text-[14px] font-semibold text-text-1 leading-snug">
+            <div className="text-md font-semibold text-text-1 leading-snug">
               {branch ? `Branch ${branch}` : "No branch"}
             </div>
           )}
-          <div className="mt-1 flex items-center gap-2 text-[11px] text-text-4 min-w-0">
+          <div className="mt-1 flex items-center gap-2 text-xs text-text-4 min-w-0">
             {pr ? (
               <>
                 <span className="tabular-nums shrink-0">#{pr.number}</span>
@@ -470,7 +441,7 @@ export function ChecksPanel({ repoRoot, conflictsCount }: Props) {
                       editor.openPrDetail(repoRoot, pr.number, pr.title)
                     }
                     title="Open this pull request as a full tab"
-                    className="inline-flex items-center gap-1 text-[11px] font-medium text-text-3 hover:text-text-1 transition-colors"
+                    className="inline-flex items-center gap-1 text-xs font-medium text-text-3 hover:text-text-1 transition-colors"
                   >
                     <OpenTabGlyph />
                     <span>Open as tab</span>
@@ -478,10 +449,17 @@ export function ChecksPanel({ repoRoot, conflictsCount }: Props) {
                   <button
                     type="button"
                     onClick={updateWithAura}
-                    title="Ask Aura to reconcile the PR title + description with what actually shipped"
-                    className="inline-flex items-center gap-1 text-[11px] font-medium text-text-3 hover:text-text-1 transition-colors"
+                    title={UPDATE_PR_HINT}
+                    className="inline-flex items-center gap-1 text-xs font-medium text-text-3 hover:text-text-1 transition-colors"
                   >
-                    {updateSent ? "Sent to Aura ✓" : "Update with Aura"}
+                    {isRunning(updatePrJobId(pr.number)) ? (
+                      <>
+                        <AsciiSpinner className="text-2xs" />
+                        <span>Updating…</span>
+                      </>
+                    ) : (
+                      actionText(updatePrJobId(pr.number), "Update with Aura")
+                    )}
                   </button>
                 </div>
               </>
@@ -489,7 +467,229 @@ export function ChecksPanel({ repoRoot, conflictsCount }: Props) {
               branch && <span className="font-mono truncate">{branch}</span>
             )}
           </div>
+        </div>
 
+        <div className="mx-4 h-px bg-line-soft/70" />
+
+        {/* Quiet status strip — git reality + Aura's semantic checks. Every
+            action hands the work to the Aura chat.
+
+            It leads the panel now. It used to sit UNDER the PR description,
+            and a description is unbounded: on a real PR it took seventy-odd
+            lines of scrolling to reach a single check, so a tab called
+            "Checks" opened on prose and showed none. Everything above the
+            description is bounded and glanceable, in ascending order of how
+            far it can grow — six git rows, three Aura rows, one line per
+            review comment — and the one section with no ceiling goes last. */}
+        <div className="px-4 py-3 flex flex-col gap-3">
+          <Section label="Status">
+            {/* Every label here comes from `branchStateLabel` — the same
+                vocabulary the state bar at the top of this rail uses. These
+                rows used to write their own copy, so a conflicted branch read
+                "Merge conflicts" in the bar and "Incompatible with remote"
+                fifteen rows below it, each with its own Resolve button.
+
+                `hint` is the precise git fact, on the row's hover. It is the
+                same split the bar makes: the words on screen say what the
+                state means to someone who doesn't write code, and "586
+                commits on the upstream branch that this one doesn't have" is
+                one hover away rather than gone. */}
+            {conflictsCount > 0 && (
+              <Row
+                done={false}
+                running={isRunning("resolve")}
+                label={branchStateLabel("conflicts")}
+                hint={branchStateDetail("conflicts")}
+                actionLabel={actionText("resolve", "Resolve")}
+                onAction={() =>
+                  askAura("resolve", "Resolve the conflicts", resolveConflictsPrompt())
+                }
+              />
+            )}
+            {changedCount > 0 && (
+              <Row
+                done={false}
+                running={isRunning("commit")}
+                label={branchStateLabel("uncommitted", changedCount)}
+                hint={branchStateDetail("uncommitted", changedCount)}
+                actionLabel={actionText("commit", "Commit and push")}
+                onAction={() =>
+                  askAura(
+                    "commit",
+                    "Commit and push",
+                    "Commit the current uncommitted changes with a clear, accurate message that reflects what changed and why, then push to the remote.",
+                  )
+                }
+              />
+            )}
+            {/* Nothing has come back from git yet, or the last read failed
+                with nothing before it. Every row below reads a field of `ab`,
+                and the zeroed struct that used to stand in for "not read"
+                spelled "unpublished" exactly — so this section opened by
+                telling you nobody could see your work and offering to publish
+                it, and stayed there for the session if git kept failing. */}
+            {ab === null ? (
+              <Row
+                passive
+                label={branchStateLabel("unknown")}
+                hint={
+                  readErr
+                    ? `${branchStateDetail("unknown")}\n${readErr}`
+                    : branchStateDetail("unknown")
+                }
+              />
+            ) : !ab.has_upstream ? (
+              <Row
+                done={false}
+                running={isRunning("publish")}
+                label={branchStateLabel("unpublished")}
+                hint={branchStateDetail("unpublished")}
+                actionLabel={actionText("publish", "Publish")}
+                onAction={() =>
+                  askAura(
+                    "publish",
+                    "Publish the branch",
+                    "Publish this branch to the remote (set its upstream) and push the commits.",
+                  )
+                }
+              />
+            ) : (
+              <>
+                {ab.behind > 0 && (
+                  <Row
+                    done={false}
+                    running={isRunning("pull")}
+                    label={branchStateLabel("behind", ab.behind)}
+                    hint={branchStateDetail("behind", ab.behind)}
+                    actionLabel={actionText("pull", "Pull")}
+                    onAction={() =>
+                      askAura(
+                        "pull",
+                        "Pull from the remote",
+                        "Pull the latest changes from the remote into this branch and reconcile anything that needs it.",
+                      )
+                    }
+                  />
+                )}
+                {ab.ahead > 0 && (
+                  <Row
+                    done={false}
+                    running={isRunning("push")}
+                    label={branchStateLabel("ahead", ab.ahead)}
+                    hint={branchStateDetail("ahead", ab.ahead)}
+                    actionLabel={actionText("push", "Push")}
+                    onAction={() =>
+                      askAura(
+                        "push",
+                        "Push to the remote",
+                        `Push the ${ab.ahead} unpushed commit${ab.ahead === 1 ? "" : "s"} on this branch to the remote.`,
+                      )
+                    }
+                  />
+                )}
+                {inSync && conflictsCount === 0 && (
+                  <Row
+                    done
+                    label={branchStateLabel("clean")}
+                    hint={branchStateDetail("clean")}
+                  />
+                )}
+              </>
+            )}
+            {pr &&
+              (prState === "merged" ? (
+                <Row
+                  done
+                  label={branchStateLabel("merged")}
+                  hint={branchStateDetail("merged")}
+                />
+              ) : prState === "closed" ? (
+                // Closed and never merged: an ending, not a pending step. It
+                // used to draw the amber spinner — the app's "working on it"
+                // mark — and animate it forever beside a PR nothing would ever
+                // happen to again.
+                <Row glyph={<ClosedCircle />} label="Closed without merging" />
+              ) : (
+                <Row
+                  done={approved}
+                  passive={!approved}
+                  label={approved ? "PR approved" : "Waiting for PR review"}
+                />
+              ))}
+          </Section>
+
+          <Section label="Aura">
+            {/* Each of these has Aura run its OWN tool (`aura pr-review` /
+                `aura prove` / `aura attest`) as a background job and report the
+                verdict there. The row spins while it runs; the toast that lands
+                when it's done opens the transcript.
+
+                The hints say what the row DOES, not which command produces it.
+                They used to be the command's own summary line — "Semantic PR
+                review — bugs, security, layer drift", "Signed intent +
+                provenance" — which reads as a feature list to someone who
+                already knows the feature and as nothing at all to everybody
+                else. Aura's term for the thing goes in parentheses where it
+                helps you find it again elsewhere; it never leads. */}
+            <Row
+              glyph={<RunGlyph />}
+              running={isRunning("review")}
+              label="Safety check"
+              hint="Aura reads every change here and looks for bugs, security holes, and code reaching into places it shouldn't. Runs in the background; open it from the toast when it's done."
+              actionLabel={actionText("review", "Review")}
+              onAction={() => askAura("review", "Safety check", safetyCheckPrompt())}
+            />
+            <Row
+              glyph={<RunGlyph />}
+              running={isRunning("prove")}
+              label="Goals proven"
+              hint="Checks that what you set out to build actually works end to end, not just that the code for it exists. Runs in the background; open it from the toast when it's done."
+              actionLabel={actionText("prove", "Prove")}
+              onAction={() => askAura("prove", "Prove the goals", proveGoalsPrompt())}
+            />
+            <Row
+              glyph={<RunGlyph />}
+              running={isRunning("attest")}
+              label="Signed record"
+              hint="A signed, tamper-evident record of who changed what here and why, so it can be checked later (Aura calls these attestations). Runs in the background; open it from the toast when it's done."
+              actionLabel={actionText("attest", "View")}
+              onAction={() => askAura("attest", "Signed record", attestPrompt())}
+            />
+          </Section>
+
+          {/* Real PR discussion — comments people left on this pull request,
+              each with hover-reveal actions (Hide / Add to chat). One line
+              apiece, so N comments cost N lines and the checks above them
+              never move. */}
+          {pr && discussion.length > 0 && (
+            <Section
+              label="Comments"
+              action={{ label: "Add all to chat", onClick: addAllToChat }}
+            >
+              {discussion.map((c) => (
+                <CommentRow
+                  key={c.id}
+                  author={c.author}
+                  body={c.body.trim()}
+                  onOpen={() =>
+                    editor.openPrDetail(repoRoot, pr.number, pr.title, "conversation")
+                  }
+                  onHide={() =>
+                    setHidden((prev) => new Set(prev).add(c.id))
+                  }
+                  onAddToChat={() => addOneToChat(c)}
+                />
+              ))}
+            </Section>
+          )}
+        </div>
+
+        <div className="mx-4 h-px bg-line-soft/70" />
+
+        {/* The PR document — the long read, and the only section here with no
+            ceiling on its height. Editable in place: click the prose to write
+            it, ⌘↵ or blur to save. */}
+        <div className="px-4 py-3">
           {pr ? (
             editingBody ? (
               <textarea
@@ -512,7 +712,7 @@ export function ChecksPanel({ repoRoot, conflictsCount }: Props) {
                 }}
                 onBlur={commitBody}
                 placeholder="Add a description…"
-                className="mt-3 w-full bg-transparent outline-none resize-none text-[12.5px] text-text-2 leading-relaxed placeholder:text-text-5"
+                className="w-full bg-transparent outline-none resize-none text-base text-text-2 leading-relaxed placeholder:text-text-5"
                 style={{ minHeight: "4.5em" }}
               />
             ) : (
@@ -523,188 +723,57 @@ export function ChecksPanel({ repoRoot, conflictsCount }: Props) {
                   setEditingBody(true);
                 }}
                 title="Click to edit the description"
-                className="group/desc block w-full text-left mt-3 rounded px-1 -mx-1 hover:bg-bg-2/40 transition-colors"
+                className="group/desc block w-full text-left rounded px-1 -mx-1 hover:bg-state-hover transition-colors"
               >
                 {body ? (
                   <MarkdownInline source={body} className="text-text-2" />
                 ) : (
-                  <span className="text-[12px] text-text-4">
+                  <span className="text-sm text-text-4">
                     Add a description…
                   </span>
                 )}
               </button>
             )
           ) : (
-            <div className="mt-3 flex flex-col gap-2">
-              <p className="text-[12px] text-text-4 leading-relaxed">
-                No pull request for this branch yet — so there's nothing to
-                describe here. Once a PR is open, Aura keeps its title and
-                description written for you as work lands.
+            <div className="flex flex-col gap-2">
+              {/* This used to end "Once a PR is open, Aura keeps its title and
+                  description written for you as work lands." Nothing does that.
+                  `updatePrPrompt` has exactly three callers and all three are
+                  onClick handlers — the button above, the one in the header, and
+                  the one on a PR tab. Nothing watches for a commit or a push and
+                  re-runs it, so a person who read that sentence and then pushed
+                  four more commits would be looking at a description of work
+                  that shipped three days ago, believing it was current. Say what
+                  the button does and where the button is. */}
+              <p className="text-sm text-text-4 leading-relaxed">
+                No pull request for this branch yet, so there's nothing to
+                describe here. Open one and Aura writes the title and
+                description from what actually changed. It won't revise them on
+                its own after that. When more work lands, press "Update with
+                Aura" at the top of this panel.
               </p>
               <button
                 type="button"
                 onClick={draftWithAura}
-                title="Ask Aura to commit and push if needed, open the pull request, and write its description from what actually changed"
-                className="self-start inline-flex items-center gap-1.5 text-[11px] font-medium text-text-3 hover:text-text-1 transition-colors"
+                title="Aura commits and pushes what's needed, runs the checks, opens the pull request, and writes its description from what actually changed. In the background"
+                className="self-start inline-flex items-center gap-1.5 text-xs font-medium text-text-3 hover:text-text-1 transition-colors"
               >
-                {draftSent ? (
-                  "Sent to Aura ✓"
+                {isRunning("create-pr") ? (
+                  <>
+                    <AsciiSpinner className="text-2xs" />
+                    <span>Opening the pull request…</span>
+                  </>
                 ) : (
                   <>
                     <PlusGlyph />
-                    <span>Draft the pull request with Aura</span>
+                    <span>
+                      {actionText("create-pr", "Draft the pull request with Aura")}
+                    </span>
                   </>
                 )}
               </button>
             </div>
           )}
-        </div>
-
-        <div className="mx-4 h-px bg-line-soft/70" />
-
-        {/* Quiet status strip — git reality + Aura's semantic checks. Every
-            action hands the work to the Aura chat. */}
-        <div className="px-4 py-3 flex flex-col gap-3">
-          <Section label="Status">
-            {conflictsCount > 0 && (
-              <Row
-                done={false}
-                running={runningAction?.id === "resolve"}
-                label="Incompatible with remote"
-                actionLabel={actionText("resolve", "Resolve")}
-                onAction={() => askAura("resolve", resolveConflictsPrompt())}
-              />
-            )}
-            {changedCount > 0 && (
-              <Row
-                done={false}
-                running={runningAction?.id === "commit"}
-                label={`${changedCount} uncommitted change${changedCount === 1 ? "" : "s"}`}
-                actionLabel={actionText("commit", "Commit and push")}
-                onAction={() =>
-                  askAura(
-                    "commit",
-                    "Commit the current uncommitted changes with a clear, accurate message that reflects what changed and why, then push to the remote.",
-                  )
-                }
-              />
-            )}
-            {!ab.has_upstream ? (
-              <Row
-                done={false}
-                running={runningAction?.id === "publish"}
-                label="Branch isn't published yet"
-                actionLabel={actionText("publish", "Publish")}
-                onAction={() =>
-                  askAura(
-                    "publish",
-                    "Publish this branch to the remote (set its upstream) and push the commits.",
-                  )
-                }
-              />
-            ) : (
-              <>
-                {ab.behind > 0 && (
-                  <Row
-                    done={false}
-                    running={runningAction?.id === "pull"}
-                    label={`${ab.behind} commit${ab.behind === 1 ? "" : "s"} behind remote`}
-                    actionLabel={actionText("pull", "Pull")}
-                    onAction={() =>
-                      askAura(
-                        "pull",
-                        "Pull the latest changes from the remote into this branch and reconcile anything that needs it.",
-                      )
-                    }
-                  />
-                )}
-                {ab.ahead > 0 && (
-                  <Row
-                    done={false}
-                    running={runningAction?.id === "push"}
-                    label={`${ab.ahead} commit${ab.ahead === 1 ? "" : "s"} ahead of remote`}
-                    actionLabel={actionText("push", "Push")}
-                    onAction={() =>
-                      askAura(
-                        "push",
-                        `Push the ${ab.ahead} unpushed commit${ab.ahead === 1 ? "" : "s"} on this branch to the remote.`,
-                      )
-                    }
-                  />
-                )}
-                {inSync && conflictsCount === 0 && (
-                  <Row done label="In sync with remote" />
-                )}
-              </>
-            )}
-            {pr &&
-              (prState === "merged" ? (
-                <Row done label="Merged" />
-              ) : prState === "closed" ? (
-                <Row done={false} passive label="PR closed without merging" />
-              ) : (
-                <Row
-                  done={approved}
-                  passive={!approved}
-                  label={approved ? "PR approved" : "Waiting for PR review"}
-                />
-              ))}
-          </Section>
-
-          {/* Real PR discussion — comments people left on this pull request,
-              each with hover-reveal actions (Hide / Add to chat). */}
-          {pr && discussion.length > 0 && (
-            <Section
-              label="Comments"
-              action={{ label: "Add all to chat", onClick: addAllToChat }}
-            >
-              {discussion.map((c) => (
-                <CommentRow
-                  key={c.id}
-                  author={c.author}
-                  body={c.body.trim()}
-                  onOpen={() =>
-                    editor.openPrDetail(repoRoot, pr.number, pr.title, "conversation")
-                  }
-                  onHide={() =>
-                    setHidden((prev) => new Set(prev).add(c.id))
-                  }
-                  onAddToChat={() => addOneToChat(c)}
-                />
-              ))}
-            </Section>
-          )}
-
-          <Section label="Aura">
-            {/* Each of these asks Aura to run its OWN tool (`aura pr-review` /
-                `aura prove` / `aura attest`) right in the chat the user is
-                already watching, and report the verdict inline — no separate
-                tab or pane opens. `askAura` seeds the ambient manager chat. */}
-            <Row
-              glyph={<RunGlyph />}
-              running={runningAction?.id === "review"}
-              label="Safety check"
-              hint="Semantic PR review — bugs, security, layer drift (Aura runs aura pr-review in chat)"
-              actionLabel={actionText("review", "Review")}
-              onAction={() => askAura("review", safetyCheckPrompt())}
-            />
-            <Row
-              glyph={<RunGlyph />}
-              running={runningAction?.id === "prove"}
-              label="Goals proven"
-              hint="Prove the user-facing behavior is actually wired (Aura runs aura prove in chat)"
-              actionLabel={actionText("prove", "Prove")}
-              onAction={() => askAura("prove", proveGoalsPrompt())}
-            />
-            <Row
-              glyph={<RunGlyph />}
-              running={runningAction?.id === "attest"}
-              label="Attestations"
-              hint="Signed intent + provenance for these changes (Aura runs aura attest in chat)"
-              actionLabel={actionText("attest", "View")}
-              onAction={() => askAura("attest", attestPrompt())}
-            />
-          </Section>
         </div>
       </div>
 
@@ -750,12 +819,12 @@ function Section({
   return (
     <div>
       <div className="flex items-center mb-1">
-        <span className="text-[10px] tracking-wide text-text-4">{label}</span>
+        <span className="text-2xs tracking-wide text-text-4">{label}</span>
         {action && (
           <button
             type="button"
             onClick={action.onClick}
-            className="ml-auto text-[11px] font-medium text-text-3 hover:text-text-1 hover:underline"
+            className="ml-auto text-xs font-medium text-text-3 hover:text-text-1 hover:underline"
           >
             {action.label}
           </button>
@@ -793,7 +862,7 @@ function CommentRow({
         type="button"
         onClick={onOpen}
         title={`${author}: ${body}`}
-        className="min-w-0 flex-1 text-left truncate text-[11.5px] leading-snug hover:underline underline-offset-2"
+        className="min-w-0 flex-1 text-left truncate text-sm leading-snug hover:underline underline-offset-2"
       >
         <span className="text-text-2 font-medium">{author}</span>{" "}
         <span className="text-text-3">{body}</span>
@@ -804,7 +873,7 @@ function CommentRow({
           type="button"
           onClick={onAddToChat}
           title="Add this comment to the Aura chat"
-          className="text-[11px] font-medium text-text-3 hover:text-text-1"
+          className="text-xs font-medium text-text-3 hover:text-text-1"
         >
           Add to chat
         </button>
@@ -812,7 +881,7 @@ function CommentRow({
           type="button"
           onClick={onHide}
           title="Hide this comment"
-          className="text-[11px] font-medium text-text-4 hover:text-text-1"
+          className="text-xs font-medium text-text-4 hover:text-text-1"
         >
           Hide
         </button>
@@ -822,9 +891,11 @@ function CommentRow({
 }
 
 function Monogram({ name }: { name: string }) {
-  const ch = (name.trim()[0] ?? "?").toUpperCase();
+  // One monogram for the whole app — see lib/monogram. This one indexed by code unit, so an
+  // author whose name opened with an emoji rendered half a surrogate pair.
+  const ch = monogram(name);
   return (
-    <span className="w-4 h-4 rounded-full bg-bg-3 text-text-3 text-[9px] font-medium flex items-center justify-center">
+    <span className="w-4 h-4 rounded-full bg-bg-3 text-text-3 text-2xs font-medium flex items-center justify-center">
       {ch}
     </span>
   );
@@ -841,6 +912,10 @@ function Row({
   glyph,
 }: {
   done?: boolean;
+  /** Real, unfinished, and not yours to finish — "Waiting for PR review" waits
+   *  on a person. It draws a static pending mark rather than the empty circle
+   *  (which pairs with an action button you can press) and rather than the
+   *  spinner (which means Aura is running something right now). */
   passive?: boolean;
   /** The row's work is live in the ambient chat: the leading glyph becomes an
    *  amber spinner and the action is replaced by a non-clickable "Working…" so
@@ -859,11 +934,11 @@ function Row({
     <div className="flex items-center gap-2 py-1 min-w-0" title={hint}>
       <span className="shrink-0 w-3.5 flex items-center justify-center">
         {running ? (
-          <AsciiSpinner className="text-[10px]" />
+          <AsciiSpinner className="text-2xs" />
         ) : glyph ? (
           glyph
         ) : passive ? (
-          <AsciiSpinner className="text-[10px]" />
+          <PendingCircle />
         ) : done ? (
           <CheckCircle />
         ) : (
@@ -871,15 +946,15 @@ function Row({
         )}
       </span>
       <span
-        className={`flex-1 min-w-0 truncate text-[11.5px] ${
+        className={`flex-1 min-w-0 truncate text-sm ${
           done ? "text-text-3" : "text-text-2"
         }`}
       >
         {label}
       </span>
       {running ? (
-        <span className="shrink-0 flex items-center gap-1 text-[11px] font-medium text-amber">
-          <AsciiSpinner className="text-[10px]" />
+        <span className="shrink-0 flex items-center gap-1 text-xs font-medium text-amber">
+          <AsciiSpinner className="text-2xs" />
           Working…
         </span>
       ) : (
@@ -888,7 +963,7 @@ function Row({
           <button
             type="button"
             onClick={onAction}
-            className="shrink-0 text-[11px] font-medium text-text-3 hover:text-text-1 hover:underline"
+            className="shrink-0 text-xs font-medium text-text-3 hover:text-text-1 hover:underline"
           >
             {actionLabel}
           </button>
@@ -956,6 +1031,49 @@ function EmptyCircle() {
         r="6.2"
         stroke="var(--color-text-4)"
         strokeWidth="1.4"
+      />
+    </svg>
+  );
+}
+
+// Pending on someone else — a ring with a centred dot. Reads as "started, not
+// finished, nothing for you to press", which is exactly what waiting on a
+// human reviewer is. Static: nothing is computing.
+function PendingCircle() {
+  return (
+    <svg width="13" height="13" viewBox="0 0 16 16" fill="none" aria-hidden>
+      <circle
+        cx="8"
+        cy="8"
+        r="6.2"
+        stroke="var(--color-text-4)"
+        strokeWidth="1.4"
+      />
+      <circle cx="8" cy="8" r="2.2" fill="var(--color-text-4)" />
+    </svg>
+  );
+}
+
+// Closed without merging — a ring struck through. An ending that isn't a
+// success, so it takes neither the green tick nor the empty to-do circle.
+function ClosedCircle() {
+  return (
+    <svg width="13" height="13" viewBox="0 0 16 16" fill="none" aria-hidden>
+      <circle
+        cx="8"
+        cy="8"
+        r="6.2"
+        stroke="var(--color-text-4)"
+        strokeWidth="1.4"
+      />
+      <line
+        x1="5.2"
+        y1="8"
+        x2="10.8"
+        y2="8"
+        stroke="var(--color-text-4)"
+        strokeWidth="1.4"
+        strokeLinecap="round"
       />
     </svg>
   );

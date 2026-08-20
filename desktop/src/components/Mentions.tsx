@@ -240,12 +240,12 @@ function MentionPopover({
                 e.preventDefault();
                 onPick(m.handle);
               }}
-              className={`w-full text-left px-2.5 py-1.5 text-[12px] flex items-baseline gap-2 ${
-                i === activeIndex ? "bg-bg-2 text-text-1" : "text-text-3"
+              className={`w-full text-left px-2.5 py-1.5 text-sm flex items-baseline gap-2 ${
+                i === activeIndex ? "bg-state-selected text-text-1" : "text-text-3"
               }`}
             >
               <span className="font-medium text-text-1">@{m.handle}</span>
-              <span className="text-[11px] text-text-4 truncate">
+              <span className="text-xs text-text-4 truncate">
                 {m.name || m.email}
               </span>
             </button>
@@ -279,15 +279,22 @@ export function MentionedText({
       {tokens.map((tok, i) => {
         if (tok.kind === "text") return <span key={i}>{tok.text}</span>;
         const known = lookup.get(tok.handle);
+        // A mention is only a control where a caller passed a handler. Every
+        // call site in Tasks renders it as a plain label, and drawing those
+        // with a pointer cursor and a hover wash made every @handle in the
+        // app look clickable and do nothing.
+        const clickable = !!onMentionClick;
         return (
           <span
             key={i}
-            role={onMentionClick ? "button" : undefined}
-            onClick={() => onMentionClick?.(tok.handle)}
+            role={clickable ? "button" : undefined}
+            onClick={clickable ? () => onMentionClick(tok.handle) : undefined}
             title={known ? `${known.name || known.email}` : "unknown handle"}
-            className={`inline-flex items-baseline px-1 rounded font-medium cursor-pointer ${
+            className={`inline-flex items-baseline px-1 rounded font-medium ${
+              clickable ? "cursor-pointer" : ""
+            } ${
               known
-                ? "text-accent bg-accent/10 hover:bg-accent/20"
+                ? `text-accent bg-accent/10 ${clickable ? "hover:bg-accent/20" : ""}`
                 : "text-text-4 bg-bg-2 border border-line-soft"
             }`}
           >

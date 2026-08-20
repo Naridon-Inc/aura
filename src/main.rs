@@ -14,6 +14,11 @@ mod loop_accept;
 mod loop_stranded;
 mod loop_worktree;
 mod runner;
+mod runner_creds;
+mod runner_limits;
+mod runner_service;
+mod env_cmd;
+mod egress_cmd;
 mod work;
 mod worktree_scripts;
 mod repo_settings;
@@ -86,6 +91,9 @@ mod rekor;
 mod intent_block;
 mod intent_reconcile;
 mod deletion_guard;
+// Keeps the pre-commit gates from wedging a commit: prompts that never block
+// when nobody can answer, and a time ceiling that works without `timeout(1)`.
+mod hook_guard;
 // `team_keys` now lives in the shared `aura-attestation` crate so non-CLI
 // binaries (the desktop shell) can verify registry self-signatures too.
 // Re-exported at the old path so every `crate::team_keys::…` call site here
@@ -119,10 +127,12 @@ mod continuity;
 mod meta_refs;
 mod node;
 mod git_remote_aura_helper;
+mod push_credential;
 mod repo_identity;
 mod meta_bundle;
 mod refs_sign;
 mod merge_driver;
+mod text;
 
 use clap::{Parser, Subcommand};
 use parser::SemanticParser;
@@ -913,6 +923,17 @@ enum Commands {
         #[command(subcommand)]
         sub: RunnerSubcommands,
     },
+    /// Git's credential helper, answering with a short-lived token minted for
+    /// the member this box is acting for (`AURA_ACTING_MEMBER`) from the org's
+    /// own GitHub App — scoped to the one repository being pushed, and never
+    /// written to disk. Git invokes this; you rarely will.
+    #[command(name = "git-credential", hide = true)]
+    GitCredential {
+        /// get | store | erase — git's own verbs. `store` is deliberately a
+        /// no-op: keeping the token is what made it the box's credential
+        /// instead of the member's.
+        action: String,
+    },
     /// Open isolated worktrees for parallel coding sessions (a second Claude
     /// Code, Codex, or your own hands), then merge each back AST-aware and
     /// recorded in the intent log — no branch-switching, no lost work.
@@ -932,6 +953,14 @@ enum Commands {
     Radar {
         #[command(subcommand)]
         sub: Option<RadarSubcommands>,
+        /// Only show events touching this path fragment or symbol.
+        #[arg(long)]
+        focus: Option<String>,
+        /// Max events to show.
+        #[arg(long)]
+        limit: Option<usize>,
+        #[arg(long)]
+        json: bool,
     },
     /// Cross-worktree control plane — every checkout of this repo, which agent
     /// is in it, what each is holding, and where two of them are converging on
@@ -939,6 +968,15 @@ enum Commands {
     Worktrees {
         #[command(subcommand)]
         sub: Option<WorktreeSubcommands>,
+        #[arg(long)]
+        json: bool,
+        /// Skip the per-checkout working-tree read (dirty count, drift from
+        /// trunk).
+        #[arg(long)]
+        no_git_status: bool,
+        /// Include checkouts that are clean and have nobody working in them.
+        #[arg(long)]
+        all: bool,
     },
     /// Show the repo-local Ed25519 identity (`did:aura:key/...`) that signs your
     /// awareness events so they can't be spoofed by another actor.
@@ -1142,6 +1180,18 @@ enum Commands {
         /// produced even when it lives on a branch that isn't checked out.
         #[arg(long)]
         at: Option<String>,
+    },
+    /// Declare this project's environment — toolchains, packages, services —
+    /// seal it, and bring this machine to it.
+    Env {
+        #[command(subcommand)]
+        sub: env_cmd::EnvSubcommands,
+    },
+    /// The agent phase's allowlist — hold it while a run is confined, or read
+    /// back what a run was refused.
+    Egress {
+        #[command(subcommand)]
+        sub: egress_cmd::EgressSubcommands,
     },
     /// (Internal) Verify semantic safety
     #[command(hide = true)]
@@ -3026,6 +3076,12 @@ enum LoopSubcommands {
         /// Agent to dispatch for this node (e.g. claude | aura | codex).
         #[arg(long)]
         agent: Option<String>,
+        /// Which machine should run it: `cloud` sends it to a connected box (it
+        /// is offered to the board on the next sync and your laptop leaves it
+        /// alone), `local` pins it to a machine you're sitting at. Omit and any
+        /// machine may take it.
+        #[arg(long)]
+        place: Option<String>,
         /// Comma-separated tags.
         #[arg(long, default_value = "")]
         tags: String,
@@ -3179,6 +3235,12 @@ enum LoopSubcommands {
         /// Drain only this crew's nodes — run one crew while another is working.
         #[arg(long)]
         crew: Option<String>,
+        /// Which machine this process is. `local` (the default) runs the nodes
+        /// meant for a machine you're sitting at and leaves the cloud-placed
+        /// ones for a runner; `cloud` is the inverse and is what `aura runner
+        /// serve` passes. Nodes with no placement run under both.
+        #[arg(long, default_value = "local")]
+        place: String,
         #[arg(long)]
         json: bool,
     },
@@ -3306,16 +3368,19 @@ enum RunnerSubcommands {
         #[arg(long)]
         name: Option<String>,
         /// Default agent for tasks that don't name their own kind.
-        #[arg(long, default_value = "claude")]
+        ///
+        /// Falls back to `AURA_RUNNER_AGENT`, so a box that carries its tuning
+        /// in `runner.env` keeps it even when the unit passes no flags.
+        #[arg(long, env = "AURA_RUNNER_AGENT", default_value = "claude")]
         agent: String,
         /// Restrict the cloud task pull to one repo (owner/name).
         #[arg(long)]
         repo: Option<String>,
         /// Lease window (seconds) handed to each claimed task.
-        #[arg(long, default_value_t = 1800)]
+        #[arg(long, env = "AURA_RUNNER_LEASE_SECS", default_value_t = 1800)]
         lease_secs: i64,
         /// Seconds to sleep between cycles when the backlog is empty.
-        #[arg(long, default_value_t = 20)]
+        #[arg(long, env = "AURA_RUNNER_POLL_SECS", default_value_t = 20)]
         poll_secs: u64,
         /// Run one cycle and exit (for testing or cron-driven runners).
         #[arg(long)]
@@ -3339,6 +3404,90 @@ enum RunnerSubcommands {
     },
     /// Print this box's runner record from the cloud (needs AURA_RUNNER_TOKEN).
     Status,
+    /// Install the runner as a systemd service so it survives logout and
+    /// reboot. Without this a runner started by hand dies with its shell.
+    Install {
+        /// Install under your own user (no root) and enable lingering so it
+        /// still starts at boot. This is the right choice on a box shared by
+        /// several people — each gets their own runner, credentials and limits.
+        #[arg(long)]
+        user: bool,
+        /// Runner display name (defaults to this box's hostname).
+        #[arg(long)]
+        name: Option<String>,
+        /// Pin the runner to one repo (owner/name). Omit to drain every project.
+        #[arg(long)]
+        repo: Option<String>,
+        /// Default agent for tasks that don't name their own.
+        #[arg(long)]
+        agent: Option<String>,
+        /// Path to the file holding AURA_RUNNER_TOKEN. Omit to look in the
+        /// usual places (~/.config/aura/runner.env, /etc/aura-runner/runner.env).
+        #[arg(long)]
+        env_file: Option<String>,
+        /// Cap CPU, systemd syntax — "400%" is four cores. "auto" lets the box
+        /// work out one member's share from its own core count, leaving a core
+        /// for the machine itself. Omit for no CPU limit at all.
+        #[arg(long)]
+        cpu_quota: Option<String>,
+        /// Cap memory, systemd syntax — e.g. "8G", or "auto" for this box's own
+        /// share arithmetic. The memory the kernel and sshd need is always left
+        /// outside the cap, which is what keeps a box under a runaway build one
+        /// you can still log into.
+        #[arg(long)]
+        memory_max: Option<String>,
+        /// Cap swap, systemd syntax, or "auto". Added to --memory-max rather
+        /// than taken out of it. This is the give under the ceiling: with swap,
+        /// a build that reaches its limit gets slow; without it, it gets killed.
+        #[arg(long)]
+        memory_swap_max: Option<String>,
+        /// How many people share this box, for "auto" to divide by. Omit and
+        /// the box counts its own accounts.
+        #[arg(long)]
+        members: Option<u32>,
+    },
+    /// Stop, disable and remove the runner's systemd service.
+    Uninstall {
+        /// Target the per-user unit rather than the system one.
+        #[arg(long)]
+        user: bool,
+    },
+    /// Show `systemctl status` for the installed runner service.
+    Service {
+        /// Target the per-user unit rather than the system one.
+        #[arg(long)]
+        user: bool,
+    },
+    /// Manage the API keys this box runs agents with — the unattended
+    /// alternative to signing in through a browser.
+    Creds {
+        #[command(subcommand)]
+        cmd: CredsSubcommands,
+    },
+}
+
+#[derive(Subcommand)]
+enum CredsSubcommands {
+    /// Store an API key for one agent (written 0600, never printed back).
+    Set {
+        /// Agent name: claude, codex or gemini.
+        #[arg(long)]
+        agent: String,
+        /// The key itself. Prefer piping it in via --key-stdin so it doesn't
+        /// land in your shell history.
+        #[arg(long, conflicts_with = "key_stdin")]
+        key: Option<String>,
+        /// Read the key from stdin instead of the command line.
+        #[arg(long)]
+        key_stdin: bool,
+    },
+    /// List which agents this box can authenticate (keys shown masked).
+    List,
+    /// Forget one agent's key.
+    Clear {
+        #[arg(long)]
+        agent: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -3505,7 +3654,9 @@ enum WorktreeSubcommands {
     Say {
         /// The message.
         message: String,
-        /// Checkout to address, e.g. `barcelona` or `main`.
+        /// Who to address: a checkout (`auckland`, `main`), an agent
+        /// (`codex`), or one agent in one checkout (`codex@auckland`).
+        /// Omitted, the message reaches every agent in every checkout.
         #[arg(long)]
         to: Option<String>,
         #[arg(long)]
@@ -3513,6 +3664,36 @@ enum WorktreeSubcommands {
     },
     /// Read what other checkouts have said to this one.
     Inbox {
+        #[arg(short, long, default_value = "20")]
+        limit: usize,
+        /// Collect mail addressed to this agent by name, e.g. `codex`. A
+        /// session that has already claimed work is recognised without it.
+        #[arg(long)]
+        agent: Option<String>,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Hand a board task to an agent in another checkout — "codex, in
+    /// auckland, take AURA-42". Writes the address onto the task AND tells
+    /// the agent, so the assignment survives everyone logging off.
+    Assign {
+        /// The task: a uuid, `AURA-42`, or a bare `42`.
+        task: String,
+        /// Agent to give it to, e.g. `codex`, `claude`, `gemini`.
+        #[arg(long)]
+        to: Option<String>,
+        /// Checkout the work is to happen in, e.g. `auckland` or `main`.
+        #[arg(long = "in")]
+        in_worktree: Option<String>,
+        #[arg(long)]
+        json: bool,
+    },
+    /// What has been assigned to me here — the board rows addressed to this
+    /// checkout, and to this agent or to nobody in particular.
+    Mine {
+        /// Answer as this agent rather than the session's own identity.
+        #[arg(long)]
+        agent: Option<String>,
         #[arg(short, long, default_value = "20")]
         limit: usize,
         #[arg(long)]
@@ -3527,9 +3708,9 @@ enum RadarSubcommands {
         /// Only show events touching this path fragment or symbol.
         #[arg(long)]
         focus: Option<String>,
-        /// Max events to show.
-        #[arg(short, long, default_value = "20")]
-        limit: usize,
+        /// Max events to show. [default: 20]
+        #[arg(short, long)]
+        limit: Option<usize>,
         #[arg(long)]
         json: bool,
     },
@@ -3955,6 +4136,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         Commands::RequestAccess { .. } => "request-access",
         Commands::GoalTrace { .. } => "goal-trace",
         Commands::Config { .. } => "config",
+        Commands::Egress { .. } => "egress",
         Commands::Live { .. } => "live",
         Commands::Server { .. } => "server",
         Commands::Save { .. } => "save",
@@ -4486,14 +4668,32 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                 let mut parser = SemanticParser::new()?;
                 let mut staged_nodes = Vec::new();
+                let mut file_oids: std::collections::HashMap<String, String> =
+                    std::collections::HashMap::new();
 
-                // Scan all files in index for the baseline
+                // Scan all files in index for the baseline. This is the one place
+                // a full-repo parse is genuinely the job, so it stays a full
+                // parse — but it records each file's content address as it goes,
+                // which is what lets the *first* commit after `aura init` reuse
+                // this work instead of parsing the whole tree over again.
                 for entry in index.iter() {
                     let path_str = String::from_utf8_lossy(&entry.path).to_string();
                     let ext = detect_lang_ext(&path_str); if ext.is_empty() { continue }; let ext = ext.as_str();
                     if let Ok(source_code) = fs::read_to_string(&path_str) {
-                        if let Ok(ast_nodes) = parser.parse_file(&source_code, ext) {
+                        // Hash what was actually read, not the index entry: at
+                        // init the worktree may well differ from the index, and
+                        // the cache key must describe the bytes these nodes came
+                        // from or a later capture would trust a stale AST.
+                        let Ok(oid) = git2::Oid::hash_object(
+                            git2::ObjectType::Blob,
+                            source_code.as_bytes(),
+                        ) else { continue };
+                        // `parse_file_with_path`, not `parse_file`: the nodes need
+                        // to know which file they came from for the cache above to
+                        // be able to hand them back per file.
+                        if let Ok(ast_nodes) = parser.parse_file_with_path(&source_code, ext, &path_str) {
                             staged_nodes.extend(ast_nodes);
+                            file_oids.insert(path_str, CheckpointStore::content_key(&oid.to_string()));
                         }
                     }
                 }
@@ -4501,34 +4701,65 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let id = Uuid::new_v4().to_string().replace("-", "");
                 let checkpoint = CheckpointData {
                     id: id.clone(),
-                    timestamp: SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs(),
+                    // Milliseconds, like every other checkpoint writer. This
+                    // one used to stamp seconds, which reads as a checkpoint
+                    // written in 1970 and made "how old is this graph" answer
+                    // zero forever.
+                    timestamp: SystemTime::now().duration_since(UNIX_EPOCH)?.as_millis() as u64,
                     agent_id: "Aura Initializer".to_string(),
                     intent: "[Aura Baseline] Initialized Merkle-Graph for existing codebase.".to_string(),
                     ast_nodes: staged_nodes,
                     intent_vector: None,
                     intent_vector_model: None,
                     env_fingerprint: capture_env_fingerprint(),
+                    file_oids,
                 };
 
                 CheckpointStore::stage_checkpoint(&checkpoint)?;
                 CheckpointStore::commit_staged(&repo)?;
                 println!("    {} Baseline established successfully (ID: {}).", "✓".green(), id.cyan());            }
 
-            // Auto-start the watcher daemon in the background
-            println!("  {} Starting Aura watcher daemon...", "⚙️ ".cyan());
-            match std::process::Command::new("aura")
-                .arg("daemon")
-                .stdin(std::process::Stdio::null())
-                .stdout(std::process::Stdio::null())
-                .stderr(std::process::Stdio::null())
-                .spawn()
-            {
-                Ok(child) => {
-                    println!("    {} Watcher daemon running (PID: {}). Every file save is now tracked.", "✓".green(), child.id());
-                    println!("    {} Snapshots stored in {}. Rewind will work even without commits.", "↳".dimmed(), ".aura/snapshots/".cyan());
-                }
-                Err(_) => {
-                    println!("    {} Could not auto-start daemon. Run {} manually in a separate terminal.", "⚠️".yellow(), "aura daemon".cyan());
+            // Auto-start the watcher daemon in the background — unless this
+            // tree already has one. `init` is safe to re-run, so without this
+            // check every re-run adds another watcher over the same files;
+            // each carries its own parser and AST cache, and they accumulate
+            // for as long as the machine is up.
+            if !watcher::autostart_allowed() {
+                println!("  {} Watcher daemon not started — {} is set.", "⚙️ ".cyan(), watcher::NO_DAEMON_ENV.cyan());
+                println!("    {} Run {} yourself when you want save-by-save snapshots.", "↳".dimmed(), "aura daemon".cyan());
+            } else {
+                match watcher::daemon_watching(Path::new(".")) {
+                    Some(pid) => {
+                        println!("  {} Aura watcher daemon already running here (PID: {}) — leaving it alone.", "⚙️ ".cyan(), pid);
+                        println!("    {} Snapshots stored in {}. Rewind will work even without commits.", "↳".dimmed(), ".aura/snapshots/".cyan());
+                    }
+                    None => {
+                        println!("  {} Starting Aura watcher daemon...", "⚙️ ".cyan());
+                        // Start *this* binary, not whatever `aura` is first on
+                        // PATH. That is not a hypothetical difference: the
+                        // daemon is what keeps running, so an older copy on
+                        // PATH means its bugs outlive every upgrade of the
+                        // binary actually invoked — including the fix that
+                        // makes a watcher stop when the tree it was pointed at
+                        // is deleted.
+                        let exe = std::env::current_exe()
+                            .unwrap_or_else(|_| std::path::PathBuf::from("aura"));
+                        match std::process::Command::new(exe)
+                            .arg("daemon")
+                            .stdin(std::process::Stdio::null())
+                            .stdout(std::process::Stdio::null())
+                            .stderr(std::process::Stdio::null())
+                            .spawn()
+                        {
+                            Ok(child) => {
+                                println!("    {} Watcher daemon started (PID: {}). Every file save is now tracked.", "✓".green(), child.id());
+                                println!("    {} Snapshots stored in {}. Rewind will work even without commits.", "↳".dimmed(), ".aura/snapshots/".cyan());
+                            }
+                            Err(_) => {
+                                println!("    {} Could not auto-start daemon. Run {} manually in a separate terminal.", "⚠️".yellow(), "aura daemon".cyan());
+                            }
+                        }
+                    }
                 }
             }
 
@@ -4547,6 +4778,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             println!("\n{}\n", "Welcome to the age of Agentic Engineering.".bold().blue());
         }
         Commands::CaptureContext { force } => {
+            // This command runs as `pre-commit`, so nothing it does may outlive
+            // the user's patience for pressing Commit. Under a GUI client there
+            // is nobody to see a spinner or press Ctrl-C, so a ceiling goes on
+            // here — in the binary, where it reaches people whose hook file was
+            // written months ago and is never rewritten, and where it works on
+            // macOS, which has no `timeout(1)` for the old hook's guard to use.
+            hook_guard::arm_time_budget();
+
             // Detect rebase/pull and migrate shadow branch if needed
             if let Ok(repo) = Repository::open(".") {
                 if let Ok(true) = CheckpointStore::migrate_shadow_if_needed(&repo) {
@@ -4572,6 +4811,70 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let index = repo.index()?;
             let mut staged_nodes = Vec::new();
 
+            // The previous checkpoint, read ONCE and as a single git note.
+            //
+            // Three places below want the same thing — "what did the last
+            // snapshot look like": the parse cache here, the deletion guard, and
+            // the blast-radius scan. Each used to call
+            // `get_all_checkpoints(..).first()`, which deserializes *every*
+            // checkpoint in history to look at one. Since a checkpoint holds the
+            // whole repo's AST, that is megabytes per note — on this repo, 517
+            // notes totalling 10.4 GB, read two or three times over on every
+            // single commit, and growing by another full AST each time. That is
+            // what made the pre-commit hook get slower forever and, on a machine
+            // with a slow disk or little memory, stop reading as slow and start
+            // reading as a hang.
+            // A read failure here means "can't tell", never "nothing was
+            // there" — the guards below simply skip rather than report an
+            // empty history as a wholesale deletion.
+            let previous_checkpoint = CheckpointStore::latest_checkpoint(&repo).ok().flatten();
+
+            // The previous checkpoint's nodes, grouped by the file they came
+            // from, so an unchanged file can hand back its AST instead of being
+            // parsed again. Borrowed, not cloned — only the nodes actually reused
+            // get copied.
+            let previous_by_file: std::collections::HashMap<&str, Vec<&crate::models::AstNode>> = {
+                let mut map: std::collections::HashMap<&str, Vec<&crate::models::AstNode>> =
+                    std::collections::HashMap::new();
+                if let Some(prev) = previous_checkpoint.as_ref() {
+                    for node in &prev.ast_nodes {
+                        if let Some(path) = node.file_path.as_deref() {
+                            map.entry(path).or_default().push(node);
+                        }
+                    }
+                }
+                map
+            };
+
+            // Which tracked files differ between the index and the worktree.
+            //
+            // Git answers this from stat data for anything untouched, so it costs
+            // far less than opening the files — and for every path NOT in here
+            // the index entry's own OID already *is* the content hash, so those
+            // files can be recognised as unchanged without a single read.
+            let dirty_in_worktree: std::collections::HashSet<String> = {
+                let mut set = std::collections::HashSet::new();
+                let mut opts = git2::DiffOptions::new();
+                opts.include_untracked(false);
+                if let Ok(diff) = repo.diff_index_to_workdir(Some(&index), Some(&mut opts)) {
+                    for delta in diff.deltas() {
+                        for path in [delta.old_file().path(), delta.new_file().path()] {
+                            if let Some(p) = path {
+                                set.insert(p.to_string_lossy().to_string());
+                            }
+                        }
+                    }
+                }
+                set
+            };
+
+            // Content address of everything captured, stored on the new
+            // checkpoint so the *next* commit can do the same trick.
+            let mut file_oids: std::collections::HashMap<String, String> =
+                std::collections::HashMap::new();
+            let mut reused_files = 0usize;
+            let mut parsed_files = 0usize;
+
             for entry in index.iter() {
                 let path_str = String::from_utf8_lossy(&entry.path).to_string();
 
@@ -4588,49 +4891,113 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                 let ext = detect_lang_ext(&path_str); if ext.is_empty() { continue }; let ext = ext.as_str();
 
-                if let Ok(source_code) = fs::read_to_string(&path_str) {
-                    if let Ok(ast_nodes) = parser.parse_file_with_path(&source_code, ext, &path_str) {
-                        for node in ast_nodes {
-                            if node.contains_secret {
-                                let ident = node.identifier.clone().unwrap_or_else(|| "Anonymous".to_string());
+                // The content key, and the source only if we had to read it.
+                // Clean against the worktree → git already hashed these bytes and
+                // the file is never opened. Dirty → read once and hash what we
+                // read, which is the same read the parse would have needed.
+                let (content_key, source): (String, Option<String>) =
+                    if dirty_in_worktree.contains(&path_str) {
+                        let Ok(source_code) = fs::read_to_string(&path_str) else { continue };
+                        let oid = git2::Oid::hash_object(
+                            git2::ObjectType::Blob,
+                            source_code.as_bytes(),
+                        );
+                        let Ok(oid) = oid else { continue };
+                        (CheckpointStore::content_key(&oid.to_string()), Some(source_code))
+                    } else {
+                        (CheckpointStore::content_key(&entry.id.to_string()), None)
+                    };
 
-                                // KILL SHOT FIX: Check allowlist and Dev Mode bypass
-                                let is_allowed = config.secret_allowlist.contains(&ident) || config.dev_mode || *force;
+                // Same bytes as last checkpoint, same parser version → the AST is
+                // the same by construction, so re-deriving it would be pure cost.
+                // The old code re-parsed all 1692 parseable files on every commit
+                // no matter how few were staged; a typical commit now parses the
+                // handful it actually touched.
+                let unchanged = previous_checkpoint
+                    .as_ref()
+                    .and_then(|prev| prev.file_oids.get(&path_str))
+                    .is_some_and(|stored| *stored == content_key);
 
-                                if !is_allowed {
-                                    if config.strict_gatekeeper_mode {
-                                        spinner.finish_and_clear();
-                                        let config_path = ConfigManager::get_config_path().map(|p| p.to_string_lossy().to_string()).unwrap_or_else(|| "unknown".to_string());
-                                        println!("{} Semantic Sentinel: High-Entropy Secret detected in {} (Hash: {}). Commit halted!", "🚨".red().bold(), ident.yellow(), node.content_hash[0..8].to_string());
-                                        println!("  {} If this is legitimate, run: {} {} {}", "↳".dimmed(), "aura request-access".cyan(), ident, "to allowlist this node.");
-                                        if ConfigManager::is_strict_mode_locked(&config) {
-                                            println!("  {} Strict mode is passcode-locked (human must unlock from terminal).", "💡".blue());
-                                        } else {
-                                            println!("  {} To bypass all blocks globally, run: {}", "💡".blue(), "aura config set strict-mode false".italic());
-                                        }
-                                        println!("  {} (Using config: {})", "🔍".dimmed(), config_path.dimmed());
-                                        std::process::exit(1);
-                                    } else {
-                                        spinner.finish_and_clear();
-                                        println!("{} Semantic Sentinel Warning.", "⚠️".yellow().bold());
-                                        println!("  {} High-entropy pattern detected in node '{}'.", "↳".dimmed(), ident.yellow());
-                                        println!("  {} Strict mode is OFF. You can enable it with: {}", "💡".blue(), "aura config set strict-mode true".italic());
-                                        let should_continue = dialoguer::Confirm::with_theme(&ColorfulTheme::default())
-                                            .with_prompt("Continue with commit?")
-                                            .default(true)
-                                            .interact()
-                                            .unwrap_or(true);
-                                        if !should_continue {
-                                            println!("{} Commit cancelled. Review and fix the flagged node, then try again.", "✗".red().bold());
-                                            std::process::exit(1);
-                                        }
-                                    }
+                let nodes: Vec<crate::models::AstNode> = if unchanged {
+                    reused_files += 1;
+                    // An absent entry is not a miss: a file that parsed to no
+                    // nodes last time still recorded its key, and reproduces as
+                    // the empty set.
+                    previous_by_file
+                        .get(path_str.as_str())
+                        .map(|prev| prev.iter().map(|n| (*n).clone()).collect())
+                        .unwrap_or_default()
+                } else {
+                    let source_code = match source {
+                        Some(s) => s,
+                        None => match fs::read_to_string(&path_str) {
+                            Ok(s) => s,
+                            Err(_) => continue,
+                        },
+                    };
+                    match parser.parse_file_with_path(&source_code, ext, &path_str) {
+                        Ok(parsed) => {
+                            parsed_files += 1;
+                            parsed
+                        }
+                        // Unparseable: record nothing for it, exactly as before,
+                        // so a later capture retries rather than caching a gap.
+                        Err(_) => continue,
+                    }
+                };
+
+                file_oids.insert(path_str.clone(), content_key);
+
+                for node in nodes {
+                    if node.contains_secret {
+                        let ident = node.identifier.clone().unwrap_or_else(|| "Anonymous".to_string());
+
+                        // KILL SHOT FIX: Check allowlist and Dev Mode bypass
+                        let is_allowed = config.secret_allowlist.contains(&ident) || config.dev_mode || *force;
+
+                        if !is_allowed {
+                            if config.strict_gatekeeper_mode {
+                                spinner.finish_and_clear();
+                                let config_path = ConfigManager::get_config_path().map(|p| p.to_string_lossy().to_string()).unwrap_or_else(|| "unknown".to_string());
+                                println!("{} Semantic Sentinel: High-Entropy Secret detected in {} (Hash: {}). Commit halted!", "🚨".red().bold(), ident.yellow(), node.content_hash[0..8].to_string());
+                                println!("  {} If this is legitimate, run: {} {} {}", "↳".dimmed(), "aura request-access".cyan(), ident, "to allowlist this node.");
+                                if ConfigManager::is_strict_mode_locked(&config) {
+                                    println!("  {} Strict mode is passcode-locked (human must unlock from terminal).", "💡".blue());
+                                } else {
+                                    println!("  {} To bypass all blocks globally, run: {}", "💡".blue(), "aura config set strict-mode false".italic());
+                                }
+                                println!("  {} (Using config: {})", "🔍".dimmed(), config_path.dimmed());
+                                std::process::exit(1);
+                            } else {
+                                spinner.finish_and_clear();
+                                println!("{} Semantic Sentinel Warning.", "⚠️".yellow().bold());
+                                println!("  {} High-entropy pattern detected in node '{}'.", "↳".dimmed(), ident.yellow());
+                                println!("  {} Strict mode is OFF. You can enable it with: {}", "💡".blue(), "aura config set strict-mode true".italic());
+                                let should_continue = hook_guard::confirm(
+                                    "Continue with commit?",
+                                    true,
+                                    true,
+                                    "continuing, because strict mode is off and this branch is a warning, not a gate",
+                                );
+                                if !should_continue {
+                                    println!("{} Commit cancelled. Review and fix the flagged node, then try again.", "✗".red().bold());
+                                    std::process::exit(1);
                                 }
                             }
-                            staged_nodes.push(node);
                         }
                     }
+                    staged_nodes.push(node);
                 }
+            }
+
+            // Say what the cache actually did. A pre-commit hook that people
+            // suspect of hanging should be legible about where its time went,
+            // and this is the line that shows the parse work collapsing to the
+            // files a commit really touched.
+            if reused_files > 0 {
+                spinner.set_message(format!(
+                    "Parsed {parsed_files} changed file(s); reused {reused_files} unchanged"
+                ));
             }
 
             thread::sleep(Duration::from_millis(200));
@@ -4640,8 +5007,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             // Compare staged AST nodes against the latest checkpoint to find deletions.
             // This is the core protection against "AI overwrites good code while building new features."
             {
-                let deletion_check_checkpoints = CheckpointStore::get_all_checkpoints(&repo).unwrap_or_default();
-                if let Some(latest_checkpoint) = deletion_check_checkpoints.first() {
+                if let Some(latest_checkpoint) = previous_checkpoint.as_ref() {
                     let staged_identifiers: std::collections::HashSet<String> = staged_nodes.iter()
                         .filter_map(|n| n.identifier.clone())
                         .collect();
@@ -4734,11 +5100,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 println!("\n  {} {}", "How to Fix:".bold().green(), "This removal is not accounted for. Log an intent that owns it — run:");
                                 println!("    {} {}", "$".dimmed(), fix_cmd.cyan());
                                 println!("  {} Strict mode is OFF, so this is not enforced. Make it a hard gate with: {}", "💡".blue(), "aura config set strict-mode true".italic());
-                                let should_continue = dialoguer::Confirm::with_theme(&ColorfulTheme::default())
-                                    .with_prompt(format!("Continue? {} logic node(s) will be removed", deleted_nodes.len()))
-                                    .default(false)
-                                    .interact()
-                                    .unwrap_or(false);
+                                // Enter means "stop" for a person who can read the
+                                // list above; with nobody there it continues, because
+                                // strict mode is off and turning an advisory warning
+                                // into a hard block just for running under a GUI
+                                // client would be its own bug. The removals stay
+                                // printed either way, and `strict-mode true` is the
+                                // switch that makes this branch block for real.
+                                let should_continue = hook_guard::confirm(
+                                    &format!("Continue? {} logic node(s) will be removed", deleted_nodes.len()),
+                                    false,
+                                    true,
+                                    "continuing, because strict mode is off; run `aura config set strict-mode true` to make unaccounted removals block the commit",
+                                );
                                 if !should_continue {
                                     println!("{} Commit cancelled — the removal was left unaccounted.", "✗".red().bold());
                                     println!("  {} Run the command above to log intent for the removal, then commit again.", "↳".dimmed());
@@ -4969,11 +5343,33 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
             // ── Session lifecycle: link this commit to an agent session ──
             let sess = session::SessionManager::start_session(&agent_id);
-            // Track all staged files in the session (from git index)
-            for entry in index.iter() {
-                let path_str = String::from_utf8_lossy(&entry.path).to_string();
-                if detect_lang_ext(&path_str).is_empty() { continue; }
-                session::SessionManager::touch_file(&path_str);
+            // Record the staged files against this session — the ones actually
+            // going into the commit, which is what this block always meant to
+            // do. It used to walk the whole index instead, so every tracked
+            // source file in the repo was filed as "touched" by every session,
+            // and each one cost a full read of the session store. One batched
+            // write now, over the real staged set.
+            {
+                let head_tree = repo
+                    .head()
+                    .ok()
+                    .and_then(|h| h.peel_to_tree().ok());
+                let staged: Vec<String> = repo
+                    .diff_tree_to_index(head_tree.as_ref(), Some(&index), None)
+                    .map(|diff| {
+                        let mut paths = Vec::new();
+                        for delta in diff.deltas() {
+                            if let Some(p) = delta.new_file().path().or_else(|| delta.old_file().path()) {
+                                let path_str = p.to_string_lossy().to_string();
+                                if !detect_lang_ext(&path_str).is_empty() {
+                                    paths.push(path_str);
+                                }
+                            }
+                        }
+                        paths
+                    })
+                    .unwrap_or_default();
+                session::SessionManager::touch_files(&staged);
             }
             // Capture full Claude Code transcript into session storage
             session::capture_full_transcript();
@@ -5052,11 +5448,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         println!("{} Intent Poisoning Warning.", "⚠️".yellow().bold());
                         println!("  {} Missing explicit semantic intent for modified nodes.", "↳".dimmed());
                         println!("  {} Strict mode is OFF. You can enable it with: {}", "💡".blue(), "aura config set strict-mode true".italic());
-                        let should_continue = dialoguer::Confirm::with_theme(&ColorfulTheme::default())
-                            .with_prompt("Continue with commit?")
-                            .default(true)
-                            .interact()
-                            .unwrap_or(true);
+                        let should_continue = hook_guard::confirm(
+                            "Continue with commit?",
+                            true,
+                            true,
+                            "continuing, because strict mode is off and a missing explicit intent is a warning here, not a gate",
+                        );
                         if !should_continue {
                             println!("{} Commit cancelled. Add semantic intent to your commit message and try again.", "✗".red().bold());
                             std::process::exit(1);
@@ -5107,11 +5504,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         println!("{} Intent Mismatch Warning.", "⚠️".yellow().bold());
                         println!("  {} The AI modified nodes without explicit documentation: {}", "↳".dimmed(), identified_nodes.join(", ").yellow());
                         println!("  {} Strict mode is OFF. You can enable it with: {}", "💡".blue(), "aura config set strict-mode true".italic());
-                        let should_continue = dialoguer::Confirm::with_theme(&ColorfulTheme::default())
-                            .with_prompt("Continue with commit?")
-                            .default(true)
-                            .interact()
-                            .unwrap_or(true);
+                        // The most frequently reached prompt in the whole hook: it
+                        // fires whenever a commit message doesn't happen to name
+                        // the symbols that changed, which is most commits. Under a
+                        // GUI client that made every such commit hang.
+                        let should_continue = hook_guard::confirm(
+                            "Continue with commit?",
+                            true,
+                            true,
+                            "continuing, because strict mode is off and an unnamed symbol is a warning here, not a gate",
+                        );
                         if !should_continue {
                             println!("{} Commit cancelled. Update your commit message to reference the modified nodes.", "✗".red().bold());
                             std::process::exit(1);
@@ -5141,44 +5543,42 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
 
             // Proactive Blast Radius Detection
-            if let Ok(checkpoints) = CheckpointStore::get_all_checkpoints(&repo) {
-                if let Some(latest) = checkpoints.first() {
-                    let mut modified_identifiers = Vec::new();
-                    for current_node in &staged_nodes {
-                        let mut is_modified = true;
-                        for past_node in &latest.ast_nodes {
-                            if past_node.identifier == current_node.identifier && past_node.content_hash == current_node.content_hash {
-                                is_modified = false;
-                                break;
-                            }
-                        }
-                        if is_modified {
-                            if let Some(ref ident) = current_node.identifier {
-                                modified_identifiers.push(ident.clone());
-                            }
+            if let Some(latest) = previous_checkpoint.as_ref() {
+                let mut modified_identifiers = Vec::new();
+                for current_node in &staged_nodes {
+                    let mut is_modified = true;
+                    for past_node in &latest.ast_nodes {
+                        if past_node.identifier == current_node.identifier && past_node.content_hash == current_node.content_hash {
+                            is_modified = false;
+                            break;
                         }
                     }
+                    if is_modified {
+                        if let Some(ref ident) = current_node.identifier {
+                            modified_identifiers.push(ident.clone());
+                        }
+                    }
+                }
 
-                    let mut tainted_downstream = Vec::new();
-                    for past_node in &latest.ast_nodes {
-                        for dep in &past_node.dependencies {
-                            if modified_identifiers.contains(&dep.name) {
-                                if let Some(ref past_ident) = past_node.identifier {
-                                    if !tainted_downstream.contains(past_ident) {
-                                        tainted_downstream.push(past_ident.clone());
-                                    }
+                let mut tainted_downstream = Vec::new();
+                for past_node in &latest.ast_nodes {
+                    for dep in &past_node.dependencies {
+                        if modified_identifiers.contains(&dep.name) {
+                            if let Some(ref past_ident) = past_node.identifier {
+                                if !tainted_downstream.contains(past_ident) {
+                                    tainted_downstream.push(past_ident.clone());
                                 }
                             }
                         }
                     }
+                }
 
-                    if !tainted_downstream.is_empty() {
-                        spinner.println(format!("{} Proactive Blast Radius: The following downstream logic blocks may be tainted by this change:", "⚠️".yellow().bold()));
-                        for tainted in tainted_downstream {
-                            spinner.println(format!("  {} {}", "↳".dimmed(), tainted.yellow()));
-                        }
-                        spinner.println(format!("  {} Run `aura map` to view the affected Merkle-Graph edges.", "↳".dimmed()));
+                if !tainted_downstream.is_empty() {
+                    spinner.println(format!("{} Proactive Blast Radius: The following downstream logic blocks may be tainted by this change:", "⚠️".yellow().bold()));
+                    for tainted in tainted_downstream {
+                        spinner.println(format!("  {} {}", "↳".dimmed(), tainted.yellow()));
                     }
+                    spinner.println(format!("  {} Run `aura map` to view the affected Merkle-Graph edges.", "↳".dimmed()));
                 }
             }
 
@@ -5204,6 +5604,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 intent_vector,
                 intent_vector_model,
                 env_fingerprint,
+                file_oids,
             };
 
             CheckpointStore::stage_checkpoint(&checkpoint)?;
@@ -5929,9 +6330,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         Commands::Map => {
             println!("\n{} {}\n", "🕸️".bold(), "Aura Semantic Merkle-Graph (Latest State)".bold().cyan());
             let repo = open_repo()?;
-            let results = CheckpointStore::get_all_checkpoints(&repo)?;
+            let latest = CheckpointStore::latest_checkpoint(&repo)?;
             
-            if let Some(latest) = results.first() {
+            if let Some(latest) = latest.as_ref() {
                 use petgraph::Graph;
                 use petgraph::dot::{Dot, Config};
                 use std::collections::HashMap;
@@ -6174,10 +6575,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
             match Repository::open(".") {
                 Ok(repo) => {
-                    match CheckpointStore::get_all_checkpoints(&repo) {
-                        Ok(checkpoints) => {
-                            if let Some(latest) = checkpoints.first() {
-                                println!("  {} {}: {}", "📍".blue(), "Latest Checkpoint".bold(), latest.id[0..8].to_string().cyan());
+                    match CheckpointStore::latest_checkpoint(&repo) {
+                        Ok(checkpoint) => {
+                            if let Some(latest) = checkpoint {
+                                println!("  {} {}: {}", "📍".blue(), "Latest Checkpoint".bold(), crate::text::clip(&latest.id, 8).to_string().cyan());
                                 println!("  {} {}: {} logic nodes tracked", "🧠".magenta(), "Merkle-Graph Size".bold(), latest.ast_nodes.len().to_string().yellow());
                             } else {
                                 println!("  {} {}", "ℹ️ ".blue(), "No semantic checkpoints found. Run `aura capture-context` or `git commit` to start tracking.".dimmed());
@@ -6256,7 +6657,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     } else if !current_repo.is_empty() {
                         println!("  {} Repo: {} ({})", "•".dimmed(), current_repo.cyan(), "personal".yellow());
                     }
-                    live_sync::print_mothership_status_line();
+                    // Cached: everything above this line lands in ~5ms, and a
+                    // live presence probe was measured at 1517ms of a 1550ms
+                    // `aura status`. `aura live status` still measures.
+                    live_sync::print_mothership_status_line_cached();
                 }
             }
 
@@ -6744,8 +7148,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 println!("    {} Pruned to {} snapshots.", "✓".green(), checkpoint::SnapshotStore::get_all_snapshots().len());
             }
 
-            // 4. Check git hooks are installed
-            let hooks_ok = Path::new(".git/hooks/pre-commit").exists();
+            // 4. Check git hooks are installed. Ask git for the hooks directory
+            // rather than assuming `.git/hooks` — a linked worktree keeps a
+            // `.git` file, and `core.hooksPath` moves hooks elsewhere. Guessing
+            // made doctor say "not installed" in every worktree no matter how
+            // many times the suggested fix was run.
+            let hooks_ok = HookInstaller::hooks_dir().join("pre-commit").exists();
             if hooks_ok {
                 println!("  {} Git hooks installed.", "✓".green().bold());
             } else {
@@ -7588,19 +7996,39 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         Commands::Runner { sub } => {
             handle_runner_command(sub)?;
         }
+        Commands::GitCredential { action } => {
+            push_credential::run(action)?;
+        }
         Commands::Work { sub } => {
             work::handle(sub)?;
         }
         Commands::Activity { sub } => {
             handle_activity_command(sub)?;
         }
-        Commands::Radar { sub } => match sub {
-            None => awareness::cmd::run_show(None, 20, false),
+        Commands::Radar {
+            sub,
+            focus: bare_focus,
+            limit: bare_limit,
+            json: bare_json,
+        } => match sub {
+            // Bare `aura radar` IS `aura radar show`, so it has to answer to the
+            // same flags — otherwise `--json` on the documented default form is
+            // an error message instead of an answer. A flag typed before the
+            // subcommand lands here too, so fold it in rather than dropping it.
+            None => awareness::cmd::run_show(
+                bare_focus.as_deref(),
+                bare_limit.unwrap_or(20),
+                *bare_json,
+            ),
             Some(RadarSubcommands::Show { focus, limit, json }) => {
-                awareness::cmd::run_show(focus.as_deref(), *limit, *json);
+                awareness::cmd::run_show(
+                    focus.as_deref().or(bare_focus.as_deref()),
+                    limit.or(*bare_limit).unwrap_or(20),
+                    *json || *bare_json,
+                );
             }
             Some(RadarSubcommands::Conflicts { as_actor, all, json }) => {
-                awareness::cmd::run_conflicts(as_actor.as_deref(), *all, *json);
+                awareness::cmd::run_conflicts(as_actor.as_deref(), *all, *json || *bare_json);
             }
             Some(RadarSubcommands::Emit {
                 kind,
@@ -7634,14 +8062,25 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 awareness::cmd::run_sync(*json, *quiet);
             }
         },
-        Commands::Worktrees { sub } => match sub {
-            None => worktree::cmd::run_list(false, false, false),
+        Commands::Worktrees {
+            sub,
+            json: bare_json,
+            no_git_status: bare_no_git_status,
+            all: bare_all,
+        } => match sub {
+            // Same contract as the radar: bare `aura worktrees` is `... list`,
+            // so it answers to list's flags too.
+            None => worktree::cmd::run_list(*bare_json, *bare_no_git_status, *bare_all),
             Some(WorktreeSubcommands::List {
                 json,
                 no_git_status,
                 all,
             }) => {
-                worktree::cmd::run_list(*json, *no_git_status, *all);
+                worktree::cmd::run_list(
+                    *json || *bare_json,
+                    *no_git_status || *bare_no_git_status,
+                    *all || *bare_all,
+                );
             }
             Some(WorktreeSubcommands::Whoami { json }) => {
                 worktree::cmd::run_whoami(*json);
@@ -7649,8 +8088,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             Some(WorktreeSubcommands::Say { message, to, json }) => {
                 worktree::cmd::run_say(message, to.as_deref(), *json);
             }
-            Some(WorktreeSubcommands::Inbox { limit, json }) => {
-                worktree::cmd::run_inbox(*limit, *json);
+            Some(WorktreeSubcommands::Inbox { limit, agent, json }) => {
+                worktree::cmd::run_inbox(*limit, agent.as_deref(), *json);
+            }
+            Some(WorktreeSubcommands::Assign {
+                task,
+                to,
+                in_worktree,
+                json,
+            }) => {
+                worktree::cmd::run_assign(task, to.as_deref(), in_worktree.as_deref(), *json);
+            }
+            Some(WorktreeSubcommands::Mine { agent, limit, json }) => {
+                worktree::cmd::run_mine(agent.as_deref(), *limit, *json);
             }
         },
         Commands::Identity { json } => {
@@ -7724,6 +8174,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         Commands::Plugin { sub } => {
             cmd_plugin_marketplace::run(sub)?;
+        }
+        Commands::Env { sub } => {
+            env_cmd::handle(sub)?;
+        }
+        Commands::Egress { sub } => {
+            egress_cmd::handle(sub)?;
         }
         Commands::Orchestrate { sub } => {
             match sub {
@@ -9758,7 +10214,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     let current_repo = live_sync::repo_name_from_cwd();
                     let is_team = config.team_repos.contains(&current_repo);
 
-                    println!("\n  {} Team Status", "Team".bold());
+                    println!("\n  {} {}", "🤝", "Team Status".bold());
 
                     if !current_repo.is_empty() {
                         if is_team {
@@ -9840,15 +10296,35 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 TeamSubcommands::Zones { sub: zsub } => {
                     match zsub {
                         ZoneSubcommands::Claim { patterns, mode, label } => {
-                            match live_sync::create_remote_zone(patterns, mode, label.as_deref()) {
-                                Ok(resp) => {
-                                    let id = resp["zone_id"].as_str().unwrap_or("?");
-                                    println!("{} Zone claimed (id: {})", "✓".green().bold(), id.dimmed());
-                                    for p in patterns {
-                                        println!("  {} {} ({})", "•".dimmed(), p.cyan(), mode);
-                                    }
-                                }
-                                Err(e) => eprintln!("{} Failed: {}", "✗".red().bold(), e),
+                            // Claim locally first. The local sentinel is what
+                            // stops the next `aura snapshot`, so a claim that
+                            // only reached the mothership protected nothing on
+                            // the machine doing the editing — and on a cloud
+                            // without the zones endpoint it protected nothing
+                            // anywhere.
+                            let session_id = session::SessionManager::get_active_session()
+                                .map(|s| s.session_id)
+                                .unwrap_or_else(crate::sentinel::SentinelManager::cli_session_id);
+                            let zone_mode = if mode == "block" {
+                                crate::sentinel::ZoneMode::Block
+                            } else {
+                                crate::sentinel::ZoneMode::Warn
+                            };
+                            let local = crate::sentinel::SentinelManager::create_zone(
+                                &session_id, patterns.clone(), zone_mode,
+                            );
+                            println!("{} Zone claimed (id: {})", "✓".green().bold(), local.zone_id.dimmed());
+                            for p in patterns {
+                                println!("  {} {} ({})", "•".dimmed(), p.cyan(), mode);
+                            }
+                            // A zone lasts as long as this session does. Saying
+                            // so here is the difference between a claim people
+                            // trust and one they re-take "just in case".
+                            println!("  {} held while this session is alive · {} to drop it",
+                                "•".dimmed(),
+                                format!("aura team zones release {}", local.zone_id).cyan());
+                            if let Err(e) = live_sync::create_remote_zone(patterns, mode, label.as_deref()) {
+                                println!("  {} not shared with the team: {}", "•".dimmed(), e.dimmed());
                             }
                             let cfg = crate::config::ConfigManager::load();
                             if cfg.sync_enabled && cfg.cloud_api_token.is_some() {
@@ -9858,47 +10334,115 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             }
                         }
                         ZoneSubcommands::List { json } => {
-                            match live_sync::fetch_remote_zones() {
-                                Ok(resp) => {
-                                    if *json {
-                                        // The remote already hands back a JSON
-                                        // object; re-emit it verbatim (pretty) so
-                                        // the shell parses the same shape the
-                                        // mothership produced.
-                                        println!("{}", serde_json::to_string_pretty(&resp)?);
-                                        return Ok(());
-                                    }
-                                    let zones = resp["zones"].as_array();
-                                    let total = zones.map(|a| a.len()).unwrap_or(0);
-                                    println!("\n  {} Sentinel Zones ({} active)", "Zones".bold(), total);
-                                    if let Some(items) = zones {
-                                        for z in items {
-                                            let user = z["username"].as_str().unwrap_or("?");
-                                            let mode = z["mode"].as_str().unwrap_or("warn");
-                                            let label = z["label"].as_str().unwrap_or("");
-                                            let patterns = z["patterns"].as_array()
-                                                .map(|a| a.iter().filter_map(|v| v.as_str()).collect::<Vec<_>>().join(", "))
-                                                .unwrap_or_default();
-                                            let id = z["id"].as_str().unwrap_or("");
-                                            let mode_display = if mode == "block" { mode.red().to_string() } else { mode.yellow().to_string() };
-                                            println!("  {} {} [{}] {} {}",
-                                                "•".dimmed(), user.cyan(), mode_display, patterns,
-                                                if !label.is_empty() { format!("({})", label).dimmed().to_string() } else { String::new() });
-                                            println!("     {}", format!("id: {}", id).dimmed());
-                                        }
-                                    }
-                                    println!();
-                                }
-                                Err(e) => eprintln!("{} Failed: {}", "✗".red().bold(), e),
+                            // Local first, because local is what enforces. This
+                            // command used to ask the mothership only — and on
+                            // a cloud without that endpoint it answered
+                            // "Invalid response: error decoding response body"
+                            // while a local zone was actively warning on every
+                            // snapshot. A list you can't get is how a zone
+                            // becomes un-releasable.
+                            let views = crate::sentinel::SentinelManager::list_zone_views();
+                            let remote = live_sync::fetch_remote_zones();
+
+                            if *json {
+                                let local = views.iter().map(|v| serde_json::json!({
+                                    "zone_id": v.zone.zone_id,
+                                    "session_id": v.zone.session_id,
+                                    "patterns": v.zone.patterns,
+                                    "mode": format!("{:?}", v.zone.mode).to_lowercase(),
+                                    "worktree": v.zone.worktree,
+                                    "enforced": v.live,
+                                    "age_secs": v.age_secs,
+                                    "owner_alive": v.owner_alive,
+                                })).collect::<Vec<_>>();
+                                println!("{}", serde_json::to_string_pretty(&serde_json::json!({
+                                    "zones": local,
+                                    "remote": remote.as_ref().ok(),
+                                    "remote_error": remote.as_ref().err(),
+                                }))?);
+                                return Ok(());
                             }
+
+                            let live = views.iter().filter(|v| v.live).count();
+                            println!("\n  {} ({} in force, {} total)", "Sentinel Zones".bold(), live, views.len());
+                            if views.is_empty() {
+                                println!("  {} Nothing claimed. {} to claim one.",
+                                    "•".dimmed(), "aura team zones claim <pattern>".cyan());
+                            }
+                            for v in &views {
+                                let mode = format!("{:?}", v.zone.mode).to_lowercase();
+                                let mode_display = if mode == "block" { mode.red().to_string() } else { mode.yellow().to_string() };
+                                let who = v.zone.worktree.clone()
+                                    .or_else(|| v.owner_worktree.clone())
+                                    .unwrap_or_else(|| "main".to_string());
+                                let state = if v.live {
+                                    "in force".green().to_string()
+                                } else {
+                                    // Say which of the two ways it lapsed, so
+                                    // the answer to "why did this stop?" isn't
+                                    // a guess.
+                                    match v.owner_alive {
+                                        Some(false) => "expired — session gone".dimmed().to_string(),
+                                        _ => "expired — idle too long".dimmed().to_string(),
+                                    }
+                                };
+                                println!("  {} {} [{}] {} — {}",
+                                    "•".dimmed(), who.cyan(), mode_display,
+                                    v.zone.patterns.join(", "), state);
+                                println!("     {}", format!(
+                                    "id: {} · session {} · claimed {}",
+                                    v.zone.zone_id, v.zone.session_id, human_age(v.age_secs)
+                                ).dimmed());
+                            }
+                            if let Err(e) = &remote {
+                                println!("  {} team-wide zones unavailable: {}", "•".dimmed(), e.dimmed());
+                            }
+                            println!();
                         }
                         ZoneSubcommands::Release { zone_id } => {
-                            match live_sync::delete_remote_zone(zone_id) {
-                                Ok(_) => println!("{} Zone released", "✓".green().bold()),
-                                Err(e) => eprintln!("{} Failed: {}", "✗".red().bold(), e),
+                            // Release where it binds. The remote copy is worth
+                            // clearing too, but a release that only reached the
+                            // mothership left the warning firing locally and
+                            // reported success — which is the version of this
+                            // command that made zones feel unfixable.
+                            let local = crate::sentinel::SentinelManager::release_zone(zone_id);
+                            let remote = live_sync::delete_remote_zone(zone_id);
+                            match (local, remote.is_ok()) {
+                                (true, _) => println!("{} Zone {} released", "✓".green().bold(), zone_id.dimmed()),
+                                (false, true) => println!("{} Zone {} released on the team board (nothing local by that id)",
+                                    "✓".green().bold(), zone_id.dimmed()),
+                                (false, false) => eprintln!("{} No zone {} here. {} to see what is claimed.",
+                                    "✗".red().bold(), zone_id, "aura team zones list".cyan()),
                             }
                         }
                         ZoneSubcommands::Check { file_path } => {
+                            // The local answer is the one that will actually
+                            // stop you, so give it first and unconditionally.
+                            let session_id = session::SessionManager::get_active_session()
+                                .map(|s| s.session_id)
+                                .unwrap_or_else(crate::sentinel::SentinelManager::cli_session_id);
+                            match crate::sentinel::SentinelManager::check_zone(&session_id, file_path) {
+                                Some(z) => {
+                                    let mode = format!("{:?}", z.mode).to_lowercase();
+                                    println!("  {} claimed by {} [{}] — {}",
+                                        "⚠".yellow(),
+                                        z.worktree.clone().unwrap_or_else(|| "main".into()).cyan(),
+                                        if mode == "block" { mode.red().to_string() } else { mode.yellow().to_string() },
+                                        z.patterns.join(", "));
+                                    println!("     {}", format!("id: {} · session {}", z.zone_id, z.session_id).dimmed());
+                                }
+                                // `check_zone` skips your own zones, which is
+                                // right for enforcement and confusing to read
+                                // straight after claiming one. Say which of the
+                                // two "no" answers this is.
+                                None => {
+                                    match crate::sentinel::SentinelManager::own_zone(&session_id, file_path) {
+                                        Some(z) => println!("{} {} is in your own zone {} — nobody else may touch it",
+                                            "✓".green().bold(), file_path.cyan(), z.zone_id.dimmed()),
+                                        None => println!("{} No zone holds {} here", "✓".green().bold(), file_path.cyan()),
+                                    }
+                                }
+                            }
                             match live_sync::check_remote_zone(file_path) {
                                 Ok(resp) => {
                                     let blocked = resp["blocked"].as_bool().unwrap_or(false);
@@ -9918,7 +10462,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                         }
                                     }
                                 }
-                                Err(e) => eprintln!("{} Failed: {}", "✗".red().bold(), e),
+                                // Not a failure of the command — the local
+                                // answer above already stands on its own.
+                                Err(e) => println!("  {} team-wide zones unavailable: {}", "•".dimmed(), e.dimmed()),
                             }
                         }
                     }
@@ -11343,14 +11889,7 @@ fn recall_patch(
         .json(body)
         .send()
         .map_err(|e| format!("request failed: {}", e))?;
-    let status = resp.status();
-    let resp_body = resp
-        .json::<serde_json::Value>()
-        .map_err(|e| format!("response parse failed (HTTP {}): {}", status, e))?;
-    if !status.is_success() {
-        return Err(format!("HTTP {}: {}", status, resp_body));
-    }
-    Ok(resp_body)
+    recall_decode(resp)
 }
 
 /// S2-AT: filter task ids to the URL-safe ascii subset before
@@ -12138,10 +12677,9 @@ fn format_webhooks_list(body: &serde_json::Value) -> String {
 
 /// S2-WH: DELETE sibling of recall_get/recall_post/recall_patch.
 /// Same auth + error shape so the dispatch handlers stay symmetric.
-/// Some cloud DELETE handlers return an empty body on success — we
-/// treat any 2xx without parseable JSON as `{}` rather than an error
-/// so the caller can still print "deleted" without surfacing a
-/// confusing parse failure.
+/// Some cloud DELETE handlers answer 2xx with an empty body;
+/// `recall_decode` reads that as `{}` so the caller can print "deleted"
+/// instead of a confusing parse failure.
 fn recall_delete(
     client: &reqwest::blocking::Client,
     url: &str,
@@ -12152,21 +12690,7 @@ fn recall_delete(
         .header("Authorization", format!("Bearer {}", token))
         .send()
         .map_err(|e| format!("request failed: {}", e))?;
-    let status = resp.status();
-    let text = resp
-        .text()
-        .map_err(|e| format!("response read failed (HTTP {}): {}", status, e))?;
-    let parsed: serde_json::Value = if text.trim().is_empty() {
-        serde_json::Value::Object(Default::default())
-    } else {
-        serde_json::from_str(&text).map_err(|e| {
-            format!("response parse failed (HTTP {}): {} — body: {}", status, e, text)
-        })?
-    };
-    if !status.is_success() {
-        return Err(format!("HTTP {}: {}", status, parsed));
-    }
-    Ok(parsed)
+    recall_decode(resp)
 }
 
 /// S2-AC: dispatch for `aura agent-card`. Hits the unauthenticated
@@ -12199,13 +12723,7 @@ fn run_agent_card(
         req = req.header("host", h);
     }
     let resp = req.send().map_err(|e| format!("request failed: {}", e))?;
-    let status = resp.status();
-    let body = resp
-        .json::<serde_json::Value>()
-        .map_err(|e| format!("response parse failed (HTTP {}): {}", status, e))?;
-    if !status.is_success() {
-        return Err(format!("HTTP {}: {}", status, body));
-    }
+    let body = recall_decode(resp)?;
     if json {
         println!("{}", serde_json::to_string_pretty(&body).unwrap_or_default());
     } else {
@@ -12530,6 +13048,71 @@ fn recall_push_i64(url: &mut String, sep: &mut char, key: &str, value: Option<i6
     }
 }
 
+/// Turn a finished cloud response into either its JSON body or a sentence that
+/// says what actually went wrong.
+///
+/// The order of the two checks is the whole point. These helpers used to call
+/// `.json()` first and look at the status afterwards, so a 404 whose body was
+/// an error page — exactly what the cloud returns for a repo it has never heard
+/// of — came out as `response parse failed (HTTP 404 Not Found): error decoding
+/// response body`. That reads like the CLI is broken, and it buries the one
+/// fact the user needed. The status was there the whole time; it just never got
+/// to speak first.
+pub(crate) fn recall_decode(
+    resp: reqwest::blocking::Response,
+) -> Result<serde_json::Value, String> {
+    let status = resp.status();
+    let text = resp
+        .text()
+        .map_err(|e| format!("HTTP {}: reply could not be read: {}", status, e))?;
+    if !status.is_success() {
+        return Err(match recall_error_detail(&text) {
+            Some(detail) => format!("HTTP {}: {}", status, detail),
+            None => format!("HTTP {}", status),
+        });
+    }
+    if text.trim().is_empty() {
+        // A 2xx with no body is a success with nothing to say — some DELETE
+        // handlers answer this way. `{}` lets the caller report it as done
+        // instead of inventing a parse failure.
+        return Ok(serde_json::Value::Object(Default::default()));
+    }
+    serde_json::from_str(&text).map_err(|e| {
+        format!(
+            "HTTP {}: reply was not JSON: {} — body: {}",
+            status,
+            e,
+            truncate(text.trim(), 200)
+        )
+    })
+}
+
+/// The most useful sentence inside an error body.
+///
+/// A JSON `error`/`message`/`detail` field if the cloud sent one, else the raw
+/// body trimmed. HTML error pages carry nothing worth quoting, so they yield
+/// nothing and the caller prints the bare status rather than a wall of markup.
+fn recall_error_detail(text: &str) -> Option<String> {
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    if let Ok(v) = serde_json::from_str::<serde_json::Value>(trimmed) {
+        for key in ["error", "message", "detail"] {
+            if let Some(s) = v.get(key).and_then(|x| x.as_str()) {
+                if !s.trim().is_empty() {
+                    return Some(s.trim().to_string());
+                }
+            }
+        }
+        return Some(truncate(trimmed, 200));
+    }
+    if trimmed.starts_with('<') {
+        return None;
+    }
+    Some(truncate(trimmed, 200))
+}
+
 pub(crate) fn recall_get(
     client: &reqwest::blocking::Client,
     url: &str,
@@ -12540,14 +13123,7 @@ pub(crate) fn recall_get(
         .header("Authorization", format!("Bearer {}", token))
         .send()
         .map_err(|e| format!("request failed: {}", e))?;
-    let status = resp.status();
-    let body = resp
-        .json::<serde_json::Value>()
-        .map_err(|e| format!("response parse failed (HTTP {}): {}", status, e))?;
-    if !status.is_success() {
-        return Err(format!("HTTP {}: {}", status, body));
-    }
-    Ok(body)
+    recall_decode(resp)
 }
 
 /// S2-RNC: POST sibling of recall_get for endpoints that take a JSON
@@ -12565,14 +13141,7 @@ pub(crate) fn recall_post(
         .json(body)
         .send()
         .map_err(|e| format!("request failed: {}", e))?;
-    let status = resp.status();
-    let resp_body = resp
-        .json::<serde_json::Value>()
-        .map_err(|e| format!("response parse failed (HTTP {}): {}", status, e))?;
-    if !status.is_success() {
-        return Err(format!("HTTP {}: {}", status, resp_body));
-    }
-    Ok(resp_body)
+    recall_decode(resp)
 }
 
 /// S2-RNC: render a NarrateResponse as a CLI-friendly digest. Header
@@ -13089,12 +13658,21 @@ fn print_loop_task(t: &aura_loop::LoopTask) {
         "medium" => "medium".normal(),
         _ => "low".dimmed(),
     };
+    // Where a node runs is the other half of what `crew add` was told, so it
+    // belongs on the row: asking for `--place cloud` and being shown a line
+    // identical to a local one gives you no way to know it took.
+    let place = match t.place.as_deref().and_then(aura_loop::normalize_place) {
+        Some(aura_loop::PLACE_CLOUD) => format!("  {} cloud", "☁").cyan().to_string(),
+        Some(aura_loop::PLACE_LOCAL) => format!("  {} local", "▪").dimmed().to_string(),
+        _ => String::new(),
+    };
     println!(
-        "  {}  {}  [{}] {}",
+        "  {}  {}  [{}] {}{}",
         t.short_id().yellow().bold(),
         t.title.bold(),
         loop_status_color(&t.status),
         prio,
+        place,
     );
     if !t.depends_on.is_empty() {
         let deps: Vec<String> = t
@@ -13148,6 +13726,129 @@ fn handle_runner_command(sub: &RunnerSubcommands) -> Result<(), Box<dyn std::err
             )
         }
         RunnerSubcommands::Status => runner::status(),
+        RunnerSubcommands::Install {
+            user,
+            name,
+            repo,
+            agent,
+            env_file,
+            cpu_quota,
+            memory_max,
+            memory_swap_max,
+            members,
+        } => {
+            let done = runner_service::install(runner_service::InstallOpts {
+                user_scope: *user,
+                name: name.clone(),
+                repo: repo.clone(),
+                agent: agent.clone(),
+                env_file: env_file.clone(),
+                cpu_quota: cpu_quota.clone(),
+                memory_max: memory_max.clone(),
+                memory_swap_max: memory_swap_max.clone(),
+                members: *members,
+            })?;
+            println!("{} runner service installed", "✓".green());
+            println!("  unit    {}", done.path.display().to_string().dimmed());
+            println!(
+                "  logs    {}",
+                format!(
+                    "journalctl {}-u {} -f",
+                    if *user { "--user " } else { "" },
+                    runner_service::UNIT_NAME
+                )
+                .dimmed()
+            );
+            // What the box decided about itself, printed because "one member
+            // cannot wedge this machine" is a claim, and a claim nobody can see
+            // the numbers behind is a slogan. It also lands in the wizard's
+            // `~/aura-runner.log`, which is what the setup panel tails.
+            if let Some(l) = done.limits.as_ref() {
+                println!(
+                    "  share   {}",
+                    format!(
+                        "cpu {} · memory {} · swap {}",
+                        l.cpu_quota, l.memory_max, l.memory_swap_max
+                    )
+                    .dimmed()
+                );
+            }
+            if done.swapless {
+                println!(
+                    "  {} {}",
+                    "!".yellow(),
+                    "This box has no swap, so a build that reaches its memory limit is killed \
+                     rather than slowed. Add a swap file and it degrades instead."
+                        .dimmed()
+                );
+            }
+            println!(
+                "  {}",
+                "It now starts on boot and restarts if it falls over.".dimmed()
+            );
+            Ok(())
+        }
+        RunnerSubcommands::Uninstall { user } => {
+            runner_service::uninstall(*user)?;
+            println!("{} runner service removed", "✓".green());
+            Ok(())
+        }
+        RunnerSubcommands::Service { user } => {
+            println!("{}", runner_service::service_status(*user)?);
+            Ok(())
+        }
+        RunnerSubcommands::Creds { cmd } => handle_runner_creds(cmd),
+    }
+}
+
+fn handle_runner_creds(sub: &CredsSubcommands) -> Result<(), Box<dyn std::error::Error>> {
+    match sub {
+        CredsSubcommands::Set {
+            agent,
+            key,
+            key_stdin,
+        } => {
+            let key = if *key_stdin {
+                let mut buf = String::new();
+                std::io::Read::read_to_string(&mut std::io::stdin(), &mut buf)?;
+                buf
+            } else {
+                key.clone().ok_or("pass --key <key> or --key-stdin")?
+            };
+            let path = runner_creds::set(agent, &key)?;
+            // Deliberately no echo of the key, not even masked — the one place
+            // it could leak into a terminal recording is right here.
+            println!("{} {} key stored", "✓".green(), agent);
+            println!("  {}", path.display().to_string().dimmed());
+            println!(
+                "  {}",
+                "Restart the runner to pick it up: aura runner install (or systemctl restart)."
+                    .dimmed()
+            );
+            Ok(())
+        }
+        CredsSubcommands::List => {
+            let creds = runner_creds::list()?;
+            if creds.is_empty() {
+                println!(
+                    "No agent keys on this box. It can still run an agent you signed in \
+                     interactively (`claude setup-token`)."
+                );
+                return Ok(());
+            }
+            for c in creds {
+                println!("{} {:<8} {}  {}", "●".green(), c.agent, c.var, c.tail.dimmed());
+            }
+            Ok(())
+        }
+        CredsSubcommands::Clear { agent } => {
+            if runner_creds::clear(agent)? {
+                println!("{} {} key removed", "✓".green(), agent);
+            } else {
+                println!("No key was stored for {agent}.");
+            }
+            Ok(())
+        }
     }
 }
 
@@ -13164,6 +13865,7 @@ fn handle_loop_command(sub: &LoopSubcommands) -> Result<(), Box<dyn std::error::
             deps,
             ac,
             agent,
+            place,
             tags,
             json,
         } => {
@@ -13180,8 +13882,24 @@ fn handle_loop_command(sub: &LoopSubcommands) -> Result<(), Box<dyn std::error::
                     return Err(format!("dependency {d} not found").into());
                 }
             }
+            // Reject an unusable placement here rather than minting a node
+            // that silently ignores it. `--place` is the user saying where
+            // this should run; quietly dropping that would put the work on
+            // the wrong machine and look like it worked.
+            let placement = match place {
+                Some(raw) => match aura_loop::normalize_place(raw) {
+                    Some(p) => Some(p.to_string()),
+                    None => {
+                        return Err(format!(
+                            "--place must be 'local' or 'cloud', got '{raw}'"
+                        )
+                        .into())
+                    }
+                },
+                None => None,
+            };
             let body = if input.is_empty() { title.clone() } else { input.clone() };
-            let task = graph.create(
+            let mut task = graph.create(
                 title.clone(),
                 body,
                 priority.clone(),
@@ -13191,6 +13909,10 @@ fn handle_loop_command(sub: &LoopSubcommands) -> Result<(), Box<dyn std::error::
                 agent.clone(),
                 tags_vec,
             )?;
+            if placement.is_some() {
+                task.place = placement;
+                graph.save(&task)?;
+            }
             if *json {
                 println!("{}", serde_json::to_string(&task)?);
             } else {
@@ -13502,8 +14224,12 @@ fn handle_loop_command(sub: &LoopSubcommands) -> Result<(), Box<dyn std::error::
             rollback,
             goal,
             crew,
+            place,
             json,
         } => {
+            let here = aura_loop::normalize_place(place).ok_or_else(|| {
+                format!("--place must be 'local' or 'cloud', got '{place}'")
+            })?;
             let opts = aura_loop_run::RunOpts {
                 agent: agent.clone(),
                 lease_secs: *lease_secs,
@@ -13515,6 +14241,7 @@ fn handle_loop_command(sub: &LoopSubcommands) -> Result<(), Box<dyn std::error::
                 rollback: *rollback,
                 goal: goal.clone(),
                 crew: crew.clone(),
+                place: here.to_string(),
                 json: *json,
             };
             aura_loop_run::run(&repo_root, &opts)?;
@@ -13659,6 +14386,12 @@ fn handle_loop_command(sub: &LoopSubcommands) -> Result<(), Box<dyn std::error::
             let mut pulled = 0usize;
             let mut pushed = 0usize;
             let mut notes: Vec<String> = Vec::new();
+            // Set when the board could not be read at all. A count of zero then
+            // means "we never saw the list", not "the list was empty", and the
+            // summary line has to say which — a runner pointed at a repo the
+            // cloud has never heard of otherwise reports a clean idle cycle
+            // forever.
+            let mut pull_error: Option<String> = None;
 
             // PULL — ready cloud tasks become local graph nodes. Each is claimed
             // on the cloud (→ working) so a second runner won't also pull it.
@@ -13757,7 +14490,155 @@ fn handle_loop_command(sub: &LoopSubcommands) -> Result<(), Box<dyn std::error::
                             pulled += 1;
                         }
                     }
-                    Err(e) => notes.push(format!("pull: {e}")),
+                    Err(e) => {
+                        notes.push(format!("pull: {e}"));
+                        pull_error = Some(e);
+                    }
+                }
+            }
+
+            // OFFER — local nodes placed `cloud` that the board has never seen
+            // get minted onto it, so a runner can claim them.
+            //
+            // This is the leg that was missing. `--pull` brought cloud-born work
+            // down and `--push` reported it back up, but work born HERE — the
+            // node you just added while looking at your own worktree — had no
+            // way to reach a box. "Move this to the cloud" was a sentence the
+            // system could not act on. Now placement is the instruction and this
+            // is what carries it out.
+            let mut offered = 0usize;
+            if do_push {
+                for mut node in graph.list() {
+                    if node.place.as_deref().and_then(aura_loop::normalize_place)
+                        != Some(aura_loop::PLACE_CLOUD)
+                    {
+                        continue;
+                    }
+                    // Already on the board, or already finished here.
+                    if node.remote_id.is_some() || node.is_terminal() {
+                        continue;
+                    }
+                    let mut b = serde_json::Map::new();
+                    let kind_agent = node.agent_kind.clone().unwrap_or_else(|| agent.clone());
+                    b.insert("agent_kind".into(), serde_json::json!(kind_agent));
+                    b.insert("input".into(), serde_json::json!(node.input));
+                    if let Some(r) = &repo_slug {
+                        b.insert("repo".into(), serde_json::json!(r));
+                    }
+                    // The server requires acceptance criteria for plan/wave/task
+                    // but not for a leaf. A node with no AC is offered as a
+                    // subtask rather than rejected — the placement instruction
+                    // matters more than the taxonomy, and refusing here would
+                    // strand the work on the laptop with no explanation.
+                    match &node.acceptance_criteria {
+                        Some(ac) if !ac.trim().is_empty() => {
+                            b.insert("task_kind".into(), serde_json::json!(node.task_kind));
+                            b.insert("acceptance_criteria".into(), serde_json::json!(ac));
+                        }
+                        _ => {
+                            b.insert("task_kind".into(), serde_json::json!("subtask"));
+                        }
+                    }
+                    // Carry the branch so the desktop's placement badge can put
+                    // the cloud mark on the right worktree row.
+                    if let Some(br) = node
+                        .branch
+                        .clone()
+                        .or_else(|| detect_current_branch_for_a2a().ok().flatten())
+                    {
+                        b.insert("branch".into(), serde_json::json!(br));
+                    }
+                    if !node.tags.is_empty() {
+                        b.insert("tags".into(), serde_json::json!(node.tags));
+                    }
+                    let curl = format!("{}/api/v2/a2a/tasks", base);
+                    match recall_post(&client, &curl, &token, &serde_json::Value::Object(b)) {
+                        Ok(resp) => match resp.get("id").and_then(|v| v.as_str()) {
+                            Some(cid) => {
+                                node.remote_id = Some(cid.to_string());
+                                if let Err(e) = graph.save(&node) {
+                                    // The board now holds work whose local node
+                                    // doesn't know its id. Say so loudly — the
+                                    // alternative is a task that runs on the box
+                                    // and never reports home.
+                                    notes.push(format!(
+                                        "offered {} as {cid} but could not record the id locally: {e}",
+                                        node.short_id()
+                                    ));
+                                } else {
+                                    offered += 1;
+                                }
+                            }
+                            None => notes.push(format!(
+                                "offer {}: the board accepted it but returned no id",
+                                node.short_id()
+                            )),
+                        },
+                        Err(e) => notes.push(format!("offer {}: {e}", node.short_id())),
+                    }
+                }
+            }
+
+            // RECONCILE — adopt the cloud's answer for work we sent away.
+            //
+            // Only nodes this machine offered (`place: cloud` + a remote id +
+            // not yet finished). A runner's own pulled nodes carry no placement,
+            // so it skips this entirely instead of re-reading its own board.
+            let mut adopted = 0usize;
+            if do_pull {
+                const PUSHED_TAG: &str = "cloud:pushed";
+                for mut node in graph.list() {
+                    if node.place.as_deref().and_then(aura_loop::normalize_place)
+                        != Some(aura_loop::PLACE_CLOUD)
+                    {
+                        continue;
+                    }
+                    if node.is_terminal() {
+                        continue;
+                    }
+                    let rid = match &node.remote_id {
+                        Some(r) => r.clone(),
+                        None => continue, // not offered yet
+                    };
+                    let gurl = format!("{}/api/v2/a2a/tasks/{}", base, a2a_safe_id(&rid));
+                    let row = match recall_get(&client, &gurl, &token) {
+                        Ok(v) => v,
+                        Err(e) => {
+                            notes.push(format!("reconcile {}: {e}", node.short_id()));
+                            continue;
+                        }
+                    };
+                    let remote_status = match row.get("status").and_then(|v| v.as_str()) {
+                        Some(s) if !s.is_empty() => s.to_string(),
+                        _ => continue,
+                    };
+                    if remote_status == node.status {
+                        continue;
+                    }
+                    let became_terminal = aura_loop::is_terminal(&remote_status);
+                    node.status = remote_status;
+                    if let Some(sha) = row.get("commit_sha").and_then(|v| v.as_str()) {
+                        node.commit_sha = Some(sha.to_string());
+                    }
+                    if let Some(err) = row.get("error_message").and_then(|v| v.as_str()) {
+                        node.error_message = Some(err.to_string());
+                    }
+                    if let Some(res) = row.get("result") {
+                        if !res.is_null() {
+                            node.result = Some(res.clone());
+                        }
+                    }
+                    // This outcome came FROM the cloud, so the push leg must not
+                    // send it back — terminal states are sticky server-side and
+                    // re-PATCHing one answers 409. Reusing the push leg's own
+                    // tag is the honest way to say "already reported".
+                    if became_terminal && !node.tags.iter().any(|t| t == PUSHED_TAG) {
+                        node.tags.push(PUSHED_TAG.to_string());
+                    }
+                    match graph.save(&node) {
+                        Ok(_) => adopted += 1,
+                        Err(e) => notes.push(format!("reconcile save {}: {e}", node.short_id())),
+                    }
                 }
             }
 
@@ -13806,15 +14687,33 @@ fn handle_loop_command(sub: &LoopSubcommands) -> Result<(), Box<dyn std::error::
                         "repo": repo_slug,
                         "pulled": pulled,
                         "pushed": pushed,
+                        // Local work handed to the board this cycle, and cloud
+                        // outcomes adopted back onto local nodes. Separate from
+                        // pulled/pushed because they move work the other way.
+                        "offered": offered,
+                        "adopted": adopted,
+                        // Present only when the board could not be read, so a
+                        // caller can tell an idle cycle from a broken one
+                        // without string-matching the notes.
+                        "pull_error": pull_error,
                         "notes": notes,
                     })
                 );
             } else {
                 let mut parts: Vec<String> = Vec::new();
                 if do_pull {
-                    parts.push(format!("pulled {pulled}"));
+                    parts.push(match &pull_error {
+                        Some(_) => "could not read the board".to_string(),
+                        None => format!("pulled {pulled}"),
+                    });
+                    if adopted > 0 {
+                        parts.push(format!("heard back on {adopted}"));
+                    }
                 }
                 if do_push {
+                    if offered > 0 {
+                        parts.push(format!("sent {offered}"));
+                    }
                     parts.push(format!("pushed {pushed}"));
                 }
                 let scope = repo_slug.as_deref().unwrap_or("org-wide");
@@ -14613,6 +15512,18 @@ fn format_relative_seconds(unix: i64) -> String {
     }
 }
 
+/// A duration as "3 minutes ago" rather than a count of seconds. Used where
+/// the age is the point — a zone claimed 4 minutes ago and one claimed in May
+/// are different situations, and a raw second count doesn't say which is which.
+fn human_age(secs: u64) -> String {
+    match secs {
+        0..=59 => "moments ago".to_string(),
+        60..=3599 => format!("{}m ago", secs / 60),
+        3600..=86399 => format!("{}h ago", secs / 3600),
+        _ => format!("{}d ago", secs / 86400),
+    }
+}
+
 #[cfg(test)]
 mod recall_tests {
     use super::*;
@@ -14628,6 +15539,64 @@ mod recall_tests {
         let out = truncate("abcdefghijk", 5);
         assert_eq!(out.chars().count(), 5);
         assert!(out.ends_with('…'));
+    }
+
+    /// Build a blocking Response with a chosen status and body, so the decode
+    /// order can be tested for real rather than by inspection.
+    fn reply(status: u16, body: &str) -> reqwest::blocking::Response {
+        let raw = http::Response::builder()
+            .status(status)
+            .body(body.to_string())
+            .expect("response");
+        reqwest::blocking::Response::from(raw)
+    }
+
+    /// The defect this whole helper exists to kill. The cloud answers 404 with
+    /// an error page for a repo it has never heard of; the old code parsed
+    /// first, so the user was told the *reply was malformed* instead of that
+    /// the repo was unknown.
+    #[test]
+    fn an_unknown_repo_reports_its_status_not_a_parse_failure() {
+        let err = recall_decode(reply(404, "<html><body>404 Not Found</body></html>"))
+            .expect_err("404 is not a success");
+        assert!(err.starts_with("HTTP 404"), "leads with the status: {err}");
+        assert!(
+            !err.contains("parse"),
+            "must not blame the parser for a routing answer: {err}"
+        );
+        assert!(
+            !err.contains("<html"),
+            "an error page carries nothing worth quoting: {err}"
+        );
+    }
+
+    #[test]
+    fn a_json_error_body_is_quoted_in_the_servers_own_words() {
+        let err = recall_decode(reply(403, r#"{"error":"repo not in your org"}"#))
+            .expect_err("403 is not a success");
+        assert_eq!(err, "HTTP 403 Forbidden: repo not in your org");
+    }
+
+    #[test]
+    fn a_success_still_returns_its_body() {
+        let v = recall_decode(reply(200, r#"{"tasks":[]}"#)).expect("200 decodes");
+        assert!(v["tasks"].is_array());
+    }
+
+    /// Some DELETE handlers answer 204 with nothing. That is a success, and
+    /// reporting it as a parse failure was the second half of the same bug.
+    #[test]
+    fn an_empty_success_is_a_success() {
+        let v = recall_decode(reply(204, "")).expect("204 decodes");
+        assert!(v.is_object());
+    }
+
+    /// A 2xx that really is malformed is still worth saying so — the fix moved
+    /// the parse check, it did not delete it.
+    #[test]
+    fn a_malformed_success_body_is_still_reported() {
+        let err = recall_decode(reply(200, "not json at all")).expect_err("garbage 200");
+        assert!(err.contains("not JSON"), "{err}");
     }
 
     #[test]

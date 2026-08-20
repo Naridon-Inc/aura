@@ -12,7 +12,7 @@ use serde_json::Value;
 
 /// A single message in a chat conversation. Mirrors the OpenAI / Anthropic
 /// `messages: [...]` shape; brains map this onto their provider format.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ChatMessage {
     /// `user`, `assistant`, or `system`.
     pub role: String,
@@ -21,7 +21,7 @@ pub struct ChatMessage {
 }
 
 /// What the caller wants the brain to do this turn.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ChatRequest {
     /// Conversation so far.
     pub messages: Vec<ChatMessage>,
@@ -111,6 +111,51 @@ pub(crate) fn cacheable_prefix(system: Option<&str>, tools: &[Value]) -> (Value,
     (system_val, tools_val)
 }
 
+/// Rewrite Anthropic-shaped message content into the multi-part shape the
+/// OpenAI Chat Completions API accepts.
+///
+/// Aura authors every user turn in Anthropic's block shape, and for text-only
+/// turns the two APIs agree closely enough that the content used to be passed
+/// through untouched. Images don't agree: Anthropic carries base64 in
+/// `{"type":"image","source":{...}}` and OpenAI wants a data URL in
+/// `{"type":"image_url","image_url":{"url":...}}`. Passing the block through
+/// meant OpenAI rejected the request outright — attaching a screenshot to an
+/// OpenAI-backed chat failed 100% of the time.
+///
+/// A plain string is returned unchanged (the common case, and the cheapest
+/// wire form). Blocks that aren't text or image pass through as-is: this path
+/// carries no tool traffic, and inventing a translation for a block we don't
+/// produce would be guesswork.
+pub fn content_to_openai(content: &Value) -> Value {
+    let Some(blocks) = content.as_array() else {
+        return content.clone();
+    };
+    let mapped: Vec<Value> = blocks
+        .iter()
+        .map(|block| match block.get("type").and_then(|v| v.as_str()) {
+            Some("image") => {
+                let src = block.get("source").cloned().unwrap_or_default();
+                let media_type = src
+                    .get("media_type")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("image/png");
+                if let Some(data) = src.get("data").and_then(|v| v.as_str()) {
+                    serde_json::json!({
+                        "type": "image_url",
+                        "image_url": { "url": format!("data:{media_type};base64,{data}") },
+                    })
+                } else if let Some(url) = src.get("url").and_then(|v| v.as_str()) {
+                    serde_json::json!({ "type": "image_url", "image_url": { "url": url } })
+                } else {
+                    block.clone()
+                }
+            }
+            _ => block.clone(),
+        })
+        .collect();
+    Value::Array(mapped)
+}
+
 /// Token accounting for one turn, surfaced to the UI's context-fill meter.
 /// `input_tokens` is the prompt the provider billed (history + system +
 /// tools), `output_tokens` is what the model generated. Both are best-effort:
@@ -122,8 +167,72 @@ pub struct TokenUsage {
     pub output_tokens: u32,
 }
 
+/// A slash command a hosted agent publishes for the session it is in.
+///
+/// Aura's own palette is a static list compiled into the app. This is the
+/// other kind: whatever the agent itself decided it can do here, which for
+/// OpenCode means its built-in commands plus every skill the user has
+/// installed into it. Neither Aura nor the user can enumerate that in
+/// advance — only the agent knows, and only once it is running.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct AgentCommand {
+    pub name: String,
+    #[serde(default)]
+    pub description: Option<String>,
+}
+
+/// One way of working the agent offers. OpenCode ships `build` and `plan`;
+/// plan mode refuses every edit tool, which is a real safety control and
+/// the reason this is worth surfacing rather than leaving buried.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct AgentMode {
+    pub id: String,
+    pub name: String,
+    #[serde(default)]
+    pub description: Option<String>,
+}
+
+/// One step of the agent's own plan for the work in front of it.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct AgentPlanEntry {
+    pub content: String,
+    /// `pending`, `in_progress`, `completed` — the agent's word, passed
+    /// through rather than mapped, so a new one shows up instead of being
+    /// silently bucketed as something it isn't.
+    #[serde(default)]
+    pub status: Option<String>,
+    #[serde(default)]
+    pub priority: Option<String>,
+}
+
+/// What a live agent session is offering right now, beyond its replies.
+///
+/// This is session state, and deliberately neither of the two places it
+/// could have gone:
+///
+///   - not [`BrainCapabilities`], which is static and cached by callers —
+///     "OpenCode is in plan mode" is not a property of the build;
+///   - not a [`ChatChunk`], which is transcript: persisted to disk,
+///     replayed on reload, synced, exported. A command list is not
+///     something that was *said*.
+///
+/// So it is read from the live brain on demand instead. All three arrive
+/// unprompted over ACP while a turn runs, and every one of them used to be
+/// parsed and then dropped on the floor.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct AgentSurface {
+    /// Slash commands the agent publishes for this session.
+    pub commands: Vec<AgentCommand>,
+    /// The modes it can work in.
+    pub modes: Vec<AgentMode>,
+    /// Which of `modes` it is in now.
+    pub current_mode: Option<String>,
+    /// Its plan, while it is working to one.
+    pub plan: Vec<AgentPlanEntry>,
+}
+
 /// One streaming event from `Brain::chat`. Frontend reassembles into bubbles.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum ChatChunk {
     /// Incremental text — append to the active assistant bubble at `block_idx`.
@@ -145,13 +254,46 @@ pub enum ChatChunk {
         input_tokens: u32,
         output_tokens: u32,
     },
+    /// What this turn cost, and what the key behind it has cost in total.
+    ///
+    /// Emitted once per turn, right before `End`, and only in API mode — a
+    /// brain driven by a CLI subscription or the Aura cloud isn't billed per
+    /// token here, so no figure is invented for it. `cost_usd` prices every
+    /// round of the tool loop (each round is its own billed request), while
+    /// `spend_usd` is the running total for the API key since it was added,
+    /// summed across every project it has been used in — the number people
+    /// actually want when they wonder what an app is doing to their bill.
+    ///
+    /// `estimated` marks a turn priced off the tier fallback rather than a
+    /// published rate; the UI shows it as `~$…`. A model nobody can price
+    /// emits no chunk at all rather than a confident wrong number.
+    Cost {
+        cost_usd: f64,
+        spend_usd: f64,
+        /// Unix seconds the key was added — the "since" the total counts from.
+        spend_since: u64,
+        estimated: bool,
+    },
     /// Complete tool-use block. `tool_use_id` matches the eventual `ToolResult`
     /// the caller sends back in the next `ChatRequest`.
+    ///
+    /// `signature` is an opaque provider token that must travel back with this
+    /// call on the next request. Gemini 3 stamps a `thoughtSignature` on every
+    /// `functionCall` part — it's the encrypted continuation of the reasoning
+    /// that produced the call — and REJECTS the follow-up request outright
+    /// ("Function call is missing a thought_signature in functionCall parts",
+    /// 400 INVALID_ARGUMENT) if it comes back without one. So a tool loop that
+    /// rebuilds the assistant turn from `(id, name, input)` alone works for
+    /// exactly one round and then dies. Providers with no such token leave it
+    /// `None` and nothing changes for them; the field is `#[serde(default)]`
+    /// so already-persisted transcripts still deserialize.
     ToolUse {
         block_idx: usize,
         tool_use_id: String,
         name: String,
         input: Value,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        signature: Option<String>,
     },
     /// Result of a server-side tool execution, keyed back to the originating
     /// `ToolUse` by `tool_use_id` so the frontend can attach it to that

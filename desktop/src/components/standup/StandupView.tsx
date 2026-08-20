@@ -14,7 +14,10 @@ import {
   type Task,
   type TeamManifest,
 } from "../../lib/api";
+import { fetchTasks } from "../../lib/tasksCache";
 import { AsciiSpinner } from "../ui/ascii-spinner";
+import { fetchTeam } from "../../lib/teamCache";
+import { agentName } from "../../lib/agentNames";
 
 type Props = {
   repoRoot: string;
@@ -55,12 +58,12 @@ export function StandupView({ repoRoot, embedded = false }: Props) {
     (async () => {
       try {
         const [t, entries, taskRows] = await Promise.all([
-          api.teamLoad(repoRoot).catch(() => null),
+          fetchTeam(repoRoot).catch(() => null),
           api
             .auraReadIntentLogV2(repoRoot, 500)
             .then((p) => p.entries ?? [])
             .catch(() => [] as IntentEntry[]),
-          api.tasksList(repoRoot).catch(() => [] as Task[]),
+          fetchTasks(repoRoot).catch(() => [] as Task[]),
         ]);
         if (cancelled) return;
         setTeam(t);
@@ -106,8 +109,8 @@ export function StandupView({ repoRoot, embedded = false }: Props) {
   return (
     <div className={root}>
       <div className="px-4 py-3 border-b border-line-soft flex items-center gap-3">
-        <h2 className="text-[14px] font-medium text-text-1">Standup</h2>
-        <span className="text-[11px] text-text-3">
+        <h2 className="text-md font-medium text-text-1">Standup</h2>
+        <span className="text-xs text-text-3">
           Last {DAYS_BACK} days · what each person worked on
         </span>
         <div className="ml-auto flex items-center gap-2">
@@ -115,14 +118,14 @@ export function StandupView({ repoRoot, embedded = false }: Props) {
             // Only a failure needs the reader here; a successful post is
             // confirmed by the text alone.
             <span
-              className={`text-[11px] ${postNote.ok ? "text-text-3" : "text-red"}`}
+              className={`text-xs ${postNote.ok ? "text-text-3" : "text-red"}`}
             >
               {postNote.text}
             </span>
           )}
           <button
             type="button"
-            className="text-[11px] px-2 py-0.5 rounded bg-bg-2 hover:bg-bg-3 text-text-2 disabled:opacity-50"
+            className="text-xs px-2 py-0.5 rounded bg-bg-2 hover:bg-bg-3 text-text-2 disabled:opacity-50"
             disabled={posting || loading || empty}
             title={`Share this summary with the team in #${STANDUP_CHANNEL}`}
             onClick={() => void post()}
@@ -134,13 +137,13 @@ export function StandupView({ repoRoot, embedded = false }: Props) {
 
       <div className="flex-1 overflow-y-auto p-4 space-y-4">
         {loading && (
-          <div className="flex items-center gap-2 text-[12px] text-text-4">
+          <div className="flex items-center gap-2 text-sm text-text-4">
             <AsciiSpinner />
             Loading…
           </div>
         )}
         {err && (
-          <div className="text-[11px] px-2 py-1 rounded bg-red/10 text-red">
+          <div className="text-xs px-2 py-1 rounded bg-red/10 text-red">
             {err}
           </div>
         )}
@@ -148,7 +151,7 @@ export function StandupView({ repoRoot, embedded = false }: Props) {
           <TasksSummaryCard summary={taskSummary} days={DAYS_BACK} />
         )}
         {!loading && !err && empty && (
-          <div className="text-[12px] text-text-3 leading-snug">
+          <div className="text-sm text-text-3 leading-snug">
             Nothing happened in the last {DAYS_BACK} days. As soon as someone
             saves work or moves a task, it shows up here.
           </div>
@@ -162,7 +165,7 @@ export function StandupView({ repoRoot, embedded = false }: Props) {
         ))}
       </div>
 
-      <div className="px-4 py-2 border-t border-line-soft text-[10.5px] text-text-4">
+      <div className="px-4 py-2 border-t border-line-soft text-xs text-text-4">
         Built from what your team saved and the Tasks board. Post shares a
         written summary in #{STANDUP_CHANNEL}.
       </div>
@@ -190,8 +193,8 @@ function TasksSummaryCard({
   return (
     <section className="border border-line-soft rounded px-3 py-2">
       <div className="flex items-center gap-2 mb-1">
-        <span className="text-[12px] font-medium text-text-1">Tasks</span>
-        <span className="text-[10.5px] text-text-4">
+        <span className="text-sm font-medium text-text-1">Tasks</span>
+        <span className="text-xs text-text-4">
           last {days}d · {bits.join(" · ")}
         </span>
       </div>
@@ -200,7 +203,7 @@ function TasksSummaryCard({
           {completed.slice(0, 6).map((t) => (
             <li
               key={t.id}
-              className="text-[11.5px] text-text-2 truncate"
+              className="text-sm text-text-2 truncate"
               title={t.title}
             >
               <span className="text-text-4" aria-hidden>✓</span>{" "}
@@ -213,7 +216,7 @@ function TasksSummaryCard({
             </li>
           ))}
           {completed.length > 6 && (
-            <li className="text-[10.5px] text-text-4">
+            <li className="text-xs text-text-4">
               +{completed.length - 6} more…
             </li>
           )}
@@ -221,6 +224,30 @@ function TasksSummaryCard({
       )}
     </section>
   );
+}
+
+/** The name to print over a day's updates.
+ *
+ *  Three different things end up in this column and only one of them was
+ *  handled. A teammate on the roster resolves to their name. An agent id —
+ *  `claude`, `cli:gemini` — is a product, not a person, and belongs in the
+ *  one table every other surface names agents from; printed raw it was a
+ *  slug. And a row with nobody recorded printed the literal key "unknown",
+ *  which is also what every row on this pane looked like for as long as the
+ *  reader underneath was dropping `agent_id` on the floor. */
+function authorDisplay(
+  author: string,
+  knownMembers: TeamManifest["members"],
+): string {
+  const member = knownMembers.find(
+    (m) => m.email === author || m.handle === author,
+  );
+  if (member) return member.name || member.handle;
+  // An address nobody on the roster claims is still the most recognisable
+  // thing we hold for that person — more use than the title-cased local part
+  // the agent table would reduce it to.
+  if (author.includes("@")) return author;
+  return agentName(author, { empty: "Not recorded", unknown: "Not recorded" });
 }
 
 function DaySection({
@@ -232,25 +259,22 @@ function DaySection({
 }) {
   return (
     <section>
-      <div className="text-[11px] uppercase tracking-wider text-text-4 mb-1.5">
+      <div className="section-label mb-1.5">
         {bucket.date}
       </div>
       <div className="space-y-2">
         {Array.from(bucket.byAuthor.entries()).map(([author, rows]) => {
-          const member = knownMembers.find(
-            (m) => m.email === author || m.handle === author,
-          );
-          const display = member?.name || member?.handle || author;
+          const display = authorDisplay(author, knownMembers);
           return (
             <div
-              key={author}
+              key={author || "(none)"}
               className="border border-line-soft rounded px-3 py-2"
             >
               <div className="flex items-center gap-2 mb-1">
-                <span className="text-[12px] font-medium text-text-1">
+                <span className="text-sm font-medium text-text-1">
                   {display}
                 </span>
-                <span className="text-[10.5px] text-text-4 tabular-nums">
+                <span className="text-xs text-text-4 tabular-nums">
                   {rows.length} update{rows.length === 1 ? "" : "s"}
                 </span>
               </div>
@@ -258,14 +282,14 @@ function DaySection({
                 {rows.slice(0, 6).map((r) => (
                   <li
                     key={r.id}
-                    className="text-[11.5px] text-text-2 truncate"
+                    className="text-sm text-text-2 truncate"
                     title={r.intent}
                   >
                     · {r.intent}
                   </li>
                 ))}
                 {rows.length > 6 && (
-                  <li className="text-[10.5px] text-text-4">
+                  <li className="text-xs text-text-4">
                     +{rows.length - 6} more…
                   </li>
                 )}
@@ -290,7 +314,10 @@ function bucketByDay(intents: IntentEntry[], days: number): DayBucket[] {
       bucket = { date: key, byAuthor: new Map() };
       map.set(key, bucket);
     }
-    const author = e.agent || "unknown";
+    // Keyed by the raw id, named later. "unknown" as a key is a word a
+    // teammate could plausibly commit under, and it decided here what the
+    // screen said, which put a made-up name beyond the reach of the roster.
+    const author = e.agent || "";
     const arr = bucket.byAuthor.get(author) ?? [];
     arr.push(e);
     bucket.byAuthor.set(author, arr);
@@ -330,7 +357,7 @@ function buildDigest(
   days: number,
 ): string {
   const lines: string[] = [];
-  lines.push(`**Standup — last ${days} days**`);
+  lines.push(`**Standup. Last ${days} days**`);
   const { completed, inProgress, inReview } = taskSummary;
   const bits = [`${completed.length} completed`, `${inProgress} in progress`];
   if (inReview > 0) bits.push(`${inReview} in review`);
@@ -339,12 +366,12 @@ function buildDigest(
   for (const b of buckets) {
     lines.push(`**${b.date}**`);
     for (const [author, rows] of b.byAuthor.entries()) {
-      const member = (team?.members ?? []).find(
-        (m) => m.email === author || m.handle === author,
-      );
-      const display = member?.name || member?.handle || author;
+      // Same naming as the screen, off the same function: a digest that
+      // named people differently from the pane it was built from would be
+      // read as a second, disagreeing account of the same week.
+      const display = authorDisplay(author, team?.members ?? []);
       lines.push(
-        `- ${display} — ${rows.length} intent${rows.length === 1 ? "" : "s"}`,
+        `- ${display} · ${rows.length} intent${rows.length === 1 ? "" : "s"}`,
       );
       for (const r of rows.slice(0, 6)) lines.push(`  - ${r.intent}`);
       if (rows.length > 6) lines.push(`  - +${rows.length - 6} more…`);

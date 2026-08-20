@@ -459,7 +459,11 @@ pub async fn pty_close(state: State<'_, PtyRegistry>, id: String) -> Result<(), 
         return Ok(());
     }
     if let Some(sess) = state.sessions.lock().unwrap().remove(&id) {
-        let _ = sess.child.lock().unwrap().kill();
+        // Hang the line up rather than SIGKILL the shell, so whatever the
+        // user was RUNNING in this tab stops too — see `pty_reap`. Dropping
+        // `sess` right after also drops the master, which is the other half
+        // of what closing a terminal window does.
+        crate::pty_reap::hangup_and_reap(&mut **sess.child.lock().unwrap());
     }
     state.forget(&id);
     Ok(())

@@ -48,7 +48,7 @@ export function MobileWaitlistDialog({ onClose }: { onClose: () => void }) {
             type="button"
             onClick={onClose}
             aria-label="Close"
-            className="absolute right-3 top-3 grid h-6 w-6 place-items-center rounded-md text-text-4 transition-colors hover:bg-bg-2 hover:text-text-2"
+            className="absolute right-3 top-3 grid h-6 w-6 place-items-center rounded-md text-text-4 transition-colors hover:bg-state-hover hover:text-text-2"
           >
             <X className="h-3.5 w-3.5" aria-hidden="true" />
           </button>
@@ -63,15 +63,12 @@ export function MobileWaitlistDialog({ onClose }: { onClose: () => void }) {
             <Smartphone className="h-[18px] w-[18px]" aria-hidden="true" />
           </span>
 
-          <div
-            className="mt-3 font-mono text-[10.5px] font-semibold uppercase tracking-[0.14em]"
-            style={{ color: "var(--color-accent)" }}
-          >
+          <div className="eyebrow mt-3">
             Coming soon
           </div>
           <h2
             id="mobile-waitlist-title"
-            className="mt-1.5 text-[17px] font-semibold leading-snug text-text-1"
+            className="mt-1.5 text-lg font-semibold leading-snug text-text-1"
             style={{ textWrap: "balance" }}
           >
             Aura on your phone

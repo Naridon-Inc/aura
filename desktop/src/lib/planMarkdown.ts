@@ -77,7 +77,7 @@ export function pendingPlanToMarkdown(plan: PendingPlan): string {
     lines.push("## Phases");
     lines.push("");
     for (const [i, phase] of plan.phases.entries()) {
-      lines.push(`### Phase ${i + 1} — ${phase.title}`);
+      lines.push(`### Phase ${i + 1} · ${phase.title}`);
       lines.push("");
       if (phase.body?.trim()) {
         lines.push(phase.body.trim());
@@ -214,7 +214,7 @@ export function planTreeToMarkdown(
   const unscoped = root.children.filter((c) => kindOf(c.row) !== "wave");
 
   for (const [i, wave] of waves.entries()) {
-    lines.push(`## Wave ${i + 1} — ${titleOf(wave.row)}  <!-- task:${wave.row.id} -->`);
+    lines.push(`## Wave ${i + 1} · ${titleOf(wave.row)}  <!-- task:${wave.row.id} -->`);
     lines.push("");
     const waveAc = acOf(wave.row);
     if (waveAc) {

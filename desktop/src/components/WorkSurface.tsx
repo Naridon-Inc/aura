@@ -10,11 +10,21 @@ import {
   useMemo,
   useRef,
   useState,
+  type JSX,
   type PointerEvent as ReactPointerEvent,
   type ReactNode,
 } from "react";
+import type { TraceActions } from "./AdeSidebar";
+import { TraceTabs } from "./trace/TraceTabs";
+import { TraceToolSurface } from "./trace/TraceToolSurface";
+import { goToPlace } from "../lib/placeRoute";
+import { usePlaceRoot } from "../lib/projectRoots";
+import type { TraceKey } from "./trace/traceDestinations";
 import { convertFileSrc } from "@tauri-apps/api/core";
-import { Tabs } from "./Tabs";
+import { startWindowDrag } from "./TopBar";
+import { AgentTabMark, ManagerTabStatus } from "./TabStatus";
+import { TabMoreButton, tabContextItems } from "./TabMenu";
+import { useTabStripScroll } from "./tabStripScroll";
 import { MonacoEditor as Editor } from "./MonacoEditor";
 import { DiffView } from "./DiffView";
 import { EditorBreadcrumbs } from "./EditorBreadcrumbs";
@@ -22,15 +32,12 @@ import { EditorInlineComposer } from "./editor/EditorInlineComposer";
 import { MarkdownView } from "./MarkdownView";
 import { SegmentedControl } from "./ui/segmented";
 import { AsciiSpinner } from "./ui/ascii-spinner";
-import { Input } from "./ui/input";
 import { FileInsightStrip } from "./FileInsightStrip";
 import { AgentSurface, buildAgentTabMenuItems, type AgentTabMenuItem } from "./agent/AgentSurface";
 import {
   ContextMenu,
   ContextMenuTrigger,
   ContextMenuContent,
-  ContextMenuItem,
-  ContextMenuSeparator,
 } from "./ui/context-menu";
 import { ManagerSurface, buildManagerTabMenuItems } from "./manager/ManagerSurface";
 import { ManagerDashboardSurface } from "./manager/ManagerDashboardSurface";
@@ -48,40 +55,30 @@ import { TraceSurface } from "./workpanes/TraceSurface";
 import { PlanTab } from "./workpanes/PlanTab";
 import { PlanMarkdownTab } from "./workpanes/PlanMarkdownTab";
 import { EmptyPanePicker } from "./EmptyPanePicker";
-import {
-  AURA_MANAGER_ENABLED,
-  COMMONS_ENABLED,
-  MEMORY_SURFACE_ENABLED,
-} from "../lib/featureFlags";
+import { AURA_MANAGER_ENABLED, COMMONS_ENABLED } from "../lib/featureFlags";
 import { TasksBoard } from "./TasksBoard";
 import { openPopout } from "../lib/popout";
 import { TaskDetailPane } from "./tasks/TaskDetailPane";
+import { CloudThreadPane } from "./cloud/CloudThreadPane";
 import { StandupView } from "./standup/StandupView";
 import { AutomationsSurface } from "./automations/AutomationsSurface";
 import { CommonsSurface } from "./commons/CommonsSurface";
 import { AppPaneSurface } from "./plugins/AppPaneSurface";
 import { TeamSurface } from "./team/TeamSurface";
 import { ScreenshareTab } from "./chat/ScreenshareTab";
+import { LiveSessionPane } from "./collab";
+// Read, not subscribed: the tab label is recomputed on every layout render
+// anyway, so it can take the current value without the pane's own hook.
+import { getSessionLive } from "../lib/sessionLiveRegistry";
 import { PagesSurface } from "./pages2/PagesSurface";
-import { ReviewDialog } from "./dialogs/ReviewDialog";
-import { TimeMachinePane } from "./workpanes/TimeMachinePane";
-import { AttestationsDialog } from "./dialogs/AttestationsDialog";
-import { DoctorDialog } from "./dialogs/DoctorDialog";
-import { MemoryDialog } from "./dialogs/MemoryDialog";
-import { ImpactsPane } from "./workpanes";
-import { PaneOverflowMenu, type PaneMenuItem } from "./PaneOverflowMenu";
 import {
   useEditorStore,
   MAX_SPLIT_PANES,
-  samePaneRef,
-  treeContains,
   treeLeaves,
   treeLeafNodes,
   treeAllRefs,
-  treePaneCount,
   sessionsViewFromId,
   openBrowserTab,
-  newBrowserTabId,
   type AgentTab,
   type OpenFile,
   type PlanTabData,
@@ -94,17 +91,20 @@ import {
   type TraceView,
   isPlanMarkdownPath,
 } from "../lib/editorStore";
-import { AgentIcon } from "./agent/AgentIcon";
-import { api, type OutlineNode, type StrictModeInfo, type ZoneRule } from "../lib/api";
-import { forgetAgentSession } from "../lib/agentSessionStore";
+import { traceToolLabel } from "../lib/traceToolLabels";
+import { TabMark, projectName } from "./TabMark";
+import { PaneAddPopover } from "./PaneAddPopover";
+import { api, type OutlineNode, type StrictModeInfo } from "../lib/api";
 import { useTeammatePresence } from "../lib/usePresence";
 import { usePagesActiveTitle } from "../lib/pagesActiveTitle";
 import {
   useBrowserTabTitles,
   type BrowserTabMeta,
 } from "../lib/browserTabTitles";
+import { useAgentTerminalTitles } from "../lib/agentTerminalTitles";
 import { hostOf } from "../lib/browserEngine";
 import { BrowserTab, reapBrowserTabs } from "./workpanes/BrowserTab";
+import { formatBytes } from "../lib/bytes";
 
 /** Background for a terminal that lives inside a split. A hair cooler +
  *  darker than the editor panes (bg-content ≈ #161618) and the default xterm
@@ -125,34 +125,67 @@ type WorkSurfaceProps = {
   /** Active zone rules from App.tsx's poll. Forwarded into Tabs so each
    *  FileTab can show a zone-owner pill when its file is owned by
    *  another agent's session. */
-  zones?: ZoneRule[];
   /** Strict-mode posture, forwarded to AgentSurface so its
    *  SessionInfoCard can show a matching pill. */
   strictMode?: StrictModeInfo["mode"];
   /** Spawn an agent PTY tab. Forwarded to Tabs so the tab strip's `+`
    *  popover and the optional preset bar can launch agents directly,
    *  matching the EmptyState launcher. */
-  onLaunchAgent?: (agentId: string, label: string) => void;
   /** Quick-action openers used by FileInsightStrip when an Aura-tracked
    *  file is shown in diff mode. App.tsx already owns the dialog state
    *  for each of these, so we just forward callbacks. */
   onOpenRewind?: (filePath?: string) => void;
   onLogIntent?: (filePath?: string) => void;
   onSnapshot?: (filePath: string) => void;
+  /** Trace's own switcher, rendered ON the surface above every Trace pane.
+   *
+   *  Trace used to be reachable only through a 232px rail: you clicked Trace in
+   *  the nav, a second column appeared listing ten destinations, and it stayed
+   *  open the whole time you read a wide table so you could reach the other
+   *  nine. Workspaces and Mission Control already put their view switch on the
+   *  surface; this is Trace catching up, and it hands the column back to the
+   *  work. Same shape as `onOpenRewind` and friends — the handlers live in
+   *  App.tsx (two of them ask the ambient manager a question and need its busy
+   *  state), so they arrive here as a bag rather than being rebuilt. Omitted,
+   *  Trace panes render bare and the rail is the only way in. */
+  traceActions?: TraceActions;
+  /** Window chrome that rides in the tab row, either side of the strip.
+   *
+   *  The work column used to carry a band of its own above this surface,
+   *  holding two icons and nothing else across the rest of a full-width row,
+   *  stacked directly on top of the tab strip and its controls. The band is
+   *  gone; what it held arrives here and sits on the one row. See TopBar's
+   *  `SidebarPeek` (leading — the traffic-light gutter and the control that
+   *  brings the sidebar back, present only while the sidebar is collapsed)
+   *  and `PaneToggles` (trailing — terminal and review).
+   *
+   *  They are nodes rather than props because this component has no business
+   *  knowing what window chrome is: it owns the row, and the row has two
+   *  ends. Per-surface toolbars (the terminal's, the editor's) keep their own
+   *  place in that row, inboard of the trailing slot. */
+  chromeLeading?: ReactNode;
+  chromeTrailing?: ReactNode;
 };
 
 export function WorkSurface({
   repoRoot,
   projectName,
-  zones,
   strictMode,
-  onLaunchAgent,
   onOpenRewind,
   onLogIntent,
   onSnapshot,
+  traceActions,
+  chromeLeading,
+  chromeTrailing,
 }: WorkSurfaceProps) {
   const store = useEditorStore();
   const inFlight = useInFlight();
+  // The project the place rails' switcher is pointed at. Team is a place that
+  // can also open as a pane, and its shell asserts the chat model it draws was
+  // built for the root it was handed — so this pane has to name the same root
+  // the app-level provider does, or a pane open while someone switches project
+  // takes the surface down. See lib/projectRoots.
+  const placeRoot = usePlaceRoot(repoRoot);
   const [showDiff, setShowDiff] = useState(false);
   const [showOutline, setShowOutline] = useState<boolean>(() => {
     return localStorage.getItem("aura.outline.open") !== "0";
@@ -168,6 +201,18 @@ export function WorkSurface({
       return {};
     }
   });
+  // Which split file panes are showing the diff instead of the editor.
+  // The toggle draws in the pane's TAB STRIP now, not in a header band
+  // inside the pane body, and those two are siblings — so the state that
+  // links them has to sit above both. Keyed by path + the view the file was
+  // OPENED with, so re-opening the same file from Changes (defaultView
+  // "diff") lands on the diff again even if you'd toggled that path back to
+  // the editor earlier — which is what the effect this replaced did.
+  const [splitDiffOn, setSplitDiffOn] = useState<Record<string, boolean>>({});
+  const splitDiffKey = (f: OpenFile) => `${f.path}::${f.defaultView ?? ""}`;
+  const splitDiffFor = (f: OpenFile) =>
+    splitDiffOn[splitDiffKey(f)] ?? f.defaultView === "diff";
+
   const active = store.files.find((f) => f.path === store.activePath) ?? null;
   const activeAgentTab =
     store.agentTabs.find((t) => t.sessionId === store.activeAgentId) ?? null;
@@ -204,13 +249,17 @@ export function WorkSurface({
         ref.kind === "commons" ||
         ref.kind === "app" ||
         ref.kind === "screenshare" ||
+        ref.kind === "live" ||
         ref.kind === "trace" ||
         ref.kind === "sessions" ||
         ref.kind === "inspector" ||
         ref.kind === "replay" ||
         ref.kind === "prove" ||
         ref.kind === "graph" ||
-        ref.kind === "pages"
+        ref.kind === "pages" ||
+        ref.kind === "planBuilder" ||
+        ref.kind === "cloudJob" ||
+        ref.kind === "inbox"
       ) {
         return ref;
       }
@@ -312,129 +361,34 @@ export function WorkSurface({
     return () => window.removeEventListener("keydown", onKey);
   }, [saveActive]);
 
-  // The main strip is the EDITOR area's tab bar — it must list only the
-  // terminals that live in the editor (opened here directly, or pulled in
-  // via "Move Terminal into Editor Area"), never the ones owned by the
-  // bottom Terminal panel. Both kinds share the single `terminalTabs`
-  // roster (it's the PTY list), so without this filter every panel
-  // terminal also rendered as a main tab — and surfaced in the strip the
-  // moment the surrounding code tabs were closed, looking like the
-  // terminals "jumped" up from the panel on their own. A terminal is
-  // panel-owned iff it appears in some `terminalGroups` layout; promoting
-  // one to the editor removes it from those groups, so it correctly
-  // reappears in the strip only when the user explicitly moves it.
-  const panelOwnedTermIds = new Set<string>();
-  for (const g of store.terminalGroups) {
-    for (const ref of treeLeaves(g.layout)) {
-      if (ref.kind === "terminal") panelOwnedTermIds.add(ref.id);
-    }
-  }
-  const editorTerminalTabs = store.terminalTabs.filter(
-    (t) => !panelOwnedTermIds.has(t.termId),
+  // The window's top row when there is no layout to draw a tab strip from —
+  // which now means: no tabs are open at all. Every opener seeds a layout and
+  // both restore paths seed one from what they restored (seedLayoutForState),
+  // so a tab always has a tree to live in and PerPaneTabStrip always draws it.
+  //
+  // This row is still the top edge of the window, so it keeps the shell's
+  // chrome at either end and moves the window from the empty middle. It draws
+  // no launcher: the surface underneath it — WorkSurfaceEmpty, or the
+  // dashboard — is the launcher, and a second one 32px above would be the
+  // two-doors-onto-one-thing problem again.
+  const chromeBand = (surfaceActions?: ReactNode) => (
+    <div className="flex items-stretch flex-shrink-0">
+      {chromeLeading}
+      <div
+        className="flex-1 min-w-0 bg-bg-chrome border-b border-line-soft"
+        style={{ height: "var(--topbar-h)" }}
+        data-tauri-drag-region
+        onMouseDown={startWindowDrag}
+      />
+      {surfaceActions}
+      {chromeTrailing}
+    </div>
   );
 
-  const tabsCommonProps = {
-    files: store.files,
-    agentTabs: store.agentTabs,
-    terminalTabs: editorTerminalTabs,
-    managerTabs: store.managerTabs,
-    prTabs: store.prTabs,
-    activePrTabId: store.activePrTabId,
-    onActivatePr: store.setActivePrTab,
-    onClosePr: store.closePrTab,
-    inspectorOpen: store.inspectorOpen,
-    inspectorActive: store.activeInspector,
-    replayOpen: store.replayOpen,
-    replayActive: store.activeReplay,
-    planBuilderOpen: store.planBuilderOpen,
-    planBuilderActive: store.activePlanBuilder,
-    proveOpen: store.proveOpen,
-    proveActive: store.activeProve,
-    graphOpen: store.graphOpen,
-    graphActive: store.activeGraph,
-    inboxOpen: store.inboxOpen,
-    inboxActive: store.activeInbox,
-    activePath: store.activePath,
-    activeAgentId: store.activeAgentId,
-    activeTermId: store.activeTermId,
-    activeManagerId: store.activeManagerId,
-    dashboardActive: store.activeDashboard,
-    onActivateDashboard: store.setActiveDashboard,
-    isDirty: store.isDirty,
-    repoRoot,
-    zones,
-    onActivateFile: store.setActive,
-    onActivateAgent: store.setActiveAgent,
-    onActivateTerminal: store.setActiveTerminal,
-    onActivateManager: store.setActiveManager,
-    onActivateInspector: store.setActiveInspector,
-    onActivateReplay: store.setActiveReplay,
-    onActivatePlanBuilder: store.setActivePlanBuilder,
-    onActivateProve: store.setActiveProve,
-    onActivateGraph: store.setActiveGraph,
-    onActivateInbox: store.setActiveInbox,
-    onCloseFile: store.close,
-    onCloseAgent: (sid: string) => {
-      // Closing the tab stops the agent by default: kill the underlying PTY so
-      // a closed Claude Code (or other CLI) doesn't linger as an orphan, then
-      // drop the live subscription cache. "Detach to window" keeps a session
-      // alive on purpose (it hands the live PTY to a popout, using plain
-      // closeAgent), so the kill lives here at the close call site, not in
-      // closeAgent.
-      store.stopAndCloseAgent(sid);
-      forgetAgentSession(sid);
-    },
-    onCloseTerminal: store.closeTerminal,
-    onCloseManager: store.closeManager,
-    onCloseInspector: store.closeInspector,
-    onCloseReplay: store.closeReplay,
-    onClosePlanBuilder: store.closePlanBuilder,
-    onCloseProve: store.closeProve,
-    onCloseGraph: store.closeGraph,
-    onCloseInbox: store.closeInbox,
-    // Trace tools now live in the unified split leaf as `kind: "trace"`
-    // tabs (rendered by PerPaneTabStrip), so the global strip never draws
-    // a trace pill — that would double it up. Kept wired (open=false) so
-    // the prop contract stays intact.
-    traceToolOpen: false,
-    traceToolKind: store.traceTool,
-    onActivateTraceTool: () => {
-      if (store.traceTool) store.openTraceTool(store.traceTool, store.traceToolArg ?? undefined);
-    },
-    onCloseTraceTool: store.closeTraceTool,
-    splitActive: !!store.splitLayout,
-    onAddToSplit: (ref: WorkPaneRef) => store.addSplitPane(ref),
-    isInSplit: (ref: WorkPaneRef): boolean =>
-      !!store.splitLayout && treeContains(store.splitLayout, ref),
-    splitMemberCount: treePaneCount(store.splitLayout),
-    onClearSplit: () => store.clearSplitLayout(),
-    onReorderFile: store.reorderFileTabs,
-    onReorderAgent: store.reorderAgentTabs,
-    onReorderTerminal: store.reorderTerminalTabs,
-    onReorderManager: store.reorderManagerTabs,
-    onSplitTab: (ref: WorkPaneRef, direction: WorkSplitDirection) =>
-      store.splitWithEmpty(ref, direction),
-    onNewTerminal: () => store.openTerminal(repoRoot),
-    onLaunchAgent,
-  };
-
-  // Plan Builder path: singleton wizard. Same shape as Inspector — the
-  // tab strip stays so the user can pop back to other tabs without
-  // losing the wizard buffer.
-  if (store.activePlanBuilder) {
-    return (
-      <div className="h-full w-full flex flex-col bg-bg-content">
-        <div className="flex items-stretch flex-shrink-0">
-          <div className="flex-1 min-w-0">
-            <Tabs {...tabsCommonProps} />
-          </div>
-        </div>
-        <div className="flex-1 min-h-0">
-          <PlanBuilderSurface repoRoot={repoRoot} onClose={store.closePlanBuilder} />
-        </div>
-      </div>
-    );
-  }
+  // Plan Builder is a workpane tab (`kind: "planBuilder"`) like everything
+  // else — the split path below renders it. It used to return here, above
+  // that path, which meant opening the wizard swapped the whole window's tab
+  // strip for the legacy one. `activePlanBuilder` survives as the rail mirror.
 
   // Trace verify tools (Review / Rewind / Attestations / Doctor / Memory)
   // are no longer a standalone surface — they live in the unified split
@@ -452,24 +406,10 @@ export function WorkSurface({
   // renderSplitPane handle the body; describeRef gives each tab its pill;
   // the matching active* flag survives only as the Trace rail mirror.
 
-  // Inbox path: singleton (Stage 8A). Graphite-style PR triage.
-  // Highest priority among PR surfaces because it's the entry point —
-  // user clicks a row inside, which sets selectedPr and flips to
-  // activePrDetail.
-  if (store.activeInbox) {
-    return (
-      <div className="h-full w-full flex flex-col bg-bg-content">
-        <div className="flex items-stretch flex-shrink-0">
-          <div className="flex-1 min-w-0">
-            <Tabs {...tabsCommonProps} />
-          </div>
-        </div>
-        <div className="flex-1 min-h-0">
-          <InboxPane repoRoot={repoRoot} onClose={store.closeInbox} />
-        </div>
-      </div>
-    );
-  }
+  // PR triage is likewise a workpane tab (`kind: "inbox"`), so it opens
+  // beside your agents instead of replacing the strip they live on. It is
+  // still the entry point to a PR: a row inside sets selectedPr and flips
+  // activePrDetail, handled just below.
 
   // Sessions/Overview (Trace v2) is now a workpane tab (`kind: "sessions"`),
   // rendered through the leaf like every other page instead of taking over
@@ -496,20 +436,10 @@ export function WorkSurface({
   // Plans are session-only snapshots stored in the editor store, so this
   // tab keeps rendering even after the originating Manager session
   // resolves the plan.
-  if (activePlanTab) {
-    return (
-      <div className="h-full w-full flex flex-col bg-bg-content">
-        <div className="flex items-stretch flex-shrink-0">
-          <div className="flex-1 min-w-0">
-            <Tabs {...tabsCommonProps} />
-          </div>
-        </div>
-        <div className="flex-1 min-h-0">
-          <PlanTab plan={activePlanTab} />
-        </div>
-      </div>
-    );
-  }
+  // `kind: "plan"` has been a tree kind for a while — resolveSplitPane and
+  // renderSplitPane have handled it all along — but this branch sat above
+  // the split path and won, so plans were the third way to end up on the
+  // legacy strip. `activePlanTab` is now only a focus hint (activeSplitRef).
 
   // Split path: N-pane workspace (2..MAX_SPLIT_PANES). Tabs remain
   // canonical; this branch composes the layout from already-open tabs.
@@ -522,6 +452,36 @@ export function WorkSurface({
     // resolved pane. Leaves are looked up positionally in DFS order
     // so the existing `resolvedPanes` + index-based store mutators
     // keep working with no further changes.
+    // Which pane strips actually touch the top edge of the window — because
+    // those are the ones that have to carry the window's chrome. The leading
+    // cluster goes on the top-LEFT pane, which is always the first leaf in DFS
+    // order; the trailing cluster on the top-RIGHT one, found by walking right
+    // at every row split and up at every column split. With a column split at
+    // the root the top pane spans the full width and takes both.
+    //
+    // Without this the chrome simply vanished: a workspace with tabs is a
+    // one-leaf split, so this branch — not the global strip — is what draws
+    // the top of the window nearly all of the time.
+    const leafTotal = (n: WorkSplitTree): number =>
+      n.kind === "leaf"
+        ? 1
+        : n.children.reduce((sum, c) => sum + leafTotal(c), 0);
+    const topRightLeaf = (() => {
+      let node: WorkSplitTree = splitLayout;
+      let base = 0;
+      while (node.kind !== "leaf") {
+        if (!node.children.length) return 0;
+        if (node.direction === "row") {
+          const last = node.children.length - 1;
+          for (let i = 0; i < last; i++) base += leafTotal(node.children[i]);
+          node = node.children[last];
+        } else {
+          node = node.children[0];
+        }
+      }
+      return base;
+    })();
+
     let leafCursor = 0;
     const renderTree = (node: WorkSplitTree, path: number[] = []): ReactNode => {
       if (node.kind === "leaf") {
@@ -550,6 +510,11 @@ export function WorkSurface({
                 leaf={node}
                 paneIndex={idx}
                 currentRepoRoot={repoRoot}
+                trailing={paneTrailingControls(pane)}
+                chromeLeading={idx === 0 ? chromeLeading : undefined}
+                chromeTrailing={
+                  idx === topRightLeaf ? chromeTrailing : undefined
+                }
               />
               <div className="flex-1 min-h-0 min-w-0">
                 {renderSplitPane(pane, idx)}
@@ -617,11 +582,7 @@ export function WorkSurface({
   if (activeAgentTab) {
     return (
       <div className="h-full w-full flex flex-col bg-bg-content">
-        <div className="flex items-stretch flex-shrink-0">
-          <div className="flex-1 min-w-0">
-            <Tabs {...tabsCommonProps} />
-          </div>
-        </div>
+        {chromeBand()}
         <div className="flex-1 min-h-0">
           <AgentSurface tab={activeAgentTab} strictMode={strictMode} />
         </div>
@@ -634,17 +595,54 @@ export function WorkSurface({
   if (activeTermTab) {
     return (
       <div className="h-full w-full flex flex-col bg-bg-content">
-        <div className="flex items-stretch flex-shrink-0">
-          <div className="flex-1 min-w-0">
-            <Tabs {...tabsCommonProps} />
-          </div>
-        </div>
+        {chromeBand(
+          <>
+            {/* Terminal actions ride in the tab row, the same place the file
+                path puts its editor actions. The band that used to carry them
+                — inside the pane, under this strip — also printed the
+                terminal's name a second time, so it is gone. */}
+            <div className="flex items-center gap-1 px-2 bg-bg-chrome border-b border-line-soft">
+              <ToolbarBtn
+                onClick={() => store.demoteTerminalToPanel(activeTermTab.termId)}
+                title="Move terminal to panel"
+              >
+                <svg width="13" height="13" viewBox="0 0 16 16" fill="none">
+                  <rect x="2.5" y="2.5" width="11" height="11" rx="1.2" stroke="currentColor" strokeWidth="1.2" />
+                  <line x1="2.5" y1="9.8" x2="13.5" y2="9.8" stroke="currentColor" strokeWidth="1.2" />
+                  <path
+                    d="M8 4v3.4M6.5 6 8 7.5 9.5 6"
+                    stroke="currentColor"
+                    strokeWidth="1.2"
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                  />
+                </svg>
+              </ToolbarBtn>
+              <ToolbarBtn
+                onClick={() => splitTerminal(activeTermTab, "row")}
+                title="Split right"
+              >
+                <svg width="13" height="13" viewBox="0 0 16 16" fill="none">
+                  <rect x="2.5" y="3" width="11" height="10" rx="1.2" stroke="currentColor" strokeWidth="1.2" />
+                  <line x1="8" y1="3.5" x2="8" y2="12.5" stroke="currentColor" strokeWidth="1.2" />
+                </svg>
+              </ToolbarBtn>
+              <ToolbarBtn
+                onClick={() => splitTerminal(activeTermTab, "column")}
+                title="Split down"
+              >
+                <svg width="13" height="13" viewBox="0 0 16 16" fill="none">
+                  <rect x="2.5" y="3" width="11" height="10" rx="1.2" stroke="currentColor" strokeWidth="1.2" />
+                  <line x1="3" y1="8" x2="13" y2="8" stroke="currentColor" strokeWidth="1.2" />
+                </svg>
+              </ToolbarBtn>
+            </div>
+          </>,
+        )}
         <div className="flex-1 min-h-0">
           <TerminalPaneSurface
             tab={activeTermTab}
             repoRoot={repoRoot}
-            onSplit={(direction) => splitTerminal(activeTermTab, direction)}
-            onMoveToPanel={() => store.demoteTerminalToPanel(activeTermTab.termId)}
             onSessionOpened={store.setTerminalDaemonSession}
           />
         </div>
@@ -667,11 +665,7 @@ export function WorkSurface({
     // dedicated bar.
     return (
       <div className="h-full w-full flex flex-col bg-bg-content">
-        <div className="flex items-stretch flex-shrink-0">
-          <div className="flex-1 min-w-0">
-            <Tabs {...tabsCommonProps} />
-          </div>
-        </div>
+        {chromeBand()}
         <div className="flex-1 min-h-0">
           <ManagerSurface
             sessionId={activeManagerTab.sessionId}
@@ -697,11 +691,7 @@ export function WorkSurface({
     const fallbackName = projectName ?? repoRoot.split("/").pop() ?? repoRoot;
     return (
       <div className="h-full w-full flex flex-col bg-bg-content">
-        <div className="flex items-stretch flex-shrink-0">
-          <div className="flex-1 min-w-0">
-            <Tabs {...tabsCommonProps} />
-          </div>
-        </div>
+        {chromeBand()}
         <div className="flex-1 min-h-0">
           {AURA_MANAGER_ENABLED ? (
             <ManagerDashboardSurface repoRoot={repoRoot} projectName={fallbackName} />
@@ -712,8 +702,7 @@ export function WorkSurface({
             <WorkSurfaceEmpty
               repoRoot={repoRoot}
               projectName={fallbackName}
-              onOpenTerminal={() => store.openTerminal(repoRoot, { label: "Terminal" })}
-              onOpenChat={() => store.openChannels(repoRoot)}
+              onOpenChat={() => goToPlace("team")}
               onSearch={() => window.dispatchEvent(new CustomEvent("aura:open-search"))}
             />
           )}
@@ -725,17 +714,12 @@ export function WorkSurface({
     const fallbackName = projectName ?? repoRoot.split("/").pop() ?? repoRoot;
     return (
       <div className="h-full w-full flex flex-col bg-bg-content">
-        <div className="flex items-stretch flex-shrink-0">
-          <div className="flex-1 min-w-0">
-            <Tabs {...tabsCommonProps} />
-          </div>
-        </div>
+        {chromeBand()}
         <div className="flex-1 min-h-0">
           <WorkSurfaceEmpty
             repoRoot={repoRoot}
             projectName={fallbackName}
-            onOpenTerminal={() => store.openTerminal(repoRoot, { label: "Terminal" })}
-            onOpenChat={() => store.openChannels(repoRoot)}
+            onOpenChat={() => goToPlace("team")}
             onSearch={() => window.dispatchEvent(new CustomEvent("aura:open-search"))}
           />
         </div>
@@ -760,75 +744,74 @@ export function WorkSurface({
 
   return (
     <div className="h-full w-full flex flex-col bg-bg-content">
-      <div className="flex items-stretch flex-shrink-0">
-        <div className="flex-1 min-w-0">
-          <Tabs {...tabsCommonProps} />
-        </div>
-        <div className="flex items-center gap-1 px-2 bg-bg-chrome border-b border-line-soft">
-          {/* The markdown Raw/Rendered/Split toggle used to live here; it
-              now rides in the breadcrumb row right below (see the
-              EditorBreadcrumbs `trailing` slot), next to the file path. */}
-          <ToolbarBtn
-            active={showDiff}
-            onClick={() => setShowDiff((v) => !v)}
-            title="Show what changed since your last commit"
-          >
-            <svg width="13" height="13" viewBox="0 0 16 16" fill="none">
-              <line x1="8" y1="2" x2="8" y2="14" stroke="currentColor" strokeWidth="1.2" strokeDasharray="2 2" />
-              <rect x="2" y="3" width="4" height="10" rx="0.5" stroke="currentColor" strokeWidth="1.2" fill="none" />
-              <rect x="10" y="3" width="4" height="10" rx="0.5" stroke="currentColor" strokeWidth="1.2" fill="none" />
-            </svg>
-          </ToolbarBtn>
-          <ToolbarBtn
-            onClick={() => splitFile(active, "row")}
-            title="Split right"
-          >
-            <svg width="13" height="13" viewBox="0 0 16 16" fill="none">
-              <rect x="2.5" y="3" width="11" height="10" rx="1.2" stroke="currentColor" strokeWidth="1.2" />
-              <line x1="8" y1="3.5" x2="8" y2="12.5" stroke="currentColor" strokeWidth="1.2" />
-            </svg>
-          </ToolbarBtn>
-          <ToolbarBtn
-            onClick={() => splitFile(active, "column")}
-            title="Split down"
-          >
-            <svg width="13" height="13" viewBox="0 0 16 16" fill="none">
-              <rect x="2.5" y="3" width="11" height="10" rx="1.2" stroke="currentColor" strokeWidth="1.2" />
-              <line x1="3" y1="8" x2="13" y2="8" stroke="currentColor" strokeWidth="1.2" />
-            </svg>
-          </ToolbarBtn>
-          <ToolbarBtn
-            onClick={() => store.saveActive()}
-            disabled={!store.isDirty(active.path)}
-            title="Save (⌘S)"
-          >
-            <svg width="13" height="13" viewBox="0 0 16 16" fill="none">
-              <path
-                d="M3 2h8l2 2v10a1 1 0 01-1 1H3a1 1 0 01-1-1V3a1 1 0 011-1z"
-                stroke="currentColor"
-                strokeWidth="1.2"
-                fill="none"
-              />
-              <rect x="5" y="2" width="6" height="4" stroke="currentColor" strokeWidth="1.2" fill="none" />
-            </svg>
-          </ToolbarBtn>
-          {/* Theme toggle removed — lives in Settings dialog only. */}
-          <ToolbarBtn
-            active={showOutline}
-            onClick={() => setShowOutline((v) => !v)}
-            title="Toggle code outline"
-          >
-            <svg width="13" height="13" viewBox="0 0 16 16" fill="none">
-              <line x1="3" y1="4" x2="13" y2="4" stroke="currentColor" strokeWidth="1.2" />
-              <line x1="5" y1="8" x2="13" y2="8" stroke="currentColor" strokeWidth="1.2" />
-              <line x1="3" y1="12" x2="13" y2="12" stroke="currentColor" strokeWidth="1.2" />
-              <circle cx="2" cy="4" r="0.8" fill="currentColor" />
-              <circle cx="4" cy="8" r="0.8" fill="currentColor" />
-              <circle cx="2" cy="12" r="0.8" fill="currentColor" />
-            </svg>
-          </ToolbarBtn>
-        </div>
-      </div>
+      {chromeBand(
+        <>
+          <div className="flex items-center gap-1 px-2 bg-bg-chrome border-b border-line-soft">
+            {/* The markdown Raw/Rendered/Split toggle used to live here; it
+                now rides in the breadcrumb row right below (see the
+                EditorBreadcrumbs `trailing` slot), next to the file path. */}
+            <ToolbarBtn
+              active={showDiff}
+              onClick={() => setShowDiff((v) => !v)}
+              title="Show what changed since your last commit"
+            >
+              <svg width="13" height="13" viewBox="0 0 16 16" fill="none">
+                <line x1="8" y1="2" x2="8" y2="14" stroke="currentColor" strokeWidth="1.2" strokeDasharray="2 2" />
+                <rect x="2" y="3" width="4" height="10" rx="0.5" stroke="currentColor" strokeWidth="1.2" fill="none" />
+                <rect x="10" y="3" width="4" height="10" rx="0.5" stroke="currentColor" strokeWidth="1.2" fill="none" />
+              </svg>
+            </ToolbarBtn>
+            <ToolbarBtn
+              onClick={() => splitFile(active, "row")}
+              title="Split right"
+            >
+              <svg width="13" height="13" viewBox="0 0 16 16" fill="none">
+                <rect x="2.5" y="3" width="11" height="10" rx="1.2" stroke="currentColor" strokeWidth="1.2" />
+                <line x1="8" y1="3.5" x2="8" y2="12.5" stroke="currentColor" strokeWidth="1.2" />
+              </svg>
+            </ToolbarBtn>
+            <ToolbarBtn
+              onClick={() => splitFile(active, "column")}
+              title="Split down"
+            >
+              <svg width="13" height="13" viewBox="0 0 16 16" fill="none">
+                <rect x="2.5" y="3" width="11" height="10" rx="1.2" stroke="currentColor" strokeWidth="1.2" />
+                <line x1="3" y1="8" x2="13" y2="8" stroke="currentColor" strokeWidth="1.2" />
+              </svg>
+            </ToolbarBtn>
+            <ToolbarBtn
+              onClick={() => store.saveActive()}
+              disabled={!store.isDirty(active.path)}
+              title="Save (⌘S)"
+            >
+              <svg width="13" height="13" viewBox="0 0 16 16" fill="none">
+                <path
+                  d="M3 2h8l2 2v10a1 1 0 01-1 1H3a1 1 0 01-1-1V3a1 1 0 011-1z"
+                  stroke="currentColor"
+                  strokeWidth="1.2"
+                  fill="none"
+                />
+                <rect x="5" y="2" width="6" height="4" stroke="currentColor" strokeWidth="1.2" fill="none" />
+              </svg>
+            </ToolbarBtn>
+            {/* Theme toggle removed — lives in Settings dialog only. */}
+            <ToolbarBtn
+              active={showOutline}
+              onClick={() => setShowOutline((v) => !v)}
+              title="Toggle code outline"
+            >
+              <svg width="13" height="13" viewBox="0 0 16 16" fill="none">
+                <line x1="3" y1="4" x2="13" y2="4" stroke="currentColor" strokeWidth="1.2" />
+                <line x1="5" y1="8" x2="13" y2="8" stroke="currentColor" strokeWidth="1.2" />
+                <line x1="3" y1="12" x2="13" y2="12" stroke="currentColor" strokeWidth="1.2" />
+                <circle cx="2" cy="4" r="0.8" fill="currentColor" />
+                <circle cx="4" cy="8" r="0.8" fill="currentColor" />
+                <circle cx="2" cy="12" r="0.8" fill="currentColor" />
+              </svg>
+            </ToolbarBtn>
+          </div>
+        </>,
+      )}
 
       {active.status === "ok" && !showDiff && (
         <EditorBreadcrumbs
@@ -900,7 +883,11 @@ export function WorkSurface({
               path={active.path}
               current={active.current}
               baseline={active.baseline}
-              loadOriginal={(root, file) => api.gitShowHead(root, file)}
+              loadOriginal={(root, file) =>
+                active.diffOriginal !== undefined
+                  ? Promise.resolve(active.diffOriginal)
+                  : api.gitShowHead(root, file)
+              }
             />
           ) : isMd && mdView === "rendered" ? (
             <MarkdownView source={active.current} />
@@ -953,6 +940,52 @@ export function WorkSurface({
     </div>
   );
 
+  /** The lit tab's own controls, drawn at the right end of its pane's tab
+   *  strip. Only kinds with an action the tab strip and the right-click menu
+   *  can't already express get one — everything structural (split, add pane,
+   *  close pane) lives in the menu, so this stays a very short list rather
+   *  than the toolbar-per-pane it replaced. */
+  function paneTrailingControls(pane: ResolvedSplitPane): ReactNode {
+    if (pane.kind === "file" && pane.file.status === "ok") {
+      const on = splitDiffFor(pane.file);
+      const key = splitDiffKey(pane.file);
+      return (
+        <ToolbarBtn
+          active={on}
+          onClick={() => setSplitDiffOn((prev) => ({ ...prev, [key]: !on }))}
+          title="Show what changed since your last commit"
+        >
+          <svg width="13" height="13" viewBox="0 0 16 16" fill="none">
+            <line x1="8" y1="2" x2="8" y2="14" stroke="currentColor" strokeWidth="1.2" strokeDasharray="2 2" />
+            <rect x="2" y="3" width="4" height="10" rx="0.5" stroke="currentColor" strokeWidth="1.2" fill="none" />
+            <rect x="10" y="3" width="4" height="10" rx="0.5" stroke="currentColor" strokeWidth="1.2" fill="none" />
+          </svg>
+        </ToolbarBtn>
+      );
+    }
+    if (pane.kind === "terminal") {
+      return (
+        <ToolbarBtn
+          onClick={() => store.demoteTerminalToPanel(pane.tab.termId)}
+          title="Move terminal to panel"
+        >
+          <svg width="13" height="13" viewBox="0 0 16 16" fill="none">
+            <rect x="2.5" y="2.5" width="11" height="11" rx="1.2" stroke="currentColor" strokeWidth="1.2" />
+            <line x1="2.5" y1="9.8" x2="13.5" y2="9.8" stroke="currentColor" strokeWidth="1.2" />
+            <path
+              d="M8 4v3.4M6.5 6 8 7.5 9.5 6"
+              stroke="currentColor"
+              strokeWidth="1.2"
+              strokeLinecap="round"
+              strokeLinejoin="round"
+            />
+          </svg>
+        </ToolbarBtn>
+      );
+    }
+    return null;
+  }
+
   function renderSplitPane(pane: ResolvedSplitPane, index: number) {
     const closePane = () => store.removeSplitPane(index);
     if (pane.kind === "agent") {
@@ -975,10 +1008,6 @@ export function WorkSurface({
           // distinct surface once the work area is split. Single-pane + panel
           // terminals never get this and keep exact VSCode parity.
           bgTint={SPLIT_TERMINAL_BG}
-          onSplit={(direction) => splitTerminal(pane.tab, direction)}
-          onAddPane={() => addSplitTerminal(pane.tab.cwd)}
-          onClosePane={closePane}
-          onMoveToPanel={() => store.demoteTerminalToPanel(pane.tab.termId)}
           onSessionOpened={store.setTerminalDaemonSession}
         />
       );
@@ -1038,6 +1067,11 @@ export function WorkSurface({
         />
       );
     }
+    if (pane.kind === "cloudJob") {
+      return (
+        <CloudThreadPane threadKey={pane.threadKey} repoRoot={pane.repoRoot} />
+      );
+    }
     if (pane.kind === "standup") {
       return <StandupView repoRoot={pane.repoRoot} embedded />;
     }
@@ -1045,17 +1079,14 @@ export function WorkSurface({
       return <AutomationsSurface repoRoot={pane.repoRoot} />;
     }
     if (pane.kind === "channels") {
-      const channelsName =
-        projectName ?? pane.repoRoot.split("/").pop() ?? pane.repoRoot;
-      // The Team navigator remains in the sidebar. This workpane owns only
-      // the selected conversation and its synchronized detail/canvas panes.
-      return (
-        <TeamSurface
-          repoRoot={pane.repoRoot}
-          projectName={channelsName}
-          mode="detail"
-        />
-      );
+      // Team opens whole: its conversation list, the conversation, and the
+      // thread rail, all in this pane. The list used to be the app sidebar's
+      // body instead — so stepping into Team took your projects off screen and
+      // replaced them with a second index, and stepping back out took the
+      // conversations away mid-read. A page's own navigation belongs to the
+      // page. `full` already lays out all three columns and folds them down as
+      // the pane narrows; nothing new was built for this.
+      return <TeamSurface repoRoot={placeRoot} mode="full" />;
     }
     if (pane.kind === "commons") {
       // Full-width Commons (Lounge + Plugin Exchange). Gated behind
@@ -1082,16 +1113,22 @@ export function WorkSurface({
     if (pane.kind === "screenshare") {
       return <ScreenshareTab huddleKey={pane.huddleKey} />;
     }
+    if (pane.kind === "live") {
+      // Closing the tab is not leaving the session — see the pane's own
+      // "Leave". `closePane` drops the tab and nothing else.
+      return <LiveSessionPane sessionId={pane.sessionId} onClose={closePane} />;
+    }
     if (pane.kind === "trace") {
       // The dialog's own × closes just this trace tab (drops it from the
       // leaf), not the whole pane — the sibling agent/Tasks tabs stay.
-      return (
+      return inTrace(
+        pane.tool,
         <TraceToolSurface
           tool={pane.tool}
           arg={pane.arg}
           repoRoot={repoRoot}
           onClose={store.closeTraceTool}
-        />
+        />,
       );
     }
     if (pane.kind === "sessions") {
@@ -1100,28 +1137,52 @@ export function WorkSurface({
       // so the surface renders exactly one view and the old in-pane segmented
       // toggle is gone. Cross-links (Overview → sessions/usage) open the
       // sibling tab via openSessions.
-      return (
+      return inTrace(
+        pane.view,
         <TraceSurface
           repoRoot={repoRoot}
           view={pane.view}
           onOpenView={store.openSessions}
-        />
+        />,
       );
     }
     if (pane.kind === "inspector") {
-      return <IntentInspector repoRoot={repoRoot} onClose={store.closeInspector} />;
+      return inTrace(
+        "intent",
+        <IntentInspector repoRoot={repoRoot} onClose={store.closeInspector} />,
+      );
     }
     if (pane.kind === "replay") {
-      return <ProvenanceReplay repoRoot={repoRoot} onClose={store.closeReplay} />;
+      // Provenance replay has no entry in the strip — it opens from a session,
+      // not from the menu — so nothing lights. The strip still rides along so
+      // the rest of Trace stays one click away.
+      return inTrace(
+        null,
+        <ProvenanceReplay repoRoot={repoRoot} onClose={store.closeReplay} />,
+      );
     }
     if (pane.kind === "prove") {
-      return <ProvePane repoRoot={repoRoot} onClose={store.closeProve} />;
+      // Likewise: "Goals" on the strip hands a question to Aura rather than
+      // opening this pane, so it stays unlit while the pane is up.
+      return inTrace(
+        null,
+        <ProvePane repoRoot={repoRoot} onClose={store.closeProve} />,
+      );
     }
     if (pane.kind === "graph") {
-      return <SemanticGraphPane repoRoot={repoRoot} onClose={store.closeGraph} />;
+      return inTrace(
+        "codemap",
+        <SemanticGraphPane repoRoot={repoRoot} onClose={store.closeGraph} />,
+      );
     }
     if (pane.kind === "pages") {
       return <PagesSurface repoRoot={pane.repoRoot} />;
+    }
+    if (pane.kind === "planBuilder") {
+      return <PlanBuilderSurface repoRoot={repoRoot} onClose={store.closePlanBuilder} />;
+    }
+    if (pane.kind === "inbox") {
+      return <InboxPane repoRoot={repoRoot} onClose={store.closeInbox} />;
     }
     // file pane — buffer through the Editor, with a Diff/Edit toggle + the
     // Aura insight strip (story behind the change) when opened from Changes.
@@ -1129,9 +1190,7 @@ export function WorkSurface({
       <FilePaneSurface
         file={pane.file}
         onChange={(text) => store.updateBuffer(pane.file.path, text)}
-        onSplit={(direction) => splitFile(pane.file, direction)}
-        onAddPane={() => addSplitFile(pane.file)}
-        onClosePane={closePane}
+        showDiff={splitDiffFor(pane.file)}
         repoRoot={repoRoot}
         onOpenRewind={
           onOpenRewind ? () => onOpenRewind(pane.file.path) : undefined
@@ -1144,6 +1203,36 @@ export function WorkSurface({
     );
   }
 
+  /** Wrap a Trace pane in Trace's own strip.
+   *
+   *  Every Trace destination renders through here, so the switcher is present
+   *  wherever you land — which is the whole point of moving it out of the rail.
+   *  It is one strip per Trace pane rather than one for the window because
+   *  Trace panes can be split side by side, and a switcher that changed the
+   *  pane you weren't looking at would be worse than the rail was.
+   *
+   *  Without `traceActions` (a host that hasn't wired them) the pane renders
+   *  exactly as it did before — no strip, no gap. */
+  function inTrace(activeKey: TraceKey | null, body: JSX.Element): JSX.Element {
+    if (!traceActions) return body;
+    return (
+      <div className="flex h-full min-h-0 flex-col">
+        <TraceTabs
+          // Named, not switchable: this pane reads the window's repo, so a
+          // picker here would move the shared scope and leave the pane on the
+          // project you were already looking at. Trace-as-a-page is the one
+          // that follows it.
+          repoRoot={repoRoot}
+          handlers={traceActions}
+          activeKey={activeKey}
+          impactsCount={traceActions.impactsCount}
+          busyKey={traceActions.busyKey}
+        />
+        <div className="min-h-0 flex-1">{body}</div>
+      </div>
+    );
+  }
+
   function splitTerminal(tab: TerminalTab, direction: WorkSplitDirection) {
     // Splitting now opens an empty sibling pane — the user picks what
     // goes there from the EmptyPanePicker (cross-workspace agents,
@@ -1151,21 +1240,10 @@ export function WorkSurface({
     store.splitWithEmpty({ kind: "terminal", id: tab.termId }, direction);
   }
 
-  function addSplitTerminal(_cwd: string) {
-    if (!store.splitLayout) return;
-    if (treePaneCount(store.splitLayout) >= MAX_SPLIT_PANES) return;
-    store.addEmptySplitPane();
-  }
-
   function splitFile(file: OpenFile, direction: WorkSplitDirection) {
     store.splitWithEmpty({ kind: "file", path: file.path }, direction);
   }
 
-  function addSplitFile(_file: OpenFile) {
-    if (!store.splitLayout) return;
-    if (treePaneCount(store.splitLayout) >= MAX_SPLIT_PANES) return;
-    store.addEmptySplitPane();
-  }
 }
 
 type ResolvedSplitPane =
@@ -1177,12 +1255,14 @@ type ResolvedSplitPane =
   | { kind: "empty"; ref: WorkPaneRef; id: string }
   | { kind: "tasks"; ref: WorkPaneRef; repoRoot: string }
   | { kind: "task"; ref: WorkPaneRef; taskId: string; repoRoot: string }
+  | { kind: "cloudJob"; ref: WorkPaneRef; threadKey: string; repoRoot: string }
   | { kind: "standup"; ref: WorkPaneRef; repoRoot: string }
   | { kind: "automations"; ref: WorkPaneRef; repoRoot: string }
   | { kind: "channels"; ref: WorkPaneRef; repoRoot: string }
   | { kind: "commons"; ref: WorkPaneRef; repoRoot: string }
   | { kind: "app"; ref: WorkPaneRef; appKey: string }
   | { kind: "screenshare"; ref: WorkPaneRef; huddleKey: string }
+  | { kind: "live"; ref: WorkPaneRef; sessionId: string }
   | {
       kind: "trace";
       ref: WorkPaneRef;
@@ -1195,7 +1275,9 @@ type ResolvedSplitPane =
   | { kind: "prove"; ref: WorkPaneRef }
   | { kind: "graph"; ref: WorkPaneRef }
   | { kind: "pages"; ref: WorkPaneRef; repoRoot: string }
-  | { kind: "browser"; ref: WorkPaneRef; id: string; url?: string };
+  | { kind: "browser"; ref: WorkPaneRef; id: string; url?: string }
+  | { kind: "planBuilder"; ref: WorkPaneRef }
+  | { kind: "inbox"; ref: WorkPaneRef };
 
 function resolveSplitPane(
   ref: WorkPaneRef,
@@ -1235,6 +1317,9 @@ function resolveSplitPane(
   if (ref.kind === "task") {
     return { kind: "task", ref, taskId: ref.id, repoRoot: ref.repoRoot };
   }
+  if (ref.kind === "cloudJob") {
+    return { kind: "cloudJob", ref, threadKey: ref.id, repoRoot: ref.repoRoot };
+  }
   if (ref.kind === "standup") {
     return { kind: "standup", ref, repoRoot: ref.id };
   }
@@ -1252,6 +1337,9 @@ function resolveSplitPane(
   }
   if (ref.kind === "screenshare") {
     return { kind: "screenshare", ref, huddleKey: ref.id };
+  }
+  if (ref.kind === "live") {
+    return { kind: "live", ref, sessionId: ref.id };
   }
   if (ref.kind === "trace") {
     return { kind: "trace", ref, tool: ref.tool, arg: ref.arg ?? null };
@@ -1273,6 +1361,12 @@ function resolveSplitPane(
   }
   if (ref.kind === "pages") {
     return { kind: "pages", ref, repoRoot: ref.id };
+  }
+  if (ref.kind === "planBuilder") {
+    return { kind: "planBuilder", ref };
+  }
+  if (ref.kind === "inbox") {
+    return { kind: "inbox", ref };
   }
   const file = files.find((f) => f.path === ref.path);
   return file ? { kind: "file", ref, file } : null;
@@ -1537,10 +1631,6 @@ function SplitPaneShell({
 function TerminalPaneSurface({
   tab,
   repoRoot,
-  onSplit,
-  onAddPane,
-  onClosePane,
-  onMoveToPanel,
   onSessionOpened,
   bgTint,
 }: {
@@ -1552,65 +1642,23 @@ function TerminalPaneSurface({
    *  terminal pane read as a distinct surface from the editor panes beside
    *  it. Absent for single-pane / panel terminals. */
   bgTint?: string;
-  onSplit: (direction: WorkSplitDirection) => void;
-  /** Append another terminal pane to the existing split. Only fires
-   *  when the parent already has an active layout — falsy otherwise. */
-  onAddPane?: () => void;
-  /** Drop this pane from the active split. Only present when this
-   *  surface is rendered inside a split layout. */
-  onClosePane?: () => void;
-  /** Move this terminal back into the bottom Terminal panel — inverse of
-   *  the panel's "open in editor". Works even when the panel is closed (it
-   *  re-opens), so a promoted terminal is always recoverable without a
-   *  drop target. Also available by dragging the editor tab onto the
-   *  panel's terminal list. */
-  onMoveToPanel?: () => void;
   /** Record the daemon session id once the PTY opens, so this terminal
    *  reconnects to its live process on the next app launch (parity with
    *  the bottom panel — without this an editor terminal always cold-starts). */
   onSessionOpened: (termId: string, daemonSessionId: string) => void;
 }) {
-  const items: PaneMenuItem[] = [
-    { kind: "item", label: "Split right", onSelect: () => onSplit("row") },
-    { kind: "item", label: "Split down", onSelect: () => onSplit("column") },
-  ];
-  if (onMoveToPanel)
-    items.push({ kind: "item", label: "Move terminal to panel", onSelect: onMoveToPanel });
-  if (onAddPane) items.push({ kind: "item", label: "Add empty pane", onSelect: onAddPane });
-  if (onClosePane) items.push({ kind: "item", label: "Close this pane", onSelect: onClosePane });
+  // No header band. This surface used to open with a 36px full-width bar
+  // carrying a ">_" glyph, the terminal's label and its cwd — directly under
+  // a tab that already carried a terminal glyph and the same label. The tab
+  // is the title; the controls that were pinned to the right of that band
+  // now ride at the right end of the tab strip itself (see the `trailing`
+  // slot on PerPaneTabStrip and the global strip's toolbar), and the split /
+  // add-pane / close-pane ops live in the tab's right-click menu.
   return (
     <div
       className="h-full w-full flex flex-col bg-bg-content"
       style={bgTint ? { backgroundColor: bgTint } : undefined}
     >
-      <div className="h-9 px-3 border-b border-line-soft bg-bg-chrome flex items-center gap-2 flex-shrink-0">
-        <span className="text-text-4 font-mono text-[11px]">{">_"}</span>
-        <div className="min-w-0 flex-1">
-          <div className="text-text-2 text-[12px] font-medium truncate">
-            {tab.label ?? "Terminal"}
-          </div>
-          <div className="text-text-5 text-[10px] font-mono truncate">
-            {shortRoot(tab.cwd)}
-          </div>
-        </div>
-        {onMoveToPanel && (
-          <ToolbarBtn onClick={onMoveToPanel} title="Move terminal to panel">
-            <svg width="13" height="13" viewBox="0 0 16 16" fill="none">
-              <rect x="2.5" y="2.5" width="11" height="11" rx="1.2" stroke="currentColor" strokeWidth="1.2" />
-              <line x1="2.5" y1="9.8" x2="13.5" y2="9.8" stroke="currentColor" strokeWidth="1.2" />
-              <path
-                d="M8 4v3.4M6.5 6 8 7.5 9.5 6"
-                stroke="currentColor"
-                strokeWidth="1.2"
-                strokeLinecap="round"
-                strokeLinejoin="round"
-              />
-            </svg>
-          </ToolbarBtn>
-        )}
-        <SplitPaneButtons onSplit={onSplit} />
-        <PaneOverflowMenu title="Pane actions" items={items} />
-      </div>
       <div className="flex-1 min-h-0">
         <Terminal
           key={tab.termId}
@@ -1638,9 +1686,7 @@ function TerminalPaneSurface({
 function FilePaneSurface({
   file,
   onChange,
-  onSplit,
-  onAddPane,
-  onClosePane,
+  showDiff,
   repoRoot,
   onOpenRewind,
   onLogIntent,
@@ -1648,62 +1694,25 @@ function FilePaneSurface({
 }: {
   file: OpenFile;
   onChange: (text: string) => void;
-  onSplit: (direction: WorkSplitDirection) => void;
-  onAddPane?: () => void;
-  onClosePane?: () => void;
+  /** Diff-vs-HEAD instead of the editor. Owned by the pane's tab strip,
+   *  which draws the toggle — the strip and this body are siblings, so the
+   *  state that links them lives above both. */
+  showDiff: boolean;
   repoRoot: string;
   onOpenRewind?: () => void;
   onLogIntent?: () => void;
   onSnapshot?: () => void;
 }) {
-  // Honor the open intent: clicking a row in the Changes panel opens with
-  // defaultView "diff", the file tree with "edit". The toggle then flips
-  // between the Monaco diff (vs HEAD) + Aura insight strip and the editor.
-  const [showDiff, setShowDiff] = useState(file.defaultView === "diff");
-  useEffect(() => {
-    if (file.defaultView === "diff") setShowDiff(true);
-    else if (file.defaultView === "edit") setShowDiff(false);
-  }, [file.path, file.defaultView]);
-
-  const items: PaneMenuItem[] = [
-    { kind: "item", label: "Split right", onSelect: () => onSplit("row") },
-    { kind: "item", label: "Split down", onSelect: () => onSplit("column") },
-  ];
-  if (onAddPane) items.push({ kind: "item", label: "Add empty pane", onSelect: onAddPane });
-  if (onClosePane) items.push({ kind: "item", label: "Close this pane", onSelect: onClosePane });
-
-  const fileLabel = file.path.split("/").pop() ?? file.path;
+  // No header band. It printed the file's icon and the file's basename in a
+  // 36px full-width bar directly under a tab carrying the same icon and the
+  // same name — one file, two titles, 35px apart. Where the file LIVES is
+  // the half of the path a tab can't show, and that now rides in the tab's
+  // own tooltip; the diff toggle rides at the right end of the tab strip;
+  // split / add-pane / close-pane live in the tab's right-click menu.
   const diffable = file.status === "ok";
 
   return (
     <div className="h-full w-full flex flex-col bg-bg-content">
-      <div className="h-9 px-3 border-b border-line-soft bg-bg-chrome flex items-center gap-2 flex-shrink-0">
-        <span className="text-text-4 font-mono text-[11px]">{"≡"}</span>
-        <div className="min-w-0 flex-1">
-          <div className="text-text-2 text-[12px] font-medium truncate">
-            {fileLabel}
-          </div>
-          <div className="text-text-5 text-[10px] font-mono truncate">
-            {shortPath(file.path, repoRoot)}
-          </div>
-        </div>
-        {diffable && (
-          <ToolbarBtn
-            active={showDiff}
-            onClick={() => setShowDiff((v) => !v)}
-            title="Show what changed since your last commit"
-          >
-            <svg width="13" height="13" viewBox="0 0 16 16" fill="none">
-              <line x1="8" y1="2" x2="8" y2="14" stroke="currentColor" strokeWidth="1.2" strokeDasharray="2 2" />
-              <rect x="2" y="3" width="4" height="10" rx="0.5" stroke="currentColor" strokeWidth="1.2" fill="none" />
-              <rect x="10" y="3" width="4" height="10" rx="0.5" stroke="currentColor" strokeWidth="1.2" fill="none" />
-            </svg>
-          </ToolbarBtn>
-        )}
-        <SplitPaneButtons onSplit={onSplit} />
-        <PaneOverflowMenu title="Pane actions" items={items} />
-      </div>
-
       {diffable && showDiff && (
         <FileInsightStrip
           repoRoot={repoRoot}
@@ -1724,7 +1733,11 @@ function FilePaneSurface({
               path={file.path}
               current={file.current}
               baseline={file.baseline}
-              loadOriginal={(root, f) => api.gitShowHead(root, f)}
+              loadOriginal={(root, f) =>
+                file.diffOriginal !== undefined
+                  ? Promise.resolve(file.diffOriginal)
+                  : api.gitShowHead(root, f)
+              }
             />
           ) : isPlanMarkdownPath(file.path) ? (
             <PlanMarkdownTab
@@ -1757,6 +1770,17 @@ function FilePaneSurface({
 function shortPath(path: string, repoRoot: string): string {
   if (path.startsWith(repoRoot + "/")) return path.slice(repoRoot.length + 1);
   return path;
+}
+
+/** The repo-relative FOLDER a file sits in — "" at the repo root.
+ *
+ *  For a header whose title is already the basename, this is the half of the
+ *  path that carries new information. `shortPath` returns the whole thing,
+ *  basename included, which under such a title just says the title again. */
+function folderPath(path: string, repoRoot: string): string {
+  const rel = shortPath(path, repoRoot);
+  const cut = rel.lastIndexOf("/");
+  return cut < 0 ? "" : rel.slice(0, cut);
 }
 
 function shortRoot(root: string): string {
@@ -1804,15 +1828,15 @@ function OutlinePanel({
       style={{ width: 220 }}
     >
       <header className="flex items-center h-9 px-3 border-b border-line-soft">
-        <span className="text-text-3 text-[10.5px] uppercase tracking-wider font-medium">
+        <span className="section-label">
           Outline
         </span>
-        <span className="ml-auto text-text-4 text-[10.5px]">
+        <span className="ml-auto text-text-4 text-xs">
           {loading ? "…" : nodes.length}
         </span>
       </header>
       {!loading && nodes.length === 0 && (
-        <div className="text-text-4 text-[11px] px-3 py-3">No pieces here</div>
+        <div className="text-text-4 text-xs px-3 py-3">No pieces here</div>
       )}
       {nodes.map((n, i) => (
         <button
@@ -1825,14 +1849,14 @@ function OutlinePanel({
               }),
             )
           }
-          className="w-full text-left flex items-center gap-2 px-3 py-1 hover:bg-bg-2"
+          className="w-full text-left flex items-center gap-2 px-3 py-1 hover:bg-state-hover"
           title={`Jump to ${n.kind} · line ${n.line}`}
         >
           <KindBadge kind={n.kind} />
-          <span className="text-text-1 text-[11.5px] font-mono truncate flex-1">
+          <span className="text-text-1 text-sm font-mono truncate flex-1">
             {n.name}
           </span>
-          <span className="text-text-4 text-[10px] tabular-nums">{n.line}</span>
+          <span className="text-text-4 text-2xs tabular-nums">{n.line}</span>
         </button>
       ))}
     </aside>
@@ -1849,7 +1873,7 @@ function KindBadge({ kind }: { kind: string }) {
           ? "text-amber"
           : "text-text-3";
   return (
-    <span className={`text-[9px] uppercase tracking-wider w-7 ${tone}`}>{kind}</span>
+    <span className={`text-2xs w-7 ${tone}`}>{kind}</span>
   );
 }
 
@@ -1912,7 +1936,7 @@ function ImagePreview({ path, name }: { path: string; name: string }) {
 
   if (failed) {
     return (
-      <div className="h-full w-full flex items-center justify-center bg-bg-content text-text-4 text-[12px]">
+      <div className="h-full w-full flex items-center justify-center bg-bg-content text-text-4 text-sm">
         Binary file
       </div>
     );
@@ -1988,44 +2012,17 @@ function FilePreviewOrPlaceholder({ file }: { file: PreviewFile }) {
 function UnreadablePlaceholder({ file }: { file: PreviewFile }) {
   const reason =
     file.status === "too_large"
-      ? `file is too large (${(file.size / 1024 / 1024).toFixed(2)} MB cap is 2 MB)`
+      ? `file is too large (${formatBytes(file.size)} cap is 2 MB)`
       : file.status === "binary"
-        ? "file looks binary — won't render in the text editor"
+        ? "file looks binary. Won't render in the text editor"
         : `unreadable (${file.status})`;
   return (
     <div className="h-full w-full flex items-center justify-center bg-bg-content">
-      <div className="text-center text-text-3 text-[12px] max-w-md">
+      <div className="text-center text-text-3 text-sm max-w-md">
         <div className="text-text-2 font-medium mb-1">{file.name}</div>
         <div>{reason}</div>
       </div>
     </div>
-  );
-}
-
-/** Split-right / split-down buttons for a pane header — the universal
- *  "fan this pane into a split" affordance. Rendered on every pane kind
- *  (file, terminal, agent, chat) so the capability is consistent and
- *  one-click, not buried in an overflow menu (VS Code parity). */
-function SplitPaneButtons({
-  onSplit,
-}: {
-  onSplit: (direction: WorkSplitDirection) => void;
-}) {
-  return (
-    <>
-      <ToolbarBtn onClick={() => onSplit("row")} title="Split right">
-        <svg width="13" height="13" viewBox="0 0 16 16" fill="none">
-          <rect x="2.5" y="3" width="11" height="10" rx="1.2" stroke="currentColor" strokeWidth="1.2" />
-          <line x1="8" y1="3.5" x2="8" y2="12.5" stroke="currentColor" strokeWidth="1.2" />
-        </svg>
-      </ToolbarBtn>
-      <ToolbarBtn onClick={() => onSplit("column")} title="Split down">
-        <svg width="13" height="13" viewBox="0 0 16 16" fill="none">
-          <rect x="2.5" y="3" width="11" height="10" rx="1.2" stroke="currentColor" strokeWidth="1.2" />
-          <line x1="3" y1="8" x2="13" y2="8" stroke="currentColor" strokeWidth="1.2" />
-        </svg>
-      </ToolbarBtn>
-    </>
   );
 }
 
@@ -2053,71 +2050,12 @@ function ToolbarBtn({
           ? "text-text-5"
           : active
             ? "bg-bg-card text-text-1"
-            : "text-text-3 hover:text-text-1 hover:bg-bg-2"
+            : "text-text-3 hover:text-text-1 hover:bg-state-hover"
       }`}
     >
       {children}
     </button>
   );
-}
-
-// Renders the open Trace verify tool inline (page mode). The dialog
-// components share the `Dialog` scaffold's `inline` flag, so the same
-// component backs both the (legacy) modal and this page — no body fork.
-function TraceToolSurface({
-  tool,
-  arg,
-  repoRoot,
-  onClose,
-}: {
-  tool: TraceToolKind;
-  arg: { identifier?: string; file?: string } | null;
-  repoRoot: string;
-  onClose: () => void;
-}) {
-  if (tool === "review") {
-    return <ReviewDialog inline open repoRoot={repoRoot} onClose={onClose} />;
-  }
-  if (tool === "rewind") {
-    // The old by-name Rewind form is replaced by the meaning-first Time
-    // machine: a timeline of every moment your code changed, with one-click
-    // bring-back of a single piece. Same engine call (`aura rewind`), same
-    // right-click prefill (identifier + file) — just a recovery surface a
-    // non-engineer can actually navigate.
-    return (
-      <TimeMachinePane
-        repoRoot={repoRoot}
-        defaultIdentifier={arg?.identifier ?? null}
-        defaultFile={arg?.file ?? null}
-        onExpand={() =>
-          window.dispatchEvent(
-            new CustomEvent("aura:open-time-machine", {
-              detail: { identifier: arg?.identifier ?? null, file: arg?.file ?? null },
-            }),
-          )
-        }
-      />
-    );
-  }
-  if (tool === "attest") {
-    return <AttestationsDialog inline open repoRoot={repoRoot} onClose={onClose} />;
-  }
-  if (tool === "memory") {
-    // Memory is hidden until it works end-to-end / folds into agent
-    // customizations. Guard the render too, so a stale persisted "memory was
-    // open" workpane can't re-mount the dialog past the hidden nav.
-    if (!MEMORY_SURFACE_ENABLED) {
-      return <div className="h-full w-full bg-bg-content" />;
-    }
-    return <MemoryDialog inline open repoRoot={repoRoot} onClose={onClose} />;
-  }
-  if (tool === "impacts") {
-    // Cross-branch live impacts — the real home of cross-branch danger now
-    // that the fake pr-review wall is gone. Reuses the same ImpactsPane the
-    // sidebar tab renders (one component, one data source).
-    return <ImpactsPane repoRoot={repoRoot} />;
-  }
-  return <DoctorDialog inline open repoRoot={repoRoot} onClose={onClose} />;
 }
 
 type MdView = "raw" | "rendered" | "split";
@@ -2141,6 +2079,9 @@ type PaneTabPillData = {
   sub: string;
   agentId?: string;
   foreign: boolean;
+  /** The project a foreign tab belongs to, in the words the project switcher
+   *  uses. Set wherever `foreign` is — the badge names the place. */
+  foreignName?: string;
 };
 
 // A tab label must NEVER read as a raw machine id. A vibecoder seeing
@@ -2159,9 +2100,13 @@ function looksLikeOpaqueId(s: string): boolean {
 // Keyed on the pane kind so the fallback still says *what* the tab is.
 function fallbackLabelForKind(kind: WorkPaneRef["kind"]): string {
   switch (kind) {
+    // A nameless CLI session is a "Chat"; a nameless ORCHESTRATOR session is
+    // "Aura". They shared one word here, which is half of why the same tab
+    // could read "Aura" via one door and "Chat" via another.
     case "agent":
-    case "manager":
       return "Chat";
+    case "manager":
+      return "Aura";
     case "task":
       return "Task";
     case "terminal":
@@ -2193,6 +2138,7 @@ function describeRef(
   currentRepoRoot: string,
   pagesActiveTitle?: string | null,
   browserTitles?: Record<string, BrowserTabMeta>,
+  agentTitles?: Record<string, string>,
 ): PaneTabPillData | null {
   const data = describeRefRaw(
     ref,
@@ -2200,6 +2146,7 @@ function describeRef(
     currentRepoRoot,
     pagesActiveTitle,
     browserTitles,
+    agentTitles,
   );
   if (!data) return null;
   // One chokepoint so no pane kind — present or future — can leak a raw
@@ -2213,6 +2160,7 @@ function describeRefRaw(
   currentRepoRoot: string,
   pagesActiveTitle?: string | null,
   browserTitles?: Record<string, BrowserTabMeta>,
+  agentTitles?: Record<string, string>,
 ): PaneTabPillData | null {
   if (ref.kind === "browser") {
     // Label tracks the live page: title first, then host, then a plain
@@ -2231,12 +2179,20 @@ function describeRefRaw(
   if (ref.kind === "agent") {
     const t = store.agentTabs.find((x) => x.sessionId === ref.id);
     if (!t) return null;
+    // Same rule as a browser tab: what the thing itself says it is beats what
+    // we called it when we opened it. An agent rewrites its terminal title as
+    // the session takes shape, so the pill can say "fixing the retry backoff"
+    // instead of a third identical "Claude Code". The brand still shows — the
+    // agent's glyph is on the pill and `agentId` is right below this line.
+    const live = agentTitles?.[ref.id]?.trim();
     return {
       ref,
-      label: t.agentLabel,
+      label: live && live.length > 0 ? live : t.agentLabel,
       sub: shortRoot(t.repoRoot),
       agentId: t.agentId,
       foreign: t.repoRoot !== currentRepoRoot,
+      foreignName:
+        t.repoRoot !== currentRepoRoot ? projectName(t.repoRoot) : undefined,
     };
   }
   if (ref.kind === "terminal") {
@@ -2247,6 +2203,7 @@ function describeRefRaw(
       label: t.label ?? "Terminal",
       sub: shortRoot(t.cwd),
       foreign: t.cwd !== currentRepoRoot,
+      foreignName: t.cwd !== currentRepoRoot ? projectName(t.cwd) : undefined,
     };
   }
   if (ref.kind === "manager") {
@@ -2255,7 +2212,9 @@ function describeRefRaw(
     return {
       ref,
       label: t.label || "Manager",
-      sub: t.sessionId.slice(0, 8),
+      // A plain descriptor, never the raw session hash: this string is the
+      // tab's tooltip, and "019ec07e" answers no question the reader has.
+      sub: "Aura chat",
       agentId: "aura-manager",
       foreign: false,
     };
@@ -2273,10 +2232,19 @@ function describeRefRaw(
   }
   if (ref.kind === "file") {
     const f = store.files.find((x) => x.path === ref.path);
+    // Where the file LIVES, repo-relative — the half of the path the tab's
+    // own label can't carry, and the only thing the pane header band under
+    // this tab used to add before it was deleted for repeating the label.
+    // "" at the repo root, where there is genuinely nothing left to say.
+    // Files opened from outside the workspace keep their absolute folder,
+    // since a relative path would be a lie about where they came from.
+    const folder = ref.path.startsWith(currentRepoRoot + "/")
+      ? folderPath(ref.path, currentRepoRoot)
+      : dirName(ref.path);
     return {
       ref,
       label: f?.name ?? baseName(ref.path),
-      sub: dirName(ref.path),
+      sub: folder,
       foreign: false,
     };
   }
@@ -2346,6 +2314,23 @@ function describeRefRaw(
       foreign: refRoot !== currentRepoRoot,
     };
   }
+  if (ref.kind === "live") {
+    // Whose session this is, because that is the fact that distinguishes it
+    // from every other tab in the strip: the work is happening on someone
+    // else's machine. The raw external id would answer no question a reader
+    // has, so it stays out of both lines — the host's name IS the identity of
+    // a joined session. Read straight from the plane rather than remembered at
+    // open time, so a session joined before `presence` landed stops saying
+    // "Shared session" as soon as it knows better.
+    const host = getSessionLive(ref.id).participants.find((p) => p.role === "host");
+    return {
+      ref,
+      label: host?.name ? `${host.name}'s session` : "Shared session",
+      sub: "Joined",
+      // Never dimmed as another project's: it belongs to no project of yours.
+      foreign: false,
+    };
+  }
   if (ref.kind === "pages") {
     // The pages pane stays a single repoRoot-keyed tab; only its LABEL
     // tracks the open page. Falls back to "Pages" before the first
@@ -2359,16 +2344,9 @@ function describeRefRaw(
     };
   }
   if (ref.kind === "trace") {
-    const label =
-      ref.tool === "review"
-        ? "Safety check"
-        : ref.tool === "rewind"
-          ? "Time machine"
-          : ref.tool === "attest"
-            ? "Genuine record"
-            : ref.tool === "memory"
-              ? "Memory"
-              : "Repo health";
+    // One shared table, not a second ternary chain — the chain this replaced
+    // had no `impacts` arm, so "Impacts on me" opened as "Project health".
+    const label = traceToolLabel(ref.tool);
     return { ref, label, sub: label, foreign: false };
   }
   if (ref.kind === "sessions") {
@@ -2398,6 +2376,12 @@ function describeRefRaw(
   if (ref.kind === "graph") {
     return { ref, label: "Code Map", sub: "Map of your code", foreign: false };
   }
+  if (ref.kind === "planBuilder") {
+    return { ref, label: "Plan", sub: "Draft a plan before you build", foreign: false };
+  }
+  if (ref.kind === "inbox") {
+    return { ref, label: "Reviews", sub: "Pull requests waiting on you", foreign: false };
+  }
   if (ref.kind === "task") {
     // A task DETAIL pane. The task title isn't in `store` (the board owns
     // it), so the pill reads a plain "Task" — humanizeTabLabel would have
@@ -2408,6 +2392,20 @@ function describeRefRaw(
       label: "Task",
       sub: ref.repoRoot !== currentRepoRoot ? shortRoot(ref.repoRoot) : "Task detail",
       foreign: ref.repoRoot !== currentRepoRoot,
+    };
+  }
+  if (ref.kind === "cloudJob") {
+    // Named for where the work is, not for the record it's read from: "In the
+    // cloud" is the phrase every other surface uses for it, and the thread's
+    // own title is on the pane's header two lines below the pill.
+    return {
+      ref,
+      label: "In the cloud",
+      sub:
+        ref.repoRoot && ref.repoRoot !== currentRepoRoot
+          ? shortRoot(ref.repoRoot)
+          : "Work running on another machine",
+      foreign: !!ref.repoRoot && ref.repoRoot !== currentRepoRoot,
     };
   }
   if (ref.kind === "empty") {
@@ -2428,10 +2426,26 @@ function PerPaneTabStrip({
   leaf,
   paneIndex,
   currentRepoRoot,
+  trailing,
+  chromeLeading,
+  chromeTrailing,
 }: {
   leaf: WorkSplitLeaf;
   paneIndex: number;
   currentRepoRoot: string;
+  /** Controls belonging to the tab that's currently lit — the diff toggle on
+   *  a file, "move to panel" on a terminal. They ride at the right end of
+   *  this strip because that is the row that already names the thing they
+   *  act on. They used to sit in a 36px full-width band directly beneath it,
+   *  a band whose other content was the tab's own icon and the tab's own
+   *  name, printed again at the same size 35px lower. */
+  trailing?: ReactNode;
+  /** Window chrome, for whichever pane strip touches the window's top edge.
+   *  Not pane controls: these belong to the WINDOW (show the sidebar, show
+   *  the terminal, show the review rail) and only ride here because this row
+   *  is the top of it. Handed down from the shell — see the split branch. */
+  chromeLeading?: ReactNode;
+  chromeTrailing?: ReactNode;
 }) {
   const store = useEditorStore();
   const [addOpen, setAddOpen] = useState(false);
@@ -2440,6 +2454,11 @@ function PerPaneTabStrip({
   // instead of the static word "Pages". Null until a page is open.
   const pagesActiveTitle = usePagesActiveTitle();
   const browserTitles = useBrowserTabTitles();
+  // What each running agent last called itself, straight off its terminal.
+  const agentTitles = useAgentTerminalTitles();
+  // Keep the lit tab on screen and say which edge is hiding the rest — the
+  // strip hides its scrollbar, so without this a tab is just cut off mid-word.
+  const strip = useTabStripScroll(`${leaf.paneId}:${leaf.activeIndex}`);
 
   // Cross-pane drag mime — encodes `{srcPaneId, srcIndex}` as
   // `<paneId>:<index>` so a drop on a different pane's strip can call
@@ -2534,14 +2553,27 @@ function PerPaneTabStrip({
         });
       }
     }
-    if (specialized.length === 0 && paneCount > 2) {
-      generic.push({ kind: "separator" });
-      generic.push({
-        kind: "item",
-        label: "Close this pane",
-        tone: "danger",
-        onSelect: () => store.removeSplitPane(paneIndex),
-      });
+    // Pane-level ops. "Add empty pane" used to be reachable only from the
+    // overflow menu inside each pane's own header band; with the band gone
+    // it belongs here, beside the other things you can do to a pane.
+    if (specialized.length === 0) {
+      const paneOps: AgentTabMenuItem[] = [];
+      if (paneCount < MAX_SPLIT_PANES) {
+        paneOps.push({
+          kind: "item",
+          label: "Add empty pane",
+          onSelect: () => store.addEmptySplitPane(),
+        });
+      }
+      if (paneCount > 2) {
+        paneOps.push({
+          kind: "item",
+          label: "Close this pane",
+          tone: "danger",
+          onSelect: () => store.removeSplitPane(paneIndex),
+        });
+      }
+      if (paneOps.length) generic.push({ kind: "separator" }, ...paneOps);
     }
     return specialized.length
       ? [...specialized, { kind: "separator" }, ...generic]
@@ -2550,9 +2582,14 @@ function PerPaneTabStrip({
 
   return (
     <div
-      className={`flex items-stretch h-8 flex-shrink-0 bg-bg-chrome border-b border-line-soft ${
+      className={`flex items-stretch flex-shrink-0 bg-bg-chrome border-b border-line-soft ${
         overTab ? "outline outline-1 outline-accent-blue -outline-offset-1" : ""
       }`}
+      // One height for every strip that starts at y=0 — this one, the
+      // sidebar's header and the review rail's. It used to be h-8 against
+      // their 30px and the global strip's 36px: three numbers for one line
+      // across the top of the window, none of them agreeing.
+      style={{ height: "var(--topbar-h)" }}
       // This strip is the cross-pane tab DROP target: a tab dragged from
       // another pane lands anywhere on it → moveTabBetweenPanes. The pane-
       // REORDER drag SOURCE is the empty spacer after the tabs (below), NOT
@@ -2565,7 +2602,12 @@ function PerPaneTabStrip({
       onDragLeave={() => setOverTab(false)}
       onDrop={onStripDrop}
     >
-      <div className="flex items-stretch min-w-0 overflow-x-auto no-scrollbar">
+      {chromeLeading}
+      <div
+        ref={strip.scrollRef}
+        style={strip.fadeStyle}
+        className="flex items-stretch min-w-0 overflow-x-auto no-scrollbar"
+      >
         {leaf.tabs
           // Unified tab bar: every opened page is a visible tab and nothing is
           // ever hidden. Agent/manager tabs (the Claude session) pin leftmost so
@@ -2580,12 +2622,26 @@ function PerPaneTabStrip({
             currentRepoRoot,
             pagesActiveTitle,
             browserTitles,
+            agentTitles,
           );
           if (!data) return null;
           const isActive = idx === leaf.activeIndex;
+          // The one thing a tab most needs to say is whether the thing behind
+          // it wants something from you. Agent and chat tabs carry a live mark
+          // (waiting · working · done) and bold their label while they wait —
+          // shared with the global strip, which is where it used to live and
+          // only live. See TabStatus.tsx.
+          const agentTab =
+            ref.kind === "agent"
+              ? store.agentTabs.find((t) => t.sessionId === ref.id)
+              : undefined;
+          // Built once and handed to both routes into it — the visible ⋯
+          // button inside the pill and the right-click menu around it.
+          const menuItems = buildTabMenu(ref, idx);
           const tabButton = (
             <button
               key={`${leaf.paneId}-${idx}-${data.label}`}
+              ref={isActive ? strip.activeRef : undefined}
               type="button"
               draggable
               onDragStart={(e) => {
@@ -2613,28 +2669,66 @@ function PerPaneTabStrip({
               onMouseDown={(e) => {
                 if (e.button === 0) store.setActiveTabInPane(leaf.paneId, idx);
               }}
-              className={`group flex items-center gap-1.5 px-2 h-full text-[11.5px] border-r border-line-soft transition-colors ${
+              // `flex-shrink-0`: the strip beneath scrolls, so a tab should
+              // run out of room before it runs out of name. Without it flex
+              // compressed the pills first — and because the label is
+              // `truncate` (overflow:hidden, so its automatic minimum is
+              // zero), it compressed them past the label entirely. Open one
+              // more tab and an existing one silently became a bare icon, with
+              // no ellipsis and no scrollbar to say where its name had gone.
+              className={`group flex items-center gap-1.5 px-2 h-full text-sm border-r border-line-soft flex-shrink-0 transition-colors ${
                 isActive
                   ? "bg-bg-content text-text-1"
-                  : "text-text-3 hover:text-text-1 hover:bg-bg-2"
+                  : "text-text-3 hover:text-text-1 hover:bg-state-hover"
               }`}
-              title={data.sub}
+              // The place a foreign tab comes from rides here rather than on a
+              // second line of the strip — and only when it says something the
+              // name doesn't already say.
+              title={
+                data.foreignName && data.foreignName !== data.label
+                  ? `${data.sub} — ${data.foreignName}`
+                  : data.sub
+              }
             >
+              {/* Each tab wears the mark its destination wears everywhere else
+                  in the app — resolved by `TabMark`, which the "+" picker and
+                  the empty-pane picker now share, because all three used to
+                  draw their own answer to the same question. */}
               <span className="w-3.5 h-3.5 flex items-center justify-center flex-shrink-0">
-                {data.agentId ? (
-                  <AgentIcon agentId={data.agentId} size={11} />
-                ) : ref.kind === "terminal" ? (
-                  <span className="text-[10px] opacity-70">▤</span>
-                ) : ref.kind === "file" ? (
-                  <span className="text-[10px] opacity-70">⌘</span>
-                ) : null}
+                {agentTab ? (
+                  // An agent tab's mark carries what the agent is DOING — it
+                  // breathes while it works, rings when it wants you. The dot
+                  // and spinner that used to sit beside it said the same thing
+                  // twice more, and the amber one read as an error.
+                  <AgentTabMark tab={agentTab} agentId={data.agentId} />
+                ) : (
+                  <TabMark refr={ref} label={data.label} agentId={data.agentId} />
+                )}
               </span>
-              <span className="truncate max-w-[140px]">{data.label}</span>
-              {data.foreign && (
-                <span className="text-[9px] uppercase tracking-wider text-text-4 px-1 rounded bg-bg-2 border border-line-soft">
-                  ext
-                </span>
+              {/* One line, always. The project a foreign tab belongs to used
+                  to ride under the name as a caption, which cost the whole
+                  strip a second line of height on every pane — and most of the
+                  time it printed the name a second time, because a tab opened
+                  on a project is usually named after it. The place now lives in
+                  the tab's tooltip (see `title` above), where it costs nothing
+                  and is one hover away. */}
+              <span
+                className={`truncate max-w-[140px] min-w-0 ${
+                  agentTab?.attention ? "font-semibold text-text-1" : ""
+                }`}
+              >
+                {data.label}
+              </span>
+              {ref.kind === "manager" && (
+                <ManagerTabStatus sessionId={ref.id} />
               )}
+              {/* Every action this tab has, on a control you can see. The
+                  right-click menu below carries the same list, but every tab
+                  here is `draggable` and the webview eats context menus on
+                  draggable elements often enough that the codebase says so in
+                  writing — which left this strip with no reliable route to
+                  split, move-to-pane or close-others at all. */}
+              <TabMoreButton items={menuItems} reserveSpace={false} />
               <span
                 role="button"
                 tabIndex={-1}
@@ -2647,37 +2741,21 @@ function PerPaneTabStrip({
                   e.stopPropagation();
                   store.closeTabInPane(leaf.paneId, idx);
                 }}
-                className="ml-1 w-3.5 h-3.5 inline-flex items-center justify-center rounded text-text-5 opacity-0 group-hover:opacity-100 hover:bg-bg-3 hover:text-text-1 transition-opacity"
+                className="ml-1 w-3.5 h-3.5 inline-flex items-center justify-center rounded text-text-5 opacity-0 group-hover:opacity-100 hover:bg-state-hover hover:text-text-1 transition-opacity"
                 title="Close tab"
               >
                 ×
               </span>
             </button>
           );
-          // Agent tabs in a split pane get the same right-click menu as the
-          // global strip's agent tabs — the actions fire at the live
-          // Every tab kind gets a right-click menu now (agents/managers keep
-          // their surface-specific controls via the pane-action bridge; all
-          // kinds get the universal close / close-others / move-to-pane ops).
-          const menuItems = buildTabMenu(ref, idx);
+          // Every tab kind gets a menu (agents/managers keep their
+          // surface-specific controls via the pane-action bridge; all kinds get
+          // the universal close / close-others / move-to-pane ops).
           return (
             <ContextMenu key={`${leaf.paneId}-${idx}-${data.label}`}>
               <ContextMenuTrigger asChild>{tabButton}</ContextMenuTrigger>
               <ContextMenuContent className="min-w-[12rem]">
-                {menuItems.map((item, i) =>
-                  item.kind === "separator" ? (
-                    <ContextMenuSeparator key={`sep-${i}`} />
-                  ) : (
-                    <ContextMenuItem
-                      key={`${item.label}-${i}`}
-                      disabled={item.disabled}
-                      variant={item.tone === "danger" ? "destructive" : "default"}
-                      onSelect={item.onSelect}
-                    >
-                      {item.label}
-                    </ContextMenuItem>
-                  ),
-                )}
+                {tabContextItems(menuItems)}
               </ContextMenuContent>
             </ContextMenu>
           );
@@ -2688,228 +2766,52 @@ function PerPaneTabStrip({
           triggers a pane reorder and dragging here never sets the tab mime —
           the two drags stay cleanly separate. `flex-1` fills the leftover strip
           width; the tabs row scrolls first when tabs overflow. */}
-      <div
-        className="flex-1 min-w-[16px] self-stretch cursor-grab active:cursor-grabbing"
-        draggable
-        onDragStart={(e) => {
-          e.dataTransfer.setData(
-            "application/x-aura-split-pane",
-            String(paneIndex),
-          );
-          e.dataTransfer.effectAllowed = "move";
-        }}
-        title="Drag to reorder pane"
-      />
+      {paneCount > 1 ? (
+        <div
+          className="flex-1 min-w-[16px] self-stretch cursor-grab active:cursor-grabbing"
+          draggable
+          onDragStart={(e) => {
+            e.dataTransfer.setData(
+              "application/x-aura-split-pane",
+              String(paneIndex),
+            );
+            e.dataTransfer.effectAllowed = "move";
+          }}
+          title="Drag to reorder pane"
+        />
+      ) : (
+        // Nothing to reorder with one pane, and this strip is now the top edge
+        // of the window — so its empty half does what the empty half of a
+        // title bar does: it moves the window.
+        <div
+          className="flex-1 min-w-[16px] self-stretch"
+          data-tauri-drag-region
+          onMouseDown={startWindowDrag}
+        />
+      )}
+      {trailing && (
+        <div className="flex items-center gap-1 px-2 flex-shrink-0 border-l border-line-soft">
+          {trailing}
+        </div>
+      )}
       <div className="relative flex items-stretch flex-shrink-0">
         <button
           type="button"
           onClick={() => setAddOpen((v) => !v)}
           title="Add tab from any workspace"
-          className="px-2 h-full text-[12px] text-text-3 hover:text-text-1 hover:bg-bg-2 transition-colors border-l border-line-soft"
+          className="px-2 h-full text-sm text-text-3 hover:text-text-1 hover:bg-state-hover transition-colors border-l border-line-soft"
         >
           +
         </button>
         {addOpen && (
           <PaneAddPopover
             leaf={leaf}
-            paneIndex={paneIndex}
             currentRepoRoot={currentRepoRoot}
             onClose={() => setAddOpen(false)}
           />
         )}
       </div>
-    </div>
-  );
-}
-
-function PaneAddPopover({
-  leaf,
-  paneIndex: _paneIndex,
-  currentRepoRoot,
-  onClose,
-}: {
-  leaf: WorkSplitLeaf;
-  paneIndex: number;
-  currentRepoRoot: string;
-  onClose: () => void;
-}) {
-  const store = useEditorStore();
-  const [filter, setFilter] = useState("");
-  const ref = useRef<HTMLDivElement | null>(null);
-
-  // Outside-click + Esc close.
-  useEffect(() => {
-    function onDoc(e: MouseEvent) {
-      if (!ref.current) return;
-      if (!ref.current.contains(e.target as Node)) onClose();
-    }
-    function onKey(e: KeyboardEvent) {
-      if (e.key === "Escape") onClose();
-    }
-    document.addEventListener("mousedown", onDoc);
-    document.addEventListener("keydown", onKey);
-    return () => {
-      document.removeEventListener("mousedown", onDoc);
-      document.removeEventListener("keydown", onKey);
-    };
-  }, [onClose]);
-
-  const candidates = useMemo<PaneTabPillData[]>(() => {
-    const inThisPane = (r: WorkPaneRef) => leaf.tabs.some((x) => samePaneRef(x, r));
-    const out: PaneTabPillData[] = [];
-    for (const t of store.agentTabs) {
-      const r: WorkPaneRef = { kind: "agent", id: t.sessionId };
-      if (inThisPane(r)) continue;
-      out.push({
-        ref: r,
-        label: t.agentLabel,
-        sub: shortRoot(t.repoRoot),
-        agentId: t.agentId,
-        foreign: t.repoRoot !== currentRepoRoot,
-      });
-    }
-    for (const t of store.terminalTabs) {
-      const r: WorkPaneRef = { kind: "terminal", id: t.termId };
-      if (inThisPane(r)) continue;
-      out.push({
-        ref: r,
-        label: t.label ?? "Terminal",
-        sub: shortRoot(t.cwd),
-        foreign: t.cwd !== currentRepoRoot,
-      });
-    }
-    for (const t of store.managerTabs) {
-      const r: WorkPaneRef = { kind: "manager", id: t.sessionId };
-      if (inThisPane(r)) continue;
-      out.push({
-        ref: r,
-        label: t.label || "Manager",
-        sub: t.sessionId.slice(0, 8),
-        agentId: "aura-manager",
-        foreign: false,
-      });
-    }
-    for (const p of store.planTabs) {
-      const r: WorkPaneRef = { kind: "plan", id: p.id };
-      if (inThisPane(r)) continue;
-      out.push({
-        ref: r,
-        label: p.title || "Plan",
-        sub: `${p.todos.length} todo${p.todos.length === 1 ? "" : "s"}`,
-        agentId: "aura-manager",
-        foreign: false,
-      });
-    }
-    for (const f of store.files) {
-      const r: WorkPaneRef = { kind: "file", path: f.path };
-      if (inThisPane(r)) continue;
-      out.push({
-        ref: r,
-        label: f.name,
-        sub: dirName(f.path),
-        foreign: false,
-      });
-    }
-    const q = filter.trim().toLowerCase();
-    if (!q) return out;
-    return out.filter(
-      (c) =>
-        c.label.toLowerCase().includes(q) || c.sub.toLowerCase().includes(q),
-    );
-  }, [
-    leaf.tabs,
-    store.agentTabs,
-    store.terminalTabs,
-    store.managerTabs,
-    store.planTabs,
-    store.files,
-    currentRepoRoot,
-    filter,
-  ]);
-
-  return (
-    <div
-      ref={ref}
-      className="absolute right-0 top-full mt-1 z-30 w-72 max-h-80 overflow-hidden rounded-lg border border-line-soft bg-bg-1 shadow-[var(--shadow-flyout)] flex flex-col"
-    >
-      <div className="px-2 py-2 border-b border-line-soft">
-        <Input
-          autoFocus
-          value={filter}
-          onChange={(e) => setFilter(e.target.value)}
-          placeholder="Add tab from any workspace…"
-          className="h-7 text-[12px]"
-        />
-      </div>
-      {/* Spawn a brand-new surface into THIS pane. The existing-tabs list
-          below only re-homes things already open, so without this the in-app
-          browser was unreachable while split (the global "+" menu that hosts
-          it isn't drawn in split mode). Lands + focuses via addTabToPane. */}
-      <div className="px-2 py-1.5 border-b border-line-soft">
-        <button
-          type="button"
-          onClick={() => {
-            store.addTabToPane(leaf.paneId, {
-              kind: "browser",
-              id: newBrowserTabId(),
-            });
-            onClose();
-          }}
-          className="w-full flex items-center gap-2 px-2 h-8 rounded text-left hover:bg-bg-2 transition-colors"
-        >
-          <span className="w-4 h-4 flex items-center justify-center flex-shrink-0 text-text-3">
-            <svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.2">
-              <circle cx="8" cy="8" r="6.2" />
-              <ellipse cx="8" cy="8" rx="2.6" ry="6.2" />
-              <path d="M2 6.2h12M2 9.8h12" strokeLinecap="round" />
-            </svg>
-          </span>
-          <span className="text-[12px] text-text-1">New browser</span>
-          <span className="ml-auto text-[10px] text-text-5 font-mono">⌘⇧B</span>
-        </button>
-      </div>
-      <div className="flex-1 overflow-y-auto">
-        {candidates.length === 0 ? (
-          <div className="px-3 py-4 text-center text-text-4 text-[11.5px]">
-            Nothing else open. Spawn an agent or terminal in the workspace
-            rail.
-          </div>
-        ) : (
-          <ul className="py-1">
-            {candidates.map((c) => (
-              <li key={`${c.ref.kind}:${(c.ref as { id?: string; path?: string }).id ?? (c.ref as { path?: string }).path ?? ""}`}>
-                <button
-                  type="button"
-                  onClick={() => {
-                    store.addTabToPane(leaf.paneId, c.ref);
-                    onClose();
-                  }}
-                  className="w-full flex items-center gap-2 px-3 h-8 text-left hover:bg-bg-2 transition-colors"
-                >
-                  <span className="w-4 h-4 flex items-center justify-center flex-shrink-0">
-                    {c.agentId ? (
-                      <AgentIcon agentId={c.agentId} size={12} />
-                    ) : c.ref.kind === "terminal" ? (
-                      <span className="text-[11px] opacity-70">▤</span>
-                    ) : (
-                      <span className="text-[11px] opacity-70">⌘</span>
-                    )}
-                  </span>
-                  <span className="text-[12px] text-text-1 truncate">{c.label}</span>
-                  <span className="text-[10.5px] text-text-5 font-mono truncate ml-auto">
-                    {c.sub}
-                  </span>
-                  {c.foreign && (
-                    <span className="ml-1 text-[9px] uppercase tracking-wider text-text-4 px-1 rounded bg-bg-2 border border-line-soft">
-                      ext
-                    </span>
-                  )}
-                </button>
-              </li>
-            ))}
-          </ul>
-        )}
-      </div>
+      {chromeTrailing}
     </div>
   );
 }
@@ -2920,8 +2822,8 @@ function PaneAddPopover({
 function PaneUnavailable() {
   return (
     <div className="flex-1 min-h-0 flex flex-col items-center justify-center gap-1 text-center px-6 bg-bg-0">
-      <div className="text-[13px] text-text-2">Not available</div>
-      <div className="text-[11px] text-text-3 max-w-[260px]">
+      <div className="text-base text-text-2">Not available</div>
+      <div className="text-xs text-text-3 max-w-[260px]">
         This surface is turned off. You can close this tab.
       </div>
     </div>

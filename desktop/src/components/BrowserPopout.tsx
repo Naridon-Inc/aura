@@ -142,7 +142,7 @@ export function BrowserPopout({ tabId, initialUrl }: { tabId: string; initialUrl
             spellCheck={false}
             autoCapitalize="off"
             autoCorrect="off"
-            className="w-full h-6 pl-2.5 pr-2 rounded-full bg-bg-2 text-[12px] text-text-1 placeholder:text-text-4 outline-none focus:ring-1 focus:ring-accent"
+            className="w-full h-6 pl-2.5 pr-2 rounded-full bg-bg-2 text-sm text-text-1 placeholder:text-text-4 outline-none focus:ring-1 focus:ring-accent"
           />
         </div>
       </form>
@@ -170,7 +170,7 @@ function NavBtn({
       title={label}
       aria-label={label}
       onClick={onClick}
-      className="flex items-center justify-center w-6 h-6 flex-shrink-0 rounded-md text-text-3 hover:text-text-1 hover:bg-bg-3 transition-colors"
+      className="flex items-center justify-center w-6 h-6 flex-shrink-0 rounded-md text-text-3 hover:text-text-1 hover:bg-state-hover transition-colors"
     >
       {children}
     </button>

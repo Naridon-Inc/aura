@@ -6,10 +6,11 @@
       "brand": "claude",
       "brandName": "Claude",
       "models": [
+        { "key": "opus-5", "id": "claude-opus-5", "label": "Opus 5", "isNew": true },
         { "key": "sonnet-5", "id": "claude-sonnet-5", "label": "Sonnet 5", "isNew": true },
         { "key": "fable-5", "id": "claude-fable-5", "label": "Fable 5", "isNew": true },
-        { "key": "opus-4-8-1m", "id": "claude-opus-4-8", "label": "Opus 4.8 1M", "longContext": true, "isNew": true },
-        { "key": "opus-4-8", "id": "claude-opus-4-8", "label": "Opus 4.8", "isNew": true },
+        { "key": "opus-4-8-1m", "id": "claude-opus-4-8", "label": "Opus 4.8 1M", "longContext": true },
+        { "key": "opus-4-8", "id": "claude-opus-4-8", "label": "Opus 4.8" },
         { "key": "opus-4-7-1m", "id": "claude-opus-4-7", "label": "Opus 4.7 1M", "longContext": true },
         { "key": "opus-4-7", "id": "claude-opus-4-7", "label": "Opus 4.7" },
         { "key": "opus-4-6-1m", "id": "claude-opus-4-6", "label": "Opus 4.6 1M", "longContext": true },
@@ -35,8 +36,10 @@
       "brand": "gemini",
       "brandName": "Gemini",
       "models": [
-        { "key": "gemini-3-pro", "id": "gemini-3-pro-preview", "label": "Gemini 3 Pro", "isNew": true },
-        { "key": "gemini-3-flash", "id": "gemini-3-flash-preview", "label": "Gemini 3 Flash", "isNew": true },
+        { "key": "gemini-3-6-flash", "id": "gemini-3.6-flash", "label": "Gemini 3.6 Flash", "isNew": true },
+        { "key": "gemini-3-5-flash", "id": "gemini-3.5-flash", "label": "Gemini 3.5 Flash" },
+        { "key": "gemini-3-1-pro", "id": "gemini-3.1-pro-preview", "label": "Gemini 3.1 Pro", "isNew": true },
+        { "key": "gemini-3-flash", "id": "gemini-3-flash-preview", "label": "Gemini 3 Flash" },
         { "key": "gemini-2-5-pro", "id": "gemini-2.5-pro", "label": "Gemini 2.5 Pro" },
         { "key": "gemini-2-5-flash", "id": "gemini-2.5-flash", "label": "Gemini 2.5 Flash" }
       ]

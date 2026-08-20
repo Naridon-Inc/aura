@@ -100,23 +100,23 @@ export function OpenProjectScreen({
           "flex flex-col items-center justify-center text-center px-6 py-12",
           dragging
             ? "border-accent bg-accent-soft"
-            : "border-line-soft bg-bg-2/40 hover:bg-bg-2 hover:border-line-strong",
+            : "border-line-soft bg-bg-2/40 hover:bg-state-hover hover:border-line-strong",
         ].join(" ")}
       >
         <span className="inline-flex items-center gap-2.5 text-text-1">
           <span className="text-text-3">
             <FolderIcon />
           </span>
-          <span className="text-[14px] font-medium">Open Project</span>
+          <span className="text-md font-medium">Open Project</span>
         </span>
-        <span className="mt-2 text-[12px] text-text-4">
+        <span className="mt-2 text-sm text-text-4">
           Drag a folder with .git or click to browse
         </span>
       </button>
 
       {recents.length > 0 ? (
         <div className="mt-5 w-full">
-          <div className="px-1 mb-1.5 text-[10.5px] font-medium uppercase tracking-wide text-text-5">
+          <div className="section-label px-1 mb-1.5">
             Recent
           </div>
           <div className="flex flex-col">
@@ -127,15 +127,15 @@ export function OpenProjectScreen({
                   key={root}
                   type="button"
                   onClick={() => open(root)}
-                  className="group flex items-center gap-2.5 h-9 px-2 rounded-md hover:bg-bg-2 transition-colors text-left"
+                  className="group flex items-center gap-2.5 h-9 px-2 rounded-md hover:bg-state-hover transition-colors text-left"
                 >
                   <span className="text-text-5 group-hover:text-text-3 transition-colors">
                     <FolderIcon size={15} />
                   </span>
-                  <span className="text-[12.5px] text-text-2 group-hover:text-text-1 transition-colors shrink-0">
+                  <span className="text-base text-text-2 group-hover:text-text-1 transition-colors shrink-0">
                     {name}
                   </span>
-                  <span className="text-[11px] text-text-5 truncate">{root}</span>
+                  <span className="text-xs text-text-5 truncate">{root}</span>
                 </button>
               );
             })}
@@ -143,7 +143,7 @@ export function OpenProjectScreen({
         </div>
       ) : null}
 
-      <div className="mt-6 flex items-center gap-2 text-[12px] text-text-4">
+      <div className="mt-6 flex items-center gap-2 text-sm text-text-4">
         <span>Or start a new project</span>
         <Button
           type="button"

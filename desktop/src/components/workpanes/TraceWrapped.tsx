@@ -13,11 +13,16 @@
 // OpenCode) each appear as a first-class collaborator with its own logo.
 
 import { useEffect, useMemo, useState } from "react";
-import { api, type ClaudeSession, type IntentRow } from "../../lib/api";
+import { type ClaudeSession, type IntentRow } from "../../lib/api";
+import { fetchSessions } from "../../lib/sessionsCache";
+import { fetchIntentRows } from "../../lib/intentCache";
 import { agentDisplayLabel } from "../../lib/agentIdentity";
+import { intentTypeChip } from "../../lib/intentTypeLabels";
 import { collapseAutoStubSessions } from "../../lib/sessionMeta";
 import { AgentIcon } from "../agent/AgentIcon";
 import { FullscreenOverlay } from "../FullscreenOverlay";
+import { ErrorState, LoadingState } from "../ui/state";
+import { percent } from "../../lib/percent";
 
 // ── Pure stat computation (no React) ─────────────────────────────────────────
 
@@ -29,6 +34,11 @@ type WrappedStats = {
   added: number;
   removed: number;
   filesTouched: number;
+  /** How many of those runs actually recorded a line count. `added`/`removed`/
+   *  `filesTouched` are sums over ONLY these — a log full of rows that never
+   *  carried a changeset sums to zero, which is not the same fact as "nothing
+   *  changed" and must never be printed as one. */
+  churnRuns: number;
   activeDays: number;
   longestStreak: number;
   signed: number;
@@ -81,6 +91,7 @@ function computeWrapped(
   let added = 0;
   let removed = 0;
   let signed = 0;
+  let churnRuns = 0;
   let firstTs: number | null = null;
   let lastTs: number | null = null;
 
@@ -100,7 +111,11 @@ function computeWrapped(
 
     if (r.signed_block_id) signed += 1;
 
-    // Churn + files are summed across the whole collapsed run.
+    // Churn + files are summed across the whole collapsed run. `hasChurn` is
+    // the difference between a run that recorded "+0" and one that recorded
+    // nothing at all; without counting it, the two are indistinguishable in
+    // the totals below.
+    if (entry.hasChurn) churnRuns += 1;
     added += Math.max(0, entry.adds);
     removed += Math.max(0, entry.dels);
     for (const p of entry.paths) files.add(p);
@@ -151,6 +166,7 @@ function computeWrapped(
     added,
     removed,
     filesTouched: files.size,
+    churnRuns,
     activeDays: dayCounts.size,
     longestStreak,
     signed,
@@ -180,10 +196,10 @@ function fmtDate(ms: number): string {
   return `${MONTH_LABELS[d.getMonth()]} ${d.getDate()}`;
 }
 
-function typeLabel(raw: string): string {
-  // intent_type values are CamelCase (FeatureAdd, BugFix…). Space them out.
-  return raw.replace(/([a-z])([A-Z])/g, "$1 $2");
-}
+// intent_type values are CamelCase (FeatureAdd, BugFix…). `intentTypeChip` is
+// the one shared map that turns them into words — spacing them out here left
+// "Feature Add", which is still the enum with a gap in it.
+const typeLabel = intentTypeChip;
 
 // ── Component ────────────────────────────────────────────────────────────────
 
@@ -207,10 +223,17 @@ export function TraceWrapped({
     setLoading(true);
     setError(null);
     Promise.all([
-      // A generous ceiling so a full year of activity is covered. The log is a
-      // local JSONL read, so this stays cheap.
-      api.auraIntentRecent(repoRoot, 5000),
-      api.claudeListSessions(repoRoot).catch(() => [] as ClaudeSession[]),
+      // A generous ceiling so a full year of activity is covered — and it has
+      // to be honoured, not just asked for. The backend used to cap every read
+      // at 500 rows, so on any repo past 500 intents this pane silently
+      // reviewed only the recent tail: the year picker below is built from
+      // whatever years appear in these rows, so older years did not merely
+      // read low, they were not offered at all.
+      //
+      // Shared with the Overview pane, which asks for the same rows and is
+      // usually the surface this one was opened from.
+      fetchIntentRows(repoRoot, 5000),
+      fetchSessions(repoRoot).catch(() => [] as ClaudeSession[]),
     ])
       .then(([data, sessions]) => {
         if (!alive) return;
@@ -246,20 +269,23 @@ export function TraceWrapped({
   );
 
   return (
-    <FullscreenOverlay onClose={onClose} closeHint="esc">
+    <FullscreenOverlay onClose={onClose}>
       <div className="min-h-0 flex-1 overflow-y-auto">
         <div className="mx-auto flex max-w-[760px] flex-col gap-6 px-6 py-8">
           {loading && rows.length === 0 ? (
-            <div className="py-16 text-center text-[12px] text-text-4">
-              Reading your intent log…
-            </div>
+            // The shared loader, not bare text: this read takes seconds on a
+            // full year, and a motionless line reads as a stall.
+            <LoadingState
+              label="Reading your year…"
+              size="md"
+              className="py-16"
+            />
           ) : error ? (
-            <div className="py-16 text-center text-[12px] text-text-3">
-              Couldn&rsquo;t load your year.
-              <span className="mt-1 block font-mono text-[11px] text-text-4">
-                {error}
-              </span>
-            </div>
+            <ErrorState
+              title="Couldn’t read your year"
+              message={`Aura couldn’t open this project’s history log. ${error}`}
+              className="py-16"
+            />
           ) : stats.total === 0 ? (
             <EmptyYear year={activeYear} years={years} onPick={setYear} />
           ) : (
@@ -276,7 +302,7 @@ export function TraceWrapped({
               <MonthlyStrip stats={stats} />
               {stats.types.length > 0 && <WorkMix stats={stats} />}
               <Provenance stats={stats} />
-              <p className="pb-4 text-center text-[11px] leading-relaxed text-text-4">
+              <p className="pb-4 text-center text-xs leading-relaxed text-text-4">
                 Built only from your local intent log. Nothing here left this
                 machine.
               </p>
@@ -309,10 +335,10 @@ function YearSwitch({
           onClick={() => onPick(y)}
           aria-selected={y === active}
           className={
-            "rounded-md px-2.5 py-1 text-[12px] transition-colors " +
+            "rounded-md px-2.5 py-1 text-sm transition-colors " +
             (y === active
               ? "bg-accent text-accent-foreground"
-              : "text-text-3 hover:bg-bg-2 hover:text-text-1")
+              : "text-text-3 hover:bg-state-hover hover:text-text-1")
           }
         >
           {y}
@@ -341,13 +367,13 @@ function Hero({
     <div className="flex flex-col gap-4">
       <YearSwitch years={years} active={year} onPick={onPick} />
       <div className="rounded-lg border border-accent/30 bg-accent/10 p-4 text-center">
-        <div className="text-[11px] uppercase tracking-[0.22em] text-accent">
-          Aura — Year in review
+        <div className="text-xs uppercase tracking-[0.22em] text-accent">
+          Aura. Year in review
         </div>
         <div className="mt-2 text-[44px] font-semibold leading-none text-text-1">
           {year}
         </div>
-        <div className="mt-3 text-[13px] leading-relaxed text-text-3">
+        <div className="mt-3 text-base leading-relaxed text-text-3">
           You logged{" "}
           <span className="font-semibold text-text-1">
             {fmtNum(stats.total)}
@@ -365,40 +391,66 @@ function Hero({
 }
 
 function BigGrid({ stats }: { stats: WrappedStats }) {
-  const cards: Array<{ label: string; value: string; sub?: string }> = [
-    { label: "Intents", value: fmtNum(stats.total) },
-    {
-      label: "Lines added",
-      value: `+${fmtNum(stats.added)}`,
-    },
-    {
-      label: "Lines removed",
-      value: `−${fmtNum(stats.removed)}`,
-    },
-    {
-      label: "Files touched",
-      value: fmtNum(stats.filesTouched),
-    },
-  ];
+  // The three churn cards are sums over runs that recorded a line count. On a
+  // log where none did, they summed to zero and this grid printed "+0 LINES
+  // ADDED / −0 LINES REMOVED" beside "407 INTENTS" — a year's work reported as
+  // having changed nothing. Zero is only a fact here if something was measured.
+  const measured = stats.churnRuns > 0;
+  // No "Intents" card: the hero sentence directly above already reads "You
+  // logged 407 intents", so the card was the same number twice, 40px apart.
+  // This grid carries what the hero doesn't.
+  const cards: Array<{ label: string; value: string; sub?: string }> = [];
   // Sessions only when the log actually carried session ids — never invent.
   if (stats.sessions > 0) {
-    cards.splice(1, 0, { label: "Sessions", value: fmtNum(stats.sessions) });
+    cards.push({ label: "Sessions", value: fmtNum(stats.sessions) });
   }
+  // Three cards each reading "— / not recorded" would say one thing three
+  // times. When nothing was measured the cards go and a single line says it.
+  if (measured) {
+    cards.push(
+      { label: "Lines added", value: `+${fmtNum(stats.added)}` },
+      { label: "Lines removed", value: `−${fmtNum(stats.removed)}` },
+      { label: "Files touched", value: fmtNum(stats.filesTouched) },
+    );
+  }
+  const note = !measured
+    ? "Line and file counts weren’t recorded for these runs, so there’s no churn to total up."
+    : stats.churnRuns < stats.total
+      ? // Partial coverage is its own fact: the numbers are real, they just
+        // don't cover every run. Say which, rather than letting a partial sum
+        // pass for a total.
+        `Line and file counts come from ${fmtNum(stats.churnRuns)} of ${fmtNum(
+          stats.total,
+        )} runs. The rest didn’t record them.`
+      : null;
+  if (cards.length === 0 && !note) return null;
   return (
-    <div className="grid grid-cols-2 gap-3 sm:grid-cols-3">
-      {cards.map((c) => (
-        <div
-          key={c.label}
-          className="rounded-lg border border-line-soft bg-bg-1 p-3"
-        >
-          <div className="text-[22px] font-semibold leading-none text-text-1">
-            {c.value}
+    <div className="flex flex-col gap-2">
+      {cards.length > 0 ? (
+      <div className="grid grid-cols-2 gap-3 sm:grid-cols-3">
+        {cards.map((c) => (
+          <div
+            key={c.label}
+            className="rounded-lg border border-line-soft bg-bg-1 p-3"
+          >
+            <div className="text-xl font-semibold leading-none text-text-1">
+              {c.value}
+            </div>
+            <div className="section-label mt-2">
+              {c.label}
+            </div>
+            {c.sub ? (
+              <div className="mt-1 text-xs leading-none text-text-3">
+                {c.sub}
+              </div>
+            ) : null}
           </div>
-          <div className="mt-2 text-[11px] uppercase tracking-wide text-text-4">
-            {c.label}
-          </div>
-        </div>
-      ))}
+        ))}
+      </div>
+      ) : null}
+      {note ? (
+        <p className="text-xs leading-relaxed text-text-4">{note}</p>
+      ) : null}
     </div>
   );
 }
@@ -407,31 +459,40 @@ function Collaborators({ stats }: { stats: WrappedStats }) {
   const top = stats.agents[0];
   if (!top) return null;
   const max = top.count;
-  const topShare = Math.round((top.count / stats.total) * 100);
+  const topShare = percent(top.count, stats.total);
+  // With one agent in the log there is no ranking to report: the card read
+  // "YOUR TOP COLLABORATOR / Claude Code / 100% of changes" above a bar chart
+  // whose single full-width bar said the same thing a third time. A share of
+  // one is not a share. The "%" also counted intents, not changes, so even in
+  // the multi-agent case the unit under it was the wrong noun.
+  const solo = stats.agents.length === 1;
   return (
     <div className="rounded-lg border border-line-soft bg-bg-1 p-3">
       <div className="flex items-center gap-3">
         <AgentIcon agentId={top.key} label={agentDisplayLabel(top.key)} size={28} />
         <div className="min-w-0">
-          <div className="text-[11px] uppercase tracking-wide text-text-4">
-            Your top collaborator
+          <div className="section-label">
+            {solo ? "Who did the work" : "Your top collaborator"}
           </div>
-          <div className="truncate text-[15px] font-semibold text-text-1">
+          <div className="truncate text-lg font-semibold text-text-1">
             {agentDisplayLabel(top.key)}
           </div>
         </div>
         <div className="ml-auto text-right">
-          <div className="text-[18px] font-semibold leading-none text-text-1">
-            {topShare}%
+          <div className="text-xl font-semibold leading-none text-text-1">
+            {solo ? fmtNum(top.count) : `${topShare}%`}
           </div>
-          <div className="mt-1 text-[11px] text-text-4">of changes</div>
+          <div className="mt-1 text-xs text-text-4">
+            {solo ? "every run this year" : "of your runs"}
+          </div>
         </div>
       </div>
+      {solo ? null : (
       <div className="mt-4 flex flex-col gap-2.5">
         {stats.agents.slice(0, 6).map((a) => (
           <div key={a.key} className="flex items-center gap-2.5">
             <AgentIcon agentId={a.key} label={agentDisplayLabel(a.key)} size={16} />
-            <span className="w-28 shrink-0 truncate text-[12px] text-text-2">
+            <span className="w-28 shrink-0 truncate text-sm text-text-2">
               {agentDisplayLabel(a.key)}
             </span>
             <div className="h-1.5 flex-1 overflow-hidden rounded-full bg-bg-3">
@@ -440,12 +501,13 @@ function Collaborators({ stats }: { stats: WrappedStats }) {
                 style={{ width: `${Math.max(3, (a.count / max) * 100)}%` }}
               />
             </div>
-            <span className="w-10 shrink-0 text-right text-[11px] tabular-nums text-text-4">
+            <span className="w-10 shrink-0 text-right text-xs tabular-nums text-text-4">
               {fmtNum(a.count)}
             </span>
           </div>
         ))}
       </div>
+      )}
     </div>
   );
 }
@@ -483,14 +545,14 @@ function Rhythm({ stats }: { stats: WrappedStats }) {
           key={c.label}
           className="rounded-lg border border-line-soft bg-bg-1 p-3"
         >
-          <div className="text-[18px] font-semibold leading-none text-text-1">
+          <div className="text-xl font-semibold leading-none text-text-1">
             {c.value}
           </div>
-          <div className="mt-2 text-[11px] uppercase tracking-wide text-text-4">
+          <div className="section-label mt-2">
             {c.label}
           </div>
           {c.sub ? (
-            <div className="mt-1 text-[11px] leading-none text-text-3">
+            <div className="mt-1 text-xs leading-none text-text-3">
               {c.sub}
             </div>
           ) : null}
@@ -504,7 +566,7 @@ function MonthlyStrip({ stats }: { stats: WrappedStats }) {
   const max = Math.max(1, ...stats.monthly);
   return (
     <div className="rounded-lg border border-line-soft bg-bg-1 p-3">
-      <div className="mb-3 text-[11px] uppercase tracking-wide text-text-4">
+      <div className="section-label mb-3">
         Across the year
       </div>
       <div className="flex h-24 items-end gap-1.5">
@@ -520,7 +582,7 @@ function MonthlyStrip({ stats }: { stats: WrappedStats }) {
                 title={`${MONTH_LABELS[m]}: ${fmtNum(c)} intents`}
               />
             </div>
-            <span className="text-[9px] text-text-4">
+            <span className="text-2xs text-text-4">
               {MONTH_LABELS[m].charAt(0)}
             </span>
           </div>
@@ -534,13 +596,13 @@ function WorkMix({ stats }: { stats: WrappedStats }) {
   const max = Math.max(1, ...stats.types.map((t) => t.count));
   return (
     <div className="rounded-lg border border-line-soft bg-bg-1 p-3">
-      <div className="mb-3 text-[11px] uppercase tracking-wide text-text-4">
+      <div className="section-label mb-3">
         What you worked on
       </div>
       <div className="flex flex-col gap-2.5">
         {stats.types.slice(0, 7).map((t) => (
           <div key={t.key} className="flex items-center gap-2.5">
-            <span className="w-28 shrink-0 truncate text-[12px] text-text-2">
+            <span className="w-28 shrink-0 truncate text-sm text-text-2">
               {typeLabel(t.key)}
             </span>
             <div className="h-1.5 flex-1 overflow-hidden rounded-full bg-bg-3">
@@ -549,7 +611,7 @@ function WorkMix({ stats }: { stats: WrappedStats }) {
                 style={{ width: `${Math.max(3, (t.count / max) * 100)}%` }}
               />
             </div>
-            <span className="w-10 shrink-0 text-right text-[11px] tabular-nums text-text-4">
+            <span className="w-10 shrink-0 text-right text-xs tabular-nums text-text-4">
               {fmtNum(t.count)}
             </span>
           </div>
@@ -560,14 +622,19 @@ function WorkMix({ stats }: { stats: WrappedStats }) {
 }
 
 function Provenance({ stats }: { stats: WrappedStats }) {
-  const pct = stats.total > 0 ? Math.round((stats.signed / stats.total) * 100) : 0;
+  const pct = percent(stats.signed, stats.total);
   return (
     <div className="rounded-lg border border-line-soft bg-bg-1 p-3">
+      {/* "Genuine records", not "Signed & verified" — the Overview card one
+          click away already calls this exact measure Genuine records, and the
+          sentence under it used to explain it as "a cryptographic signature",
+          which is the vocabulary of the thing rather than of what it does for
+          the reader. */}
       <div className="flex items-baseline justify-between">
-        <div className="text-[11px] uppercase tracking-wide text-text-4">
-          Signed &amp; verified
+        <div className="section-label">
+          Genuine records
         </div>
-        <div className="text-[12px] text-text-3">
+        <div className="text-sm text-text-3">
           {fmtNum(stats.signed)} of {fmtNum(stats.total)}
         </div>
       </div>
@@ -577,9 +644,9 @@ function Provenance({ stats }: { stats: WrappedStats }) {
           style={{ width: `${pct}%` }}
         />
       </div>
-      <div className="mt-2 text-[11px] leading-relaxed text-text-3">
-        {pct}% of your intents carry a cryptographic signature — a tamper-evident
-        record of who changed what, and why.
+      <div className="mt-2 text-xs leading-relaxed text-text-3">
+        {pct}% of your runs are sealed. The record of what changed, and why,
+        can&rsquo;t be altered afterwards, not even by you.
       </div>
     </div>
   );
@@ -597,11 +664,11 @@ function EmptyYear({
   return (
     <div className="flex flex-col items-center gap-5 py-16 text-center">
       <YearSwitch years={years} active={year} onPick={onPick} />
-      <div className="text-[15px] font-medium text-text-1">
+      <div className="text-lg font-medium text-text-1">
         No intents logged in {year}
       </div>
-      <div className="max-w-[420px] text-[12px] leading-relaxed text-text-3">
-        Aura builds your year from the intent log — the reasons you (and your
+      <div className="max-w-[420px] text-sm leading-relaxed text-text-3">
+        Aura builds your year from the intent log. The reasons you (and your
         agents) recorded for each change. Once you log a few, this fills in.
       </div>
     </div>

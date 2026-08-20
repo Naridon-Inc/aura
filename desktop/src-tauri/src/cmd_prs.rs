@@ -107,6 +107,11 @@ pub struct PrDetail {
     /// review JSON, deserialized loosely so we don't break when the
     /// CLI adds fields.
     pub aura_review: Option<AuraReviewPayload>,
+    /// Why `aura_review` is empty, or what we had to skip to fill it. Same
+    /// contract as `diff_error`: the pane's "no review on disk" sentence is a
+    /// claim, and a claim needs a read that came back.
+    #[serde(default)]
+    pub aura_review_error: Option<String>,
     /// Reviewer roster — completed reviews from `latestReviews` merged
     /// with still-pending users from `reviewRequests`. Drives the
     /// right-rail Reviewers card.
@@ -185,6 +190,15 @@ pub struct AuraReviewPayload {
     pub cross_branch_conflicts: Vec<String>,
     #[serde(default)]
     pub omni_graph_impact: Vec<String>,
+    /// Advisory taste-engine violations. The engine writes these
+    /// (`aura-cli/src/pr.rs`) and the PR pane groups them under "Taste" — but
+    /// this struct didn't name the field, so serde dropped it on the way
+    /// across and the pane rendered "No semantic findings — clean review."
+    /// over findings that were sitting in the file. Worse, `risk_score`
+    /// *includes* them, so the same row showed an elevated risk beside an
+    /// empty list. Any field the frontend reads has to be named here.
+    #[serde(default)]
+    pub taste_findings: Vec<String>,
     #[serde(default)]
     pub unverified_nodes: serde_json::Value,
     // Humanized surface (pr_humanize). Pass-through to the frontend as opaque
@@ -336,25 +350,77 @@ fn edit_args(
 
 // ── Aura review enrichment ────────────────────────────────────────────
 
-/// Walk `.aura/reviews/*.json` in the repo, return the most recent one
-/// whose `base_branch` matches `base_ref`. Best-effort — any IO/parse
-/// failure returns None so the UI just omits the Aura chip.
-fn latest_aura_review(repo_root: &str, base_ref: &str) -> Option<AuraReviewPayload> {
+/// Parse one `.aura/reviews/*.json` body.
+///
+/// Every field of `AuraReviewPayload` is `#[serde(default)]`, which means
+/// *any* JSON object deserializes into it — `{}` included. That is deliberate
+/// (older reviews predate newer fields) but it makes "parsed successfully" a
+/// worthless signal on its own: a file this build cannot understand arrives
+/// as a review with nothing in it. So check the shape too: a review names its
+/// own base branch. Anything else is a file we found and could not read.
+fn parse_review(body: &str) -> Result<AuraReviewPayload, String> {
+    let value: serde_json::Value =
+        serde_json::from_str(body).map_err(|e| format!("not JSON: {}", e))?;
+    if value.get("base_branch").and_then(|v| v.as_str()).is_none() {
+        return Err("no `base_branch` — not a review this build recognises".to_string());
+    }
+    serde_json::from_value(value).map_err(|e| format!("unexpected shape: {}", e))
+}
+
+/// Walk `.aura/reviews/*.json` in the repo, return the most recent one whose
+/// `base_branch` matches `base_ref` — **and** why we came back with nothing
+/// when we did.
+///
+/// This used to be `.ok()?` / `continue` all the way down, on the grounds
+/// that a failure would "just omit the Aura chip". It doesn't any more: the
+/// PR pane says *"No Aura review on disk for base X — run `aura pr-review`"*,
+/// which is a claim about the contents of a directory, and it was being made
+/// when the directory couldn't be opened, when a file couldn't be read, and
+/// when a review written by a different version of the CLI failed to parse.
+/// The advice in that sentence is to re-run the command that produced the
+/// file we just refused to read. So the reason travels with the answer, the
+/// same way `diff_error` does.
+fn latest_aura_review(
+    repo_root: &str,
+    base_ref: &str,
+) -> (Option<AuraReviewPayload>, Option<String>) {
     let dir = PathBuf::from(repo_root).join(".aura").join("reviews");
-    let entries = fs::read_dir(&dir).ok()?;
+    let entries = match fs::read_dir(&dir) {
+        Ok(e) => e,
+        // No reviews directory = Aura has never reviewed here. That is a real
+        // "nothing on disk", and the pane's advice is exactly right.
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return (None, None),
+        Err(e) => {
+            return (
+                None,
+                Some(format!("{} couldn't be read: {}", dir.display(), e)),
+            )
+        }
+    };
     let mut best: Option<(i64, AuraReviewPayload)> = None;
+    let mut skipped: Vec<String> = Vec::new();
     for entry in entries.flatten() {
         let path = entry.path();
         if path.extension().and_then(|s| s.to_str()) != Some("json") {
             continue;
         }
+        let name = path
+            .file_name()
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or_else(|| path.display().to_string());
         let body = match fs::read_to_string(&path) {
             Ok(b) => b,
-            Err(_) => continue,
+            Err(e) => {
+                skipped.push(format!("{}: {}", name, e));
+                continue;
+            }
         };
-        let payload: AuraReviewPayload = match serde_json::from_str(&body) {
+        let payload = match parse_review(&body) {
             Ok(p) => p,
-            Err(_) => continue,
+            Err(e) => {
+                skipped.push(format!("{}: {}", name, e));
+                continue;
+            }
         };
         if payload.base_branch != base_ref {
             continue;
@@ -367,7 +433,18 @@ fn latest_aura_review(repo_root: &str, base_ref: &str) -> Option<AuraReviewPaylo
             }
         }
     }
-    best.map(|(_, p)| p)
+    let note = if skipped.is_empty() {
+        None
+    } else {
+        Some(format!(
+            "{} review file{} in {} couldn't be read by this build — the app and the aura CLI may be different versions. {}",
+            skipped.len(),
+            if skipped.len() == 1 { "" } else { "s" },
+            dir.display(),
+            skipped.join("; ")
+        ))
+    };
+    (best.map(|(_, p)| p), note)
 }
 
 /// Scan `.aura/reviews/*.json` **once** and return the newest review per
@@ -392,7 +469,10 @@ fn reviews_by_base(repo_root: &str) -> std::collections::HashMap<String, AuraRev
             Ok(b) => b,
             Err(_) => continue,
         };
-        let payload: AuraReviewPayload = match serde_json::from_str(&body) {
+        // Same shape guard as the detail path: without it, any JSON object in
+        // this directory deserializes into an all-defaults "review" and gets
+        // filed under the base branch `""`.
+        let payload = match parse_review(&body) {
             Ok(p) => p,
             Err(_) => continue,
         };
@@ -558,54 +638,57 @@ pub struct PrCheck {
 /// exposes, so it's one cached `gh pr view` call and no new integration.
 #[tauri::command]
 pub async fn pr_checks(repo_root: String, number: u64) -> Result<Vec<PrCheck>, String> {
-    let stdout = run_gh(
-        &repo_root,
-        &[
-            "pr",
-            "view",
-            &number.to_string(),
-            "--json",
-            "statusCheckRollup",
-        ],
-    )?;
-    #[derive(Deserialize, Default)]
-    struct Wrap {
-        #[serde(
-            default,
-            rename = "statusCheckRollup",
-            deserialize_with = "null_to_default"
-        )]
-        status_check_rollup: Vec<GhRollupEntry>,
-    }
-    let wrap: Wrap =
-        serde_json::from_str(&stdout).map_err(|e| format!("gh json parse: {}", e))?;
-    let out = wrap
-        .status_check_rollup
-        .iter()
-        .map(|r| {
-            let name = if !r.name.is_empty() {
-                r.name.clone()
-            } else if !r.context.is_empty() {
-                r.context.clone()
-            } else {
-                "check".to_string()
-            };
-            let url = if !r.details_url.is_empty() {
-                r.details_url.clone()
-            } else {
-                r.target_url.clone()
-            };
-            PrCheck {
-                name,
-                bucket: signal_for(r).to_string(),
-                raw: raw_signal(r),
-                url,
-                workflow: r.workflow_name.clone(),
-                description: r.description.clone(),
-            }
-        })
-        .collect();
-    Ok(out)
+    crate::blocking::run(move || {
+        let stdout = run_gh(
+            &repo_root,
+            &[
+                "pr",
+                "view",
+                &number.to_string(),
+                "--json",
+                "statusCheckRollup",
+            ],
+        )?;
+        #[derive(Deserialize, Default)]
+        struct Wrap {
+            #[serde(
+                default,
+                rename = "statusCheckRollup",
+                deserialize_with = "null_to_default"
+            )]
+            status_check_rollup: Vec<GhRollupEntry>,
+        }
+        let wrap: Wrap =
+            serde_json::from_str(&stdout).map_err(|e| format!("gh json parse: {}", e))?;
+        let out = wrap
+            .status_check_rollup
+            .iter()
+            .map(|r| {
+                let name = if !r.name.is_empty() {
+                    r.name.clone()
+                } else if !r.context.is_empty() {
+                    r.context.clone()
+                } else {
+                    "check".to_string()
+                };
+                let url = if !r.details_url.is_empty() {
+                    r.details_url.clone()
+                } else {
+                    r.target_url.clone()
+                };
+                PrCheck {
+                    name,
+                    bucket: signal_for(r).to_string(),
+                    raw: raw_signal(r),
+                    url,
+                    workflow: r.workflow_name.clone(),
+                    description: r.description.clone(),
+                }
+            })
+            .collect();
+        Ok(out)
+    })
+    .await
 }
 
 #[derive(Deserialize, Default)]
@@ -627,130 +710,136 @@ const PR_LIST_FIELDS: &str = "number,title,state,author,headRefName,baseRefName,
 /// busy repos; the desktop sidebar paginates client-side.
 #[tauri::command]
 pub async fn pr_list(repo_root: String) -> Result<Vec<PrSummary>, String> {
-    let stdout = run_gh(
-        &repo_root,
-        &["pr", "list", "--limit", "200", "--state", "all", "--json", PR_LIST_FIELDS],
-    )?;
-    let raw: Vec<GhPrSummary> =
-        serde_json::from_str(&stdout).map_err(|e| format!("gh json parse: {}", e))?;
-    // Resolve the gh viewer once per call so Inbox bucketing has a stable
-    // "is this me" answer. Empty string falls through as "no match".
-    let viewer = viewer_login(&repo_root).unwrap_or_default();
-    // One disk scan for all reviews; CI state comes from each PR's inline
-    // statusCheckRollup (already in `raw`) — so the whole list is exactly
-    // ONE GitHub request, not 1 + N. This is what keeps us off GitHub's
-    // secondary rate limit on busy repos.
-    let reviews = reviews_by_base(&repo_root);
-    let out = raw
-        .into_iter()
-        .map(|p| {
-            let aura = reviews.get(&p.base_ref_name);
-            // CI checks summarized from the inline rollup — no network.
-            let checks = summarize_rollup(&p.status_check_rollup);
-            let is_authored_by_me =
-                !viewer.is_empty() && p.author.login.eq_ignore_ascii_case(&viewer);
-            let is_review_requested_for_me = !viewer.is_empty()
-                && p.review_requests
-                    .iter()
-                    .any(|u| u.login.eq_ignore_ascii_case(&viewer));
-            PrSummary {
-                number: p.number,
-                title: p.title,
-                state: p.state,
-                author: p.author.login,
-                head_ref: p.head_ref_name,
-                base_ref: p.base_ref_name,
-                is_draft: p.is_draft,
-                additions: p.additions,
-                deletions: p.deletions,
-                created_at: p.created_at,
-                updated_at: p.updated_at,
-                review_decision: empty_to_none(p.review_decision),
-                url: p.url,
-                aura_risk_score: aura.as_ref().map(|a| a.risk_score),
-                aura_risk_label: aura.as_ref().map(|a| a.risk_label.clone()),
-                checks_state: checks.state,
-                checks_total: checks.total,
-                checks_passing: checks.passing,
-                checks_failing: checks.failing,
-                checks_pending: checks.pending,
-                is_authored_by_me,
-                is_review_requested_for_me,
-                labels: p
-                    .labels
-                    .into_iter()
-                    .map(|l| PrLabel {
-                        name: l.name,
-                        color: l.color,
-                        description: l.description,
-                    })
-                    .collect(),
-            }
-        })
-        .collect();
-    Ok(out)
+    crate::blocking::run(move || {
+        let stdout = run_gh(
+            &repo_root,
+            &["pr", "list", "--limit", "200", "--state", "all", "--json", PR_LIST_FIELDS],
+        )?;
+        let raw: Vec<GhPrSummary> =
+            serde_json::from_str(&stdout).map_err(|e| format!("gh json parse: {}", e))?;
+        // Resolve the gh viewer once per call so Inbox bucketing has a stable
+        // "is this me" answer. Empty string falls through as "no match".
+        let viewer = viewer_login(&repo_root).unwrap_or_default();
+        // One disk scan for all reviews; CI state comes from each PR's inline
+        // statusCheckRollup (already in `raw`) — so the whole list is exactly
+        // ONE GitHub request, not 1 + N. This is what keeps us off GitHub's
+        // secondary rate limit on busy repos.
+        let reviews = reviews_by_base(&repo_root);
+        let out = raw
+            .into_iter()
+            .map(|p| {
+                let aura = reviews.get(&p.base_ref_name);
+                // CI checks summarized from the inline rollup — no network.
+                let checks = summarize_rollup(&p.status_check_rollup);
+                let is_authored_by_me =
+                    !viewer.is_empty() && p.author.login.eq_ignore_ascii_case(&viewer);
+                let is_review_requested_for_me = !viewer.is_empty()
+                    && p.review_requests
+                        .iter()
+                        .any(|u| u.login.eq_ignore_ascii_case(&viewer));
+                PrSummary {
+                    number: p.number,
+                    title: p.title,
+                    state: p.state,
+                    author: p.author.login,
+                    head_ref: p.head_ref_name,
+                    base_ref: p.base_ref_name,
+                    is_draft: p.is_draft,
+                    additions: p.additions,
+                    deletions: p.deletions,
+                    created_at: p.created_at,
+                    updated_at: p.updated_at,
+                    review_decision: empty_to_none(p.review_decision),
+                    url: p.url,
+                    aura_risk_score: aura.as_ref().map(|a| a.risk_score),
+                    aura_risk_label: aura.as_ref().map(|a| a.risk_label.clone()),
+                    checks_state: checks.state,
+                    checks_total: checks.total,
+                    checks_passing: checks.passing,
+                    checks_failing: checks.failing,
+                    checks_pending: checks.pending,
+                    is_authored_by_me,
+                    is_review_requested_for_me,
+                    labels: p
+                        .labels
+                        .into_iter()
+                        .map(|l| PrLabel {
+                            name: l.name,
+                            color: l.color,
+                            description: l.description,
+                        })
+                        .collect(),
+                }
+            })
+            .collect();
+        Ok(out)
+    })
+    .await
 }
 
 /// List repository issues through the same authenticated `gh` session as PRs.
 /// `gh issue list` excludes pull requests and returns only real issues.
 #[tauri::command]
 pub async fn github_issue_list(repo_root: String) -> Result<Vec<GithubIssue>, String> {
-    const FIELDS: &str =
-        "number,title,body,state,author,labels,url,createdAt,updatedAt";
-    let stdout = run_gh(
-        &repo_root,
-        &["issue", "list", "--state", "open", "--limit", "200", "--json", FIELDS],
-    )?;
-    #[derive(Deserialize, Default)]
-    struct IssueAuthor {
-        #[serde(default)]
-        login: String,
-    }
-    #[derive(Deserialize, Default)]
-    struct IssueLabel {
-        #[serde(default)]
-        name: String,
-    }
-    #[derive(Deserialize)]
-    struct RawIssue {
-        number: u64,
-        title: String,
-        #[serde(default)]
-        body: Option<String>,
-        #[serde(default)]
-        state: String,
-        #[serde(default)]
-        author: Option<IssueAuthor>,
-        #[serde(default)]
-        labels: Vec<IssueLabel>,
-        #[serde(default)]
-        url: String,
-        #[serde(default, rename = "createdAt")]
-        created_at: String,
-        #[serde(default, rename = "updatedAt")]
-        updated_at: String,
-    }
-    let raw: Vec<RawIssue> = serde_json::from_str(&stdout)
-        .map_err(|e| format!("gh issue list parse: {}", e))?;
-    Ok(raw
-        .into_iter()
-        .map(|issue| GithubIssue {
-            number: issue.number,
-            title: issue.title,
-            body: issue.body.unwrap_or_default(),
-            state: issue.state,
-            author: issue.author.unwrap_or_default().login,
-            labels: issue
-                .labels
-                .into_iter()
-                .map(|label| label.name)
-                .filter(|name| !name.is_empty())
-                .collect(),
-            url: issue.url,
-            created_at: issue.created_at,
-            updated_at: issue.updated_at,
-        })
-        .collect())
+    crate::blocking::run(move || {
+        const FIELDS: &str =
+            "number,title,body,state,author,labels,url,createdAt,updatedAt";
+        let stdout = run_gh(
+            &repo_root,
+            &["issue", "list", "--state", "open", "--limit", "200", "--json", FIELDS],
+        )?;
+        #[derive(Deserialize, Default)]
+        struct IssueAuthor {
+            #[serde(default)]
+            login: String,
+        }
+        #[derive(Deserialize, Default)]
+        struct IssueLabel {
+            #[serde(default)]
+            name: String,
+        }
+        #[derive(Deserialize)]
+        struct RawIssue {
+            number: u64,
+            title: String,
+            #[serde(default)]
+            body: Option<String>,
+            #[serde(default)]
+            state: String,
+            #[serde(default)]
+            author: Option<IssueAuthor>,
+            #[serde(default)]
+            labels: Vec<IssueLabel>,
+            #[serde(default)]
+            url: String,
+            #[serde(default, rename = "createdAt")]
+            created_at: String,
+            #[serde(default, rename = "updatedAt")]
+            updated_at: String,
+        }
+        let raw: Vec<RawIssue> = serde_json::from_str(&stdout)
+            .map_err(|e| format!("gh issue list parse: {}", e))?;
+        Ok(raw
+            .into_iter()
+            .map(|issue| GithubIssue {
+                number: issue.number,
+                title: issue.title,
+                body: issue.body.unwrap_or_default(),
+                state: issue.state,
+                author: issue.author.unwrap_or_default().login,
+                labels: issue
+                    .labels
+                    .into_iter()
+                    .map(|label| label.name)
+                    .filter(|name| !name.is_empty())
+                    .collect(),
+                url: issue.url,
+                created_at: issue.created_at,
+                updated_at: issue.updated_at,
+            })
+            .collect())
+    })
+    .await
 }
 
 /// Create a GitHub pull request directly from the desktop authoring dialog.
@@ -765,45 +854,48 @@ pub async fn pr_create(
     base_branch: Option<String>,
     draft: bool,
 ) -> Result<PrCreated, String> {
-    let title = title.trim();
-    if title.is_empty() {
-        return Err("pull request title can't be empty".to_string());
-    }
-    let branch = current_branch(&repo_root, head_branch.as_deref())?;
-    push_branch(&repo_root, &branch)?;
+    crate::blocking::run(move || {
+        let title = title.trim();
+        if title.is_empty() {
+            return Err("pull request title can't be empty".to_string());
+        }
+        let branch = current_branch(&repo_root, head_branch.as_deref())?;
+        push_branch(&repo_root, &branch)?;
 
-    let args = create_args(
-        &branch,
-        title,
-        body.trim(),
-        base_branch.as_deref(),
-        draft,
-    );
-    let argrefs: Vec<&str> = args.iter().map(String::as_str).collect();
-    let created_stdout = run_gh(&repo_root, &argrefs)?;
-    let created_url = created_stdout
-        .lines()
-        .rev()
-        .map(str::trim)
-        .find(|line| line.starts_with("https://") || line.starts_with("http://"));
-    let target = created_url.unwrap_or(&branch);
-    let view = run_gh(
-        &repo_root,
-        &["pr", "view", target, "--json", "number,title,url"],
-    )?;
-    #[derive(Deserialize)]
-    struct CreatedView {
-        number: u64,
-        title: String,
-        url: String,
-    }
-    let parsed: CreatedView = serde_json::from_str(&view)
-        .map_err(|e| format!("gh pr view created PR parse: {}", e))?;
-    Ok(PrCreated {
-        number: parsed.number,
-        title: parsed.title,
-        url: parsed.url,
+        let args = create_args(
+            &branch,
+            title,
+            body.trim(),
+            base_branch.as_deref(),
+            draft,
+        );
+        let argrefs: Vec<&str> = args.iter().map(String::as_str).collect();
+        let created_stdout = run_gh(&repo_root, &argrefs)?;
+        let created_url = created_stdout
+            .lines()
+            .rev()
+            .map(str::trim)
+            .find(|line| line.starts_with("https://") || line.starts_with("http://"));
+        let target = created_url.unwrap_or(&branch);
+        let view = run_gh(
+            &repo_root,
+            &["pr", "view", target, "--json", "number,title,url"],
+        )?;
+        #[derive(Deserialize)]
+        struct CreatedView {
+            number: u64,
+            title: String,
+            url: String,
+        }
+        let parsed: CreatedView = serde_json::from_str(&view)
+            .map_err(|e| format!("gh pr view created PR parse: {}", e))?;
+        Ok(PrCreated {
+            number: parsed.number,
+            title: parsed.title,
+            url: parsed.url,
+        })
     })
+    .await
 }
 
 /// Edit the author-controlled PR metadata. Draft/ready is a separate gh
@@ -817,34 +909,37 @@ pub async fn pr_edit(
     base_branch: Option<String>,
     draft: bool,
 ) -> Result<(), String> {
-    let title = title.trim();
-    if title.is_empty() {
-        return Err("pull request title can't be empty".to_string());
-    }
-    let args = edit_args(pr_number, title, body.trim(), base_branch.as_deref());
-    let argrefs: Vec<&str> = args.iter().map(String::as_str).collect();
-    run_gh(&repo_root, &argrefs)?;
-
-    let current = run_gh(
-        &repo_root,
-        &["pr", "view", &pr_number.to_string(), "--json", "isDraft"],
-    )?;
-    #[derive(Deserialize)]
-    struct DraftView {
-        #[serde(rename = "isDraft")]
-        is_draft: bool,
-    }
-    let current: DraftView = serde_json::from_str(&current)
-        .map_err(|e| format!("gh pr view draft state parse: {}", e))?;
-    if draft != current.is_draft {
-        let number = pr_number.to_string();
-        if draft {
-            run_gh(&repo_root, &["pr", "ready", &number, "--undo"])?;
-        } else {
-            run_gh(&repo_root, &["pr", "ready", &number])?;
+    crate::blocking::run(move || {
+        let title = title.trim();
+        if title.is_empty() {
+            return Err("pull request title can't be empty".to_string());
         }
-    }
-    Ok(())
+        let args = edit_args(pr_number, title, body.trim(), base_branch.as_deref());
+        let argrefs: Vec<&str> = args.iter().map(String::as_str).collect();
+        run_gh(&repo_root, &argrefs)?;
+
+        let current = run_gh(
+            &repo_root,
+            &["pr", "view", &pr_number.to_string(), "--json", "isDraft"],
+        )?;
+        #[derive(Deserialize)]
+        struct DraftView {
+            #[serde(rename = "isDraft")]
+            is_draft: bool,
+        }
+        let current: DraftView = serde_json::from_str(&current)
+            .map_err(|e| format!("gh pr view draft state parse: {}", e))?;
+        if draft != current.is_draft {
+            let number = pr_number.to_string();
+            if draft {
+                run_gh(&repo_root, &["pr", "ready", &number, "--undo"])?;
+            } else {
+                run_gh(&repo_root, &["pr", "ready", &number])?;
+            }
+        }
+        Ok(())
+    })
+    .await
 }
 
 /// List all labels defined in the repo (not just PR-attached) so the
@@ -852,27 +947,30 @@ pub async fn pr_edit(
 /// `gh label list --json name,color,description --limit 200`.
 #[tauri::command]
 pub async fn pr_labels_list(repo_root: String) -> Result<Vec<PrLabel>, String> {
-    let stdout = run_gh(
-        &repo_root,
-        &[
-            "label",
-            "list",
-            "--limit",
-            "200",
-            "--json",
-            "name,color,description",
-        ],
-    )?;
-    let raw: Vec<GhLabel> = serde_json::from_str(&stdout)
-        .map_err(|e| format!("gh label list parse: {}", e))?;
-    Ok(raw
-        .into_iter()
-        .map(|l| PrLabel {
-            name: l.name,
-            color: l.color,
-            description: l.description,
-        })
-        .collect())
+    crate::blocking::run(move || {
+        let stdout = run_gh(
+            &repo_root,
+            &[
+                "label",
+                "list",
+                "--limit",
+                "200",
+                "--json",
+                "name,color,description",
+            ],
+        )?;
+        let raw: Vec<GhLabel> = serde_json::from_str(&stdout)
+            .map_err(|e| format!("gh label list parse: {}", e))?;
+        Ok(raw
+            .into_iter()
+            .map(|l| PrLabel {
+                name: l.name,
+                color: l.color,
+                description: l.description,
+            })
+            .collect())
+    })
+    .await
 }
 
 /// Replace the labels on a PR with `names`. Diffs against the PR's
@@ -885,51 +983,54 @@ pub async fn pr_labels_set(
     pr_number: u64,
     names: Vec<String>,
 ) -> Result<(), String> {
-    // Fetch current labels for diff.
-    let stdout = run_gh(
-        &repo_root,
-        &[
-            "pr",
-            "view",
-            &pr_number.to_string(),
-            "--json",
-            "labels",
-        ],
-    )?;
-    #[derive(Deserialize)]
-    struct V {
-        #[serde(default)]
-        labels: Vec<GhLabel>,
-    }
-    let v: V = serde_json::from_str(&stdout)
-        .map_err(|e| format!("gh pr view labels parse: {}", e))?;
-    let current: std::collections::HashSet<String> =
-        v.labels.into_iter().map(|l| l.name).collect();
-    let want: std::collections::HashSet<String> = names.into_iter().collect();
+    crate::blocking::run(move || {
+        // Fetch current labels for diff.
+        let stdout = run_gh(
+            &repo_root,
+            &[
+                "pr",
+                "view",
+                &pr_number.to_string(),
+                "--json",
+                "labels",
+            ],
+        )?;
+        #[derive(Deserialize)]
+        struct V {
+            #[serde(default)]
+            labels: Vec<GhLabel>,
+        }
+        let v: V = serde_json::from_str(&stdout)
+            .map_err(|e| format!("gh pr view labels parse: {}", e))?;
+        let current: std::collections::HashSet<String> =
+            v.labels.into_iter().map(|l| l.name).collect();
+        let want: std::collections::HashSet<String> = names.into_iter().collect();
 
-    let to_add: Vec<&String> = want.difference(&current).collect();
-    let to_remove: Vec<&String> = current.difference(&want).collect();
+        let to_add: Vec<&String> = want.difference(&current).collect();
+        let to_remove: Vec<&String> = current.difference(&want).collect();
 
-    if to_add.is_empty() && to_remove.is_empty() {
-        return Ok(());
-    }
+        if to_add.is_empty() && to_remove.is_empty() {
+            return Ok(());
+        }
 
-    let mut args: Vec<String> = vec![
-        "pr".into(),
-        "edit".into(),
-        pr_number.to_string(),
-    ];
-    for name in &to_add {
-        args.push("--add-label".into());
-        args.push((*name).clone());
-    }
-    for name in &to_remove {
-        args.push("--remove-label".into());
-        args.push((*name).clone());
-    }
-    let argrefs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
-    run_gh(&repo_root, &argrefs)?;
-    Ok(())
+        let mut args: Vec<String> = vec![
+            "pr".into(),
+            "edit".into(),
+            pr_number.to_string(),
+        ];
+        for name in &to_add {
+            args.push("--add-label".into());
+            args.push((*name).clone());
+        }
+        for name in &to_remove {
+            args.push("--remove-label".into());
+            args.push((*name).clone());
+        }
+        let argrefs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
+        run_gh(&repo_root, &argrefs)?;
+        Ok(())
+    })
+    .await
 }
 
 /// Edit a PR's title and/or body via `gh pr edit`. Either field may be
@@ -942,22 +1043,25 @@ pub async fn pr_update(
     title: Option<String>,
     body: Option<String>,
 ) -> Result<(), String> {
-    let mut args: Vec<String> = vec!["pr".into(), "edit".into(), pr_number.to_string()];
-    if let Some(t) = &title {
-        args.push("--title".into());
-        args.push(t.clone());
-    }
-    if let Some(b) = &body {
-        args.push("--body".into());
-        args.push(b.clone());
-    }
-    // No fields supplied — nothing to edit.
-    if args.len() == 3 {
-        return Ok(());
-    }
-    let argrefs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
-    run_gh(&repo_root, &argrefs)?;
-    Ok(())
+    crate::blocking::run(move || {
+        let mut args: Vec<String> = vec!["pr".into(), "edit".into(), pr_number.to_string()];
+        if let Some(t) = &title {
+            args.push("--title".into());
+            args.push(t.clone());
+        }
+        if let Some(b) = &body {
+            args.push("--body".into());
+            args.push(b.clone());
+        }
+        // No fields supplied — nothing to edit.
+        if args.len() == 3 {
+            return Ok(());
+        }
+        let argrefs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
+        run_gh(&repo_root, &argrefs)?;
+        Ok(())
+    })
+    .await
 }
 
 /// `gh api user --jq .login` — returns the authenticated viewer login.
@@ -965,7 +1069,10 @@ pub async fn pr_update(
 /// caches it after the first call). Empty when gh isn't authenticated.
 #[tauri::command]
 pub async fn pr_whoami(repo_root: String) -> Result<String, String> {
-    viewer_login(&repo_root)
+    crate::blocking::run(move || {
+        viewer_login(&repo_root)
+    })
+    .await
 }
 
 /// Internal: same as `pr_whoami` but returns Result for use during
@@ -1146,16 +1253,20 @@ pub async fn pr_detail(repo_root: String, pr_number: u64) -> Result<PrDetail, St
 }
 
 async fn pr_detail_inner(repo_root: String, pr_number: u64) -> Result<PrDetail, String> {
-    let view = run_gh(
-        &repo_root,
-        &["pr", "view", &pr_number.to_string(), "--json", PR_DETAIL_FIELDS],
-    )?;
-    let raw: GhPrDetail =
-        serde_json::from_str(&view).map_err(|e| format!("gh json parse: {}", e))?;
+    let view_root = repo_root.clone();
+    let raw: GhPrDetail = crate::blocking::run(move || {
+        let view = run_gh(
+            &view_root,
+            &["pr", "view", &pr_number.to_string(), "--json", PR_DETAIL_FIELDS],
+        )?;
+        serde_json::from_str(&view).map_err(|e| format!("gh json parse: {}", e))
+    })
+    .await?;
     let (diff, diff_error) =
         fetch_pr_diff(&repo_root, pr_number, &raw.base_ref_name).await;
-    let aura = latest_aura_review(&repo_root, &raw.base_ref_name);
-    Ok(PrDetail {
+    crate::blocking::run(move || {
+        let (aura, aura_review_error) = latest_aura_review(&repo_root, &raw.base_ref_name);
+        Ok(PrDetail {
         number: raw.number,
         title: raw.title,
         state: raw.state,
@@ -1183,6 +1294,7 @@ async fn pr_detail_inner(repo_root: String, pr_number: u64) -> Result<PrDetail, 
         diff,
         diff_error,
         aura_review: aura,
+        aura_review_error,
         reviewers: build_reviewers(&raw.latest_reviews, &raw.review_requests),
         assignees: raw
             .assignees
@@ -1214,7 +1326,9 @@ async fn pr_detail_inner(repo_root: String, pr_number: u64) -> Result<PrDetail, 
                 })
             })
             .collect(),
+        })
     })
+    .await
 }
 
 /// Run `gh pr diff` with full stdout/stderr capture; fall back to a
@@ -1637,78 +1751,81 @@ pub async fn pr_comments_list(
     repo_root: String,
     pr_number: u64,
 ) -> Result<Vec<PrComment>, String> {
-    let owner_repo = repo_owner_path(&repo_root)?;
-    let inline_path = format!("repos/{}/pulls/{}/comments?per_page=100", owner_repo, pr_number);
-    let issue_path = format!("repos/{}/issues/{}/comments?per_page=100", owner_repo, pr_number);
-    let inline = run_gh(&repo_root, &["api", "--paginate", &inline_path]).unwrap_or_default();
-    let issue = run_gh(&repo_root, &["api", "--paginate", &issue_path]).unwrap_or_default();
+    crate::blocking::run(move || {
+        let owner_repo = repo_owner_path(&repo_root)?;
+        let inline_path = format!("repos/{}/pulls/{}/comments?per_page=100", owner_repo, pr_number);
+        let issue_path = format!("repos/{}/issues/{}/comments?per_page=100", owner_repo, pr_number);
+        let inline = run_gh(&repo_root, &["api", "--paginate", &inline_path]).unwrap_or_default();
+        let issue = run_gh(&repo_root, &["api", "--paginate", &issue_path]).unwrap_or_default();
 
-    // Resolve-state lookup: we issue a single GraphQL call per PR to map
-    // each review-thread node id → (resolved, [comment_node_ids]).
-    let thread_map = fetch_thread_states(&repo_root, &owner_repo, pr_number).unwrap_or_default();
-    // Stage 8M — bulk reactions fetch: one GraphQL call returning
-    // reactionGroups for every comment on the PR (review + issue).
-    // Keyed by REST databaseId so we can attach to each PrComment by id.
-    let reactions_map =
-        fetch_reactions(&repo_root, &owner_repo, pr_number).unwrap_or_default();
+        // Resolve-state lookup: we issue a single GraphQL call per PR to map
+        // each review-thread node id → (resolved, [comment_node_ids]).
+        let thread_map = fetch_thread_states(&repo_root, &owner_repo, pr_number).unwrap_or_default();
+        // Stage 8M — bulk reactions fetch: one GraphQL call returning
+        // reactionGroups for every comment on the PR (review + issue).
+        // Keyed by REST databaseId so we can attach to each PrComment by id.
+        let reactions_map =
+            fetch_reactions(&repo_root, &owner_repo, pr_number).unwrap_or_default();
 
-    let mut out = Vec::new();
-    if !inline.trim().is_empty() {
-        let raw: Vec<GhInlineComment> = serde_json::from_str(&inline)
-            .map_err(|e| format!("gh inline comments parse: {}", e))?;
-        for c in raw {
-            let line = c.line.or(c.original_line);
-            let start_line = c.start_line.or(c.original_start_line);
-            let (thread_node, resolved) = thread_map
-                .get(&c.node_id)
-                .cloned()
-                .unwrap_or((None, false));
-            let reactions = reactions_map.get(&c.id).cloned().unwrap_or_default();
-            out.push(PrComment {
-                id: c.id,
-                node_id: c.node_id,
-                author: c.user.login,
-                body: c.body,
-                created_at: c.created_at,
-                updated_at: c.updated_at,
-                path: empty_to_none(c.path),
-                line,
-                start_line,
-                side: empty_to_none(c.side),
-                in_reply_to: c.in_reply_to_id,
-                is_issue_comment: false,
-                thread_node_id: thread_node,
-                thread_resolved: resolved,
-                reactions,
-            });
+        let mut out = Vec::new();
+        if !inline.trim().is_empty() {
+            let raw: Vec<GhInlineComment> = serde_json::from_str(&inline)
+                .map_err(|e| format!("gh inline comments parse: {}", e))?;
+            for c in raw {
+                let line = c.line.or(c.original_line);
+                let start_line = c.start_line.or(c.original_start_line);
+                let (thread_node, resolved) = thread_map
+                    .get(&c.node_id)
+                    .cloned()
+                    .unwrap_or((None, false));
+                let reactions = reactions_map.get(&c.id).cloned().unwrap_or_default();
+                out.push(PrComment {
+                    id: c.id,
+                    node_id: c.node_id,
+                    author: c.user.login,
+                    body: c.body,
+                    created_at: c.created_at,
+                    updated_at: c.updated_at,
+                    path: empty_to_none(c.path),
+                    line,
+                    start_line,
+                    side: empty_to_none(c.side),
+                    in_reply_to: c.in_reply_to_id,
+                    is_issue_comment: false,
+                    thread_node_id: thread_node,
+                    thread_resolved: resolved,
+                    reactions,
+                });
+            }
         }
-    }
-    if !issue.trim().is_empty() {
-        let raw: Vec<GhIssueComment> = serde_json::from_str(&issue)
-            .map_err(|e| format!("gh issue comments parse: {}", e))?;
-        for c in raw {
-            let reactions = reactions_map.get(&c.id).cloned().unwrap_or_default();
-            out.push(PrComment {
-                id: c.id,
-                node_id: c.node_id,
-                author: c.user.login,
-                body: c.body,
-                created_at: c.created_at,
-                updated_at: c.updated_at,
-                path: None,
-                line: None,
-                start_line: None,
-                side: None,
-                in_reply_to: None,
-                is_issue_comment: true,
-                thread_node_id: None,
-                thread_resolved: false,
-                reactions,
-            });
+        if !issue.trim().is_empty() {
+            let raw: Vec<GhIssueComment> = serde_json::from_str(&issue)
+                .map_err(|e| format!("gh issue comments parse: {}", e))?;
+            for c in raw {
+                let reactions = reactions_map.get(&c.id).cloned().unwrap_or_default();
+                out.push(PrComment {
+                    id: c.id,
+                    node_id: c.node_id,
+                    author: c.user.login,
+                    body: c.body,
+                    created_at: c.created_at,
+                    updated_at: c.updated_at,
+                    path: None,
+                    line: None,
+                    start_line: None,
+                    side: None,
+                    in_reply_to: None,
+                    is_issue_comment: true,
+                    thread_node_id: None,
+                    thread_resolved: false,
+                    reactions,
+                });
+            }
         }
-    }
-    out.sort_by(|a, b| a.created_at.cmp(&b.created_at));
-    Ok(out)
+        out.sort_by(|a, b| a.created_at.cmp(&b.created_at));
+        Ok(out)
+    })
+    .await
 }
 
 /// Post a new inline review comment on a specific file:line of a PR.
@@ -1724,73 +1841,76 @@ pub async fn pr_comment_post(
     side: Option<String>,
     start_line: Option<u64>,
 ) -> Result<PrComment, String> {
-    let owner_repo = repo_owner_path(&repo_root)?;
-    let head_sha = pr_head_sha(&repo_root, pr_number)?;
-    let side_val = side.unwrap_or_else(|| "RIGHT".to_string());
-    let line_str = line.to_string();
-    let pr_str = pr_number.to_string();
-    let path = format!("repos/{}/pulls/{}/comments", owner_repo, pr_number);
-    // GitHub multi-line review comments take `start_line` + `start_side`
-    // in addition to `line` + `side`. Single-line still omits both
-    // start_* fields. Anchor lives on `line` (the bottom of the range).
-    // Pin the API version so GitHub validates against the modern
-    // `line`+`side` schema. Without the header, gh's default Accept
-    // sometimes routes the request through the legacy position-based
-    // schema (which rejects `line`/`start_line`/`subject_type` as
-    // "not permitted keys" and dumps a confusing oneOf failure).
-    // `subject_type` is intentionally omitted — it defaults to "line"
-    // when `line` is set, and including it explicitly was the second
-    // half of the 422.
-    let mut args: Vec<String> = vec![
-        "api".to_string(),
-        "-X".to_string(),
-        "POST".to_string(),
-        "-H".to_string(),
-        "X-GitHub-Api-Version: 2022-11-28".to_string(),
-        "-H".to_string(),
-        "Accept: application/vnd.github+json".to_string(),
-        path,
-        "-f".to_string(),
-        format!("body={}", body),
-        "-f".to_string(),
-        format!("commit_id={}", head_sha),
-        "-f".to_string(),
-        format!("path={}", file),
-        "-F".to_string(),
-        format!("line={}", line_str),
-        "-f".to_string(),
-        format!("side={}", side_val),
-    ];
-    if let Some(s) = start_line {
-        if s != line {
-            args.push("-F".to_string());
-            args.push(format!("start_line={}", s));
-            args.push("-f".to_string());
-            args.push(format!("start_side={}", side_val));
+    crate::blocking::run(move || {
+        let owner_repo = repo_owner_path(&repo_root)?;
+        let head_sha = pr_head_sha(&repo_root, pr_number)?;
+        let side_val = side.unwrap_or_else(|| "RIGHT".to_string());
+        let line_str = line.to_string();
+        let pr_str = pr_number.to_string();
+        let path = format!("repos/{}/pulls/{}/comments", owner_repo, pr_number);
+        // GitHub multi-line review comments take `start_line` + `start_side`
+        // in addition to `line` + `side`. Single-line still omits both
+        // start_* fields. Anchor lives on `line` (the bottom of the range).
+        // Pin the API version so GitHub validates against the modern
+        // `line`+`side` schema. Without the header, gh's default Accept
+        // sometimes routes the request through the legacy position-based
+        // schema (which rejects `line`/`start_line`/`subject_type` as
+        // "not permitted keys" and dumps a confusing oneOf failure).
+        // `subject_type` is intentionally omitted — it defaults to "line"
+        // when `line` is set, and including it explicitly was the second
+        // half of the 422.
+        let mut args: Vec<String> = vec![
+            "api".to_string(),
+            "-X".to_string(),
+            "POST".to_string(),
+            "-H".to_string(),
+            "X-GitHub-Api-Version: 2022-11-28".to_string(),
+            "-H".to_string(),
+            "Accept: application/vnd.github+json".to_string(),
+            path,
+            "-f".to_string(),
+            format!("body={}", body),
+            "-f".to_string(),
+            format!("commit_id={}", head_sha),
+            "-f".to_string(),
+            format!("path={}", file),
+            "-F".to_string(),
+            format!("line={}", line_str),
+            "-f".to_string(),
+            format!("side={}", side_val),
+        ];
+        if let Some(s) = start_line {
+            if s != line {
+                args.push("-F".to_string());
+                args.push(format!("start_line={}", s));
+                args.push("-f".to_string());
+                args.push(format!("start_side={}", side_val));
+            }
         }
-    }
-    let arg_refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
-    let stdout = run_gh(&repo_root, &arg_refs)?;
-    let _ = pr_str;
-    let raw: GhInlineComment = serde_json::from_str(&stdout)
-        .map_err(|e| format!("gh post comment parse: {}", e))?;
-    Ok(PrComment {
-        id: raw.id,
-        node_id: raw.node_id,
-        author: raw.user.login,
-        body: raw.body,
-        created_at: raw.created_at,
-        updated_at: raw.updated_at,
-        path: empty_to_none(raw.path),
-        line: raw.line.or(raw.original_line),
-        start_line: raw.start_line.or(raw.original_start_line),
-        side: empty_to_none(raw.side),
-        in_reply_to: raw.in_reply_to_id,
-        is_issue_comment: false,
-        thread_node_id: None,
-        thread_resolved: false,
-        reactions: Vec::new(),
+        let arg_refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
+        let stdout = run_gh(&repo_root, &arg_refs)?;
+        let _ = pr_str;
+        let raw: GhInlineComment = serde_json::from_str(&stdout)
+            .map_err(|e| format!("gh post comment parse: {}", e))?;
+        Ok(PrComment {
+            id: raw.id,
+            node_id: raw.node_id,
+            author: raw.user.login,
+            body: raw.body,
+            created_at: raw.created_at,
+            updated_at: raw.updated_at,
+            path: empty_to_none(raw.path),
+            line: raw.line.or(raw.original_line),
+            start_line: raw.start_line.or(raw.original_start_line),
+            side: empty_to_none(raw.side),
+            in_reply_to: raw.in_reply_to_id,
+            is_issue_comment: false,
+            thread_node_id: None,
+            thread_resolved: false,
+            reactions: Vec::new(),
+        })
     })
+    .await
 }
 
 /// Reply to an existing inline review comment within its thread.
@@ -1801,34 +1921,37 @@ pub async fn pr_comment_reply(
     in_reply_to: u64,
     body: String,
 ) -> Result<PrComment, String> {
-    let owner_repo = repo_owner_path(&repo_root)?;
-    let path = format!(
-        "repos/{}/pulls/{}/comments/{}/replies",
-        owner_repo, pr_number, in_reply_to
-    );
-    let stdout = run_gh(
-        &repo_root,
-        &["api", "-X", "POST", &path, "-f", &format!("body={}", body)],
-    )?;
-    let raw: GhInlineComment = serde_json::from_str(&stdout)
-        .map_err(|e| format!("gh reply parse: {}", e))?;
-    Ok(PrComment {
-        id: raw.id,
-        node_id: raw.node_id,
-        author: raw.user.login,
-        body: raw.body,
-        created_at: raw.created_at,
-        updated_at: raw.updated_at,
-        path: empty_to_none(raw.path),
-        line: raw.line.or(raw.original_line),
-        start_line: raw.start_line.or(raw.original_start_line),
-        side: empty_to_none(raw.side),
-        in_reply_to: raw.in_reply_to_id,
-        is_issue_comment: false,
-        thread_node_id: None,
-        thread_resolved: false,
-        reactions: Vec::new(),
+    crate::blocking::run(move || {
+        let owner_repo = repo_owner_path(&repo_root)?;
+        let path = format!(
+            "repos/{}/pulls/{}/comments/{}/replies",
+            owner_repo, pr_number, in_reply_to
+        );
+        let stdout = run_gh(
+            &repo_root,
+            &["api", "-X", "POST", &path, "-f", &format!("body={}", body)],
+        )?;
+        let raw: GhInlineComment = serde_json::from_str(&stdout)
+            .map_err(|e| format!("gh reply parse: {}", e))?;
+        Ok(PrComment {
+            id: raw.id,
+            node_id: raw.node_id,
+            author: raw.user.login,
+            body: raw.body,
+            created_at: raw.created_at,
+            updated_at: raw.updated_at,
+            path: empty_to_none(raw.path),
+            line: raw.line.or(raw.original_line),
+            start_line: raw.start_line.or(raw.original_start_line),
+            side: empty_to_none(raw.side),
+            in_reply_to: raw.in_reply_to_id,
+            is_issue_comment: false,
+            thread_node_id: None,
+            thread_resolved: false,
+            reactions: Vec::new(),
+        })
     })
+    .await
 }
 
 /// Post a top-level conversation (issue) comment on the PR.
@@ -1838,31 +1961,34 @@ pub async fn pr_comment_post_issue(
     pr_number: u64,
     body: String,
 ) -> Result<PrComment, String> {
-    let owner_repo = repo_owner_path(&repo_root)?;
-    let path = format!("repos/{}/issues/{}/comments", owner_repo, pr_number);
-    let stdout = run_gh(
-        &repo_root,
-        &["api", "-X", "POST", &path, "-f", &format!("body={}", body)],
-    )?;
-    let raw: GhIssueComment = serde_json::from_str(&stdout)
-        .map_err(|e| format!("gh issue comment parse: {}", e))?;
-    Ok(PrComment {
-        id: raw.id,
-        node_id: raw.node_id,
-        author: raw.user.login,
-        body: raw.body,
-        created_at: raw.created_at,
-        updated_at: raw.updated_at,
-        path: None,
-        line: None,
-        start_line: None,
-        side: None,
-        in_reply_to: None,
-        is_issue_comment: true,
-        thread_node_id: None,
-        thread_resolved: false,
-        reactions: Vec::new(),
+    crate::blocking::run(move || {
+        let owner_repo = repo_owner_path(&repo_root)?;
+        let path = format!("repos/{}/issues/{}/comments", owner_repo, pr_number);
+        let stdout = run_gh(
+            &repo_root,
+            &["api", "-X", "POST", &path, "-f", &format!("body={}", body)],
+        )?;
+        let raw: GhIssueComment = serde_json::from_str(&stdout)
+            .map_err(|e| format!("gh issue comment parse: {}", e))?;
+        Ok(PrComment {
+            id: raw.id,
+            node_id: raw.node_id,
+            author: raw.user.login,
+            body: raw.body,
+            created_at: raw.created_at,
+            updated_at: raw.updated_at,
+            path: None,
+            line: None,
+            start_line: None,
+            side: None,
+            in_reply_to: None,
+            is_issue_comment: true,
+            thread_node_id: None,
+            thread_resolved: false,
+            reactions: Vec::new(),
+        })
     })
+    .await
 }
 
 /// Resolve a review thread via GraphQL. `thread_node_id` comes from the
@@ -1872,19 +1998,22 @@ pub async fn pr_comment_resolve(
     repo_root: String,
     thread_node_id: String,
 ) -> Result<(), String> {
-    let mutation = "mutation($id:ID!){resolveReviewThread(input:{threadId:$id}){thread{id isResolved}}}";
-    run_gh(
-        &repo_root,
-        &[
-            "api",
-            "graphql",
-            "-f",
-            &format!("query={}", mutation),
-            "-f",
-            &format!("id={}", thread_node_id),
-        ],
-    )?;
-    Ok(())
+    crate::blocking::run(move || {
+        let mutation = "mutation($id:ID!){resolveReviewThread(input:{threadId:$id}){thread{id isResolved}}}";
+        run_gh(
+            &repo_root,
+            &[
+                "api",
+                "graphql",
+                "-f",
+                &format!("query={}", mutation),
+                "-f",
+                &format!("id={}", thread_node_id),
+            ],
+        )?;
+        Ok(())
+    })
+    .await
 }
 
 #[derive(Deserialize)]
@@ -2110,29 +2239,32 @@ pub async fn pr_reaction_add(
     comment_node_id: String,
     content: String,
 ) -> Result<(), String> {
-    if !is_valid_reaction_content(&content) {
-        return Err(format!("invalid reaction content: {}", content));
-    }
-    // Pass `content` as a GraphQL variable typed `ReactionContent!` —
-    // gh's -f flag would stringify it; -F keeps it as a JSON string but
-    // GraphQL still expects an enum. Inline-substitute into the query
-    // is safe here because we whitelist content above.
-    let mutation = format!(
-        "mutation($id:ID!){{addReaction(input:{{subjectId:$id,content:{}}}){{reaction{{content}}}}}}",
-        content
-    );
-    run_gh(
-        &repo_root,
-        &[
-            "api",
-            "graphql",
-            "-f",
-            &format!("query={}", mutation),
-            "-f",
-            &format!("id={}", comment_node_id),
-        ],
-    )?;
-    Ok(())
+    crate::blocking::run(move || {
+        if !is_valid_reaction_content(&content) {
+            return Err(format!("invalid reaction content: {}", content));
+        }
+        // Pass `content` as a GraphQL variable typed `ReactionContent!` —
+        // gh's -f flag would stringify it; -F keeps it as a JSON string but
+        // GraphQL still expects an enum. Inline-substitute into the query
+        // is safe here because we whitelist content above.
+        let mutation = format!(
+            "mutation($id:ID!){{addReaction(input:{{subjectId:$id,content:{}}}){{reaction{{content}}}}}}",
+            content
+        );
+        run_gh(
+            &repo_root,
+            &[
+                "api",
+                "graphql",
+                "-f",
+                &format!("query={}", mutation),
+                "-f",
+                &format!("id={}", comment_node_id),
+            ],
+        )?;
+        Ok(())
+    })
+    .await
 }
 
 #[tauri::command]
@@ -2141,25 +2273,28 @@ pub async fn pr_reaction_remove(
     comment_node_id: String,
     content: String,
 ) -> Result<(), String> {
-    if !is_valid_reaction_content(&content) {
-        return Err(format!("invalid reaction content: {}", content));
-    }
-    let mutation = format!(
-        "mutation($id:ID!){{removeReaction(input:{{subjectId:$id,content:{}}}){{reaction{{content}}}}}}",
-        content
-    );
-    run_gh(
-        &repo_root,
-        &[
-            "api",
-            "graphql",
-            "-f",
-            &format!("query={}", mutation),
-            "-f",
-            &format!("id={}", comment_node_id),
-        ],
-    )?;
-    Ok(())
+    crate::blocking::run(move || {
+        if !is_valid_reaction_content(&content) {
+            return Err(format!("invalid reaction content: {}", content));
+        }
+        let mutation = format!(
+            "mutation($id:ID!){{removeReaction(input:{{subjectId:$id,content:{}}}){{reaction{{content}}}}}}",
+            content
+        );
+        run_gh(
+            &repo_root,
+            &[
+                "api",
+                "graphql",
+                "-f",
+                &format!("query={}", mutation),
+                "-f",
+                &format!("id={}", comment_node_id),
+            ],
+        )?;
+        Ok(())
+    })
+    .await
 }
 
 fn is_valid_reaction_content(c: &str) -> bool {
@@ -2184,16 +2319,19 @@ pub async fn pr_approve(
     pr_number: u64,
     body: Option<String>,
 ) -> Result<(), String> {
-    let pr_str = pr_number.to_string();
-    let mut args = vec!["pr", "review", &pr_str, "--approve"];
-    let body_value;
-    if let Some(b) = body.filter(|s| !s.trim().is_empty()) {
-        body_value = b;
-        args.push("--body");
-        args.push(&body_value);
-    }
-    run_gh(&repo_root, &args)?;
-    Ok(())
+    crate::blocking::run(move || {
+        let pr_str = pr_number.to_string();
+        let mut args = vec!["pr", "review", &pr_str, "--approve"];
+        let body_value;
+        if let Some(b) = body.filter(|s| !s.trim().is_empty()) {
+            body_value = b;
+            args.push("--body");
+            args.push(&body_value);
+        }
+        run_gh(&repo_root, &args)?;
+        Ok(())
+    })
+    .await
 }
 
 #[tauri::command]
@@ -2202,21 +2340,24 @@ pub async fn pr_request_changes(
     pr_number: u64,
     body: String,
 ) -> Result<(), String> {
-    if body.trim().is_empty() {
-        return Err("request-changes needs a body".to_string());
-    }
-    run_gh(
-        &repo_root,
-        &[
-            "pr",
-            "review",
-            &pr_number.to_string(),
-            "--request-changes",
-            "--body",
-            &body,
-        ],
-    )?;
-    Ok(())
+    crate::blocking::run(move || {
+        if body.trim().is_empty() {
+            return Err("request-changes needs a body".to_string());
+        }
+        run_gh(
+            &repo_root,
+            &[
+                "pr",
+                "review",
+                &pr_number.to_string(),
+                "--request-changes",
+                "--body",
+                &body,
+            ],
+        )?;
+        Ok(())
+    })
+    .await
 }
 
 #[tauri::command]
@@ -2225,21 +2366,24 @@ pub async fn pr_comment_review(
     pr_number: u64,
     body: String,
 ) -> Result<(), String> {
-    if body.trim().is_empty() {
-        return Err("comment review needs a body".to_string());
-    }
-    run_gh(
-        &repo_root,
-        &[
-            "pr",
-            "review",
-            &pr_number.to_string(),
-            "--comment",
-            "--body",
-            &body,
-        ],
-    )?;
-    Ok(())
+    crate::blocking::run(move || {
+        if body.trim().is_empty() {
+            return Err("comment review needs a body".to_string());
+        }
+        run_gh(
+            &repo_root,
+            &[
+                "pr",
+                "review",
+                &pr_number.to_string(),
+                "--comment",
+                "--body",
+                &body,
+            ],
+        )?;
+        Ok(())
+    })
+    .await
 }
 
 /// `strategy` must be one of `"squash" | "merge" | "rebase"`.
@@ -2250,19 +2394,22 @@ pub async fn pr_merge(
     strategy: String,
     delete_branch: bool,
 ) -> Result<(), String> {
-    let flag = match strategy.as_str() {
-        "squash" => "--squash",
-        "rebase" => "--rebase",
-        "merge" => "--merge",
-        other => return Err(format!("unknown merge strategy: {}", other)),
-    };
-    let pr_str = pr_number.to_string();
-    let mut args = vec!["pr", "merge", &pr_str, flag];
-    if delete_branch {
-        args.push("--delete-branch");
-    }
-    run_gh(&repo_root, &args)?;
-    Ok(())
+    crate::blocking::run(move || {
+        let flag = match strategy.as_str() {
+            "squash" => "--squash",
+            "rebase" => "--rebase",
+            "merge" => "--merge",
+            other => return Err(format!("unknown merge strategy: {}", other)),
+        };
+        let pr_str = pr_number.to_string();
+        let mut args = vec!["pr", "merge", &pr_str, flag];
+        if delete_branch {
+            args.push("--delete-branch");
+        }
+        run_gh(&repo_root, &args)?;
+        Ok(())
+    })
+    .await
 }
 
 #[derive(Serialize, Clone)]
@@ -2310,90 +2457,93 @@ pub async fn pr_stack(
     // serves this without a second network hit.
     let all = pr_list(repo_root.clone()).await?;
 
-    // Local, token-free: branch -> authoritative parent branch (empty for a
-    // non-Graphite repo). Read once and reused for every effective-parent
-    // lookup below.
-    let gt_parents = crate::integrations::graphite::stack_parents(&repo_root);
-    let eff_parent = |p: &PrSummary| -> String {
-        gt_parents
-            .get(&p.head_ref)
-            .cloned()
-            .unwrap_or_else(|| p.base_ref.clone())
-    };
+    crate::blocking::run(move || {
+        // Local, token-free: branch -> authoritative parent branch (empty for a
+        // non-Graphite repo). Read once and reused for every effective-parent
+        // lookup below.
+        let gt_parents = crate::integrations::graphite::stack_parents(&repo_root);
+        let eff_parent = |p: &PrSummary| -> String {
+            gt_parents
+                .get(&p.head_ref)
+                .cloned()
+                .unwrap_or_else(|| p.base_ref.clone())
+        };
 
-    let by_head: std::collections::HashMap<&str, &PrSummary> =
-        all.iter().map(|p| (p.head_ref.as_str(), p)).collect();
-    // Children keyed by their effective parent branch.
-    let mut by_parent: std::collections::HashMap<String, Vec<&PrSummary>> =
-        std::collections::HashMap::new();
-    for p in &all {
-        by_parent.entry(eff_parent(p)).or_default().push(p);
-    }
-    let root = all
-        .iter()
-        .find(|p| p.number == pr_number)
-        .ok_or_else(|| format!("PR #{} not in open list", pr_number))?;
+        let by_head: std::collections::HashMap<&str, &PrSummary> =
+            all.iter().map(|p| (p.head_ref.as_str(), p)).collect();
+        // Children keyed by their effective parent branch.
+        let mut by_parent: std::collections::HashMap<String, Vec<&PrSummary>> =
+            std::collections::HashMap::new();
+        for p in &all {
+            by_parent.entry(eff_parent(p)).or_default().push(p);
+        }
+        let root = all
+            .iter()
+            .find(|p| p.number == pr_number)
+            .ok_or_else(|| format!("PR #{} not in open list", pr_number))?;
 
-    // Walk down (this PR's children, grandchildren, …)
-    let mut included: std::collections::BTreeMap<u64, &PrSummary> =
-        std::collections::BTreeMap::new();
-    included.insert(root.number, root);
-    let mut frontier = vec![root.head_ref.clone()];
-    while let Some(head) = frontier.pop() {
-        if let Some(children) = by_parent.get(&head) {
-            for c in children {
-                if included.insert(c.number, c).is_none() {
-                    frontier.push(c.head_ref.clone());
+        // Walk down (this PR's children, grandchildren, …)
+        let mut included: std::collections::BTreeMap<u64, &PrSummary> =
+            std::collections::BTreeMap::new();
+        included.insert(root.number, root);
+        let mut frontier = vec![root.head_ref.clone()];
+        while let Some(head) = frontier.pop() {
+            if let Some(children) = by_parent.get(&head) {
+                for c in children {
+                    if included.insert(c.number, c).is_none() {
+                        frontier.push(c.head_ref.clone());
+                    }
                 }
             }
         }
-    }
-    // Walk up (parent chain) following the effective parent branch.
-    let mut cur_parent = eff_parent(root);
-    while let Some(parent) = by_head.get(cur_parent.as_str()).copied() {
-        if included.contains_key(&parent.number) {
-            break;
+        // Walk up (parent chain) following the effective parent branch.
+        let mut cur_parent = eff_parent(root);
+        while let Some(parent) = by_head.get(cur_parent.as_str()).copied() {
+            if included.contains_key(&parent.number) {
+                break;
+            }
+            included.insert(parent.number, parent);
+            cur_parent = eff_parent(parent);
         }
-        included.insert(parent.number, parent);
-        cur_parent = eff_parent(parent);
-    }
 
-    let mut nodes: Vec<PrStackNode> = included
-        .values()
-        .map(|p| PrStackNode {
-            number: p.number,
-            title: p.title.clone(),
-            head_ref: p.head_ref.clone(),
-            base_ref: p.base_ref.clone(),
-            author: p.author.clone(),
-            state: p.state.clone(),
-            is_draft: p.is_draft,
-            aura_risk_score: p.aura_risk_score,
-            url: p.url.clone(),
-            children: Vec::new(),
-            parent: None,
-            gt_managed: gt_parents.contains_key(&p.head_ref),
-        })
-        .collect();
+        let mut nodes: Vec<PrStackNode> = included
+            .values()
+            .map(|p| PrStackNode {
+                number: p.number,
+                title: p.title.clone(),
+                head_ref: p.head_ref.clone(),
+                base_ref: p.base_ref.clone(),
+                author: p.author.clone(),
+                state: p.state.clone(),
+                is_draft: p.is_draft,
+                aura_risk_score: p.aura_risk_score,
+                url: p.url.clone(),
+                children: Vec::new(),
+                parent: None,
+                gt_managed: gt_parents.contains_key(&p.head_ref),
+            })
+            .collect();
 
-    // Cross-link parent/children using each node's effective parent branch.
-    let head_to_idx: std::collections::HashMap<String, usize> = nodes
-        .iter()
-        .enumerate()
-        .map(|(i, n)| (n.head_ref.clone(), i))
-        .collect();
-    for i in 0..nodes.len() {
-        let parent_branch = gt_parents
-            .get(&nodes[i].head_ref)
-            .cloned()
-            .unwrap_or_else(|| nodes[i].base_ref.clone());
-        if let Some(&p_idx) = head_to_idx.get(&parent_branch) {
-            nodes[i].parent = Some(nodes[p_idx].number);
-            let child_num = nodes[i].number;
-            nodes[p_idx].children.push(child_num);
+        // Cross-link parent/children using each node's effective parent branch.
+        let head_to_idx: std::collections::HashMap<String, usize> = nodes
+            .iter()
+            .enumerate()
+            .map(|(i, n)| (n.head_ref.clone(), i))
+            .collect();
+        for i in 0..nodes.len() {
+            let parent_branch = gt_parents
+                .get(&nodes[i].head_ref)
+                .cloned()
+                .unwrap_or_else(|| nodes[i].base_ref.clone());
+            if let Some(&p_idx) = head_to_idx.get(&parent_branch) {
+                nodes[i].parent = Some(nodes[p_idx].number);
+                let child_num = nodes[i].number;
+                nodes[p_idx].children.push(child_num);
+            }
         }
-    }
-    Ok(nodes)
+        Ok(nodes)
+    })
+    .await
 }
 
 // ── helpers ───────────────────────────────────────────────────────────
@@ -2449,11 +2599,18 @@ pub async fn pr_vercel_status(
 ) -> Result<Option<crate::integrations::vercel::VercelDeployment>, String> {
     // Config first — the common case (nobody configured Vercel) short-circuits
     // before we spend a `gh` round-trip resolving the sha.
-    let cfg = match crate::integrations::config::vercel().map_err(|e| e.to_string())? {
-        Some(cfg) => cfg,
-        None => return Ok(None),
+    let prepared = crate::blocking::run(move || -> Result<_, String> {
+        let cfg = match crate::integrations::config::vercel().map_err(|e| e.to_string())? {
+            Some(cfg) => cfg,
+            None => return Ok(None),
+        };
+        let sha = pr_head_sha(&repo_root, pr_number)?;
+        Ok(Some((cfg, sha)))
+    })
+    .await?;
+    let Some((cfg, sha)) = prepared else {
+        return Ok(None);
     };
-    let sha = pr_head_sha(&repo_root, pr_number)?;
     crate::integrations::vercel::latest_for(&cfg, &sha, None)
         .await
         .map_err(|e| e.to_string())
@@ -2491,7 +2648,7 @@ pub async fn aura_review_json(
         .filter(|b| !b.is_empty())
         .unwrap_or_else(|| "main".to_string());
 
-    let out = tokio::process::Command::new("aura")
+    let out = tokio::process::Command::new(crate::agent_event_listener::resolve_aura_bin())
         .args(["pr-review", "--base", &base, "--json"])
         .current_dir(&cwd)
         .output()

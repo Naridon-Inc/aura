@@ -1,137 +1,221 @@
-// ADE Build-section nav — the labeled rows that sit above the workspace
-// roster: "Workspaces" (the resting context, the roster below it) and "Crew"
-// (the autonomous work loop). Deliberately minimal — the footer section
-// switcher still owns Build / Team / Plan / Trace. (Automations re-homed to
-// the Plan section, next to Tasks & Pages. "Agents & extensions" re-homed to
-// an icon button at the end of the top header.)
+// The Build family of destinations — "Aura" (the orchestrator you talk to),
+// "Workspaces" (the fleet page, and the roster below it) and "Tasks" (the
+// work). These render as the HEAD of the sidebar's one
+// nav list, above Team / Pages / Trace, in the same `.ade-nav-row` markup: they
+// are destinations exactly like those three, and drawing them as a second band
+// — its own hairline, its own row height, its own accent-tint active state
+// against the section rows' surface fill — made the top of the sidebar two
+// navigation systems stacked on each other, seven rows over two treatments,
+// with no rule a reader could infer for which idea went in which band.
+//
+// The word "Build" went with the band. It was the section row that revealed
+// this list plus the project roster, so it captioned a group whose first row
+// already said the same thing in plainer words — and "Build", as a place, is
+// engine-speak on a rail read by people who don't write code.
+//
+//
+// Aura sits at the top because it is the one row that is a *who* rather than a
+// *where*: the orchestrator that fans work out to the CLI agents and chains
+// their results. It had no permanent door in the ADE sidebar — the right rail's
+// "Aura" tab is not built in this layout (see RightRail's `!adeMode` guard), so
+// reaching the chat meant going through a status pill or waiting for something
+// else to focus it. The row opens the workspace's current conversation, or
+// starts one when there isn't a conversation yet.
 //
 // The Workspaces row IS the door to the full Workspaces view — clicking the
 // label opens it. It used to only re-select the roster below, with a separate
 // expand arrow beside it for the real view; that split made the fleet look
-// like a side trip off the roster rather than the page it is. One target now,
-// and + New is the row's only trailing affordance.
+// like a side trip off the roster rather than the page it is. One target now.
+// It carries no "+ New" of its own: that button opened the folder picker, and
+// the "+" in the Projects header eight pixels below it called the very same
+// `pickAndOpenFolder` — one action wearing two controls, one of them the only
+// solid-green button in the rail.
+//
+// All three rows lead to PAGES that fill the content area beside this sidebar,
+// which is why each can be the current one and paints as such. They used to
+// open as modals over the whole shell — where "which row am I on?" had no
+// answer, because you weren't on a row, you were in a dialog.
 
 import { useEffect, useState } from "react";
 
-import { Button } from "./ui/button";
-import { api } from "../lib/api";
+import { AgentIcon } from "./agent/AgentIcon";
+import { fetchReadyView } from "../lib/loopCache";
+import {
+  loadTasksForRoots,
+  rootsForScope,
+  rootsKeyOf,
+  useKnownProjects,
+  useProjectScope,
+} from "../lib/projectRoots";
+import { AURA_MANAGER_ENABLED } from "../lib/featureFlags";
+
+/** Which nav row is the surface the user is currently standing in. Only one
+ *  can be it, which is the whole reason this is a prop: the Workspaces row used
+ *  to hard-code `active`, so once a second row existed it would have kept
+ *  claiming to be current while the user sat in the other one. */
+export type BuildNavRow = "aura" | "workspaces" | "work";
 
 type BuildNavProps = {
-  /** Opens the folder picker to add a workspace. The compact "+ New"
-   *  affordance lives on the Workspaces row itself — the action sits with
-   *  its label instead of a full-width button below the roster. */
-  onAddWorkspace?: () => void;
+  /** Opens the workspace's Aura conversation — the existing one if there is
+   *  one, a fresh one if there isn't. Omitted (or with the native manager
+   *  gated off in featureFlags) the row is not rendered at all. */
+  onOpenAura?: () => void;
+  /** The row to paint as current, or null when the reader is standing in none
+   *  of them (an editor tab, a terminal). This used to default to Workspaces,
+   *  so the rail claimed you were on the Workspaces page whenever no page was
+   *  up — which is most of the time, since the resting state of this app is a
+   *  file open in the middle. */
+  activeRow?: BuildNavRow | null;
   /** Returns the center surface to the workspace roster (the resting Build
-   *  context). Workspaces is always the selected row now that Automations has
-   *  moved to Plan. */
+   *  context). Only the fallback for a host that doesn't wire
+   *  `onOpenWorkspaces`. */
   onSelectWorkspaces?: () => void;
   /** Opens the Workspaces view — every parallel copy across every open
    *  project, seen three ways (All / Board / Live). This is what the row's
    *  label does; `onSelectWorkspaces` is only the fallback for a host that
    *  doesn't wire it. */
   onOpenWorkspaces?: () => void;
-  /** Opens "Mission Control" — the single full-screen command center for the
-   *  autonomous work loop: the live Activity overview, the Kanban Board, the
-   *  Queue (hand agents a stack of work and they do it in the right order),
-   *  Automations (the triggers), and Control (the Runner). One door for all of
-   *  it; the engine always existed (`aura crew run`). */
-  onOpenCrew?: () => void;
+  /** Opens Tasks — the one place the work lives, seen five ways: List, Board
+   *  and Sprint over the backlog, Plan and Graph over what the agents are
+   *  doing about it.
+   *
+   *  This row used to say "Mission Control" and open a second board. That
+   *  board was a projection of this one — a crew node carries `board_task_id`
+   *  straight back to the card it came from — so the rail was offering two
+   *  doors onto one set of work, in two vocabularies, and asking the reader to
+   *  work out the difference. See lib/workRoute. */
+  onOpenWork?: () => void;
   /** The active workspace root — needed so the Crew row can show live overall
    *  progress (done / total) read straight from the shared crew graph. */
   repoRoot?: string;
 };
 
-/** What the Crew nav row shows: how much of the crew's work is finished, and
- *  whether anything is being worked right now. Read from the same ready_view
- *  the Crew surface and `aura crew run` consume, so the badge never drifts. */
-type CrewProgress = {
+/** What the Tasks row shows: how much of the work is finished, and whether
+ *  anything is being worked right now.
+ *
+ *  The count is the BOARD's — every task in `.aura/tasks/`, and how many of
+ *  them are done. It used to be the crew graph's, back when this row said
+ *  "Mission Control" and a crew run was the only thing it could have meant.
+ *  Beside a row that says "Tasks" that number was answering a different
+ *  question from the one the word asks: 984 crew nodes against 1,149 board
+ *  cards, the two sets overlapping but neither containing the other.
+ *
+ *  `working` still comes from the crew, because "an agent is on something
+ *  right now" is a fact only the crew graph holds — and it is drawn as a dot,
+ *  not folded into the ratio. */
+type WorkProgress = {
   done: number;
   total: number;
   working: number;
 };
 
 export function BuildNav({
-  onAddWorkspace,
+  onOpenAura,
+  activeRow = null,
   onSelectWorkspaces,
   onOpenWorkspaces,
-  onOpenCrew,
+  onOpenWork,
   repoRoot,
 }: BuildNavProps) {
-  const crew = useCrewProgress(repoRoot);
+  const crew = useWorkProgress(repoRoot);
+  const wsActive = activeRow === "workspaces";
+  // No wrapper element: these rows are siblings of Team / Pages / Trace inside
+  // the one `.ade-nav`, not a group of their own.
   return (
-    <div className="ade-build-nav">
-      <div className="ade-bnav-row active">
+    <>
+      {AURA_MANAGER_ENABLED && onOpenAura && (
         <button
           type="button"
-          className="ade-bnav-rowmain"
-          onClick={onOpenWorkspaces ?? onSelectWorkspaces}
-          aria-current="true"
-          title="Workspaces — every parallel copy across every open project (⌘⇧W)"
+          className={`ade-nav-row${activeRow === "aura" ? " active" : ""}`}
+          onClick={onOpenAura}
+          aria-current={activeRow === "aura" ? "page" : undefined}
+          title="Aura. The orchestrator: give it the goal and it hands work to your agents and pulls their results together"
         >
-          <LayersGlyph />
-          <span className="nm">Workspaces</span>
+          {/* The same mark the agent surfaces use for the orchestrator, so
+              one identity carries across the app rather than a nav-only
+              glyph. It brings its own colour — the row adds none. */}
+          <AgentIcon agentId="aura-manager" size={16} />
+          <span className="nm">Aura</span>
         </button>
-        {onAddWorkspace && (
-          <Button
-            variant="accentSoft"
-            size="xs"
-            className="ade-bnav-new"
-            onClick={onAddWorkspace}
-            title="New workspace (⌘N)"
-            aria-label="New workspace"
-          >
-            <PlusGlyph />
-            New
-          </Button>
-        )}
-      </div>
-      {onOpenCrew && (
-        <div className="ade-bnav-row">
-          <button
-            type="button"
-            className="ade-bnav-rowmain"
-            onClick={onOpenCrew}
-            title="Mission Control — one full-screen place for the work loop: live Activity, the Board, the Queue (hand agents a stack of work and they do it in the right order), Automations, and the Runner"
-          >
-            <MissionGlyph />
-            <span className="nm">Mission Control</span>
-            <CrewProgressBadge crew={crew} />
-          </button>
-        </div>
       )}
-    </div>
+      <button
+        type="button"
+        className={`ade-nav-row${wsActive ? " active" : ""}`}
+        onClick={onOpenWorkspaces ?? onSelectWorkspaces}
+        aria-current={wsActive ? "page" : undefined}
+        title="Workspaces. Every parallel copy across every open project (⌘⇧W)"
+      >
+        <LayersGlyph />
+        <span className="nm">Workspaces</span>
+      </button>
+      {onOpenWork && (
+        <button
+          type="button"
+          className={`ade-nav-row${activeRow === "work" ? " active" : ""}`}
+          onClick={onOpenWork}
+          aria-current={activeRow === "work" ? "page" : undefined}
+          title="Tasks. Everything that needs doing, and what the agents are working through"
+        >
+          <TasksGlyph />
+          <span className="nm">Tasks</span>
+          <CrewProgressBadge crew={crew} />
+        </button>
+      )}
+    </>
   );
 }
 
-/** Polls the shared crew graph for overall progress so the Crew nav row can
- *  carry a calm "{done}/{total}" count — the same way Conductor surfaces its
- *  progress on its own menu item. Light cadence (~10s) plus a read on mount;
- *  any error just leaves the badge hidden (we never invent numbers). */
-function useCrewProgress(repoRoot?: string): CrewProgress | null {
-  const [crew, setCrew] = useState<CrewProgress | null>(null);
+/** Polls for overall progress so the Tasks row can carry a calm
+ *  "{done}/{total}" count — the same way Conductor surfaces its progress on
+ *  its own menu item. Light cadence (~10s) plus a read on mount; any error
+ *  just leaves the badge hidden (we never invent numbers).
+ *
+ *  The two reads are settled independently: a repo with a task board and no
+ *  crew graph is the common case, and one missing must not blank the other. */
+function useWorkProgress(repoRoot?: string): WorkProgress | null {
+  const [crew, setCrew] = useState<WorkProgress | null>(null);
+  // The same scope the Tasks rail's picker writes and the board reads. Without
+  // it the row would say 1,149 while the board beside it drew every project's
+  // — the row and the page disagreeing about the word they both print.
+  const scope = useProjectScope();
+  const known = useKnownProjects(repoRoot ?? "");
+  const roots = rootsForScope(scope, repoRoot ?? "", known);
+  const rootsKey = rootsKeyOf(roots);
   useEffect(() => {
-    if (!repoRoot) {
+    if (roots.length === 0) {
       setCrew(null);
       return;
     }
     let live = true;
     const read = async () => {
-      try {
-        const view = await api.loopReadyView(repoRoot);
-        if (!live) return;
-        const c = view?.counts;
-        if (!c) {
-          setCrew(null);
-          return;
-        }
-        const total =
-          c.ready + c.blocked + c.working + c.done + c.paused + c.other;
-        setCrew({ done: c.done, total, working: c.working });
-      } catch {
-        // Crew graph not initialised (or transient read error) — leave the
-        // badge off rather than show a fake count.
-        if (live) setCrew(null);
+      // The ratio is a plain count of the board — the same rows the Board and
+      // List lenses draw, so the number in the rail and the cards on the page
+      // are the same claim. This used to project the crew graph through
+      // `readyViewToMission` and read the whole proof ledger on every tick,
+      // ten seconds apart, to answer a question the board answers by looking
+      // at itself.
+      const [board, graph] = await Promise.allSettled([
+        loadTasksForRoots(roots),
+        // "An agent is on it right now" is the open project's answer — the crew
+        // graph the user is standing in, not a sum across projects they aren't
+        // looking at.
+        fetchReadyView(roots[0]!),
+      ]);
+      if (!live) return;
+      if (board.status !== "fulfilled" || !Array.isArray(board.value)) {
+        // No board (or a transient read error) — leave the badge off rather
+        // than show a fake count.
+        setCrew(null);
+        return;
       }
+      const tasks = board.value;
+      const working =
+        graph.status === "fulfilled" ? (graph.value?.working?.length ?? 0) : 0;
+      setCrew({
+        done: tasks.filter((t) => t.status === "done").length,
+        total: tasks.length,
+        working,
+      });
     };
     read();
     const id = window.setInterval(read, 10000);
@@ -139,76 +223,46 @@ function useCrewProgress(repoRoot?: string): CrewProgress | null {
       live = false;
       window.clearInterval(id);
     };
-  }, [repoRoot]);
+    // `rootsKey` stands in for `roots` — a fresh array each render would
+    // restart the 10s poll constantly.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [rootsKey]);
   return crew;
 }
 
-/** The small trailing badge on the Crew row. Hidden until there's a graph
- *  with work in it. A dot marks work actively in flight — the one thing here
- *  that is happening right now; the count itself stays plain text, including
- *  when everything is finished (a finished run is not asking for anything). */
-function CrewProgressBadge({ crew }: { crew: CrewProgress | null }) {
+/** The small trailing badge on the Tasks row. Hidden until there's work in
+ *  the board. A dot marks work actively in flight — the one thing
+ *  here that is happening right now; the count itself stays quiet, including
+ *  when everything is finished (a finished run is not asking for anything).
+ *
+ *  It reads as progress, not as an ask: the amber pill beside Team and Trace
+ *  means "N things are waiting for you", and how much of a crew's plan has
+ *  landed is not that. Same tier, no fill — `.prog` in styles.css. */
+function CrewProgressBadge({ crew }: { crew: WorkProgress | null }) {
   if (!crew || crew.total === 0) return null;
-  const allDone = crew.done >= crew.total;
-  const color = allDone ? "var(--color-text-2)" : "var(--color-text-3)";
   return (
     <span
-      className="ade-bnav-crew-badge"
-      title={`${crew.done} of ${crew.total} done${
-        crew.working > 0 ? ` · ${crew.working} working` : ""
+      className="prog"
+      title={`${crew.done} of ${crew.total} tasks done${
+        crew.working > 0
+          ? ` · ${crew.working} being worked by an agent right now`
+          : ""
       }`}
-      style={{
-        flex: "none",
-        display: "inline-flex",
-        alignItems: "center",
-        gap: "4px",
-        marginLeft: "4px",
-        fontSize: "10px",
-        fontVariantNumeric: "tabular-nums",
-        letterSpacing: "0.02em",
-        color,
-      }}
     >
       {crew.working > 0 && (
-        <span
-          aria-hidden="true"
-          style={{
-            flex: "none",
-            width: "5px",
-            height: "5px",
-            borderRadius: "999px",
-            // Work actually in flight — amber, the pack's "an agent is on
-            // it" slot, matching CrewCanvas's STATUS_DOT.working and the
-            // Automations run dot. It is not the accent: this row already
-            // takes the accent when it is the section you are standing in,
-            // and one row cannot wear the same paint for two meanings.
-            background: "var(--color-amber)",
-          }}
-        />
+        // Work actually in flight — amber, the pack's "an agent is on it"
+        // slot, matching CrewCanvas's STATUS_DOT.working and the Automations
+        // run dot.
+        <span className="dot" aria-hidden="true" />
       )}
       {crew.done}/{crew.total}
     </span>
   );
 }
 
-function PlusGlyph() {
-  return (
-    <svg
-      viewBox="0 0 24 24"
-      fill="none"
-      stroke="currentColor"
-      strokeWidth="2"
-      strokeLinecap="round"
-    >
-      <path d="M12 5v14M5 12h14" />
-    </svg>
-  );
-}
-
 function LayersGlyph() {
   return (
     <svg
-      className="ade-bnav-glyph"
       viewBox="0 0 24 24"
       fill="none"
       stroke="currentColor"
@@ -222,11 +276,12 @@ function LayersGlyph() {
   );
 }
 
-function MissionGlyph() {
-  // A gauge / mission-control mark — one dial watching everything at once.
+function TasksGlyph() {
+  // A checklist — the plainest possible mark for "things that need doing".
+  // It replaced a gauge dial, which drew the old name (a control room you
+  // watch) rather than the thing the row is about.
   return (
     <svg
-      className="ade-bnav-glyph"
       viewBox="0 0 24 24"
       fill="none"
       stroke="currentColor"
@@ -234,10 +289,9 @@ function MissionGlyph() {
       strokeLinecap="round"
       strokeLinejoin="round"
     >
-      <path d="M12 21a9 9 0 1 0-9-9" />
-      <path d="M3 12h2M12 3v2M19 5l-1.5 1.5" />
-      <path d="m12 12 4-2.5" />
-      <circle cx="12" cy="12" r="1.4" fill="currentColor" stroke="none" />
+      <path d="m3 6 2 2 3.5-3.5" />
+      <path d="m3 14 2 2 3.5-3.5" />
+      <path d="M12 6.5h9M12 15.5h9" />
     </svg>
   );
 }

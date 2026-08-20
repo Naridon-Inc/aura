@@ -258,9 +258,9 @@ function PlanWizardDecisionBar({
             onChange={setParallelism}
             ariaLabel="Build parallelism"
             options={[
-              { value: "auto", label: "Auto" },
-              { value: "parallel", label: "Parallel" },
-              { value: "serial", label: "Serial" },
+              { value: "auto", label: "When safe" },
+              { value: "parallel", label: "All at once" },
+              { value: "serial", label: "One at a time" },
             ]}
           />
         </div>
@@ -306,7 +306,7 @@ function PlanWizardDecisionBar({
           size="sm"
           disabled={submitting !== null}
           onClick={() => void decide("build")}
-          title="Waiting for your go-ahead — start building this plan"
+          title="Waiting for your go-ahead. Start building this plan"
         >
           {submitting === "build" ? "Building…" : "Build"}
         </Button>

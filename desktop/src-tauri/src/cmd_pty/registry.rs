@@ -76,7 +76,10 @@ impl PtyRegistry {
     pub fn kill_all(&self) {
         let mut sessions = self.sessions.lock().unwrap();
         for (_, sess) in sessions.drain() {
-            let _ = sess.child.lock().unwrap().kill();
+            // Hangs up each session's whole process group — quitting the app
+            // has to stop the dev servers and watchers its terminals started,
+            // not just the shells that started them.
+            crate::pty_reap::hangup_and_reap(&mut **sess.child.lock().unwrap());
         }
     }
 

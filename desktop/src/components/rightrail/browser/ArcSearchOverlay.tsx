@@ -55,12 +55,12 @@ export function ArcSearchOverlay({
             onClick={onClose}
             title="Back to page"
             aria-label="Back to page"
-            className="flex items-center justify-center w-7 h-7 rounded-full text-text-3 hover:text-text-1 hover:bg-bg-3 transition-colors"
+            className="flex items-center justify-center w-7 h-7 rounded-full text-text-3 hover:text-text-1 hover:bg-state-hover transition-colors"
           >
             <ArrowLeft className="h-4 w-4" />
           </button>
         )}
-        <div className="flex items-center gap-1.5 text-[11px] text-text-3">
+        <div className="flex items-center gap-1.5 text-xs text-text-3">
           <Sparkles className="h-3 w-3 text-accent" />
           Tap <span className="font-semibold text-text-2">Browse for me</span> for a faster answer
         </div>
@@ -78,7 +78,7 @@ export function ArcSearchOverlay({
             spellCheck={false}
             autoCapitalize="off"
             autoCorrect="off"
-            className="flex-1 min-w-0 bg-transparent text-[14px] text-text-1 placeholder:text-text-4 outline-none"
+            className="flex-1 min-w-0 bg-transparent text-md text-text-1 placeholder:text-text-4 outline-none"
           />
           <Mic className="h-4 w-4 text-text-4 flex-shrink-0" />
           <Glasses className="h-4 w-4 text-text-4 flex-shrink-0" />
@@ -90,7 +90,7 @@ export function ArcSearchOverlay({
         {suggestions.length === 0 ? (
           <div className="flex flex-col items-center justify-center h-full gap-2 px-6 text-center">
             <Search className="h-7 w-7 text-text-4" strokeWidth={1.5} />
-            <div className="text-[12px] text-text-3">Search the web or ask anything</div>
+            <div className="text-sm text-text-3">Search the web or ask anything</div>
           </div>
         ) : (
           suggestions.map((s, i) => (
@@ -120,22 +120,25 @@ function SuggestionRow({
   onBrowse: () => void;
 }) {
   return (
-    <div className="group flex items-center gap-2 pl-2.5 pr-1.5 py-1 rounded-xl hover:bg-bg-2 transition-colors">
+    <div className="group flex items-center gap-2 pl-2.5 pr-1.5 py-1 rounded-xl hover:bg-state-hover transition-colors">
       <button
         type="button"
         onClick={onSearch}
         className="flex items-center gap-2.5 flex-1 min-w-0 py-1.5 text-left"
       >
         <Search className="h-4 w-4 flex-shrink-0 text-text-4" />
-        <span className="text-[13.5px] text-text-1 truncate">{query}</span>
+        <span className="text-md text-text-1 truncate">{query}</span>
       </button>
       <button
         type="button"
         onClick={onBrowse}
-        className={`flex-shrink-0 h-7 px-3 rounded-full text-[11px] font-medium transition-colors ${
+        className={`flex-shrink-0 h-7 px-3 rounded-full text-xs font-medium transition-colors ${
           primary
             ? "bg-accent text-[color:var(--color-accent-foreground)] hover:bg-accent/90"
-            : "bg-bg-3 text-text-2 hover:text-text-1 hover:bg-bg-3/80"
+            : // Hover brightens. This was `hover:bg-bg-3/80` — the one control
+              // left in the app that faded on hover, so pointing at it read as
+              // the button backing away rather than answering.
+              "bg-bg-3 text-text-2 hover:text-text-1 hover:bg-state-hover"
         }`}
       >
         Browse for me

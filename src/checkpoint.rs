@@ -23,6 +23,14 @@ pub struct CheckpointData {
     pub agent_id: String,
     pub intent: String,
     pub ast_nodes: Vec<AstNode>,
+    /// When this checkpoint was written. **Milliseconds** since the epoch —
+    /// read it through [`CheckpointData::written_at_ms`] rather than directly,
+    /// because notes on disk are not all in the same unit: `aura init` wrote
+    /// its baseline checkpoint in seconds while every other writer used
+    /// milliseconds, so a repo initialised before that was fixed still has
+    /// both. Comparing a seconds value against a milliseconds clock silently
+    /// saturates to zero, which is how "graph is 0 seconds old" ended up on
+    /// every atlas and every deletion-impact confidence score.
     pub timestamp: u64,
     #[serde(default)]
     pub intent_vector: Option<Vec<f32>>,
@@ -33,6 +41,45 @@ pub struct CheckpointData {
     pub intent_vector_model: Option<String>,
     #[serde(default)]
     pub env_fingerprint: Option<String>,
+    /// Content address of every file whose nodes are in `ast_nodes`, keyed by
+    /// the same `file_path` those nodes carry. The value is a git blob OID —
+    /// an exact content hash — so the next capture can tell, without reading a
+    /// byte of source, which files are unchanged and reuse their nodes instead
+    /// of re-parsing them.
+    ///
+    /// Additive and self-healing: a checkpoint written before this field
+    /// deserializes with an empty map, which simply means "nothing to reuse"
+    /// and costs one full parse.
+    #[serde(default)]
+    pub file_oids: std::collections::HashMap<String, String>,
+}
+
+impl CheckpointData {
+    /// Any epoch value below this is too small to be milliseconds — it would
+    /// put the checkpoint before 2001 — so it is a legacy seconds value.
+    /// Milliseconds stay above it until the year 33658.
+    const MILLIS_FLOOR: u64 = 1_000_000_000_000;
+
+    /// When this checkpoint was written, in milliseconds since the epoch,
+    /// with legacy seconds-valued checkpoints converted.
+    pub fn written_at_ms(&self) -> u64 {
+        if self.timestamp < Self::MILLIS_FLOOR {
+            self.timestamp.saturating_mul(1000)
+        } else {
+            self.timestamp
+        }
+    }
+
+    /// How long ago this checkpoint was written, in seconds. A checkpoint
+    /// stamped in the future (clock skew, or a note fetched from a machine
+    /// running ahead) reads as 0 rather than wrapping.
+    pub fn age_secs(&self) -> u64 {
+        let now_ms = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0);
+        now_ms.saturating_sub(self.written_at_ms()) / 1000
+    }
 }
 
 /// A durable file-level snapshot stored on disk in .aura/snapshots/
@@ -273,6 +320,24 @@ pub struct CheckpointStore;
 impl CheckpointStore {
     const NOTES_REF: &'static str = "refs/notes/aura";
 
+    /// Version stamp carried in every `file_oids` value.
+    ///
+    /// The cache says "this file's bytes are unchanged, so its AST is
+    /// unchanged" — which is only true while the parser produces the same nodes
+    /// for the same bytes. Bump this whenever the grammar set, the node shape or
+    /// the hashing changes, and every cached entry stops matching, so the next
+    /// capture re-parses from source instead of trusting a stale AST.
+    pub const AST_CACHE_VERSION: u32 = 1;
+
+    /// Build a `file_oids` value from a git blob OID.
+    ///
+    /// The OID is an exact content hash, so two files with the same key have
+    /// byte-identical contents; the version prefix makes the key also mean "and
+    /// this parser would produce the same nodes for it".
+    pub fn content_key(blob_oid: &str) -> String {
+        format!("v{}:{}", Self::AST_CACHE_VERSION, blob_oid)
+    }
+
     /// Save the checkpoint data locally in a temp file during pre-commit
     pub fn stage_checkpoint(data: &CheckpointData) -> Result<(), Box<dyn std::error::Error>> {
         let json = serde_json::to_string_pretty(data)?;
@@ -355,8 +420,164 @@ impl CheckpointStore {
         self::walk_notes_tree(repo, &tree, &mut checkpoints)?;
         
         // Sort by timestamp descending
-        checkpoints.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
+        // Through the accessor, not the raw field: notes written before the
+        // unit was made uniform are in seconds, and comparing those against
+        // milliseconds sorts every legacy checkpoint to the bottom regardless
+        // of when it was actually written.
+        checkpoints.sort_by(|a, b| b.written_at_ms().cmp(&a.written_at_ms()));
         Ok(checkpoints)
+    }
+
+    /// How far back down the notes ref's own history to look for the last note
+    /// that was written, before giving up and reading everything. Any commit on
+    /// that ref that touches a note ends the search, so this only ever advances
+    /// past commits that changed nothing we can read — the bound exists so a
+    /// corrupt or foreign notes ref cannot turn into an unbounded walk.
+    const WRITE_LOG_LOOKBACK: usize = 128;
+
+    /// The most recently written checkpoint.
+    ///
+    /// Equivalent to `get_all_checkpoints(repo)?.into_iter().next()`, without
+    /// its cost. That call inflates and deserializes every note — on this repo,
+    /// 423 notes totalling 4.4 GB, about 14 seconds — to build a `Vec` that the
+    /// caller then throws away except for its first element.
+    ///
+    /// The shortcut is that `refs/notes/aura` is its own write log: every
+    /// `add_note` appends a commit to it, so the newest commit on that ref names
+    /// the note that was written last. Walk back to the first commit that
+    /// touched a note and read only that one.
+    ///
+    /// Two properties worth stating, because they are what make this equivalent
+    /// rather than merely similar:
+    ///
+    ///   - It orders by when a checkpoint was *written*, which is what
+    ///     `CheckpointData::timestamp` records — it is stamped from the clock
+    ///     immediately before the note is added. Ordering by the annotated
+    ///     commit's date would not be the same thing: checkpoints are attached
+    ///     to HEAD, and HEAD is routinely days older than the checkpoint, so in
+    ///     a repo with several worktrees the newest commit carrying a note is
+    ///     often not the one whose checkpoint was written last.
+    ///   - A note that is overwritten counts as a write, which is correct:
+    ///     re-checkpointing the same commit does produce the newest checkpoint.
+    ///
+    /// Falls back to the full scan if the write log yields nothing readable, so
+    /// a repo whose notes ref was rebuilt by other tooling still gets an answer.
+    pub fn latest_checkpoint(
+        repo: &Repository,
+    ) -> Result<Option<CheckpointData>, Box<dyn std::error::Error>> {
+        Ok(Self::latest_checkpoints(repo, 1)?.into_iter().next())
+    }
+
+    /// The newest `limit` checkpoints, newest first, without reading the rest.
+    ///
+    /// Almost every caller wants a bounded prefix — the latest one for a status
+    /// line, ten for a history listing, a handful to assemble context — and
+    /// getting it through `get_all_checkpoints` costs the whole store. On this
+    /// repo that is 423 notes, 4.7 GB and 2.9 million AST nodes; the ten newest
+    /// are a few megabytes, because a checkpoint is only large on the runs that
+    /// captured a large tree.
+    ///
+    /// Returns fewer than `limit` when the store holds fewer — that is a
+    /// complete answer, not a truncated one. Falls back to the full scan only
+    /// when the write log yields nothing at all.
+    pub fn latest_checkpoints(
+        repo: &Repository,
+        limit: usize,
+    ) -> Result<Vec<CheckpointData>, Box<dyn std::error::Error>> {
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+        let found = Self::from_write_log(repo, limit);
+        if !found.is_empty() {
+            return Ok(found);
+        }
+        Ok(Self::get_all_checkpoints(repo)?
+            .into_iter()
+            .take(limit)
+            .collect())
+    }
+
+    /// How many checkpoints the store holds, without reading any of them.
+    ///
+    /// A note's existence is a tree entry; the megabytes are in the blob it
+    /// points at, and counting never needs them.
+    pub fn count(repo: &Repository) -> usize {
+        match repo.notes(Some(Self::NOTES_REF)) {
+            Ok(notes) => notes.count(),
+            Err(_) => 0,
+        }
+    }
+
+    /// Walk `refs/notes/aura` backwards, newest first, reading the notes each
+    /// commit touched until `limit` distinct checkpoints have been collected.
+    ///
+    /// Empty means the write log could not answer — no such ref, or nothing
+    /// readable within [`Self::WRITE_LOG_LOOKBACK`] consecutive commits that
+    /// changed no note we can parse. The bound counts *barren* commits rather
+    /// than steps, so a long history does not cut the walk short while it is
+    /// still producing checkpoints, and a corrupt or foreign notes ref still
+    /// cannot turn into an unbounded walk.
+    fn from_write_log(repo: &Repository, limit: usize) -> Vec<CheckpointData> {
+        let Some(mut commit) = repo
+            .find_reference(Self::NOTES_REF)
+            .ok()
+            .and_then(|r| r.peel_to_commit().ok())
+        else {
+            return Vec::new();
+        };
+
+        let mut out: Vec<CheckpointData> = Vec::new();
+        let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let mut barren = 0usize;
+
+        loop {
+            let Ok(tree) = commit.tree() else { break };
+            let parent_tree = commit.parent(0).ok().and_then(|p| p.tree().ok());
+            let Ok(diff) = repo.diff_tree_to_tree(parent_tree.as_ref(), Some(&tree), None) else {
+                break;
+            };
+
+            // Normally exactly one note changed. More than one means a merge or
+            // an import of somebody else's notes, so the batch is ordered among
+            // itself before being taken.
+            let mut batch: Vec<CheckpointData> = Vec::new();
+            for delta in diff.deltas() {
+                if !matches!(delta.status(), git2::Delta::Added | git2::Delta::Modified) {
+                    continue;
+                }
+                let Ok(blob) = repo.find_blob(delta.new_file().id()) else {
+                    continue;
+                };
+                let Ok(parsed) = serde_json::from_slice::<CheckpointData>(blob.content()) else {
+                    continue;
+                };
+                batch.push(parsed);
+            }
+            batch.sort_by(|a, b| b.written_at_ms().cmp(&a.written_at_ms()));
+
+            let before = out.len();
+            for cp in batch {
+                // A note that is rewritten appears again further back; the
+                // first time we meet it is the newest version of it.
+                if seen.insert(cp.id.clone()) {
+                    out.push(cp);
+                    if out.len() >= limit {
+                        return out;
+                    }
+                }
+            }
+
+            barren = if out.len() > before { 0 } else { barren + 1 };
+            if barren >= Self::WRITE_LOG_LOOKBACK {
+                break;
+            }
+            match commit.parent(0) {
+                Ok(parent) => commit = parent,
+                Err(_) => break,
+            }
+        }
+
+        out
     }
 
     /// Retrieve the checkpoint that best represents the code **at a given commit** —
@@ -616,7 +837,11 @@ impl CheckpointStore {
         let tree = repo.find_tree(tree_oid)?;
 
         // Commit onto the shadow branch
-        let msg = format!("aura: checkpoint {} (session {})", &data.id[..8], session_num);
+        let msg = format!(
+            "aura: checkpoint {} (session {})",
+            crate::text::clip(&data.id, 8),
+            session_num
+        );
         if let Some(ref parent_commit) = parent {
             repo.commit(
                 Some(&format!("refs/heads/{}", Self::SHADOW_BRANCH)),
@@ -703,7 +928,11 @@ impl CheckpointStore {
             }
         }
 
-        checkpoints.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
+        // Through the accessor, not the raw field: notes written before the
+        // unit was made uniform are in seconds, and comparing those against
+        // milliseconds sorts every legacy checkpoint to the bottom regardless
+        // of when it was actually written.
+        checkpoints.sort_by(|a, b| b.written_at_ms().cmp(&a.written_at_ms()));
         Ok(checkpoints)
     }
 }
@@ -729,4 +958,320 @@ fn walk_notes_tree(repo: &Repository, tree: &git2::Tree, checkpoints: &mut Vec<C
         }
     }
     Ok(())
+}
+
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use git2::{Oid, Time};
+
+    fn now_ms() -> u64 {
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as u64
+    }
+
+    fn checkpoint(id: &str, timestamp: u64) -> CheckpointData {
+        CheckpointData {
+            id: id.to_string(),
+            agent_id: "test-agent".to_string(),
+            intent: format!("checkpoint {id}"),
+            ast_nodes: Vec::new(),
+            timestamp,
+            intent_vector: None,
+            intent_vector_model: None,
+            env_fingerprint: None,
+            // Nothing to reuse: these fixtures carry no ast_nodes, so there is
+            // no file whose blob OID a later capture could match against.
+            file_oids: Default::default(),
+        }
+    }
+
+    /// A commit with a chosen committer date, so a fixture can put the newest
+    /// commit and the newest checkpoint on different commits.
+    fn commit_at(repo: &Repository, when: i64, message: &str) -> Oid {
+        let time = Time::new(when, 0);
+        let signature = Signature::new("Aura Test", "test@aura.local", &time).unwrap();
+        let tree_oid = repo.treebuilder(None).unwrap().write().unwrap();
+        let tree = repo.find_tree(tree_oid).unwrap();
+
+        match repo.head().and_then(|head| head.peel_to_commit()) {
+            Ok(parent) => repo
+                .commit(Some("HEAD"), &signature, &signature, message, &tree, &[&parent])
+                .unwrap(),
+            Err(_) => repo
+                .commit(Some("HEAD"), &signature, &signature, message, &tree, &[])
+                .unwrap(),
+        }
+    }
+
+    /// Three commits, oldest first, with committer dates a day apart.
+    fn repo_with_three_commits() -> (tempfile::TempDir, Repository, Vec<Oid>) {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = Repository::init(dir.path()).unwrap();
+        let commits = (0..3)
+            .map(|i| commit_at(&repo, 1_700_000_000 + i * 86_400, &format!("commit-{i}")))
+            .collect();
+        (dir, repo, commits)
+    }
+
+    fn write_checkpoint(repo: &Repository, commit: Oid, id: &str, timestamp: u64) {
+        let commit = repo.find_commit(commit).unwrap();
+        CheckpointStore::add_note(repo, &commit, &checkpoint(id, timestamp)).unwrap();
+    }
+
+    #[test]
+    fn latest_checkpoint_agrees_with_the_full_scan() {
+        // The production case: checkpoints are stamped from the clock as they
+        // are written, so write order and timestamp order are the same and the
+        // shortcut must land on exactly what reading everything would.
+        let (_dir, repo, commits) = repo_with_three_commits();
+        let base = now_ms();
+        for (i, commit) in commits.iter().enumerate() {
+            write_checkpoint(&repo, *commit, &format!("checkpoint-{i}"), base + i as u64 * 1000);
+        }
+
+        let all = CheckpointStore::get_all_checkpoints(&repo).unwrap();
+        let latest = CheckpointStore::latest_checkpoint(&repo).unwrap().unwrap();
+
+        assert_eq!(latest.id, all.first().unwrap().id);
+        assert_eq!(latest.timestamp, all.first().unwrap().timestamp);
+    }
+
+    #[test]
+    fn latest_checkpoint_is_the_one_written_last_not_the_one_on_the_newest_commit() {
+        // Checkpoints attach to HEAD, and HEAD is routinely days older than the
+        // checkpoint — a branch you have not committed to today still gets a
+        // checkpoint written today. Ordering by the annotated commit's date
+        // would hand back the other branch's older graph.
+        let (_dir, repo, commits) = repo_with_three_commits();
+        let base = now_ms();
+
+        // Newest commit, written first — and therefore NOT the answer.
+        write_checkpoint(&repo, commits[2], "on-the-newest-commit", base);
+        // Oldest commit, written last — the current picture.
+        write_checkpoint(&repo, commits[0], "written-last", base + 5_000);
+
+        let latest = CheckpointStore::latest_checkpoint(&repo).unwrap().unwrap();
+        assert_eq!(latest.id, "written-last");
+        assert_eq!(
+            latest.id,
+            CheckpointStore::get_all_checkpoints(&repo).unwrap()[0].id,
+        );
+    }
+
+    #[test]
+    fn re_checkpointing_the_same_commit_is_the_newest_write() {
+        let (_dir, repo, commits) = repo_with_three_commits();
+        let base = now_ms();
+        write_checkpoint(&repo, commits[0], "first", base);
+        write_checkpoint(&repo, commits[1], "second", base + 1_000);
+        write_checkpoint(&repo, commits[0], "overwrote-the-first", base + 2_000);
+
+        let latest = CheckpointStore::latest_checkpoint(&repo).unwrap().unwrap();
+        assert_eq!(latest.id, "overwrote-the-first");
+    }
+
+    #[test]
+    fn latest_checkpoint_is_none_without_notes_ref() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = Repository::init(dir.path()).unwrap();
+
+        assert!(CheckpointStore::latest_checkpoint(&repo).unwrap().is_none());
+    }
+
+    #[test]
+    fn a_prefix_is_the_same_prefix_the_full_scan_would_give() {
+        // The whole point of the bounded walk: a caller asking for the newest
+        // few must get exactly what reading all of them and taking the first
+        // few would give, or it is a different answer that merely looks cheaper.
+        let (_dir, repo, commits) = repo_with_three_commits();
+        let base = now_ms();
+        for (i, commit) in commits.iter().enumerate() {
+            write_checkpoint(&repo, *commit, &format!("checkpoint-{i}"), base + i as u64 * 1000);
+        }
+
+        let all = CheckpointStore::get_all_checkpoints(&repo).unwrap();
+        for limit in 1..=3 {
+            let prefix = CheckpointStore::latest_checkpoints(&repo, limit).unwrap();
+            let expected: Vec<&str> = all.iter().take(limit).map(|c| c.id.as_str()).collect();
+            let got: Vec<&str> = prefix.iter().map(|c| c.id.as_str()).collect();
+            assert_eq!(got, expected, "limit {limit}");
+        }
+    }
+
+    #[test]
+    fn asking_for_more_than_exist_returns_what_there_is() {
+        // A short answer here is complete, not truncated — and it must not send
+        // the caller down the full-scan fallback, which would read everything
+        // to arrive at the same list.
+        let (_dir, repo, commits) = repo_with_three_commits();
+        let base = now_ms();
+        write_checkpoint(&repo, commits[0], "only-one", base);
+
+        let found = CheckpointStore::latest_checkpoints(&repo, 50).unwrap();
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].id, "only-one");
+    }
+
+    #[test]
+    fn asking_for_none_reads_nothing() {
+        let (_dir, repo, commits) = repo_with_three_commits();
+        write_checkpoint(&repo, commits[0], "unread", now_ms());
+
+        assert!(CheckpointStore::latest_checkpoints(&repo, 0).unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_rewritten_checkpoint_appears_once() {
+        // Re-checkpointing a commit replaces its note, and the old version is
+        // still down the write log. Without the dedupe a caller asking for two
+        // gets the same checkpoint twice and never sees the second-newest.
+        let (_dir, repo, commits) = repo_with_three_commits();
+        let base = now_ms();
+        write_checkpoint(&repo, commits[0], "older", base);
+        write_checkpoint(&repo, commits[1], "newer", base + 1_000);
+        write_checkpoint(&repo, commits[1], "newer", base + 2_000);
+
+        let found = CheckpointStore::latest_checkpoints(&repo, 2).unwrap();
+        let ids: Vec<&str> = found.iter().map(|c| c.id.as_str()).collect();
+        assert_eq!(ids, vec!["newer", "older"]);
+    }
+
+    #[test]
+    fn counting_does_not_depend_on_reading_them() {
+        // `count` exists because callers report a total beside a bounded read,
+        // and the bounded read cannot supply it — its length is the limit.
+        let (_dir, repo, commits) = repo_with_three_commits();
+        let base = now_ms();
+        for (i, commit) in commits.iter().enumerate() {
+            write_checkpoint(&repo, *commit, &format!("checkpoint-{i}"), base + i as u64 * 1000);
+        }
+
+        assert_eq!(CheckpointStore::count(&repo), 3);
+        assert_eq!(CheckpointStore::latest_checkpoints(&repo, 1).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn counting_an_empty_store_is_zero_not_an_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = Repository::init(dir.path()).unwrap();
+
+        assert_eq!(CheckpointStore::count(&repo), 0);
+    }
+
+    #[test]
+    fn a_seconds_timestamp_is_the_same_moment_as_its_milliseconds_twin() {
+        let secs = checkpoint("legacy", 1_700_000_000);
+        let millis = checkpoint("current", 1_700_000_000_000);
+        assert_eq!(secs.written_at_ms(), millis.written_at_ms());
+    }
+
+    #[test]
+    fn a_checkpoint_written_an_hour_ago_is_an_hour_old_in_either_unit() {
+        // The bug this exists to stop: `aura init` stamped seconds while every
+        // other writer stamped milliseconds, and the age was computed against a
+        // milliseconds clock. A seconds value is ~1000x too small, the
+        // subtraction saturates, and the graph reports itself as brand new
+        // forever — which fed a High confidence score onto stale deletion
+        // analysis and printed "0 seconds old" on every atlas.
+        let hour_ago_ms = now_ms() - 3_600_000;
+        let in_millis = checkpoint("millis", hour_ago_ms);
+        let in_seconds = checkpoint("seconds", hour_ago_ms / 1000);
+
+        for cp in [&in_millis, &in_seconds] {
+            let age = cp.age_secs();
+            assert!(
+                (3_590..=3_610).contains(&age),
+                "{} reported an age of {age}s, expected about 3600",
+                cp.id,
+            );
+        }
+    }
+
+    #[test]
+    fn a_checkpoint_stamped_in_the_future_reads_as_new_rather_than_wrapping() {
+        let ahead = checkpoint("skewed", now_ms() + 60_000);
+        assert_eq!(ahead.age_secs(), 0);
+    }
+
+    #[test]
+    fn the_full_scan_orders_mixed_units_by_when_they_were_really_written() {
+        let (_dir, repo, commits) = repo_with_three_commits();
+        let now = now_ms();
+        // Older, but stamped in milliseconds; newer, but stamped in seconds.
+        write_checkpoint(&repo, commits[0], "older-millis", now - 86_400_000);
+        write_checkpoint(&repo, commits[1], "newer-seconds", now / 1000);
+
+        let all = CheckpointStore::get_all_checkpoints(&repo).unwrap();
+        assert_eq!(all[0].id, "newer-seconds");
+        assert_eq!(all[1].id, "older-millis");
+    }
+
+    /// The reason anchoring exists: `refs/notes/aura` is ONE store shared by
+    /// every worktree and every branch, so "the newest checkpoint" is whoever
+    /// committed last *anywhere*. A crew loop building three branches at once
+    /// would otherwise grade one branch's goal against another branch's code —
+    /// and report a confident, wrong zero that throws the work away.
+    #[test]
+    fn a_commit_resolves_to_its_own_snapshot_not_the_newest_one() {
+        let (_dir, repo, commits) = repo_with_three_commits();
+        let base = now_ms();
+        write_checkpoint(&repo, commits[0], "its-own", base);
+        write_checkpoint(&repo, commits[2], "somebody-elses", base + 5_000);
+
+        let found = CheckpointStore::get_checkpoint_for_commit(&repo, &commits[0].to_string())
+            .expect("the commit carries a note");
+        assert_eq!(found.id, "its-own");
+        // …and the unanchored path really would have handed back the other one.
+        assert_eq!(CheckpointStore::latest_checkpoint(&repo).unwrap().unwrap().id, "somebody-elses");
+    }
+
+    /// A short sha is what the loop actually has to hand, and `HEAD` is what a
+    /// hook has — both must resolve to the same note as the full oid.
+    #[test]
+    fn a_short_sha_and_a_symbolic_rev_resolve_the_same_as_the_full_oid() {
+        let (_dir, repo, commits) = repo_with_three_commits();
+        write_checkpoint(&repo, commits[2], "on-head", now_ms());
+
+        let full = commits[2].to_string();
+        for rev in [&full[..9], "HEAD", full.as_str()] {
+            assert_eq!(
+                CheckpointStore::get_checkpoint_for_commit(&repo, rev).unwrap().id,
+                "on-head",
+                "rev {rev} should resolve to the note on that commit",
+            );
+        }
+    }
+
+    /// When a commit has no note of its own — the agent committed with hooks
+    /// skipped — the nearest DESCENDANT is preferred over the nearest ancestor,
+    /// because a later snapshot at least contains the work, while an earlier one
+    /// predates it and would read as "nothing was built".
+    #[test]
+    fn a_bare_commit_prefers_the_snapshot_taken_after_it_over_the_one_before() {
+        let (_dir, repo, commits) = repo_with_three_commits();
+        let base = now_ms();
+        write_checkpoint(&repo, commits[0], "before-the-work", base);
+        write_checkpoint(&repo, commits[2], "after-the-work", base + 1_000);
+
+        // commits[1] carries no note; both neighbours do.
+        let found = CheckpointStore::get_checkpoint_for_commit(&repo, &commits[1].to_string())
+            .expect("a neighbour snapshot stands in");
+        assert_eq!(found.id, "after-the-work");
+    }
+
+    /// Nothing to check against is `None`, which callers turn into an `unknown`
+    /// verdict. `unknown` never fails a node — discarding good work over missing
+    /// evidence is the failure mode this whole path exists to avoid.
+    #[test]
+    fn no_notes_ref_and_an_unknown_rev_are_both_none() {
+        let (_dir, repo, commits) = repo_with_three_commits();
+        assert!(CheckpointStore::get_checkpoint_for_commit(&repo, &commits[0].to_string()).is_none());
+
+        write_checkpoint(&repo, commits[0], "only", now_ms());
+        assert!(CheckpointStore::get_checkpoint_for_commit(&repo, "deadbeefdeadbeef").is_none());
+    }
 }

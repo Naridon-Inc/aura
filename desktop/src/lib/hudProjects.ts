@@ -16,6 +16,7 @@
 
 import { api } from "./api";
 import type { LivePtySession, ProjectEntry, WorktreeEntry } from "./api";
+import { sentenceCase } from "./textCase";
 
 /** A worktree instance of a project (the main checkout, or a parallel copy). */
 export type HudInstance = {
@@ -71,7 +72,10 @@ export function sameRoot(a: string | null | undefined, b: string | null | undefi
  *  original repo root. */
 export function projectIdForRoot(
   root: string,
-  projects: ProjectEntry[],
+  /** Anything carrying the two fields this reads. Widened from `ProjectEntry[]`
+   *  so the place-scope resolver can pass its own lighter rows instead of
+   *  growing a second copy of the managed/sibling layout regexes. */
+  projects: Array<{ id: string; root: string }>,
 ): string | null {
   // Managed layout `<store>/p-<id>/<branch>` embeds the project id directly.
   const m = root.match(MANAGED_ID_RE);
@@ -133,7 +137,7 @@ export function prettyLeaf(leaf: string): string {
     .replace(/^(?:worktree-)?(?:lane|work)[-_/]/i, "")
     .replace(/[-_/]+/g, " ")
     .trim();
-  return pretty ? pretty.charAt(0).toUpperCase() + pretty.slice(1) : "Copy";
+  return pretty ? sentenceCase(pretty) : "Copy";
 }
 
 function instanceLabel(w: WorktreeEntry): string {

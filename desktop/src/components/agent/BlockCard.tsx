@@ -75,7 +75,7 @@ export function BlockCard({ block, focused = false, exit = null }: Props) {
         border: `1px solid ${focused ? tone : "var(--color-line)"}`,
       }}
     >
-      <div className="flex items-center gap-2 text-[10.5px] uppercase tracking-wider">
+      <div className="section-label flex items-center gap-2">
         <span
           className="inline-block rounded-full"
           style={{ background: tone, width: 7, height: 7 }}
@@ -108,10 +108,10 @@ export function BlockCard({ block, focused = false, exit = null }: Props) {
 
       {payload && (
         <div className="flex items-start gap-2.5 font-mono">
-          <span style={{ color: prefixColor }} className="text-[13px]">
+          <span style={{ color: prefixColor }} className="text-base">
             {prefix}
           </span>
-          <span className="text-text-1 text-[12.5px] whitespace-pre-wrap break-words flex-1 leading-relaxed">
+          <span className="text-text-1 text-base whitespace-pre-wrap break-words flex-1 leading-relaxed">
             {payload}
           </span>
         </div>
@@ -121,7 +121,7 @@ export function BlockCard({ block, focused = false, exit = null }: Props) {
         <OutputView block={block} state={state} />
       )}
       {block.kind === "output" && collapsed && block.text && (
-        <div className="text-text-4 text-[10.5px] font-mono italic">
+        <div className="text-text-4 text-xs font-mono italic">
           {linesOf(block.text)} lines collapsed · click ▸ to expand
         </div>
       )}
@@ -182,7 +182,7 @@ function ActionButton({
       type="button"
       title={title}
       onClick={onClick}
-      className="text-text-4 hover:text-text-1 hover:bg-bg-1/60 rounded px-1.5 py-0.5 text-[11px] leading-none"
+      className="text-text-4 hover:text-text-1 hover:bg-state-hover rounded px-1.5 py-0.5 text-xs leading-none"
     >
       {children}
     </button>
@@ -197,7 +197,7 @@ function linesOf(s: string): number {
 }
 
 function blockToMarkdown(b: BlockEnvelope): string {
-  const head = `### Block ${b.id?.slice(0, 8) ?? "?"} — ${b.kind}`;
+  const head = `### Block ${b.id?.slice(0, 8) ?? "?"} · ${b.kind}`;
   const sub = b.kind === "exit" ? `exit code: ${b.exit_code ?? 0}` : "";
   const body = b.text ?? "";
   const fenced = body ? `\n\n\`\`\`\n${body}\n\`\`\`` : "";
@@ -215,7 +215,7 @@ function OutputView({
     if (state === "running") {
       return (
         <div
-          className="flex items-center gap-2 px-3 py-1.5 rounded-sm text-[11px] font-mono"
+          className="flex items-center gap-2 px-3 py-1.5 rounded-sm text-xs font-mono"
           style={{
             background: "var(--color-bg-0)",
             border: "1px solid var(--color-line-soft)",
@@ -233,7 +233,7 @@ function OutputView({
   }
   return (
     <pre
-      className="rounded-sm px-3 py-2 text-[11.5px] font-mono leading-relaxed text-text-1 whitespace-pre-wrap break-words overflow-auto max-h-[420px]"
+      className="rounded-sm px-3 py-2 text-sm font-mono leading-relaxed text-text-1 whitespace-pre-wrap break-words overflow-auto max-h-[420px]"
       style={{
         background: "var(--color-bg-0)",
         border: "1px solid var(--color-line-soft)",

@@ -8,7 +8,7 @@
 use serde_json::{json, Value};
 
 use super::{overview, paths};
-use crate::sentinel::SentinelManager;
+use crate::sentinel::{Address, SentinelManager};
 use crate::session::SessionManager;
 
 /// The whole board, plus a one-line summary an agent can act on without
@@ -71,31 +71,43 @@ fn sender() -> (String, String) {
     }
 }
 
-/// Message a checkout by name, a session by id, or everyone.
+/// Message an agent, a checkout, a session by id, or everyone.
+///
+/// `to_worktree` accepts the addressing shorthand as well as a bare checkout
+/// name, so `codex@auckland` works wherever a checkout name does — an agent
+/// that has read one form should not have to learn a second.
 ///
 /// Reports how many sessions the message can actually reach — silence and
 /// "delivered to nobody" look identical otherwise, and an agent that thinks it
 /// has coordinated when it hasn't is worse than one that knows it hasn't.
-pub fn say(message: &str, to_worktree: Option<&str>, to_session: Option<&str>) -> Value {
+pub fn say(
+    message: &str,
+    to_worktree: Option<&str>,
+    to_agent: Option<&str>,
+    to_session: Option<&str>,
+) -> Value {
     if paths::repo_root().is_none() {
         return json!({ "error": "not inside a git repository" });
     }
     let (session_id, agent_id) = sender();
-    SentinelManager::cleanup_old_messages();
-    let msg =
-        SentinelManager::send_message_to(&session_id, &agent_id, to_session, to_worktree, message);
 
-    let recipients = match (to_worktree, to_session) {
-        (Some(w), _) => SentinelManager::sessions_in_worktree(w).len(),
-        (None, Some(_)) => 1,
-        (None, None) => SentinelManager::load_all_claims()
-            .iter()
-            .filter(|c| c.session_id != session_id)
-            .count(),
-    };
+    let mut addr = to_worktree.map(Address::parse).unwrap_or_default();
+    // An explicit `to_agent` wins over one parsed out of `to`, and a session id
+    // narrows further still.
+    if to_agent.is_some() {
+        addr.agent = to_agent.map(str::to_string);
+    }
+    if to_session.is_some() {
+        addr.session = to_session.map(str::to_string);
+    }
+
+    SentinelManager::cleanup_old_messages();
+    let msg = SentinelManager::send_addressed(&session_id, &agent_id, &addr, message);
+    let recipients = SentinelManager::reach_of(&addr, &session_id);
 
     json!({
         "sent": msg,
+        "to": addr.describe(),
         "from_worktree": SentinelManager::worktree_token(paths::current_worktree().as_deref()),
         "recipients": recipients,
         "note": if recipients == 0 {
@@ -107,18 +119,24 @@ pub fn say(message: &str, to_worktree: Option<&str>, to_session: Option<&str>) -
 }
 
 /// What other checkouts have said to this one. Marks them read.
-pub fn inbox(limit: usize) -> Value {
+///
+/// `agent` lets a caller collect mail addressed to it by name before its first
+/// claim lands — the startup case, which is exactly when an agent wants to
+/// know what it has been handed.
+pub fn inbox(limit: usize, agent: Option<&str>) -> Value {
     if paths::repo_root().is_none() {
         return json!({ "error": "not inside a git repository" });
     }
-    let (session_id, _) = sender();
-    let rows: Vec<Value> = SentinelManager::read_messages(&session_id, limit)
+    let (session_id, my_agent) = sender();
+    let reading_as = agent.or(if my_agent == "cli" { None } else { Some(&my_agent) });
+    let rows: Vec<Value> = SentinelManager::read_messages_as(&session_id, reading_as, limit)
         .into_iter()
         .map(|(m, unread)| {
             json!({
                 "from_agent": m.from_agent,
                 "from_worktree": SentinelManager::worktree_token(m.from_worktree.as_deref()),
                 "to_worktree": m.to_worktree,
+                "to_agent": m.to_agent,
                 "content": m.content,
                 "timestamp": m.timestamp,
                 "unread": unread,

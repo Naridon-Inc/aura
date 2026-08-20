@@ -28,6 +28,15 @@ import { TerminalTabsList } from "./TerminalTabsList";
 import { TerminalFindWidget } from "./TerminalFindWidget";
 import { isTerminalFocused } from "../../lib/terminalKeymap";
 import { openPopout } from "../../lib/popout";
+import {
+  focusRun,
+  liveRunTermId,
+  runProject,
+  stopRun,
+  type RunDeps,
+} from "../../lib/runPane";
+import { promptForRunCommand } from "./runPrompt";
+import { claimRunRequest, onRunRequested } from "../../lib/runRequest";
 
 const SIDE_LIST_KEY = "aura.terminal.sideListOpen";
 
@@ -193,6 +202,63 @@ export function TerminalPanel({ repoRoot, maximized, onToggleMaximize, onClosePa
     if (panelActiveTermId) store.closeTerminal(panelActiveTermId);
   }
 
+  // Run — the one reserved terminal per project. The store surface it needs is
+  // built here and passed down rather than imported inside `runPane`, so that
+  // logic stays exercisable without a React tree or a live store.
+  const runDeps = useMemo<RunDeps>(
+    () => ({
+      openPanelTerminal: (cwd, opts) => store.openPanelTerminal(cwd, opts),
+      selectPanelTerminal: (id) => store.selectPanelTerminal(id),
+      closeTerminal: (id) => store.closeTerminal(id),
+      terminals: terminalTabs,
+    }),
+    // `store` is a fresh object each render but its actions mutate a
+    // singleton, so the captured ref stays valid. Only the terminal list
+    // changes what these answer.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [terminalTabs],
+  );
+  const runTermId = useMemo(
+    () => liveRunTermId(repoRoot, runDeps),
+    [repoRoot, runDeps],
+  );
+
+  async function handleRun() {
+    const outcome = await runProject(repoRoot, runDeps);
+    if (outcome.ok) return;
+    // The repo justified no command and none was pinned. Ask — in the same
+    // dialog the row's pencil opens — and run the answer. A cancelled prompt
+    // runs nothing; it does not fall back to a hopeful guess.
+    const chosen = await promptForRunCommand(repoRoot);
+    if (chosen) await runProject(repoRoot, runDeps);
+  }
+
+  function handleFocusRun() {
+    // The row only asks for focus when it believes Run is open. If it isn't
+    // (it was killed from the toolbar a moment ago), start it rather than
+    // doing nothing — the click meant "show me the thing running".
+    if (!focusRun(repoRoot, runDeps)) void handleRun();
+  }
+
+  function handleStopRun() {
+    stopRun(repoRoot, runDeps);
+  }
+
+  // ⌘R can be pressed while the panel is closed, in which case this component
+  // does not exist yet — the keypress opens the panel and *then* wants it to
+  // run. So the request is claimed on subscribe rather than delivered as an
+  // event that a not-yet-mounted panel would miss.
+  useEffect(() => {
+    return onRunRequested(() => {
+      if (claimRunRequest()) void handleRun();
+    });
+    // `handleRun` is re-made every render; the values it closes over are the
+    // two below, so re-binding on those keeps the listener current without
+    // churning on every render. Re-subscribing can't double-run: the claim is
+    // gone after the first one takes it.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [repoRoot, runDeps]);
+
   // Terminal-scoped shortcuts. Both gate on `isTerminalFocused()` so they
   // never hijack the editor: ⌘F opens find (the widget then owns
   // Esc/Enter); ⌘\ splits the active terminal in the panel.
@@ -291,6 +357,10 @@ export function TerminalPanel({ repoRoot, maximized, onToggleMaximize, onClosePa
             onMerge={store.mergeTerminalIntoGroup}
             onDemote={store.demoteTerminalToPanel}
             onKill={store.closeTerminal}
+            runTermId={runTermId}
+            onRun={() => void handleRun()}
+            onFocusRun={handleFocusRun}
+            onStopRun={handleStopRun}
             {...sharedMenuProps}
           />
         )}
@@ -334,7 +404,7 @@ function TerminalBody({
   const tab = soloTermId ? tabs.get(soloTermId) : null;
   if (!tab) {
     return (
-      <div className="h-full w-full grid place-items-center text-text-5 text-[11px]">
+      <div className="h-full w-full grid place-items-center text-text-5 text-xs">
         No terminals.
       </div>
     );

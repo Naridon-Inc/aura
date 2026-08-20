@@ -21,5 +21,10 @@
     "noFallthroughCasesInSwitch": true
   },
   "include": ["src"],
+  /* Tests run under `bun test` and import `bun:test`, whose types ship with
+     the Bun runtime rather than node_modules — tsc can't resolve them and
+     fails the app's typecheck on a module the app never bundles. Bun
+     typechecks them itself when it runs them. */
+  "exclude": ["src/**/*.test.ts", "src/**/*.test.tsx"],
   "references": [{ "path": "./tsconfig.node.json" }]
 }

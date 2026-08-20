@@ -291,7 +291,7 @@ function SpecialistRow({
             ) : (
               findings.length > 0 && (
                 <span
-                  className="t-2xs t-ui uppercase shrink-0"
+                  className="section-label shrink-0"
                   style={{
                     color: "var(--color-text-3)",
                     letterSpacing: "var(--letter-spacing-wide)",
@@ -337,7 +337,7 @@ function SpecialistRow({
           {questions.length > 0 && (
             <div className="flex flex-col gap-1 mt-1">
               <div
-                className="t-2xs t-ui uppercase"
+                className="section-label"
                 style={{
                   color: "var(--color-text-3)",
                   letterSpacing: "var(--letter-spacing-wide)",
@@ -371,7 +371,7 @@ function FindingItem({ finding }: { finding: ScoutFinding }) {
     >
       <div className="flex items-center gap-2">
         <span
-          className="t-2xs t-ui uppercase"
+          className="section-label"
           style={{ color: tone, letterSpacing: "var(--letter-spacing-wide)" }}
         >
           {finding.severity}

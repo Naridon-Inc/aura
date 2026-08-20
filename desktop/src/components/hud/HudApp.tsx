@@ -25,7 +25,7 @@ import {
   useState,
 } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import { getCurrentWindow } from "@tauri-apps/api/window";
+import { beginWindowDrag } from "../../lib/windowDrag";
 
 import { AgentIcon } from "../agent/AgentIcon";
 import { MarkdownInline } from "../MarkdownView";
@@ -61,13 +61,15 @@ import {
 } from "../../lib/hudProjects";
 import { useResolvedTheme } from "../../lib/themeStore";
 import "./hud.css";
-
-function basename(root: string): string {
-  return root.split("/").filter(Boolean).pop() ?? root;
-}
-
+import { basename } from "../../lib/paths";
+import { formatDuration } from "../../lib/duration";
 // Short, plain-language status labels (no engineer jargon — "Ready", not
 // "Idle"). The chip stays glanceable; richer phrasing lives in the glance line.
+/** What the HUD says before anyone has said anything — collapsed in the pill
+ *  and expanded under the ambient sparkle. One string so the two states can't
+ *  drift into two different openings. */
+const GREETING = "Where should we start?";
+
 const STATUS_LABEL: Record<HudStatusKind, string> = {
   idle: "Ready",
   thinking: "Thinking…",
@@ -148,18 +150,6 @@ function readHudNumLS(key: string, fallback: number, lo: number, hi: number): nu
 // through the active conversation like any other send).
 const SIDEBAR_CHIPS = ["Summarize the changes", "Any risks?", "What's next?"];
 
-// Compact time-taken: "8s", "2m 5s", "1h 3m". Mirrors the Aura-chat footer's
-// reply duration (the gap to the prompt it answered).
-function fmtDuration(sec: number): string {
-  if (sec < 1) return "<1s";
-  if (sec < 60) return `${Math.round(sec)}s`;
-  const m = Math.floor(sec / 60);
-  const s = Math.round(sec % 60);
-  if (m < 60) return s ? `${m}m ${s}s` : `${m}m`;
-  const h = Math.floor(m / 60);
-  return `${h}h ${m % 60}m`;
-}
-
 const CopyGlyph = (
   <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
     <rect x="9" y="9" width="11" height="11" rx="2.5" />
@@ -198,7 +188,7 @@ function SidebarTurn({ turn, onOpen }: { turn: HudTurn; onOpen: () => void }) {
         <div className="hud-sb-meta">
           {turn.durationSec != null ? (
             <span className="hud-sb-took" title="Time taken">
-              {fmtDuration(turn.durationSec)}
+              {formatDuration(turn.durationSec)}
             </span>
           ) : null}
           <button type="button" className="hud-sb-act" onClick={copy} title="Copy this reply">
@@ -603,7 +593,7 @@ export function HudApp() {
     if (!d || d.moved) return;
     if (Math.abs(e.screenX - d.x) + Math.abs(e.screenY - d.y) > 4) {
       d.moved = true;
-      void getCurrentWindow().startDragging();
+      beginWindowDrag();
     }
   }, []);
   const onFabClick = useCallback(() => {
@@ -745,7 +735,16 @@ export function HudApp() {
   // status when it hasn't spoken yet. Use `||` (not `??`) so an EMPTY string —
   // a reply that summarised to nothing — still falls back to the status label
   // instead of rendering a blank pill.
-  const glanceText = state.lastAgent?.text?.trim() || STATUS_LABEL[state.status];
+  //
+  // Except on a cold HUD, where that fallback printed the status word twice:
+  // the pill said "Ready" and the subcaption directly under it said "Ready ·
+  // mixrank". The one line people summon this thing to read spent itself
+  // repeating the line below it. With nothing said yet it asks the same thing
+  // the expanded greeting asks, and the status stays where it already was.
+  const coldStart = !state.lastUser && !state.lastAgent;
+  const glanceText =
+    state.lastAgent?.text?.trim() ||
+    (coldStart ? GREETING : STATUS_LABEL[state.status]);
 
   const statusBit = (
     <span className="hud-status">
@@ -792,7 +791,7 @@ export function HudApp() {
             onPointerMove={onFabMove}
             onClick={onFabClick}
             title={glanceText}
-            aria-label="Open Aura — drag to move"
+            aria-label="Open Aura. Drag to move"
           >
             <span className="hud-avatar">
               <AgentIcon agentId={agentId} label={agentLabel} size={20} />
@@ -892,7 +891,7 @@ export function HudApp() {
                 ) : historyTurns === null ? (
                   <span className="hud-sb-empty">Loading…</span>
                 ) : (
-                  <span className="hud-sb-empty">No messages yet — ask below.</span>
+                  <span className="hud-sb-empty">No messages yet. Ask below.</span>
                 )}
               </div>
             ) : showGreeting ? (
@@ -900,7 +899,7 @@ export function HudApp() {
               // place of an empty exchange. Once a turn lands, the exchange shows.
               <div className="hud-greeting">
                 <AmbientSpark />
-                <div className="hud-greeting-text">Where should we start?</div>
+                <div className="hud-greeting-text">{GREETING}</div>
               </div>
             ) : (
             <div className="hud-lines">
@@ -982,7 +981,11 @@ export function HudApp() {
                 className="hud-input"
                 rows={1}
                 value={text}
-                placeholder="Ask anything…"
+                placeholder={
+                  state.canSend
+                    ? "Ask anything…"
+                    : "Open a project in Aura to start a conversation"
+                }
                 onChange={(e) => setText(e.target.value)}
                 onKeyDown={onKeyDown}
                 onFocus={() => setFocused(true)}

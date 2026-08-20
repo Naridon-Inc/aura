@@ -17,6 +17,7 @@
 
 import { useState } from "react";
 import { Bot, ChevronDown, History, Radio } from "lucide-react";
+import { relativeAgeFromSecs } from "../../lib/relativeTime";
 
 import { Button } from "../ui/button";
 import {
@@ -38,6 +39,7 @@ import {
   type LiveAgentSession,
   type Task,
 } from "../../lib/api";
+import { refreshSessions as readSessionList } from "../../lib/sessionsCache";
 
 type Props = {
   task: Task;
@@ -84,21 +86,13 @@ export function StartInAgentButton({
       .agentPtyList(repoRoot)
       .then(setLive)
       .catch(() => setLive([]));
-    api
-      .claudeListSessions(repoRoot)
+    readSessionList(repoRoot)
       .then((rows) => setRecent(rows.slice(0, 6)))
       .catch(() => setRecent([]));
   };
 
-  const relAgo = (sec: number): string => {
-    const s = Math.max(0, Math.floor(Date.now() / 1000) - sec);
-    if (s < 60) return `${s}s ago`;
-    const m = Math.floor(s / 60);
-    if (m < 60) return `${m}m ago`;
-    const h = Math.floor(m / 60);
-    if (h < 24) return `${h}h ago`;
-    return `${Math.floor(h / 24)}d ago`;
-  };
+  // One ladder for the whole app — see lib/relativeTime.
+  const relAgo = (sec: number): string => relativeAgeFromSecs(sec);
 
   const recentLabel = (sess: ClaudeSession): string => {
     const t = (sess.last_prompt || sess.first_prompt || "").trim();
@@ -177,7 +171,7 @@ export function StartInAgentButton({
           <ChevronDown className="h-3 w-3 opacity-70" />
         </Button>
       </DropdownMenuTrigger>
-      <DropdownMenuContent align="end" className="min-w-[240px] text-[12px]">
+      <DropdownMenuContent align="end" className="min-w-[240px] text-sm">
         {live && live.length > 0 && (
           <>
             <DropdownMenuLabel className="flex items-center gap-1.5">

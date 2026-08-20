@@ -21,8 +21,10 @@ import {
   useState,
   type ReactNode,
 } from "react";
-import { ChevronDown, ChevronRight, Plus } from "lucide-react";
+import { ChevronDown, ChevronRight, ListTree, Plus } from "lucide-react";
+import { BoardEmpty } from "../board";
 import { api, type Task, type TaskStatus, type TeamMember } from "../../lib/api";
+import { fetchTeam } from "../../lib/teamCache";
 import { useEditorStore } from "../../lib/editorStore";
 import { AssigneeStack } from "../AssigneePicker";
 import {
@@ -30,32 +32,20 @@ import {
   PopoverContent,
   PopoverTrigger,
 } from "../ui/popover";
-import {
-  PRIORITY_CHIP,
-  StatusChip,
-  TASK_STATE_CHIP,
-} from "../ui/statusChip";
 import { Button } from "../ui/button";
 import { Input } from "../ui/input";
 import { cn } from "../../lib/utils";
+import { TASK_COLUMNS } from "./taskColumns";
+import { TASK_PRIORITY_LABEL, TaskPriorityBars, TaskStateRing } from "./taskGlyphs";
+import { TaskIdChip } from "./TaskIdChip";
+import { percent } from "../../lib/percent";
 
-// Canonical four-stop status set + labels, kept local so the panel
-// doesn't reach into TasksBoard's internals (mirrors the same const in
-// TaskDetailSidePanel). Drives the inline status dropdown.
-const STATUS_OPTIONS: { id: TaskStatus; label: string }[] = [
-  { id: "backlog", label: "Backlog" },
-  { id: "in_progress", label: "In Progress" },
-  { id: "in_review", label: "In Review" },
-  { id: "done", label: "Done" },
-];
-
-const PRIORITY_LABELS: Record<string, string> = {
-  urgent: "Urgent",
-  high: "High",
-  medium: "Medium",
-  low: "Low",
-  none: "None",
-};
+// The status set comes from `TASK_COLUMNS` — the same four lanes the board
+// draws and the same groups the list draws. This used to be a local copy
+// "so the panel doesn't reach into TasksBoard's internals"; that reason is
+// gone now the pipeline lives in its own module, and a local copy could only
+// ever drift.
+const STATUS_OPTIONS = TASK_COLUMNS;
 
 type SubTaskRow = { task: Task; depth: number };
 
@@ -108,8 +98,7 @@ export function SubTasksPanel({
   // are non-essential; an empty list just renders raw-handle initials.
   useEffect(() => {
     let alive = true;
-    api
-      .teamLoad(repoRoot)
+    fetchTeam(repoRoot)
       .then((team) => {
         if (alive) setMembers(team?.members ?? []);
       })
@@ -153,7 +142,7 @@ export function SubTasksPanel({
 
   const total = rows.length;
   const doneCount = rows.filter((r) => r.task.status === "done").length;
-  const pct = total > 0 ? Math.round((doneCount / total) * 100) : 0;
+  const pct = percent(doneCount, total);
 
   const canCreate = !readOnly && typeof onCreateChild === "function";
 
@@ -206,7 +195,7 @@ export function SubTasksPanel({
       variant="outline"
       size="xs"
       onClick={() => setAdding(true)}
-      className="gap-1 text-[11px] text-text-3 hover:text-text-1 shrink-0"
+      className="gap-1 text-xs text-text-3 hover:text-text-1 shrink-0"
       title="Add a sub-task"
     >
       <Plus className="w-3 h-3" strokeWidth={2} aria-hidden />
@@ -233,11 +222,11 @@ export function SubTasksPanel({
           ) : (
             <ChevronDown className="w-3.5 h-3.5" strokeWidth={2} aria-hidden />
           )}
-          <span className="text-[12.5px] font-semibold tracking-tight">
+          <span className="text-base font-semibold tracking-tight">
             Sub-tasks
           </span>
           {total > 0 && (
-            <span className="text-[11px] text-text-5 tabular-nums">{total}</span>
+            <span className="text-xs text-text-5 tabular-nums">{total}</span>
           )}
         </button>
         <div className="ml-auto flex items-center gap-1.5">{addButton}</div>
@@ -256,7 +245,7 @@ export function SubTasksPanel({
               aria-hidden
             />
           </div>
-          <span className="text-[11px] text-text-4 tabular-nums shrink-0">
+          <span className="text-xs text-text-4 tabular-nums shrink-0">
             {pct}% Done
           </span>
           {embedded && addButton}
@@ -266,26 +255,27 @@ export function SubTasksPanel({
       {expanded && (
         <div className="mt-3">
           {total === 0 ? (
-            <div className="flex flex-col items-start gap-2 py-2">
-              <span className="text-[12px] text-text-5 italic">
-                No sub-tasks yet.
-              </span>
-              {canCreate && !adding && (
-                <Button
-                  variant="ghost"
-                  size="xs"
-                  onClick={() => setAdding(true)}
-                  className="gap-1 px-0 text-[11.5px] text-text-3 hover:text-text-1"
-                >
-                  <Plus className="w-3 h-3" strokeWidth={2} aria-hidden />
-                  Add sub-task
-                </Button>
-              )}
+            <div className="py-1">
+              <BoardEmpty
+                icon={ListTree}
+                title="No sub-tasks yet"
+                body="Break this into smaller pieces when it's too big to finish in one go. Each piece can be handed to a different person or agent."
+                size="sm"
+                action={
+                  canCreate && !adding
+                    ? {
+                        label: "Add sub-task",
+                        onClick: () => setAdding(true),
+                        icon: Plus,
+                      }
+                    : undefined
+                }
+              />
             </div>
           ) : (
             <div className="rounded-lg border border-line-soft overflow-hidden">
               {/* Quiet column-header row. */}
-              <div className="flex items-center h-7 px-3 bg-bg-2/40 border-b border-line-soft text-[10px] uppercase tracking-wider text-text-5">
+              <div className="section-label flex items-center h-7 px-3 bg-bg-2/40 border-b border-line-soft">
                 <span className="flex-1 min-w-0">Work</span>
                 <span className="w-[110px] shrink-0">Priority</span>
                 <span className="w-[120px] shrink-0">Status</span>
@@ -328,16 +318,16 @@ export function SubTasksPanel({
                 onBlur={() => {
                   if (!draft.trim() && !creating) setAdding(false);
                 }}
-                placeholder="Sub-task title — Enter to add, Esc to cancel"
+                placeholder="Sub-task title. Enter to add, Esc to cancel"
                 disabled={creating}
-                className="flex-1 text-[12px]"
+                className="flex-1 text-sm"
               />
               <Button
                 variant="outline"
                 size="sm"
                 onClick={() => void submitChild()}
                 disabled={creating || draft.trim().length === 0}
-                className="text-[11.5px] text-text-2 hover:text-text-1"
+                className="text-sm text-text-2 hover:text-text-1"
               >
                 {creating ? "Adding…" : "Add"}
               </Button>
@@ -345,7 +335,7 @@ export function SubTasksPanel({
           )}
 
           {error && (
-            <div className="mt-2 text-[11px] text-red leading-snug">
+            <div className="mt-2 text-xs text-red leading-snug">
               {error}
             </div>
           )}
@@ -375,7 +365,7 @@ function SubTaskTableRow({
   onChangeStatus: (status: TaskStatus) => void;
 }) {
   return (
-    <div className="group flex items-center h-9 px-3 hover:bg-bg-2/50 border-b border-line-soft/50 last:border-b-0 transition-colors">
+    <div className="group flex items-center h-9 px-3 hover:bg-state-hover border-b border-line-soft/50 last:border-b-0 transition-colors">
       {/* Work — key chip + title (opens on click). */}
       <div
         className="flex-1 min-w-0 flex items-center gap-2"
@@ -383,36 +373,41 @@ function SubTaskTableRow({
       >
         {depth > 0 && (
           <span
-            className="text-text-5/60 select-none shrink-0 text-[11px] leading-none"
+            className="text-text-5/60 select-none shrink-0 text-xs leading-none"
             aria-hidden
           >
             └
           </span>
         )}
-        <span className="shrink-0 font-mono text-[10.5px] text-text-4 tabular-nums">
-          {child.sequence_id > 0 ? `AURA-${child.sequence_id}` : "AURA-?"}
+        <span className="shrink-0">
+          <TaskIdChip sequenceId={child.sequence_id} />
         </span>
         <button
           type="button"
           onClick={onOpen}
           title={child.title}
-          className="flex-1 min-w-0 truncate text-left text-[12.5px] text-text-1 hover:text-accent transition-colors"
+          className="flex-1 min-w-0 truncate text-left text-base text-text-1 hover:text-accent transition-colors"
         >
           {child.title || "(untitled)"}
         </button>
       </div>
-      {/* Priority. */}
+      {/* Priority — the shared bar signal plus the word, because this column
+          is literally headed "Priority". Deliberately NOT a coloured chip: on
+          this board colour means progress, not rank. */}
       <div className="w-[110px] shrink-0">
-        <StatusChip tone={PRIORITY_CHIP[child.priority].tone} dot dense>
-          {PRIORITY_LABELS[child.priority] ?? child.priority}
-        </StatusChip>
+        <span className="inline-flex items-center gap-1.5 text-xs text-text-3">
+          <TaskPriorityBars priority={child.priority} />
+          {TASK_PRIORITY_LABEL[child.priority] ?? child.priority}
+        </span>
       </div>
-      {/* Status — inline dropdown (or static chip when read-only). */}
+      {/* Status — inline dropdown (or the static glyph + name when read-only,
+          the same pair a board lane header and a list group header wear). */}
       <div className="w-[120px] shrink-0">
         {readOnly ? (
-          <StatusChip tone={TASK_STATE_CHIP[child.status].tone} dot dense>
+          <span className="inline-flex items-center gap-1.5 text-xs text-text-3">
+            <TaskStateRing statusId={child.status} />
             {labelFor(STATUS_OPTIONS, child.status)}
-          </StatusChip>
+          </span>
         ) : (
           <StatusDropdown value={child.status} onChange={onChangeStatus} />
         )}
@@ -427,16 +422,17 @@ function SubTaskTableRow({
             maxAvatars={2}
           />
         ) : (
-          <span className="text-[11px] text-text-5">—</span>
+          <span className="text-xs text-text-5">·</span>
         )}
       </div>
     </div>
   );
 }
 
-// Inline status chip that opens a popover to change the sub-task's
-// status. Mirrors the spreadsheet's PriorityCell pattern (chip trigger +
-// chevron, popover list of options) so the two read identically.
+// Inline status control: the shared glyph + name as the trigger, a popover of
+// the same four statuses to change it. Every option wears the same state ring
+// the board's lanes and the list's groups wear, so picking a status here and
+// reading one there are visibly the same act.
 function StatusDropdown({
   value,
   onChange,
@@ -445,29 +441,17 @@ function StatusDropdown({
   onChange: (status: TaskStatus) => void;
 }): ReactNode {
   const [open, setOpen] = useState(false);
-  const spec = TASK_STATE_CHIP[value] ?? TASK_STATE_CHIP.backlog;
   return (
     <Popover open={open} onOpenChange={setOpen}>
       <PopoverTrigger asChild>
         <button
           type="button"
-          className="inline-flex"
+          className="inline-flex items-center gap-1.5 rounded-[4px] px-1 py-0.5 text-xs text-text-3 transition-colors hover:bg-state-hover hover:text-text-1"
           aria-label="Change sub-task status"
         >
-          <StatusChip
-            tone={spec.tone}
-            dot
-            dense
-            icon={
-              <ChevronDown
-                className="w-2.5 h-2.5 order-last"
-                strokeWidth={1.5}
-                aria-hidden
-              />
-            }
-          >
-            {labelFor(STATUS_OPTIONS, value)}
-          </StatusChip>
+          <TaskStateRing statusId={value} />
+          {labelFor(STATUS_OPTIONS, value)}
+          <ChevronDown className="h-2.5 w-2.5" strokeWidth={1.5} aria-hidden />
         </button>
       </PopoverTrigger>
       <PopoverContent
@@ -484,15 +468,16 @@ function StatusDropdown({
               setOpen(false);
             }}
             className={cn(
-              "w-full flex items-center justify-between gap-2 text-left px-2 py-1 text-[11.5px] rounded hover:bg-bg-2",
+              "w-full flex items-center justify-between gap-2 text-left px-2 py-1 text-sm rounded hover:bg-state-hover",
               s.id === value ? "text-text-1" : "text-text-3",
             )}
           >
-            <StatusChip tone={TASK_STATE_CHIP[s.id].tone} dot dense>
+            <span className="inline-flex items-center gap-1.5">
+              <TaskStateRing statusId={s.id} />
               {s.label}
-            </StatusChip>
+            </span>
             {s.id === value && (
-              <span className="text-accent text-[10px] shrink-0" aria-hidden>
+              <span className="text-accent text-2xs shrink-0" aria-hidden>
                 ✓
               </span>
             )}

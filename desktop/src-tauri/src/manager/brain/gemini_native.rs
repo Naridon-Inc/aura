@@ -28,7 +28,14 @@ use super::{
 
 const PROVIDER_ID: &str = "gemini_native";
 const ENDPOINT_BASE: &str = "https://generativelanguage.googleapis.com/v1beta/models";
-const DEFAULT_MODEL: &str = "gemini-2.5-pro";
+/// The rolling alias, not a pinned id: it always resolves to Google's
+/// current Pro, so an install that nobody touches doesn't quietly stay two
+/// generations behind (this was still pinned to 2.5 Pro while the API was
+/// serving the 3.x line). The picker deliberately hides `-latest` aliases
+/// from the model *list* — an alias beside concrete ids reads as a
+/// duplicate — but as the fallback for "whatever this brain runs by
+/// default" it's exactly right.
+const DEFAULT_MODEL: &str = "gemini-pro-latest";
 const DEFAULT_MAX_TOKENS: u32 = 8_192;
 
 #[derive(Debug, Clone)]
@@ -106,9 +113,51 @@ fn content_to_parts(content: &Value, call_names: &HashMap<String, String>) -> Ve
                 "tool_use" => {
                     let name = block.get("name").and_then(|v| v.as_str()).unwrap_or("");
                     let input = block.get("input").cloned().unwrap_or(json!({}));
-                    parts.push(json!({
+                    let mut part = json!({
                         "functionCall": { "name": name, "args": input }
-                    }));
+                    });
+                    // Hand the reasoning token back exactly where Gemini put
+                    // it. Without this the model's own previous call reads as
+                    // unattributable and the request is refused with
+                    // "Function call is missing a thought_signature in
+                    // functionCall parts" — so the assistant answers once and
+                    // every follow-up turn dies. Absent (an older model, or a
+                    // turn replayed from a transcript written before we kept
+                    // signatures) → omit the key rather than send an empty
+                    // one, which Gemini rejects on its own.
+                    if let Some(sig) = block.get("signature").and_then(|v| v.as_str()) {
+                        if !sig.is_empty() {
+                            part["thoughtSignature"] = json!(sig);
+                        }
+                    }
+                    parts.push(part);
+                }
+                "image" => {
+                    // Anthropic-shape image block → Gemini `inlineData`. Without
+                    // this arm the block fell through to the catch-all below and
+                    // the base64 payload was stringified into a TEXT part: the
+                    // model saw a wall of gibberish instead of the screenshot,
+                    // and the user paid full prompt price for it.
+                    if let Some(src) = block.get("source") {
+                        let media_type = src
+                            .get("media_type")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("image/png");
+                        match src.get("data").and_then(|v| v.as_str()) {
+                            Some(data) if !data.is_empty() => parts.push(json!({
+                                "inlineData": { "mimeType": media_type, "data": data }
+                            })),
+                            // A URL-sourced image (Anthropic allows one) is a
+                            // reference Gemini fetches itself.
+                            _ => {
+                                if let Some(url) = src.get("url").and_then(|v| v.as_str()) {
+                                    parts.push(json!({
+                                        "fileData": { "mimeType": media_type, "fileUri": url }
+                                    }));
+                                }
+                            }
+                        }
+                    }
                 }
                 "tool_result" => {
                     // Resolve the synthetic call id back to the function name
@@ -299,10 +348,12 @@ impl Brain for GeminiNativeBrain {
             .with(
                 cap_keys::SUPPORTED_MODELS,
                 json!([
-                    "gemini-2.0-flash",
-                    "gemini-2.0-pro",
-                    "gemini-2.5-flash",
+                    "gemini-3.6-flash",
+                    "gemini-3.5-flash",
+                    "gemini-3.1-pro-preview",
+                    "gemini-3-flash-preview",
                     "gemini-2.5-pro",
+                    "gemini-2.5-flash",
                 ]),
             )
     }
@@ -470,11 +521,21 @@ impl Brain for GeminiNativeBrain {
                             // so the caller can correlate the tool_result.
                             let tool_use_id = format!("gemini-call-{}", tool_seq);
                             tool_seq += 1;
+                            // `thoughtSignature` sits on the PART, beside
+                            // `functionCall`, not inside it — and Gemini 3
+                            // requires it back on the same part next turn or
+                            // the whole request 400s. Carry it out so the
+                            // tool loop can put it back.
+                            let signature = part
+                                .get("thoughtSignature")
+                                .and_then(|v| v.as_str())
+                                .map(str::to_string);
                             yield ChatChunk::ToolUse {
                                 block_idx: 0,
                                 tool_use_id,
                                 name,
                                 input,
+                                signature,
                             };
                         }
                     }
@@ -643,6 +704,49 @@ mod tests {
         // Plain-string tool output is wrapped into an object under `content`.
         assert!(resp["response"].is_object());
         assert_eq!(resp["response"]["content"], "{\"title\":\"x\"}");
+    }
+
+    /// Gemini 3 refuses a request whose `functionCall` parts don't carry the
+    /// `thoughtSignature` it issued with them — "Function call is missing a
+    /// thought_signature in functionCall parts", 400 INVALID_ARGUMENT. The
+    /// signature the loop kept on the `tool_use` block has to come back out
+    /// on the PART, beside `functionCall`, not inside it.
+    #[test]
+    fn a_kept_signature_rides_back_on_the_function_call_part() {
+        let messages = json!([
+            { "role": "user", "content": "list tasks" },
+            { "role": "assistant", "content": [
+                { "type": "tool_use", "id": "gemini-call-0", "name": "aura_tasks_list",
+                  "input": {}, "signature": "Cr4BAdHtim8opaque==" }
+            ]},
+            { "role": "user", "content": [
+                { "type": "tool_result", "tool_use_id": "gemini-call-0",
+                  "content": "[]", "is_error": false }
+            ]}
+        ]);
+        let contents = build_contents(&request_with(messages, json!([])));
+        let part = &contents[1]["parts"][0];
+        assert_eq!(part["functionCall"]["name"], "aura_tasks_list");
+        // On the part, as a sibling of functionCall.
+        assert_eq!(part["thoughtSignature"], "Cr4BAdHtim8opaque==");
+        // …and NOT smuggled inside the call object, where Gemini won't read it.
+        assert!(part["functionCall"].get("thoughtSignature").is_none());
+    }
+
+    /// A turn replayed from a transcript written before we kept signatures
+    /// (or from a model that issues none) must omit the key entirely —
+    /// an empty `thoughtSignature` is itself a 400.
+    #[test]
+    fn no_signature_means_no_key_at_all() {
+        for block in [
+            json!({ "type": "tool_use", "id": "c0", "name": "t", "input": {} }),
+            json!({ "type": "tool_use", "id": "c0", "name": "t", "input": {}, "signature": "" }),
+        ] {
+            let messages = json!([{ "role": "assistant", "content": [block] }]);
+            let contents = build_contents(&request_with(messages, json!([])));
+            let part = &contents[0]["parts"][0];
+            assert!(part.get("thoughtSignature").is_none());
+        }
     }
 
     #[test]

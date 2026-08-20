@@ -438,7 +438,7 @@ async fn apply_intent(repo_root: &str, text: &str) {
     // + .intent_logged marker the rest of the toolchain expects. Tag
     // the agent_id as "aurawatch" so the user can grep for our
     // contributions.
-    let _ = tokio::process::Command::new("aura")
+    let _ = tokio::process::Command::new(crate::agent_event_listener::resolve_aura_bin())
         .args([
             "log-intent",
             text,

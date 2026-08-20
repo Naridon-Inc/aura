@@ -79,6 +79,11 @@ pub struct BundleIntent {
     pub signed_block_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub key_id: Option<String>,
+    /// Where the intent text came from — see `IntentRow::source`. Mirrored so
+    /// a bundled row doesn't come out the other end looking like somebody
+    /// stated a reason they never stated.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
 }
 
 impl BundleIntent {
@@ -90,6 +95,7 @@ impl BundleIntent {
             intent_type: r.intent_type.clone(),
             signed_block_id: r.signed_block_id.clone(),
             key_id: r.key_id.clone(),
+            source: r.source.clone(),
         }
     }
 
@@ -105,6 +111,7 @@ impl BundleIntent {
             intent_type: self.intent_type.clone(),
             signed_block_id: self.signed_block_id.clone(),
             key_id: self.key_id.clone(),
+            source: self.source.clone(),
         };
         // serde_json on a serde_json::Value is deterministic for object
         // key order (it preserves insertion order via the map impl used

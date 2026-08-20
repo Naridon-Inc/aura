@@ -17,6 +17,7 @@
 
 import { useEffect, useState } from "react";
 import { AgentBadge } from "../../agent/AgentBadge";
+import { intentTypeChip } from "../../../lib/intentTypeLabels";
 import {
   cumulativeAt,
   momentStamp,
@@ -26,17 +27,8 @@ import {
   type TimelineModel,
 } from "../../../lib/timelineModel";
 
-// Plain-language names for the canonical intent types (mirrors the wording the
-// Attestation surface uses, so a "BugFix" reads the same everywhere).
-const TYPE_LABEL: Record<string, string> = {
-  FeatureAdd: "New feature",
-  BugFix: "Bug fix",
-  Refactor: "Tidy-up",
-  Revert: "Undo",
-  Performance: "Speed-up",
-  Docs: "Docs",
-  Deps: "Dependencies",
-};
+// Plain-language names for the canonical intent types come from the one shared
+// map (`lib/intentTypeLabels`), so a "BugFix" reads the same everywhere.
 
 // A calm accent tint per type, so the eye reads "fix vs feature" before words.
 const TYPE_TONE: Record<string, string> = {
@@ -111,7 +103,7 @@ export function TimelineMomentDetail({
   const chapter = model.sessions[moment.sessionIndex];
   const chapterNo = moment.sessionIndex + 1;
   const beat = chapter.momentIndices.indexOf(index) + 1; // 1-based in the chapter
-  const typeLabel = moment.intentType ? TYPE_LABEL[moment.intentType] ?? moment.intentType : null;
+  const typeLabel = moment.intentType ? intentTypeChip(moment.intentType) : null;
   const typeTone = moment.intentType ? TYPE_TONE[moment.intentType] ?? "border-line-soft text-text-2" : "";
   const cum = cumulativeAt(model, index);
 
@@ -119,7 +111,7 @@ export function TimelineMomentDetail({
     <div className="mx-auto flex h-full w-full max-w-3xl flex-col overflow-y-auto px-7 pb-56 pt-7">
       {/* Chapter ribbon — which session/run this beat belongs to, with a jump
           to that run's full Session detail (transcript + changes + safety). */}
-      <div className="flex flex-wrap items-center gap-2 text-[11px] text-text-4">
+      <div className="flex flex-wrap items-center gap-2 text-xs text-text-4">
         <span className="font-medium tabular-nums text-text-3">
           Chapter {chapterNo} of {model.sessions.length}
         </span>
@@ -134,7 +126,7 @@ export function TimelineMomentDetail({
             type="button"
             onClick={onOpenSession}
             title="Open this run's full session detail"
-            className="ml-auto flex items-center gap-1 rounded-md border border-line-soft px-2 py-1 text-[11px] text-text-2 transition-colors hover:border-[color-mix(in_oklab,var(--color-accent)_45%,transparent)] hover:text-text-1"
+            className="ml-auto flex items-center gap-1 rounded-md border border-line-soft px-2 py-1 text-xs text-text-2 transition-colors hover:border-[color-mix(in_oklab,var(--color-accent)_45%,transparent)] hover:text-text-1"
           >
             <span>View session</span>
             <svg width="11" height="11" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
@@ -149,18 +141,18 @@ export function TimelineMomentDetail({
       <div className="mt-3.5">
         {typeLabel && (
           <span
-            className={`mb-2 inline-block rounded-full border px-2 py-0.5 text-[10px] font-medium uppercase tracking-wide ${typeTone}`}
+            className={`mb-2 inline-block rounded-full border px-2 py-0.5 text-2xs font-medium ${typeTone}`}
           >
             {typeLabel}
           </span>
         )}
-        <h2 className="text-[21px] font-semibold leading-snug tracking-[-0.01em] text-text-1">
+        <h2 className="text-xl font-semibold leading-snug tracking-[-0.01em] text-text-1">
           {headline || "A change with no logged reason"}
         </h2>
       </div>
 
       {/* Who + when. */}
-      <div className="mt-2.5 flex flex-wrap items-center gap-2 text-[11px] text-text-3">
+      <div className="mt-2.5 flex flex-wrap items-center gap-2 text-xs text-text-3">
         <AgentBadge agentId={moment.agentId} />
         <span className="text-text-4">·</span>
         <span className="text-text-2">{momentStamp(moment.ts)}</span>
@@ -175,7 +167,7 @@ export function TimelineMomentDetail({
           <button
             type="button"
             onClick={() => setReasoningOpen((o) => !o)}
-            className="flex items-center gap-1.5 text-[10px] uppercase tracking-wider text-text-4 transition-colors hover:text-text-2"
+            className="section-label flex items-center gap-1.5 transition-colors hover:text-text-2"
           >
             <Chevron open={reasoningOpen} />
             <span>The reasoning</span>
@@ -188,7 +180,7 @@ export function TimelineMomentDetail({
               {beats.map((b, i) => (
                 <li
                   key={i}
-                  className="relative text-[13px] leading-relaxed text-text-2"
+                  className="relative text-base leading-relaxed text-text-2"
                 >
                   <span
                     className="absolute -left-[18px] top-[9px] h-1 w-1 rounded-full"
@@ -212,24 +204,33 @@ export function TimelineMomentDetail({
           onClick={() => setFilesOpen((o) => !o)}
           className="flex w-full items-center justify-between gap-2 text-left transition-colors"
         >
-          <span className="flex items-center gap-1.5 text-[10px] uppercase tracking-wider text-text-4 transition-colors group-hover:text-text-2">
+          <span className="section-label flex items-center gap-1.5 transition-colors group-hover:text-text-2">
             <Chevron open={filesOpen} />
             <span>What changed</span>
           </span>
           {moment.files.length > 0 ? (
-            <span className="text-[11px] tabular-nums text-text-4">
-              {moment.fileCount} file{moment.fileCount === 1 ? "" : "s"} ·{" "}
-              <span className="text-[var(--color-accent)]">+{moment.adds}</span>{" "}
-              <span className="text-red-400">−{moment.dels}</span>
+            <span className="text-xs tabular-nums text-text-4">
+              {moment.fileCount} file{moment.fileCount === 1 ? "" : "s"}
+              {/* Line counts only when they were actually recorded. Most intent
+                  rows carry none, and "+0 −0" beside a real file count doesn't
+                  read as missing data — it reads as a change that touched
+                  files without touching a line. */}
+              {moment.adds > 0 || moment.dels > 0 ? (
+                <>
+                  {" · "}
+                  <span className="text-[var(--color-accent)]">+{moment.adds}</span>{" "}
+                  <span className="text-red-400">−{moment.dels}</span>
+                </>
+              ) : null}
             </span>
           ) : (
-            <span className="text-[11px] text-text-4">a note, not an edit</span>
+            <span className="text-xs text-text-4">a note, not an edit</span>
           )}
         </button>
         {filesOpen &&
           (moment.files.length === 0 ? (
-            <div className="mt-2 rounded-md border border-dashed border-line px-4 py-7 text-center text-[12px] text-text-4">
-              No file changes were recorded for this moment — it was a note, not
+            <div className="mt-2 rounded-md border border-dashed border-line px-4 py-7 text-center text-sm text-text-4">
+              No file changes were recorded for this moment. It was a note, not
               an edit.
             </div>
           ) : (
@@ -239,10 +240,10 @@ export function TimelineMomentDetail({
                 return (
                   <li
                     key={`${f.path}-${i}`}
-                    className="flex items-center gap-2.5 border-b border-line-soft bg-bg-1 px-3 py-2 text-[12px] last:border-b-0"
+                    className="flex items-center gap-2.5 border-b border-line-soft bg-bg-1 px-3 py-2 text-sm last:border-b-0"
                   >
                     <span
-                      className={`w-14 shrink-0 text-[10px] uppercase tracking-wide ${statusTone(f.status)}`}
+                      className={`w-14 shrink-0 text-2xs ${statusTone(f.status)}`}
                     >
                       {statusWord(f.status)}
                     </span>
@@ -251,7 +252,7 @@ export function TimelineMomentDetail({
                       <span className="text-text-1">{name}</span>
                     </span>
                     {(f.additions > 0 || f.deletions > 0) && (
-                      <span className="shrink-0 tabular-nums text-[11px]">
+                      <span className="shrink-0 tabular-nums text-xs">
                         <span className="text-[var(--color-accent)]">+{f.additions}</span>{" "}
                         <span className="text-red-400">−{f.deletions}</span>
                       </span>
@@ -263,22 +264,35 @@ export function TimelineMomentDetail({
           ))}
       </div>
 
-      {/* The project so far — how far the build had come by this beat. */}
-      <div className="mt-6 grid grid-cols-4 gap-px overflow-hidden rounded-md border border-line bg-line">
-        <Stat label="Moments" value={cum.moments} />
-        <Stat label="Sessions" value={cum.sessions} />
-        <Stat label="Files touched" value={cum.files} />
-        <Stat
-          label="Lines"
-          value={
-            <span className="tabular-nums">
-              <span className="text-[var(--color-accent)]">+{cum.adds}</span>{" "}
-              <span className="text-red-400">−{cum.dels}</span>
-            </span>
-          }
-        />
-      </div>
-      <div className="mt-1.5 text-center text-[10px] text-text-4">
+      {/* The project so far — how far the build had come by this beat.
+          The Lines card only earns a column when line counts were recorded:
+          this history's intent rows mostly carry none, so it rendered a green
+          "+0" and a red "−0" beside "6 files touched" — a stat card asserting
+          a figure it can't back, and asserting the wrong one. Three columns
+          when it's absent, four when it's real. */}
+      {cum.adds > 0 || cum.dels > 0 ? (
+        <div className="mt-6 grid grid-cols-4 gap-px overflow-hidden rounded-md border border-line bg-line">
+          <Stat label="Moments" value={cum.moments} />
+          <Stat label="Sessions" value={cum.sessions} />
+          <Stat label="Files touched" value={cum.files} />
+          <Stat
+            label="Lines"
+            value={
+              <span className="tabular-nums">
+                <span className="text-[var(--color-accent)]">+{cum.adds}</span>{" "}
+                <span className="text-red-400">−{cum.dels}</span>
+              </span>
+            }
+          />
+        </div>
+      ) : (
+        <div className="mt-6 grid grid-cols-3 gap-px overflow-hidden rounded-md border border-line bg-line">
+          <Stat label="Moments" value={cum.moments} />
+          <Stat label="Sessions" value={cum.sessions} />
+          <Stat label="Files touched" value={cum.files} />
+        </div>
+      )}
+      <div className="mt-1.5 text-center text-2xs text-text-4">
         the project, by this point in its life
       </div>
     </div>
@@ -288,10 +302,10 @@ export function TimelineMomentDetail({
 function Stat({ label, value }: { label: string; value: React.ReactNode }) {
   return (
     <div className="bg-bg-1 px-3 py-2.5 text-center">
-      <div className="text-[15px] font-semibold tabular-nums text-text-1">
+      <div className="text-lg font-semibold tabular-nums text-text-1">
         {value}
       </div>
-      <div className="mt-0.5 text-[10px] uppercase tracking-wider text-text-4">
+      <div className="section-label mt-0.5">
         {label}
       </div>
     </div>

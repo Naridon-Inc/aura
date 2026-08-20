@@ -19,11 +19,11 @@ export type SteeringMode = "auto" | "plan" | "build" | "ask";
 export function buildSteeringText(mode: SteeringMode): string {
   switch (mode) {
     case "plan":
-      return "[PLAN MODE — Discuss and propose a plan FIRST. Surface gray areas via `aura ask-user`, then ALWAYS finish by piping a rich JSON envelope into `aura propose-plan --json -` so the PlanCard + plan tab + Build button render. NEVER paste a wave/phase outline into chat as markdown and ask the user to reply 'build' — the only way to accept a plan is the Build button on the PlanCard. Do not edit files or run shell commands until the user clicks Build.]\n\n";
+      return "[PLAN MODE. Discuss and propose a plan FIRST. Surface gray areas via `aura ask-user`, then ALWAYS finish by piping a rich JSON envelope into `aura propose-plan --json -` so the PlanCard + plan tab + Build button render. NEVER paste a wave/phase outline into chat as markdown and ask the user to reply 'build'. The only way to accept a plan is the Build button on the PlanCard. Do not edit files or run shell commands until the user clicks Build.]\n\n";
     case "ask":
-      return "[ASK MODE — Read-only. Answer in chat; do not edit files, do not spawn agents, do not run shell mutations. Use Aura MCP read tools only.]\n\n";
+      return "[ASK MODE. Read-only. Answer in chat; do not edit files, do not spawn agents, do not run shell mutations. Use Aura MCP read tools only.]\n\n";
     case "auto":
-      return "[AUTO MODE — Full autopilot. Judge the request and pick the approach yourself: answer trivial things directly; for real work, make the edits and run the commands end-to-end WITHOUT pausing for plan approval. Do not stop to ask unless you hit a decision only the user can make (then use `aura ask-user`). Keep going until the task is genuinely complete.]\n\n";
+      return "[AUTO MODE. Full autopilot. Judge the request and pick the approach yourself: answer trivial things directly; for real work, make the edits and run the commands end-to-end WITHOUT pausing for plan approval. Do not stop to ask unless you hit a decision only the user can make (then use `aura ask-user`). Keep going until the task is genuinely complete.]\n\n";
     case "build":
     default:
       return "";

@@ -35,7 +35,6 @@
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
-  AtSign,
   Headphones,
   Maximize2,
   MessageCircle,
@@ -46,14 +45,13 @@ import {
   MonitorOff,
   MonitorX,
   Send,
-  Settings,
-  Smile,
-  Sparkles,
   Users,
   Video,
   VideoOff,
 } from "lucide-react";
 import { AsciiSpinner } from "../ui/ascii-spinner";
+import { monogram } from "../../lib/monogram";
+import { clockTimeFromSecs } from "../../lib/clockTime";
 import { api, type ChatMessage } from "../../lib/api";
 import { parseAttachments } from "./FileAttachment";
 import { Avatar } from "../team/presentation/Avatar";
@@ -171,7 +169,7 @@ export function ScreenshareTab({ huddleKey }: Props) {
                 track={share.track}
                 fit="contain"
               />
-              <div className="absolute right-3 top-3 flex h-6 items-center gap-1.5 rounded-md bg-black/55 px-2 text-[10.5px] font-bold tracking-wide backdrop-blur">
+              <div className="absolute right-3 top-3 flex h-6 items-center gap-1.5 rounded-md bg-black/55 px-2 text-xs font-bold tracking-wide backdrop-blur">
                 <span className="h-1.5 w-1.5 rounded-full bg-red" />
                 LIVE
               </div>
@@ -185,7 +183,7 @@ export function ScreenshareTab({ huddleKey }: Props) {
                         type="button"
                         onClick={() => setActiveKey(t.key)}
                         className={
-                          "flex items-center gap-1.5 rounded-md px-2 py-1 text-[11px] transition " +
+                          "flex items-center gap-1.5 rounded-md px-2 py-1 text-xs transition " +
                           (on
                             ? "bg-white/20 text-white"
                             : "text-white/60 hover:bg-white/10 hover:text-white")
@@ -264,12 +262,11 @@ export function ScreenshareTab({ huddleKey }: Props) {
           >
             <Monitor size={19} />
           </CtlButton>
-          <CtlButton onClick={() => {}} tone="default" title="Reactions">
-            <Smile size={19} />
-          </CtlButton>
-          <CtlButton onClick={() => {}} tone="default" title="Huddle settings">
-            <Settings size={19} />
-          </CtlButton>
+          {/* Reactions and Huddle settings used to sit here, styled exactly
+              like Mic and Camera beside them and wired to `() => {}`. There
+              are no in-call reactions to send and no huddle settings to open,
+              so the two buttons hovered, depressed and did nothing — and did
+              it in the middle of the row of controls that work. */}
           <CtlButton
             onClick={() => leaveCall()}
             tone="hangup"
@@ -345,13 +342,14 @@ function HuddleThread({
       <header>
         <strong>Thread</strong>
         <span className="flex-1" />
-        <Sparkles size={17} />
+        {/* No decorative glyph beside the close button: in a header's action
+            row, anything icon-shaped reads as something you can press. */}
         <button type="button" onClick={onClose} aria-label="Close huddle thread">×</button>
       </header>
       <div ref={scrollerRef} className="slack-huddle-thread-messages">
         <div className="slack-huddle-thread-intro">
           <MessageCircle size={17} />
-          <p><strong>Every huddle has a thread.</strong><br />Send messages, files, and links to everyone in the huddle. They’re saved in <b>#{channel}</b>, so you can access them after the huddle is done.</p>
+          <p><strong>Every huddle has a thread.</strong><br />What you send here reaches everyone in the huddle and is saved in <b>#{channel}</b>, so it’s still there after the huddle ends.</p>
         </div>
         {messages.slice(-18).map((message) => {
           const body = parseAttachments(message.body).text;
@@ -359,14 +357,18 @@ function HuddleThread({
             <div key={message.id} className="slack-huddle-thread-message">
               <Avatar name={message.from_name || message.from_handle} size={34} />
               <div>
-                <p><strong>{message.from_name || message.from_handle}</strong><time>{new Date(message.ts * 1000).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}</time></p>
+                <p><strong>{message.from_name || message.from_handle}</strong><time>{clockTimeFromSecs(message.ts)}</time></p>
                 <span>{body || "Shared an attachment"}</span>
               </div>
             </div>
           );
         })}
       </div>
-      <div className="slack-huddle-external"><b>B</b><span>Huddle notes are shared with everyone in this channel</span></div>
+      {/* The red "B" square that used to lead this row is Slack's
+          external-connection badge. It came across with the layout and means
+          nothing here — a coloured mark that labels nothing is worse than no
+          mark. The sentence is true, so the sentence stays. */}
+      <div className="slack-huddle-external"><span>Huddle notes are shared with everyone in this channel</span></div>
       <div className="slack-huddle-reply">
         <textarea
           value={draft}
@@ -381,10 +383,11 @@ function HuddleThread({
           rows={2}
         />
         <div>
-          <button type="button">+</button>
-          <button type="button"><Smile size={16} /></button>
-          <button type="button"><AtSign size={16} /></button>
-          <button type="button">Aa</button>
+          {/* Attach, emoji, mention and formatting stood here with no onClick
+              at all — four buttons that hovered like the send button and did
+              nothing when pressed. None of the four has anything behind it:
+              the huddle thread sends text. Whichever one gets something
+              behind it comes back with it. */}
           <span className="flex-1" />
           <button type="button" onClick={() => void send()} disabled={!draft.trim() || sending} className="is-send"><Send size={16} /></button>
         </div>
@@ -418,7 +421,8 @@ function ParticipantGrid({
 }
 
 function ParticipantTile({ p, big = false }: { p: CallParticipant; big?: boolean }) {
-  const initial = (p.name.trim()[0] || "?").toUpperCase();
+  // One monogram for the whole app — see lib/monogram.
+  const initial = monogram(p.name);
   return (
     <div
       className="slack-huddle-participant relative overflow-hidden border border-white/5"
@@ -451,7 +455,7 @@ function ParticipantTile({ p, big = false }: { p: CallParticipant; big?: boolean
           </div>
         </div>
       )}
-      <div className="absolute bottom-2 left-2 flex h-6 max-w-[calc(100%-16px)] items-center gap-1.5 rounded-lg bg-black/55 px-2 text-[11.5px] font-semibold backdrop-blur">
+      <div className="absolute bottom-2 left-2 flex h-6 max-w-[calc(100%-16px)] items-center gap-1.5 rounded-lg bg-black/55 px-2 text-sm font-semibold backdrop-blur">
         {!p.micEnabled && <MicOff size={11} className="shrink-0 text-red" />}
         <span className="truncate">{p.isLocal ? `${p.name} (you)` : p.name}</span>
       </div>
@@ -559,7 +563,7 @@ function StageEmpty({ ended }: { ended: boolean }) {
       <MonitorOff size={30} className="opacity-50" />
       <div>
         {ended
-          ? "Huddle ended — close this tab to dismiss."
+          ? "Huddle ended. Close this tab to dismiss."
           : "Waiting for the call to connect…"}
       </div>
     </div>

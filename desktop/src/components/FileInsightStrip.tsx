@@ -8,6 +8,7 @@
 
 import { useEffect, useState } from "react";
 import { useFileInsight } from "../lib/useFileInsight";
+import { relativeAge } from "../lib/relativeTime";
 import { SymbolContextMenu } from "./SymbolContextMenu";
 import { Churn } from "./diff/Churn";
 
@@ -62,18 +63,18 @@ export function FileInsightStrip({
       <button
         type="button"
         onClick={() => setOpen((v) => !v)}
-        className="w-full h-7 px-3 flex items-center gap-2 text-left hover:bg-bg-2/40 transition-colors"
+        className="w-full h-7 px-3 flex items-center gap-2 text-left hover:bg-state-hover transition-colors"
       >
         <ChevronGlyph open={open} />
-        <span className="text-text-3 text-[10.5px] uppercase tracking-wider font-medium">
+        <span className="section-label">
           Aura insight
         </span>
-        <span className="text-text-1 text-[11px] truncate">{fileLabel}</span>
-        <span className="ml-auto flex items-center gap-2 text-[10.5px] font-mono">
+        <span className="text-text-1 text-xs truncate">{fileLabel}</span>
+        <span className="ml-auto flex items-center gap-2 text-xs font-mono">
           <Churn
             additions={insight.additions}
             deletions={insight.deletions}
-            className="text-[10.5px]"
+            className="text-xs"
           />
           {touchedSymbols.length > 0 && (
             <Pill label={`${touchedSymbols.length} changed`} />
@@ -91,7 +92,7 @@ export function FileInsightStrip({
         <div className="px-3 pb-2.5 pt-1 grid grid-cols-2 gap-3">
           <Section title="What changed" count={0}>
             {whatText ? (
-              <div className="text-[11px] text-text-1 leading-snug">
+              <div className="text-xs text-text-1 leading-snug">
                 {whatText}
               </div>
             ) : insight.loading ? (
@@ -107,7 +108,7 @@ export function FileInsightStrip({
                 <button
                   type="button"
                   onClick={() => setShowTech((v) => !v)}
-                  className="flex items-center gap-1 text-[10px] text-text-4 hover:text-text-2 transition-colors"
+                  className="flex items-center gap-1 text-2xs text-text-4 hover:text-text-2 transition-colors"
                 >
                   <ChevronGlyph open={showTech} />
                   Technical details
@@ -123,7 +124,7 @@ export function FileInsightStrip({
                         kind={s.kind}
                       >
                         <li
-                          className="flex items-center gap-1.5 text-[11px] truncate cursor-default rounded px-1 -mx-1 hover:bg-bg-2/50"
+                          className="flex items-center gap-1.5 text-xs truncate cursor-default rounded px-1 -mx-1 hover:bg-state-hover"
                           title={`${s.kind} · line ${s.line} · right-click for actions`}
                         >
                           <KindBadge kind={s.kind} />
@@ -137,7 +138,7 @@ export function FileInsightStrip({
                       </SymbolContextMenu>
                     ))}
                     {touchedSymbols.length > 6 && (
-                      <li className="text-text-4 text-[10.5px]">
+                      <li className="text-text-4 text-xs">
                         +{touchedSymbols.length - 6} more
                       </li>
                     )}
@@ -156,8 +157,8 @@ export function FileInsightStrip({
             {intentCount > 0 ? (
               <ul className="space-y-1">
                 {insight.relatedIntents.slice(0, 3).map((i) => (
-                  <li key={i.id} className="text-[11px]">
-                    <div className="flex items-center gap-1.5 text-text-3 text-[10px]">
+                  <li key={i.id} className="text-xs">
+                    <div className="flex items-center gap-1.5 text-text-3 text-2xs">
                       <span className="font-mono">{i.agent}</span>
                       <span>·</span>
                       <span>{relTime(i.timestamp)}</span>
@@ -169,9 +170,9 @@ export function FileInsightStrip({
                 ))}
               </ul>
             ) : insight.sessionIntent ? (
-              <div className="text-[11px]">
-                <div className="flex items-center gap-1.5 text-text-3 text-[10px]">
-                  <span className="uppercase tracking-wider">From this session</span>
+              <div className="text-xs">
+                <div className="flex items-center gap-1.5 text-text-3 text-2xs">
+                  <span className="section-label">From this session</span>
                   <span>·</span>
                   <span className="font-mono">{insight.sessionIntent.agent}</span>
                   <span>·</span>
@@ -182,8 +183,8 @@ export function FileInsightStrip({
                 </div>
               </div>
             ) : whatText ? (
-              <div className="text-[11px]">
-                <div className="text-text-3 text-[10px] uppercase tracking-wider mb-0.5">
+              <div className="text-xs">
+                <div className="section-label mb-0.5">
                   Inferred from the change
                 </div>
                 <div className="text-text-1 leading-snug">{whatText}</div>
@@ -212,11 +213,11 @@ function Section({
   return (
     <div className="min-w-0">
       <header className="flex items-center gap-1.5 mb-1.5">
-        <span className="text-text-3 text-[10px] uppercase tracking-wider font-medium">
+        <span className="section-label">
           {title}
         </span>
         {count > 0 && (
-          <span className="text-text-4 text-[10px] tabular-nums">{count}</span>
+          <span className="text-text-4 text-2xs tabular-nums">{count}</span>
         )}
       </header>
       {children}
@@ -229,7 +230,7 @@ function Section({
  *  sit on the neutral ramp and let the diff itself carry the eye. */
 function Pill({ label }: { label: string }) {
   return (
-    <span className="rounded bg-bg-2 px-1.5 py-px text-[10px] font-medium text-text-3">
+    <span className="rounded bg-bg-2 px-1.5 py-px text-2xs font-medium text-text-3">
       {label}
     </span>
   );
@@ -259,20 +260,17 @@ function ChevronGlyph({ open }: { open: boolean }) {
 
 function KindBadge({ kind }: { kind: string }) {
   return (
-    <span className="w-6 shrink-0 text-[9px] uppercase tracking-wider text-text-4">
+    <span className="w-6 shrink-0 text-2xs text-text-4">
       {kind}
     </span>
   );
 }
 
 function Muted({ children }: { children: React.ReactNode }) {
-  return <div className="text-text-4 text-[10.5px] py-1">{children}</div>;
+  return <div className="text-text-4 text-xs py-1">{children}</div>;
 }
 
 function relTime(ts: number): string {
-  const diff = Date.now() - ts;
-  if (diff < 60_000) return "just now";
-  if (diff < 3_600_000) return `${Math.floor(diff / 60_000)}m ago`;
-  if (diff < 86_400_000) return `${Math.floor(diff / 3_600_000)}h ago`;
-  return `${Math.floor(diff / 86_400_000)}d ago`;
+  // One ladder for the whole app — see lib/relativeTime.
+  return relativeAge(ts);
 }

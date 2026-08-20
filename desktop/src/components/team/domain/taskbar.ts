@@ -92,23 +92,6 @@ export function serializeTaskbar(items: TaskItem[]): string {
   return `# Taskbar\n\n${lines.join("\n")}\n`;
 }
 
-/** Compact, human age like `just now` / `4m` / `3h` / `2d` / `1w`. */
-export function formatAge(tsMs: number, nowMs: number): string {
-  const s = Math.max(0, Math.floor((nowMs - tsMs) / 1000));
-  if (s < 45) return "just now";
-  const m = Math.floor(s / 60);
-  if (m < 60) return `${m}m`;
-  const h = Math.floor(m / 60);
-  if (h < 24) return `${h}h`;
-  const d = Math.floor(h / 24);
-  if (d < 7) return `${d}d`;
-  const w = Math.floor(d / 7);
-  if (w < 5) return `${w}w`;
-  const mo = Math.floor(d / 30);
-  if (mo < 12) return `${mo}mo`;
-  return `${Math.floor(d / 365)}y`;
-}
-
 /** Local-calendar day bucket, e.g. "2026-6-24". */
 export function dayKey(tsMs: number): string {
   const d = new Date(tsMs);

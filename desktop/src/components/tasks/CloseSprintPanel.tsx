@@ -18,6 +18,7 @@ import { Button } from "../ui/button";
 import { Field } from "../ui/field";
 import { Select } from "../ui/select";
 import type { Sprint } from "../../lib/api";
+import { plural } from "../../lib/plural";
 
 /** Sentinel destination = send unfinished items back to the backlog
  *  (clear their cycle pointer). Any other value is a target sprint id. */
@@ -103,10 +104,10 @@ export function CloseSprintPanel({
       <div className="flex w-full flex-col items-center px-6 py-8 sm:py-10">
         <div className="flex w-full max-w-[560px] flex-col gap-6">
           <div className="flex flex-col gap-1.5">
-            <h1 className="text-[18px] font-medium leading-7 text-text-1">
+            <h1 className="text-xl font-medium leading-7 text-text-1">
               Complete {sprint.name}
             </h1>
-            <p className="text-[13px] leading-5 text-text-3">
+            <p className="text-base leading-5 text-text-3">
               {sprint.start} → {sprint.end}. Closing records this sprint's
               velocity and moves anything unfinished out of the way.
             </p>
@@ -125,7 +126,7 @@ export function CloseSprintPanel({
             <StatTile
               label="Carried over"
               value={String(carriedCount)}
-              sub={carriedCount === 1 ? "unfinished" : "unfinished"}
+              sub={`unfinished ${plural(carriedCount, "item")}`}
               tone={carriedCount > 0 ? "alert" : "muted"}
             />
             <StatTile
@@ -143,7 +144,7 @@ export function CloseSprintPanel({
                 carriedCount === 1 ? "" : "s"
               } to`}
               htmlFor="csp-carry"
-              description="They keep their status — only their sprint changes. Backlog is the safe default."
+              description="They keep their status. Only their sprint changes. Backlog is the safe default."
             >
               <Select
                 id="csp-carry"
@@ -154,8 +155,8 @@ export function CloseSprintPanel({
               />
             </Field>
           ) : (
-            <div className="rounded-lg border border-dashed border-line-soft px-4 py-6 text-center text-[12.5px] text-text-5">
-              Everything in this sprint is done — nothing to carry over. Clean
+            <div className="rounded-lg border border-dashed border-line-soft px-4 py-6 text-center text-base text-text-5">
+              Everything in this sprint is done. Nothing to carry over. Clean
               finish.
             </div>
           )}
@@ -182,13 +183,13 @@ function StatTile({
   const valueTone = tone === "alert" ? "text-amber" : "text-text-1";
   return (
     <div className="rounded-lg bg-bg-content p-3 border border-line-soft">
-      <div className="text-[10.5px] uppercase tracking-wider text-text-5">
+      <div className="section-label">
         {label}
       </div>
-      <div className={`mt-1 text-[20px] font-medium tabular-nums ${valueTone}`}>
+      <div className={`mt-1 text-xl font-medium tabular-nums ${valueTone}`}>
         {value}
       </div>
-      <div className="mt-0.5 text-[11px] text-text-5">{sub}</div>
+      <div className="mt-0.5 text-xs text-text-5">{sub}</div>
     </div>
   );
 }

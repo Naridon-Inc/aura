@@ -159,11 +159,11 @@ export function ConnectAgentScreen({
   return (
     <OnboardingCenter width={380}>
       <div className="text-center">
-        <div className="text-[15px] font-semibold text-text-1">
+        <div className="text-lg font-semibold text-text-1">
           Connect a coding agent
         </div>
-        <div className="mt-1.5 text-[12.5px] text-text-3">
-          Optional — sign in now, or set this up later in Settings.
+        <div className="mt-1.5 text-base text-text-3">
+          Optional. Sign in now, or set this up later in Settings.
         </div>
       </div>
 
@@ -180,16 +180,16 @@ export function ConnectAgentScreen({
                 onClick={() => connect(a.id)}
                 className="group flex items-center gap-3 h-[52px] w-full px-3.5 rounded-md border border-line-soft bg-bg-2 hover:bg-bg-3 hover:border-line-strong disabled:hover:bg-bg-2 transition-colors text-left"
               >
-                <span className="w-8 h-8 shrink-0 rounded-md bg-bg-1 border border-line-soft inline-flex items-center justify-center text-[15px] text-text-2">
+                <span className="w-8 h-8 shrink-0 rounded-md bg-bg-1 border border-line-soft inline-flex items-center justify-center text-lg text-text-2">
                   {a.glyph}
                 </span>
                 <span className="flex-1 min-w-0">
-                  <span className="block text-[13px] font-medium text-text-1">
+                  <span className="block text-base font-medium text-text-1">
                     {a.label}
                   </span>
-                  <span className="block text-[11px] text-text-4">{a.hint}</span>
+                  <span className="block text-xs text-text-4">{a.hint}</span>
                 </span>
-                <span className="shrink-0 inline-flex items-center text-[11.5px]">
+                <span className="shrink-0 inline-flex items-center text-sm">
                   {st === "connected" ? (
                     <span className="inline-flex items-center gap-1 text-accent-green">
                       <CheckIcon /> Connected
@@ -214,7 +214,7 @@ export function ConnectAgentScreen({
               {/* Broken / missing Codex → explain + hand over a copyable fix. */}
               {isCodexFix && (
                 <div className="rounded-md border border-amber/20 bg-amber/[0.06] px-3 py-2.5">
-                  <div className="flex items-start gap-2 text-[11.5px] text-text-2 leading-relaxed">
+                  <div className="flex items-start gap-2 text-sm text-text-2 leading-relaxed">
                     <span className="mt-[1px] text-amber shrink-0">
                       <WarnIcon />
                     </span>
@@ -222,11 +222,11 @@ export function ConnectAgentScreen({
                       {codex.detail ||
                         (codex.state === "missing"
                           ? "The Codex CLI isn't installed."
-                          : "Codex is installed but won't run — it needs reinstalling.")}
+                          : "Codex is installed but won't run. It needs reinstalling.")}
                       {codex.hasCreds && (
                         <>
                           {" "}
-                          You're already signed in to Codex — this just repairs
+                          You're already signed in to Codex. This just repairs
                           the command-line tool.
                         </>
                       )}
@@ -236,17 +236,17 @@ export function ConnectAgentScreen({
                     <button
                       type="button"
                       onClick={() => void copy(codex.fix!)}
-                      className="mt-2 flex w-full items-center gap-2 rounded border border-line-soft bg-bg-1 px-2.5 py-1.5 text-left font-mono text-[11px] text-text-2 hover:border-line-strong transition-colors"
+                      className="mt-2 flex w-full items-center gap-2 rounded border border-line-soft bg-bg-1 px-2.5 py-1.5 text-left font-mono text-xs text-text-2 hover:border-line-strong transition-colors"
                     >
                       <span className="text-text-4">$</span>
                       <span className="flex-1 min-w-0 truncate">{codex.fix}</span>
-                      <span className="inline-flex items-center gap-1 text-[10.5px] text-text-3 shrink-0">
+                      <span className="inline-flex items-center gap-1 text-xs text-text-3 shrink-0">
                         {copied ? <CheckIcon /> : <CopyIcon />}
                         {copied ? "Copied" : "Copy"}
                       </span>
                     </button>
                   )}
-                  <div className="mt-2 text-[10.5px] text-text-4 leading-relaxed">
+                  <div className="mt-2 text-xs text-text-4 leading-relaxed">
                     Run it in your terminal, then reopen this step. You can also
                     skip and set Codex up later.
                   </div>
@@ -255,7 +255,7 @@ export function ConnectAgentScreen({
 
               {/* Sign-in failure reason (real message from the CLI). */}
               {rowErr && !isCodexFix && (
-                <div className="flex items-start gap-2 rounded-md border border-line-soft bg-bg-2 px-3 py-2 text-[11px] text-text-3 leading-relaxed">
+                <div className="flex items-start gap-2 rounded-md border border-line-soft bg-bg-2 px-3 py-2 text-xs text-text-3 leading-relaxed">
                   <span className="mt-[1px] text-amber shrink-0">
                     <WarnIcon />
                   </span>

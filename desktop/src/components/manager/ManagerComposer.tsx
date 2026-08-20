@@ -33,8 +33,14 @@ import {
 import { BrainPicker } from "./BrainPicker";
 import { UsagePopover } from "./chat/UsagePopover";
 import { useClaudeUsage } from "./chat/ClaudeUsageRing";
-import { type TokenUsage } from "./chat/types";
-import { api, type BrainChoice, type ReasoningEffort, type ApprovalPolicy } from "../../lib/api";
+import { type TokenUsage, type TurnSpend } from "./chat/types";
+import {
+  api,
+  type AgentMode,
+  type BrainChoice,
+  type ReasoningEffort,
+  type ApprovalPolicy,
+} from "../../lib/api";
 import {
   OS_FILE_DROP_COMPOSER,
   OS_FILE_DRAG,
@@ -43,7 +49,11 @@ import { type SelectedModel } from "../../lib/modelCatalog";
 import { ModelDefaultsPanel } from "./ModelDefaultsPanel";
 import { registerComposerInserter } from "../../lib/composerBridge";
 import { useFollowUpBehavior } from "../../lib/followUpBehavior";
-import { TiptapComposer, type TiptapComposerHandle } from "./TiptapComposer";
+import {
+  TiptapComposer,
+  type SlashItem,
+  type TiptapComposerHandle,
+} from "./TiptapComposer";
 import { ChipButton } from "../ui/chip";
 import {
   DropdownMenu,
@@ -67,6 +77,15 @@ import { Kbd } from "../ui/kbd";
 import { Button } from "../ui/button";
 import { readTerminalContext } from "../Terminal";
 import { useEditorStore } from "../../lib/editorStore";
+import { useDismiss } from "../../lib/useDismiss";
+import {
+  composerKey,
+  pushHistory,
+  readDraft,
+  readHistory,
+  writeDraft,
+  writeHistory,
+} from "../composer/composerDrafts";
 
 type ComposerImage = {
   id: string;
@@ -100,7 +119,12 @@ type SpeechRecognitionLike = {
   continuous: boolean;
   interimResults: boolean;
   start(): void;
+  /** Graceful: finishes the utterance, then fires `onend`. */
   stop(): void;
+  /** Immediate: drops the utterance and releases the input device now.
+   *  Optional because the DOM lib doesn't type the Web Speech API at all and
+   *  we can't assume every WebView ships it. */
+  abort?(): void;
   onresult: ((e: SpeechRecognitionEventLike) => void) | null;
   onerror: ((e: unknown) => void) | null;
   onend: ((e: unknown) => void) | null;
@@ -120,6 +144,7 @@ type Props = {
   /** Last-turn context fill from the native brain. Drives a slim context-window
    *  meter in the composer's bottom row. Null (CLI brains / no report) hides it. */
   usage?: TokenUsage | null;
+  spend?: TurnSpend | null;
   /** Optional placeholder override (e.g. "Add more optional details"). */
   placeholder?: string;
   /** Fires on Enter (no shift) or Send click. Receives the trimmed text
@@ -212,15 +237,55 @@ type Props = {
    *  input read as one stacked panel (the card rounds only its top). False =
    *  the standalone rounded composer. */
   docked?: boolean;
+  /** Slash commands the running agent published for itself — merged into
+   *  the `/` menu below Aura's verbs and the repo's Claude commands. */
+  agentCommands?: SlashItem[];
+  /** Modes the running agent can actually be put into, if it has any.
+   *  Present → the Mode chip stops being a prompt steer and becomes a real
+   *  control on a real process (OpenCode's plan mode refuses every edit
+   *  tool), so the chip says which of the two it is. */
+  agentModes?: AgentMode[];
+  /** The mode the agent reports it is in right now. Diverges from the
+   *  chip's own label when the agent switched itself mid-turn, which is
+   *  worth showing rather than papering over. */
+  agentMode?: string | null;
+  /** Push a mode to the agent. Rejects if the agent won't take it — the
+   *  caller surfaces that rather than leaving the chip claiming a
+   *  read-only mode the agent never entered. */
+  onAgentModeChange?: (modeId: string) => Promise<void>;
+  /** Last mode switch the agent refused, in its own words. */
+  agentModeError?: string | null;
 };
+
+/** Which of the agent's own modes an Aura mode means.
+ *
+ * Aura's chip is four positions and an agent's is usually two, so this is
+ * a narrowing, not a mapping: everything that promises not to edit
+ * (`plan`, `ask`) asks for the agent's plan mode, and everything that
+ * expects work done takes whatever else it offers. Matching on the id
+ * rather than a per-agent table means an agent with modes we have never
+ * heard of still gets the read-only half right. */
+export function agentModeFor(
+  mode: ComposerMode,
+  modes: AgentMode[],
+): string | null {
+  if (modes.length === 0) return null;
+  const readOnly = mode === "plan" || mode === "ask";
+  const planLike = modes.find((m) => /plan/i.test(m.id) || /plan/i.test(m.name));
+  if (readOnly) return planLike?.id ?? null;
+  return (modes.find((m) => m !== planLike) ?? modes[0]).id;
+}
 
 // `hint` is the full description (the trigger tooltip); `blurb` is the 1-3 word
 // inline note shown on the menu row, kept tight so rows stay single-line.
 const MODE_OPTIONS: { value: ComposerMode; label: string; hint: string; blurb: string }[] = [
-  { value: "auto", label: "Auto", hint: "Full autopilot — decide, build, and finish without pausing", blurb: "autopilot" },
+  // "Autopilot", not "Auto" — the model chip on this same bar says Auto when
+  // nothing is pinned, and the two sit 220px apart meaning different things.
+  // The stored value stays "auto" (aura.manager.mode), so nobody's setting moves.
+  { value: "auto", label: "Autopilot", hint: "Decides, builds and finishes, never stops to ask", blurb: "no pauses" },
   { value: "build", label: "Build", hint: "Make the changes end-to-end", blurb: "make changes" },
   { value: "plan", label: "Plan", hint: "Discuss and plan before any edits", blurb: "plan first" },
-  { value: "ask", label: "Ask", hint: "Read-only chat — no edits", blurb: "read-only" },
+  { value: "ask", label: "Ask", hint: "Read-only chat. No edits", blurb: "read-only" },
 ];
 
 const MODE_KEY = "aura.manager.mode";
@@ -228,70 +293,25 @@ const EFFORT_KEY = "aura.manager.effort";
 const FAST_KEY = "aura.manager.fast";
 const APPROVAL_KEY = "aura.manager.approval";
 
-// Per-session composer draft. Unlike the chips above (global), a half-typed
-// message belongs to ONE conversation — switching Manager sessions must not
-// bleed drafts across them, so the key carries the session id. A null
-// session (picker hidden / pre-session) folds onto one shared slot.
+// Per-session composer draft and the up-arrow recall ring. Unlike the chips
+// above (global), a half-typed message belongs to ONE conversation — switching
+// Manager sessions must not bleed drafts across them, so the key carries the
+// session id. A null session (picker hidden / pre-session) folds onto one
+// shared slot.
+//
+// The rules themselves now live in `components/composer/composerDrafts`, because
+// the agent chat's composer needs byte-identical behaviour for a CLI session and
+// a second copy is how the edges drift. This file keeps only the namespace.
 const DRAFT_PREFIX = "aura.manager.draft:";
 function draftKey(sessionId?: string | null): string {
-  return `${DRAFT_PREFIX}${sessionId ?? "__global"}`;
-}
-function readDraft(key: string): string {
-  try {
-    return localStorage.getItem(key) ?? "";
-  } catch {
-    return "";
-  }
-}
-/** Persist a draft, or drop the key when empty so stale empty slots don't
- *  accumulate (also how a successful send clears the draft). */
-function writeDraft(key: string, value: string): void {
-  try {
-    if (value.length === 0) localStorage.removeItem(key);
-    else localStorage.setItem(key, value);
-  } catch {
-    /* storage disabled */
-  }
+  return composerKey(DRAFT_PREFIX, sessionId);
 }
 
-// Per-session message-history ring — the shell-style "Up arrow recalls my last
-// message" recall. Keyed exactly like drafts (per Manager session) so history
-// never bleeds across conversations, and persisted in localStorage so it
-// survives a reload. We store the RAW text the user typed (`/foo`, not the
-// slash-expanded forward text) so recall round-trips byte-identically. Newest
-// message is LAST in the array; consecutive duplicates collapse so spamming the
-// same message doesn't bloat the ring, and the ring is capped so it can't grow
-// without bound.
+// We store the RAW text the user typed (`/foo`, not the slash-expanded forward
+// text) so recall round-trips byte-identically. Newest message is LAST.
 const HISTORY_PREFIX = "aura.manager.history:";
-const HISTORY_CAP = 50;
 function historyKey(sessionId?: string | null): string {
-  return `${HISTORY_PREFIX}${sessionId ?? "__global"}`;
-}
-function readHistory(key: string): string[] {
-  try {
-    const raw = localStorage.getItem(key);
-    if (!raw) return [];
-    const parsed: unknown = JSON.parse(raw);
-    if (!Array.isArray(parsed)) return [];
-    return parsed.filter((v): v is string => typeof v === "string");
-  } catch {
-    return [];
-  }
-}
-function writeHistory(key: string, value: string[]): void {
-  try {
-    if (value.length === 0) localStorage.removeItem(key);
-    else localStorage.setItem(key, JSON.stringify(value));
-  } catch {
-    /* storage disabled */
-  }
-}
-/** Append a sent message to the ring (newest last), collapsing a consecutive
- *  duplicate of the current newest and capping the length. */
-function pushHistory(ring: string[], message: string): string[] {
-  if (ring.length > 0 && ring[ring.length - 1] === message) return ring;
-  const next = [...ring, message];
-  return next.length > HISTORY_CAP ? next.slice(next.length - HISTORY_CAP) : next;
+  return composerKey(HISTORY_PREFIX, sessionId);
 }
 
 // The Effort chip is a cross-agent control: whichever brain runs the next
@@ -303,11 +323,13 @@ const EFFORT_OPTIONS: {
   hint: string;
   blurb: string;
 }[] = [
-  { value: null, label: "Auto", hint: "Let the model pick its own reasoning depth", blurb: "model decides" },
+  // "Default", not "Auto" — this strip lives inside the model switcher, where
+  // the model row and the routing summary each had an "Auto" of their own.
+  { value: null, label: "Default", hint: "Whatever depth the model reasons at on its own", blurb: "model decides" },
   { value: "low", label: "Low", hint: "Quick, shallow reasoning", blurb: "quick" },
   { value: "medium", label: "Medium", hint: "Balanced reasoning", blurb: "balanced" },
-  { value: "high", label: "High", hint: "Deep, careful reasoning — slower", blurb: "deep" },
-  { value: "max", label: "Max", hint: "Maximum depth — ultrathink, slowest", blurb: "ultrathink" },
+  { value: "high", label: "High", hint: "Deep, careful reasoning. Slower", blurb: "deep" },
+  { value: "max", label: "Max", hint: "Maximum depth. Ultrathink, slowest", blurb: "ultrathink" },
 ];
 
 // The Approvals chip is a cross-agent autonomy control (Claude's
@@ -323,10 +345,10 @@ const APPROVAL_OPTIONS: {
   hint: string;
   blurb: string;
 }[] = [
-  { value: null, label: "Default", hint: "Agent's standard flow — asks before risky edits", blurb: "asks first" },
+  { value: null, label: "Default", hint: "Agent's standard flow. Asks before risky edits", blurb: "asks first" },
   { value: "accept_edits", label: "Accept Edits", hint: "Auto-accept file edits; still guard shell/destructive actions", blurb: "auto-edits" },
-  { value: "plan", label: "Plan", hint: "Read-only — propose a plan, change nothing on disk", blurb: "read-only" },
-  { value: "bypass", label: "Bypass", hint: "Full autonomy — skip all permission prompts", blurb: "no prompts" },
+  { value: "plan", label: "Plan", hint: "Read-only. Propose a plan, change nothing on disk", blurb: "read-only" },
+  { value: "bypass", label: "Bypass", hint: "Full autonomy. Skip all permission prompts", blurb: "no prompts" },
 ];
 
 // Per-row glyphs so the Approvals / Mode menus read like the effort menu:
@@ -351,6 +373,7 @@ export function ManagerComposer({
   workspaceLabel: _workspaceLabel,
   busy,
   usage,
+  spend,
   placeholder,
   onSend,
   onStop,
@@ -362,6 +385,11 @@ export function ManagerComposer({
   onQueue,
   onSteer,
   docked = false,
+  agentCommands,
+  agentModes,
+  agentMode = null,
+  onAgentModeChange,
+  agentModeError = null,
 }: Props) {
   // Follow-up behavior while a turn is running: "queue" parks the message for
   // turn-end, "steer" redirects the running turn now. ⌘↵ always steers
@@ -618,24 +646,7 @@ export function ManagerComposer({
   }, [approval]);
 
   // Click-outside / Esc closes the unified add (+) menu.
-  useEffect(() => {
-    if (!addOpen) return;
-    function onDoc(e: MouseEvent) {
-      const t = e.target as Node | null;
-      if (addRef.current && t && !addRef.current.contains(t)) {
-        setAddOpen(false);
-      }
-    }
-    function onKey(e: globalThis.KeyboardEvent) {
-      if (e.key === "Escape") setAddOpen(false);
-    }
-    document.addEventListener("mousedown", onDoc);
-    document.addEventListener("keydown", onKey);
-    return () => {
-      document.removeEventListener("mousedown", onDoc);
-      document.removeEventListener("keydown", onKey);
-    };
-  }, [addOpen]);
+  useDismiss(addOpen, () => setAddOpen(false), addRef);
 
   // Cmd/Ctrl+L focuses the composer (Conductor parity — the "⌘L to focus"
   // hint). We don't steal focus from another live text field (a code editor,
@@ -738,14 +749,45 @@ export function ManagerComposer({
           URL.revokeObjectURL(img.preview_url);
         }
       }
-      try {
-        recognitionRef.current?.stop();
-      } catch {
-        // ignore — stop() throws if recognition never started
-      }
+      // Dictation holds the microphone. Unmounting the composer with it still
+      // running would leave the input device open behind a surface that no
+      // longer exists — `abort()` so it goes back immediately, not after the
+      // engine finishes chewing on the last utterance.
+      stopDictationRef.current(true);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  // Every exit from dictation goes through here: the toggle, submit, an
+  // engine-side end/error, a start() that throws, and unmount. It owns the
+  // ref, so there is never more than one live recognizer and never one that
+  // nothing holds a reference to.
+  //
+  // Why it matters: a running SpeechRecognition holds the audio input exactly
+  // like a getUserMedia stream does. On macOS an open input hands the Mac
+  // ownership of connected AirPods and drops them out of A2DP, so a recognizer
+  // orphaned behind a "not listening" UI leaves the user's headphones stuck on
+  // the laptop and fighting their phone for the rest of the session.
+  const stopDictation = useCallback((immediate = false) => {
+    const rec = recognitionRef.current;
+    recognitionRef.current = null;
+    if (rec) {
+      try {
+        if (immediate && typeof rec.abort === "function") rec.abort();
+        else rec.stop();
+      } catch {
+        // stop()/abort() throw when recognition never started — in that case
+        // there is no device to hand back and nothing to do.
+      }
+    }
+    setListening(false);
+  }, []);
+  // The unmount effect above runs with render-0's closures; route it through a
+  // ref so it always calls the current teardown.
+  const stopDictationRef = useRef(stopDictation);
+  useEffect(() => {
+    stopDictationRef.current = stopDictation;
+  }, [stopDictation]);
 
   function getSpeechRecognitionCtor(): SpeechRecognitionCtor | null {
     const w = window as unknown as {
@@ -756,12 +798,11 @@ export function ManagerComposer({
   }
 
   function toggleListening() {
-    if (listening) {
-      try {
-        recognitionRef.current?.stop();
-      } catch {
-        // ignore
-      }
+    // `recognitionRef.current` is checked as well as `listening` so a
+    // recognizer that survived a UI state we lost track of is still stopped
+    // rather than orphaned next to a second one.
+    if (listening || recognitionRef.current) {
+      stopDictation();
       return;
     }
     const Ctor = getSpeechRecognitionCtor();
@@ -785,8 +826,8 @@ export function ManagerComposer({
       // replace, not append. setMarkdown also pushes the mirror via onChange.
       composerRef.current?.setMarkdown(base + sep + collected);
     };
-    rec.onerror = () => setListening(false);
-    rec.onend = () => setListening(false);
+    rec.onerror = () => stopDictation();
+    rec.onend = () => stopDictation();
     recognitionRef.current = rec;
     try {
       rec.start();
@@ -794,7 +835,10 @@ export function ManagerComposer({
       composerRef.current?.focus();
     } catch (err) {
       console.warn("[composer] recognition.start() failed", err);
-      setListening(false);
+      // start() can throw *after* the engine already took the input (a
+      // double-start raises InvalidStateError). Tear the recognizer down
+      // instead of dropping the reference with the microphone still open.
+      stopDictation(true);
     }
   }
 
@@ -1007,13 +1051,9 @@ export function ManagerComposer({
   }
 
   async function submit(opts?: { steer?: boolean }) {
-    if (listening) {
-      try {
-        recognitionRef.current?.stop();
-      } catch {
-        // ignore
-      }
-    }
+    // Sending is the end of dictation — hand the microphone back here rather
+    // than leaving it open behind the sent message.
+    if (listening || recognitionRef.current) stopDictation();
     const trimmed = text.trim();
     if (!trimmed && images.length === 0) return;
     // `/brain [query]` is a client-side affordance, not a message: it opens
@@ -1143,6 +1183,34 @@ export function ManagerComposer({
   // Esc=stop affordance, both forwarded into the editor's key handling below.
 
   const activeMode = MODE_OPTIONS.find((m) => m.value === mode) ?? MODE_OPTIONS[0];
+
+  // The agent's own mode this chip position asks for, when the running
+  // agent has modes at all. Null = the chip is the prompt steer it has
+  // always been.
+  const enforcedMode = agentModes?.length
+    ? agentModeFor(mode, agentModes)
+    : null;
+  // The agent says it is somewhere else. Agents change mode on their own
+  // — OpenCode leaves plan mode when you accept its plan — and a chip
+  // that kept saying Plan through that would be the most dangerous kind
+  // of wrong.
+  const driftedMode =
+    enforcedMode && agentMode && agentMode !== enforcedMode ? agentMode : null;
+
+  /** Pick a mode. Beyond moving the chip, this pushes the agent's
+   *  equivalent when there is one — the whole point of the control on a
+   *  hosted agent. The push is fire-and-forget here because the parent
+   *  owns the error: it hands back `agentModeError`, which the chip
+   *  shows. */
+  function chooseMode(next: ComposerMode) {
+    setMode(next);
+    if (!onAgentModeChange || !agentModes?.length) return;
+    const target = agentModeFor(next, agentModes);
+    if (!target || target === agentMode) return;
+    void onAgentModeChange(target).catch(() => {
+      // Reported through `agentModeError`, not thrown into a click.
+    });
+  }
   const activeApproval =
     APPROVAL_OPTIONS.find((a) => a.value === approval) ?? APPROVAL_OPTIONS[0];
   const canSend = !busy && (text.trim().length > 0 || images.length > 0);
@@ -1196,17 +1264,17 @@ export function ManagerComposer({
   // next turn, so they belong on one surface — the model chip carries them.
   const turnControls = (
     <div className="flex flex-wrap items-center gap-x-2 gap-y-1.5 border-b border-line-soft px-3 py-2">
-      <span className="text-[10px] uppercase tracking-wider text-text-5">This turn</span>
+      <span className="text-xs font-medium text-text-4">This turn</span>
       <button
         type="button"
         aria-pressed={fast}
         onClick={() => setFast((v) => !v)}
         title={
           fast
-            ? "Fast mode on — minimal reasoning, lowest latency. Click to turn off."
-            : "Fast mode — minimal reasoning, lowest latency (overrides Effort)"
+            ? "Fast mode on. Minimal reasoning, lowest latency. Click to turn off."
+            : "Fast mode. Minimal reasoning, lowest latency (overrides Effort)"
         }
-        className="flex items-center gap-1 rounded px-1.5 py-0.5 text-[11.5px]"
+        className="flex items-center gap-1 rounded px-1.5 py-0.5 text-sm"
         style={
           fast
             ? {
@@ -1233,8 +1301,8 @@ export function ManagerComposer({
               type="button"
               disabled={fast}
               onClick={() => setEffort(opt.value)}
-              title={fast ? "Effort is overridden by Fast" : `${opt.label} — ${opt.hint}`}
-              className={`flex items-center gap-1 rounded px-1.5 py-0.5 text-[11.5px] ${
+              title={fast ? "Effort is overridden by Fast" : `${opt.label} · ${opt.hint}`}
+              className={`flex items-center gap-1 rounded px-1.5 py-0.5 text-sm ${
                 fast ? "cursor-not-allowed" : ""
               }`}
               style={
@@ -1302,7 +1370,7 @@ export function ManagerComposer({
       {/* Conductor-style focus hint — only while the field is empty, so it
           never crowds what the user is typing. */}
       {text.length === 0 && images.length === 0 && !busy && (
-        <span className="absolute top-2.5 right-3 text-[10.5px] text-text-4 pointer-events-none select-none">
+        <span className="absolute top-2.5 right-3 text-xs text-text-4 pointer-events-none select-none">
           <Kbd>⌘L</Kbd> to focus
         </span>
       )}
@@ -1344,10 +1412,10 @@ export function ManagerComposer({
         placeholder={
           busy && (onQueue || onSteer)
             ? followUpBehavior === "steer" && onSteer
-              ? "Steer the running turn — ↵ redirects it now"
+              ? "Steer the running turn. ↵ redirects it now"
               : onSteer
-                ? "Queue a follow-up — ⌘↵ to steer now"
-                : "Queue a follow-up — sends when the agent finishes"
+                ? "Queue a follow-up. ⌘↵ to steer now"
+                : "Queue a follow-up. Sends when the agent finishes"
             : (placeholder ?? "Ask to make changes, @mention files, run /commands")
         }
         onChange={setText}
@@ -1355,15 +1423,16 @@ export function ManagerComposer({
         onEscapeWhileBusy={onStop}
         onImageFiles={(files) => files.forEach(ingestFile)}
         canRecallHistory={canRecall}
+        agentRows={agentCommands}
       />
 
       <div className="composer-bottom">
         {/* Model picker — grouped by agent, exact models. Picks both the
             brain the next turn runs through AND its concrete model;
             cross-agent by construction. Defaults + auto-routing (the model new
-            sessions start on, how Auto routes each task class) fold into the
-            bottom of this same switcher (`modalFooter`) — one model chip, not
-            two look-alike "Auto" chips (#17). */}
+            sessions start on, which model each task class routes to) fold into
+            the bottom of this same switcher (`modalFooter`) — one model chip,
+            not two look-alike chips (#17). */}
         {sessionId && onBrainOverrideChange && onModelOverrideChange && (
           <BrainPicker
             sessionId={sessionId}
@@ -1391,8 +1460,8 @@ export function ManagerComposer({
             <ChipButton
               title={
                 approval
-                  ? `Approvals: ${activeApproval.label} — ${activeApproval.hint}`
-                  : "Approvals — the autonomy the agent runs with this turn"
+                  ? `Approvals: ${activeApproval.label} · ${activeApproval.hint}`
+                  : "Approvals. The autonomy the agent runs with this turn"
               }
               chevron={false}
               // Bypass is the one risky setting — it reads red, not accent, so an
@@ -1443,8 +1512,8 @@ export function ManagerComposer({
           <ChipButton
             title={
               goalMode
-                ? "Sending as a goal — the brain will plan it through the crew loop. Click to unset."
-                : "Send as a goal — the brain plans it through the crew loop and proves it"
+                ? "Sending as a goal. The brain will plan it through the crew loop. Click to unset."
+                : "Send as a goal. The brain plans it through the crew loop and proves it"
             }
             chevron={false}
             className={goalMode ? "chip-on" : undefined}
@@ -1458,17 +1527,35 @@ export function ManagerComposer({
         )}
 
         {/* Plan / Build / Ask — the map chip (Conductor's plan-mode glyph).
-            A visual hint only; the brain still decides plan-vs-build. Always
-            lit with the app accent (it always carries a mode). */}
+            Normally a steer: the words are prepended to the message and the
+            brain still decides plan-vs-build. When the running agent has
+            modes of its own, the same chip drives those instead — OpenCode's
+            plan mode refuses every edit tool, which is a promise the prompt
+            alone can't make — and the tooltip says which of the two you're
+            getting. Always lit with the app accent (it always carries a
+            mode). */}
         <DropdownMenu>
           <DropdownMenuTrigger asChild>
             <ChipButton
-              title={`${activeMode.label} — ${activeMode.hint}`}
-              className="chip-on"
+              title={
+                agentModeError
+                  ? `${activeMode.label} — the agent refused the switch: ${agentModeError}`
+                  : `${activeMode.label} · ${activeMode.hint}${
+                      enforcedMode
+                        ? `\nEnforced by the agent, not just asked for (${enforcedMode})`
+                        : ""
+                    }`
+              }
+              className={agentModeError ? "chip-on chip-danger" : "chip-on"}
               chevron={false}
             >
               <svg className="ico-12"><use href="#i-map" /></svg>
               <span className="chip-label">{activeMode.label}</span>
+              {/* The agent is in a different mode than this chip claims —
+                  it switched itself mid-turn. Show its word, not ours. */}
+              {driftedMode && (
+                <span className="chip-label text-text-3">· {driftedMode}</span>
+              )}
             </ChipButton>
           </DropdownMenuTrigger>
           <DropdownMenuContent align="start" side="top">
@@ -1479,7 +1566,7 @@ export function ManagerComposer({
                 <DropdownMenuItem
                   key={opt.value}
                   className="gap-x-2"
-                  onSelect={() => setMode(opt.value)}
+                  onSelect={() => chooseMode(opt.value)}
                 >
                   <span className="flex w-3.5 shrink-0 justify-center">
                     <Icon className="h-3.5 w-3.5" />
@@ -1503,6 +1590,7 @@ export function ManagerComposer({
             <div className="mr-0.5">
               <UsagePopover
                 usage={usage}
+                spend={spend}
                 contextWindow={modelOverride?.longContext ? 1_000_000 : undefined}
                 usageTitle={claudeUsage ? "Claude usage" : undefined}
                 limit={
@@ -1522,7 +1610,7 @@ export function ManagerComposer({
             <button
               type="button"
               className="icon-btn-sm"
-              title="Add — attach an image or dictate"
+              title="Add. Attach an image or dictate"
               aria-expanded={addOpen}
               onClick={() => setAddOpen((v) => !v)}
               style={
@@ -1547,7 +1635,7 @@ export function ManagerComposer({
                     setAddOpen(false);
                     fileInputRef.current?.click();
                   }}
-                  className="w-full flex items-center gap-2.5 px-2.5 py-1.5 text-left text-[12px] text-text-2 hover:bg-bg-2 hover:text-text-1 transition-colors"
+                  className="w-full flex items-center gap-2.5 px-2.5 py-1.5 text-left text-sm text-text-2 hover:bg-state-hover hover:text-text-1 transition-colors"
                 >
                   <svg className="ico-12"><use href="#i-image" /></svg>
                   <span>Attach image…</span>
@@ -1558,7 +1646,7 @@ export function ManagerComposer({
                     setAddOpen(false);
                     toggleListening();
                   }}
-                  className="w-full flex items-center gap-2.5 px-2.5 py-1.5 text-left text-[12px] text-text-2 hover:bg-bg-2 hover:text-text-1 transition-colors"
+                  className="w-full flex items-center gap-2.5 px-2.5 py-1.5 text-left text-sm text-text-2 hover:bg-state-hover hover:text-text-1 transition-colors"
                 >
                   <svg className="ico-12"><use href="#i-mic" /></svg>
                   <span>{listening ? "Stop dictation" : "Dictate"}</span>
@@ -1577,8 +1665,8 @@ export function ManagerComposer({
                   onClick={() => void submit()}
                   title={
                     followUpBehavior === "steer"
-                      ? "Steer — redirects the running turn now (↵)"
-                      : "Queue — sends when the current turn finishes (↵)"
+                      ? "Steer. Redirects the running turn now (↵)"
+                      : "Queue. Sends when the current turn finishes (↵)"
                   }
                 >
                   {followUpBehavior === "steer" ? (
@@ -1596,7 +1684,7 @@ export function ManagerComposer({
                   size="sm"
                   className="font-mono text-accent"
                   onClick={() => void submit({ steer: true })}
-                  title="Steer — fold this into the running turn now (⌘↵)"
+                  title="Steer. Fold this into the running turn now (⌘↵)"
                 >
                   {steerGlyph}
                   <span className="send-kbd">⌘⏎</span>
@@ -1697,7 +1785,7 @@ function ImageThumb({
           className="w-full h-full object-cover"
         />
       ) : (
-        <div className="flex flex-col items-center justify-center text-text-3 text-[9px] gap-0.5 px-1">
+        <div className="flex flex-col items-center justify-center text-text-3 text-2xs gap-0.5 px-1">
           <svg className="w-[18px] h-[18px]">
             <use href={img.kind === "path" ? "#i-folder" : "#i-file"} />
           </svg>
@@ -1708,7 +1796,7 @@ function ImageThumb({
         type="button"
         onClick={onRemove}
         title="Remove"
-        className="absolute top-0.5 right-0.5 w-4 h-4 rounded-full bg-bg-deep/80 text-text-1 text-[10px] leading-none flex items-center justify-center opacity-0 group-hover:opacity-100 focus-visible:opacity-100 transition-opacity focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-accent/50"
+        className="absolute top-0.5 right-0.5 w-4 h-4 rounded-full bg-bg-deep/80 text-text-1 text-2xs leading-none flex items-center justify-center opacity-0 group-hover:opacity-100 focus-visible:opacity-100 transition-opacity focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-accent/50"
       >
         ×
       </button>

@@ -35,6 +35,8 @@ import type {
   AskOption,
   ToolField,
 } from "./types";
+import { basename } from "../../../lib/paths";
+import { camelSplitTail, sentenceCase } from "../../../lib/textCase";
 
 /** Cap a built unified diff so a giant Write doesn't blow out the card. */
 const MAX_DIFF_LINES = 80;
@@ -1229,13 +1231,6 @@ export function isReadOnlyBash(cmd: string): boolean {
     "git", "test", "[", "[[", "true", "false",
   ].includes(head);
 }
-
-export function basename(path: string): string {
-  if (!path) return "";
-  const last = path.split("/").filter(Boolean).pop();
-  return last || path;
-}
-
 /** Raster/vector image extensions the chat can render inline. A read whose
  *  target matches gets an `imagePath` on its `ToolView`, so the card shows the
  *  actual picture instead of a bare filename row. */
@@ -1302,7 +1297,12 @@ export function humanizeKey(k: string): string {
     .replace(/([a-z0-9])([A-Z])/g, "$1 $2")
     .trim();
   if (!s) return k;
-  return s.charAt(0).toUpperCase() + s.slice(1).toLowerCase();
+  // Bring down only the words the camel split left Capitalised, so "filePath"
+  // reads "File path" while an acronym survives: this used to lowercase the
+  // whole tail, and turned "MCP" into "Mcp". It cannot rescue a brand with a
+  // capital inside it — the camel splitter above has already cut "GitHub" into
+  // "Git Hub" by the time we get here, and always did. See lib/textCase.
+  return sentenceCase(s.split(" ").map(camelSplitTail).join(" "));
 }
 
 /** Render a tool's raw input object as humanized `{label, value}` rows so the

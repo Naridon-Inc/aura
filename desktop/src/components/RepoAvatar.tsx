@@ -103,7 +103,7 @@ export function RepoAvatar({
 // that the day the neutral override is dropped the two surfaces already agree,
 // instead of someone having to reconcile two hashes after the fact.
 //
-// `accentForRoot` (components/WorkspaceRail.tsx) is not reused for the same
+// `accentForRoot` (lib/workspaceRef.ts) is not reused for the same
 // reason it can't be trusted above: it was deliberately flattened to one
 // neutral for all roots, so it carries no per-project identity — passing it in
 // would tint every tile identically. Its history is the warning label on this

@@ -15,11 +15,13 @@ import { CommitInput } from "./CommitInput";
 import { FileRow } from "./FileRow";
 import { Tooltip, TooltipTrigger, TooltipContent } from "../ui/tooltip";
 import { AsciiSpinner } from "../ui/ascii-spinner";
+import { ErrorState } from "../ui/state";
 import { useLiveSync } from "./sync/useLiveSync";
 import { GoLiveControl } from "./sync/GoLiveControl";
 import { IncomingSection } from "./sync/IncomingSection";
 import { ConflictsSection } from "./sync/ConflictsSection";
 import { TeamRadarSection } from "./radar/TeamRadarSection";
+import { resolveAstConflict } from "../../lib/ambientCache";
 
 // "Go live" (real-time co-editing) is hidden from Changes for now — the
 // feature stays wired behind AURA_SYNC_ENABLED, we just don't surface the
@@ -70,6 +72,68 @@ function openModeFor(e: React.MouseEvent): OpenMode {
   return "diff";
 }
 
+/** What this panel may say about your working tree, given how much of it git
+ *  actually managed to tell us.
+ *
+ *  `useGitChanges` has always computed an `error` — it is declared in the
+ *  exported `GitChanges` type and set in the hook's catch — and this panel
+ *  never read it. So when `git status` failed (an index.lock left behind by a
+ *  crashed editor, a half-finished rebase, a permissions problem on a network
+ *  drive) the lists came back empty with `loading` false, and the panel drew
+ *  the one sentence it must never draw on a guess:
+ *
+ *      No changes yet. Every file matches your last save
+ *
+ *  On a four-second poll that keeps failing, that sentence is permanent. It is
+ *  also the exact reassurance somebody checks before closing the lid, and the
+ *  only place in the app that answers "is my work saved?" without opening a
+ *  terminal. "I couldn't look" and "there is nothing there" are not the same
+ *  answer and this now says which one it has.
+ *
+ *  A failed read with rows still on screen is deliberately softer: the last
+ *  good list is still true as of the last successful poll, so it stays, with
+ *  the header admitting it may have moved on. Only a failure with nothing to
+ *  show replaces the body — there is nothing to preserve, and a bare panel is
+ *  indistinguishable from a clean tree.
+ *
+ *  `headerNote: null` means "the caller's own counts are the honest note" —
+ *  the panel prints `N changed · M generated` in that case. */
+export function changesReadout(s: {
+  loading: boolean;
+  failed: boolean;
+  total: number;
+  liveActive: boolean;
+}): {
+  headerNote: string | null;
+  body: string | null;
+  tone: "known" | "waiting" | "failed";
+} {
+  if (s.failed && s.total === 0)
+    return {
+      headerNote: "couldn’t read",
+      body: "Aura couldn’t ask git what you’ve changed. Nothing has been lost. This is the reading that failed. It keeps trying every few seconds.",
+      tone: "failed",
+    };
+  // Rows survived a failed refresh: keep them, but stop calling them current.
+  if (s.failed)
+    return { headerNote: "may be out of date", body: null, tone: "failed" };
+  if (s.loading && s.total === 0)
+    return {
+      headerNote: "reading…",
+      body: "Looking at what you’ve changed…",
+      tone: "waiting",
+    };
+  if (s.total === 0)
+    return {
+      headerNote: "no changes",
+      body: s.liveActive
+        ? "Your changes are in sync"
+        : "No changes yet. Every file matches your last save",
+      tone: "known",
+    };
+  return { headerNote: null, body: null, tone: "known" };
+}
+
 export function ChangesPanel({ repoRoot, onOpenFile, onBeforeCommit }: Props) {
   const changes = useGitChanges(repoRoot);
   const [open, setOpen] = useState<SectionsOpen>(loadSectionsOpen);
@@ -109,7 +173,7 @@ export function ChangesPanel({ repoRoot, onOpenFile, onBeforeCommit }: Props) {
     async (id: string, strategy: "ours" | "theirs") => {
       setResolvingId(id);
       try {
-        await api.auraConflictsResolve(repoRoot, {
+        await resolveAstConflict(repoRoot, {
           conflict_id: id,
           strategy,
         });
@@ -276,6 +340,12 @@ export function ChangesPanel({ repoRoot, onOpenFile, onBeforeCommit }: Props) {
   }
 
   const totalChanged = changes.changedCount + changes.untracked.length;
+  const readout = changesReadout({
+    loading: changes.loading,
+    failed: changes.error !== null,
+    total: totalChanged,
+    liveActive,
+  });
 
   return (
     <div
@@ -291,15 +361,14 @@ export function ChangesPanel({ repoRoot, onOpenFile, onBeforeCommit }: Props) {
         }
       >
       <header className="flex items-center gap-2 h-8 px-3 border-b border-line-soft shrink-0 bg-bg-1/40 min-w-0">
-        <span className="text-text-2 text-[11.5px] font-medium uppercase tracking-wider truncate shrink-0">
+        <span className="section-label truncate shrink-0">
           Source Control
         </span>
-        <span className="text-text-4 text-[10.5px] tabular-nums truncate min-w-0 flex-1">
-          {totalChanged === 0
-            ? "no changes"
-            : parts.noiseCount > 0
+        <span className="text-text-4 text-xs tabular-nums truncate min-w-0 flex-1">
+          {readout.headerNote ??
+            (parts.noiseCount > 0
               ? `${parts.signalCount} changed · ${parts.noiseCount} generated`
-              : `${parts.signalCount} changed`}
+              : `${parts.signalCount} changed`)}
         </span>
         <div className="flex items-center gap-0.5 shrink-0">
           <Tooltip>
@@ -309,7 +378,7 @@ export function ChangesPanel({ repoRoot, onOpenFile, onBeforeCommit }: Props) {
                 onClick={() =>
                   window.dispatchEvent(new CustomEvent("aura:open-branch-graph"))
                 }
-                className="size-5 rounded flex items-center justify-center text-text-3 hover:text-text-1 hover:bg-bg-2 transition-colors"
+                className="size-5 rounded flex items-center justify-center text-text-3 hover:text-text-1 hover:bg-state-hover transition-colors"
               >
                 <svg width="12" height="12" viewBox="0 0 16 16" fill="none">
                   <circle cx="4" cy="3.5" r="1.7" stroke="currentColor" strokeWidth="1.3" />
@@ -332,7 +401,7 @@ export function ChangesPanel({ repoRoot, onOpenFile, onBeforeCommit }: Props) {
               <button
                 type="button"
                 onClick={() => changes.refresh()}
-                className="size-5 rounded flex items-center justify-center text-text-3 hover:text-text-1 hover:bg-bg-2 transition-colors"
+                className="size-5 rounded flex items-center justify-center text-text-3 hover:text-text-1 hover:bg-state-hover transition-colors"
               >
                 <svg width="11" height="11" viewBox="0 0 16 16" fill="none">
                   <path
@@ -362,7 +431,7 @@ export function ChangesPanel({ repoRoot, onOpenFile, onBeforeCommit }: Props) {
       )}
 
       {(error || sync.error) && (
-        <div className="bg-red/10 text-red text-[10.5px] px-3 py-1.5 border-b border-red/30">
+        <div className="bg-red/10 text-red text-xs px-3 py-1.5 border-b border-red/30">
           {error ?? sync.error}
         </div>
       )}
@@ -392,14 +461,23 @@ export function ChangesPanel({ repoRoot, onOpenFile, onBeforeCommit }: Props) {
             />
           </>
         )}
-        {changes.loading && totalChanged === 0 ? (
-          <div className="flex items-center gap-1.5 text-text-4 text-[11px] px-3 py-3">
-            <AsciiSpinner className="text-[10px]" />
-            <span>Looking at what you’ve changed…</span>
+        {readout.tone === "waiting" ? (
+          <div className="flex items-center gap-1.5 text-text-4 text-xs px-3 py-3">
+            <AsciiSpinner className="text-2xs" />
+            <span>{readout.body}</span>
           </div>
-        ) : totalChanged === 0 ? (
-          <div className="text-text-4 text-[11px] px-3 py-6 text-center">
-            {liveActive ? "Your changes are in sync" : "No changes yet — every file matches your last save"}
+        ) : readout.tone === "failed" && readout.body ? (
+          <div className="px-3 py-5">
+            <ErrorState
+              size="sm"
+              title="Aura couldn’t read your changes"
+              message={readout.body}
+              onRetry={() => void refreshAll()}
+            />
+          </div>
+        ) : readout.body ? (
+          <div className="text-text-4 text-xs px-3 py-6 text-center">
+            {readout.body}
           </div>
         ) : (
           <>
@@ -417,7 +495,7 @@ export function ChangesPanel({ repoRoot, onOpenFile, onBeforeCommit }: Props) {
                         onClick={() =>
                           unstagePaths(parts.sigStaged.map((f) => f.path))
                         }
-                        className="size-5 rounded flex items-center justify-center text-text-3 hover:text-text-1 hover:bg-bg-1"
+                        className="size-5 rounded flex items-center justify-center text-text-3 hover:text-text-1 hover:bg-state-hover"
                       >
                         <svg width="10" height="10" viewBox="0 0 16 16" fill="none">
                           <path
@@ -453,7 +531,7 @@ export function ChangesPanel({ repoRoot, onOpenFile, onBeforeCommit }: Props) {
                         onClick={() =>
                           stagePaths(parts.sigUnstaged.map((f) => f.path))
                         }
-                        className="size-5 rounded flex items-center justify-center text-text-3 hover:text-text-1 hover:bg-bg-1"
+                        className="size-5 rounded flex items-center justify-center text-text-3 hover:text-text-1 hover:bg-state-hover"
                       >
                         <svg width="10" height="10" viewBox="0 0 16 16" fill="none">
                           <path
@@ -489,7 +567,7 @@ export function ChangesPanel({ repoRoot, onOpenFile, onBeforeCommit }: Props) {
                         onClick={() =>
                           stagePaths(parts.sigUntracked.map((f) => f.path))
                         }
-                        className="size-5 rounded flex items-center justify-center text-text-3 hover:text-text-1 hover:bg-bg-1"
+                        className="size-5 rounded flex items-center justify-center text-text-3 hover:text-text-1 hover:bg-state-hover"
                       >
                         <svg width="10" height="10" viewBox="0 0 16 16" fill="none">
                           <path

@@ -27,6 +27,7 @@ import {
   type Trigger,
 } from "../../lib/api";
 import { useAgents } from "../../lib/agents";
+import { relativeAgeFromSecs } from "../../lib/relativeTime";
 import { Button } from "../ui/button";
 import {
   AutomationForm,
@@ -34,6 +35,7 @@ import {
   type FormSeed,
 } from "./AutomationForm";
 import { AutomationCard } from "./AutomationCard";
+import { sentenceCase } from "../../lib/textCase";
 import {
   elapsedBetween,
   localTzOffsetMin,
@@ -130,7 +132,7 @@ const STARTERS: Starter[] = [
       name: "Bug scan",
       trigger: dailyTrigger("08:00"),
       action: runAgent(
-        "Scan the commits since the last run (or the last 24h) for likely bugs — null/edge cases, race conditions, leaked resources — and propose a concrete fix for each with the file and line.",
+        "Scan the commits since the last run (or the last 24h) for likely bugs (null/edge cases, race conditions, leaked resources) and propose a concrete fix for each with the file and line.",
       ),
     }),
   },
@@ -165,7 +167,7 @@ function laneToRow(l: LaneOutcome): RecentRow {
     verdict: live
       ? null
       : l.status === "failed" || l.status === "conflict" || l.status === "cancelled"
-        ? { label: capitalize(l.status), tone: "fail" }
+        ? { label: sentenceCase(l.status), tone: "fail" }
         : { label: "Done", tone: "ok" },
     live,
   };
@@ -187,16 +189,14 @@ function automationToRow(a: Automation): RecentRow | null {
 }
 
 function relativeFromUnix(unixSecs: number): string {
-  return relativeTime(new Date(unixSecs * 1000).toISOString());
-}
-
-function capitalize(s: string): string {
-  return s.charAt(0).toUpperCase() + s.slice(1);
+  // Was seconds → Date → ISO string → Date.parse, a round trip that existed
+  // only because the local helper took ISO. The shared ladder takes seconds.
+  return relativeAgeFromSecs(unixSecs);
 }
 
 // ── Small chrome pieces (defined here, used only on this surface) ─────────
 
-/** A quiet uppercase section label with an optional right-aligned count —
+/** A quiet section label with an optional right-aligned count —
  *  the same calm header grammar the Mission/Tasks columns use, scaled down
  *  to a stacked list section. */
 function SectionHead({
@@ -208,11 +208,11 @@ function SectionHead({
 }) {
   return (
     <div className="mb-2 flex items-center gap-2 px-0.5">
-      <span className="text-[10.5px] font-medium uppercase tracking-wider text-text-4">
+      <span className="section-label">
         {label}
       </span>
       {count != null && (
-        <span className="text-[10.5px] tabular-nums text-text-5">{count}</span>
+        <span className="text-xs tabular-nums text-text-5">{count}</span>
       )}
     </div>
   );
@@ -251,14 +251,14 @@ function AutoGlance({
   const paused = Math.max(0, recipes - active);
   return (
     <div>
-      <div className="text-[10.5px] font-medium uppercase tracking-wider text-text-5">
+      <div className="section-label">
         Automations
       </div>
       <div className="mt-2 flex items-baseline gap-1.5">
-        <span className="text-[22px] font-semibold leading-none tabular-nums text-text-1">
+        <span className="text-xl font-semibold leading-none tabular-nums text-text-1">
           {recipes}
         </span>
-        <span className="text-[12px] text-text-4">
+        <span className="text-sm text-text-4">
           recipe{recipes === 1 ? "" : "s"}
         </span>
       </div>
@@ -289,7 +289,7 @@ function AutoStatRow({
   label: string;
 }) {
   return (
-    <div className="flex items-center gap-2 text-[12px]">
+    <div className="flex items-center gap-2 text-sm">
       <span
         className="h-1.5 w-1.5 shrink-0 rounded-full"
         style={{ background: dot }}
@@ -307,13 +307,13 @@ function AutoStatRow({
 function RecipeRail({ onPick }: { onPick: (s: Starter) => void }) {
   return (
     <div>
-      <div className="text-[10.5px] font-medium uppercase tracking-wider text-text-5">
+      <div className="section-label">
         Start from a recipe
       </div>
       <div className="mt-2 flex flex-col gap-3">
         {STARTER_CATEGORIES.map((cat) => (
           <div key={cat}>
-            <div className="mb-1 text-[10px] uppercase tracking-wider text-text-5/80">
+            <div className="section-label mb-1">
               {cat}
             </div>
             <div className="flex flex-col gap-0.5">
@@ -342,7 +342,7 @@ function RecipeRow({
       type="button"
       onClick={onClick}
       title={`Set up "${starter.title}"`}
-      className="group -mx-2 flex w-[calc(100%_+_1rem)] items-start gap-2 rounded-md px-2 py-1.5 text-left transition-colors hover:bg-bg-2/60"
+      className="group -mx-2 flex w-[calc(100%_+_1rem)] items-start gap-2 rounded-md px-2 py-1.5 text-left transition-colors hover:bg-state-hover"
     >
       <Clock
         size={13}
@@ -351,10 +351,10 @@ function RecipeRow({
         aria-hidden
       />
       <span className="min-w-0 flex-1">
-        <span className="block truncate text-[12.5px] text-text-2">
+        <span className="block truncate text-base text-text-2">
           {starter.title}
         </span>
-        <span className="mt-0.5 line-clamp-2 text-[11px] leading-snug text-text-5">
+        <span className="mt-0.5 line-clamp-2 text-xs leading-snug text-text-5">
           {starter.desc}
         </span>
       </span>
@@ -474,14 +474,33 @@ export function AutomationsSurface({ repoRoot }: { repoRoot: string }) {
       setAutomations((prev) =>
         prev.map((a) => (a.id === id ? { ...a, enabled } : a)),
       );
-      api.automationSetEnabled(repoRoot, id, enabled).then(reload).catch(reload);
+      api
+        .automationSetEnabled(repoRoot, id, enabled)
+        .then(reload)
+        .catch((e) => {
+          // Put the switch back where the server has it and say why. Left
+          // to `.catch(reload)` this showed an automation as enabled that
+          // the backend had refused — the one state a switch must never be
+          // in is disagreeing with the thing it controls.
+          setAutomations((prev) =>
+            prev.map((a) => (a.id === id ? { ...a, enabled: !enabled } : a)),
+          );
+          setLoadErr(String(e));
+          reload();
+        });
     },
     [repoRoot, reload],
   );
 
   const remove = useCallback(
     (id: string) => {
-      api.automationDelete(repoRoot, id).then(reload).catch(reload);
+      api
+        .automationDelete(repoRoot, id)
+        .then(reload)
+        .catch((e) => {
+          setLoadErr(String(e));
+          reload();
+        });
     },
     [repoRoot, reload],
   );
@@ -530,8 +549,8 @@ export function AutomationsSurface({ repoRoot }: { repoRoot: string }) {
           New automation
         </Button>
         <RecipeRail onPick={startStarter} />
-        <p className="mt-auto pt-3 text-[11px] leading-relaxed text-text-5">
-          Automations run while Aura — or your Aura Runner — is on. No cloud
+        <p className="mt-auto pt-3 text-xs leading-relaxed text-text-5">
+          Automations run while Aura, or your Aura Runner, is on. No cloud
           required.
         </p>
       </aside>
@@ -555,7 +574,7 @@ export function AutomationsSurface({ repoRoot }: { repoRoot: string }) {
         {/* Your automations */}
         <section className="mb-7">
           {loadErr && (
-            <p className="mb-2 rounded-[6px] border border-line-soft bg-bg-2 px-3 py-2 text-[11.5px] leading-snug text-red">
+            <p className="mb-2 rounded-[6px] border border-line-soft bg-bg-2 px-3 py-2 text-sm leading-snug text-red">
               Couldn't load automations: {loadErr}
             </p>
           )}
@@ -566,10 +585,10 @@ export function AutomationsSurface({ repoRoot }: { repoRoot: string }) {
           />
 
           {loaded && automations.length === 0 && !form ? (
-            <div className="rounded-[6px] border border-dashed border-line-soft bg-bg-content px-3.5 py-5 text-[11.5px] leading-relaxed text-text-4">
+            <div className="rounded-[6px] border border-dashed border-line-soft bg-bg-content px-3.5 py-5 text-sm leading-relaxed text-text-4">
               No automations yet. Hit{" "}
               <strong className="text-text-2">New automation</strong> for
-              something like "Every weekday at 9am → run the crew" — or pick a
+              something like "Every weekday at 9am → run the crew", or pick a
               recipe on the left.
             </div>
           ) : (
@@ -593,8 +612,8 @@ export function AutomationsSurface({ repoRoot }: { repoRoot: string }) {
         <section>
           <SectionHead label="Recent runs" />
           {recentRows.length === 0 ? (
-            <div className="rounded-[6px] border border-line-soft bg-bg-content px-3.5 py-4 text-[11.5px] leading-relaxed text-text-4">
-              No runs yet. Turn an automation on or use "Run now" — finished runs
+            <div className="rounded-[6px] border border-line-soft bg-bg-content px-3.5 py-4 text-sm leading-relaxed text-text-4">
+              No runs yet. Turn an automation on or use "Run now". Finished runs
               show here with how long they took.
             </div>
           ) : (
@@ -616,16 +635,16 @@ export function AutomationsSurface({ repoRoot }: { repoRoot: string }) {
                     style={{ background: runDotColor(r) }}
                     aria-hidden
                   />
-                  <span className="min-w-0 flex-1 truncate text-[12.5px] font-medium text-text-1">
+                  <span className="min-w-0 flex-1 truncate text-base font-medium text-text-1">
                     {r.title}
                   </span>
-                  <span className="flex-shrink-0 text-[10.5px] tabular-nums text-text-4">
+                  <span className="flex-shrink-0 text-xs tabular-nums text-text-4">
                     {r.when}
                     {r.elapsed ? ` · ${r.elapsed}` : ""}
                   </span>
                   {r.verdict && (
                     <span
-                      className="flex-shrink-0 text-[10.5px] font-medium"
+                      className="flex-shrink-0 text-xs font-medium"
                       style={{ color: runVerdictColor(r.verdict.tone) }}
                     >
                       {r.verdict.label}

@@ -6,6 +6,16 @@
 //! from day one — downstream waves fill the payloads in without churning
 //! the tag set. This follows the annex design rule "keep door open for
 //! protocol growth" without adding v1 scope.
+//!
+//! ACP is deliberately absent. It is a subprocess protocol — the client
+//! spawns the agent and speaks JSON-RPC over its stdin and stdout — so no
+//! ACP client would go looking for an agent on a Unix socket. Aura's agent
+//! surface is `aura acp-serve`, and the verbs it answers (`prove`,
+//! `review`, `impacts`) are the CLI's semantic engine; serving them from
+//! here would mean the daemon taking a dependency on that entire engine to
+//! answer a prompt, inverting which crate is the lightweight one. There
+//! were `AcpMessage` variants on all three bodies once. Nothing ever sent
+//! one.
 
 use serde::{Deserialize, Serialize};
 use serde_bytes::ByteBuf;
@@ -66,9 +76,6 @@ pub enum RequestBody {
     },
     Subscribe {
         filter: SubscribeFilter,
-    },
-    AcpMessage {
-        payload: String,
     },
     GetFleetData {
         active_only: bool,
@@ -167,9 +174,6 @@ pub enum ResponseBody {
     HandoverXml {
         xml: String,
     },
-    AcpMessage {
-        payload: String,
-    },
     FleetData {
         json_payload: String,
     },
@@ -221,15 +225,12 @@ pub enum EventBody {
     PeerLeft {
         peer_id: String,
     },
-    AcpMessage {
-        payload: String,
-    },
     /// An agent-lifecycle transition broadcast for headless observers.
     /// Mirrors `RequestBody::PublishAgentLifecycle`: the daemon re-emits
     /// the published payload verbatim onto the event bus so every
     /// subscriber on the lossless stream sees the live agent's phase.
     /// `state` is a free string — one of session_start|prompt|pre_tool|
-    /// tool_complete|idle|blocked|stop. Like `PeerJoined` / `AcpMessage`
+    /// tool_complete|idle|blocked|stop. Like `PeerJoined` / `PeerLeft`
     /// this variant carries no `lamport`: lifecycle phases are
     /// session-scoped status, not block-output ordering, so there is no
     /// per-block clock to attach.

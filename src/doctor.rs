@@ -20,7 +20,7 @@
 use serde::Serialize;
 use std::path::Path;
 
-use crate::{checkpoint, intent_block, manifest_sig, plugin, replay, session, skill_rank};
+use crate::{checkpoint, hook, intent_block, manifest_sig, plugin, replay, session, skill_rank};
 
 /// A single stuck-session entry — the agent that left it and why doctor
 /// considers it stuck (e.g. "no activity for 3h").
@@ -145,8 +145,13 @@ pub fn collect_report() -> Result<DoctorReport, Box<dyn std::error::Error>> {
         oversized: snapshots.len() > 400,
     };
 
-    // 4. Git hooks installed.
-    let hooks_installed = Path::new(".git/hooks/pre-commit").exists();
+    // 4. Git hooks installed. Ask git where hooks live rather than assuming
+    // `.git/hooks`: in a linked worktree `.git` is a file, and a repo with
+    // `core.hooksPath` set runs hooks from somewhere else entirely. Assuming
+    // the layout here reported "hooks not installed" in every worktree even
+    // immediately after `aura enable` had installed them correctly — so the
+    // card told people to run a command that could never change its verdict.
+    let hooks_installed = hook::HookInstaller::hooks_dir().join("pre-commit").exists();
     if !hooks_installed {
         issues_found += 1;
     }

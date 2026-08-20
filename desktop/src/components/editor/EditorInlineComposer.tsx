@@ -14,6 +14,7 @@ import { ArrowUp } from "lucide-react";
 
 import { TiptapComposer, type TiptapComposerHandle } from "../manager/TiptapComposer";
 import { ChipButton } from "../ui/chip";
+import { Kbd } from "../ui/kbd";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -24,10 +25,10 @@ import {
 type Mode = "auto" | "build" | "plan" | "ask";
 
 const MODE_OPTIONS: { value: Mode; label: string; hint: string }[] = [
-  { value: "auto", label: "Auto", hint: "Let Aura decide: plan or build" },
+  { value: "auto", label: "Autopilot", hint: "Let Aura decide: plan or build" },
   { value: "build", label: "Build", hint: "Make the change now" },
   { value: "plan", label: "Plan", hint: "Draft a plan before editing" },
-  { value: "ask", label: "Ask", hint: "Answer — don't edit files" },
+  { value: "ask", label: "Ask", hint: "Answer. Don't edit files" },
 ];
 
 // Same key + event the main chat composer uses, so the two stay in lockstep.
@@ -135,7 +136,7 @@ export function EditorInlineComposer({
   return (
     <div className="absolute bottom-3 left-1/2 z-20 w-[min(680px,92%)] -translate-x-1/2 rounded-xl border border-line-soft bg-bg-card/95 shadow-lg shadow-black/30 backdrop-blur">
       {/* Top row — target + open-file context + focus hint. */}
-      <div className="flex items-center gap-2 px-3 pt-2 text-[11px] text-text-4">
+      <div className="flex items-center gap-2 px-3 pt-2 text-xs text-text-4">
         <span>Sending to</span>
         <DropdownMenu>
           <DropdownMenuTrigger asChild>
@@ -156,9 +157,7 @@ export function EditorInlineComposer({
         </span>
         {empty && (
           <span className="ml-auto shrink-0">
-            <kbd className="rounded border border-line-soft bg-bg-2 px-1 py-0.5 text-[10px] text-text-4">
-              ⌘L
-            </kbd>{" "}
+            <Kbd>⌘L</Kbd>{" "}
             to focus
           </span>
         )}

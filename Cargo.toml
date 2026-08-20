@@ -1,6 +1,6 @@
 [package]
 name = "aura"
-version = "0.19.33"
+version = "0.19.39"
 edition = "2024"
 
 # Public release workspace: the aura CLI (root package) + its vendored
@@ -14,6 +14,15 @@ members = ["crates/*", "desktop/src-tauri"]
 # workspace resolution graph.
 exclude = ["crates/aura-stackgraph"]
 resolver = "2"
+
+# The `aura` binary itself is auto-discovered from src/main.rs (package name).
+# `git-remote-aura` is the git remote helper for the `aura://` scheme: git finds
+# it on PATH and runs it as `git-remote-aura <remote> <url>`. It rewrites the URL
+# to the node's smart-HTTP and execs git's own git-remote-http. See
+# `src/bin/git_remote_aura.rs`.
+[[bin]]
+name = "git-remote-aura"
+path = "src/bin/git_remote_aura.rs"
 
 [dependencies]
 # These three live under `crates/` rather than beside us at the repo root.
@@ -31,6 +40,12 @@ aura-attestation = { path = "crates/aura-attestation" }
 aura-plugin-sign = { path = "crates/aura-plugin-sign" }
 aura-blocks      = { path = "crates/aura-blocks" }
 aura-blockstore  = { path = "crates/aura-blockstore" }
+# The project's declared environment — toolchains, packages, services — parsed,
+# signed and turned into an ordered plan. The CLI drives that plan through
+# `std::process`, the desktop app drives the same plan through `Place::sh`, so a
+# laptop and a box converge through one implementation rather than two.
+aura-env         = { path = "crates/aura-env" }
+aura-egress      = { path = "crates/aura-egress" }
 aura-loop        = { path = "crates/aura-loop" }
 aura-policy       = { path = "crates/aura-policy" }
 # Semantic CI — declarative .aura/pipelines that orchestrate the gates we
@@ -55,7 +70,7 @@ aura-prdiff      = { path = "crates/aura-prdiff" }
 # for the protocol.
 axum = "0.8.8"
 bincode = "1"
-clap = { version = "4.5.60", features = ["derive"] }
+clap = { version = "4.5.60", features = ["derive", "env"] }
 clap_complete = "4.5"
 colored = "3.1.1"
 git2 = { version = "0.20.4", features = ["vendored-openssl", "vendored-libgit2"] }

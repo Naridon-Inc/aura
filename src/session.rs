@@ -1,7 +1,8 @@
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::io::{BufRead, BufReader, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::sync::{Mutex, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 const MAX_TRANSCRIPT_LINES: usize = 5000;
@@ -135,6 +136,147 @@ pub struct TranscriptEntry {
     pub session_id: String,
 }
 
+// ─── Finding the session that belongs to this process ──────────────────────
+//
+// `get_active_session` is called from forty-odd places, including once per API
+// call to add token counts. It used to answer by reading and deserialising
+// every session file in the directory — on a repo that has been worked in for
+// a while that is hundreds of files and megabytes of JSON, per call.
+//
+// Two things make it cheap. Which file is ours is settled by our pid, and a
+// pid does not change while we run, so the answer is memoised as a path and
+// every later call re-reads that one file — re-reads, not remembers, because
+// callers want the current phase and token counts. And the scan that finds it
+// the first time tests for our pid as a substring before parsing, so the file
+// that is ours is the only one that goes through serde.
+
+fn read_session_file(path: &Path) -> Option<AgentSession> {
+    serde_json::from_str(&fs::read_to_string(path).ok()?).ok()
+}
+
+/// Every session file in `dir`, most recently written first.
+///
+/// The order is what makes the first call cheap. Our own session was written
+/// when this process started, so it is at or near the front — the scan below
+/// stops as soon as it finds it, having read a handful of files rather than
+/// all of them. Asking the filesystem for a modified time is far cheaper than
+/// reading the file, and the megabytes are the cost here, not the parsing.
+fn session_files(dir: &str) -> Vec<PathBuf> {
+    let Ok(entries) = fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    let mut files: Vec<(std::time::SystemTime, PathBuf)> = entries
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| p.extension().map(|x| x == "json").unwrap_or(false))
+        .map(|p| {
+            let modified = fs::metadata(&p)
+                .and_then(|m| m.modified())
+                .unwrap_or(UNIX_EPOCH);
+            (modified, p)
+        })
+        .collect();
+    files.sort_by(|a, b| b.0.cmp(&a.0));
+    files.into_iter().map(|(_, p)| p).collect()
+}
+
+/// Is a process with this id still running? `kill(pid, 0)` runs the existence
+/// and permission checks without sending a signal; a process we are not
+/// allowed to signal is still a process that exists.
+#[cfg(unix)]
+fn pid_is_running(pid: u32) -> bool {
+    if unsafe { libc::kill(pid as libc::pid_t, 0) } == 0 {
+        return true;
+    }
+    std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
+}
+
+#[cfg(not(unix))]
+fn pid_is_running(_pid: u32) -> bool {
+    true
+}
+
+/// This process's own session, if it has one.
+///
+/// The substring test is a filter, not the answer — a file that happens to
+/// contain our pid somewhere else is still rejected by the parsed check
+/// below. It is here so that finding our session costs one parse rather than
+/// one per file.
+fn find_own_session(paths: &[PathBuf], my_pid: u32) -> Option<(PathBuf, AgentSession)> {
+    let needles = [format!("\"pid\": {my_pid}"), format!("\"pid\":{my_pid}")];
+    for path in paths {
+        let Ok(raw) = fs::read_to_string(path) else {
+            continue;
+        };
+        if !needles.iter().any(|n| raw.contains(n.as_str())) {
+            continue;
+        }
+        let Ok(session) = serde_json::from_str::<AgentSession>(&raw) else {
+            continue;
+        };
+        if session.pid == Some(my_pid) && session.phase != SessionPhase::Ended {
+            return Some((path.clone(), session));
+        }
+    }
+    None
+}
+
+/// The most recently active session belonging to a process that is still
+/// running.
+///
+/// The liveness test matters because sessions are only marked `Ended` when a
+/// run finishes cleanly, and runs are usually killed instead — so the
+/// directory fills up with sessions that read as active and whose process
+/// left months ago. Without the test, a command with no session of its own
+/// adopts one of those and writes its model, its first prompt and its token
+/// counts into somebody else's file. A session with no pid recorded cannot be
+/// shown to belong to anything running, so it is not adopted either.
+fn most_recent_live_session(paths: &[PathBuf]) -> Option<AgentSession> {
+    let mut live: Vec<AgentSession> = paths
+        .iter()
+        .filter_map(|p| read_session_file(p))
+        .filter(|s: &AgentSession| s.phase != SessionPhase::Ended)
+        .filter(|s| s.pid.map(pid_is_running).unwrap_or(false))
+        .collect();
+    live.sort_by(|a, b| b.last_activity.cmp(&a.last_activity));
+    live.into_iter().next()
+}
+
+fn own_session_path() -> &'static Mutex<Option<PathBuf>> {
+    static MINE: OnceLock<Mutex<Option<PathBuf>>> = OnceLock::new();
+    MINE.get_or_init(|| Mutex::new(None))
+}
+
+pub(crate) fn active_session_in(dir: &str) -> Option<AgentSession> {
+    let my_pid = std::process::id();
+    let memo = own_session_path();
+
+    // Already know which file is ours: read it and nothing else.
+    let remembered = memo.lock().ok().and_then(|g| g.clone());
+    if let Some(path) = remembered {
+        match read_session_file(&path) {
+            Some(s) if s.pid == Some(my_pid) && s.phase != SessionPhase::Ended => {
+                return Some(s);
+            }
+            // Ended, deleted, or rewritten by something else — find it again.
+            _ => {
+                if let Ok(mut g) = memo.lock() {
+                    *g = None;
+                }
+            }
+        }
+    }
+
+    let paths = session_files(dir);
+    if let Some((path, session)) = find_own_session(&paths, my_pid) {
+        if let Ok(mut g) = memo.lock() {
+            *g = Some(path);
+        }
+        return Some(session);
+    }
+    most_recent_live_session(&paths)
+}
+
 pub struct SessionManager;
 
 impl SessionManager {
@@ -219,13 +361,40 @@ impl SessionManager {
 
     /// Record a file as touched in the current session
     pub fn touch_file(file_path: &str) {
-        if let Some(mut session) = Self::get_active_session() {
-            if !session.files_touched.contains(&file_path.to_string()) {
-                session.files_touched.push(file_path.to_string());
-            }
-            session.last_activity = now_secs();
-            Self::save_session(&session);
+        Self::touch_files(std::slice::from_ref(&file_path.to_string()));
+    }
+
+    /// Record several files as touched in one pass.
+    ///
+    /// [`get_active_session`] reads and deserializes *every* session file in the
+    /// store — hundreds of files and tens of megabytes on a machine that has
+    /// been working for a while — so calling [`touch_file`] in a loop is
+    /// quadratic in the worst way: the pre-commit hook was re-parsing the whole
+    /// store once per file in the index, which measured as ~97% of its runtime
+    /// and read as a frozen commit. Doing the read once and the write once
+    /// makes a batch cost the same as a single file.
+    ///
+    /// Dedup is against the set already recorded as well as within `paths`, so
+    /// this is exactly equivalent to calling [`touch_file`] for each path in
+    /// order — just without paying for the store each time.
+    pub fn touch_files(paths: &[String]) {
+        if paths.is_empty() {
+            return;
         }
+        let Some(mut session) = Self::get_active_session() else {
+            return;
+        };
+        let mut seen: std::collections::HashSet<&str> =
+            session.files_touched.iter().map(|s| s.as_str()).collect();
+        let mut added: Vec<String> = Vec::new();
+        for path in paths {
+            if seen.insert(path.as_str()) {
+                added.push(path.clone());
+            }
+        }
+        session.files_touched.extend(added);
+        session.last_activity = now_secs();
+        Self::save_session(&session);
     }
 
     /// Transition session phase
@@ -284,32 +453,11 @@ impl SessionManager {
     }
 
     /// Get the currently active session for this process.
-    /// Prefers a session matching the current PID; falls back to most recent active.
+    /// Prefers a session matching the current PID; falls back to the most
+    /// recent session that still belongs to a running process.
     pub fn get_active_session() -> Option<AgentSession> {
         Self::ensure_dirs();
-        if let Ok(entries) = fs::read_dir(&sessions_dir()) {
-            let my_pid = std::process::id();
-            let mut sessions: Vec<AgentSession> = entries
-                .flatten()
-                .filter(|e| e.path().extension().map(|x| x == "json").unwrap_or(false))
-                .filter_map(|e| {
-                    fs::read_to_string(e.path())
-                        .ok()
-                        .and_then(|s| serde_json::from_str(&s).ok())
-                })
-                .filter(|s: &AgentSession| s.phase != SessionPhase::Ended)
-                .collect();
-            sessions.sort_by(|a, b| b.last_activity.cmp(&a.last_activity));
-
-            // Prefer session matching our PID (multi-agent safe)
-            if let Some(mine) = sessions.iter().find(|s| s.pid == Some(my_pid)) {
-                return Some(mine.clone());
-            }
-            // Fallback: most recent active session
-            sessions.into_iter().next()
-        } else {
-            None
-        }
+        active_session_in(&sessions_dir())
     }
 
     /// List all sessions (newest first)
@@ -464,7 +612,7 @@ impl SessionManager {
         if let Some(mut session) = Self::get_active_session() {
             if session.first_prompt.is_none() {
                 let truncated = if prompt.len() > 200 {
-                    format!("{}...", &prompt[..200])
+                    format!("{}...", crate::text::clip(prompt, 200))
                 } else {
                     prompt.to_string()
                 };
@@ -498,7 +646,7 @@ impl SessionManager {
             {
                 sub.ended_at = Some(now_secs());
                 sub.result_summary = result_summary.map(|s| {
-                    if s.len() > 200 { format!("{}...", &s[..200]) }
+                    if s.len() > 200 { format!("{}...", crate::text::clip(s, 200)) }
                     else { s.to_string() }
                 });
             }
@@ -647,7 +795,7 @@ impl SessionManager {
         let mut condensed = String::new();
         for entry in transcript.iter().take(50) {
             let content = if entry.content.len() > 300 {
-                format!("{}...", &entry.content[..300])
+                format!("{}...", crate::text::clip(&entry.content, 300))
             } else {
                 entry.content.clone()
             };
@@ -1137,7 +1285,7 @@ impl SessionManager {
             };
             // Truncate long entries for condensed view
             let content = if entry.content.len() > 200 {
-                format!("{}...", &entry.content[..200])
+                format!("{}...", crate::text::clip(&entry.content, 200))
             } else {
                 entry.content.clone()
             };
@@ -1345,5 +1493,150 @@ mod tests {
         assert!(s.developer_handle.is_none());
         assert!(s.model_name.is_none());
         assert_eq!(s.token_usage.as_ref().unwrap().input_tokens, 10);
+    }
+
+    // ─── Which session is ours ─────────────────────────────────────────────
+
+    /// A pid that is certainly not running: reap a child we just waited on.
+    fn a_pid_that_is_gone() -> u32 {
+        let mut child = std::process::Command::new("true")
+            .spawn()
+            .expect("spawn `true`");
+        let pid = child.id();
+        let _ = child.wait();
+        pid
+    }
+
+    fn write_session(dir: &Path, id: &str, pid: Option<u32>, last_activity: u64) -> PathBuf {
+        let mut s = blank_session(id);
+        s.pid = pid;
+        s.last_activity = last_activity;
+        let path = dir.join(format!("{id}.json"));
+        fs::write(&path, serde_json::to_string_pretty(&s).unwrap()).unwrap();
+        path
+    }
+
+    #[test]
+    fn finds_the_session_that_records_our_pid() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mine = std::process::id();
+        for i in 0..30 {
+            write_session(tmp.path(), &format!("other-{i}"), Some(900_000 + i), 5000);
+        }
+        write_session(tmp.path(), "mine", Some(mine), 10);
+
+        let (path, found) = find_own_session(&session_files(tmp.path().to_str().unwrap()), mine)
+            .expect("our own session");
+        assert_eq!(found.session_id, "mine");
+        assert!(path.ends_with("mine.json"));
+    }
+
+    #[test]
+    fn lists_the_most_recently_written_first() {
+        let tmp = tempfile::tempdir().unwrap();
+        for i in 0..4 {
+            let p = write_session(tmp.path(), &format!("s{i}"), Some(700 + i), 0);
+            // Distinct mtimes without sleeping.
+            let when = std::time::SystemTime::UNIX_EPOCH
+                + std::time::Duration::from_secs(1_700_000_000 + i as u64 * 60);
+            let f = fs::File::options().write(true).open(&p).unwrap();
+            f.set_modified(when).unwrap();
+        }
+        let files = session_files(tmp.path().to_str().unwrap());
+        let names: Vec<String> = files
+            .iter()
+            .map(|p| p.file_stem().unwrap().to_string_lossy().into_owned())
+            .collect();
+        // Our own session was written when this process started, so newest
+        // first is what lets the scan stop after a few files instead of
+        // reading the whole directory.
+        assert_eq!(names, vec!["s3", "s2", "s1", "s0"]);
+    }
+
+    #[test]
+    fn the_substring_test_is_a_filter_not_the_answer() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mine = std::process::id();
+        // Another field carries our pid's digits; the file is still not ours.
+        write_session(tmp.path(), "look-alike", Some(4), mine as u64);
+
+        let hit = find_own_session(&session_files(tmp.path().to_str().unwrap()), mine);
+        assert!(hit.is_none(), "matched on a field that is not the pid");
+    }
+
+    #[test]
+    fn does_not_take_over_a_session_whose_process_is_gone() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_session(tmp.path(), "abandoned", Some(a_pid_that_is_gone()), 9999);
+
+        // Sessions are only marked Ended when a run finishes cleanly, so an
+        // abandoned one still reads as active. Adopting it would write this
+        // command's model and token counts into someone else's file.
+        let picked = most_recent_live_session(&session_files(tmp.path().to_str().unwrap()));
+        assert!(picked.is_none());
+    }
+
+    #[test]
+    fn does_not_take_over_a_session_with_no_pid_recorded() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_session(tmp.path(), "pidless", None, 9999);
+
+        let picked = most_recent_live_session(&session_files(tmp.path().to_str().unwrap()));
+        assert!(picked.is_none());
+    }
+
+    #[test]
+    fn falls_back_to_the_newest_session_that_is_still_running() {
+        let tmp = tempfile::tempdir().unwrap();
+        let live = std::process::id();
+        write_session(tmp.path(), "dead-but-newer", Some(a_pid_that_is_gone()), 9999);
+        write_session(tmp.path(), "live-but-older", Some(live), 100);
+
+        let picked = most_recent_live_session(&session_files(tmp.path().to_str().unwrap()))
+            .expect("the running one");
+        assert_eq!(picked.session_id, "live-but-older");
+    }
+
+    #[test]
+    fn skips_sessions_that_ended() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mine = std::process::id();
+        let path = write_session(tmp.path(), "finished", Some(mine), 9999);
+        let mut s: AgentSession = read_session_file(&path).unwrap();
+        s.phase = SessionPhase::Ended;
+        fs::write(&path, serde_json::to_string_pretty(&s).unwrap()).unwrap();
+
+        let files = session_files(tmp.path().to_str().unwrap());
+        assert!(find_own_session(&files, mine).is_none());
+        assert!(most_recent_live_session(&files).is_none());
+    }
+
+    /// One test, not two, because the memo it exercises is process-wide and
+    /// the test binary runs its cases in parallel.
+    #[test]
+    fn remembers_which_file_is_ours_but_not_what_was_in_it() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mine = std::process::id();
+        let path = write_session(tmp.path(), "mine", Some(mine), 10);
+
+        let first = active_session_in(tmp.path().to_str().unwrap()).expect("first read");
+        assert_eq!(first.session_id, "mine");
+
+        // Point the next call at a directory that holds nothing. It still
+        // answers, because it goes straight to the file it remembered — which
+        // is the whole point: in a real run the directory does not change, and
+        // re-listing and re-parsing it on every call is the cost being removed.
+        let empty = tempfile::tempdir().unwrap();
+        let second = active_session_in(empty.path().to_str().unwrap()).expect("second read");
+        assert_eq!(second.session_id, "mine");
+
+        // Remembered path, not remembered contents: token counts and phase
+        // change constantly, and a caller asking again wants what is on disk.
+        let mut s: AgentSession = read_session_file(&path).unwrap();
+        s.model_name = Some("claude-opus-5".to_string());
+        fs::write(&path, serde_json::to_string_pretty(&s).unwrap()).unwrap();
+
+        let third = active_session_in(tmp.path().to_str().unwrap()).expect("third read");
+        assert_eq!(third.model_name.as_deref(), Some("claude-opus-5"));
     }
 }

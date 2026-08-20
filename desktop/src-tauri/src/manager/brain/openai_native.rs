@@ -64,9 +64,10 @@ impl OpenAINativeBrain {
 
 /// Translate Aura's Anthropic-shaped `ChatRequest` into OpenAI's
 /// `messages: [{role, content}]` array. system prompt becomes a
-/// leading `{"role":"system"}` entry. Content blocks that aren't a
-/// plain string are passed through as JSON — OpenAI accepts the
-/// multi-part `content: [{type:"text"|"image_url", ...}]` shape.
+/// leading `{"role":"system"}` entry. Block content is rewritten by
+/// [`content_to_openai`](super::types::content_to_openai) — text passes
+/// through, and an Anthropic image block becomes the `image_url` data-URL
+/// form OpenAI actually accepts.
 fn build_messages(req: &ChatRequest) -> Vec<Value> {
     let mut out: Vec<Value> = Vec::with_capacity(req.messages.len() + 1);
     if let Some(sys) = req.system.as_deref() {
@@ -75,7 +76,10 @@ fn build_messages(req: &ChatRequest) -> Vec<Value> {
         }
     }
     for m in &req.messages {
-        out.push(json!({ "role": m.role, "content": m.content }));
+        out.push(json!({
+            "role": m.role,
+            "content": super::types::content_to_openai(&m.content),
+        }));
     }
     out
 }
@@ -213,6 +217,7 @@ impl Brain for OpenAINativeBrain {
                             tool_use_id: std::mem::take(&mut tool_id),
                             name: std::mem::take(&mut tool_name),
                             input,
+                            signature: None,
                         };
                         tool_args.clear();
                         tool_index = None;
@@ -279,6 +284,7 @@ impl Brain for OpenAINativeBrain {
                                         tool_use_id: std::mem::take(&mut tool_id),
                                         name: std::mem::take(&mut tool_name),
                                         input,
+                                        signature: None,
                                     };
                                     tool_args.clear();
                                 }
@@ -315,6 +321,7 @@ impl Brain for OpenAINativeBrain {
                                 tool_use_id: std::mem::take(&mut tool_id),
                                 name: std::mem::take(&mut tool_name),
                                 input,
+                                signature: None,
                             };
                             tool_args.clear();
                             tool_index = None;

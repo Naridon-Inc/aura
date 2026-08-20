@@ -4,7 +4,40 @@
 // renders nothing for that slot.
 
 import { AgentIcon } from "../agent/AgentIcon";
-import { compactCount, statusMeta, type CopyAgent, type CopyStatus } from "./workspacesModel";
+import { CloudGlyph } from "../ui/cloud-glyph";
+import { labelForAgentId } from "../../lib/useLiveAgentSessions";
+import type { CloudPlacement } from "../../lib/api";
+import {
+  prTint,
+  statusMeta,
+  type CopyAgent,
+  type CopyStatus,
+} from "./workspacesModel";
+import { compactNumber } from "../../lib/compactNumber";
+
+// The column every fleet lens reads in.
+//
+// A workspace row is a name, a diff badge and an age — text that ends a third
+// of the way across a wide window. Run edge to edge and the age sits an inch of
+// empty dark away from the name it belongs to, and the eye has to travel the
+// whole window to pair them. So the fleet reads in a centred column, the width
+// a list of names actually wants.
+//
+// The column is the page's, not one lens's: the filter strip, the All list and
+// Live all share it, so the search caret and the first row's branch mark line
+// up rather than each lens picking its own left edge. (It was once a
+// `max-w-3xl` island on the All lens alone, which gave one page three of them.)
+//
+// The header bar is deliberately NOT in it. Tabs stay hard left and "New
+// workspace" hard right, against the window — that bar is chrome for the whole
+// surface, not part of what you're reading, and pulling it inward would leave
+// the top of the page floating in the middle with dead space either side.
+// Chrome frames the window; the column is for the text.
+//
+// The Board lens is the one deliberate exception: its lanes lay out
+// horizontally, so a reading column would crush four of them into a third of
+// the window. A board is a canvas, not a column.
+export const FLEET_COLUMN = "mx-auto w-full max-w-4xl";
 
 // Stable, subtle per-folder tint (FNV-1a hash → hue), matching the roster's
 // folderTint so a project reads the same colour in the sidebar and the view.
@@ -71,15 +104,15 @@ export function ProjectGlyph({
 export function DiffPill({ added, removed }: { added: number; removed: number }) {
   if (added <= 0 && removed <= 0) return null;
   return (
-    <span className="inline-flex items-center gap-1.5 text-[11px] tabular-nums flex-none">
+    <span className="inline-flex items-center gap-1.5 text-xs tabular-nums flex-none">
       {added > 0 && (
         <span style={{ color: "var(--color-green)" }}>
-          +{compactCount(added)}
+          +{compactNumber(added)}
         </span>
       )}
       {removed > 0 && (
         <span style={{ color: "var(--color-red)" }}>
-          −{compactCount(removed)}
+          −{compactNumber(removed)}
         </span>
       )}
     </span>
@@ -89,19 +122,10 @@ export function DiffPill({ added, removed }: { added: number; removed: number })
 // "#816" pill, tinted by open/merged/closed. Nothing when there's no PR.
 export function PrPill({ pr }: { pr?: { number: number; state: string } }) {
   if (!pr) return null;
-  const state = pr.state.toLowerCase();
-  // merged = landed (the accent, the one PR state you can still navigate to),
-  // closed = went nowhere (red), open = live (mint). Was three undefined token
-  // names falling through to a violet/red/green trio the palette never had.
-  const tint =
-    state === "merged"
-      ? "var(--color-accent)"
-      : state === "closed"
-        ? "var(--color-red)"
-        : "var(--color-accent-green)";
+  const tint = prTint(pr.state);
   return (
     <span
-      className="inline-flex items-center h-[17px] px-1.5 rounded text-[10px] font-medium tabular-nums flex-none border"
+      className="inline-flex items-center h-[17px] px-1.5 rounded text-2xs font-medium tabular-nums flex-none border"
       style={{
         color: tint,
         borderColor: `color-mix(in srgb, ${tint} 40%, transparent)`,
@@ -110,6 +134,38 @@ export function PrPill({ pr }: { pr?: { number: number; state: string } }) {
       title={`PR #${pr.number} · ${pr.state}`}
     >
       #{pr.number}
+    </span>
+  );
+}
+
+// "This one isn't running on your disk." Leads the signal cluster on both
+// fleet lenses, because where the work is happening changes how everything
+// beside it reads: a clean diff on a copy a runner is mid-turn on means the
+// machine hasn't pushed yet, not that nothing is going on.
+//
+// It breathes only once a box has actually claimed the job. `submitted` is
+// still queued, and a still glyph is the truthful picture of work nobody has
+// picked up — a pulse there would claim a machine is on it when none is.
+export function CloudMark({
+  cloud,
+  size = 13,
+}: {
+  cloud?: CloudPlacement;
+  size?: number;
+}) {
+  if (!cloud) return null;
+  const queued = cloud.status === "submitted";
+  const who = labelForAgentId(cloud.agent);
+  return (
+    <span
+      className="inline-flex flex-none items-center text-text-4"
+      title={
+        queued
+          ? `Queued for a machine. ${who} hasn't started yet`
+          : `Running on your machine in the cloud. ${who}`
+      }
+    >
+      <CloudGlyph size={size} pulse={!queued} />
     </span>
   );
 }
@@ -139,7 +195,7 @@ export function AgentChips({ agents }: { agents: CopyAgent[] }) {
         </span>
       ))}
       {extra > 0 && (
-        <span className="text-[10px] text-text-4 tabular-nums">+{extra}</span>
+        <span className="text-2xs text-text-4 tabular-nums">+{extra}</span>
       )}
     </span>
   );

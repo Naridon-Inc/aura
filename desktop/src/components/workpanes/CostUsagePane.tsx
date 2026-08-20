@@ -20,7 +20,9 @@ import {
 } from "../../lib/api";
 import { TeamAgentUsage } from "./TeamAgentUsage";
 import { TeamOverview } from "./TeamOverview";
+import { Receipt } from "lucide-react";
 import { Button } from "../ui/button";
+import { EmptyState, LoadingState } from "../ui/state";
 import {
   CumulativeTrend,
   ModelSplitBar,
@@ -29,13 +31,28 @@ import {
   type TrendPoint,
 } from "./UsageCharts";
 import { currentMonthKey, prettyMonth } from "./usageProviders";
+import { fetchTeam } from "../../lib/teamCache";
+import { fetchBillingUsage } from "../../lib/billingCache";
 
-/** Last path segment of a repo root — the repo's short name. */
-function repoShortName(root: string): string {
-  const trimmed = (root ?? "").replace(/[/\\]+$/, "");
-  if (!trimmed) return "";
-  const parts = trimmed.split(/[/\\]+/);
-  return parts[parts.length - 1] || trimmed;
+/** What the empty state may say about WHY it is empty.
+ *
+ *  This keyed off `billing` — the spend payload — and the catch that fills it
+ *  does `setBilling(null)` for every failure mode there is. So a signed-in
+ *  reader whose billing call timed out got "Sign in to Aura Cloud", directly
+ *  under a comment saying that doing exactly that makes a reader "reasonably
+ *  conclude the page is broken". Whether you are signed in is a different
+ *  question with its own API (`cloud_auth_status`), and it is asked now.
+ *
+ *  `null` here means the sign-in check itself failed: the empty state only
+ *  renders once `loading` is false, and `loading` clears after every task —
+ *  the auth one included — has settled. So there is no "not yet" to confuse
+ *  with "no"; there is only "yes", "no", and "we couldn't find out". */
+export function spendFootnote(signedIn: boolean | null): string {
+  if (signedIn === null)
+    return "Aura couldn’t check your Aura Cloud connection just now. Reopen this tab to see the whole team’s spend.";
+  return signedIn
+    ? "You’re connected to Aura Cloud. Spend will appear here as your team runs agents."
+    : "Sign in to Aura Cloud to see the whole team’s spend in one place.";
 }
 
 function RefreshIcon() {
@@ -64,6 +81,12 @@ export function CostUsagePane({ repoRoot }: { repoRoot: string }) {
   // cloud auth, usage CLI absent) and degrades only its own section.
   const [roster, setRoster] = useState<TeamMember[]>([]);
   const [billing, setBilling] = useState<BillingUsageByMember | null>(null);
+  /** Whether you're SIGNED IN — which is not the same question as whether a
+   *  spend figure came back, and the footnote below used to answer it with the
+   *  latter. `setBilling(null)` is what the catch does for every failure mode,
+   *  so a signed-in reader whose billing call timed out was told to sign in.
+   *  Null here means the auth check itself hasn't answered. */
+  const [signedIn, setSignedIn] = useState<boolean | null>(null);
   const [monthUsage, setMonthUsage] = useState<UsageReport | null>(null);
   const [allUsage, setAllUsage] = useState<UsageReport | null>(null);
   const [loading, setLoading] = useState(true);
@@ -71,12 +94,25 @@ export function CostUsagePane({ repoRoot }: { repoRoot: string }) {
   const aliveRef = useRef(true);
 
   const load = useCallback(async () => {
+    // Whether you're signed in is not a property of the open project, so this
+    // one runs even when there isn't one — otherwise the no-project frame would
+    // report a failed sign-in check that never ran.
+    const authTask = (async () => {
+      try {
+        const st = await api.cloudAuthStatus();
+        if (aliveRef.current) setSignedIn(st?.connected === true);
+      } catch {
+        if (aliveRef.current) setSignedIn(null);
+      }
+    })();
+
     if (!repoRoot) {
       setRoster([]);
       setBilling(null);
       setMonthUsage(null);
       setAllUsage(null);
-      setLoading(false);
+      await authTask;
+      if (aliveRef.current) setLoading(false);
       return;
     }
     setLoading(true);
@@ -84,12 +120,12 @@ export function CostUsagePane({ repoRoot }: { repoRoot: string }) {
 
     // Each source is fetched in isolation so a single failure (no cloud auth,
     // no team manifest, usage CLI absent) degrades only its own card.
-    const tasks: Promise<void>[] = [];
+    const tasks: Promise<void>[] = [authTask];
 
     tasks.push(
       (async () => {
         try {
-          const team = await api.teamLoad(repoRoot);
+          const team = await fetchTeam(repoRoot);
           if (aliveRef.current) setRoster(team?.members ?? []);
         } catch {
           if (aliveRef.current) setRoster([]);
@@ -100,7 +136,7 @@ export function CostUsagePane({ repoRoot }: { repoRoot: string }) {
     tasks.push(
       (async () => {
         try {
-          const usage = await api.cloudBillingUsageByMember();
+          const usage = await fetchBillingUsage();
           if (aliveRef.current) setBilling(usage ?? null);
         } catch {
           if (aliveRef.current) setBilling(null);
@@ -139,7 +175,6 @@ export function CostUsagePane({ repoRoot }: { repoRoot: string }) {
     };
   }, [load]);
 
-  const shortName = useMemo(() => repoShortName(repoRoot), [repoRoot]);
   const nowSecs = Math.floor(nowMs / 1000);
 
   // Cloud per-dev numbers are only trustworthy at org scope. "self" scope means
@@ -193,8 +228,14 @@ export function CostUsagePane({ repoRoot }: { repoRoot: string }) {
     };
   }, [allUsage]);
 
+  // Only models that actually burned something. `byModel` can carry a row per
+  // configured model with every total at 0; charting those draws a split bar
+  // with no width and — worse — counts as "there is usage here" downstream.
   const modelSlices = useMemo(
-    () => (monthUsage ? slicesFromLocalModels(monthUsage.byModel) : []),
+    () =>
+      (monthUsage ? slicesFromLocalModels(monthUsage.byModel) : []).filter(
+        (s) => s.tokensIn + s.tokensOut > 0 || s.costUsd > 0,
+      ),
     [monthUsage],
   );
 
@@ -218,25 +259,38 @@ export function CostUsagePane({ repoRoot }: { repoRoot: string }) {
       ? "Aura Cloud · you"
       : "Local · this install";
 
-  // Something worth rendering = any usage figure or any roster member.
+  // Something worth rendering = a NON-ZERO usage figure somewhere.
+  //
+  // This used to be satisfied by `roster.length > 0` (and by `heroMonth`, which
+  // is non-null whenever a usage report exists even when every total in it is
+  // 0). The roster is the git contributor list, so it is non-empty in any repo
+  // that has ever been committed to — which made the empty state below
+  // unreachable in practice and put a dashboard of zeros in its place: a $0
+  // hero over six people each labelled "no usage". That reads as a broken page,
+  // not as "nothing spent", and it contradicts this file's own honesty rule.
+  //
+  // Presence of a roster is not evidence of spend, so it is no longer counted.
+  const spent = (n: number | undefined) => (n ?? 0) > 0;
   const hasAnything =
-    heroMonth != null ||
+    (heroMonth != null &&
+      (spent(heroMonth.tokensIn) ||
+        spent(heroMonth.tokensOut) ||
+        spent(heroMonth.costUsd))) ||
+    (accumulated != null &&
+      (spent(accumulated.tokens) || spent(accumulated.costUsd))) ||
     modelSlices.length > 0 ||
-    billingMembers.length > 0 ||
-    roster.length > 0;
+    billingMembers.some(
+      (m) => spent(m.tokens_in) || spent(m.tokens_out) || spent(m.cost_usd),
+    );
 
   return (
     <div className="flex h-full min-h-0 flex-col bg-bg-content">
-      {/* Header */}
-      <div className="flex shrink-0 items-center justify-between border-b border-line-soft px-4 py-3">
-        <div className="flex flex-col gap-0.5">
-          <span className="text-[15px] font-medium leading-none text-text-1">
-            Cost & usage
-          </span>
-          {shortName ? (
-            <span className="text-[12px] text-text-4">{shortName}</span>
-          ) : null}
-        </div>
+      {/* ── Header ─────────────────────────────────────────────────────
+          Actions only. It used to open with "Cost & usage" in 18px and the
+          project's name under it — the exact two words on the tab you clicked
+          to get here, over the exact name in the window's breadcrumb. 56px
+          spent telling the reader where they already know they are. */}
+      <div className="flex shrink-0 items-center justify-end border-b border-line-soft px-4 py-1.5">
         <Button
           type="button"
           variant="ghost"
@@ -254,15 +308,20 @@ export function CostUsagePane({ repoRoot }: { repoRoot: string }) {
       {/* Body */}
       <div className="min-h-0 flex-1 overflow-y-auto">
         {loading && !hasAnything ? (
-          <div className="px-4 py-4 text-[12px] text-text-4">Loading…</div>
+          <LoadingState label="Adding up what you’ve spent…" />
         ) : !hasAnything ? (
-          <div className="flex h-full flex-col items-center justify-center px-8 text-center">
-            <span className="text-[13px] text-text-2">No usage yet.</span>
-            <span className="mt-1.5 max-w-[24rem] text-[12px] leading-relaxed text-text-4">
-              Token spend and per-developer cost appear here as you and your
-              agents work. Sign in to Aura Cloud to see the whole team&rsquo;s
-              usage in one place.
-            </span>
+          <div className="flex h-full items-center justify-center">
+            <EmptyState
+              icon={Receipt}
+              title="Nothing spent yet"
+              body="Running an agent costs money. This is where you see how much (by month, and by who ran it) so it never turns into a surprise on the bill."
+              // Only offer the sign-in when signing in is actually the missing
+              // piece. Told to sign in while already signed in, a reader
+              // reasonably concludes the page is broken — which is what this
+              // did, because it asked the spend payload instead of the sign-in
+              // check. See `spendFootnote`.
+              footnote={spendFootnote(signedIn)}
+            />
           </div>
         ) : (
           <div className="mx-auto flex max-w-[760px] flex-col gap-5 px-4 py-5">

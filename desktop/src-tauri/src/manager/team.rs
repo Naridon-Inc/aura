@@ -42,7 +42,7 @@ pub async fn claim_zones(repo_root: &str, patterns: &[String], label: &str) -> C
     args.push("--label".into());
     args.push(label.to_string());
 
-    let out = match Command::new("aura")
+    let out = match Command::new(crate::agent_event_listener::resolve_aura_bin())
         .args(&args)
         .current_dir(repo_root)
         .stdout(Stdio::piped())
@@ -83,7 +83,7 @@ pub async fn announce(repo_root: &str, manager_sid: &str, content: &str) {
         "--content".to_string(),
         content.to_string(),
     ];
-    let _ = Command::new("aura")
+    let _ = Command::new(crate::agent_event_listener::resolve_aura_bin())
         .args(&args)
         .current_dir(repo_root)
         .stdout(Stdio::null())

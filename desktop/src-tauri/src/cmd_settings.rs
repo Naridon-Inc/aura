@@ -235,6 +235,28 @@ pub async fn settings_set_local_embeddings(enabled: bool) -> Result<(), String> 
     write_raw(&map)
 }
 
+/// Turn strict mode ON without setting a passcode.
+///
+/// The shell could already turn the guard *off* in one click but had no way
+/// to turn it on — the pane told you to run `aura config set strict-mode
+/// true` in a terminal, which makes the protective direction the hard one
+/// and the risky direction the easy one.
+///
+/// Deliberately does not touch `strict_mode_passcode_hash`. Locking is what
+/// needs a human at a terminal: a passcode set over the IPC bridge is a
+/// passcode an agent could have chosen, and the whole point of the lock is
+/// that nothing on this machine can undo it. Enabling has no such hazard —
+/// switching a guard on is never the dangerous direction — and the resulting
+/// on-but-unlocked state is one the CLI, the pane and the pre-commit hook
+/// already understand. Idempotent, and preserves an existing hash if one is
+/// somehow present so this can never quietly unlock a locked repo.
+#[tauri::command]
+pub async fn settings_enable_strict_unlocked() -> Result<(), String> {
+    let mut map = read_raw()?;
+    map.insert("strict_gatekeeper_mode".into(), serde_json::Value::Bool(true));
+    write_raw(&map)
+}
+
 /// Disable strict mode WITHOUT a passcode. Refuses if the mode is
 /// locked (passcode hash present) — locked-mode disable must go
 /// through the CLI's interactive `aura config reset-passcode` flow,
@@ -339,35 +361,38 @@ pub struct TelemetryView {
 
 #[tauri::command]
 pub async fn settings_telemetry_show() -> Result<TelemetryView, String> {
-    let creds = read_raw()?;
-    let enabled = creds
-        .get("telemetry_enabled")
-        .and_then(|v| v.as_bool())
-        .unwrap_or(true);
-    let path = aura_dir()?.join("telemetry.json");
-    if !path.exists() {
-        return Ok(TelemetryView {
+    crate::blocking::run(move || {
+        let creds = read_raw()?;
+        let enabled = creds
+            .get("telemetry_enabled")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(true);
+        let path = aura_dir()?.join("telemetry.json");
+        if !path.exists() {
+            return Ok(TelemetryView {
+                enabled,
+                counts: BTreeMap::new(),
+                last_updated: None,
+            });
+        }
+        let raw = fs::read_to_string(&path).unwrap_or_default();
+        let counts: BTreeMap<String, u64> = if raw.trim().is_empty() {
+            BTreeMap::new()
+        } else {
+            serde_json::from_str(&raw).unwrap_or_default()
+        };
+        let last_updated = fs::metadata(&path)
+            .ok()
+            .and_then(|m| m.modified().ok())
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|d| d.as_secs());
+        Ok(TelemetryView {
             enabled,
-            counts: BTreeMap::new(),
-            last_updated: None,
-        });
-    }
-    let raw = fs::read_to_string(&path).unwrap_or_default();
-    let counts: BTreeMap<String, u64> = if raw.trim().is_empty() {
-        BTreeMap::new()
-    } else {
-        serde_json::from_str(&raw).unwrap_or_default()
-    };
-    let last_updated = fs::metadata(&path)
-        .ok()
-        .and_then(|m| m.modified().ok())
-        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-        .map(|d| d.as_secs());
-    Ok(TelemetryView {
-        enabled,
-        counts,
-        last_updated,
+            counts,
+            last_updated,
+        })
     })
+    .await
 }
 
 #[tauri::command]

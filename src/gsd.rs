@@ -295,17 +295,15 @@ impl GsdEngine {
         
         let mut ast_context = String::from("No Merkle-Graph context available. Proceed with standard heuristics.");
         if let Ok(repo) = Repository::open(".") {
-            if let Ok(checkpoints) = CheckpointStore::get_all_checkpoints(&repo) {
-                if let Some(latest) = checkpoints.first() {
-                    ast_context = String::from("Current AST Graph Architecture:\n");
-                    for node in latest.ast_nodes.iter().take(50) { 
-                        if let Some(ident) = &node.identifier {
-                            ast_context.push_str(&format!("- Logic Node: {} (Type: {})\n", ident, node.kind));
-                            if !node.dependencies.is_empty() {
-                                ast_context.push_str("  Dependencies:\n");
-                                for dep in &node.dependencies {
-                                    ast_context.push_str(&format!("    -> {}\n", dep.name));
-                                }
+            if let Ok(Some(latest)) = CheckpointStore::latest_checkpoint(&repo) {
+                ast_context = String::from("Current AST Graph Architecture:\n");
+                for node in latest.ast_nodes.iter().take(50) {
+                    if let Some(ident) = &node.identifier {
+                        ast_context.push_str(&format!("- Logic Node: {} (Type: {})\n", ident, node.kind));
+                        if !node.dependencies.is_empty() {
+                            ast_context.push_str("  Dependencies:\n");
+                            for dep in &node.dependencies {
+                                ast_context.push_str(&format!("    -> {}\n", dep.name));
                             }
                         }
                     }
@@ -626,7 +624,7 @@ impl GsdEngine {
                 .unwrap()
                 .progress_chars("=>-"));
 
-            let short_action = if action.len() > 60 { format!("{}...", &action[..57]) } else { action.clone() };
+            let short_action = if action.len() > 60 { format!("{}...", crate::text::clip(&action, 57)) } else { action.clone() };
             pb.set_message(format!("Action: {}", short_action));
             
             // Simulate AI Coding
@@ -635,7 +633,7 @@ impl GsdEngine {
                 std::thread::sleep(std::time::Duration::from_millis(30));
             }
             
-            let short_verify = if verify.len() > 60 { format!("{}...", &verify[..57]) } else { verify.clone() };
+            let short_verify = if verify.len() > 60 { format!("{}...", crate::text::clip(&verify, 57)) } else { verify.clone() };
             pb.set_message(format!("Verification: {}", short_verify));
             
             // Simulate AST Check
@@ -886,9 +884,8 @@ impl GsdEngine {
     /// `MAX` cap so a large repo can't blow the prompt budget.
     fn repo_symbol_catalog(goal: &str, context: Option<&str>) -> Option<String> {
         let repo = Repository::open(".").ok()?;
-        let checkpoints = CheckpointStore::get_all_checkpoints(&repo).ok()?;
-        let latest = checkpoints.first()?;
-        Self::symbol_catalog_from(latest, goal, context)
+        let latest = CheckpointStore::latest_checkpoint(&repo).ok()??;
+        Self::symbol_catalog_from(&latest, goal, context)
     }
 
     /// The scoring core of [`Self::repo_symbol_catalog`], operating on a **given**
@@ -997,9 +994,8 @@ impl GsdEngine {
                 });
             }
         };
-        let checkpoints = CheckpointStore::get_all_checkpoints(&repo).unwrap_or_default();
-        let latest = match checkpoints.first() {
-            Some(l) => l,
+        let latest = match CheckpointStore::latest_checkpoint(&repo).unwrap_or_default() {
+            Some(latest) => latest,
             None => {
                 return json!({
                     "goal": goal, "checks": [], "passed": 0, "total": 0,
@@ -1009,7 +1005,7 @@ impl GsdEngine {
             }
         };
 
-        Self::check_requirements_against(goal, requirements, latest)
+        Self::check_requirements_against(goal, requirements, &latest)
     }
 
     /// Same deterministic AST check as [`Self::prove_requirements`], but against

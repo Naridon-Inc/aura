@@ -2,6 +2,9 @@
 // handles each class of brain call, and the manager forwards that
 // choice to the CLI/agent layer. Defaults err on the cheap side: Haiku
 // for simple edits, Sonnet for normal turns, Opus for plans.
+//
+// Changing a default only moves fresh installs — `read()` layers stored
+// prefs over DEFAULTS, so anyone who has already chosen keeps their pick.
 
 import { useSyncExternalStore } from "react";
 
@@ -13,6 +16,7 @@ export type ModelId =
   | "claude-opus-4-6"
   | "claude-opus-4-7"
   | "claude-opus-4-8"
+  | "claude-opus-5"
   | "claude-fable-5";
 
 export type TaskClass = "simple_edit" | "chat" | "plan";
@@ -30,20 +34,21 @@ const DEFAULTS: ModelPrefs = {
   default: "auto",
   byClass: {
     simple_edit: "claude-haiku-4-5",
-    chat: "claude-sonnet-4-6",
-    plan: "claude-opus-4-7",
+    chat: "claude-sonnet-5",
+    plan: "claude-opus-5",
   },
 };
 
 export const MODEL_OPTIONS: { id: ModelId; label: string; hint: string }[] = [
-  { id: "auto", label: "Auto", hint: "System picks per task class" },
-  { id: "claude-haiku-4-5", label: "Claude Haiku 4.5", hint: "Fast + cheap — simple edits" },
-  { id: "claude-sonnet-4-6", label: "Claude Sonnet 4.6", hint: "Balanced — daily chat + refactors" },
-  { id: "claude-sonnet-5", label: "Claude Sonnet 5", hint: "Latest balanced model — coding + agents" },
-  { id: "claude-opus-4-6", label: "Claude Opus 4.6", hint: "Strong — bigger plans" },
-  { id: "claude-opus-4-7", label: "Claude Opus 4.7", hint: "Strongest — planning + long context" },
-  { id: "claude-opus-4-8", label: "Claude Opus 4.8", hint: "Frontier coding — complex plans" },
-  { id: "claude-fable-5", label: "Claude Fable 5", hint: "Long-horizon work — hardest projects" },
+  { id: "auto", label: "Pick per task", hint: "Aura chooses by the kind of work. Set them below" },
+  { id: "claude-haiku-4-5", label: "Claude Haiku 4.5", hint: "Fast + cheap. Simple edits" },
+  { id: "claude-sonnet-4-6", label: "Claude Sonnet 4.6", hint: "Balanced. Daily chat + refactors" },
+  { id: "claude-sonnet-5", label: "Claude Sonnet 5", hint: "Latest balanced model. Coding + agents" },
+  { id: "claude-opus-4-6", label: "Claude Opus 4.6", hint: "Strong. Bigger plans" },
+  { id: "claude-opus-4-7", label: "Claude Opus 4.7", hint: "Strongest. Planning + long context" },
+  { id: "claude-opus-4-8", label: "Claude Opus 4.8", hint: "Frontier coding. Complex plans" },
+  { id: "claude-opus-5", label: "Claude Opus 5", hint: "Frontier. Hardest coding and plans" },
+  { id: "claude-fable-5", label: "Claude Fable 5", hint: "Long-horizon work. Hardest projects" },
 ];
 
 export const TASK_CLASSES: { id: TaskClass; label: string; hint: string }[] = [

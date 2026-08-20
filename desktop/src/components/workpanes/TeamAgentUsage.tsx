@@ -16,12 +16,12 @@ import { useMemo } from "react";
 import type { BillingMemberRow, UsageModel } from "../../lib/api";
 import { AgentIcon } from "../agent/AgentIcon";
 import {
-  fmtCost,
-  fmtTokens,
   providerAccent,
   providerForModel,
   providerLabel,
 } from "./usageProviders";
+import { compactNumber } from "../../lib/compactNumber";
+import { formatCost } from "../../lib/money";
 
 /** One coding agent's folded usage across the team (or this install). */
 type AgentUsage = {
@@ -115,10 +115,10 @@ export function TeamAgentUsage({
   return (
     <div className="rounded-lg border border-line-soft bg-bg-1 p-2.5">
       <div className="mb-2.5 flex items-baseline justify-between">
-        <span className="text-[11px] uppercase tracking-wide text-text-4">
+        <span className="section-label">
           By coding agent
         </span>
-        <span className="text-[11px] text-text-4">{scopeNote}</span>
+        <span className="text-xs text-text-4">{scopeNote}</span>
       </div>
       <div className="flex flex-col gap-2.5">
         {agents.map((a) => {
@@ -133,12 +133,12 @@ export function TeamAgentUsage({
               </span>
               <div className="flex min-w-0 flex-1 flex-col gap-1">
                 <div className="flex items-baseline justify-between gap-2">
-                  <span className="truncate text-[12.5px] text-text-2">
+                  <span className="truncate text-base text-text-2">
                     {providerLabel(a.providerId)}
                   </span>
-                  <span className="shrink-0 font-mono text-[11px] text-text-3">
-                    {fmtTokens(a.total)}
-                    <span className="text-text-4"> · {fmtCost(a.costUsd)}</span>
+                  <span className="shrink-0 font-mono text-xs text-text-3">
+                    {compactNumber(a.total)}
+                    <span className="text-text-4"> · {formatCost(a.costUsd)}</span>
                   </span>
                 </div>
                 <span className="flex h-1.5 w-full overflow-hidden rounded-full bg-bg-2">

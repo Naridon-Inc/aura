@@ -142,11 +142,14 @@ fn read_dir_clips(dir: &std::path::Path) -> Vec<SoundboardClip> {
 
 #[tauri::command]
 pub async fn soundboard_list(repo_root: String) -> Result<Vec<SoundboardClip>, String> {
-    let dir = clips_dir(&repo_root)?;
-    if !dir.exists() {
-        return Ok(Vec::new());
-    }
-    Ok(read_dir_clips(&dir))
+    crate::blocking::run(move || {
+        let dir = clips_dir(&repo_root)?;
+        if !dir.exists() {
+            return Ok(Vec::new());
+        }
+        Ok(read_dir_clips(&dir))
+    })
+    .await
 }
 
 #[tauri::command]
@@ -191,22 +194,25 @@ pub async fn soundboard_read(
     repo_root: String,
     clip_id: String,
 ) -> Result<Vec<u8>, String> {
-    let dir = clips_dir(&repo_root)?;
-    if !dir.exists() {
-        return Err("no clips for this repo".into());
-    }
-    // Find the file with this stem (don't trust caller's claimed ext).
-    let entries = fs::read_dir(&dir).map_err(|e| format!("read_dir: {}", e))?;
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if !path.is_file() {
-            continue;
+    crate::blocking::run(move || {
+        let dir = clips_dir(&repo_root)?;
+        if !dir.exists() {
+            return Err("no clips for this repo".into());
         }
-        if stem(&path) == clip_id {
-            return fs::read(&path).map_err(|e| format!("read: {}", e));
+        // Find the file with this stem (don't trust caller's claimed ext).
+        let entries = fs::read_dir(&dir).map_err(|e| format!("read_dir: {}", e))?;
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if !path.is_file() {
+                continue;
+            }
+            if stem(&path) == clip_id {
+                return fs::read(&path).map_err(|e| format!("read: {}", e));
+            }
         }
-    }
-    Err(format!("clip not found: {}", clip_id))
+        Err(format!("clip not found: {}", clip_id))
+    })
+    .await
 }
 
 #[tauri::command]
@@ -214,20 +220,23 @@ pub async fn soundboard_delete(
     repo_root: String,
     clip_id: String,
 ) -> Result<(), String> {
-    let dir = clips_dir(&repo_root)?;
-    if !dir.exists() {
-        return Ok(());
-    }
-    let entries = fs::read_dir(&dir).map_err(|e| format!("read_dir: {}", e))?;
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if !path.is_file() {
-            continue;
-        }
-        if stem(&path) == clip_id {
-            fs::remove_file(&path).map_err(|e| format!("remove: {}", e))?;
+    crate::blocking::run(move || {
+        let dir = clips_dir(&repo_root)?;
+        if !dir.exists() {
             return Ok(());
         }
-    }
-    Ok(())
+        let entries = fs::read_dir(&dir).map_err(|e| format!("read_dir: {}", e))?;
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if !path.is_file() {
+                continue;
+            }
+            if stem(&path) == clip_id {
+                fs::remove_file(&path).map_err(|e| format!("remove: {}", e))?;
+                return Ok(());
+            }
+        }
+        Ok(())
+    })
+    .await
 }

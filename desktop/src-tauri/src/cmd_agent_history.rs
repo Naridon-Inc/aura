@@ -45,7 +45,10 @@ pub async fn agent_history_preroll(
     repo_root: String,
     session_id: String,
 ) -> Result<Vec<PrerollTurn>, String> {
-    read_agent_history(&agent_id, &repo_root, &session_id)
+    crate::blocking::run(move || {
+        read_agent_history(&agent_id, &repo_root, &session_id)
+    })
+    .await
 }
 
 /// Non-command transcript reader, shared by the `agent_history_preroll`
@@ -57,10 +60,46 @@ pub(crate) fn read_agent_history(
     repo_root: &str,
     session_id: &str,
 ) -> Result<Vec<PrerollTurn>, String> {
-    match agent_id {
-        "claude" => claude_preroll(repo_root, session_id),
-        "gemini" => gemini_preroll(repo_root, session_id),
-        _ => Ok(vec![]),
+    let mut turns = match agent_id {
+        "claude" => claude_preroll(repo_root, session_id)?,
+        "gemini" => gemini_preroll(repo_root, session_id)?,
+        _ => vec![],
+    };
+    scrub_brokered_secrets(repo_root, &mut turns);
+    Ok(turns)
+}
+
+/// Take any brokered secret back out of a transcript before it becomes context.
+///
+/// This is the one path in the app where text an agent has already written comes
+/// *back* as a prompt: the pre-roll pane replays it, and
+/// `manager_import_agent_session` hydrates a native Aura chat from it. Nothing
+/// puts a secret here — the values are handed to the CLI's process environment
+/// and never to its input (`manager::brain::place_secrets`) — so this is the
+/// second lock rather than the first. It exists because the two failures are not
+/// symmetrical: a transcript nobody scrubbed is a token in a model's context
+/// forever, and a scrub that never had anything to find costs one pass over a
+/// few kilobytes.
+fn scrub_brokered_secrets(repo_root: &str, turns: &mut [PrerollTurn]) {
+    let held = crate::manager::brain::place_secrets::boot_here(repo_root);
+    if held.is_empty() || turns.is_empty() {
+        return;
+    }
+    for turn in turns.iter_mut() {
+        turn.text = held.redact(&turn.text);
+        if let Some(thinking) = turn.thinking.as_mut() {
+            *thinking = held.redact(thinking);
+        }
+        for call in turn.tool_calls.iter_mut() {
+            // The arguments a tool was given and what it printed back — where a
+            // token would be if a CLI had ever been handed one, since a `bash`
+            // call's input is a command line and its result is that command's
+            // output.
+            held.redact_json(&mut call.input);
+            if let Some(result) = call.result.as_mut() {
+                result.content = held.redact(&result.content);
+            }
+        }
     }
 }
 
@@ -69,7 +108,7 @@ fn claude_preroll(repo_root: &str, session_id: &str) -> Result<Vec<PrerollTurn>,
     let mut path = PathBuf::from(home);
     path.push(".claude");
     path.push("projects");
-    path.push(encode_claude_path(repo_root));
+    path.push(crate::cmd_claude_sessions::encode_path(repo_root));
     path.push(format!("{session_id}.jsonl"));
 
     if !path.exists() {
@@ -413,13 +452,6 @@ fn first_line(path: &PathBuf) -> Option<Value> {
     let mut line = String::new();
     reader.read_line(&mut line).ok()?;
     serde_json::from_str(&line).ok()
-}
-
-fn encode_claude_path(repo_root: &str) -> String {
-    repo_root
-        .chars()
-        .map(|c| if c == '/' || c == ' ' { '-' } else { c })
-        .collect()
 }
 
 fn parse_iso_ts(s: &str) -> Option<i64> {

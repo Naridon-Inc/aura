@@ -40,16 +40,16 @@ export function GoLiveControl({
         <div className="flex items-center gap-2.5">
           <div className="min-w-0 flex-1">
             <div
-              className={`text-[12.5px] font-semibold leading-tight ${
+              className={`text-base font-semibold leading-tight ${
                 live ? "text-accent" : "text-text-1"
               }`}
             >
               {live ? "Live" : "Go Live"}
             </div>
-            <div className="text-[10.5px] text-text-3 truncate leading-tight mt-0.5">
+            <div className="text-xs text-text-3 truncate leading-tight mt-0.5">
               {live
                 ? "Tree syncing with the team"
-                : "Sync this tree with the team — no git push"}
+                : "Sync this tree with the team. No git push"}
             </div>
           </div>
           <Switch
@@ -67,7 +67,7 @@ export function GoLiveControl({
                 {activePeers.slice(0, 4).map((p, i) => (
                   <span
                     key={p.sessionId}
-                    className="flex h-[18px] w-[18px] items-center justify-center rounded-full text-[8px] font-bold text-bg-0 ring-2 ring-bg-1 shrink-0"
+                    className="flex h-[18px] w-[18px] items-center justify-center rounded-full text-2xs font-bold text-bg-0 ring-2 ring-bg-1 shrink-0"
                     style={{
                       background: peerColor(p.sessionId),
                       marginLeft: i === 0 ? 0 : -6,
@@ -77,20 +77,20 @@ export function GoLiveControl({
                     {initials(p.agentId)}
                   </span>
                 ))}
-                <span className="ml-2 text-[10.5px] text-text-3 truncate">
+                <span className="ml-2 text-xs text-text-3 truncate">
                   {activePeers.length} live
                 </span>
               </div>
             ) : (
               <span
-                className="text-[10.5px] text-text-4 truncate"
+                className="text-xs text-text-4 truncate"
                 title={presenceHint ?? undefined}
               >
                 {presenceHint ?? "waiting for peers…"}
               </span>
             )}
             <span
-              className="ml-auto flex items-center gap-1.5 text-[10.5px] text-accent-green shrink-0"
+              className="ml-auto flex items-center gap-1.5 text-xs text-accent-green shrink-0"
               title={`live ${agoShort(startedAt)}`}
             >
               <span className="h-[7px] w-[7px] rounded-full bg-accent-green shadow-[0_0_0_3px_color-mix(in_oklab,var(--color-accent-green)_18%,transparent)]" />

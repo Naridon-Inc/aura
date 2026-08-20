@@ -41,8 +41,8 @@ export function ModePermissionsBadge({ toolAcl, showSafe = false }: Props) {
     if (!showSafe) return null;
     return (
       <span
-        className="inline-flex items-center gap-1 rounded-full bg-bg-2 px-2 py-0.5 text-[10px] text-text-3"
-        title="No advanced tools — this mode cannot exec shell commands or modify state"
+        className="inline-flex items-center gap-1 rounded-full bg-bg-2 px-2 py-0.5 text-2xs text-text-3"
+        title="No advanced tools. This mode cannot exec shell commands or modify state"
       >
         Safe
       </span>
@@ -51,7 +51,7 @@ export function ModePermissionsBadge({ toolAcl, showSafe = false }: Props) {
 
   return (
     <span
-      className="inline-flex items-center gap-1 rounded-full bg-amber/10 px-2 py-0.5 text-[10px] text-amber"
+      className="inline-flex items-center gap-1 rounded-full bg-amber/10 px-2 py-0.5 text-2xs text-amber"
       title={`Advanced tools requested: ${wanted.join(", ")}`}
     >
       <ShieldAlert className="h-3 w-3" />

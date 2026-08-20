@@ -37,11 +37,11 @@ export class GraphErrorBoundary extends Component<Props, State> {
   render() {
     if (!this.state.err) return this.props.children;
     return (
-      <div className="h-full w-full flex flex-col items-center justify-center bg-bg-1 text-[12px] gap-3 p-6">
-        <div className="text-amber-400 text-[13px] font-medium">
+      <div className="h-full w-full flex flex-col items-center justify-center bg-bg-1 text-sm gap-3 p-6">
+        <div className="text-amber-400 text-base font-medium">
           Graph view crashed
         </div>
-        <pre className="text-text-3 text-[11px] max-w-lg whitespace-pre-wrap text-center font-mono">
+        <pre className="text-text-3 text-xs max-w-lg whitespace-pre-wrap text-center font-mono">
           {String(this.state.err.message || this.state.err)}
         </pre>
         <Button
@@ -49,11 +49,11 @@ export class GraphErrorBoundary extends Component<Props, State> {
           variant="subtle"
           size="sm"
           onClick={this.retry}
-          className="text-[11px]"
+          className="text-xs"
         >
           Retry
         </Button>
-        <div className="text-text-4 text-[10px]">
+        <div className="text-text-4 text-2xs">
           Crash dumps: ~/.aura/aura-shell-crashes/
         </div>
       </div>

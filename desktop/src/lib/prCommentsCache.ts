@@ -8,6 +8,7 @@
 // fresh window) refreshes in the background.
 
 import { api, type PrComment } from "./api";
+import { setCache } from "./localStore";
 
 const STALE_MS = 15_000; // 15s: comments move faster than detail
 const EXPIRY_MS = 10 * 60_000;
@@ -43,7 +44,7 @@ function loadPersisted(k: string): Entry | null {
 
 function savePersisted(k: string, entry: Entry): void {
   try {
-    localStorage.setItem(
+    setCache(
       lsKey(k),
       JSON.stringify({ data: entry.data, fetchedAt: entry.fetchedAt }),
     );

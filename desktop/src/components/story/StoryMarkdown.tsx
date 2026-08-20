@@ -31,7 +31,7 @@ export function StoryMarkdown({ children, className, compact }: Props) {
     <div
       className={cn(
         "story-md text-text-2 leading-relaxed",
-        compact ? "text-[12px]" : "text-[12.5px]",
+        compact ? "text-sm" : "text-base",
         className,
       )}
     >
@@ -48,21 +48,21 @@ const COMPONENTS: Components = {
   },
   h1({ children }) {
     return (
-      <h1 className="text-[14px] font-semibold text-text-1 mt-3 mb-1.5 first:mt-0">
+      <h1 className="text-md font-semibold text-text-1 mt-3 mb-1.5 first:mt-0">
         {children}
       </h1>
     );
   },
   h2({ children }) {
     return (
-      <h2 className="text-[13px] font-semibold text-text-1 mt-3 mb-1.5 first:mt-0">
+      <h2 className="text-base font-semibold text-text-1 mt-3 mb-1.5 first:mt-0">
         {children}
       </h2>
     );
   },
   h3({ children }) {
     return (
-      <h3 className="text-[12.5px] font-semibold text-text-1 mt-2 mb-1 first:mt-0">
+      <h3 className="text-base font-semibold text-text-1 mt-2 mb-1 first:mt-0">
         {children}
       </h3>
     );
@@ -120,20 +120,20 @@ const COMPONENTS: Components = {
     const isBlock = /language-/.test(className ?? "");
     if (isBlock) {
       return (
-        <code className={cn("font-mono text-[11.5px]", className)}>
+        <code className={cn("font-mono text-sm", className)}>
           {children}
         </code>
       );
     }
     return (
-      <code className="bg-bg-2 text-text-1 px-1 py-0.5 rounded text-[11.5px] font-mono">
+      <code className="bg-bg-2 text-text-1 px-1 py-0.5 rounded text-sm font-mono">
         {children}
       </code>
     );
   },
   pre({ children }) {
     return (
-      <pre className="bg-bg-2 border border-line-soft rounded-md my-2 p-2.5 overflow-x-auto text-[11.5px]">
+      <pre className="bg-bg-2 border border-line-soft rounded-md my-2 p-2.5 overflow-x-auto text-sm">
         {children}
       </pre>
     );

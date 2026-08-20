@@ -27,8 +27,8 @@ export function DuplicatesBanner({
   if (!onConfirm || !onReject || suggestions.length === 0) return null;
   return (
     <div className="mx-2 mb-2">
-      <div className="text-[10px] uppercase tracking-wider text-text-5 font-medium pb-1 px-0.5">
-        Possible duplicates — {suggestions.length}
+      <div className="section-label pb-1 px-0.5">
+        Possible duplicates · {suggestions.length}
       </div>
       <div className="flex flex-col gap-1.5">
         {suggestions.map((s) => (
@@ -71,7 +71,7 @@ function DuplicateCard({
       );
       await onConfirm(survivor_email, others);
     } catch (e) {
-      setError(e instanceof Error ? e.message : "Couldn't merge these — try again.");
+      setError(e instanceof Error ? e.message : "Couldn't merge these. Try again.");
       setBusy(false);
     }
     // On success the list re-fetches and this card unmounts; no need to
@@ -90,7 +90,7 @@ function DuplicateCard({
         }
       }
     } catch (e) {
-      setError(e instanceof Error ? e.message : "Couldn't save that — try again.");
+      setError(e instanceof Error ? e.message : "Couldn't save that. Try again.");
       setBusy(false);
     }
   };
@@ -114,7 +114,7 @@ function DuplicateCard({
           })}
         </span>
         <div className="flex-1 min-w-0">
-          <div className="text-[11px] text-text-2 leading-snug">
+          <div className="text-xs text-text-2 leading-snug">
             {labels.map((l, i) => (
               <span key={emails[i]}>
                 <span className="text-text-1">{l}</span>
@@ -124,7 +124,7 @@ function DuplicateCard({
               </span>
             ))}
           </div>
-          <div className="text-[10.5px] text-text-4 leading-snug mt-0.5">
+          <div className="text-xs text-text-4 leading-snug mt-0.5">
             {reason}
             {confidence === "medium" && (
               <span className="text-text-5"> · not sure</span>
@@ -133,15 +133,15 @@ function DuplicateCard({
         </div>
       </div>
       {error && (
-        <div className="text-[10px] text-red mt-1 leading-snug">{error}</div>
+        <div className="text-2xs text-red mt-1 leading-snug">{error}</div>
       )}
       <div className="flex items-center gap-1 mt-1.5">
         <button
           type="button"
           onClick={confirm}
           disabled={busy}
-          className="px-1.5 py-0.5 rounded text-[10px] leading-none border border-accent/25 text-accent hover:bg-accent/10 disabled:opacity-50"
-          title={`Treat these as one person — keep ${survivor_email}`}
+          className="px-1.5 py-0.5 rounded text-2xs leading-none border border-accent/25 text-accent hover:bg-accent/10 disabled:opacity-50"
+          title={`Treat these as one person. Keep ${survivor_email}`}
         >
           Same person
         </button>
@@ -149,7 +149,7 @@ function DuplicateCard({
           type="button"
           onClick={reject}
           disabled={busy}
-          className="px-1.5 py-0.5 rounded text-[10px] leading-none border border-line-soft text-text-4 hover:text-text-1 hover:bg-bg-2 disabled:opacity-50"
+          className="px-1.5 py-0.5 rounded text-2xs leading-none border border-line-soft text-text-4 hover:text-text-1 hover:bg-state-hover disabled:opacity-50"
           title="Keep them separate and stop suggesting this"
         >
           Different people

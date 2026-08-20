@@ -29,16 +29,17 @@ export type HudComposerState = {
 };
 
 // Option tables — ported verbatim from ManagerComposer so the HUD offers the
-// exact same choices. `null` is the "Auto"/"Default" sentinel.
+// exact same choices, under the exact same names. `null` is the sentinel for
+// "don't set this one".
 export const MODE_OPTIONS: { value: HudComposerMode; label: string }[] = [
-  { value: "auto", label: "Auto" },
+  { value: "auto", label: "Autopilot" },
   { value: "plan", label: "Plan" },
   { value: "build", label: "Build" },
   { value: "ask", label: "Ask" },
 ];
 
 export const EFFORT_OPTIONS: { value: ReasoningEffort | null; label: string }[] = [
-  { value: null, label: "Auto" },
+  { value: null, label: "Default" },
   { value: "low", label: "Low" },
   { value: "medium", label: "Medium" },
   { value: "high", label: "High" },
@@ -202,9 +203,9 @@ export function useHudComposer(): HudComposer {
           label: o.label,
           checked: (state.approval ?? null) === o.value,
         }));
-      // brain·model — Auto first, then one submenu per engine with its models.
+      // brain·model — follow-the-brain first, then one submenu per engine.
       const rows: HudMenuRow[] = [
-        { id: "auto", label: "Auto", checked: !state.model },
+        { id: "auto", label: "Follow the active brain", checked: !state.model },
       ];
       for (const b of brains) {
         const models = catalogFor(b, catalogRef.current).map((m) => ({
@@ -265,10 +266,10 @@ export function useHudComposer(): HudComposer {
 
   const labels = {
     mode: MODE_OPTIONS.find((o) => o.value === state.mode)?.label ?? "Build",
-    effort: EFFORT_OPTIONS.find((o) => o.value === (state.effort ?? null))?.label ?? "Auto",
+    effort: EFFORT_OPTIONS.find((o) => o.value === (state.effort ?? null))?.label ?? "Default",
     approval:
       APPROVAL_OPTIONS.find((o) => o.value === (state.approval ?? null))?.label ?? "Default",
-    model: state.model?.label ?? "Auto",
+    model: state.model?.label ?? "Active brain",
   };
 
   return {

@@ -68,10 +68,10 @@ export function SayToWorktreeDialog({ repoRoot, toWorktree, onClose }: Props) {
       }
     >
       {sent ? (
-        <p className="text-[12.5px] leading-relaxed" style={{ color: "var(--color-text-2)" }}>
+        <p className="text-base leading-relaxed" style={{ color: "var(--color-text-2)" }}>
           {sent.recipients > 0
             ? `Delivered to ${sent.recipients} ${sent.recipients === 1 ? "session" : "sessions"} working in ${toWorktree}.`
-            : `Nothing is running in ${toWorktree} right now, so the note is waiting there. Whoever opens it next — you or an agent — reads it before starting.`}
+            : `Nothing is running in ${toWorktree} right now, so the note is waiting there. Whoever opens it next, you or an agent, reads it before starting.`}
         </p>
       ) : (
         <>
@@ -86,19 +86,19 @@ export function SayToWorktreeDialog({ repoRoot, toWorktree, onClose }: Props) {
               }
             }}
             rows={4}
-            placeholder="e.g. I'm rewriting the login check in here — leave it alone for now"
-            className="w-full resize-none rounded-sm px-2.5 py-2 text-[12.5px] leading-relaxed outline-none"
+            placeholder="e.g. I'm rewriting the login check in here. Leave it alone for now"
+            className="w-full resize-none rounded-sm px-2.5 py-2 text-base leading-relaxed outline-none"
             style={{
               background: "var(--color-bg-2)",
               color: "var(--color-text-1)",
               border: "1px solid var(--color-line-soft)",
             }}
           />
-          <p className="mt-2 text-[11px]" style={{ color: "var(--color-text-4)" }}>
+          <p className="mt-2 text-xs" style={{ color: "var(--color-text-4)" }}>
             Goes to whoever works in that copy next. ⌘↵ to send.
           </p>
           {error && (
-            <p className="mt-2 text-[11.5px]" style={{ color: "var(--color-red)" }}>
+            <p className="mt-2 text-sm" style={{ color: "var(--color-red)" }}>
               {error}
             </p>
           )}

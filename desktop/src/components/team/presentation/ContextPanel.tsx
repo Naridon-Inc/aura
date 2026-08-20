@@ -12,11 +12,17 @@
  *  sub-panes (`MembersRail`, `PinnedPanel`, `ThreadReplies`) to it. */
 
 import { useMemo } from "react";
-import { FileText, X } from "lucide-react";
+import { X } from "lucide-react";
 
 import { COMMONS_ENABLED } from "../../../lib/featureFlags";
 import { SegmentedControl } from "../../ui/segmented";
-import { persistLastRead, prettyName } from "../domain";
+import {
+  persistLastRead,
+  prettyName,
+  presenceForConversation,
+  type ConvPresence,
+} from "../domain";
+import type { TeamMember } from "../../../lib/api";
 import type { TeamChatModel } from "../application/useTeamChat";
 import { LoungePanel } from "./LoungePanel";
 import { MembersRail } from "./MembersRail";
@@ -24,7 +30,6 @@ import { PinnedPanel } from "./PinnedPanel";
 import { PluginBrowser } from "./PluginBrowser";
 import { ThreadReplies } from "./ThreadReplies";
 import { ExpandToPaneIcon, MembersIcon, PinIcon } from "./icons";
-import { ChannelCanvasTab } from "./ChannelCanvasTab";
 import { Avatar } from "./Avatar";
 
 export type ContextTab =
@@ -33,7 +38,6 @@ export type ContextTab =
   | "pinned"
   | "lounge"
   | "plugins"
-  | "canvas"
   | "thread";
 
 export function ContextPanel({
@@ -106,7 +110,7 @@ export function ContextPanel({
           onClick={onToggleCollapse}
           title="Show context"
           aria-label="Show context"
-          className="w-7 h-7 rounded flex items-center justify-center text-text-4 hover:text-text-1 hover:bg-bg-2"
+          className="w-7 h-7 rounded flex items-center justify-center text-text-4 hover:text-text-1 hover:bg-state-hover"
         >
           <ExpandToPaneIcon />
         </button>
@@ -118,7 +122,7 @@ export function ContextPanel({
           }}
           title="Members"
           aria-label="Members"
-          className="w-7 h-7 rounded flex items-center justify-center text-text-4 hover:text-text-1 hover:bg-bg-2"
+          className="w-7 h-7 rounded flex items-center justify-center text-text-4 hover:text-text-1 hover:bg-state-hover"
         >
           <MembersIcon />
         </button>
@@ -130,12 +134,12 @@ export function ContextPanel({
           }}
           title="Pinned"
           aria-label="Pinned"
-          className="relative w-7 h-7 rounded flex items-center justify-center text-text-4 hover:text-text-1 hover:bg-bg-2"
+          className="relative w-7 h-7 rounded flex items-center justify-center text-text-4 hover:text-text-1 hover:bg-state-hover"
         >
           <PinIcon />
           {pins.length > 0 && (
             <span
-              className="absolute -top-0.5 -right-0.5 min-w-[12px] px-0.5 rounded-full text-[9px] font-semibold tabular-nums leading-none bg-bg-3 text-text-2 border border-line-soft flex items-center justify-center"
+              className="absolute -top-0.5 -right-0.5 min-w-[12px] px-0.5 rounded-full text-2xs font-semibold tabular-nums leading-none bg-bg-3 text-text-2 border border-line-soft flex items-center justify-center"
               style={{ paddingBlock: 1 }}
             >
               {pins.length > 9 ? "9+" : pins.length}
@@ -152,7 +156,7 @@ export function ContextPanel({
               }}
               title="Activity"
               aria-label="Activity"
-              className="w-7 h-7 rounded flex items-center justify-center text-text-4 hover:text-text-1 hover:bg-bg-2"
+              className="w-7 h-7 rounded flex items-center justify-center text-text-4 hover:text-text-1 hover:bg-state-hover"
             >
               <LoungeIcon />
             </button>
@@ -164,7 +168,7 @@ export function ContextPanel({
               }}
               title="Plugins"
               aria-label="Plugins"
-              className="w-7 h-7 rounded flex items-center justify-center text-text-4 hover:text-text-1 hover:bg-bg-2"
+              className="w-7 h-7 rounded flex items-center justify-center text-text-4 hover:text-text-1 hover:bg-state-hover"
             >
               <PackageIcon />
             </button>
@@ -212,7 +216,6 @@ export function ContextPanel({
       <div className="slack-context-header flex-shrink-0 flex items-center gap-2 px-3 h-12 border-b border-line-soft">
         {fixedTab ? (
           <>
-            {fixedTab === "canvas" && <FileText size={16} />}
             <strong className="flex-1 truncate">
               {contextTitle(fixedTab, active?.kind === "dm")}
             </strong>
@@ -238,7 +241,7 @@ export function ContextPanel({
             onClick={onClose ?? onToggleCollapse}
             title="Close pane"
             aria-label="Close pane"
-            className="w-7 h-7 rounded flex items-center justify-center text-text-4 hover:text-text-1 hover:bg-bg-2 flex-shrink-0"
+            className="w-7 h-7 rounded flex items-center justify-center text-text-4 hover:text-text-1 hover:bg-state-hover flex-shrink-0"
           >
             <X size={18} />
           </button>
@@ -297,12 +300,6 @@ export function ContextPanel({
               persistLastRead(active.id, max);
             }}
           />
-        ) : viewTab === "canvas" ? (
-          <ChannelCanvasTab
-            repoRoot={repoRoot}
-            channel={active?.channel ?? null}
-            channelName={active?.name ?? "Team"}
-          />
         ) : viewTab === "pinned" ? (
           <PinnedPanel
             pins={pins}
@@ -317,7 +314,12 @@ export function ContextPanel({
             onClose={() => onTabChange("members")}
           />
         ) : viewTab === "details" ? (
-          <ConversationDetails conv={active} memberCount={members.length} />
+          <ConversationDetails
+            conv={active}
+            members={members}
+            memberCount={members.length}
+            repoRoot={repoRoot}
+          />
         ) : (
           <MembersRail
             conv={active}
@@ -386,8 +388,8 @@ function PackageIcon() {
 function ContextEmpty() {
   return (
     <div className="h-full flex flex-col items-center justify-center px-6 text-center">
-      <div className="text-text-4 text-[12px]">No conversation selected</div>
-      <div className="text-text-5 text-[11px] mt-1 leading-snug max-w-[200px]">
+      <div className="text-text-4 text-sm">No conversation selected</div>
+      <div className="text-text-5 text-xs mt-1 leading-snug max-w-[200px]">
         Pick a channel or direct message to see its members, details, and
         pinned messages here.
       </div>
@@ -397,31 +399,57 @@ function ContextEmpty() {
 
 function ConversationDetails({
   conv,
+  members,
   memberCount,
+  repoRoot,
 }: {
   conv: import("../domain").Conversation;
+  members: TeamMember[];
   memberCount: number;
+  repoRoot: string;
 }) {
   const isDm = conv.kind === "dm";
   const displayName = prettyName(conv).replace(/^#/, "");
+  const presence = isDm ? presenceForConversation(conv, members) : null;
   return (
     <div className="slack-details-view flex-1 overflow-y-auto">
       <div className="slack-details-hero">
         {isDm ? (
-          <Avatar name={displayName} size={72} presence="online" />
+          <Avatar name={displayName} size={72} presence={presence} />
         ) : (
           <div className={`slack-details-channel-icon ${conv.private ? "is-private" : ""}`}>
             {conv.private ? "▣" : "#"}
           </div>
         )}
         <h2>{displayName}</h2>
-        <p>{isDm ? "Active" : detailKind(conv.kind, conv.private)}</p>
+        {/* This said "Active" for everyone, under a dot that told the truth —
+            so the panel showed a grey offline marker with the word "Active"
+            printed beneath it. Both now read the same signal. */}
+        <p>{isDm ? presenceWord(presence) : detailKind(conv.kind, conv.private)}</p>
       </div>
       {isDm && (
+        // Was Message / Huddle / More, none of which had a handler: three
+        // buttons that did nothing, one of which ("Message") asked you to open
+        // the conversation you were already reading. Huddle is real — it's the
+        // same event the composer's headphones button fires — so that's what
+        // stays.
         <div className="slack-details-actions">
-          <button type="button">Message</button>
-          <button type="button">Huddle</button>
-          <button type="button">More</button>
+          <button
+            type="button"
+            onClick={() =>
+              window.dispatchEvent(
+                new CustomEvent("aura:start-huddle", {
+                  detail: {
+                    repoRoot,
+                    channel: conv.channel ?? "general",
+                    channelName: conv.name,
+                  },
+                }),
+              )
+            }
+          >
+            Huddle
+          </button>
         </div>
       )}
       <div className="slack-details-card">
@@ -429,8 +457,18 @@ function ConversationDetails({
         {!isDm && conv.kind !== "project" && (
           <DetailRow label="Members" value={String(memberCount)} />
         )}
-        {conv.channel && <DetailRow label="Channel" value={`${conv.private ? "▣" : "#"}${conv.channel}`} />}
-        {conv.hint && <DetailRow label={isDm ? "About" : "Description"} value={conv.hint} />}
+        {/* A DM's channel slug is routing plumbing — this row read
+            "CHANNEL #dm-mhask--mo", which is neither of the two people's names
+            and nothing you can type anywhere. What's actually useful about a
+            person here is their handle, which the row below used to label
+            "ABOUT". Channels keep the slug: there, "#general" IS the name. */}
+        {conv.channel && !isDm && (
+          <DetailRow label="Channel" value={`${conv.private ? "▣" : "#"}${conv.channel}`} />
+        )}
+        {isDm && conv.handle && <DetailRow label="Handle" value={`@${conv.handle}`} />}
+        {conv.hint && conv.hint !== conv.handle && (
+          <DetailRow label={isDm ? "About" : "Description"} value={conv.hint} />
+        )}
       </div>
     </div>
   );
@@ -438,8 +476,6 @@ function ConversationDetails({
 
 function contextTitle(tab: ContextTab, isDm: boolean): string {
   switch (tab) {
-    case "canvas":
-      return "Canvas";
     case "details":
       return isDm ? "Details" : "Channel details";
     case "members":
@@ -458,12 +494,22 @@ function contextTitle(tab: ContextTab, isDm: boolean): string {
 function DetailRow({ label, value }: { label: string; value: string }) {
   return (
     <div className="flex items-baseline justify-between gap-2 border-b border-line-soft/40 pb-2">
-      <span className="text-text-5 text-[10.5px] uppercase tracking-wide">
+      <span className="section-label">
         {label}
       </span>
-      <span className="text-text-2 text-[12px] tabular-nums truncate">{value}</span>
+      <span className="text-text-2 text-sm tabular-nums truncate">{value}</span>
     </div>
   );
+}
+
+/** The presence dot in words, for the line under a person's name. "Offline"
+ *  covers both "we've seen them, not lately" and "we have never seen them
+ *  here" — the panel has nothing more specific to offer, and guessing would be
+ *  how "Active" got printed over a grey dot in the first place. */
+function presenceWord(presence: ConvPresence | null): string {
+  if (presence === "online") return "Active";
+  if (presence === "idle") return "Away";
+  return "Offline";
 }
 
 function detailKind(

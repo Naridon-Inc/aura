@@ -17,8 +17,8 @@
 import { useState } from "react";
 
 import { FileDiffTool } from "./FileDiffTool";
-import { basename } from "./toolDescribe";
 import type { TurnChangeSummary } from "./turnChangeSummary";
+import { basename } from "../../../lib/paths";
 
 /** The round's change receipt. Collapsed: a one-line tally. Expanded: the
  *  per-file before/after diffs. Renders nothing when `summary` is null upstream
@@ -50,7 +50,7 @@ export function TurnChanges({ summary }: { summary: TurnChangeSummary }) {
           {filesChanged === 1 ? "1 file changed" : `${filesChanged} files changed`}
         </span>
         <span
-          className="shrink-0 tabular-nums text-[10.5px] flex items-center gap-1.5"
+          className="shrink-0 tabular-nums text-xs flex items-center gap-1.5"
           style={{ fontFamily: "var(--font-mono)" }}
         >
           {added > 0 && (
@@ -93,13 +93,13 @@ export function TurnChanges({ summary }: { summary: TurnChangeSummary }) {
                 title={f.path}
               >
                 <span
-                  className="min-w-0 truncate font-mono text-[11px]"
+                  className="min-w-0 truncate font-mono text-xs"
                   style={{ color: "var(--color-text-1)" }}
                 >
                   {basename(f.path) || f.path}
                 </span>
                 <span
-                  className="ml-auto shrink-0 tabular-nums text-[10.5px] flex items-center gap-1.5"
+                  className="ml-auto shrink-0 tabular-nums text-xs flex items-center gap-1.5"
                   style={{ fontFamily: "var(--font-mono)" }}
                 >
                   {f.added > 0 && (

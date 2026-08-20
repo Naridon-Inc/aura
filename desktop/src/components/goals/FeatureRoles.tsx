@@ -9,36 +9,10 @@
 // feature was genuinely worked — by more than one party, or across commits or
 // sessions.
 
-import type { GoalRun, GoalVerdict } from "../../lib/goalStore";
+import type { GoalRun } from "../../lib/goalStore";
+import { VERDICT } from "../../lib/goalVerdict";
+import { relativeAge } from "../../lib/relativeTime";
 import { describeFeature } from "../../lib/featureSignals";
-
-const DOT: Record<GoalVerdict, string> = {
-  verified: "var(--color-accent-green)",
-  partial: "var(--color-amber)",
-  not_wired: "var(--color-red)",
-  unknown: "var(--color-text-4)",
-};
-
-const LAST: Record<GoalVerdict, string> = {
-  verified: "left it reached",
-  partial: "left it partly there",
-  not_wired: "left it not reached",
-  unknown: "check was inconclusive",
-};
-
-function ago(ms: number): string {
-  const s = Math.max(0, Math.floor((Date.now() - ms) / 1000));
-  if (s < 60) return "just now";
-  const m = Math.floor(s / 60);
-  if (m < 60) return `${m}m ago`;
-  const h = Math.floor(m / 60);
-  if (h < 24) return `${h}h ago`;
-  const d = Math.floor(h / 24);
-  if (d < 30) return `${d}d ago`;
-  const mo = Math.floor(d / 30);
-  if (mo < 12) return `${mo}mo ago`;
-  return `${Math.floor(mo / 12)}y ago`;
-}
 
 function joinDot(parts: string[]): string {
   return parts.join(" · ");
@@ -56,14 +30,14 @@ export function FeatureRoles({ runs, className }: { runs: GoalRun[]; className?:
   if (!worth || p.contributors.length === 0) return null;
 
   const facts: string[] = [];
-  if (p.startedAt != null) facts.push(`Started ${ago(p.startedAt)}`);
-  if (p.lastAt != null) facts.push(`last active ${ago(p.lastAt)}`);
+  if (p.startedAt != null) facts.push(`Started ${relativeAge(p.startedAt)}`);
+  if (p.lastAt != null) facts.push(`last active ${relativeAge(p.lastAt)}`);
   facts.push(`${p.sessions} session${p.sessions === 1 ? "" : "s"}`);
   if (p.commits > 0) facts.push(`${p.commits} commit${p.commits === 1 ? "" : "s"}`);
 
   return (
     <section className={className}>
-      <div className="mb-1.5 text-[10px] uppercase tracking-wider text-text-4">
+      <div className="section-label mb-1.5">
         Who worked it
       </div>
       <ul className="flex flex-col gap-0.5">
@@ -72,18 +46,18 @@ export function FeatureRoles({ runs, className }: { runs: GoalRun[]; className?:
             <span
               aria-hidden
               className="h-1.5 w-1.5 shrink-0 rounded-full"
-              style={{ background: DOT[c.lastVerdict] }}
-              title={LAST[c.lastVerdict]}
+              style={{ background: VERDICT[c.lastVerdict].color }}
+              title={`${c.who} ${VERDICT[c.lastVerdict].past}`}
             />
-            <span className="min-w-0 flex-1 truncate text-[11.5px] text-text-2">{c.who}</span>
-            <span className="text-[10px] text-text-4 tabular-nums">
+            <span className="min-w-0 flex-1 truncate text-sm text-text-2">{c.who}</span>
+            <span className="text-2xs text-text-4 tabular-nums">
               {c.checks} check{c.checks === 1 ? "" : "s"}
             </span>
-            <span className="text-[10px] text-text-5">{ago(c.lastAt)}</span>
+            <span className="text-2xs text-text-5">{relativeAge(c.lastAt)}</span>
           </li>
         ))}
       </ul>
-      <div className="mt-2 text-[10.5px] text-text-5">{joinDot(facts)}</div>
+      <div className="mt-2 text-xs text-text-5">{joinDot(facts)}</div>
     </section>
   );
 }

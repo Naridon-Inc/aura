@@ -27,6 +27,7 @@ use serde::{Deserialize, Serialize};
 use super::model::AwarenessEvent;
 use super::{policy, store, verify};
 use crate::live_events;
+use crate::worktree::paths;
 
 /// Cap on the remote cache — same ephemeral-signal bound as the local store.
 const REMOTE_MAX: usize = 500;
@@ -39,12 +40,25 @@ const PULL_EVERY_MS: u64 = 15_000;
 /// Largest batch a single push sends (matches the relay's per-request cap).
 const PUSH_BATCH_MAX: usize = 100;
 
+// Both files sit beside the local event log, on the SHARED plane — anchored at
+// the repository root, not at whatever directory the command happened to run
+// from. The local store was fixed for this; these two were left behind, and the
+// asymmetry is worse than either bug alone: my own emissions were visible from
+// every checkout while my teammates' were filed under the one I ran `aura
+// radar` from. Same repo, two checkouts, two different answers to "who else is
+// in here" — and a run from a subdirectory quietly opened a third.
+//
+// The cursors have their own failure mode. `pull_cursor` and `last_pushed_ts`
+// both start at zero in a directory that has never synced, so every new cwd
+// re-pulled the relay's whole history into a private cache and re-pushed the
+// last hundred local events at it.
+
 fn remote_path() -> PathBuf {
-    PathBuf::from(".aura").join("awareness").join("remote.jsonl")
+    PathBuf::from(paths::shared_aura_path("awareness")).join("remote.jsonl")
 }
 
 fn state_path() -> PathBuf {
-    PathBuf::from(".aura").join("awareness").join("sync_state.json")
+    PathBuf::from(paths::shared_aura_path("awareness")).join("sync_state.json")
 }
 
 /// Durable sync cursors. `ts`-based on the push side (our own clock), relay
@@ -349,6 +363,61 @@ mod tests {
         assert!(store::append(&ev("e1", "claude@here", 10)));
         assert_eq!(push_pending(false).expect("push"), 0);
         assert_eq!(pull_remote(false).expect("pull"), 0);
+    }
+
+    /// Turn the tempdir into something the repo-root walk will stop at, and
+    /// return a subdirectory deep inside it. A checkout is just a directory
+    /// with a `.git` in it — no real git needed to test which directory wins.
+    fn fake_checkout(root: &std::path::Path) -> std::path::PathBuf {
+        fs::create_dir_all(root.join(".git")).expect("git dir");
+        let deep = root.join("crates").join("engine");
+        fs::create_dir_all(&deep).expect("subdir");
+        deep
+    }
+
+    #[test]
+    fn peers_events_land_at_the_repo_root_not_the_directory_you_ran_from() {
+        let _lk = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+        let (_g, d) = enter_tmp();
+        let deep = fake_checkout(d.path());
+
+        std::env::set_current_dir(&deep).expect("cd deep");
+        write_remote(&[ev("peer", "ashiq", 20)]);
+
+        assert!(
+            !deep.join(".aura").exists(),
+            "a subdirectory must not start a plane of its own"
+        );
+
+        // The property the whole plane rests on: one repository, one answer to
+        // "who else is in here". My own emissions were already shared this way;
+        // my teammates' were filed under whichever directory happened to run
+        // the pull, so the same repo gave two different answers.
+        std::env::set_current_dir(d.path()).expect("cd root");
+        let seen = read_remote();
+        assert_eq!(seen.len(), 1);
+        assert_eq!(seen[0].id, "peer");
+    }
+
+    #[test]
+    fn the_sync_cursors_are_the_repos_so_a_new_directory_doesnt_refetch_history() {
+        let _lk = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+        let (_g, d) = enter_tmp();
+        let deep = fake_checkout(d.path());
+
+        save_state(&SyncState {
+            last_pushed_ts: 900,
+            pull_cursor: 42,
+            ..Default::default()
+        });
+
+        // Both cursors default to zero in a directory that has never synced, so
+        // a cwd-local state file meant every new one re-pulled the relay's whole
+        // history and re-pushed a batch of local events back at it.
+        std::env::set_current_dir(&deep).expect("cd deep");
+        let state = load_state();
+        assert_eq!(state.pull_cursor, 42);
+        assert_eq!(state.last_pushed_ts, 900);
     }
 
     #[test]

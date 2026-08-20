@@ -14,6 +14,7 @@ use serde::Serialize;
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::Mutex;
 use tempfile::NamedTempFile;
 
 /// Expected aura CLI version the shell was built against.
@@ -31,6 +32,19 @@ use tempfile::NamedTempFile;
 /// red ("missing").
 pub const EXPECTED_AURA_CLI_VERSION: &str = env!("CARGO_PKG_VERSION");
 
+/// An `aura` that comes FIRST on PATH but is older than this build needs —
+/// so the app steps over it (see `pick_runnable_aura`) while the user's own
+/// terminal still runs it. Two different binaries, two different truths; the
+/// chip has to be able to say both.
+#[derive(Serialize, Clone, Debug)]
+pub struct ShadowedCli {
+    /// Where `which aura` points.
+    pub path: String,
+    /// Its version. Only ever `Some` — we don't report a shadow we
+    /// couldn't read, because "can't read it" isn't evidence it's stale.
+    pub installed: String,
+}
+
 #[derive(Serialize, Clone, Debug)]
 pub struct AuraCliVersionCheck {
     /// Parsed `X.Y.Z` from `aura --version`, or `None` if the binary
@@ -38,21 +52,26 @@ pub struct AuraCliVersionCheck {
     pub installed: Option<String>,
     /// The shell's expected CLI version (constant above).
     pub expected: String,
-    /// Resolved absolute path to the `aura` binary on PATH. `None` when
-    /// `which aura` finds nothing.
+    /// Absolute path to the `aura` the app RUNS — `resolve_runnable_aura`,
+    /// the same resolver every passthrough in the shell goes through.
+    /// `None` when there is no CLI on this machine at all.
     pub path: Option<String>,
     /// Coarse status used by the footer chip:
     ///
     ///   * `"ok"`        — installed.major.minor >= expected.major.minor
     ///                     (same OR newer; a newer CLI is never downgraded)
     ///   * `"outdated"`  — installed exists but is strictly OLDER on major/minor
-    ///   * `"missing"`   — `which aura` failed (no binary on PATH)
+    ///   * `"missing"`   — no `aura` anywhere we look
     ///   * `"unknown"`   — binary found but `--version` output didn't
     ///                     parse (e.g. someone aliased `aura` to a wrapper)
     pub status: String,
     /// Raw first non-empty line from `aura --version`, kept for the
     /// popover so users can sanity-check what we actually saw.
     pub raw: Option<String>,
+    /// Set when a DIFFERENT, older `aura` sits ahead of `path` on PATH.
+    /// `status` can be `"ok"` and this still be `Some` — the app is fine
+    /// and the user's terminal is not.
+    pub shadowing: Option<ShadowedCli>,
 }
 
 /// Spawn `which aura` (or `where.exe aura` on Windows) and return the
@@ -130,65 +149,262 @@ fn major_minor_at_least(installed: &str, expected: &str) -> bool {
     }
 }
 
+/// Run `<bin> --version` and read the version out of it. `None` when the
+/// binary won't execute, or answers with something that has no version in it.
+///
+/// Older builds printed the line on stderr, so both streams are read.
+fn installed_version_of(bin: &str) -> Option<String> {
+    let out = Command::new(bin).arg("--version").output().ok()?;
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    let line = stdout
+        .lines()
+        .chain(stderr.lines())
+        .find(|l| !l.trim().is_empty())?;
+    parse_version_line(line)
+}
+
+/// The first candidate new enough to run, given `(path, version)` pairs in
+/// preference order. A candidate whose version we couldn't read loses to one
+/// we can vouch for — we have no way to tell a deliberate wrapper script from
+/// a binary too broken to answer, and only one of those is safe to run.
+fn first_current<'a>(
+    candidates: &'a [(String, Option<String>)],
+    expected: &str,
+) -> Option<&'a str> {
+    candidates
+        .iter()
+        .find(|(_, v)| {
+            v.as_deref()
+                .is_some_and(|v| major_minor_at_least(v, expected))
+        })
+        .map(|(p, _)| p.as_str())
+}
+
+/// Resolution of `aura`, computed once. Cleared by `forget_resolved_aura`.
+static RESOLVED_AURA: Mutex<Option<String>> = Mutex::new(None);
+
+/// Probe the machine for an `aura` this build can actually talk to.
+///
+/// PATH order is the user's stated preference and we honour it first — but
+/// only when the binary it points at is new enough. On this developer's own
+/// machine `/usr/local/bin/aura` was 0.4.6-alpha, left over from an early
+/// install, shadowing the current CLI in `~/.cargo/bin`; every passthrough in
+/// the app ran the two-year-old binary and reported its complaints verbatim
+/// ("error: unrecognized subcommand 'merge-driver'") as if the feature were
+/// broken.
+///
+/// A NEWER binary than this build expects is never passed over — a developer
+/// running yesterday's app against today's CLI is the normal case here, and
+/// `major_minor_at_least` exists to keep it working.
+fn pick_runnable_aura() -> String {
+    let on_path = resolve_aura_path();
+    let cargo_bin = dirs::home_dir()
+        .map(|h| h.join(".cargo").join("bin").join(bin_name()))
+        .filter(|p| p.is_file())
+        .map(|p| p.to_string_lossy().into_owned());
+    let bundled = bundled_cli_path().map(|p| p.to_string_lossy().into_owned());
+
+    // Usually `which aura` IS ~/.cargo/bin/aura. Dedupe so the common case
+    // costs one `--version` spawn, not two.
+    let mut candidates: Vec<(String, Option<String>)> = Vec::new();
+    for cand in [on_path.clone(), cargo_bin, bundled].into_iter().flatten() {
+        if candidates.iter().any(|(p, _)| *p == cand) {
+            continue;
+        }
+        let version = installed_version_of(&cand);
+        candidates.push((cand, version));
+    }
+
+    if let Some(p) = first_current(&candidates, EXPECTED_AURA_CLI_VERSION) {
+        return p.to_string();
+    }
+    // Nothing we can vouch for. Run what PATH says rather than inventing a
+    // new failure mode — the footer chip is already telling the user the CLI
+    // is stale, and a passthrough that runs and complains beats one that
+    // refuses to start.
+    on_path.unwrap_or_else(|| bin_name().to_string())
+}
+
+/// The `aura` binary the shell should spawn. Cached for the life of the
+/// process: the probe costs two subprocess spawns, and the answer only
+/// changes when someone installs a CLI — which goes through
+/// `forget_resolved_aura`.
+///
+/// `$AURA_BIN` short-circuits everything, uncached and unchecked. It is how a
+/// developer points the app at a specific build, and second-guessing it would
+/// defeat the only escape hatch there is.
+pub(crate) fn resolve_runnable_aura() -> String {
+    if let Some(v) = std::env::var_os("AURA_BIN") {
+        let s = v.to_string_lossy().trim().to_string();
+        if !s.is_empty() {
+            return s;
+        }
+    }
+    if let Some(hit) = RESOLVED_AURA.lock().ok().and_then(|g| g.clone()) {
+        return hit;
+    }
+    // Deliberately not holding the lock across the probe: two threads racing
+    // here both do the same read-only work and write the same answer.
+    let picked = pick_runnable_aura();
+    if let Ok(mut g) = RESOLVED_AURA.lock() {
+        *g = Some(picked.clone());
+    }
+    picked
+}
+
+/// Drop the cached resolution so the next call probes again. Called when the
+/// app installs a CLI, and on every version check — which is what the footer
+/// chip's refresh and the settings "Try again" buttons run, so a user who
+/// fixes their PATH outside the app has a way to make the app notice.
+pub(crate) fn forget_resolved_aura() {
+    if let Ok(mut g) = RESOLVED_AURA.lock() {
+        *g = None;
+    }
+}
+
+/// The helper program the app just ran, and how far behind it is.
+///
+/// Structured rather than pre-worded on purpose: the surface that shows it
+/// (the "Aura off" strip) has to offer the update as a button, and a sentence
+/// can't be clicked. Same three facts the footer chip renders, so the two
+/// surfaces can never disagree about which copy is stale.
+#[derive(Serialize, Clone, Debug, PartialEq)]
+pub struct StaleCli {
+    /// Version the binary reports, e.g. `0.7.2`.
+    pub installed: String,
+    /// Version this build of the app needs.
+    pub expected: String,
+    /// Where that old binary lives, so the user knows which copy to replace.
+    pub path: String,
+}
+
+/// Is `bin` an `aura` older than this build needs? `None` when it's current,
+/// or when we couldn't read a version out of it — "can't read it" is not
+/// evidence of staleness, and a caller must not blame a wrapper script for a
+/// failure it had nothing to do with.
+///
+/// This exists because the raw complaint is useless to the person reading it.
+/// An old `aura` left in `/usr/local/bin` shadows a current one in
+/// `~/.cargo/bin`, so turning Aura on for a project answers `error:
+/// unrecognized subcommand 'enable'` and a Retry button that can never work,
+/// forever — while the footer chip two rows down has already worked out that
+/// the CLI is stale and says so. Same knowledge, one place.
+pub(crate) fn stale_cli(bin: &str) -> Option<StaleCli> {
+    let installed = installed_version_of(bin)?;
+    if major_minor_at_least(&installed, EXPECTED_AURA_CLI_VERSION) {
+        return None;
+    }
+    Some(StaleCli {
+        installed,
+        expected: EXPECTED_AURA_CLI_VERSION.to_string(),
+        path: bin.to_string(),
+    })
+}
+
+/// The `aura` first on PATH, when it is a DIFFERENT binary from `running`
+/// and demonstrably older than this build needs.
+///
+/// A version we can't read is not reported: a wrapper script that answers
+/// `--version` with something unparseable is a legitimate setup, and calling
+/// it stale on no evidence would put an amber chip in the footer of every
+/// machine that has one.
+fn shadowing_cli(running: &str) -> Option<ShadowedCli> {
+    let path = resolve_aura_path()?;
+    if path == running {
+        return None;
+    }
+    let installed = installed_version_of(&path)?;
+    if major_minor_at_least(&installed, EXPECTED_AURA_CLI_VERSION) {
+        return None;
+    }
+    Some(ShadowedCli { path, installed })
+}
+
 /// Tauri command — invoked on shell startup and from the footer chip's
 /// refresh button. Returns synchronously enough to keep the UI snappy
-/// (two short subprocess spawns; ~10ms on a warm cache).
+/// (a handful of short subprocess spawns; ~10ms on a warm cache).
+///
+/// It reports the binary the app RUNS, not the first one on PATH. Those
+/// used to be the same call and stopped being one when `pick_runnable_aura`
+/// started stepping over a stale PATH entry: on this machine the chip read
+/// `aura 0.4.6-alpha → 0.19.35` off `/usr/local/bin/aura` while every
+/// passthrough in the app was happily running `~/.cargo/bin/aura` at
+/// 0.19.34. The chip was describing a binary the app had already decided
+/// not to use — and offering to "update" it as if that were what was broken.
+/// The stale PATH entry is still worth saying out loud, because the user's
+/// own terminal does run it; it just isn't the app's CLI. Hence `shadowing`.
 #[tauri::command]
 pub async fn aura_cli_version_check() -> Result<AuraCliVersionCheck, String> {
-    let expected = EXPECTED_AURA_CLI_VERSION.to_string();
-    let Some(path) = resolve_aura_path() else {
-        return Ok(AuraCliVersionCheck {
-            installed: None,
-            expected,
-            path: None,
-            status: "missing".into(),
-            raw: None,
-        });
-    };
-
-    let out = match Command::new(&path).arg("--version").output() {
-        Ok(o) => o,
-        Err(e) => {
-            // Binary was on PATH but we couldn't exec it. Surface as
-            // "unknown" so the chip nudges the user without screaming.
+    // This is the app's re-scan point: startup, the footer chip's refresh, and
+    // every settings row that offers "Try again". Whatever the user changed on
+    // disk since we last looked, look again now.
+    forget_resolved_aura();
+    crate::blocking::run(move || {
+        let expected = EXPECTED_AURA_CLI_VERSION.to_string();
+        let path = resolve_runnable_aura();
+        // `pick_runnable_aura` degrades to the bare binary name — and only
+        // that — when it finds nothing on disk and nothing on PATH. That is
+        // the "there is no CLI here" case.
+        if !Path::new(&path).is_absolute() {
             return Ok(AuraCliVersionCheck {
                 installed: None,
                 expected,
-                path: Some(path),
-                status: "unknown".into(),
-                raw: Some(format!("spawn failed: {e}")),
+                path: None,
+                status: "missing".into(),
+                raw: None,
+                shadowing: None,
             });
         }
-    };
+        let shadowing = shadowing_cli(&path);
 
-    // `aura --version` writes to stdout; some older builds wrote to
-    // stderr. Prefer stdout, fall back to stderr.
-    let stdout = String::from_utf8_lossy(&out.stdout);
-    let stderr = String::from_utf8_lossy(&out.stderr);
-    let raw_line = stdout
-        .lines()
-        .chain(stderr.lines())
-        .find(|l| !l.trim().is_empty())
-        .map(|l| l.trim().to_string());
+        let out = match Command::new(&path).arg("--version").output() {
+            Ok(o) => o,
+            Err(e) => {
+                // Binary resolved but we couldn't exec it. Surface as
+                // "unknown" so the chip nudges the user without screaming.
+                return Ok(AuraCliVersionCheck {
+                    installed: None,
+                    expected,
+                    path: Some(path),
+                    status: "unknown".into(),
+                    raw: Some(format!("spawn failed: {e}")),
+                    shadowing,
+                });
+            }
+        };
 
-    let installed = raw_line.as_deref().and_then(parse_version_line);
-    let status = match &installed {
-        // Same-or-newer than what this build bundles → green. A newer
-        // installed CLI is fine (and must never be "updated" by
-        // downgrading onto the older bundled binary — that pins the
-        // install pill forever). Only a strictly OLDER CLI is "outdated".
-        Some(v) if major_minor_at_least(v, EXPECTED_AURA_CLI_VERSION) => "ok",
-        Some(_) => "outdated",
-        None => "unknown",
-    };
+        // `aura --version` writes to stdout; some older builds wrote to
+        // stderr. Prefer stdout, fall back to stderr.
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        let raw_line = stdout
+            .lines()
+            .chain(stderr.lines())
+            .find(|l| !l.trim().is_empty())
+            .map(|l| l.trim().to_string());
 
-    Ok(AuraCliVersionCheck {
-        installed,
-        expected,
-        path: Some(path),
-        status: status.to_string(),
-        raw: raw_line,
+        let installed = raw_line.as_deref().and_then(parse_version_line);
+        let status = match &installed {
+            // Same-or-newer than what this build bundles → green. A newer
+            // installed CLI is fine (and must never be "updated" by
+            // downgrading onto the older bundled binary — that pins the
+            // install pill forever). Only a strictly OLDER CLI is "outdated".
+            Some(v) if major_minor_at_least(v, EXPECTED_AURA_CLI_VERSION) => "ok",
+            Some(_) => "outdated",
+            None => "unknown",
+        };
+
+        Ok(AuraCliVersionCheck {
+            installed,
+            expected,
+            path: Some(path),
+            status: status.to_string(),
+            raw: raw_line,
+            shadowing,
+        })
     })
+    .await
 }
 
 /// Platform binary name for the CLI.
@@ -486,37 +702,44 @@ pub async fn aura_cli_install_bundled(
     interactive: Option<bool>,
 ) -> Result<AuraCliVersionCheck, String> {
     let interactive = interactive.unwrap_or(false);
-    // The "no bundled" / "dev build" wording is a sentinel: the launch-time
-    // toast (CliUpdateToast.isNoBundleError) treats it as a silent no-op so a
-    // dev build never pops a scary failure. The manual chip still shows the
-    // actionable hint.
-    let src = bundled_cli_path().ok_or_else(|| {
-        if cfg!(debug_assertions) {
-            "no bundled aura CLI to install (dev build) — run `bun run app:build-cli` first"
-                .to_string()
+    crate::blocking::run(move || {
+        // The "no bundled" / "dev build" wording is a sentinel: the launch-time
+        // toast (CliUpdateToast.isNoBundleError) treats it as a silent no-op so a
+        // dev build never pops a scary failure. The manual chip still shows the
+        // actionable hint.
+        let src = bundled_cli_path().ok_or_else(|| {
+            if cfg!(debug_assertions) {
+                "no bundled aura CLI to install (dev build) — run `bun run app:build-cli` first"
+                    .to_string()
+            } else {
+                "no bundled aura CLI found alongside the app".to_string()
+            }
+        })?;
+        let target = install_target_path()?;
+        let parent = target
+            .parent()
+            .ok_or_else(|| format!("install target {} has no parent", target.display()))?;
+
+        // Best-effort create for the ~/.local/bin first-install case; a failure
+        // here just means the writability probe below says "no".
+        let _ = std::fs::create_dir_all(parent);
+
+        if dir_writable(parent) {
+            install_binary_atomically(&src, &target)?;
+        } else if interactive {
+            install_binary_escalated(&src, &target)?;
         } else {
-            "no bundled aura CLI found alongside the app".to_string()
+            return Err(format!(
+                "needs authorization: {} is not writable by your user",
+                parent.display()
+            ));
         }
-    })?;
-    let target = install_target_path()?;
-    let parent = target
-        .parent()
-        .ok_or_else(|| format!("install target {} has no parent", target.display()))?;
-
-    // Best-effort create for the ~/.local/bin first-install case; a failure
-    // here just means the writability probe below says "no".
-    let _ = std::fs::create_dir_all(parent);
-
-    if dir_writable(parent) {
-        install_binary_atomically(&src, &target)?;
-    } else if interactive {
-        install_binary_escalated(&src, &target)?;
-    } else {
-        return Err(format!(
-            "needs authorization: {} is not writable by your user",
-            parent.display()
-        ));
-    }
+        Ok(())
+    })
+    .await?;
+    // The binary under the resolved path just changed. Anything still holding
+    // the old answer would keep spawning the version we came here to replace.
+    forget_resolved_aura();
     aura_cli_version_check().await
 }
 
@@ -543,7 +766,7 @@ pub async fn aura_doctor_json(repo_root: String) -> Result<serde_json::Value, St
         return Err(format!("repo root does not exist: {}", repo_root));
     }
 
-    let out = tokio::process::Command::new("aura")
+    let out = tokio::process::Command::new(crate::agent_event_listener::resolve_aura_bin())
         .args(["doctor", "--json"])
         .current_dir(&cwd)
         .output()
@@ -620,5 +843,109 @@ mod tests {
         // only thing that should read as "outdated".
         assert!(!major_minor_at_least("0.15.9", "0.16.0"));
         assert!(!major_minor_at_least("0.14.0", "0.16.3"));
+    }
+
+    /// Shorthand for a candidate list: `(path, version-we-read)`.
+    fn cands(pairs: &[(&str, Option<&str>)]) -> Vec<(String, Option<String>)> {
+        pairs
+            .iter()
+            .map(|(p, v)| (p.to_string(), v.map(|s| s.to_string())))
+            .collect()
+    }
+
+    #[test]
+    fn a_stale_binary_earlier_in_path_loses_to_a_current_one() {
+        // The exact machine this was found on: an early-install 0.4.6-alpha in
+        // /usr/local/bin shadowing the current CLI in ~/.cargo/bin. Before
+        // this, every passthrough in the app ran the alpha.
+        let c = cands(&[
+            ("/usr/local/bin/aura", Some("0.4.6-alpha")),
+            ("/Users/x/.cargo/bin/aura", Some("0.19.34")),
+        ]);
+        assert_eq!(
+            first_current(&c, "0.19.34"),
+            Some("/Users/x/.cargo/bin/aura")
+        );
+    }
+
+    #[test]
+    fn path_wins_when_it_is_current() {
+        // PATH order is the user's stated preference. We only override it to
+        // skip a binary too old to run, never to prefer our own copy.
+        let c = cands(&[
+            ("/usr/local/bin/aura", Some("0.19.34")),
+            ("/Users/x/.cargo/bin/aura", Some("0.19.34")),
+        ]);
+        assert_eq!(first_current(&c, "0.19.34"), Some("/usr/local/bin/aura"));
+    }
+
+    #[test]
+    fn a_newer_cli_than_this_build_is_never_passed_over() {
+        // Yesterday's app against today's CLI is the normal developer state
+        // here. Skipping it would silently downgrade them to the bundled one.
+        let c = cands(&[
+            ("/usr/local/bin/aura", Some("0.21.0")),
+            ("/Applications/Aura.app/Contents/MacOS/aura", Some("0.19.34")),
+        ]);
+        assert_eq!(first_current(&c, "0.19.34"), Some("/usr/local/bin/aura"));
+    }
+
+    #[test]
+    fn a_binary_we_cannot_read_a_version_from_loses_to_one_we_can() {
+        let c = cands(&[
+            ("/usr/local/bin/aura", None),
+            ("/Users/x/.cargo/bin/aura", Some("0.19.34")),
+        ]);
+        assert_eq!(
+            first_current(&c, "0.19.34"),
+            Some("/Users/x/.cargo/bin/aura")
+        );
+    }
+
+    #[test]
+    fn nothing_current_means_no_pick_and_the_caller_falls_back() {
+        // Every candidate stale → `None`, and `pick_runnable_aura` then keeps
+        // the old behaviour (run what PATH says) rather than refusing to
+        // start. A passthrough that runs and complains beats one that can't.
+        let c = cands(&[
+            ("/usr/local/bin/aura", Some("0.4.6-alpha")),
+            ("/Users/x/.cargo/bin/aura", None),
+        ]);
+        assert_eq!(first_current(&c, "0.19.34"), None);
+    }
+
+    #[test]
+    fn an_empty_machine_picks_nothing() {
+        assert_eq!(first_current(&[], "0.19.34"), None);
+    }
+
+    #[test]
+    fn a_binary_that_is_not_there_is_not_called_stale() {
+        // "Couldn't read a version" is not evidence of an old build, and
+        // blaming one for a failure it had nothing to do with sends the reader
+        // off to update something that was never the problem.
+        assert_eq!(stale_cli("/nonexistent/definitely/not/aura"), None);
+    }
+
+    /// `forget_resolved_aura` is the only way a running app can notice a CLI
+    /// the user installed after launch. `aura_ensure_tracked`'s retry path
+    /// depends on it: without a re-probe, Try again re-runs the binary the
+    /// process settled on at startup, forever.
+    #[test]
+    fn forgetting_the_resolution_makes_the_next_call_probe_again() {
+        if let Ok(mut g) = RESOLVED_AURA.lock() {
+            *g = Some("/tmp/pretend-old-aura".into());
+        }
+        // The cache is consulted, so a stale entry really does decide which
+        // binary every passthrough spawns. ($AURA_BIN short-circuits ahead of
+        // it and would make this say nothing, so we only assert without one.)
+        if std::env::var_os("AURA_BIN").is_none() {
+            assert_eq!(resolve_runnable_aura(), "/tmp/pretend-old-aura");
+        }
+        forget_resolved_aura();
+        assert!(
+            RESOLVED_AURA.lock().map(|g| g.is_none()).unwrap_or(false),
+            "the cached answer must be gone, or a retry can only ever repeat itself"
+        );
     }
 }

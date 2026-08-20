@@ -25,7 +25,7 @@ import {
   RefreshCw,
   ShieldCheck,
 } from "lucide-react";
-import { AsciiSpinner } from "../ui/ascii-spinner";
+import { EmptyState, ErrorState, LoadingState } from "../ui/state";
 
 import {
   metaPlaneLog,
@@ -33,6 +33,7 @@ import {
   type MetaLogEntry,
   type MetaVerifyReport,
 } from "../../lib/metaPlane";
+import { verifyBanner, type VerifyTone } from "../../lib/metaVerifyBanner";
 import { cn } from "../../lib/utils";
 import { Button } from "../ui/button";
 
@@ -84,10 +85,10 @@ export function MeaningPlanePanel({ repoRoot }: Props) {
     <div className="flex h-full min-h-0 flex-col bg-bg-0">
       <header className="flex h-12 flex-shrink-0 items-center gap-3 border-b border-line-soft px-4">
         <div className="min-w-0">
-          <div className="text-[13px] font-semibold leading-tight text-text-1">
+          <div className="text-base font-semibold leading-tight text-text-1">
             Why &amp; proof
           </div>
-          <div className="text-[10.5px] leading-tight text-text-3">
+          <div className="text-xs leading-tight text-text-3">
             The reason behind each change, checked on this copy
           </div>
         </div>
@@ -107,13 +108,23 @@ export function MeaningPlanePanel({ repoRoot }: Props) {
       </header>
 
       <div className="min-h-0 flex-1 overflow-y-auto">
-        {state === "loading" && <LoadingState />}
-        {state === "error" && <ErrorState message={error} onRetry={() => load()} />}
+        {state === "loading" && <LoadingState label="Reading the record…" size="md" />}
+        {state === "error" && (
+          <ErrorState
+            title="Couldn’t read the record"
+            message={error}
+            onRetry={() => void load()}
+          />
+        )}
         {state === "ready" && (
           <>
             {report && <VerifyBanner report={report} />}
             {entries.length === 0 ? (
-              <EmptyState />
+              <EmptyState
+                icon={ShieldCheck}
+                title="Nothing recorded yet"
+                body="This is where the reason behind each change is kept, so anyone can see why it was made, not just what moved. Make a change and the first entry appears."
+              />
             ) : (
               <ul className="flex flex-col gap-1.5 p-3">
                 {entries.map((entry) => (
@@ -135,52 +146,50 @@ export function MeaningPlanePanel({ repoRoot }: Props) {
 
 // ── Top banner ─────────────────────────────────────────────────────────────
 
+// Green is earned by a verdict, never by a file being present — the fold in
+// `metaVerifyBanner` is the one place that decides which of the three states
+// this report has earned, so the wording and the number can't drift apart.
 function VerifyBanner({ report }: { report: MetaVerifyReport }) {
-  // Green only when something is actually proven and nothing needs a look.
-  if (report.ok && report.proven > 0) {
-    return (
-      <BannerShell tone="ok">
-        <ShieldCheck size={15} className="shrink-0 text-accent-green" />
-        <span className="text-[12px] font-medium text-text-1">
-          Verified on this clone
-        </span>
-        <span className="text-[11.5px] text-text-3">
-          {report.proven} of {report.commits} change
-          {report.commits === 1 ? "" : "s"} proven
-        </span>
-      </BannerShell>
-    );
-  }
+  const banner = verifyBanner(report);
+  const Icon =
+    banner.tone === "ok"
+      ? ShieldCheck
+      : banner.tone === "warn"
+        ? AlertTriangle
+        : CheckCircle2;
 
-  // Amber when the engine flagged things that need a look.
-  if (!report.ok) {
-    const n = report.issues.length;
-    return (
-      <BannerShell tone="warn">
-        <AlertTriangle size={15} className="shrink-0 text-amber" />
-        <span className="text-[12px] font-medium text-text-1">
-          {n} thing{n === 1 ? "" : "s"} need a look
+  return (
+    <BannerShell tone={banner.tone}>
+      <div className="flex min-w-0 items-center gap-2">
+        <Icon
+          size={15}
+          className={cn(
+            "shrink-0",
+            banner.tone === "ok" && "text-accent-green",
+            banner.tone === "warn" && "text-amber",
+            banner.tone === "calm" && "text-text-3",
+          )}
+        />
+        <span
+          className={cn(
+            "shrink-0 text-sm font-medium",
+            banner.tone === "calm" ? "text-text-2" : "text-text-1",
+          )}
+        >
+          {banner.title}
         </span>
-        {report.issues[0] && (
-          <span className="truncate text-[11.5px] text-text-3" title={report.issues.join("\n")}>
-            {report.issues[0]}
+        {banner.detail && (
+          <span
+            className="truncate text-sm text-text-3"
+            title={report.issues.length > 0 ? report.issues.join("\n") : undefined}
+          >
+            {banner.detail}
           </span>
         )}
-      </BannerShell>
-    );
-  }
-
-  // Calm neutral — nothing's wrong, but there's nothing proven yet either.
-  return (
-    <BannerShell tone="calm">
-      <CheckCircle2 size={15} className="shrink-0 text-text-3" />
-      <span className="text-[12px] font-medium text-text-2">
-        Nothing needs a look
-      </span>
-      <span className="text-[11.5px] text-text-3">
-        {report.intent_covered} of {report.commits} change
-        {report.commits === 1 ? "" : "s"} carry a reason
-      </span>
+      </div>
+      {banner.scope && (
+        <span className="mt-0.5 text-xs text-text-4">{banner.scope}</span>
+      )}
     </BannerShell>
   );
 }
@@ -189,13 +198,13 @@ function BannerShell({
   tone,
   children,
 }: {
-  tone: "ok" | "warn" | "calm";
+  tone: VerifyTone;
   children: React.ReactNode;
 }) {
   return (
     <div
       className={cn(
-        "flex items-center gap-2 border-b border-line-soft px-4 py-2.5",
+        "flex flex-col border-b border-line-soft px-4 py-2.5",
         tone === "ok" && "bg-[color-mix(in_srgb,var(--color-accent-green)_8%,transparent)]",
         tone === "warn" && "bg-[color-mix(in_srgb,var(--color-amber)_8%,transparent)]",
         tone === "calm" && "bg-bg-1/40",
@@ -228,13 +237,13 @@ function CommitRow({
         onClick={expandable ? onToggle : undefined}
         className={cn(
           "flex w-full items-center gap-2.5 px-3 py-2 text-left",
-          expandable && "hover:bg-bg-2/50",
+          expandable && "hover:bg-state-hover",
         )}
       >
-        <code className="shrink-0 font-mono text-[10.5px] text-text-4">
+        <code className="shrink-0 font-mono text-xs text-text-4">
           {entry.short}
         </code>
-        <span className="min-w-0 flex-1 truncate text-[12.5px] text-text-1" title={entry.summary}>
+        <span className="min-w-0 flex-1 truncate text-base text-text-1" title={entry.summary}>
           {entry.summary}
         </span>
         <ProofPill proof={entry.proof} />
@@ -250,13 +259,13 @@ function CommitRow({
         <div className="flex flex-col gap-2.5 border-t border-line-soft px-3 py-2.5">
           {hasWhy && (
             <div className="flex flex-col gap-1.5">
-              <div className="text-[9.5px] font-semibold uppercase tracking-[0.07em] text-text-4">
+              <div className="section-label">
                 Why
               </div>
               {entry.rows.map((row, i) => (
                 <div key={`${row.ts}-${i}`} className="flex flex-col">
-                  <p className="text-[11.5px] leading-relaxed text-text-2">{row.intent}</p>
-                  <span className="text-[10.5px] text-text-4">{row.agent_id}</span>
+                  <p className="text-sm leading-relaxed text-text-2">{row.intent}</p>
+                  <span className="text-xs text-text-4">{row.agent_id}</span>
                 </div>
               ))}
             </div>
@@ -264,15 +273,15 @@ function CommitRow({
 
           {entry.proof && entry.proof.goals.length > 0 && (
             <div className="flex flex-col gap-1.5">
-              <div className="text-[9.5px] font-semibold uppercase tracking-[0.07em] text-text-4">
+              <div className="section-label">
                 What was checked
               </div>
               {entry.proof.goals.map((goal) => (
                 <div key={goal.id} className="flex items-start gap-2">
                   <GoalDot verdict={goal.verdict} />
                   <div className="min-w-0 flex-1">
-                    <p className="text-[11.5px] leading-relaxed text-text-2">{goal.text}</p>
-                    <span className="text-[10.5px] text-text-4">
+                    <p className="text-sm leading-relaxed text-text-2">{goal.text}</p>
+                    <span className="text-xs text-text-4">
                       {goalLabel(goal.verdict)} · {goal.ok}/{goal.total}
                     </span>
                   </div>
@@ -289,7 +298,7 @@ function CommitRow({
 function ProofPill({ proof }: { proof?: MetaLogEntry["proof"] }) {
   if (!proof) {
     return (
-      <span className="shrink-0 rounded-full px-2 py-0.5 text-[10px] font-medium text-text-4">
+      <span className="shrink-0 rounded-full px-2 py-0.5 text-2xs font-medium text-text-4">
         Not checked
       </span>
     );
@@ -297,13 +306,13 @@ function ProofPill({ proof }: { proof?: MetaLogEntry["proof"] }) {
   const proven = proof.verdict === "verified" || (proof.total > 0 && proof.ok === proof.total);
   if (proven) {
     return (
-      <span className="shrink-0 rounded-full bg-[color-mix(in_srgb,var(--color-accent-green)_14%,transparent)] px-2 py-0.5 text-[10px] font-medium text-accent-green">
+      <span className="shrink-0 rounded-full bg-[color-mix(in_srgb,var(--color-accent-green)_14%,transparent)] px-2 py-0.5 text-2xs font-medium text-accent-green">
         Proven · {proof.ok}/{proof.total}
       </span>
     );
   }
   return (
-    <span className="shrink-0 rounded-full bg-[color-mix(in_srgb,var(--color-amber)_14%,transparent)] px-2 py-0.5 text-[10px] font-medium text-amber">
+    <span className="shrink-0 rounded-full bg-[color-mix(in_srgb,var(--color-amber)_14%,transparent)] px-2 py-0.5 text-2xs font-medium text-amber">
       Almost · {proof.ok}/{proof.total}
     </span>
   );
@@ -339,38 +348,3 @@ function goalLabel(verdict: string): string {
 
 // ── Loading / empty / error ─────────────────────────────────────────────────
 
-function LoadingState() {
-  return (
-    <div className="flex flex-col items-center justify-center gap-2 px-6 py-16 text-center">
-      <AsciiSpinner className="text-base" />
-      <p className="text-[12px] text-text-3">Reading the record…</p>
-    </div>
-  );
-}
-
-function EmptyState() {
-  return (
-    <div className="flex flex-col items-center justify-center gap-2 px-6 py-16 text-center">
-      <ShieldCheck size={20} className="text-text-4" />
-      <p className="text-[12.5px] font-medium text-text-2">Nothing recorded yet</p>
-      <p className="max-w-[280px] text-[11.5px] leading-relaxed text-text-4">
-        Run <code className="font-mono text-text-3">aura meta push</code> to capture why each
-        change was made.
-      </p>
-    </div>
-  );
-}
-
-function ErrorState({ message, onRetry }: { message: string; onRetry: () => void }) {
-  return (
-    <div className="flex flex-col items-center justify-center gap-2.5 px-6 py-16 text-center">
-      <AlertTriangle size={18} className="text-amber" />
-      <p className="text-[12.5px] font-medium text-text-2">Couldn’t read the record</p>
-      <p className="max-w-[300px] text-[11.5px] leading-relaxed text-text-4">{message}</p>
-      <Button variant="subtle" size="xs" onClick={onRetry} className="mt-1 gap-1.5 text-text-2">
-        <RefreshCw size={12} />
-        Try again
-      </Button>
-    </div>
-  );
-}

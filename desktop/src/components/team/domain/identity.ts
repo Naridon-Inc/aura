@@ -103,6 +103,13 @@ export function buildSelfKeys(opts: {
    *  without anyone signing into Aura. Optional — absent when `gh` isn't
    *  set up, in which case the email-prefix handle carries identity. */
   accountLogin?: string | null;
+  /** The signed-in Aura cloud account's username. When an Aura account is
+   *  signed in, that account IS the identity — a deliberate, cross-repo,
+   *  cross-machine claim that doesn't depend on `gh` being set up or on the
+   *  git email — so it counts as "me" (strong), the same standing as the
+   *  GitHub anchor. Absent when signed out, where identity falls back to the
+   *  git/roster layers below. */
+  auraAccount?: string | null;
 }): SelfKeys {
   const strong = new Set<string>();
   const weak = new Set<string>();
@@ -111,8 +118,12 @@ export function buildSelfKeys(opts: {
   // Signed out, the handle degrades to the email local-part — which a
   // colleague on the same git email would also get — so it must be treated as
   // weak (device-confirmed) instead.
-  const hasAnchor = !!norm(opts.accountLogin);
+  // A signed-in Aura account is as deliberate an anchor as the GitHub login:
+  // the user told the app who they are. It makes the handle a strong claim
+  // even when `gh` isn't set up.
+  const hasAnchor = !!norm(opts.accountLogin) || !!norm(opts.auraAccount);
   addKey(strong, opts.accountLogin);
+  addKey(strong, opts.auraAccount);
   addKey(strong, opts.auraAlias);
   const handleTarget = hasAnchor ? strong : weak;
   addKey(handleTarget, opts.effectiveHandle);

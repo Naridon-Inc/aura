@@ -44,16 +44,24 @@ export function HooksPane({
 
   return (
     <PaneScroll>
+      {/* "every change … always … undo it" was three absolutes over a git
+          hook. `aura enable` installs pre-commit, post-commit and pre-push
+          (aura-cli/src/hook.rs:98,127,164) — it fires when you commit and at
+          no other time. Work sitting uncommitted on your disk is outside it,
+          which is the whole span of time a person is most worried about. The
+          header comment at the top of this file has always said "the moment it
+          commits"; the words on screen dropped the qualifier, which is how the
+          feature ended up promising more than the mechanism can do. */}
       <PaneIntro
         title="Safety net"
-        blurb="Keep a recoverable record of every change your agents make, so you can always see what happened and undo it. We recommend leaving this on."
+        blurb="When you commit, Aura records what your agents changed and why, and keeps a way back to it. We recommend leaving this on."
       />
 
       {loading && !capture ? (
         <PaneSpinner label="Checking safety status…" />
       ) : !capture?.is_git ? (
         <EmptyHint
-          icon={<ShieldCheck size={22} />}
+          icon={ShieldCheck}
           title="Open a project first"
           body="The safety net attaches to a project's history. Open a folder that's under version control and the switch turns on here."
         />
@@ -74,17 +82,17 @@ export function HooksPane({
               <ShieldCheck size={18} />
             </div>
             <div className="min-w-0 flex-1">
-              <div className="text-[13px] font-medium text-text-1">
+              <div className="text-base font-medium text-text-1">
                 {capture.enabled ? "Safety net is on" : "Safety net is off"}
               </div>
-              <div className="text-[11.5px] text-text-4">
+              <div className="text-sm text-text-4">
                 {capture.enabled
-                  ? "Every change is recorded with its reason — nothing is lost."
-                  : "Changes won't be recorded. Turn this on to stay protected."}
+                  ? "Every commit is recorded with its reason, and can be undone."
+                  : "Commits aren't being recorded. Turn this on and Aura starts at your next one."}
               </div>
             </div>
             {busy ? (
-              <AsciiSpinner className="shrink-0 text-[14px]" />
+              <AsciiSpinner className="shrink-0 text-md" />
             ) : (
               <Switch
                 checked={capture.enabled}
@@ -96,7 +104,7 @@ export function HooksPane({
             )}
           </div>
           {error ? (
-            <div className="mt-3 rounded-md bg-bg-2 px-3 py-2 text-[11.5px] text-red">
+            <div className="mt-3 rounded-md bg-bg-2 px-3 py-2 text-sm text-red">
               {error}
             </div>
           ) : null}

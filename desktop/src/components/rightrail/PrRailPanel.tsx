@@ -38,6 +38,7 @@ import { useEditorStore } from "../../lib/editorStore";
 import { GhErrorNotice } from "../github/GhErrorNotice";
 import { Churn } from "../diff/Churn";
 import { AsciiSpinner } from "../ui/ascii-spinner";
+import { sentenceCase } from "../../lib/textCase";
 
 // "all" is the implicit default chip; the rest mirror the Inbox buckets.
 type Filter = "all" | Bucket;
@@ -141,8 +142,8 @@ export function PrRailPanel({
               />
             </svg>
           )}
-          <span className="text-[12px] font-semibold">Pull requests</span>
-          <span className="text-text-4 text-[11px] tabular-nums">
+          <span className="text-sm font-semibold">Pull requests</span>
+          <span className="text-text-4 text-xs tabular-nums">
             {openPrs.length}
           </span>
         </button>
@@ -151,7 +152,7 @@ export function PrRailPanel({
           onClick={() => void refresh(true)}
           disabled={loading}
           title="Refresh"
-          className="ml-auto w-6 h-6 rounded-md text-text-4 hover:text-text-1 hover:bg-bg-2 flex items-center justify-center disabled:opacity-50"
+          className="ml-auto w-6 h-6 rounded-md text-text-4 hover:text-text-1 hover:bg-state-hover flex items-center justify-center disabled:opacity-50"
         >
           <svg width="13" height="13" viewBox="0 0 16 16" fill="none">
             <path
@@ -170,8 +171,13 @@ export function PrRailPanel({
           {/* Filter chips — the bucket "views" */}
           {activeChips.length > 0 && (
             <div className="flex flex-wrap gap-1 px-2.5 py-2 border-b border-line-soft/60 shrink-0">
+              {/* "Open", not "All". It counts open PRs — always did — but
+                  under the name "All" it read as the parent of the chips
+                  beside it, so a row of buckets summing past it looked like
+                  arithmetic the app couldn't do. These are seven named
+                  views over one list, and the first one is the open ones. */}
               <Chip
-                label="All"
+                label="Open"
                 count={openPrs.length}
                 dot={null}
                 active={filter === "all"}
@@ -195,7 +201,7 @@ export function PrRailPanel({
             {loading && prs.length === 0 ? (
               <Hint>
                 <span className="inline-flex items-center gap-1.5">
-                  <AsciiSpinner className="text-[10px]" />
+                  <AsciiSpinner className="text-2xs" />
                   Looking for pull requests…
                 </span>
               </Hint>
@@ -243,10 +249,10 @@ function Chip({
     <button
       type="button"
       onClick={onClick}
-      className={`flex items-center gap-1.5 px-2 py-1 rounded-md text-[11px] transition-colors ${
+      className={`flex items-center gap-1.5 px-2 py-1 rounded-md text-xs transition-colors ${
         active
           ? "bg-bg-2 text-text-1"
-          : "text-text-3 hover:bg-bg-2 hover:text-text-1"
+          : "text-text-3 hover:bg-state-hover hover:text-text-1"
       }`}
     >
       {dot && <span className={`w-1.5 h-1.5 rounded-full ${dot}`} />}
@@ -284,18 +290,18 @@ function Row({
     <button
       type="button"
       onClick={onSelect}
-      className={`w-full text-left px-3 py-2 border-b border-line-soft/40 hover:bg-bg-2 transition-colors ${
-        selected ? "bg-bg-2" : ""
+      className={`w-full text-left px-3 py-2 border-b border-line-soft/40 hover:bg-state-hover transition-colors ${
+        selected ? "bg-state-selected" : ""
       }`}
     >
       <div className="flex items-center gap-2 min-w-0">
         <span className={`w-2 h-2 rounded-full shrink-0 ${risk}`} />
-        <span className="text-[11px] text-text-4 tabular-nums shrink-0">
+        <span className="text-xs text-text-4 tabular-nums shrink-0">
           #{row.number}
         </span>
-        <span className="text-[12px] text-text-1 truncate">{row.title}</span>
+        <span className="text-sm text-text-1 truncate">{row.title}</span>
       </div>
-      <div className="flex items-center gap-1.5 mt-0.5 pl-4 text-[11px] text-text-4 min-w-0">
+      <div className="flex items-center gap-1.5 mt-0.5 pl-4 text-xs text-text-4 min-w-0">
         <span className="truncate">{row.author}</span>
         <span className="font-mono truncate text-text-4/80">
           {row.head_ref}
@@ -326,23 +332,22 @@ function Row({
         <Churn
           additions={row.additions}
           deletions={row.deletions}
-          className="ml-auto text-[11px]"
+          className="ml-auto text-xs"
         />
       </div>
     </button>
   );
 }
 
+/** `CHANGES_REQUESTED` → "Changes requested". Sentence case, like every other
+ *  status word in the app — see lib/textCase. */
 function humanDecision(d: string): string {
-  return d
-    .toLowerCase()
-    .replace(/_/g, " ")
-    .replace(/\b\w/g, (c) => c.toUpperCase());
+  return sentenceCase(d.toLowerCase().replace(/_/g, " "));
 }
 
 function Hint({ children }: { children: React.ReactNode }) {
   return (
-    <div className="text-text-4 text-[12px] px-3 py-3 leading-relaxed">
+    <div className="text-text-4 text-sm px-3 py-3 leading-relaxed">
       {children}
     </div>
   );

@@ -87,7 +87,7 @@ export function RunScriptButton({ repoRoot }: Props) {
         type="button"
         onClick={openScriptSettings}
         title="Set a run or setup script for this project"
-        className="inline-flex items-center gap-1 h-5 px-1.5 rounded text-text-4 hover:text-text-2 hover:bg-bg-2 text-[10.5px] font-medium transition-colors"
+        className="inline-flex items-center gap-1 h-5 px-1.5 rounded text-text-4 hover:text-text-2 hover:bg-state-hover text-xs font-medium transition-colors"
       >
         <Plus size={11} strokeWidth={2} aria-hidden />
         Run script
@@ -103,7 +103,7 @@ export function RunScriptButton({ repoRoot }: Props) {
           type="button"
           onClick={() => launch(script.command, script.name)}
           title={`${script.name}: ${script.command}`}
-          className="inline-flex items-center gap-1 h-5 px-1.5 rounded bg-bg-2 hover:bg-bg-3 text-text-2 hover:text-text-1 text-[10.5px] font-medium transition-colors"
+          className="inline-flex items-center gap-1 h-5 px-1.5 rounded bg-bg-2 hover:bg-bg-3 text-text-2 hover:text-text-1 text-xs font-medium transition-colors"
         >
           <Play size={10} strokeWidth={2.25} aria-hidden />
           {script.name}
@@ -114,7 +114,7 @@ export function RunScriptButton({ repoRoot }: Props) {
           type="button"
           onClick={() => launch(run, "Run")}
           title={`Run: ${run}`}
-          className="inline-flex items-center gap-1 h-5 px-1.5 rounded bg-bg-2 hover:bg-bg-3 text-[color:var(--color-accent)] text-[10.5px] font-medium transition-colors"
+          className="inline-flex items-center gap-1 h-5 px-1.5 rounded bg-bg-2 hover:bg-bg-3 text-[color:var(--color-accent)] text-xs font-medium transition-colors"
         >
           <Play size={10} strokeWidth={2.25} aria-hidden />
           Run
@@ -125,7 +125,7 @@ export function RunScriptButton({ repoRoot }: Props) {
           type="button"
           onClick={() => launch(setup, "Setup")}
           title={`Setup: ${setup}`}
-          className="inline-flex items-center gap-1 h-5 px-1.5 rounded bg-bg-2 text-text-2 hover:bg-bg-3 hover:text-text-1 text-[10.5px] font-medium transition-colors"
+          className="inline-flex items-center gap-1 h-5 px-1.5 rounded bg-bg-2 text-text-2 hover:bg-bg-3 hover:text-text-1 text-xs font-medium transition-colors"
         >
           <Wrench size={10} strokeWidth={2} aria-hidden />
           Setup

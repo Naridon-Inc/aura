@@ -19,7 +19,6 @@ import { Button } from "../../ui/button";
 import { AgentIcon } from "../../agent/AgentIcon";
 import { agentDisplayLabel, canonicalAgentId } from "../../../lib/agentIdentity";
 import {
-  basename,
   editLines,
   fmtClock,
   isHandoverSummary,
@@ -30,6 +29,8 @@ import {
   type Item,
   type ToolShape,
 } from "./model";
+import { basename } from "../../../lib/paths";
+import { compactNumber } from "../../../lib/compactNumber";
 
 const RESULT_CAP = 4000;
 
@@ -70,7 +71,7 @@ export const TranscriptMessage = memo(function TranscriptMessage({
           header={<MsgHeader author="You" ts={item.ts} now={now} tail={calls} />}
         >
           <div className="rounded-lg border border-line-soft bg-bg-1 px-3.5 py-2.5">
-            <div className="whitespace-pre-wrap break-words text-[13px] leading-relaxed text-text-1">
+            <div className="whitespace-pre-wrap break-words text-base leading-relaxed text-text-1">
               {item.text}
             </div>
           </div>
@@ -83,8 +84,8 @@ export const TranscriptMessage = memo(function TranscriptMessage({
           avatar={<AgentAvatar agentId={agentId} />}
           header={<MsgHeader author={agentDisplayLabel(agentId)} ts={item.ts} now={now} />}
         >
-          <div className="text-[13px] leading-relaxed text-text-2">
-            <MarkdownInline source={item.text} className="text-[13px] leading-relaxed" />
+          <div className="text-base leading-relaxed text-text-2">
+            <MarkdownInline source={item.text} className="text-base leading-relaxed" />
           </div>
         </Row>
       );
@@ -97,7 +98,7 @@ export const TranscriptMessage = memo(function TranscriptMessage({
     case "checkpoint":
       return (
         <Row avatar={null}>
-          <div className="flex items-center gap-2 py-0.5 text-[11px] text-text-4">
+          <div className="flex items-center gap-2 py-0.5 text-xs text-text-4">
             <span className="text-accent-green">◇</span>
             <span>Save point</span>
             <span className="font-mono text-text-3">{basename(item.file)}</span>
@@ -132,7 +133,7 @@ export const TranscriptMessage = memo(function TranscriptMessage({
               : "·";
       return (
         <Row avatar={null}>
-          <div className={"flex items-center gap-2 py-0.5 text-[11px] " + tone}>
+          <div className={"flex items-center gap-2 py-0.5 text-xs " + tone}>
             <span className="shrink-0">{glyph}</span>
             <span className="truncate font-mono">{item.text}</span>
           </div>
@@ -187,7 +188,7 @@ function MsgHeader({
   // h-6 matches the avatar tile so the author name + time vertically center
   // against the avatar — they read as one aligned line, not name-above-avatar.
   return (
-    <div className="mb-0.5 flex h-6 items-center gap-1.5 text-[11px]">
+    <div className="mb-0.5 flex h-6 items-center gap-1.5 text-xs">
       <span className="font-medium text-text-3">{author}</span>
       {time ? (
         <span className="text-text-4" title={relAge(ts, now)}>
@@ -286,7 +287,7 @@ function HandoverCard({
         type="button"
         onClick={() => setOpen((s) => !s)}
         aria-expanded={isOpen}
-        className="flex w-full items-start gap-2.5 px-3 py-2.5 text-left hover:bg-bg-2/40"
+        className="flex w-full items-start gap-2.5 px-3 py-2.5 text-left hover:bg-state-hover"
       >
         <span
           className="mt-px flex h-4 w-4 shrink-0 items-center justify-center"
@@ -300,21 +301,21 @@ function HandoverCard({
         </span>
         <span className="min-w-0 flex-1">
           <span className="flex items-baseline gap-1.5">
-            <span className="text-[12.5px] font-semibold text-text-1">Session handover</span>
-            <span className="text-[11px] text-text-4">continued from a previous session</span>
+            <span className="text-base font-semibold text-text-1">Session handover</span>
+            <span className="text-xs text-text-4">continued from a previous session</span>
             {time ? (
-              <span className="text-[11px] text-text-4" title={relAge(ts, now)}>
+              <span className="text-xs text-text-4" title={relAge(ts, now)}>
                 · {time}
               </span>
             ) : null}
           </span>
           {!isOpen ? (
-            <span className="mt-0.5 block truncate text-[12px] text-text-3">{gist}</span>
+            <span className="mt-0.5 block truncate text-sm text-text-3">{gist}</span>
           ) : null}
         </span>
         <span className="flex shrink-0 items-center gap-2">
-          <span className="font-mono text-[10.5px] text-text-4">
-            {approxLines} lines · {fmtChars(chars)}
+          <span className="font-mono text-xs text-text-4">
+            {approxLines} lines · {compactNumber(chars)} chars
           </span>
           <span className="text-text-4">
             <Chevron open={isOpen} />
@@ -323,20 +324,13 @@ function HandoverCard({
       </button>
       {isOpen ? (
         <div className="border-t border-line-soft/60 bg-bg-0/40">
-          <div className="max-h-[520px] overflow-auto px-3.5 py-3 text-[12.5px] leading-relaxed text-text-2">
-            <MarkdownInline source={text} className="text-[12.5px] leading-relaxed" />
+          <div className="max-h-[520px] overflow-auto px-3.5 py-3 text-base leading-relaxed text-text-2">
+            <MarkdownInline source={text} className="text-base leading-relaxed" />
           </div>
         </div>
       ) : null}
     </div>
   );
-}
-
-/** Compact char count for the handover card meta — "12.3k", "1.2M". */
-function fmtChars(n: number): string {
-  if (n < 1000) return `${n} chars`;
-  if (n < 1_000_000) return `${(n / 1000).toFixed(n < 10_000 ? 1 : 0)}k chars`;
-  return `${(n / 1_000_000).toFixed(1)}M chars`;
 }
 
 type ToolStatus = "ok" | "error" | "none";
@@ -373,7 +367,7 @@ function ToolRow({
       <button
         type="button"
         onClick={() => setOpen((s) => !s)}
-        className="flex w-full items-center gap-2.5 px-2.5 py-1.5 text-left hover:bg-bg-2/50"
+        className="flex w-full items-center gap-2.5 px-2.5 py-1.5 text-left hover:bg-state-hover"
         aria-expanded={isOpen}
       >
         <span
@@ -383,11 +377,11 @@ function ToolRow({
         >
           <ToolGlyph shape={v.shape} />
         </span>
-        <span className="shrink-0 text-[12px] font-medium text-text-2">{v.verb}</span>
+        <span className="shrink-0 text-sm font-medium text-text-2">{v.verb}</span>
         <span
           className={
             "min-w-0 flex-1 truncate text-text-3 " +
-            (v.mono ? "font-mono text-[11.5px]" : "text-[12px]")
+            (v.mono ? "font-mono text-sm" : "text-sm")
           }
         >
           {v.subject}
@@ -422,7 +416,7 @@ function ToolRightMeta({
     const el = editLines(item.name, item.input);
     if (!el || (!el.added.length && !el.removed.length)) return null;
     return (
-      <span className="shrink-0 font-mono text-[10.5px]">
+      <span className="shrink-0 font-mono text-xs">
         {el.added.length ? (
           <span className="text-accent-green">+{el.added.length}</span>
         ) : null}
@@ -437,7 +431,7 @@ function ToolRightMeta({
   if (shape === "read") {
     const r = readRange(item.input);
     return r ? (
-      <span className="shrink-0 font-mono text-[10.5px] text-text-4">{r}</span>
+      <span className="shrink-0 font-mono text-xs text-text-4">{r}</span>
     ) : null;
   }
 
@@ -445,7 +439,7 @@ function ToolRightMeta({
     const c = status === "error" ? "var(--color-red)" : "var(--color-accent-green)";
     return (
       <span
-        className="flex shrink-0 items-center gap-1 rounded-full border px-1.5 py-px text-[10px] font-medium"
+        className="flex shrink-0 items-center gap-1 rounded-full border px-1.5 py-px text-2xs font-medium"
         style={{
           color: c,
           borderColor: `color-mix(in srgb, ${c} 30%, transparent)`,
@@ -499,7 +493,7 @@ function DiffBody({ item }: { item: Item & { type: "tool" } }) {
   const rem = el.removed.slice(0, DIFF_CAP);
   const add = el.added.slice(0, DIFF_CAP);
   return (
-    <div className="py-1.5 font-mono text-[11px] leading-[1.65]">
+    <div className="py-1.5 font-mono text-xs leading-[1.65]">
       {rem.map((l, i) => (
         <DiffLine key={`r${i}`} sign="−" text={l} tone="del" />
       ))}
@@ -541,7 +535,7 @@ function DiffLine({
 
 function DiffMore({ n }: { n: number }) {
   return (
-    <div className="px-2.5 pl-6 text-[10.5px] text-text-4">
+    <div className="px-2.5 pl-6 text-xs text-text-4">
       … {n} more line{n === 1 ? "" : "s"}
     </div>
   );
@@ -552,7 +546,7 @@ function TerminalBody({ item }: { item: Item & { type: "tool" } }) {
   const out = item.result ? capText(item.result.content, TERM_CAP) : "";
   return (
     <div className="px-2.5 py-2">
-      <div className="rounded-md border border-line-soft bg-bg-1 px-3 py-2 font-mono text-[11px] leading-[1.6]">
+      <div className="rounded-md border border-line-soft bg-bg-1 px-3 py-2 font-mono text-xs leading-[1.6]">
         <div className="whitespace-pre-wrap break-words text-text-2">
           <span className="mr-2 select-none text-accent-green">$</span>
           {cmd}
@@ -582,8 +576,8 @@ function ProseBody({
   if (!txt.trim()) return <Empty text={empty} />;
   const shown = txt.length > PREVIEW_CAP ? `${txt.slice(0, PREVIEW_CAP)} …` : txt;
   return (
-    <div className="max-h-[300px] overflow-auto px-3 py-2 text-[12px] leading-relaxed text-text-3">
-      <MarkdownInline source={shown} className="text-[12px] leading-relaxed" />
+    <div className="max-h-[300px] overflow-auto px-3 py-2 text-sm leading-relaxed text-text-3">
+      <MarkdownInline source={shown} className="text-sm leading-relaxed" />
     </div>
   );
 }
@@ -598,7 +592,7 @@ function MonoBody({
   const txt = item.result ? capText(item.result.content, PREVIEW_CAP) : "";
   if (!txt.trim()) return <Empty text={empty} />;
   return (
-    <pre className="max-h-[260px] overflow-auto whitespace-pre-wrap break-words px-2.5 py-2 font-mono text-[11px] leading-[1.55] text-text-3">
+    <pre className="max-h-[260px] overflow-auto whitespace-pre-wrap break-words px-2.5 py-2 font-mono text-xs leading-[1.55] text-text-3">
       {txt}
     </pre>
   );
@@ -612,7 +606,7 @@ function TodoBody({ item }: { item: Item & { type: "tool" } }) {
   const todos = Array.isArray(obj.todos) ? (obj.todos as unknown[]) : [];
   if (!todos.length) return <Empty text="No items." />;
   return (
-    <ul className="flex flex-col gap-1 px-3 py-2 text-[12px]">
+    <ul className="flex flex-col gap-1 px-3 py-2 text-sm">
       {todos.map((t, i) => {
         const to = (t && typeof t === "object" ? t : {}) as Record<string, unknown>;
         const st = typeof to.status === "string" ? to.status : "pending";
@@ -668,7 +662,7 @@ function GenericBody({
       {hasInput ? (
         <>
           <Label>Input</Label>
-          <pre className="mb-2 max-h-[200px] overflow-auto whitespace-pre-wrap break-words rounded bg-bg-2/60 px-2 py-1.5 font-mono text-[11px] text-text-2">
+          <pre className="mb-2 max-h-[200px] overflow-auto whitespace-pre-wrap break-words rounded bg-bg-2/60 px-2 py-1.5 font-mono text-xs text-text-2">
             {inputJson}
           </pre>
         </>
@@ -676,7 +670,7 @@ function GenericBody({
       {item.result ? (
         <>
           <div className="mb-1 flex items-center justify-between">
-            <span className="text-[10px] uppercase tracking-wide text-text-4">
+            <span className="section-label">
               {isErr ? "Error" : "Result"}
             </span>
             {!isErr && result.trim() ? (
@@ -685,19 +679,19 @@ function GenericBody({
                 variant="ghost"
                 size="xs"
                 onClick={() => setRaw((r) => !r)}
-                className="text-[10px] text-text-4 hover:text-text-2"
+                className="text-2xs text-text-4 hover:text-text-2"
               >
                 {raw ? "Rendered" : "Raw"}
               </Button>
             ) : null}
           </div>
           {showRaw ? (
-            <pre className="max-h-[260px] overflow-auto whitespace-pre-wrap break-words rounded bg-bg-2/60 px-2 py-1.5 font-mono text-[11px] text-text-3">
+            <pre className="max-h-[260px] overflow-auto whitespace-pre-wrap break-words rounded bg-bg-2/60 px-2 py-1.5 font-mono text-xs text-text-3">
               {capped}
             </pre>
           ) : (
-            <div className="max-h-[440px] overflow-auto rounded bg-bg-2/40 px-3 py-2 text-[12.5px] leading-relaxed text-text-2">
-              <MarkdownInline source={capped} className="text-[12.5px] leading-relaxed" />
+            <div className="max-h-[440px] overflow-auto rounded bg-bg-2/40 px-3 py-2 text-base leading-relaxed text-text-2">
+              <MarkdownInline source={capped} className="text-base leading-relaxed" />
             </div>
           )}
         </>
@@ -712,12 +706,12 @@ function GenericBody({
 
 function Label({ children }: { children: React.ReactNode }) {
   return (
-    <div className="mb-1 text-[10px] uppercase tracking-wide text-text-4">{children}</div>
+    <div className="section-label mb-1">{children}</div>
   );
 }
 
 function Empty({ text }: { text: string }) {
-  return <div className="px-2.5 py-2 text-[11px] text-text-4">{text}</div>;
+  return <div className="px-2.5 py-2 text-xs text-text-4">{text}</div>;
 }
 
 function TodoDot({ status }: { status: string }) {

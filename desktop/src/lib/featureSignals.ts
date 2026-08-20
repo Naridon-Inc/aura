@@ -14,6 +14,7 @@
 import type { GoalRecord, GoalRun, GoalVerdict } from "./goalStore";
 import { rollup } from "./goalStore";
 import type { ProveOutcome } from "./prove";
+import { percent } from "./percent";
 
 /** Which status colour a gate reads as. `strong` = green (good), `fair` = amber
  *  (watch), `weak` = red (problem), `unknown` = muted (not checked yet). */
@@ -110,19 +111,25 @@ function confidenceGate(p: Proof): Gate {
           : "Not checked against the code yet.",
     };
   }
-  const pct = Math.round((p.ok / p.total) * 100);
+  const pct = percent(p.ok, p.total);
   const missing = p.total - p.ok;
   const band: GateBand = p.ok === p.total ? "strong" : p.ok > 0 ? "fair" : "weak";
-  const built = Math.min(p.total, p.built ?? 0);
+  // `built` is per-part existence, and only a live outcome carries it — null
+  // means nobody looked, which is not the same as none. Collapsing the two with
+  // `?? 0` made "nothing passes" print as "none of it is built", telling you the
+  // work was never started when all Aura knew was that none of it passes yet.
+  const built = p.built == null ? null : Math.min(p.total, p.built);
   const rationale =
     p.ok === p.total
-      ? `Every part is built and checked — ${p.total} of ${p.total} in place.`
+      ? `Every part is built and checked. ${p.total} of ${p.total} in place.`
       : p.ok === 0
-        ? built > 0
-          ? built === p.total
-            ? `All ${p.total} parts are built — but none are wired up yet, so nothing runs end to end.`
-            : `${built} of ${p.total} parts are built — but none are wired up yet, so nothing runs end to end.`
-          : `None of the ${p.total} parts this needs are built yet.`
+        ? built == null
+          ? `None of the ${p.total} parts are passing yet. Run a check to see which are built and which aren't there at all.`
+          : built > 0
+            ? built === p.total
+              ? `All ${p.total} parts are built, but none are wired up yet, so nothing runs end to end.`
+              : `${built} of ${p.total} parts are built, but none are wired up yet, so nothing runs end to end.`
+            : `None of the ${p.total} parts this needs are built yet.`
         : `${p.ok} of ${p.total} parts are built and checked; ${missing} still to go.`;
   return { key: "confidence", label: "Confidence", value: `${pct}%`, pct, band, rationale };
 }
@@ -135,12 +142,22 @@ function riskGate(goal: GoalRecord, outcome: ProveOutcome | null, p: Proof): Gat
       value: "—",
       pct: 0,
       band: "unknown",
-      rationale: "Not checked yet — nothing to weigh.",
+      rationale: "Not checked yet. Nothing to weigh.",
     };
   }
   // Real danger signals, straight from the proof: placeholders that look done
   // but do nothing, and steps nothing ever calls. Plus a regression — work that
   // used to pass and stopped.
+  //
+  // The first two are per-part detail, and only a live `aura prove` outcome
+  // carries it — a recorded run stores counts. So without an outcome the scan
+  // for them never happens, and the count stays 0 because nobody looked. Zero
+  // findings from an unrun scan is not a clean bill of health, and this gate
+  // used to render one: green "Low", a full bar, and "Nothing looks
+  // done-but-empty" — an assertion about the thing it hadn't examined. A goal
+  // opened from its recorded history hit that path on first paint, every time.
+  // An outcome with no checks in it scanned nothing, same as no outcome.
+  const scanned = (outcome?.checks.length ?? 0) > 0;
   let stubs = 0;
   let dead = 0;
   if (outcome) {
@@ -164,14 +181,24 @@ function riskGate(goal: GoalRecord, outcome: ProveOutcome | null, p: Proof): Gat
     parts.push(`${regressed} part${regressed > 1 ? "s" : ""} that stopped passing`);
 
   if (flags === 0) {
-    return {
-      key: "risk",
-      label: "Risk",
-      value: "Low",
-      pct: 100,
-      band: "strong",
-      rationale: "Nothing looks done-but-empty, and nothing that was working has broken.",
-    };
+    return scanned
+      ? {
+          key: "risk",
+          label: "Risk",
+          value: "Low",
+          pct: 100,
+          band: "strong",
+          rationale: "Nothing looks done-but-empty, and nothing that was working has broken.",
+        }
+      : {
+          key: "risk",
+          label: "Risk",
+          value: "—",
+          pct: 0,
+          band: "unknown",
+          rationale:
+            "Nothing that was working has broken, but that's all Aura can see from the last recorded check. Run one to look inside the parts.",
+        };
   }
   const band: GateBand = flags <= 1 ? "fair" : "weak";
   return {
@@ -180,7 +207,10 @@ function riskGate(goal: GoalRecord, outcome: ProveOutcome | null, p: Proof): Gat
     value: flags <= 1 ? "Watch" : "High",
     pct: flags <= 1 ? 55 : 20,
     band,
-    rationale: `Worth a look — ${joinPlain(parts)}.`,
+    // What was found is real either way; without a scan it may not be all of it.
+    rationale: scanned
+      ? `Worth a look. ${joinPlain(parts)}.`
+      : `Worth a look. ${joinPlain(parts)}. Run a check to see whether there's more.`,
   };
 }
 
@@ -195,7 +225,7 @@ function driftGate(goal: GoalRecord): Gate {
       band: "unknown",
       rationale:
         rated.length === 1
-          ? "Only one check so far — not enough to see a trend."
+          ? "Only one check so far, not enough to see a trend."
           : "No checks yet to compare across.",
     };
   }
@@ -207,7 +237,7 @@ function driftGate(goal: GoalRecord): Gate {
       value: "Held",
       pct: 100,
       band: "strong",
-      rationale: `Held steady — parts that got proven stayed proven across all ${rated.length} checks.`,
+      rationale: `Held steady. Parts that got proven stayed proven across all ${rated.length} checks.`,
     };
   }
   const band: GateBand = regressed <= 1 ? "fair" : "weak";
@@ -217,36 +247,43 @@ function driftGate(goal: GoalRecord): Gate {
     value: regressed <= 1 ? "Slipped" : "Wandered",
     pct: regressed <= 1 ? 55 : 25,
     band,
-    rationale: `${regressed} time${regressed > 1 ? "s" : ""} a part that was in place stopped passing — the work drifted from where it had got to.`,
+    rationale: `${regressed} time${regressed > 1 ? "s" : ""} a part that was in place stopped passing. The work drifted from where it had got to.`,
   };
 }
 
 function buildHeadline(p: Proof, risk: Gate, done: boolean): string {
   if (!p.checked || p.total === 0) {
-    return "Not checked yet — run a verify to see where this feature stands.";
+    return "Not checked yet. Run a verify to see where this feature stands.";
   }
   if (done) {
     return risk.band === "weak"
-      ? "Built end-to-end — but clear the risks flagged below before you call it done."
-      : "Finished — every part is built and checked, and nothing risky is flagged.";
+      ? "Built end-to-end, but clear the risks flagged below before you call it done."
+      : "Finished. Every part is built and checked, and nothing risky is flagged.";
   }
   const missing = p.total - p.ok;
-  const built = Math.min(p.total, p.built ?? 0);
+  // Same rule as confidenceGate: null is "nobody looked", not "none". This is
+  // the card's top line — "Not started in the code yet" over work that may be
+  // fully written and simply not wired is the worst sentence on the page.
+  const built = p.built == null ? null : Math.min(p.total, p.built);
   const base =
     p.ok === 0
-      ? built > 0
-        ? built === p.total
-          ? `Every part is built — but none are wired up yet, so nothing runs end to end.`
-          : `${built} of ${p.total} parts are built — but none are wired up yet, so nothing runs end to end.`
-        : `Not started in the code yet — none of the ${p.total} parts are built.`
-      : `Not done yet — ${p.ok} of ${p.total} parts are built, ${missing} still to go.`;
+      ? built == null
+        ? `Nothing passes yet. ${p.total} part${p.total === 1 ? "" : "s"} to go. Run a check to see what's built.`
+        : built > 0
+          ? built === p.total
+            ? `Every part is built, but none are wired up yet, so nothing runs end to end.`
+            : `${built} of ${p.total} parts are built, but none are wired up yet, so nothing runs end to end.`
+          : `Not started in the code yet. None of the ${p.total} parts are built.`
+      : `Not done yet. ${p.ok} of ${p.total} parts are built, ${missing} still to go.`;
   return risk.band === "weak" ? `${base} And some of what's there needs a second look.` : base;
 }
 
 /** Fold a goal's proof + run history into the three feature gates and an overall
  *  read. Pass the live `aura prove` outcome when the card holds one; without it
- *  the gates fall back to the newest recorded run (Risk then can't see
- *  placeholders/dead-ends, so it weighs regressions only — it never guesses). */
+ *  the gates fall back to the newest recorded run. Risk then can't see
+ *  placeholders or dead ends — so it says so, rather than reporting the zero it
+ *  gets from a scan that never ran. Nothing here guesses, and nothing here
+ *  reports an absence of evidence as evidence of absence. */
 export function computeFeatureSignals(
   goal: GoalRecord,
   outcome: ProveOutcome | null,
@@ -296,13 +333,13 @@ function aggConfidence(
       rationale: "None of this feature's goals have been checked yet.",
     };
   }
-  const pct = sumTotal > 0 ? Math.round((sumOk / sumTotal) * 100) : 0;
+  const pct = percent(sumOk, sumTotal);
   const band: GateBand =
     reached === goalsTotal ? "strong" : reached > 0 || sumOk > 0 ? "fair" : "weak";
   const rationale =
     reached === goalsTotal
-      ? `All ${goalsTotal} goals reached — the whole feature is built and checked.`
-      : `${reached} of ${goalsTotal} goals reached — ${sumOk} of ${sumTotal} parts in place across the feature.`;
+      ? `All ${goalsTotal} goals reached. The whole feature is built and checked.`
+      : `${reached} of ${goalsTotal} goals reached · ${sumOk} of ${sumTotal} parts in place across the feature.`;
   return { key: "confidence", label: "Confidence", value: `${pct}%`, pct, band, rationale };
 }
 
@@ -314,7 +351,7 @@ function aggRisk(regressions: number, anyChecked: boolean): Gate {
       value: "—",
       pct: 0,
       band: "unknown",
-      rationale: "Not checked yet — nothing to weigh.",
+      rationale: "Not checked yet. Nothing to weigh.",
     };
   }
   if (regressions === 0) {
@@ -356,7 +393,7 @@ function aggDrift(regressions: number, ratedRuns: number): Gate {
       value: "Held",
       pct: 100,
       band: "strong",
-      rationale: `Held steady — proven parts stayed proven across all ${ratedRuns} checks.`,
+      rationale: `Held steady. Proven parts stayed proven across all ${ratedRuns} checks.`,
     };
   }
   const band: GateBand = regressions <= 1 ? "fair" : "weak";
@@ -366,7 +403,7 @@ function aggDrift(regressions: number, ratedRuns: number): Gate {
     value: regressions <= 1 ? "Slipped" : "Wandered",
     pct: regressions <= 1 ? 55 : 25,
     band,
-    rationale: `The work drifted ${regressions} time${regressions > 1 ? "s" : ""} — a part that was in place stopped passing.`,
+    rationale: `The work drifted ${regressions} time${regressions > 1 ? "s" : ""}. A part that was in place stopped passing.`,
   };
 }
 
@@ -378,15 +415,15 @@ function aggHeadline(
   risk: Gate,
 ): string {
   if (!anyChecked) {
-    return "Not checked yet — verify this feature's goals to see where it stands.";
+    return "Not checked yet. Verify this feature's goals to see where it stands.";
   }
   if (done) {
     return risk.band === "weak"
-      ? "All goals reached — but clear the risks flagged below before you call it done."
-      : "Finished — every goal in this feature is built and checked.";
+      ? "All goals reached, but clear the risks flagged below before you call it done."
+      : "Finished. Every goal in this feature is built and checked.";
   }
   const open = goalsTotal - reached;
-  return `Not done yet — ${reached} of ${goalsTotal} goals reached, ${open} still open.`;
+  return `Not done yet. ${reached} of ${goalsTotal} goals reached, ${open} still open.`;
 }
 
 /** Roll a set of goals (a feature — e.g. every goal under one task/epic, worked

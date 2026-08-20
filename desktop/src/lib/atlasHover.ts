@@ -122,7 +122,7 @@ function roleLabel(entry: AtlasHoverEntry): string {
   switch (entry.role) {
     case "feature":
       return entry.feature
-        ? `Something people do here — the “${entry.feature}” feature`
+        ? `Something people do here, the “${entry.feature}” feature`
         : "Something people do here";
     case "atom":
       return "A small building block";

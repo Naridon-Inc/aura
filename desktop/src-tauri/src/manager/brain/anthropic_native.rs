@@ -79,8 +79,8 @@ impl Brain for AnthropicNativeBrain {
             .with(
                 cap_keys::SUPPORTED_MODELS,
                 json!([
-                    "claude-sonnet-4-5-20250929",
-                    "claude-opus-4-7",
+                    "claude-opus-5",
+                    "claude-sonnet-5",
                     "claude-haiku-4-5-20251001",
                 ]),
             )

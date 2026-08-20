@@ -4,11 +4,11 @@
 //! or roll it back. It can run an optional shell verify command (your tests),
 //! and it always consults the **free, AST-only** goal proof
 //! ([`crate::goals::build::prove_task_on_commit`]) — no model call, no cost.
-//! If the goal isn't built yet ("not_wired") the work fails the gate. The
-//! absence of a goal NEVER blocks: when there's nothing to check against, the
-//! work is kept.
+//! If the goal isn't built yet ("not_wired") the work fails the gate — but only
+//! when nothing stronger says otherwise (see below). The absence of a goal NEVER
+//! blocks: when there's nothing to check against, the work is kept.
 //!
-//! Two things the gate is honest about:
+//! Three things the gate is honest about:
 //!   * **What happens to rejected work** depends on the caller's `--rollback`
 //!     flag, so the reason line is worded for what actually happens — the
 //!     commit is reverted (`rollback`) *or* kept on the branch for review
@@ -17,6 +17,19 @@
 //!   * **A "not_wired" verdict only blocks code work.** The build-proof checks
 //!     for *built symbols*; a docs / plan / analysis node builds none, so its
 //!     "not built" verdict is expected, not a failure ([`build_proof_blocks`]).
+//!   * **A passing verify command outranks a "not_wired" build proof.** The two
+//!     gates are not equally reliable. `--verify` runs the project's own tests,
+//!     typecheck and compiler against the real commit — ground truth. The build
+//!     proof asks a model to invent the symbol names a goal *probably* needs and
+//!     then checks whether symbols spelled exactly that way exist, so it reports
+//!     a confident zero whenever the implementer and the auditor chose different
+//!     names for the same thing. That is not hypothetical: a 1358-line refactor
+//!     that compiled clean scored 0 of 3, and nodes that genuinely delivered
+//!     routinely read "1 of 5" or "2 of 4". Letting the weaker signal overrule
+//!     the stronger one failed real work and — worse than losing one node —
+//!     stalled every node that depended on it. So `not_wired` blocks only when
+//!     there is no verify command to outrank it, in which case the proof is the
+//!     only evidence there is. See [`decide`].
 
 use std::path::Path;
 use std::process::Command;
@@ -41,9 +54,10 @@ pub struct AcceptOutcome {
 /// 1. If `verify_cmd` is `Some`, run it as a shell command in `repo_root`; a
 ///    non-zero exit fails the gate.
 /// 2. Always also run the free goal proof against `head_sha`. The strongest
-///    active proof's verdict decides: `not_wired` fails (nothing the goal needs
-///    was actually built), `partial` passes with a note, `verified` passes, and
-///    no goal / `unknown` passes (we can't judge, so we never block).
+///    active proof's verdict decides: `not_wired` fails only when step 1 didn't
+///    run (nothing the goal needs was built, and no tests to say otherwise),
+///    `partial` passes with a note, `verified` passes, and no goal / `unknown`
+///    passes (we can't judge, so we never block).
 ///
 /// `head_sha` is the commit to prove against (full or short sha).
 /// `proof_blocks` is whether a `not_wired` build-proof may FAIL this node —
@@ -89,7 +103,12 @@ pub fn check(
     //    Vec means there was no goal to prove — that's a clean PASS, never a
     //    block. The run is recorded into the durable `ledger_root` (main repo),
     //    keyed to this node's own goal, so the app shows a real verdict.
-    let proofs = build::prove_task_on_commit(ledger_root, task_uuid, task_title, head_sha);
+    //    The reasons come from `code_root` — the checkout the agent worked in —
+    //    because that is where it logged them. `ledger_root` is the main repo,
+    //    shared by every worktree, so reading them there grades this node
+    //    against whichever crew happened to commit last.
+    let proofs =
+        build::prove_task_on_commit(ledger_root, code_root, task_uuid, task_title, head_sha);
     let strongest = strongest_proof(&proofs);
 
     let (verdict_str, ok, total) = match strongest {
@@ -254,12 +273,24 @@ fn decide(
         // Nothing the goal needs got built. For code work that's a failure; for
         // a non-code node (#4) the build-proof simply can't judge it — keep it.
         Some("not_wired") => {
-            if proof_blocks {
+            if proof_blocks && !verify_passed {
                 (
                     false,
                     format!(
                         "The goal isn't built yet ({ok} of {total} checks) — {}.",
                         outcome_phrase(rollback_enabled)
+                    ),
+                )
+            } else if proof_blocks {
+                // Ground truth beat a guess. The verify command compiled and
+                // tested this exact commit; the proof only failed to find
+                // symbols under the names it invented. Keep the work, and say
+                // plainly which check disagreed so a human can look.
+                (
+                    true,
+                    format!(
+                        "Your checks passed, so this is kept — but the goal check found \
+                         {ok} of {total}, so it may not be finished. Worth a look."
                     ),
                 )
             } else {
@@ -410,13 +441,37 @@ mod tests {
         assert!(reason.to_lowercase().contains("rolling this back"));
     }
 
+    /// Tests green, goal proof says nothing was built. The tests compiled and
+    /// ran this exact commit; the proof only failed to find symbols under names
+    /// it invented from the goal's title. Keep the work — and say which check
+    /// disagreed rather than pretending they agreed.
     #[test]
-    fn verify_pass_plus_not_wired_blocks() {
-        // Tests green but the goal isn't built — still a rollback.
+    fn a_passing_verify_outranks_a_not_wired_proof() {
         let (passed, reason) = decide_code(Some(true), Some("not_wired"), 0, 3);
+        assert!(passed);
+        assert!(reason.contains("0 of 3"));
+        assert!(!reason.contains("rolling this back"));
+        assert!(reason.to_lowercase().contains("worth a look"));
+    }
+
+    /// With no verify command, the build proof is the only evidence there is —
+    /// so it still blocks. This is the case the gate was built for.
+    #[test]
+    fn not_wired_still_blocks_when_nothing_stronger_ran() {
+        let (passed, reason) = decide_code(None, Some("not_wired"), 0, 3);
         assert!(!passed);
         assert!(reason.contains("0 of 3"));
         assert!(reason.contains("rolling this back"));
+    }
+
+    /// The same miss, with `--rollback` off: still a fail, but the commit stays
+    /// on the branch and the wording has to say so.
+    #[test]
+    fn not_wired_without_rollback_keeps_the_commit_for_review() {
+        let (passed, reason) = decide(None, Some("not_wired"), 0, 5, true, false);
+        assert!(!passed);
+        assert!(!reason.contains("rolling this back"));
+        assert!(reason.contains("review"));
     }
 
     #[test]
@@ -504,14 +559,18 @@ mod tests {
 
     #[test]
     fn rejection_message_is_honest_about_rollback() {
+        // No verify command, so the build proof is the only evidence and its
+        // miss really does reject. (With a verify command it would not — see
+        // `a_passing_verify_outranks_a_not_wired_proof`.)
+        //
         // --rollback OFF: the commit is KEPT — the message must not claim a rollback.
-        let (passed, reason) = decide(Some(true), Some("not_wired"), 0, 2, true, false);
+        let (passed, reason) = decide(None, Some("not_wired"), 0, 2, true, false);
         assert!(!passed);
         assert!(reason.contains("leaving the commit on the branch"));
         assert!(!reason.contains("rolling this back"));
 
         // --rollback ON: the commit is reverted — say so.
-        let (_passed, reason_on) = decide(Some(true), Some("not_wired"), 0, 2, true, true);
+        let (_passed, reason_on) = decide(None, Some("not_wired"), 0, 2, true, true);
         assert!(reason_on.contains("rolling this back"));
     }
 

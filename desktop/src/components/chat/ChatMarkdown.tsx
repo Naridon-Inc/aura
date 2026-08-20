@@ -87,7 +87,7 @@ export const ChatMarkdown = memo(function ChatMarkdown({ body, members, selfHand
   const walk = (children: ReactNode) => transformMentions(children, handleSet, selfHandle);
 
   return (
-    <div className="aura-chat-md text-[12.5px] min-w-0 max-w-full" style={{ lineHeight: 1.5, overflowWrap: "anywhere" }}>
+    <div className="aura-chat-md text-base min-w-0 max-w-full" style={{ lineHeight: 1.5, overflowWrap: "anywhere" }}>
       <ReactMarkdown
         remarkPlugins={[remarkGfm, remarkMath, remarkCallouts]}
         rehypePlugins={[rehypeKatex]}
@@ -110,10 +110,10 @@ export const ChatMarkdown = memo(function ChatMarkdown({ body, members, selfHand
           ul: ({ children }) => <ul className="my-1 ml-4 list-disc space-y-0.5">{children}</ul>,
           ol: ({ children }) => <ol className="my-1 ml-4 list-decimal space-y-0.5">{children}</ol>,
           li: ({ children }) => <li>{walk(children)}</li>,
-          h1: ({ children }) => <h3 className="text-[13.5px] font-semibold my-1">{children}</h3>,
-          h2: ({ children }) => <h3 className="text-[13px] font-semibold my-1">{children}</h3>,
-          h3: ({ children }) => <h3 className="text-[12.5px] font-semibold my-1">{children}</h3>,
-          h4: ({ children }) => <h4 className="text-[12.5px] font-semibold my-0.5">{children}</h4>,
+          h1: ({ children }) => <h3 className="text-md font-semibold my-1">{children}</h3>,
+          h2: ({ children }) => <h3 className="text-base font-semibold my-1">{children}</h3>,
+          h3: ({ children }) => <h3 className="text-base font-semibold my-1">{children}</h3>,
+          h4: ({ children }) => <h4 className="text-base font-semibold my-0.5">{children}</h4>,
           blockquote: ({ children, className }) =>
             calloutFromBlockquote(className, children) ?? (
               <blockquote
@@ -131,7 +131,7 @@ export const ChatMarkdown = memo(function ChatMarkdown({ body, members, selfHand
             if (inline) {
               return (
                 <code
-                  className="px-1 py-0.5 rounded font-mono text-[11.5px]"
+                  className="px-1 py-0.5 rounded font-mono text-sm"
                   style={{
                     background: "var(--color-bg-card)",
                     border: "1px solid var(--color-line-soft)",
@@ -143,14 +143,14 @@ export const ChatMarkdown = memo(function ChatMarkdown({ body, members, selfHand
               );
             }
             return (
-              <code className={`font-mono text-[11.5px] ${className ?? ""}`} {...rest}>
+              <code className={`font-mono text-sm ${className ?? ""}`} {...rest}>
                 {children}
               </code>
             );
           },
           pre: ({ children }) => (
             <pre
-              className="my-1.5 p-2 rounded overflow-x-auto max-w-full font-mono text-[11.5px] leading-snug"
+              className="my-1.5 p-2 rounded overflow-x-auto max-w-full font-mono text-sm leading-snug"
               style={{
                 background: "var(--color-bg-card)",
                 border: "1px solid var(--color-line-soft)",
@@ -161,7 +161,7 @@ export const ChatMarkdown = memo(function ChatMarkdown({ body, members, selfHand
           ),
           table: ({ children }) => (
             <div className="my-1 overflow-x-auto">
-              <table className="text-[11.5px] border-collapse">{children}</table>
+              <table className="text-sm border-collapse">{children}</table>
             </div>
           ),
           th: ({ children }) => (

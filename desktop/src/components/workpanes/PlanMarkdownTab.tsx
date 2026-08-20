@@ -83,9 +83,9 @@ export function PlanMarkdownTab({
     <div className="h-full w-full flex flex-col bg-bg-content">
       <div className="h-9 px-3 border-b border-line-soft bg-bg-chrome flex items-center gap-2 flex-shrink-0">
         <div className="min-w-0 flex-1 flex items-baseline gap-1.5">
-          <span className="text-text-5 text-[10px] font-mono">Plans</span>
-          <span className="text-text-5 text-[10px]">›</span>
-          <span className="text-text-2 text-[12px] font-medium truncate">
+          <span className="text-text-5 text-2xs font-mono">Plans</span>
+          <span className="text-text-5 text-2xs">›</span>
+          <span className="text-text-2 text-sm font-medium truncate">
             {title}
           </span>
         </div>
@@ -94,7 +94,7 @@ export function PlanMarkdownTab({
           variant="ghost"
           size="xs"
           onClick={() => setRaw((v) => !v)}
-          className="text-[10.5px] text-text-4 hover:text-text-1"
+          className="text-xs text-text-4 hover:text-text-1"
         >
           {raw ? "Rendered" : "Edit raw"}
         </Button>
@@ -174,7 +174,7 @@ function RenderedPlan({
   onToggle: (c: ParsedCheckbox) => void;
 }) {
   return (
-    <div className="h-full w-full overflow-y-auto px-4 py-4 text-[13.5px] leading-6 text-text-2">
+    <div className="h-full w-full overflow-y-auto px-4 py-4 text-md leading-6 text-text-2">
       {groups.map((g, idx) => (
         <div key={idx} className="mb-4">
           {g.heading && (
@@ -191,7 +191,7 @@ function RenderedPlan({
               return (
                 <label
                   key={i}
-                  className={`flex items-baseline gap-2 py-0.5 cursor-pointer hover:bg-bg-2 rounded px-1 -mx-1`}
+                  className={`flex items-baseline gap-2 py-0.5 cursor-pointer hover:bg-state-hover rounded px-1 -mx-1`}
                   style={{ paddingLeft: 6 + indent * 18 }}
                 >
                   <input
@@ -240,20 +240,20 @@ function RenderedPlan({
 function Heading({ level, text }: { level: number; text: string }) {
   if (level === 1) {
     return (
-      <div className="text-[18px] font-semibold text-text-1 mb-2 mt-1">
+      <div className="text-xl font-semibold text-text-1 mb-2 mt-1">
         {text}
       </div>
     );
   }
   if (level === 2) {
     return (
-      <div className="text-[14.5px] font-semibold text-text-1 mt-3 mb-1">
+      <div className="text-md font-semibold text-text-1 mt-3 mb-1">
         {text}
       </div>
     );
   }
   return (
-    <div className="text-[13px] font-medium text-text-2 mt-2 mb-1">
+    <div className="text-base font-medium text-text-2 mt-2 mb-1">
       {text}
     </div>
   );

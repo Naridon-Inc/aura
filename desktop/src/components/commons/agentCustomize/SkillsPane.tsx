@@ -80,7 +80,7 @@ export function SkillsPane({ repoRoot }: { repoRoot: string }) {
     <PaneScroll>
       <PaneIntro
         title="Skills"
-        blurb="The named abilities your coding agents can run on demand — read straight from each agent's own setup on this machine and in this project. This is what they can already do; manage them in the agent that owns them."
+        blurb="The named abilities your coding agents can run on demand. Read straight from each agent's own setup on this machine and in this project. This is what they can already do; manage them in the agent that owns them."
         action={
           <Button
             size="sm"
@@ -102,9 +102,9 @@ export function SkillsPane({ repoRoot }: { repoRoot: string }) {
         <PaneSpinner label="Scanning your agents for skills…" />
       ) : groups.length === 0 ? (
         <EmptyHint
-          icon={<Zap size={22} />}
+          icon={Zap}
           title="No agent skills found yet"
-          body="When you add skills to an agent — a SKILL.md under ~/.claude/skills, a Codex prompt, a Cursor rule — they show up here automatically, grouped by agent. Nothing to wire up."
+          body="When you add skills to an agent (a SKILL.md under ~/.claude/skills, a Codex prompt, a Cursor rule) they show up here automatically, grouped by agent. Nothing to wire up."
         />
       ) : (
         <div className="space-y-6">
@@ -116,7 +116,7 @@ export function SkillsPane({ repoRoot }: { repoRoot: string }) {
                     organising idea: skills belong to an agent, not to Aura. */}
                 <div className="mb-2 flex items-center gap-2.5 px-0.5">
                   <AgentIcon agentId={canonical} label={g.label} size={20} />
-                  <span className="text-[13px] font-semibold text-text-1">
+                  <span className="text-base font-semibold text-text-1">
                     {g.label}
                   </span>
                   <CountPill>
@@ -141,23 +141,23 @@ export function SkillsPane({ repoRoot }: { repoRoot: string }) {
                         />
                         <div className="min-w-0 flex-1">
                           <div className="flex items-center gap-2">
-                            <span className="truncate text-[12.5px] font-medium text-text-1">
+                            <span className="truncate text-base font-medium text-text-1">
                               {s.name}
                             </span>
                             {s.scope === "project" ? (
-                              <span className="inline-flex items-center gap-1 rounded-full bg-bg-2 px-1.5 py-0.5 text-[10px] font-medium text-text-3">
+                              <span className="inline-flex items-center gap-1 rounded-full bg-bg-2 px-1.5 py-0.5 text-2xs font-medium text-text-3">
                                 <FolderGit2 size={9} />
                                 This project
                               </span>
                             ) : null}
                           </div>
                           {s.description ? (
-                            <div className="mt-0.5 line-clamp-2 text-[11.5px] leading-relaxed text-text-4">
+                            <div className="mt-0.5 line-clamp-2 text-sm leading-relaxed text-text-4">
                               {s.description}
                             </div>
                           ) : null}
                         </div>
-                        <span className="mt-0.5 shrink-0 text-[10.5px] font-medium text-text-4">
+                        <span className="mt-0.5 shrink-0 text-xs font-medium text-text-4">
                           {meta.word}
                         </span>
                       </div>

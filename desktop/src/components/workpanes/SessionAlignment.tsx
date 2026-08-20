@@ -21,11 +21,19 @@
 
 import { useEffect, useMemo, useState, type ReactNode } from "react";
 import { api, type ClaudeSession } from "../../lib/api";
-import { useEditorStore } from "../../lib/editorStore";
 import { humanizeIdentifier } from "../../lib/prove";
+import { intentTypeChip } from "../../lib/intentTypeLabels";
 import { StoryMarkdown } from "../story/StoryMarkdown";
 import { AgentBadge } from "../agent/AgentBadge";
 import { Button } from "../ui/button";
+import { goToTrace } from "../trace/traceRoute";
+import { sentenceCase } from "../../lib/textCase";
+import {
+  changeCounts,
+  changeSummary,
+  safetyLine,
+  type SafetyTone,
+} from "../../lib/changeSafety";
 import {
   deriveAskedSaid,
   deriveNodes,
@@ -37,7 +45,7 @@ import {
 
 function SectionLabel({ children }: { children: ReactNode }) {
   return (
-    <h2 className="text-[11px] font-medium uppercase tracking-wider text-text-3">
+    <h2 className="section-label">
       {children}
     </h2>
   );
@@ -67,7 +75,7 @@ export function SessionAlignment({
   if (error) {
     return (
       <div className="flex h-full items-start justify-center px-6 pt-10">
-        <div className="max-w-[520px] rounded-lg border border-line-soft bg-bg-0 shadow-[var(--shadow-card)] p-3 font-mono text-[11.5px] text-red break-words">
+        <div className="max-w-[520px] rounded-lg border border-line-soft bg-bg-0 shadow-[var(--shadow-card)] p-3 font-mono text-sm text-red break-words">
           {error}
         </div>
       </div>
@@ -101,19 +109,19 @@ export function SessionAlignment({
                     prompt
                   </Chip>
                 ) : asked.intentType ? (
-                  <Chip>{asked.intentType}</Chip>
+                  <Chip>{intentTypeChip(asked.intentType)}</Chip>
                 ) : null}
-                <span className="ml-auto text-[10.5px] tabular-nums text-text-4">
+                <span className="ml-auto text-xs tabular-nums text-text-4">
                   {formatRelative(asked.timestamp)}
                 </span>
               </div>
-              <div className="px-3.5 py-3 text-[13px] leading-relaxed text-text-1">
+              <div className="px-3.5 py-3 text-base leading-relaxed text-text-1">
                 <StoryMarkdown>{asked.text}</StoryMarkdown>
               </div>
             </div>
           ) : (
-            <p className="text-[12.5px] leading-relaxed text-text-4">
-              No task intent was recorded near this commit — the change has no
+            <p className="text-base leading-relaxed text-text-4">
+              No task intent was recorded near this commit. The change has no
               stated origin to compare against.
             </p>
           )}
@@ -151,73 +159,44 @@ export function SessionAlignment({
 // ── Overview ───────────────────────────────────────────────────────────
 
 // The lead card. Two facts, in plain words: *how much* the AI changed, and
-// whether any of it is worth a second look. The "worth a look" signals are
-// fully automated and need no goal-linking — an unfinished bit (TODO/stub), a
-// possible hard-coded secret, or a deletion. When none are present we say so
-// plainly. No match score, no coverage bar, no status dot: a calm card in the
-// same neutral language as the rest of the surface.
+// whether any of it is worth a second look. Both come from `lib/changeSafety`,
+// which carries the one thing this card used to leave out — how much of the
+// run the scan actually covered.
+//
+// The signals (an unfinished bit, a possible hard-coded secret, a deletion)
+// live on the report's structured `nodes`, and the CLI emits those only for
+// symbols it could resolve back to a parsed AST node, dropping the list
+// entirely when none resolved. The card filtered that list for secrets and,
+// finding none in a list that was never populated, told a non-engineer there
+// were none. It now says what it checked.
 function ChangeOverview({ report }: { report: IntentReport }) {
-  const nodes = useMemo(() => deriveNodes(report), [report]);
-  const fileCount = report.changed_files.length;
-  const changeCount = nodes.length;
+  const counts = useMemo(() => changeCounts(report), [report]);
+  const line = useMemo(() => safetyLine(counts), [counts]);
 
-  const secrets = nodes.filter((n) => n.contains_secret).length;
-  const stubs = nodes.filter((n) => n.is_stub).length;
-  const deletions = nodes.filter((n) => n.change === "deleted").length;
-
-  // The plain "how much changed" line.
-  const summary =
-    changeCount > 0
-      ? `The AI changed ${changeCount} ${changeCount === 1 ? "thing" : "things"}${
-          fileCount > 0
-            ? ` across ${fileCount} ${fileCount === 1 ? "file" : "files"}`
-            : ""
-        }.`
-      : fileCount > 0
-        ? `The AI touched ${fileCount} ${fileCount === 1 ? "file" : "files"} — settings or data, not code Aura breaks down piece by piece.`
-        : "No file changes were recorded for this run.";
-
-  // The safety line. Secrets are the loudest; stubs / deletions are "worth a
-  // look". Anything else reads clean.
-  const worth: string[] = [];
-  if (stubs > 0)
-    worth.push(`${stubs} unfinished ${stubs === 1 ? "bit" : "bits"} (a TODO/placeholder)`);
-  if (deletions > 0)
-    worth.push(`${deletions} ${deletions === 1 ? "deletion" : "deletions"}`);
+  const TONE_COLOR: Record<SafetyTone, string | undefined> = {
+    risk: "var(--color-red)",
+    attention: "var(--color-amber)",
+    calm: undefined,
+  };
 
   return (
     <div className="rounded-lg border border-line-soft bg-bg-0 shadow-[var(--shadow-card)] p-3">
-      <p className="text-[13px] font-medium leading-snug text-text-1">{summary}</p>
+      <p className="text-base font-medium leading-snug text-text-1">
+        {changeSummary(counts)}
+      </p>
 
-      {secrets > 0 ? (
+      {line.kind !== "none" && (
         <p
-          className="mt-2 text-[12.5px] leading-snug"
-          style={{ color: "var(--color-red)" }}
+          className={`mt-2 text-base leading-snug${
+            line.tone === "calm" ? " text-text-3" : ""
+          }`}
+          style={TONE_COLOR[line.tone] ? { color: TONE_COLOR[line.tone] } : undefined}
         >
-          Heads up — {secrets} {secrets === 1 ? "spot looks" : "spots look"} like a
-          password or key written straight into the code. Worth checking before this
-          goes anywhere.
+          {line.text}
         </p>
-      ) : worth.length > 0 ? (
-        <p
-          className="mt-2 text-[12.5px] leading-snug"
-          style={{ color: "var(--color-amber)" }}
-        >
-          Worth a look: {joinWorth(worth)}. Nothing else here looks risky.
-        </p>
-      ) : changeCount > 0 || fileCount > 0 ? (
-        <p className="mt-2 text-[12.5px] leading-snug text-text-3">
-          Nothing here looks risky — no unfinished code, no deletions, no secrets.
-        </p>
-      ) : null}
+      )}
     </div>
   );
-}
-
-function joinWorth(parts: string[]): string {
-  if (parts.length === 1) return parts[0];
-  if (parts.length === 2) return `${parts[0]} and ${parts[1]}`;
-  return `${parts.slice(0, -1).join(", ")}, and ${parts[parts.length - 1]}`;
 }
 
 // ── Said ───────────────────────────────────────────────────────────────
@@ -227,12 +206,12 @@ function SaidRow({ stated }: { stated: StatedIntent }) {
     <div className="border-b border-line-soft px-3.5 py-2.5 last:border-b-0">
       <div className="mb-1 flex items-center gap-2">
         <AgentBadge agentId={stated.agent_id} />
-        {stated.intent_type ? <Chip>{stated.intent_type}</Chip> : null}
-        <span className="ml-auto text-[10.5px] tabular-nums text-text-4">
+        {stated.intent_type ? <Chip>{intentTypeChip(stated.intent_type)}</Chip> : null}
+        <span className="ml-auto text-xs tabular-nums text-text-4">
           {formatRelative(stated.timestamp)}
         </span>
       </div>
-      <div className="text-[12.5px] leading-relaxed text-text-2">
+      <div className="text-base leading-relaxed text-text-2">
         <StoryMarkdown compact>{stated.intent}</StoryMarkdown>
       </div>
     </div>
@@ -284,7 +263,7 @@ function ChangedSection({
     <section>
       <div className="mb-2.5 flex items-baseline justify-between gap-3">
         <SectionLabel>What changed</SectionLabel>
-        <span className="flex items-center gap-1.5 text-[11px] text-text-4">
+        <span className="flex items-center gap-1.5 text-xs text-text-4">
           {nodes.length > 0 ? (
             <span className="tabular-nums">
               {nodes.length} change{nodes.length === 1 ? "" : "s"}
@@ -302,12 +281,11 @@ function ChangedSection({
       </div>
 
       {nodes.length === 0 ? (
-        <p className="text-[12.5px] leading-relaxed text-text-4">
+        <p className="text-base leading-relaxed text-text-4">
           No code-level changes to break down here
           {fileCount > 0 ? (
             <>
-              {" "}
-              — the {fileCount} changed file{fileCount === 1 ? "" : "s"} changed in
+              {" "}, the {fileCount} changed file{fileCount === 1 ? "" : "s"} changed in
               a way Aura doesn&apos;t track piece-by-piece (settings, data, or
               generated files)
             </>
@@ -333,7 +311,7 @@ function ChangedSection({
               size="xs"
               type="button"
               onClick={() => setShowAll((v) => !v)}
-              className="mt-2 px-0 text-[11px] text-text-3 hover:text-text-1"
+              className="mt-2 px-0 text-xs text-text-3 hover:text-text-1"
             >
               {showAll
                 ? "Show fewer"
@@ -366,10 +344,6 @@ function isCapabilityNode(n: NodeRef): boolean {
   return k === "" || CAPABILITY_KIND.test(k);
 }
 
-function capitalize(s: string): string {
-  return s ? s[0].toUpperCase() + s.slice(1) : s;
-}
-
 // A plain noun for the kind — what a person would call this piece of code.
 function kindNoun(kind: string): string {
   const k = (kind || "").toLowerCase();
@@ -394,7 +368,6 @@ function kindNoun(kind: string): string {
 }
 
 function NodeRow({ node, onDismiss }: { node: NodeRef; onDismiss?: () => void }) {
-  const editor = useEditorStore();
   const file = node.file ?? undefined;
   const line = node.start_line ?? undefined;
 
@@ -408,14 +381,18 @@ function NodeRow({ node, onDismiss }: { node: NodeRef; onDismiss?: () => void })
     onDismiss?.();
   };
   const rewind = () => {
-    editor.openTraceTool("rewind", { identifier: node.identifier, file });
+    goToTrace({
+      kind: "tool",
+      tool: "rewind",
+      arg: { identifier: node.identifier, file },
+    });
     onDismiss?.();
   };
 
   const sig = node.signature?.trim();
   // Non-coder first: the plain-language name leads. The exact symbol, its kind,
   // and where it lives are demoted to a small dimmed detail line below.
-  const plain = capitalize(humanizeIdentifier(node.identifier)) || node.identifier;
+  const plain = sentenceCase(humanizeIdentifier(node.identifier)) || node.identifier;
   const kindWord = kindNoun(node.kind);
   const loc = file ? `${file}${line ? `:${line}` : ""}` : sig || null;
 
@@ -424,14 +401,14 @@ function NodeRow({ node, onDismiss }: { node: NodeRef; onDismiss?: () => void })
       <div className="flex items-center gap-2.5">
         <KindGlyph kind={node.kind} />
         <span
-          className="min-w-0 truncate text-[13px] font-medium text-text-1"
+          className="min-w-0 truncate text-base font-medium text-text-1"
           title={node.identifier}
         >
           {plain}
         </span>
         <ChangeBadge change={node.change} />
         {node.is_stub ? (
-          <RiskChip tone="amber" title="Looks unfinished — a TODO or placeholder">
+          <RiskChip tone="amber" title="Looks unfinished. A TODO or placeholder">
             unfinished
           </RiskChip>
         ) : null}
@@ -448,7 +425,7 @@ function NodeRow({ node, onDismiss }: { node: NodeRef; onDismiss?: () => void })
               type="button"
               onClick={openFile}
               title={`Open ${file}${line ? `:${line}` : ""}`}
-              className="text-[10.5px] text-text-4 hover:text-text-1"
+              className="text-xs text-text-4 hover:text-text-1"
             >
               Open
             </Button>
@@ -459,18 +436,18 @@ function NodeRow({ node, onDismiss }: { node: NodeRef; onDismiss?: () => void })
             type="button"
             onClick={rewind}
             title="Put this part back the way it was"
-            className="text-[10.5px] text-text-4 hover:text-text-1"
+            className="text-xs text-text-4 hover:text-text-1"
           >
             Rewind
           </Button>
         </div>
       </div>
       {/* Coder detail, demoted: kind · the exact symbol · where it lives. */}
-      <div className="mt-1 flex items-center gap-1.5 pl-[26px] text-[10.5px] text-text-4">
+      <div className="mt-1 flex items-center gap-1.5 pl-[26px] text-xs text-text-4">
         <span className="shrink-0 capitalize">{kindWord}</span>
         <span className="text-text-5">·</span>
         <code
-          className="shrink-0 rounded border border-line-soft bg-bg-2 px-1 py-px font-mono text-[10px] text-text-3"
+          className="shrink-0 rounded border border-line-soft bg-bg-2 px-1 py-px font-mono text-2xs text-text-3"
           title="The exact name in the code"
         >
           {node.identifier}
@@ -485,7 +462,7 @@ function NodeRow({ node, onDismiss }: { node: NodeRef; onDismiss?: () => void })
         ) : null}
       </div>
       {node.rationale ? (
-        <div className="mt-1.5 pl-[26px] text-[12px] text-text-2">
+        <div className="mt-1.5 pl-[26px] text-sm text-text-2">
           <StoryMarkdown compact>{node.rationale}</StoryMarkdown>
         </div>
       ) : null}
@@ -511,15 +488,15 @@ function SupportingChanges({
       <button
         type="button"
         onClick={() => setOpen((v) => !v)}
-        className="flex items-center gap-1.5 text-[11px] text-text-4 transition-colors hover:text-text-2"
+        className="flex items-center gap-1.5 text-xs text-text-4 transition-colors hover:text-text-2"
       >
-        <span className="font-mono text-[9px] leading-none">
+        <span className="font-mono text-2xs leading-none">
           {open ? "▾" : "▸"}
         </span>
         <span className="tabular-nums">
           {nodes.length} supporting change{nodes.length === 1 ? "" : "s"}
         </span>
-        <span className="text-text-5">— internal values, not new features</span>
+        <span className="text-text-5">. Internal values, not new features</span>
       </button>
       {open ? (
         <div className="mt-1.5 overflow-hidden rounded-lg border border-line-soft bg-bg-1">
@@ -560,9 +537,9 @@ function RecoverNote({ repoRoot, report }: { repoRoot: string; report: IntentRep
   }, [repoRoot, changed]);
 
   return (
-    <p className="text-[11px] leading-relaxed text-text-4">
+    <p className="text-xs leading-relaxed text-text-4">
       <span className="font-mono text-text-3">Time machine</span> puts one part of this
-      change back the way it was — just that part, nothing else. Aura keeps a copy
+      change back the way it was, just that part, nothing else. Aura keeps a copy
       of every file from before the AI touched it, so you can always undo.
       {count !== null && count > 0 ? (
         <>
@@ -579,7 +556,7 @@ function RecoverNote({ repoRoot, report }: { repoRoot: string; report: IntentRep
 
 function Centered({ children }: { children: ReactNode }) {
   return (
-    <div className="flex h-full items-center justify-center px-6 text-center text-[12.5px] text-text-4">
+    <div className="flex h-full items-center justify-center px-6 text-center text-base text-text-4">
       {children}
     </div>
   );
@@ -589,7 +566,7 @@ function Chip({ children, title }: { children: ReactNode; title?: string }) {
   return (
     <span
       title={title}
-      className="rounded border border-line-soft bg-bg-2 px-1.5 py-px text-[9.5px] uppercase tracking-wide text-text-3"
+      className="meta-tag"
     >
       {children}
     </span>
@@ -609,7 +586,7 @@ function RiskChip({
   return (
     <span
       title={title}
-      className="shrink-0 rounded px-1.5 py-px text-[9.5px]"
+      className="shrink-0 rounded px-1.5 py-px text-2xs"
       style={{
         color,
         background: `color-mix(in oklab, ${color} 12%, transparent)`,
@@ -630,7 +607,7 @@ function ChangeBadge({ change }: { change: NodeRef["change"] }) {
   const m = map[change];
   return (
     <span
-      className="shrink-0 rounded px-1.5 py-px text-[9.5px]"
+      className="shrink-0 rounded px-1.5 py-px text-2xs"
       style={{
         color: m.color,
         background: `color-mix(in oklab, ${m.color} 12%, transparent)`,
@@ -653,7 +630,7 @@ function KindGlyph({ kind }: { kind: string }) {
         ? "ƒ"
         : "•";
   return (
-    <span className="flex h-4 w-4 shrink-0 items-center justify-center rounded border border-line-soft bg-bg-2 font-mono text-[9px] text-text-4">
+    <span className="flex h-4 w-4 shrink-0 items-center justify-center rounded border border-line-soft bg-bg-2 font-mono text-2xs text-text-4">
       {label}
     </span>
   );

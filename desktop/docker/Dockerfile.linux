@@ -44,15 +44,17 @@ ENV PATH="/root/.cargo/bin:${PATH}"
 RUN curl -fsSL https://bun.sh/install | bash
 ENV PATH="/root/.bun/bin:${PATH}"
 
-# Node 20 (vite 7 needs >=18). The repo's `build` npm script and tauri's
-# beforeBuildCommand invoke node by the macOS Homebrew absolute path
-# (/opt/homebrew/bin/node); symlink a real node there so the pipeline runs on
-# Linux byte-for-byte identically without editing the shared build scripts.
+# Node 20 (vite 7 needs >=18). The `build` script runs vite through node rather
+# than through bun on purpose, so node has to be on PATH — but it is found by
+# name now. This used to symlink a real node onto /opt/homebrew/bin/node,
+# because the script named that macOS-Homebrew-on-Apple-Silicon path outright;
+# that made the image carry a fake Homebrew prefix to satisfy a path no Linux
+# machine has, and it meant a fresh clone could not build the app on an Intel
+# Mac (Homebrew lives at /usr/local there) or on any Linux host without the same
+# fake. The script asks for `node` now, so the symlink is gone with it.
 RUN curl -fsSL https://deb.nodesource.com/setup_20.x | bash - \
     && apt-get install -y --no-install-recommends nodejs \
-    && rm -rf /var/lib/apt/lists/* \
-    && mkdir -p /opt/homebrew/bin \
-    && ln -sf "$(command -v node)" /opt/homebrew/bin/node
+    && rm -rf /var/lib/apt/lists/*
 
 # AppImage tooling refuses to run FUSE inside an unprivileged container; this
 # env makes appimagetool self-extract instead of mounting.

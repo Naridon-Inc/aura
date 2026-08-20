@@ -91,6 +91,11 @@ pub struct ManagerSummary {
     /// history dropdown render where a session lives and lets callers
     /// scope the list to the open workspace.
     pub repo_root: Option<String>,
+    /// The machine this conversation's hands are on, or `None` for this
+    /// laptop. A list of chats about one project now spans several copies of
+    /// it, so a row that can't say where it runs is a row you have to open to
+    /// find out — and a surface that adopts one can't tell whether it belongs.
+    pub machine_id: Option<String>,
 }
 
 impl From<&ManagerSession> for ManagerSummary {
@@ -109,6 +114,7 @@ impl From<&ManagerSession> for ManagerSummary {
             task_count: s.tasks.len(),
             done_count: done,
             repo_root: s.projects.first().map(|p| p.root.clone()),
+            machine_id: s.machine_id.clone(),
         }
     }
 }
@@ -132,6 +138,10 @@ pub struct ManagerStartArgs {
     pub objective: String,
     pub projects: Vec<ProjectRef>,
     pub tasks: Vec<ManagerTaskSpec>,
+    /// Which connected machine this conversation's hands are on. Absent — the
+    /// overwhelming default — is a chat about the code on this disk.
+    #[serde(default)]
+    pub machine_id: Option<String>,
 }
 
 /// User-facing task spec used by `manager_start`. Stripped down compared
@@ -155,7 +165,7 @@ pub async fn manager_start(
     runtime: State<'_, ManagerRuntime>,
     args: ManagerStartArgs,
 ) -> Result<String, String> {
-    start_session(&app, &runtime, args)
+    start_session(&app, &runtime, args).await
 }
 
 /// Manager-from-picker entry point. The user picked "Aura Manager" in
@@ -166,23 +176,60 @@ pub async fn manager_start(
 /// queries answered via `aura ask`, objective-style messages routed
 /// through `aura plan_discover` to populate `tasks` and flip the
 /// session to Running.
+///
+/// `machine_id` names a connected machine when this is a conversation about
+/// code that lives over there. The brain still runs here — only its hands
+/// reach across — so the session, its transcript and its board stay on this
+/// laptop either way, and the two chats are the same chat.
+///
+/// `projects` is every project the conversation may be about. A chat used to be
+/// born with exactly one, which is right for "the chat about this repo" and was
+/// never right for Aura's own door: the control plane is about your projects,
+/// plural, and one that carries a single root has to be told about the others
+/// every time it is opened. `repo_root` still leads — it is the cwd the tools
+/// run in, and every surface that reads `projects.first()` means it — so an
+/// omitted or empty list is exactly the old behaviour.
 #[tauri::command]
 pub async fn manager_chat_start(
     app: AppHandle,
     runtime: State<'_, ManagerRuntime>,
     repo_root: String,
     prompt: String,
+    machine_id: Option<String>,
+    projects: Option<Vec<String>>,
 ) -> Result<String, String> {
-    let project = ProjectRef {
-        root: repo_root.clone(),
-        label: project_label(&repo_root),
-    };
     let args = ManagerStartArgs {
         objective: prompt,
-        projects: vec![project],
+        projects: project_refs(&repo_root, projects.unwrap_or_default()),
         tasks: vec![],
+        machine_id,
     };
-    start_session(&app, &runtime, args)
+    start_session(&app, &runtime, args).await
+}
+
+/// The session's projects, anchor first and no repeats.
+///
+/// Deduplicated on the same trailing-slash rule the rest of this file compares
+/// roots with, because `/a/b` and `/a/b/` reaching the board as two projects
+/// would push one conversation onto the cloud twice and list it twice beside
+/// itself. Blank entries are dropped rather than becoming a project with no
+/// name whose tools would run in the app's own launch directory.
+fn project_refs(anchor: &str, extra: Vec<String>) -> Vec<ProjectRef> {
+    let mut out: Vec<ProjectRef> = Vec::with_capacity(extra.len() + 1);
+    for root in std::iter::once(anchor.to_string()).chain(extra) {
+        let root = root.trim().to_string();
+        if root.is_empty() {
+            continue;
+        }
+        if out.iter().any(|p| same_root(&p.root, &root)) {
+            continue;
+        }
+        out.push(ProjectRef {
+            label: project_label(&root),
+            root,
+        });
+    }
+    out
 }
 
 /// Cross-agent continuity — resume a Claude Code / Gemini CLI conversation
@@ -206,7 +253,17 @@ pub async fn manager_import_agent_session(
     repo_root: String,
     agent_session_id: String,
 ) -> Result<String, String> {
-    let turns = crate::cmd_agent_history::read_agent_history(&agent_id, &repo_root, &agent_session_id)?;
+    let history_agent_id = agent_id.clone();
+    let history_repo_root = repo_root.clone();
+    let history_session_id = agent_session_id.clone();
+    let turns = crate::blocking::run(move || {
+        crate::cmd_agent_history::read_agent_history(
+            &history_agent_id,
+            &history_repo_root,
+            &history_session_id,
+        )
+    })
+    .await?;
     if turns.is_empty() {
         return Err(format!(
             "No {} transcript found for that session.",
@@ -249,8 +306,11 @@ pub async fn manager_import_agent_session(
         objective,
         projects: vec![project],
         tasks: vec![],
+        // An imported CLI transcript is a record of work that ran on this
+        // laptop; continuing it continues here.
+        machine_id: None,
     };
-    let id = start_session(&app, &runtime, args)?;
+    let id = start_session(&app, &runtime, args).await?;
 
     let mut mapped = map_preroll_turns(turns, &agent_id);
     if hidden > 0 {
@@ -276,18 +336,27 @@ pub async fn manager_import_agent_session(
                 saved_tokens: None,
                 input_tokens: None,
                 output_tokens: None,
+                model: None,
+                cost_usd: None,
+                cost_estimated: None,
             },
         );
     }
-    if let Some(live) = runtime.sessions.lock().unwrap().get(&id) {
+    let hydrated = if let Some(live) = runtime.sessions.lock().unwrap().get(&id) {
         let mut state = live.state.lock().unwrap();
         state.chat = mapped;
         // Leave status as `start_session` set it (AwaitingApproval) — the
         // same calm chat-only state `manager_chat_start` uses. The composer
         // still sends, `manager_chat` routes follow-ups, and the header dot
         // stays faint rather than pulsing "running" with nothing in flight.
-        persist::save(&state)?;
-        let _ = app.emit(&format!("manager:{id}"), &*state);
+        Some(state.clone())
+    } else {
+        None
+    };
+    if let Some(hydrated) = hydrated {
+        let to_save = hydrated.clone();
+        crate::blocking::run(move || persist::save(&to_save)).await?;
+        let _ = app.emit(&format!("manager:{id}"), &hydrated);
     }
     Ok(id)
 }
@@ -308,7 +377,7 @@ pub async fn manager_fork_session(
     // Snapshot the source under its lock: objective, project list, and the
     // chat prefix through the chosen turn. Drop the guard before starting the
     // new session so there's no nested-lock hazard.
-    let (objective, projects, prefix) = {
+    let (objective, projects, machine_id, prefix) = {
         let sessions = runtime.sessions.lock().unwrap();
         let live = sessions
             .get(&session_id)
@@ -318,6 +387,10 @@ pub async fn manager_fork_session(
         (
             state.objective.clone(),
             state.projects.clone(),
+            // A fork of a conversation about a machine is still about that
+            // machine. Dropping it would quietly move the branch home, where
+            // the same questions have different answers.
+            state.machine_id.clone(),
             state.chat[..end].to_vec(),
         )
     };
@@ -329,13 +402,20 @@ pub async fn manager_fork_session(
         objective,
         projects,
         tasks: vec![],
+        machine_id,
     };
-    let id = start_session(&app, &runtime, args)?;
-    if let Some(live) = runtime.sessions.lock().unwrap().get(&id) {
+    let id = start_session(&app, &runtime, args).await?;
+    let forked = if let Some(live) = runtime.sessions.lock().unwrap().get(&id) {
         let mut state = live.state.lock().unwrap();
         state.chat = prefix;
-        persist::save(&state)?;
-        let _ = app.emit(&format!("manager:{id}"), &*state);
+        Some(state.clone())
+    } else {
+        None
+    };
+    if let Some(forked) = forked {
+        let to_save = forked.clone();
+        crate::blocking::run(move || persist::save(&to_save)).await?;
+        let _ = app.emit(&format!("manager:{id}"), &forked);
     }
     Ok(id)
 }
@@ -485,6 +565,9 @@ fn map_preroll_turns(
             saved_tokens: None,
             input_tokens: None,
             output_tokens: None,
+            model: None,
+            cost_usd: None,
+            cost_estimated: None,
         });
     }
     out
@@ -508,7 +591,7 @@ fn project_label(root: &str) -> String {
         .to_string()
 }
 
-fn start_session(
+async fn start_session(
     app: &AppHandle,
     runtime: &State<'_, ManagerRuntime>,
     args: ManagerStartArgs,
@@ -541,8 +624,13 @@ fn start_session(
         })
         .collect();
 
-    let session = ManagerSession::new(id.clone(), args.objective, args.projects, tasks);
-    persist::save(&session)?;
+    let mut session = ManagerSession::new(id.clone(), args.objective, args.projects, tasks);
+    // Where this conversation's hands are. Set once, at birth, because a chat
+    // that changed machines mid-thread would have half its transcript about
+    // one copy of the code and half about another.
+    session.machine_id = args.machine_id;
+    let to_save = session.clone();
+    crate::blocking::run(move || persist::save(&to_save)).await?;
     let _ = app.emit(&format!("manager:{id}"), &session);
 
     // Best-effort: surface this session to aura-cloud so paired mobile
@@ -590,10 +678,7 @@ pub async fn manager_status(
     runtime: State<'_, ManagerRuntime>,
     session_id: String,
 ) -> Result<ManagerSession, String> {
-    if let Some(live) = runtime.sessions.lock().unwrap().get(&session_id) {
-        return Ok(live.state.lock().unwrap().clone());
-    }
-    persist::load(&session_id)
+    load_session(&runtime, &session_id).await
 }
 
 /// Bucket O — Subagent monitor probe. Returns the most recent
@@ -607,11 +692,7 @@ pub async fn manager_subagent_monitor(
     session_id: String,
     task_id: usize,
 ) -> Result<crate::manager::SubagentMonitorView, String> {
-    let session = if let Some(live) = runtime.sessions.lock().unwrap().get(&session_id) {
-        live.state.lock().unwrap().clone()
-    } else {
-        persist::load(&session_id)?
-    };
+    let session = load_session(&runtime, &session_id).await?;
     let task = session
         .task(task_id)
         .ok_or_else(|| format!("task {task_id} not found in session {session_id}"))?;
@@ -637,11 +718,7 @@ pub async fn manager_memory_health(
     /// keeps the Tauri surface independent of brain.rs internals.
     const CHAT_BUDGET: u32 = 150_000;
 
-    let session = if let Some(live) = runtime.sessions.lock().unwrap().get(&session_id) {
-        live.state.lock().unwrap().clone()
-    } else {
-        persist::load(&session_id)?
-    };
+    let session = load_session(&runtime, &session_id).await?;
     Ok(crate::manager::tokens::memory_health(&session.chat, CHAT_BUDGET))
 }
 
@@ -663,40 +740,45 @@ pub async fn manager_list(
     // the same directory as the requested root. Sessions with no projects
     // are workspace-agnostic scratch chats — excluded from a scoped list so
     // they can't leak across workspaces.
-    let belongs = |s: &ManagerSession| -> bool {
-        match &repo_root {
-            None => true,
-            Some(root) => s.projects.iter().any(|p| same_root(&p.root, root)),
-        }
-    };
-
-    let mut summaries = vec![];
     let runtime_ids: Vec<String> = runtime.sessions.lock().unwrap().keys().cloned().collect();
+    let mut live_sessions = Vec::new();
     for id in &runtime_ids {
         let live = {
             let lock = runtime.sessions.lock().unwrap();
             lock.get(id).map(|l| l.state.clone())
         };
         if let Some(state) = live {
-            let s = state.lock().unwrap();
-            if belongs(&s) {
-                summaries.push(ManagerSummary::from(&*s));
-            }
+            live_sessions.push(state.lock().unwrap().clone());
         }
     }
-    let in_runtime: std::collections::HashSet<String> = runtime_ids.into_iter().collect();
-    for id in persist::list_session_ids() {
-        if in_runtime.contains(&id) {
-            continue;
-        }
-        if let Ok(s) = persist::load(&id) {
-            if belongs(&s) {
-                summaries.push(ManagerSummary::from(&s));
+    crate::blocking::run(move || {
+        let belongs = |s: &ManagerSession| -> bool {
+            match &repo_root {
+                None => true,
+                Some(root) => s.projects.iter().any(|p| same_root(&p.root, root)),
+            }
+        };
+        let mut summaries = Vec::new();
+        for session in live_sessions {
+            if belongs(&session) {
+                summaries.push(ManagerSummary::from(&session));
             }
         }
-    }
-    summaries.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
-    Ok(summaries)
+        let in_runtime: std::collections::HashSet<String> = runtime_ids.into_iter().collect();
+        for id in persist::list_session_ids() {
+            if in_runtime.contains(&id) {
+                continue;
+            }
+            if let Ok(session) = persist::load(&id) {
+                if belongs(&session) {
+                    summaries.push(ManagerSummary::from(&session));
+                }
+            }
+        }
+        summaries.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
+        Ok(summaries)
+    })
+    .await
 }
 
 /// One global conversation-search result. Unlike `manager_list`, this scans
@@ -781,30 +863,34 @@ pub async fn manager_search(
     let limit = limit.unwrap_or(40).clamp(1, 100);
     let runtime_ids: std::collections::HashSet<String> =
         runtime.sessions.lock().unwrap().keys().cloned().collect();
-    let mut sessions: Vec<ManagerSession> = runtime
+    let live_sessions: Vec<ManagerSession> = runtime
         .sessions
         .lock()
         .unwrap()
         .values()
         .map(|live| live.state.lock().unwrap().clone())
         .collect();
-    for id in persist::list_session_ids() {
-        if !runtime_ids.contains(&id) {
-            if let Ok(session) = persist::load(&id) {
-                sessions.push(session);
+    crate::blocking::run(move || {
+        let mut sessions = live_sessions;
+        for id in persist::list_session_ids() {
+            if !runtime_ids.contains(&id) {
+                if let Ok(session) = persist::load(&id) {
+                    sessions.push(session);
+                }
             }
         }
-    }
-    sessions.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
-    let mut hits = Vec::new();
-    for session in sessions {
-        hits.extend(session_search_hits(&session, &query_lower));
-        if hits.len() >= limit {
-            break;
+        sessions.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
+        let mut hits = Vec::new();
+        for session in sessions {
+            hits.extend(session_search_hits(&session, &query_lower));
+            if hits.len() >= limit {
+                break;
+            }
         }
-    }
-    hits.truncate(limit);
-    Ok(hits)
+        hits.truncate(limit);
+        Ok(hits)
+    })
+    .await
 }
 
 /// Replay a native Aura chat session as the same `StreamEvent` stream the
@@ -828,11 +914,7 @@ pub async fn manager_load_transcript(
 ) -> Result<Vec<crate::cmd_agent_stream::StreamEvent>, String> {
     use crate::cmd_agent_stream::StreamEvent;
 
-    let session = if let Some(live) = runtime.sessions.lock().unwrap().get(&session_id) {
-        live.state.lock().unwrap().clone()
-    } else {
-        persist::load(&session_id)?
-    };
+    let session = load_session(&runtime, &session_id).await?;
 
     let mut events: Vec<StreamEvent> = Vec::new();
     let mut turn_seq: u64 = 0;
@@ -1041,11 +1123,7 @@ pub async fn manager_session_changeset(
 ) -> Result<crate::cmd_aura::IntentChangeset, String> {
     use crate::cmd_aura::{IntentChangeset, IntentChangesetFile};
 
-    let session = if let Some(live) = runtime.sessions.lock().unwrap().get(&session_id) {
-        live.state.lock().unwrap().clone()
-    } else {
-        persist::load(&session_id)?
-    };
+    let session = load_session(&runtime, &session_id).await?;
 
     // Distinct edited paths in first-touch order.
     let mut seen = std::collections::HashSet::new();
@@ -1067,40 +1145,44 @@ pub async fn manager_session_changeset(
         return Ok(IntentChangeset::default());
     }
 
-    let base = earliest_session_baseline(&repo_root, &session_id);
-    let mut files = Vec::with_capacity(paths.len());
-    for abs in paths {
-        // Stats need the absolute path (the `.exists()` Added/Deleted probe is
-        // CWD-independent only when absolute), but the changeset stores a
-        // repo-relative path to match the intent-log changesets the Changes
-        // tree + diff view already render (`src/lib/x.ts`, not the full abs).
-        let (status, additions, deletions) =
-            session_file_stats(&repo_root, base.as_deref(), &abs);
-        // A no-op edit (wrote identical bytes) leaves nothing to show; skip it
-        // so the Changes count reflects real change, not tool invocations.
-        if status == "M" && additions.unwrap_or(0) == 0 && deletions.unwrap_or(0) == 0 {
-            continue;
+    crate::blocking::run(move || {
+        let base = earliest_session_baseline(&repo_root, &session_id);
+        let mut files = Vec::with_capacity(paths.len());
+        for abs in paths {
+            // Stats need the absolute path (the `.exists()` Added/Deleted probe is
+            // CWD-independent only when absolute), but the changeset stores a
+            // repo-relative path to match the intent-log changesets the Changes
+            // tree + diff view already render (`src/lib/x.ts`, not the full abs).
+            let (status, additions, deletions) =
+                session_file_stats(&repo_root, base.as_deref(), &abs);
+            // A no-op edit (wrote identical bytes) leaves nothing to show; skip it
+            // so the Changes count reflects real change, not tool invocations.
+            if status == "M" && additions.unwrap_or(0) == 0 && deletions.unwrap_or(0) == 0 {
+                continue;
+            }
+            let rel = std::path::Path::new(&abs)
+                .strip_prefix(&repo_root)
+                .map(|r| r.to_string_lossy().into_owned())
+                .unwrap_or_else(|_| abs.clone());
+            files.push(IntentChangesetFile {
+                path: rel,
+                status,
+                additions,
+                deletions,
+                symbols: Vec::new(),
+                commit: None,
+                base: base.clone(),
+                remote_only: false,
+            });
         }
-        let rel = std::path::Path::new(&abs)
-            .strip_prefix(&repo_root)
-            .map(|r| r.to_string_lossy().into_owned())
-            .unwrap_or_else(|_| abs.clone());
-        files.push(IntentChangesetFile {
-            path: rel,
-            status,
-            additions,
-            deletions,
-            symbols: Vec::new(),
-            commit: None,
-            base: base.clone(),
-        });
-    }
-    Ok(IntentChangeset {
-        files,
-        block_id: None,
-        source: Some("manager_session".into()),
-        captured_at: None,
+        Ok(IntentChangeset {
+            files,
+            block_id: None,
+            source: Some("manager_session".into()),
+            captured_at: None,
+        })
     })
+    .await
 }
 
 #[tauri::command]
@@ -1112,8 +1194,9 @@ pub async fn manager_resume(
     mutate(&runtime, &session_id, |s| {
         s.status = ManagerStatus::Running;
         s.push_ribbon(RibbonEvent::Resumed);
-    })?;
-    save_and_kick(&app, &runtime, &session_id);
+    })
+    .await?;
+    save_and_kick(&app, &runtime, &session_id).await;
     Ok(())
 }
 
@@ -1126,8 +1209,9 @@ pub async fn manager_pause(
     mutate(&runtime, &session_id, |s| {
         s.status = ManagerStatus::Paused;
         s.push_ribbon(RibbonEvent::Paused);
-    })?;
-    save_and_kick(&app, &runtime, &session_id);
+    })
+    .await?;
+    save_and_kick(&app, &runtime, &session_id).await;
     Ok(())
 }
 
@@ -1140,8 +1224,9 @@ pub async fn manager_cancel(
     mutate(&runtime, &session_id, |s| {
         s.status = ManagerStatus::Cancelled;
         s.push_ribbon(RibbonEvent::Cancelled);
-    })?;
-    save_and_kick(&app, &runtime, &session_id);
+    })
+    .await?;
+    save_and_kick(&app, &runtime, &session_id).await;
     // Drop the live entry; the loop sees Cancelled status and exits.
     runtime.sessions.lock().unwrap().remove(&session_id);
     Ok(())
@@ -1180,8 +1265,9 @@ pub async fn manager_override(
             }
         }
         s.push_ribbon(RibbonEvent::ManualOverride { task_id, mode });
-    })?;
-    save_and_kick(&app, &runtime, &session_id);
+    })
+    .await?;
+    save_and_kick(&app, &runtime, &session_id).await;
     Ok(())
 }
 
@@ -1203,8 +1289,9 @@ pub async fn manager_complete_manual(
             t.summary = Some(summary);
             t.completed_at = Some(now_secs());
         }
-    })?;
-    save_and_kick(&app, &runtime, &session_id);
+    })
+    .await?;
+    save_and_kick(&app, &runtime, &session_id).await;
     Ok(())
 }
 
@@ -1249,8 +1336,9 @@ pub async fn manager_rate_task(
                 skill.user_rating = Some(rating);
             }
         }
-    })?;
-    save_and_kick(&app, &runtime, &session_id);
+    })
+    .await?;
+    save_and_kick(&app, &runtime, &session_id).await;
     Ok(())
 }
 
@@ -1283,8 +1371,9 @@ pub async fn manager_override_todo_agent(
                 todo.agent = Some(agent_id.clone());
             }
         }
-    })?;
-    save_and_kick(&app, &runtime, &session_id);
+    })
+    .await?;
+    save_and_kick(&app, &runtime, &session_id).await;
     Ok(())
 }
 
@@ -1300,8 +1389,8 @@ pub async fn manager_append_chat(
     role: ChatRole,
     text: String,
 ) -> Result<(), String> {
-    mutate(&runtime, &session_id, |s| chat::append(s, role, text.clone()))?;
-    save_and_kick(&app, &runtime, &session_id);
+    mutate(&runtime, &session_id, |s| chat::append(s, role, text.clone())).await?;
+    save_and_kick(&app, &runtime, &session_id).await;
     ensure_cloud_session_pushed(&runtime, &session_id);
     ensure_cloud_inbox_poller(&app, &runtime, &session_id);
     crate::cloud_session_sync::spawn_push_message(
@@ -1515,11 +1604,16 @@ async fn manager_chat_impl(
             s.chat.len().saturating_sub(1),
             s.projects.first().map(|p| p.root.clone()),
         )
-    })?;
-    if let Some(root) = project_root.as_ref() {
-        capture_turn_baseline(root, &session_id, new_turn_index);
+    })
+    .await?;
+    if let Some(root) = project_root.clone() {
+        let baseline_session_id = session_id.clone();
+        crate::blocking::run(move || {
+            capture_turn_baseline(&root, &baseline_session_id, new_turn_index)
+        })
+        .await;
     }
-    save_and_kick(&app, &runtime, &session_id);
+    save_and_kick(&app, &runtime, &session_id).await;
     if push_to_cloud {
         ensure_cloud_session_pushed(&runtime, &session_id);
         ensure_cloud_inbox_poller(&app, &runtime, &session_id);
@@ -1573,7 +1667,8 @@ pub async fn manager_chat_edit_resend(
             return None;
         }
         s.projects.first().map(|p| p.root.clone())
-    })?;
+    })
+    .await?;
 
     // Full-tree restore to the git baseline recorded for this exact turn.
     // The baseline is the working tree as it stood when the message was
@@ -1582,18 +1677,27 @@ pub async fn manager_chat_edit_resend(
     // code state — every tracked file across the repo, not the snapshot
     // subset the old path walked. Untracked files and the `aura`
     // submodule are left untouched (see `restore_tree_to_baseline`).
-    let mut restored = false;
-    if restore_code {
-        if let Some(root) = project_root.as_ref() {
-            match restore_tree_to_baseline(root, &session_id, turn_index) {
-                Ok(true) => restored = true,
-                Ok(false) => {}
+    let restored = if restore_code {
+        if let Some(root) = project_root.clone() {
+            let restore_session_id = session_id.clone();
+            match crate::blocking::run(move || {
+                restore_tree_to_baseline(&root, &restore_session_id, turn_index)
+            })
+            .await
+            {
+                Ok(true) => true,
+                Ok(false) => false,
                 Err(e) => {
                     eprintln!("aura-shell: edit-resend full restore failed: {e}");
+                    false
                 }
             }
+        } else {
+            false
         }
-    }
+    } else {
+        false
+    };
     mutate(&runtime, &session_id, move |s| {
         if turn_index < s.chat.len() {
             s.chat.truncate(turn_index);
@@ -1606,14 +1710,19 @@ pub async fn manager_chat_edit_resend(
         if matches!(s.status, ManagerStatus::AwaitingApproval | ManagerStatus::Paused) {
             s.status = ManagerStatus::Running;
         }
-    })?;
+    })
+    .await?;
     // The resent message becomes the new turn at `turn_index`. Capture a
     // fresh baseline for it so a later edit-resend back to *this* message
     // also reverts the whole tree, not a subset.
-    if let Some(root) = project_root.as_ref() {
-        capture_turn_baseline(root, &session_id, turn_index);
+    if let Some(root) = project_root {
+        let baseline_session_id = session_id.clone();
+        crate::blocking::run(move || {
+            capture_turn_baseline(&root, &baseline_session_id, turn_index)
+        })
+        .await;
     }
-    save_and_kick(&app, &runtime, &session_id);
+    save_and_kick(&app, &runtime, &session_id).await;
     if restored {
         let _ = app.emit(
             &format!("manager-stream:{session_id}"),
@@ -1961,8 +2070,9 @@ pub async fn manager_decide_plan(
                 s.pending_plan = None;
             }
         }
-    })?;
-    save_and_kick(&app, &runtime, &session_id);
+    })
+    .await?;
+    save_and_kick(&app, &runtime, &session_id).await;
 
     // Now the slow work — the user has already seen the acknowledgement.
     let action = if is_build {
@@ -2023,7 +2133,7 @@ pub async fn manager_decide_plan(
                 None => format!("Plan built: {title}"),
             };
             tokio::spawn(async move {
-                let _ = tokio::process::Command::new("aura")
+                let _ = tokio::process::Command::new(crate::agent_event_listener::resolve_aura_bin())
                     .args(["msg", "send", &body])
                     .output()
                     .await;
@@ -2272,7 +2382,7 @@ async fn attach_goal(
         return;
     }
     let task_ref = format!("AURA-{task_seq}");
-    let mut cmd = tokio::process::Command::new("aura");
+    let mut cmd = tokio::process::Command::new(crate::agent_event_listener::resolve_aura_bin());
     cmd.current_dir(repo_root)
         .args(["goals", "add", &text, "--task", &task_ref]);
     for c in checks {
@@ -2337,8 +2447,9 @@ pub async fn manager_approve_plan(
     let now = crate::manager::now_secs();
     let approval = mutate_take(&runtime, &session_id, |s| {
         apply_plan_approval(s, &plan_id, &approver, now)
-    })??;
-    save_and_kick(&app, &runtime, &session_id);
+    })
+    .await??;
+    save_and_kick(&app, &runtime, &session_id).await;
     Ok(approval)
 }
 
@@ -2419,7 +2530,12 @@ async fn mint_a2a_tasks_for_plan(
     plan: &PendingPlan,
     project_root: Option<&str>,
 ) -> MintResult {
-    let branch = project_root.and_then(detect_current_branch);
+    let branch = if let Some(root) = project_root {
+        let root = root.to_string();
+        crate::blocking::run(move || detect_current_branch(&root)).await
+    } else {
+        None
+    };
     let plan_acceptance = plan
         .objective
         .as_deref()
@@ -2808,7 +2924,7 @@ async fn create_a2a_task(args: CreateArgs) -> Option<String> {
     }
     let metadata_str = serde_json::Value::Object(metadata_obj).to_string();
 
-    let mut cmd = tokio::process::Command::new("aura");
+    let mut cmd = tokio::process::Command::new(crate::agent_event_listener::resolve_aura_bin());
     cmd.args([
         "a2a-task",
         "create",
@@ -2914,7 +3030,7 @@ async fn snapshot_zones_pre_dispatch(
     if expanded.is_empty() {
         return Vec::new();
     }
-    let mut cmd = tokio::process::Command::new("aura");
+    let mut cmd = tokio::process::Command::new(crate::agent_event_listener::resolve_aura_bin());
     cmd.current_dir(project_root)
         .arg("snapshot-file")
         .arg("--trigger")
@@ -3036,7 +3152,7 @@ pub async fn manager_answer_question(
                 // as one grouped element (Cursor parity), not an
                 // orphaned answer bubble.
                 let display = if answer.len() > 200 {
-                    format!("{}…", &answer[..199])
+                    format!("{}…", crate::text::clip(&answer, 199))
                 } else {
                     answer.clone()
                 };
@@ -3061,9 +3177,10 @@ pub async fn manager_answer_question(
         } else {
             None
         }
-    })?
+    })
+    .await?
     .ok_or_else(|| "no matching pending question".to_string())?;
-    save_and_kick(&app, &runtime, &session_id);
+    save_and_kick(&app, &runtime, &session_id).await;
 
     if consumed.from_cli {
         // CLI bridge path — resolve the socket waiter so `aura ask-user`
@@ -3163,8 +3280,9 @@ pub async fn manager_set_tasks(
             s.status = ManagerStatus::Running;
             s.push_ribbon(RibbonEvent::Resumed);
         }
-    })?;
-    save_and_kick(&app, &runtime, &session_id);
+    })
+    .await?;
+    save_and_kick(&app, &runtime, &session_id).await;
     Ok(())
 }
 
@@ -3183,11 +3301,7 @@ pub async fn manager_brain_info(
     runtime: State<'_, ManagerRuntime>,
     session_id: String,
 ) -> Result<Option<BrainBackendInfo>, String> {
-    let session = if let Some(live) = runtime.sessions.lock().unwrap().get(&session_id) {
-        live.state.lock().unwrap().clone()
-    } else {
-        persist::load(&session_id)?
-    };
+    let session = load_session(&runtime, &session_id).await?;
     Ok(session.brain_backend.as_ref().map(|b| BrainBackendInfo {
         id: b.id(),
         label: b.label(),
@@ -3199,10 +3313,13 @@ pub async fn manager_brain_info(
 /// what they're getting before sending a message.
 #[tauri::command]
 pub async fn manager_brain_detect() -> Result<Option<BrainBackendInfo>, String> {
-    Ok(brain::BrainBackend::detect().map(|b| BrainBackendInfo {
-        id: b.id(),
-        label: b.label(),
-    }))
+    crate::blocking::run(|| {
+        Ok(brain::BrainBackend::detect().map(|b| BrainBackendInfo {
+            id: b.id(),
+            label: b.label(),
+        }))
+    })
+    .await
 }
 
 /// WW-B1 — set (or clear) this session's mid-conversation brain override.
@@ -3236,8 +3353,9 @@ pub async fn manager_set_brain_override(
     }
     mutate(&runtime, &session_id, |s| {
         s.brain_override = normalized.clone();
-    })?;
-    save_and_kick(&app, &runtime, &session_id);
+    })
+    .await?;
+    save_and_kick(&app, &runtime, &session_id).await;
     Ok(())
 }
 
@@ -3251,11 +3369,7 @@ pub async fn manager_preview_prompt(
     session_id: String,
     task_id: usize,
 ) -> Result<String, String> {
-    let session = if let Some(live) = runtime.sessions.lock().unwrap().get(&session_id) {
-        live.state.lock().unwrap().clone()
-    } else {
-        persist::load(&session_id)?
-    };
+    let session = load_session(&runtime, &session_id).await?;
     let task = session
         .task(task_id)
         .ok_or_else(|| format!("task {task_id} not found"))?;
@@ -3264,11 +3378,26 @@ pub async fn manager_preview_prompt(
 
 // ── Internals ──────────────────────────────────────────────────────────
 
-fn mutate<F>(runtime: &State<'_, ManagerRuntime>, session_id: &str, f: F) -> Result<(), String>
+async fn load_session(
+    runtime: &State<'_, ManagerRuntime>,
+    session_id: &str,
+) -> Result<ManagerSession, String> {
+    if let Some(live) = runtime.sessions.lock().unwrap().get(session_id) {
+        return Ok(live.state.lock().unwrap().clone());
+    }
+    let session_id = session_id.to_string();
+    crate::blocking::run(move || persist::load(&session_id)).await
+}
+
+async fn mutate<F>(
+    runtime: &State<'_, ManagerRuntime>,
+    session_id: &str,
+    f: F,
+) -> Result<(), String>
 where
     F: FnOnce(&mut ManagerSession),
 {
-    let state = ensure_attached(runtime, session_id)?;
+    let state = ensure_attached(runtime, session_id).await?;
     let mut s = state.lock().unwrap();
     f(&mut s);
     s.touch();
@@ -3279,7 +3408,7 @@ where
 /// caller needs to extract state during the same lock the mutation
 /// happens under (e.g. take pending_question + return it for spawn-after-
 /// release).
-fn mutate_take<F, R>(
+async fn mutate_take<F, R>(
     runtime: &State<'_, ManagerRuntime>,
     session_id: &str,
     f: F,
@@ -3287,14 +3416,18 @@ fn mutate_take<F, R>(
 where
     F: FnOnce(&mut ManagerSession) -> R,
 {
-    let state = ensure_attached(runtime, session_id)?;
+    let state = ensure_attached(runtime, session_id).await?;
     let mut s = state.lock().unwrap();
     let out = f(&mut s);
     s.touch();
     Ok(out)
 }
 
-fn save_and_kick(app: &AppHandle, runtime: &State<'_, ManagerRuntime>, session_id: &str) {
+async fn save_and_kick(
+    app: &AppHandle,
+    runtime: &State<'_, ManagerRuntime>,
+    session_id: &str,
+) {
     let (state, kick_tx) = {
         let lock = runtime.sessions.lock().unwrap();
         let Some(live) = lock.get(session_id) else {
@@ -3303,7 +3436,11 @@ fn save_and_kick(app: &AppHandle, runtime: &State<'_, ManagerRuntime>, session_i
         (live.state.clone(), live.kick_tx.clone())
     };
     let snapshot = state.lock().unwrap().clone();
-    let _ = persist::save(&snapshot);
+    let to_save = snapshot.clone();
+    crate::blocking::run(move || {
+        let _ = persist::save(&to_save);
+    })
+    .await;
     let _ = app.emit(&format!("manager:{session_id}"), &snapshot);
     let _ = kick_tx.send(());
 }
@@ -3314,14 +3451,39 @@ fn save_and_kick(app: &AppHandle, runtime: &State<'_, ManagerRuntime>, session_i
 /// restart — the user's first chat send populates the runtime instead of
 /// erroring with "session not running". Returns the live `Arc<Mutex>`
 /// state so the caller can mutate without re-locking the runtime map.
-fn ensure_attached(
+/// Put `live` in the map unless another caller attached the same session while
+/// we were reading it off disk. Returns the state every caller has to share,
+/// and whether we are the one that must start its pump.
+///
+/// Loading a session from disk is an await point, so two commands naming the
+/// same not-yet-attached session can both miss the map and both build a
+/// `LiveSession`. Inserting unconditionally evicts the first one: its caller
+/// goes on mutating an `Arc` nothing else can reach, so its writes are never
+/// seen or persisted, and two `loop_session` pumps end up driving one session
+/// and emitting its events twice.
+fn attach_or_adopt(
+    sessions: &mut HashMap<String, LiveSession>,
+    session_id: &str,
+    live: LiveSession,
+) -> (Arc<Mutex<ManagerSession>>, bool) {
+    if let Some(existing) = sessions.get(session_id) {
+        return (existing.state.clone(), false);
+    }
+    let state = live.state.clone();
+    sessions.insert(session_id.to_string(), live);
+    (state, true)
+}
+
+async fn ensure_attached(
     runtime: &State<'_, ManagerRuntime>,
     session_id: &str,
 ) -> Result<Arc<Mutex<ManagerSession>>, String> {
     if let Some(live) = runtime.sessions.lock().unwrap().get(session_id) {
         return Ok(live.state.clone());
     }
-    let session = persist::load(session_id)
+    let load_session_id = session_id.to_string();
+    let session = crate::blocking::run(move || persist::load(&load_session_id))
+        .await
         .map_err(|e| format!("session {session_id} not found on disk: {e}"))?;
     let (kick_tx, kick_rx) = mpsc::unbounded_channel();
     let live = LiveSession {
@@ -3329,13 +3491,14 @@ fn ensure_attached(
         in_flight: Arc::new(Mutex::new(HashMap::new())),
         kick_tx,
     };
-    let state = live.state.clone();
     let in_flight = live.in_flight.clone();
-    runtime
-        .sessions
-        .lock()
-        .unwrap()
-        .insert(session_id.to_string(), live);
+    let (state, attached) = {
+        let mut sessions = runtime.sessions.lock().unwrap();
+        attach_or_adopt(&mut sessions, session_id, live)
+    };
+    if !attached {
+        return Ok(state);
+    }
     let app = runtime.app_handle.lock().unwrap().clone();
     let sid = session_id.to_string();
     if let Some(app) = app {
@@ -4295,6 +4458,101 @@ mod plan_approval_tests {
         let plan = s.pending_plan.as_ref().unwrap();
         assert_eq!(plan.approved_by.as_deref(), Some("bob"));
         assert_eq!(plan.approved_at, Some(200));
+    }
+}
+
+#[cfg(test)]
+mod attach_tests {
+    use super::{attach_or_adopt, LiveSession};
+    use crate::manager::ManagerSession;
+    use std::collections::HashMap;
+    use std::sync::{Arc, Mutex};
+    use tokio::sync::mpsc;
+
+    /// A freshly loaded session, the way `ensure_attached` builds one.
+    fn live(id: &str) -> LiveSession {
+        let (kick_tx, _kick_rx) = mpsc::unbounded_channel();
+        LiveSession {
+            state: Arc::new(Mutex::new(ManagerSession::new(
+                id.to_string(),
+                "objective".to_string(),
+                Vec::new(),
+                Vec::new(),
+            ))),
+            in_flight: Arc::new(Mutex::new(HashMap::new())),
+            kick_tx,
+        }
+    }
+
+    #[test]
+    fn the_first_caller_attaches_and_owns_the_pump() {
+        let mut sessions = HashMap::new();
+        let mine = live("s1");
+        let mine_state = mine.state.clone();
+        let (state, attached) = attach_or_adopt(&mut sessions, "s1", mine);
+        assert!(attached, "nothing was attached, so this caller starts the pump");
+        assert!(Arc::ptr_eq(&state, &mine_state));
+        assert!(sessions.contains_key("s1"));
+    }
+
+    #[test]
+    fn a_caller_that_lost_the_race_adopts_the_attached_session() {
+        // Both callers missed the map and both read the session off disk; the
+        // other one got back first.
+        let mut sessions = HashMap::new();
+        let winner = live("s1");
+        let winning_state = winner.state.clone();
+        sessions.insert("s1".to_string(), winner);
+
+        let (state, attached) = attach_or_adopt(&mut sessions, "s1", live("s1"));
+        assert!(!attached, "someone else is already pumping this session");
+        assert!(
+            Arc::ptr_eq(&state, &winning_state),
+            "must hand back the state the winner attached, not our own copy",
+        );
+    }
+
+    #[test]
+    fn losing_the_race_leaves_the_attached_session_in_place() {
+        let mut sessions = HashMap::new();
+        let winner = live("s1");
+        let winning_state = winner.state.clone();
+        sessions.insert("s1".to_string(), winner);
+        attach_or_adopt(&mut sessions, "s1", live("s1"));
+        assert!(
+            Arc::ptr_eq(&sessions["s1"].state, &winning_state),
+            "the loser must not evict the session everyone else can see",
+        );
+    }
+
+    #[test]
+    fn what_the_loser_writes_reaches_the_caller_that_won() {
+        // The failure this prevents is a lost write. The winner is still
+        // holding its own `Arc` and goes on reading it; if the loser is handed
+        // a different `Arc`, everything the loser does is stranded there.
+        // Asserting through the map instead would prove nothing — an
+        // unconditional insert puts the loser's copy in the map, so the map
+        // agrees with itself either way.
+        let mut sessions = HashMap::new();
+        let winner = live("s1");
+        let winners_handle = winner.state.clone();
+        sessions.insert("s1".to_string(), winner);
+
+        let (state, _) = attach_or_adopt(&mut sessions, "s1", live("s1"));
+        state.lock().unwrap().objective = "changed".to_string();
+        assert_eq!(
+            winners_handle.lock().unwrap().objective, "changed",
+            "a write that never reaches the caller that won is a lost write",
+        );
+    }
+
+    #[test]
+    fn a_different_session_still_attaches() {
+        let mut sessions = HashMap::new();
+        sessions.insert("s1".to_string(), live("s1"));
+        let (_, attached) = attach_or_adopt(&mut sessions, "s2", live("s2"));
+        assert!(attached);
+        assert_eq!(sessions.len(), 2);
     }
 }
 

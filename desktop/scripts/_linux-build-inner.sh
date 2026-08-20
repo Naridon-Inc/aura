@@ -9,16 +9,124 @@ MODE="${MODE:-probe}"
 cd /work/aura-shell
 echo "── inner: arch=$ARCH mode=$MODE  rustc=$(rustc --version)  bun=$(bun --version)"
 
-# tauri-build embeds the frontend dist at compile time; make sure it exists so
-# even a `probe` Rust compile has assets to point at. Reuse a prior dist if the
-# mounted repo already carries one; otherwise build it.
-if [ ! -d /work/aura-shell/dist ] || [ -z "$(ls -A /work/aura-shell/dist 2>/dev/null)" ]; then
-  echo "── frontend dist missing — installing JS deps + building"
+# dist is a named volume mounted INSIDE the /work bind mount. That nesting is
+# fragile: if a process on the host rewrites aura-shell/dist while this container
+# runs — which a concurrent macOS `tauri build` does, because its
+# beforeBuildCommand is the same `bun run build` and vite empties outDir — the
+# nested mount stops covering the path, and everything this container writes to
+# dist lands on the HOST instead of the volume.
+#
+# It fails silently and looks like success from in here: the build writes dist,
+# the freshness re-check reads back the very files it just wrote, and the
+# container exits 0. The next container mounts the volume cleanly, sees the dist
+# from hours ago, and refuses to compile. That is 0.19.33's Linux pair failing
+# twice with "frontend dist is older than /work/aura-shell/src" seconds after
+# reporting "frontend dist rebuilt", and near-certainly also the earlier failure
+# where tauri could not read 68 of 149 assets mid-compile — the host build was
+# emptying dist underneath it.
+#
+# One stat call tells us which we have. A live volume is a different device from
+# the bind mount; the host's own dist directory is the same device.
+assert_dist_is_the_volume() {
+  local when="$1" dev_dist dev_work
+  dev_dist="$(stat -c %d /work/aura-shell/dist 2>/dev/null || echo x)"
+  dev_work="$(stat -c %d /work/aura-shell 2>/dev/null || echo y)"
+  if [ "$dev_dist" = "$dev_work" ]; then
+    echo "✗ $when: /work/aura-shell/dist is not the aura-linux-dist volume —"
+    echo "  it resolves to the host's own dist directory (same device as /work)."
+    echo "  Writing there corrupts the host checkout and leaves the volume stale."
+    echo "  Cause: something on the host rewrote aura-shell/dist while this"
+    echo "  container was running. Do not run a macOS and a Linux build of the"
+    echo "  same checkout at the same time — they share that directory."
+    exit 5
+  fi
+}
+assert_dist_is_the_volume "at startup"
+
+# tauri-build embeds the frontend dist at compile time, so whatever sits in dist
+# when the Rust compile starts is the UI this release ships — there is no later
+# step that would notice it is out of date.
+#
+# dist is a container-private named volume (see build-linux.sh), NOT the host's
+# dist: the host cannot refresh it, and it survives between builds. So presence
+# is not freshness. Testing only that the directory was non-empty meant a dist
+# left behind by an earlier build was reused silently — 0.19.33's first Linux
+# pair embedded a frontend built before that release's own What's New existed,
+# while macOS (which runs tauri's beforeBuildCommand) embedded the current one.
+# Two platforms of one release, shipping different UI, with nothing in the log
+# except "reusing existing frontend dist".
+#
+# Compare the stamp against the frontend inputs from the bind-mounted repo and
+# rebuild when any of them is newer.
+DIST_STAMP=/work/aura-shell/dist/index.html
+FRONTEND_INPUTS=(
+  /work/aura-shell/src
+  /work/aura-shell/public
+  /work/aura-shell/index.html
+  /work/aura-shell/package.json
+  /work/aura-shell/bun.lock
+  /work/aura-shell/vite.config.ts
+)
+
+# Prints the first frontend input newer than the stamp, or nothing if dist is
+# current. -quit stops at the first hit, so this stays cheap on a large src/.
+newer_than_dist() {
+  find "${FRONTEND_INPUTS[@]}" -newer "$DIST_STAMP" -print -quit 2>/dev/null || true
+}
+
+dist_reason=""
+if [ ! -s "$DIST_STAMP" ]; then
+  dist_reason="frontend dist missing"
+else
+  stale_src="$(newer_than_dist)"
+  if [ -n "$stale_src" ]; then
+    dist_reason="frontend dist is older than $stale_src"
+  fi
+fi
+
+# `dist` mode exists solely so the rebuild happens in a DIFFERENT container from
+# the compile. A container that writes dist and then compiles against it in the
+# same run hands the compile a pre-rewrite view of the directory: the arm64 leg
+# of 0.19.33 rebuilt dist, then tauri's asset embedding failed to read 68 of the
+# 149 JS assets — exactly the files the rebuild had added over the previous dist,
+# with the other 152 names unchanged and readable. The x86_64 leg compiled the
+# same dist minutes later without a single read error, because a previous
+# container had written it. So: rebuild here, exit, and let the caller start a
+# fresh container to compile.
+if [ "$MODE" = "dist" ]; then
+  if [ -z "$dist_reason" ]; then
+    echo "── frontend dist is current (newer than every frontend source)"
+    exit 0
+  fi
+  echo "── $dist_reason — installing JS deps + building"
   bun install --frozen-lockfile || bun install
   bun run build
-else
-  echo "── reusing existing frontend dist"
+  # Re-check after the build, not just before: vite empties and rewrites the
+  # directory, and the host can lose the mount out from under us at any point
+  # during those two minutes.
+  assert_dist_is_the_volume "after the frontend build"
+  # A build that exits 0 having written nothing would put us straight back where
+  # we started, so confirm the stamp actually moved ahead of the sources.
+  [ -s "$DIST_STAMP" ] || { echo "✗ frontend build produced no $DIST_STAMP"; exit 4; }
+  still_stale="$(newer_than_dist)"
+  if [ -n "$still_stale" ]; then
+    echo "✗ frontend build left dist older than $still_stale — refusing to embed a stale UI"
+    exit 4
+  fi
+  echo "── frontend dist rebuilt"
+  exit 0
 fi
+
+# Every other mode only checks. Building here is what caused the failure above,
+# and a stale dist is what this whole block exists to prevent, so there is
+# nothing safe left to do but stop.
+if [ -n "$dist_reason" ]; then
+  echo "✗ $dist_reason"
+  echo "  Refusing to embed it. Run this image with MODE=dist first — build-linux.sh"
+  echo "  does that as a separate container before every probe/full build."
+  exit 4
+fi
+echo "── frontend dist is current (newer than every frontend source)"
 
 if [ "$MODE" = "probe" ]; then
   echo "── PROBE: cargo build (Rust app only) to surface Linux port errors"
@@ -111,4 +219,29 @@ ARCH="$ARCH" bash /work/aura-shell/scripts/_linux-deb-bundle-cli.sh
 
 echo "── bundle artifacts:"
 find /build/target -path '*release/bundle/appimage/*.AppImage' -o -path '*release/bundle/deb/*.deb' 2>/dev/null | sort
+
+# Park a per-arch copy the moment this leg finishes, because bundle/ is NOT a
+# safe place to leave one. Both arches build the same package name at the same
+# version into the same shared volume, and tauri's bundler clears deb/ and
+# appimage/ for that name before it writes — so the second leg to run deletes
+# the first leg's artifacts out from under it. 0.19.34's arm64 AppImage and .deb
+# disappeared exactly that way, minutes after the build that made them reported
+# success. pack-linux.sh reads this stash first, so the order the two legs run
+# in, and how long the copy-out waits, both stop mattering.
+STASH="/build/target/_artifacts/$ARCH"
+rm -rf "$STASH"
+mkdir -p "$STASH"
+case "$ARCH" in
+  arm64)  stash_ai="Aura-aarch64.AppImage"; stash_deb_suffix="_arm64.deb" ;;
+  x86_64) stash_ai="Aura-x86_64.AppImage";  stash_deb_suffix="_amd64.deb" ;;
+esac
+stash_ai_path="$(find /build/target -path "*release/bundle/appimage/$stash_ai" | head -1)"
+# Newest matching .deb: the volume still holds this arch's debs going back to
+# 0.19.5, and only the one this build just sealed belongs in the stash.
+stash_deb_path="$(find /build/target -path "*release/bundle/deb/*$stash_deb_suffix" -printf '%T@ %p\n' 2>/dev/null | sort -n | tail -1 | cut -d' ' -f2-)"
+[ -n "$stash_ai_path" ]  || { echo "✗ stash: no $stash_ai to park"; exit 3; }
+[ -n "$stash_deb_path" ] || { echo "✗ stash: no *$stash_deb_suffix to park"; exit 3; }
+cp -f "$stash_ai_path" "$stash_deb_path" "$STASH/"
+echo "── parked for pack-linux: $STASH/$(basename "$stash_ai_path")  $STASH/$(basename "$stash_deb_path")"
+
 echo "✓ FULL linux/$ARCH bundle built"

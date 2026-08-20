@@ -37,8 +37,8 @@ export function AgentsPane({
   onClose: () => void;
 }) {
   const [scanning, setScanning] = useState(false);
-  // Pin state is shared with the quick-launch PresetsBar — pinning here puts
-  // the agent one tap away on the work surface.
+  // Pin state is shared with the Settings roster and the tab strip's "+"
+  // menu — pinning here puts the agent at the top of that menu.
   const { isPinned, toggle: togglePin } = usePinned();
 
   // Launch an agent through the exact same path as the + button: dispatch the
@@ -75,7 +75,7 @@ export function AgentsPane({
     <PaneScroll>
       <PaneIntro
         title="Agents"
-        blurb="The assistants that read and change your code. Ready ones start with a click; the rest are agents Aura supports — install the CLI and hit Scan again to light it up."
+        blurb="The assistants that read and change your code. Ready ones start with a click; the rest are agents Aura supports. Install the CLI and hit Scan again to light it up."
         action={
           <Button
             size="sm"
@@ -97,9 +97,9 @@ export function AgentsPane({
         <PaneSpinner label="Looking for installed agents…" />
       ) : agents.length === 0 ? (
         <EmptyHint
-          icon={<Bot size={22} />}
+          icon={Bot}
           title="No coding agents found yet"
-          body="Install one (Claude Code, Gemini CLI, Codex, Cursor, or Kimi-Coder) and hit Scan again — it shows up here automatically, nothing to configure."
+          body="Install one (Claude Code, Gemini CLI, Codex, Cursor, or Kimi-Coder) and hit Scan again. It shows up here automatically, nothing to configure."
         />
       ) : (
         <div className="space-y-6">
@@ -123,10 +123,10 @@ export function AgentsPane({
                         size={26}
                       />
                       <div className="min-w-0 flex-1">
-                        <div className="truncate text-[13px] font-medium text-text-1">
+                        <div className="truncate text-base font-medium text-text-1">
                           {agentDisplayLabel(canonical)}
                         </div>
-                        <div className="truncate text-[11.5px] text-text-4">
+                        <div className="truncate text-sm text-text-4">
                           {agent.description}
                         </div>
                       </div>
@@ -136,10 +136,10 @@ export function AgentsPane({
                         aria-pressed={isPinned(agent.id)}
                         title={
                           isPinned(agent.id)
-                            ? "Pinned to the quick-launch bar — click to unpin"
-                            : "Pin to the quick-launch bar"
+                            ? `${agentDisplayLabel(canonical)} leads the New-tab menu. Click to unpin it.`
+                            : `Put ${agentDisplayLabel(canonical)} at the top of the New-tab menu`
                         }
-                        className="shrink-0 rounded-md p-1.5 transition-colors hover:bg-bg-2"
+                        className="shrink-0 rounded-md p-1.5 transition-colors hover:bg-state-hover"
                         style={{
                           color: isPinned(agent.id)
                             ? "var(--color-blue)"
@@ -190,14 +190,14 @@ export function AgentsPane({
                         />
                       </span>
                       <div className="min-w-0 flex-1">
-                        <div className="truncate text-[13px] font-medium text-text-2">
+                        <div className="truncate text-base font-medium text-text-2">
                           {agentDisplayLabel(canonical)}
                         </div>
-                        <div className="truncate text-[11.5px] text-text-4">
+                        <div className="truncate text-sm text-text-4">
                           Not installed on this machine
                         </div>
                       </div>
-                      <span className="inline-flex shrink-0 items-center gap-1 rounded-full bg-bg-2 px-2 py-0.5 text-[10.5px] font-medium text-text-4">
+                      <span className="inline-flex shrink-0 items-center gap-1 rounded-full bg-bg-2 px-2 py-0.5 text-xs font-medium text-text-4">
                         <Download size={11} />
                         Install
                       </span>
@@ -214,19 +214,19 @@ export function AgentsPane({
             <Card className="flex items-start gap-3 p-3.5">
               <Plus size={15} className="mt-0.5 shrink-0 text-text-4" />
               <div className="min-w-0 flex-1">
-                <div className="text-[12.5px] font-medium text-text-1">
+                <div className="text-base font-medium text-text-1">
                   Add your own agent
                 </div>
-                <div className="mt-0.5 text-[11.5px] leading-relaxed text-text-4">
+                <div className="mt-0.5 text-sm leading-relaxed text-text-4">
                   Point Aura at any CLI by adding an{" "}
-                  <code className="rounded bg-bg-2 px-1 py-0.5 text-[10.5px]">
+                  <code className="rounded bg-bg-2 px-1 py-0.5 text-xs">
                     [[agent]]
                   </code>{" "}
                   block to{" "}
-                  <code className="rounded bg-bg-2 px-1 py-0.5 text-[10.5px]">
+                  <code className="rounded bg-bg-2 px-1 py-0.5 text-xs">
                     ~/.aura/agents.toml
                   </code>
-                  , then hit Scan again — no rebuild needed.
+                  , then hit Scan again. No rebuild needed.
                 </div>
               </div>
             </Card>
@@ -239,7 +239,7 @@ export function AgentsPane({
 
 function SectionLabel({ children }: { children: React.ReactNode }) {
   return (
-    <div className="mb-2 flex items-center gap-2 px-0.5 text-[11px] font-semibold uppercase tracking-wide text-text-4">
+    <div className="section-label mb-2 flex items-center gap-2 px-0.5">
       {children}
     </div>
   );

@@ -1,0 +1,26 @@
+<!doctype html>
+<!--
+  Visual harness for the shell's own chrome — the header bar and the two strips
+  that live in it.
+
+  Dev-server only: Vite's build input is index.html, so this page never reaches
+  a bundle. `bun run dev` serves it at /chrome-harness.html, and
+  `PAGE=chrome-harness.html node scripts/collab-screens.mjs` drives it with
+  Playwright to capture each piece in both themes.
+
+  It exists because chrome is the part of the app you can't screenshot on
+  demand: reaching the real Tasks header means clicking through to it, and a
+  control whose whole job is to sit correctly against a bar is exactly the kind
+  of thing a unit test cannot see.
+-->
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Chrome harness</title>
+  </head>
+  <body>
+    <div id="chrome-harness"></div>
+    <script type="module" src="/src/components/ui/__harness__/main.tsx"></script>
+  </body>
+</html>

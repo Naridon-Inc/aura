@@ -26,7 +26,13 @@ export type ChannelTab =
 
 export type Conversation = {
   id: string;            // routing id: "project" | "ch:<name>" | "sentinel" | "dm:<handle>"
+  /** What this conversation is *called* — a channel slug, or for a DM the
+   *  person's name. Not an identifier: two teammates can share a name. */
   name: string;
+  /** DMs only: the peer's git handle. `name` is for reading, this is for
+   *  matching — presence, avatars and the `@…` in the DM header all need the
+   *  exact seat, and this repo has two different people called "Ashiq". */
+  handle?: string;
   kind: ConvKind;
   channel?: string;      // chat channel slug if kind === "channel" | "dm" | "custom"
   lastBody?: string;
@@ -53,6 +59,14 @@ export type Msg = {
   mentions?: string[];
   thread_parent?: string;
   is_agent?: boolean;
+  /** True for rows synthesized from the work log rather than sent as chat —
+   *  the per-session intent roll-up in the project feed. They carry a
+   *  `thread_parent` so a session's later intents file under its first one,
+   *  but nobody wrote them *to* anyone. Screens about what people said to
+   *  each other — Threads especially — must not read them as replies.
+   *  Distinct from `is_agent`, which is true of a genuine chat message an
+   *  agent posted and which does belong on those screens. */
+  derived?: boolean;
   /** Local-only flag toggled via the pin menu; persisted per-conv in localStorage. */
   pinned?: boolean;
   /** Local-only delivery-status badge ("pending"/"failed"); sourced from the outbox poll. */

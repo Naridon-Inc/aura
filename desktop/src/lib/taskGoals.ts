@@ -11,8 +11,9 @@
 // its status across reopens and updates reactively the moment a check lands.
 
 import { useEffect, useMemo, useState } from "react";
-import { api, type Task, type TaskStatus } from "./api";
+import { type Task, type TaskStatus } from "./api";
 import { goalsForTask, rollup, useGoals, type GoalVerdict } from "./goalStore";
+import { fetchTasks } from "./tasksCache";
 
 /** A board task projected as a provable goal. `text` (the task title) is what we
  *  prove against the code; `verdict` is the last known proof result. */
@@ -88,8 +89,14 @@ export function useTaskGoals(repoRoot: string): {
     }
     let alive = true;
     setLoading(true);
-    api
-      .tasksList(repoRoot)
+    // Through the coalescer, not straight at the command. `tasks_list` is not a
+    // file read — it runs five heal passes over the board and writes back what
+    // they changed. Goals mounts next to the board and the place rail, all three
+    // asking for the same repo in the same tick, so calling it directly here put
+    // a fourth set of those passes in a race with the other three over the same
+    // files. Zero window, so this joins a read already running and never hands
+    // back a remembered answer — see tasksCache.
+    fetchTasks(repoRoot)
       .then((t) => {
         if (!alive) return;
         setTasks(Array.isArray(t) ? t : []);

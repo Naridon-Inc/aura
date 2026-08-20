@@ -27,10 +27,13 @@
 // header is the reader-facing index over it, height-capped so it never starves
 // the diff of room.
 
-import { useEffect, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import type { AtlasHoverEntry, ChangedSymbol, FileChangeNote } from "../../lib/api";
+import { relativeAgeAuto } from "../../lib/relativeTime";
 import { loadAtlasIndex, lookupEntry, type AtlasIndex } from "../../lib/atlasHover";
 import { humanizeIdentifier as humanizeWords } from "../../lib/prove";
+import { sentenceCase } from "../../lib/textCase";
+import { countOf } from "../../lib/plural";
 import {
   loadExplanation,
   loadSymbolExplanations,
@@ -70,36 +73,38 @@ function prettyKind(kind: string): string {
   }
 }
 
+/** Both forms of the plain noun, together.
+ *
+ *  They are written side by side because the summary below needs the plural
+ *  and no rule can derive it: "enum" is spelled out for the non-engineer as
+ *  "set of options", where the HEAD word takes the s. The local rule this
+ *  replaces read only the final letter, found an "s", and summarised two
+ *  changed enums as "Reworked 2 set of optionses." See lib/plural. */
+type PlainKind = { one: string; many: string };
+
 /** The same kinds, spelled out as a plain noun for the non-engineer summary
  *  ("function", "class") rather than the terse mechanism word ("fn"). */
-function plainKind(kind: string): string {
+function plainKind(kind: string): PlainKind {
   switch (prettyKind(kind)) {
     case "fn":
-      return "function";
+      return { one: "function", many: "functions" };
     case "struct":
-      return "structure";
+      return { one: "structure", many: "structures" };
     case "impl":
-      return "implementation";
+      return { one: "implementation", many: "implementations" };
     case "class":
-      return "class";
+      return { one: "class", many: "classes" };
     case "enum":
-      return "set of options";
+      return { one: "set of options", many: "sets of options" };
     case "trait":
-      return "trait";
+      return { one: "trait", many: "traits" };
     case "interface":
-      return "interface";
+      return { one: "interface", many: "interfaces" };
     case "type":
-      return "type";
+      return { one: "type", many: "types" };
     default:
-      return "piece";
+      return { one: "piece", many: "pieces" };
   }
-}
-
-/** Naive plural for the plain kind nouns above (enough for this small set). */
-function plural(noun: string, n: number): string {
-  if (n === 1) return noun;
-  if (/(s|x|ch|sh)$/.test(noun)) return `${noun}es`;
-  return `${noun}s`;
 }
 
 /** "added" | "modified" | "deleted" → a plain word for the non-engineer. */
@@ -114,19 +119,22 @@ function changeWord(change: string): string {
   }
 }
 
-/** Title-cased plain name for a piece, from the SAME humanizer the Goals surface
- *  uses: `senderFor` → "Sender For", `fsm_happy_path` → "Fsm Happy Path". The
- *  atlas title wins when present; this is the always-there fallback. */
+/** Plain name for a piece, sharing BOTH steps with the Goals surface — the
+ *  humanizer that produces the words and the casing that finishes them:
+ *  `senderFor` → "Sender for", `fsm_happy_path` → "Fsm happy path". It shared
+ *  only the first step before, and said in this comment that it shared the
+ *  answer. The atlas title wins when present; this is the always-there
+ *  fallback. */
 function titleize(id: string): string {
   const words = humanizeWords(id).trim();
   if (!words) return id;
-  return words.replace(/\b\w/g, (c) => c.toUpperCase());
+  return sentenceCase(words);
 }
 
 /** A plain-English "what kind of thing changed, and how" line, from the AST
  *  facts alone — the fallback meaning when the atlas has no richer summary. */
 function pieceMeaning(s: ChangedSymbol): string {
-  const kind = plainKind(s.kind);
+  const kind = plainKind(s.kind).one;
   switch (s.change) {
     case "added":
       return `A new ${kind}.`;
@@ -150,16 +158,16 @@ function plainSummary(symbols: ChangedSymbol[], engineNote: string): string {
     : added && !removed && added === symbols.length ? "Added"
       : "Reworked";
   // Group by plain kind, preserving first-seen order.
-  const groups: { kind: string; names: string[] }[] = [];
+  const groups: { kind: PlainKind; names: string[] }[] = [];
   for (const s of symbols) {
     const kind = plainKind(s.kind);
-    const g = groups.find((x) => x.kind === kind);
+    const g = groups.find((x) => x.kind.one === kind.one);
     const name = humanizeWords(s.identifier).trim();
     if (g) g.names.push(name);
     else groups.push({ kind, names: [name] });
   }
   const phrases = groups.map((g) => {
-    const head = `${g.names.length} ${plural(g.kind, g.names.length)}`;
+    const head = countOf(g.names.length, g.kind.one, g.kind.many);
     const named = g.names.filter(Boolean);
     return named.length ? `${head} (${named.join(", ")})` : head;
   });
@@ -170,21 +178,16 @@ function plainSummary(symbols: ChangedSymbol[], engineNote: string): string {
   return `${verb} ${list}.`;
 }
 
-/** Relative age of a commit time (unix seconds, tolerating milliseconds) — the
- *  same shape the Goals cards use, so "when" reads consistently across surfaces. */
+/** Relative age of a commit time (unix seconds, tolerating milliseconds).
+ *
+ *  This said it was "the same shape the Goals cards use, so 'when' reads
+ *  consistently across surfaces" — while being a hand copy that skipped the
+ *  weeks rung the Goals cards have, so a 10-day-old commit read "10d ago"
+ *  here and "1w ago" there. Asserting consistency is not the same as sharing
+ *  the code that produces it. */
 function relTime(value: number): string {
-  const ms = value > 1e12 ? value : value * 1000;
-  const s = Math.max(0, Math.floor((Date.now() - ms) / 1000));
-  if (s < 60) return "just now";
-  const m = Math.floor(s / 60);
-  if (m < 60) return `${m}m ago`;
-  const h = Math.floor(m / 60);
-  if (h < 24) return `${h}h ago`;
-  const d = Math.floor(h / 24);
-  if (d < 30) return `${d}d ago`;
-  const mo = Math.floor(d / 30);
-  if (mo < 12) return `${mo}mo ago`;
-  return `${Math.floor(mo / 12)}y ago`;
+  // One ladder for the whole app — see lib/relativeTime.
+  return relativeAgeAuto(value);
 }
 
 /** A readable absolute timestamp for the "when" hover. */
@@ -270,22 +273,22 @@ function SideSymbol({
 
   return (
     <li className="flex min-w-0 gap-1.5 leading-snug">
-      <span className={"mt-1 w-2 shrink-0 text-center font-mono text-[11px] " + tone}>
+      <span className={"mt-1 w-2 shrink-0 text-center font-mono text-xs " + tone}>
         {s.change === "deleted" ? "−" : s.change === "added" ? "+" : "~"}
       </span>
       <div className="min-w-0">
         {/* Meaning-first headline: the real-world name + a plain change word. */}
         <div className="flex items-baseline gap-1.5">
-          <span className="text-[12px] font-medium text-text-1">{title}</span>
-          <span className="text-[10px] uppercase tracking-wide text-text-5">
+          <span className="text-sm font-medium text-text-1">{title}</span>
+          <span className="section-label">
             {changeWord(s.change)}
           </span>
         </div>
         {/* What it does / what happened to it, in plain English. */}
-        <div className="text-[11px] leading-snug text-text-3">{meaning}</div>
+        <div className="text-xs leading-snug text-text-3">{meaning}</div>
         {/* Why this specific change, when a reason was recorded for the piece. */}
         {why ? (
-          <div className="text-[11px] leading-snug text-text-3">
+          <div className="text-xs leading-snug text-text-3">
             <span className="text-text-5">Why: </span>
             {why}
           </div>
@@ -294,7 +297,7 @@ function SideSymbol({
             signature (the noisiest, most code-shaped part) lives in the hover so
             it's there for an engineer without shouting at everyone else. */}
         <div
-          className="mt-0.5 break-words font-mono text-[10px] text-text-5"
+          className="mt-0.5 break-words font-mono text-2xs text-text-5"
           title={showSignature && s.signature ? s.signature : undefined}
         >
           {s.identifier}
@@ -309,7 +312,7 @@ function SideSymbol({
             type="button"
             onClick={() => onBringBack!(s.identifier, relFile)}
             disabled={busy}
-            className="mt-1 rounded border border-line-soft px-1.5 py-px text-[10.5px] text-text-3 hover:border-blue hover:text-blue disabled:opacity-60"
+            className="mt-1 rounded border border-line-soft px-1.5 py-px text-xs text-text-3 hover:border-blue hover:text-blue disabled:opacity-60"
             title="Bring just this one piece back to its previous saved version"
           >
             {busy ? "Bringing back…" : "Bring this back"}
@@ -361,7 +364,7 @@ function SideColumn({
   const lone = symbols.length === 1;
   return (
     <div className="min-w-0 flex-1 px-3 py-2">
-      <div className="text-[10px] uppercase tracking-wide text-text-4">{label}</div>
+      <div className="section-label">{label}</div>
       {symbols.length ? (
         <ul className="mt-1 space-y-1.5">
           {symbols.map((s) => (
@@ -381,7 +384,7 @@ function SideColumn({
           ))}
         </ul>
       ) : (
-        <div className="mt-1 text-[11.5px] leading-relaxed text-text-3">{emptyNote}</div>
+        <div className="mt-1 text-sm leading-relaxed text-text-3">{emptyNote}</div>
       )}
     </div>
   );
@@ -394,6 +397,35 @@ function Dot() {
       ·
     </span>
   );
+}
+
+/** Below this body width the two side-by-side columns stop being readable and
+ *  Monaco folds its split into one inline column — so the header's Previous/New
+ *  pair has to stack to keep saying the truth about what's beside what. Lives
+ *  here because it is this header's own constraint; every surface that mounts
+ *  it (a session's Changes tab, a pull request's Files tab) measures against
+ *  the same number rather than picking its own. */
+export const SPLIT_INLINE_PX = 700;
+
+/** Tracks whether a diff body is too narrow for side-by-side columns, so a
+ *  caller can hand `stacked` to SplitDiffHeader. Returns the ref to put on the
+ *  measured element. */
+export function useStackedDiff(): [
+  React.RefObject<HTMLDivElement | null>,
+  boolean,
+] {
+  const ref = useRef<HTMLDivElement | null>(null);
+  const [narrow, setNarrow] = useState(false);
+  useLayoutEffect(() => {
+    const el = ref.current;
+    if (!el) return;
+    const ro = new ResizeObserver((entries) => {
+      for (const e of entries) setNarrow(e.contentRect.width < SPLIT_INLINE_PX);
+    });
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, []);
+  return [ref, narrow];
 }
 
 export function SplitDiffHeader({
@@ -526,14 +558,14 @@ export function SplitDiffHeader({
           band, spanning the full width above both panes. */}
       <div className="border-b border-line-soft px-3 py-2">
         <div className="flex items-baseline gap-2">
-          <span className="min-w-0 flex-1 text-[12.5px] leading-snug text-text-1">
+          <span className="min-w-0 flex-1 text-base leading-snug text-text-1">
             {summary}
           </span>
           {pieceCount > 0 ? (
             <button
               type="button"
               onClick={() => setOpen((o) => !o)}
-              className="shrink-0 rounded px-1.5 py-px text-[10.5px] text-text-4 hover:bg-bg-2 hover:text-text-2"
+              className="shrink-0 rounded px-1.5 py-px text-xs text-text-4 hover:bg-state-hover hover:text-text-2"
               title={open ? "Hide the list of changed pieces" : "Show what changed, in plain words"}
             >
               {open ? "Hide pieces" : `Show ${pieceCount} ${pieceCount === 1 ? "piece" : "pieces"}`}
@@ -555,13 +587,13 @@ export function SplitDiffHeader({
               }
             >
               <div className="min-w-0">
-                <div className="text-[10px] uppercase tracking-wide text-text-4">Used to</div>
-                <div className="mt-0.5 text-[11.5px] leading-snug text-text-3">{before}</div>
+                <div className="section-label">Used to</div>
+                <div className="mt-0.5 text-sm leading-snug text-text-3">{before}</div>
               </div>
               {nowDoes ? (
                 <div className="min-w-0">
-                  <div className="text-[10px] uppercase tracking-wide text-text-4">Now</div>
-                  <div className="mt-0.5 text-[11.5px] leading-snug text-text-1">{nowDoes}</div>
+                  <div className="section-label">Now</div>
+                  <div className="mt-0.5 text-sm leading-snug text-text-1">{nowDoes}</div>
                 </div>
               ) : (
                 <div />
@@ -569,15 +601,15 @@ export function SplitDiffHeader({
             </div>
           ) : (
             <div className="mt-2">
-              <div className="text-[10px] uppercase tracking-wide text-text-4">What this adds</div>
-              <div className="mt-0.5 text-[11.5px] leading-snug text-text-1">{nowDoes}</div>
+              <div className="section-label">What this adds</div>
+              <div className="mt-0.5 text-sm leading-snug text-text-1">{nowDoes}</div>
             </div>
           )
         ) : null}
 
         {/* WHEN · WHERE · WHO — the reality, dead-visible. Every fact is real or
             omitted: the commit time, the file it's in, who made it. */}
-        <div className="mt-1 flex flex-wrap items-center gap-x-1.5 gap-y-0.5 text-[10.5px] text-text-4">
+        <div className="mt-1 flex flex-wrap items-center gap-x-1.5 gap-y-0.5 text-xs text-text-4">
           {when != null ? (
             <span title={absTime(when)}>{relTime(when)}</span>
           ) : null}
@@ -607,7 +639,7 @@ export function SplitDiffHeader({
               symbols={previous}
               tone="text-text-3"
               showSignature={false}
-              emptyNote="New file — nothing was here before."
+              emptyNote="New file. Nothing was here before."
               index={index}
               filePath={note.file}
               side="previous"
@@ -630,7 +662,7 @@ export function SplitDiffHeader({
               symbols={next}
               tone="text-accent"
               showSignature
-              emptyNote="File removed — nothing is here now."
+              emptyNote="File removed. Nothing is here now."
               index={index}
               filePath={note.file}
               side="next"

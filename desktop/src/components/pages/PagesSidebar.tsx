@@ -28,6 +28,7 @@ import {
   Plus,
   GripVertical,
   Search,
+  SearchX,
   X,
 } from "lucide-react";
 import {
@@ -38,10 +39,49 @@ import {
 } from "../../lib/api";
 import { cn } from "../../lib/utils";
 import { Input } from "../ui/input";
+import { EmptyState, ErrorState, LoadingState } from "../ui/state";
 import { PageFolderGroup } from "./PageFolderGroup";
 import { DEFAULT_FOLDER_COLOR } from "../pages2/folderColors";
+import { PlaceRail, PlaceRailGroup, PlaceRailScope } from "../places/PlaceRail";
+import { setProjectScope, useKnownProjects } from "../../lib/projectRoots";
 
 const FOLDERS_EXPANDED_KEY = "aura.pages.folders.expanded";
+
+/** How far along the read of this project's pages is. `summaries` starts as
+ *  `[]`, and an empty array is what a project with no pages looks like too —
+ *  so without this the rail cannot tell the two apart, and it didn't. */
+export type PagesRead = "pending" | "failed" | "done";
+
+/** What the rail body should be, given what it actually knows.
+ *
+ *  The rail had one answer for four questions. `summaries` is `[]` before
+ *  `api.notesList` returns, and the catch on that call is a comment — one
+ *  whose stated fallback is "NotesWorkpane will mirror once it mounts", which
+ *  is precisely the case the effect exists to cover when it ISN'T mounted. So
+ *  the first frame of every visit to Pages, and every frame after a read that
+ *  threw, said:
+ *
+ *      No pages yet
+ *      Pages are where the thinking lives — what you decided, what you ruled
+ *      out, what someone needs to know next time.
+ *
+ *  …with a "New page" button under it, to somebody who might have forty.
+ *
+ *  Rows win over the read state on purpose: the mirror from NotesWorkpane can
+ *  deliver pages before `notesList` resolves, and a rail with pages in it is
+ *  never loading as far as the reader is concerned. */
+export function pagesRailState(s: {
+  hasProject: boolean;
+  read: PagesRead;
+  hasRows: boolean;
+  filtering: boolean;
+}): "no-project" | "list" | "loading" | "failed" | "no-match" | "empty" {
+  if (!s.hasProject) return "no-project";
+  if (s.hasRows) return "list";
+  if (s.read === "pending") return "loading";
+  if (s.read === "failed") return "failed";
+  return s.filtering ? "no-match" : "empty";
+}
 
 const PARENT_MAP_KEY = "aura.pages.tree.parents";
 const EXPANDED_KEY = "aura.pages.tree.expanded";
@@ -232,6 +272,15 @@ type Props = {
   onDeleteFolder?: (id: string) => void;
   /** Move a page into a folder (id) or back to root (null). */
   onMovePageToFolder?: (s: NoteSummary, folderId: string | null) => void;
+  // ── What the rail is allowed to conclude from an empty list ───────────────
+  /** How far the caller's read of this project's pages has got. Defaults to
+   *  `"done"` so a caller that hands over an already-loaded list — a test, a
+   *  preview — behaves exactly as before. */
+  read?: PagesRead;
+  /** Whether there is a project to read pages from at all. */
+  hasProject?: boolean;
+  /** Re-run the read that failed. */
+  onRetry?: () => void;
 };
 
 export function PagesSidebar({
@@ -254,11 +303,24 @@ export function PagesSidebar({
   onSetFolderColor,
   onDeleteFolder,
   onMovePageToFolder,
+  read = "done",
+  hasProject = true,
+  onRetry,
 }: Props) {
   const [parents, setParents] = useState<ParentMap>(() => readParentMap());
   const [expanded, setExpanded] = useState<Set<string>>(() => readExpanded());
   const [dragKey, setDragKey] = useState<string | null>(null);
   const [dropTarget, setDropTarget] = useState<string | null>(null);
+  // The filter is a magnifier you press, not a box that is always open. It used
+  // to hold a whole 30px band of its own directly under the 28px icon band, so
+  // this rail spent two bands of chrome before the first page — for a control
+  // that is idle until you are looking for something. Same shape as the Team
+  // rail's filter, which is the one the reader has already met.
+  const [filtering, setFiltering] = useState(false);
+  const closeFilter = useCallback(() => {
+    onQuery?.("");
+    setFiltering(false);
+  }, [onQuery]);
 
   useEffect(() => {
     writeExpanded(expanded);
@@ -323,6 +385,14 @@ export function PagesSidebar({
   // days / older-by-month). The grouping only re-buckets the roots — each
   // root still renders its own subtree via <TreeRow>.
   const dateGroups = useMemo(() => groupNodesByDate(tree), [tree]);
+
+  // What the body under the header is. See `pagesRailState`.
+  const body = pagesRailState({
+    hasProject,
+    read,
+    hasRows: tree.length > 0 || sortedFolders.length > 0,
+    filtering: query.trim().length > 0,
+  });
 
   // A page row dropped onto a folder header → file it into that folder. A
   // page dropped on the root background → pull it back out of its folder.
@@ -393,18 +463,24 @@ export function PagesSidebar({
 
   return (
     <div className={cn("flex flex-col h-full", className)}>
-      {/* Shared ADE section header (matches Trace / Tasks) — the +New page
-          action rides the header's right slot. paddingInline:14 aligns the
-          label + action with the 14px content inset of the rows below. */}
-      <div className="ade-sec-h h-8 text-[10.5px]" style={{ paddingInline: 12 }}>
+      {/* Shared ADE section header (matches Trace / Tasks / Team) — the +New
+          page action rides the header's right slot. The 12px inline padding
+          aligns the label + action with the content inset of the rows below;
+          everything else (size, weight, colour, height) is `.ade-sec-h`. */}
+      <div className="ade-sec-h" style={{ paddingInline: 12 }}>
         {(onBack || onForward) && (
           <span className="flex items-center gap-0.5 mr-2 -ml-1">
             <button
               type="button"
               onClick={onBack}
               disabled={!canBack}
-              title="Back"
-              className="w-5 h-5 grid place-items-center rounded text-text-4 enabled:hover:text-text-1 enabled:hover:bg-bg-2 disabled:opacity-30 disabled:cursor-default transition-colors"
+              /* "Previous page", not "Back". The window chrome has its own
+                 back/forward 110px above this one, and that pair switches the
+                 whole project. Two identical words, two different scopes, one
+                 column. */
+              title="Previous page"
+              aria-label="Previous page"
+              className="w-5 h-5 grid place-items-center rounded text-text-4 enabled:hover:text-text-1 enabled:hover:bg-state-hover disabled:opacity-30 disabled:cursor-default transition-colors"
             >
               <ArrowLeft className="w-3.5 h-3.5" strokeWidth={1.75} aria-hidden />
             </button>
@@ -412,22 +488,38 @@ export function PagesSidebar({
               type="button"
               onClick={onForward}
               disabled={!canForward}
-              title="Forward"
-              className="w-5 h-5 grid place-items-center rounded text-text-4 enabled:hover:text-text-1 enabled:hover:bg-bg-2 disabled:opacity-30 disabled:cursor-default transition-colors"
+              title="Next page"
+              aria-label="Next page"
+              className="w-5 h-5 grid place-items-center rounded text-text-4 enabled:hover:text-text-1 enabled:hover:bg-state-hover disabled:opacity-30 disabled:cursor-default transition-colors"
             >
               <ArrowRight className="w-3.5 h-3.5" strokeWidth={1.75} aria-hidden />
             </button>
           </span>
         )}
-        Pages
-        {(onCreateFolder || onCreate) && (
+        {/* No name. The nav row above this panel already says Pages and is
+            lit; a second "Pages" 30px under it is the reader being told
+            where they just chose to go. What's left is what the chrome
+            can't say: history, new folder, new page. */}
+        {(onQuery || onCreateFolder || onCreate) && (
           <span className="right flex items-center gap-0.5">
+            {onQuery && (
+              <button
+                type="button"
+                onClick={() => (filtering ? closeFilter() : setFiltering(true))}
+                title="Filter pages"
+                aria-label="Filter pages"
+                aria-expanded={filtering}
+                className="w-5 h-5 grid place-items-center rounded text-text-4 hover:text-text-1 hover:bg-state-hover transition-colors"
+              >
+                <Search className="w-3.5 h-3.5" strokeWidth={1.75} aria-hidden />
+              </button>
+            )}
             {onCreateFolder && (
               <button
                 type="button"
                 onClick={onCreateFolder}
                 title="New folder"
-                className="w-5 h-5 grid place-items-center rounded text-text-4 hover:text-text-1 hover:bg-bg-2 transition-colors"
+                className="w-5 h-5 grid place-items-center rounded text-text-4 hover:text-text-1 hover:bg-state-hover transition-colors"
               >
                 <FolderPlus
                   className="w-3.5 h-3.5"
@@ -441,7 +533,7 @@ export function PagesSidebar({
                 type="button"
                 onClick={onCreate}
                 title="New page"
-                className="w-5 h-5 grid place-items-center rounded text-text-4 hover:text-text-1 hover:bg-bg-2 transition-colors"
+                className="w-5 h-5 grid place-items-center rounded text-text-4 hover:text-text-1 hover:bg-state-hover transition-colors"
               >
                 <Plus className="w-3.5 h-3.5" strokeWidth={1.75} aria-hidden />
               </button>
@@ -449,7 +541,7 @@ export function PagesSidebar({
           </span>
         )}
       </div>
-      {onQuery && (
+      {onQuery && filtering && (
         <div className="px-1.5 pb-2 flex-shrink-0">
           <div className="relative">
             <Search
@@ -458,10 +550,22 @@ export function PagesSidebar({
             />
             <Input
               type="text"
+              autoFocus
+              /* WebKit remembers text-input values and floats them back as a
+                 suggestion chip — which lands on top of the first result, the
+                 exact row you were filtering towards. A filter has nothing to
+                 remember: the list below it is the suggestion. */
+              autoComplete="off"
+              autoCorrect="off"
+              spellCheck={false}
               value={query}
               onChange={(e) => onQuery(e.target.value)}
-              placeholder="Filter…"
-              className="h-6 pl-7 pr-2 text-[11px]"
+              onKeyDown={(e) => {
+                if (e.key === "Escape") closeFilter();
+              }}
+              placeholder="Filter pages by name"
+              aria-label="Filter pages by name"
+              className="h-6 pl-7 pr-2 text-xs"
             />
           </div>
         </div>
@@ -479,10 +583,46 @@ export function PagesSidebar({
           dropOnRoot();
         }}
       >
-        {tree.length === 0 && sortedFolders.length === 0 && (
-          <div className="px-3 py-4 text-[11.5px] text-text-5 text-center">
-            {query.trim() ? "No pages match." : "No pages yet."}
-          </div>
+        {/* One of these, decided by `pagesRailState` — which knows the
+            difference between a project with no pages and a read that hasn't
+            finished. The rail used to draw the first of them for both. */}
+        {body === "loading" && <LoadingState size="sm" label="Opening your pages…" />}
+        {body === "failed" && (
+          <ErrorState
+            size="sm"
+            title="Aura couldn’t open your pages"
+            message="They’re still on your machine. This is the reading that failed, not the writing."
+            onRetry={onRetry}
+          />
+        )}
+        {body === "no-project" && (
+          <EmptyState
+            icon={FileText}
+            title="No project open"
+            body="Pages belong to a project. Open one from the sidebar and its pages appear here."
+            size="sm"
+          />
+        )}
+        {body === "no-match" && (
+          <EmptyState
+            icon={SearchX}
+            title="No pages match"
+            body={`Nothing here is called “${query.trim()}”.`}
+            size="sm"
+          />
+        )}
+        {body === "empty" && (
+          <EmptyState
+            icon={FileText}
+            title="No pages yet"
+            body="Pages are where the thinking lives. What you decided, what you ruled out, what someone needs to know next time. Your agents can read them too."
+            action={
+              onCreate
+                ? { label: "New page", onClick: onCreate, icon: Plus }
+                : undefined
+            }
+            size="sm"
+          />
         )}
         {/* Folders first — collapsible, color-tinted groups. Each renders its
             own pages as a small tree so nesting + drag still work inside it. */}
@@ -508,8 +648,8 @@ export function PagesSidebar({
               onDelete={() => onDeleteFolder?.(folder.id)}
             >
               {pages.length === 0 ? (
-                <div className="pl-7 pr-2 py-1 text-[11px] text-text-5 select-none">
-                  Empty — drag a page here.
+                <div className="pl-7 pr-2 py-1 text-xs text-text-5 select-none">
+                  Empty. Drag a page here.
                 </div>
               ) : (
                 <div className="pl-3">
@@ -542,11 +682,18 @@ export function PagesSidebar({
             </PageFolderGroup>
           );
         })}
+        {/* Today / Yesterday / Last 7 days — `PlaceRailGroup`, the same group
+            the Changes panel and the other rails render, so these collapse and
+            carry a count like every other bucket in the app. They were fixed
+            open headers: on a long list you scrolled past every week you
+            weren't looking for, and the header never said how many that was. */}
         {dateGroups.map((group) => (
-          <div key={group.label} className="mb-1">
-            <div className="px-2 pt-1.5 pb-0.5 text-[9.5px] font-medium uppercase tracking-[0.12em] text-text-5 select-none">
-              {group.label}
-            </div>
+          <PlaceRailGroup
+            key={group.label}
+            title={group.label}
+            count={group.nodes.length}
+            defaultOpen
+          >
             {group.nodes.map((n) => (
               <TreeRow
                 key={n.key}
@@ -571,7 +718,7 @@ export function PagesSidebar({
                 }}
               />
             ))}
-          </div>
+          </PlaceRailGroup>
         ))}
       </div>
     </div>
@@ -608,6 +755,8 @@ function TreeRow({
   const isActive = node.key === activeKey;
   const isDropping = dropTarget === node.key && dragKey && dragKey !== node.key;
   const rowRef = useRef<HTMLDivElement | null>(null);
+  const fullTitle = node.summary.title || "(untitled)";
+  const { name, detail } = splitPageTitle(fullTitle);
 
   return (
     <>
@@ -637,11 +786,19 @@ function TreeRow({
           e.stopPropagation();
           onDragEnd();
         }}
+        // The full title, always. A name can still outrun one line — 11 of
+        // the 49 here do — and until now a cut name had nowhere left to be
+        // read: no tooltip, no expansion, nothing short of opening the page.
+        title={fullTitle}
         className={cn(
-          "group h-[22px] flex items-center gap-1 rounded-sm text-[11.5px] cursor-pointer select-none transition-colors",
+          "group min-h-[22px] py-[3px] flex items-center gap-1 rounded-sm text-sm cursor-pointer select-none transition-colors",
+          // The page you're on takes the accent tint, not a surface fill.
+          // Fills mark which PART of the app you're in (the nav row above,
+          // "Pages"); the tint marks which page inside it. Two fills stacked
+          // read as two equal claims on "you are here".
           isActive
-            ? "bg-bg-2 text-text-1"
-            : "text-text-2 hover:bg-bg-2 hover:text-text-1",
+            ? "row-selected"
+            : "text-text-2 hover:bg-state-hover hover:text-text-1",
           isDropping && "ring-1 ring-accent ring-inset",
           dragKey === node.key && "opacity-40",
         )}
@@ -668,24 +825,44 @@ function TreeRow({
           </span>
         )}
         <FileText
-          className="w-3 h-3 text-text-5 flex-shrink-0"
+          className={cn(
+            "w-3 h-3 text-text-5 flex-shrink-0",
+            // The icon centres on a one-line row and rides the first line of
+            // a two-line one, so it stays level with the name rather than
+            // floating in the middle of the pair.
+            detail && "self-start mt-[5px]",
+          )}
           strokeWidth={1.5}
           aria-hidden
         />
-        <span className="flex-1 min-w-0 truncate">
-          {node.summary.title || "(untitled)"}
+        <span className="flex-1 min-w-0">
+          <span className="block truncate">{name}</span>
+          {detail && (
+            <span className="block truncate text-2xs leading-[14px] text-text-4">
+              {detail}
+            </span>
+          )}
         </span>
-        <span
-          className="opacity-0 group-hover:opacity-100 w-3 h-3 grid place-items-center text-text-5 cursor-grab active:cursor-grabbing"
-          aria-hidden
-          title="Drag to reparent"
-        >
-          <GripVertical
-            className="w-3 h-3"
-            strokeWidth={1.5}
-          />
+        {/* One gutter, two occupants. The grip is invisible until you hover
+            the row and the scope mark is absent on 30 of 31 rows, so giving
+            each its own 12px column spent a sixth of the name's width on
+            two things that are almost never both there. They share it now:
+            hover shows the grip, otherwise the mark (or nothing). */}
+        <span className="w-3 flex-shrink-0 grid place-items-center self-center">
+          <span
+            className="hidden group-hover:grid w-3 h-3 place-items-center text-text-5 cursor-grab active:cursor-grabbing"
+            aria-hidden
+            title="Drag to reparent"
+          >
+            <GripVertical className="w-3 h-3" strokeWidth={1.5} />
+          </span>
+          <span className="group-hover:hidden">
+            <ScopeBadge
+              scope={node.summary.scope}
+              bucket={node.summary.bucket}
+            />
+          </span>
         </span>
-        <ScopeBadge scope={node.summary.scope} bucket={node.summary.bucket} />
       </div>
       {isOpen &&
         node.children.map((c) => (
@@ -708,20 +885,59 @@ function TreeRow({
   );
 }
 
+// A page title in this app is almost always two things joined by a dash:
+// the NAME, then what it is about. "Aura Commons — W2 Lounge: presence +
+// ship log (design)". In a 232px rail the second half is what got cut, so
+// the row printed the half you already knew and hid the half you were
+// looking for — of this project's 49 pages, 37 (75%) died mid-title, and
+// three of them opened with the identical words "Aura Commons".
+//
+// So the row is given the two parts rather than one long string: the name
+// on its own line where it fits whole for 38 of the 49, and the rest
+// beneath it in the muted tone, where it reads as a subtitle instead of
+// competing for the same 180 pixels. Titles with no dash or colon (14 of
+// 49 — "Changelog", "Release checklist") find no split and stay exactly as
+// they were, one line.
+//
+// The em-dash and en-dash are matched with spaces around them so hyphenated
+// names ("Cross-agent", "Remote-VM") are never mistaken for a split; the
+// colon needs a trailing space for the same reason ("W2 Lounge: presence"
+// splits, "12:30" does not). Only the FIRST separator counts — everything
+// after it belongs to the subtitle, dashes and all.
+const TITLE_SPLIT = /\s+[—–]\s+|:\s+/;
+
+export function splitPageTitle(title: string): {
+  name: string;
+  detail: string | null;
+} {
+  const m = TITLE_SPLIT.exec(title);
+  if (!m || m.index === 0) return { name: title, detail: null };
+  const detail = title.slice(m.index + m[0].length).trim();
+  // A separator with nothing after it is punctuation, not a split.
+  if (!detail) return { name: title, detail: null };
+  return { name: title.slice(0, m.index).trim(), detail };
+}
+
 function ScopeBadge({ scope, bucket }: { scope: NoteScope; bucket: string }) {
-  const label =
-    scope === "team" ? "T" : scope === "channel" ? `#` : `@`;
-  const title =
-    scope === "team"
-      ? "Team"
-      : scope === "channel"
-        ? `#${bucket}`
-        : `@${bucket}`;
+  // Team is where a page lands unless you sent it somewhere else, so a "T"
+  // marked almost every row in the list — 30 of 31 here. A mark that never
+  // varies carries nothing and reads as clutter down the right edge; the
+  // information is in the exceptions, so only those are drawn. The gutter
+  // stays so the hover grip sits in the same column on every row.
+  if (scope === "team") {
+    return <span className="w-3 flex-shrink-0" aria-hidden />;
+  }
+  const label = scope === "channel" ? `#` : `@`;
+  const title = scope === "channel" ? `#${bucket}` : `@${bucket}`;
   return (
     <span
       title={title}
-      className="text-[8.5px] font-mono text-text-5/80 w-3 grid place-items-center flex-shrink-0"
-      aria-hidden
+      // The mark is a single glyph standing in for a name, so the name has to
+      // be readable somewhere. `title` alone was on an aria-hidden node, which
+      // means it reached the mouse and nobody else.
+      aria-label={title}
+      role="img"
+      className="text-2xs font-mono text-text-5/80 w-3 grid place-items-center flex-shrink-0"
     >
       {label}
     </span>
@@ -751,7 +967,18 @@ type PagesSidebarMountProps = {
 };
 
 export function PagesSidebarMount({ repoRoot, onClose }: PagesSidebarMountProps) {
+  // Which project's pages these are. Pages reads one project at a time — a
+  // page is edited, autosaved and shared inside one repo — so the picker names
+  // a project and does not offer All projects. `repoRoot` already arrives
+  // resolved against the shared scope (App mounts it through `usePlaceRoot`),
+  // so showing it is showing what's actually on screen.
+  const projects = useKnownProjects(repoRoot);
   const [summaries, setSummaries] = useState<NoteSummary[]>([]);
+  /** `summaries` is `[]` before the read returns and `[]` for a project with
+   *  no pages. This is the field that tells them apart — without it the rail
+   *  opened on "No pages yet" every single time, and stayed there forever if
+   *  the read threw. */
+  const [read, setRead] = useState<PagesRead>("pending");
   const [activeKey, setActiveKey] = useState<string | null>(null);
   const [query, setQuery] = useState("");
   const [folders, setFolders] = useState<PageFolder[]>([]);
@@ -929,16 +1156,37 @@ export function PagesSidebarMount({ repoRoot, onClose }: PagesSidebarMountProps)
 
   // Initial load — fall back if NotesWorkpane isn't mounted yet (e.g.
   // user lands on Pages rail directly).
-  useEffect(() => {
+  //
+  // The catch used to be a comment: "swallow — NotesWorkpane will mirror once
+  // it mounts". That excuse is the exact case this effect exists to cover —
+  // the one where NotesWorkpane ISN'T mounted, which is the sentence directly
+  // above. So a failure here left the rail on "No pages yet" with nothing
+  // coming to correct it.
+  const reloadSummaries = useCallback(() => {
     if (!repoRoot) return;
-    let cancelled = false;
+    setRead("pending");
     api
       .notesList({ repoRoot })
       .then((rows) => {
-        if (!cancelled) setSummaries(rows);
+        setSummaries(rows);
+        setRead("done");
+      })
+      .catch(() => setRead("failed"));
+  }, [repoRoot]);
+
+  useEffect(() => {
+    if (!repoRoot) return;
+    let cancelled = false;
+    setRead("pending");
+    api
+      .notesList({ repoRoot })
+      .then((rows) => {
+        if (cancelled) return;
+        setSummaries(rows);
+        setRead("done");
       })
       .catch(() => {
-        /* swallow — NotesWorkpane will mirror once it mounts */
+        if (!cancelled) setRead("failed");
       });
     return () => {
       cancelled = true;
@@ -955,6 +1203,10 @@ export function PagesSidebarMount({ repoRoot, onClose }: PagesSidebarMountProps)
       if (!detail) return;
       setSummaries(detail.summaries);
       setActiveKey(detail.activeKey);
+      // The mirror is a completed read too — and it's the one that arrives
+      // when the workpane is mounted, so it must clear a pending or failed
+      // state rather than leaving the rail waiting under real rows.
+      setRead("done");
     }
     window.addEventListener(
       "aura:pages:summaries",
@@ -1061,17 +1313,35 @@ export function PagesSidebarMount({ repoRoot, onClose }: PagesSidebarMountProps)
   }
 
   return (
-    <aside className="h-full w-full flex flex-col relative">
-      {onClose && (
-        <button
-          type="button"
-          onClick={onClose}
-          title="Close Pages rail"
-          className="absolute top-2.5 right-2 z-10 w-5 h-5 grid place-items-center rounded text-text-4 hover:text-text-1 hover:bg-bg-2 transition-colors"
-        >
-          <X className="w-3.5 h-3.5" strokeWidth={1.75} aria-hidden />
-        </button>
-      )}
+    <PlaceRail
+      scroll={false}
+      scope={
+        // Project on the left, close on the right, one row. The close button
+        // used to float `absolute top-1.5 right-2` over the rail — which put
+        // it exactly on top of the picker's chevron the moment the picker
+        // arrived, so reaching for "which project" hit "shut this".
+        <div className="flex items-center gap-1">
+          <div className="min-w-0 flex-1">
+            <PlaceRailScope
+              value={repoRoot}
+              onChange={setProjectScope}
+              projects={projects}
+            />
+          </div>
+          {onClose && (
+            <button
+              type="button"
+              onClick={onClose}
+              title="Close Pages rail"
+              aria-label="Close Pages rail"
+              className="shrink-0 w-5 h-5 grid place-items-center rounded text-text-4 hover:text-text-1 hover:bg-state-hover transition-colors"
+            >
+              <X className="w-3.5 h-3.5" strokeWidth={1.75} aria-hidden />
+            </button>
+          )}
+        </div>
+      }
+    >
       <PagesSidebar
         summaries={summaries}
         activeKey={activeKey}
@@ -1092,7 +1362,10 @@ export function PagesSidebarMount({ repoRoot, onClose }: PagesSidebarMountProps)
         onSetFolderColor={setFolderColor}
         onDeleteFolder={deleteFolder}
         onMovePageToFolder={movePageToFolder}
+        read={read}
+        hasProject={!!repoRoot}
+        onRetry={reloadSummaries}
       />
-    </aside>
+    </PlaceRail>
   );
 }

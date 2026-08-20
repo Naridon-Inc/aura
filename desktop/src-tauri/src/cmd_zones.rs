@@ -52,40 +52,43 @@ fn zones_dir(repo_root: &str) -> PathBuf {
 
 #[tauri::command]
 pub async fn zone_list(repo_root: String) -> Result<Vec<ZoneRule>, String> {
-    let dir = zones_dir(&repo_root);
-    if !dir.is_dir() {
-        return Ok(vec![]);
-    }
-    let mut out = Vec::new();
-    let entries = fs::read_dir(&dir).map_err(|e| e.to_string())?;
-    for entry in entries.filter_map(|r| r.ok()) {
-        let path = entry.path();
-        if path.extension().and_then(|s| s.to_str()) != Some("json") {
-            continue;
+    crate::blocking::run(move || {
+        let dir = zones_dir(&repo_root);
+        if !dir.is_dir() {
+            return Ok(vec![]);
         }
-        let mtime = entry
-            .metadata()
-            .and_then(|m| m.modified())
-            .ok()
-            .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
-            .map(|d| d.as_secs() as i64)
-            .unwrap_or(0);
-        let body = match fs::read_to_string(&path) {
-            Ok(s) => s,
-            Err(_) => continue,
-        };
-        if let Ok(mut z) = serde_json::from_str::<ZoneRule>(&body) {
-            if z.zone_id.is_empty() {
-                if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
-                    z.zone_id = stem.to_string();
-                }
+        let mut out = Vec::new();
+        let entries = fs::read_dir(&dir).map_err(|e| e.to_string())?;
+        for entry in entries.filter_map(|r| r.ok()) {
+            let path = entry.path();
+            if path.extension().and_then(|s| s.to_str()) != Some("json") {
+                continue;
             }
-            z.mtime = mtime;
-            out.push(z);
+            let mtime = entry
+                .metadata()
+                .and_then(|m| m.modified())
+                .ok()
+                .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+                .map(|d| d.as_secs() as i64)
+                .unwrap_or(0);
+            let body = match fs::read_to_string(&path) {
+                Ok(s) => s,
+                Err(_) => continue,
+            };
+            if let Ok(mut z) = serde_json::from_str::<ZoneRule>(&body) {
+                if z.zone_id.is_empty() {
+                    if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
+                        z.zone_id = stem.to_string();
+                    }
+                }
+                z.mtime = mtime;
+                out.push(z);
+            }
         }
-    }
-    out.sort_by(|a, b| b.mtime.cmp(&a.mtime));
-    Ok(out)
+        out.sort_by(|a, b| b.mtime.cmp(&a.mtime));
+        Ok(out)
+    })
+    .await
 }
 
 #[tauri::command]
@@ -139,7 +142,7 @@ pub async fn zone_claim(
         .label
         .clone()
         .unwrap_or_else(|| format!("claimed {} ({})", patterns.join(", "), mode_norm));
-    let _ = Command::new("aura")
+    let _ = Command::new(crate::agent_event_listener::resolve_aura_bin())
         .args([
             "radar",
             "emit",

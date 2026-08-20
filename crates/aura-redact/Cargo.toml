@@ -1,3 +1,10 @@
+# Standalone crate with its own git repo, published independently to crates.io.
+# The empty table opts it out of the parent Aura workspace it physically nests
+# inside, so `cargo test` here builds it on its own.
+# (Vendored into the public monorepo, where this crate is a member of the
+# root workspace. The standalone [workspace] table it carries in its own repo
+# is stripped on sync — an empty table here would declare a second root.)
+
 [package]
 name = "aura-redact"
 version = "0.2.0"

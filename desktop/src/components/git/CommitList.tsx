@@ -8,6 +8,8 @@
 import { type GraphCommit, type GraphRef } from "../../lib/api";
 import { Avatar } from "../team/presentation/Avatar";
 import { AsciiSpinner } from "../ui/ascii-spinner";
+import { relativeAgeFromDelta } from "../../lib/relativeTime";
+import { shortDateFromSecs } from "../../lib/calendarDate";
 
 export function CommitList({
   commits,
@@ -22,15 +24,15 @@ export function CommitList({
 }) {
   if (loading && commits.length === 0) {
     return (
-      <div className="flex items-center gap-1.5 px-3.5 py-3 text-[11.5px] text-text-4">
-        <AsciiSpinner className="text-[10px]" />
+      <div className="flex items-center gap-1.5 px-3.5 py-3 text-sm text-text-4">
+        <AsciiSpinner className="text-2xs" />
         <span>Reading the project’s story…</span>
       </div>
     );
   }
   if (commits.length === 0) {
     return (
-      <div className="px-3.5 py-6 text-[11.5px] leading-relaxed text-text-4">
+      <div className="px-3.5 py-6 text-sm leading-relaxed text-text-4">
         No saved versions yet. Once you save your first version, the project’s
         story shows up here.
       </div>
@@ -64,7 +66,7 @@ function CommitRow({
       type="button"
       onClick={onClick}
       className={`relative flex w-full items-start gap-2.5 px-3.5 py-2 text-left transition-colors ${
-        active ? "bg-bg-2" : "hover:bg-bg-2/60"
+        active ? "bg-state-selected" : "hover:bg-state-hover"
       }`}
     >
       {active && (
@@ -80,11 +82,11 @@ function CommitRow({
           {commit.refs.map((r, i) => (
             <RefBadge key={i} name={r.name} kind={r.kind} />
           ))}
-          <span className="truncate text-[12.5px] text-text-1">
+          <span className="truncate text-base text-text-1">
             {commit.subject || "(no message)"}
           </span>
         </span>
-        <span className="mt-0.5 flex items-center gap-1.5 text-[10.5px] text-text-4">
+        <span className="mt-0.5 flex items-center gap-1.5 text-xs text-text-4">
           <span className="font-mono text-text-3">{commit.short}</span>
           <span>·</span>
           <span className="truncate">{commit.author}</span>
@@ -104,12 +106,12 @@ function RefBadge({ name, kind }: { name: string; kind: GraphRef["kind"] }) {
   if (kind === "head") {
     return (
       <span
-        className="inline-flex shrink-0 items-center gap-1 rounded-full px-1.5 text-[9.5px] font-medium leading-[15px]"
+        className="inline-flex shrink-0 items-center gap-1 rounded-full px-1.5 text-2xs font-medium leading-[15px]"
         style={{
           background: "var(--color-accent)",
           color: "var(--color-accent-foreground)",
         }}
-        title="You are here — the version you’re working from"
+        title="You are here. The version you’re working from"
       >
         <span
           className="inline-block h-1 w-1 rounded-full"
@@ -122,7 +124,7 @@ function RefBadge({ name, kind }: { name: string; kind: GraphRef["kind"] }) {
   if (kind === "tag") {
     return (
       <span
-        className="inline-flex shrink-0 items-center rounded-full border border-line-soft px-1.5 text-[9.5px] leading-[15px] text-text-3"
+        className="inline-flex shrink-0 items-center rounded-full border border-line-soft px-1.5 text-2xs leading-[15px] text-text-3"
         title="A named release point"
       >
         ⌖ {name}
@@ -131,7 +133,7 @@ function RefBadge({ name, kind }: { name: string; kind: GraphRef["kind"] }) {
   }
   return (
     <span
-      className="inline-flex shrink-0 items-center rounded-full border px-1.5 text-[9.5px] leading-[15px] text-text-3"
+      className="inline-flex shrink-0 items-center rounded-full border px-1.5 text-2xs leading-[15px] text-text-3"
       style={{ borderColor: "var(--color-line-soft)", opacity: kind === "remote" ? 0.7 : 1 }}
       title={kind === "remote" ? "A copy that lives on the server" : "A branch"}
     >
@@ -142,11 +144,9 @@ function RefBadge({ name, kind }: { name: string; kind: GraphRef["kind"] }) {
 
 function relTime(secs: number): string {
   if (!secs) return "";
+  // Past a month a commit is history, not news — the date is the useful fact.
+  // One ladder for the whole app — see lib/relativeTime.
   const d = Math.floor(Date.now() / 1000) - secs;
-  if (d < 60) return "just now";
-  if (d < 3600) return `${Math.floor(d / 60)}m ago`;
-  if (d < 86400) return `${Math.floor(d / 3600)}h ago`;
-  if (d < 604800) return `${Math.floor(d / 86400)}d ago`;
-  if (d < 2592000) return `${Math.floor(d / 604800)}w ago`;
-  return new Date(secs * 1000).toLocaleDateString();
+  if (d >= 2592000) return shortDateFromSecs(secs);
+  return relativeAgeFromDelta(d);
 }

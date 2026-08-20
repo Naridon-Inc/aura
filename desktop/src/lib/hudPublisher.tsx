@@ -18,6 +18,7 @@ import type { UnlistenFn } from "@tauri-apps/api/event";
 import { liveActivityText } from "./agentActivity";
 import { useAgentEvent, useAllAgentStatuses } from "./agentEventStore";
 import { streamChannel, useAgentStream, useAllStreamStates } from "./agentStreamStore";
+import { placeForNewWork, readAmbientSid } from "./ambientSession";
 import {
   api,
   type CliAgentStatus,
@@ -101,13 +102,12 @@ function summarizeLine(text: string): string {
   return out.length > MAX_MSG ? `${out.slice(0, MAX_MSG - 1)}…` : out;
 }
 
+/** The chat about `root` at the place the window is standing in. The HUD
+ *  glances at the conversation you are actually in, so a project you are
+ *  working on from a machine reports that machine's thread, not the one whose
+ *  hands are on this disk. */
 function readAmbient(root: string | null): string | null {
-  if (!root) return null;
-  try {
-    return localStorage.getItem(`aura.ambient.${root}`);
-  } catch {
-    return null;
-  }
+  return readAmbientSid(root, placeForNewWork(root));
 }
 
 function sameRoot(a: string, b: string): boolean {
@@ -593,7 +593,12 @@ export function HudPublisher({ projectRoot }: { projectRoot: string | null }): n
       statusText,
       lastUser: user,
       lastAgent,
-      canSend: true,
+      // A send with no target and no project root is dropped on the floor
+      // by App's hud:send handler (`if (root)` with no else) — the HUD's
+      // composer took the text, cleared itself and nothing happened. This
+      // is the condition the composer's canSend guard was always meant to
+      // carry; it just shipped hardcoded true everywhere.
+      canSend: !!projectRoot,
       projects,
       activeRoot: projectRoot,
       agents: roster,
@@ -603,6 +608,7 @@ export function HudPublisher({ projectRoot }: { projectRoot: string | null }): n
     state = {
       ...HUD_IDLE_STATE,
       target: projectRoot ? { kind: "native", repoRoot: projectRoot } : null,
+      canSend: !!projectRoot,
       projects,
       activeRoot: projectRoot,
       agents: roster,

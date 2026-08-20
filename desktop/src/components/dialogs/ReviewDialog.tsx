@@ -10,7 +10,10 @@
 // One question, plainly answered: "is this change healthy to keep?" The
 // body is exactly two groups, no filter layer in between:
 //
-//   • Verdict       — "Safe to keep" or "N things worth a look".
+//   • Verdict       — what the check found: "Nothing broken", "Nothing
+//                      broken — but it's a big change", or "N things worth
+//                      a look". It reports; it never says you're cleared to
+//                      keep something. See `verdictCopy`.
 //   • Worth fixing   — the things actually wrong (rules broken +
 //                      clashes with another version). The only blocking list.
 //   • Good to know   — context, collapsed: what else it touches, changes
@@ -23,12 +26,14 @@
 
 import { useEffect, useMemo, useState } from "react";
 import { Dialog } from "../Dialog";
+import { relativeAge } from "../../lib/relativeTime";
 import { Button } from "../ui/button";
 import { Input } from "../ui/input";
 import { api } from "../../lib/api";
 import { humanizeFindingText } from "../../lib/humanizeFinding";
+import { askConfirm } from "../ui/ask";
+import { verdictCopy, type RiskLabel } from "../../lib/reviewVerdict";
 
-type RiskLabel = "LOW" | "MODERATE" | "CRITICAL" | string;
 
 type ReviewReport = {
   base_branch: string;
@@ -112,14 +117,8 @@ function saveCachedReview(repoRoot: string, base: string, v: CachedReview): void
 }
 
 function agoLabel(ms: number): string {
-  const diff = Date.now() - ms;
-  const mins = Math.round(diff / 60000);
-  if (mins < 1) return "just now";
-  if (mins < 60) return `${mins}m ago`;
-  const hrs = Math.round(mins / 60);
-  if (hrs < 24) return `${hrs}h ago`;
-  const days = Math.round(hrs / 24);
-  return `${days}d ago`;
+  // One ladder for the whole app — see lib/relativeTime.
+  return relativeAge(ms);
 }
 
 export function ReviewDialog({ open, repoRoot, baseBranch = "main", onClose, inline }: ReviewDialogProps) {
@@ -201,9 +200,11 @@ export function ReviewDialog({ open, repoRoot, baseBranch = "main", onClose, inl
 
   const runAutoFix = async () => {
     if (
-      !window.confirm(
-        "Let Aura try to fix these automatically? It will edit the files to resolve them.",
-      )
+      !(await askConfirm({
+        title: "Let Aura try to fix these automatically?",
+        body: "It edits the files to resolve them. Your changes are saved first, so you can undo it.",
+        confirmLabel: "Fix them",
+      }))
     ) {
       return;
     }
@@ -214,7 +215,7 @@ export function ReviewDialog({ open, repoRoot, baseBranch = "main", onClose, inl
       if (res.status !== 0) {
         setAutoFixToast(`Couldn't fix it automatically: ${res.stderr.trim() || `exit ${res.status}`}`);
       } else {
-        setAutoFixToast("Fixed — checking again");
+        setAutoFixToast("Fixed. Checking again");
         await run();
       }
       setTimeout(() => setAutoFixToast(null), 4000);
@@ -268,7 +269,7 @@ export function ReviewDialog({ open, repoRoot, baseBranch = "main", onClose, inl
     >
       {error ? (
         <div className="flex flex-col gap-3">
-          <div role="alert" className="text-red text-[11.5px] py-2">{error}</div>
+          <div role="alert" className="text-red text-sm py-2">{error}</div>
           <Button variant="default" size="xs" onClick={run} disabled={loading} className="self-start">
             {loading ? "Checking…" : "Try again"}
           </Button>
@@ -281,17 +282,21 @@ export function ReviewDialog({ open, repoRoot, baseBranch = "main", onClose, inl
         <div className={`flex flex-col gap-3 ${inline ? "" : "max-h-[68vh]"}`}>
           {ranAt != null && <CheckedStrip ranAt={ranAt} loading={loading} onRecheck={run} />}
 
-          <Verdict report={report} problemCount={problems.length} />
+          <Verdict
+            report={report}
+            problemCount={problems.length}
+            unverified={unverifiedTotal}
+          />
 
           {autoFixToast && (
-            <div className="text-[11.5px] text-accent-green border border-accent-green/40 rounded px-2 py-1">
+            <div className="text-sm text-accent-green border border-accent-green/40 rounded px-2 py-1">
               {autoFixToast}
             </div>
           )}
 
           {problems.length > 0 && (
             <div className="flex flex-col gap-2 min-h-0">
-              <div className="text-[11px] font-medium uppercase tracking-wider text-text-3">
+              <div className="section-label">
                 Worth fixing
                 <span className="ml-1.5 font-normal text-text-4">{problems.length}</span>
               </div>
@@ -339,13 +344,13 @@ function SafetyCheckLanding({
           <path d="m9 11.5 2 2 4-4.2" />
         </svg>
       </div>
-      <div className="text-text-1 text-[16px] font-semibold mb-2">Run a safety check</div>
-      <p className="text-text-2 text-[12.5px] leading-relaxed max-w-[420px]">
+      <div className="text-text-1 text-lg font-semibold mb-2">Run a safety check</div>
+      <p className="text-text-2 text-base leading-relaxed max-w-[420px]">
         A second set of eyes on everything you&apos;ve changed since{" "}
-        <span className="font-mono text-text-1">{base}</span> — it looks for bugs,
+        <span className="font-mono text-text-1">{base}</span>. It looks for bugs,
         security holes, and things that don&apos;t match what you asked for.
       </p>
-      <p className="text-text-4 text-[11px] leading-relaxed max-w-[420px] mt-2.5">
+      <p className="text-text-4 text-xs leading-relaxed max-w-[420px] mt-2.5">
         Nothing runs until you press the button, and the result is kept so you
         can come back to it without re-checking.
       </p>
@@ -374,7 +379,7 @@ function CheckedStrip({
   onRecheck: () => void;
 }) {
   return (
-    <div className="flex items-center gap-2 text-[10.5px] text-text-4">
+    <div className="flex items-center gap-2 text-xs text-text-4">
       <span
         className="w-1.5 h-1.5 rounded-full flex-shrink-0"
         style={{ background: loading ? "var(--color-amber)" : "var(--color-text-5)" }}
@@ -394,38 +399,47 @@ function CheckedStrip({
 }
 
 // The lead. Counts real problems, never impact. Risk label from the
-// engine rides along as a quiet tag so power users still see it.
-function Verdict({ report, problemCount }: { report: ReviewReport; problemCount: number }) {
-  const clean = problemCount === 0;
+// engine rides along as a quiet tag so power users still see it — in its
+// OWN colour, so a CRITICAL never renders green just because nothing
+// tripped the two counters `problemCount` is built from.
+function Verdict({
+  report,
+  problemCount,
+  unverified,
+}: {
+  report: ReviewReport;
+  problemCount: number;
+  unverified: number;
+}) {
+  const v = verdictCopy({
+    problems: problemCount,
+    totalChanges: report.total_changes,
+    risk: report.risk_label,
+    unverified,
+  });
   // Color rides on the glyph/risk-tag only — never as a full card fill.
-  const fg = clean ? "var(--color-accent-green)" : riskTone(report.risk_label);
-  const glyph = clean ? "✓" : "⚠";
-  const headline = clean
-    ? "Safe to keep"
-    : `${problemCount} ${problemCount === 1 ? "thing" : "things"} worth a look`;
-  const sub = clean
-    ? `Aura checked everything that changed${
-        report.total_changes > 0
-          ? ` — ${report.total_changes} ${report.total_changes === 1 ? "change" : "changes"} in all`
-          : ""
-      }. Nothing here looks risky — you're good to keep these changes.`
-    : "Have a look before you keep these changes — each one could break something, or clashes with someone else's work.";
+  const fg =
+    v.tone === "good"
+      ? "var(--color-accent-green)"
+      : v.tone === "bad"
+        ? "var(--color-red)"
+        : "var(--color-amber)";
   return (
     <div className="rounded-lg px-3 py-3 border border-line-soft bg-bg-1">
       <div className="flex items-center gap-2.5">
-        <span aria-hidden className="text-[13px] leading-none flex-shrink-0" style={{ color: fg }}>
-          {glyph}
+        <span aria-hidden className="text-base leading-none flex-shrink-0" style={{ color: fg }}>
+          {v.glyph}
         </span>
-        <span className="text-[14px] font-semibold text-text-1">{headline}</span>
+        <span className="text-md font-semibold text-text-1">{v.headline}</span>
         <span
-          className="ml-auto text-[9.5px] uppercase tracking-wide px-1.5 py-0.5 rounded border border-line-soft"
-          style={{ color: fg }}
+          className="ml-auto text-2xs px-1.5 py-0.5 rounded border border-line-soft"
+          style={{ color: riskTone(report.risk_label) }}
           title={`Aura's overall read on these changes: ${String(report.risk_label).toLowerCase()}`}
         >
           {report.risk_label}
         </span>
       </div>
-      <div className="text-[12px] text-text-2 mt-1.5 leading-snug">{sub}</div>
+      <div className="text-sm text-text-2 mt-1.5 leading-snug">{v.sub}</div>
     </div>
   );
 }
@@ -442,12 +456,12 @@ function FindingRow({ finding }: { finding: Finding }) {
           {/* The kind of problem is a label, not an alarm — the severity glyph and
               the row border already carry the "look at me". A third hue per
               category just made the list noisy. */}
-          <span className="text-[9.5px] uppercase tracking-wide px-1.5 py-0.5 rounded bg-bg-3 text-text-3">
+          <span className="meta-tag">
             {categoryLabel(finding.category)}
           </span>
-          <span className="text-[10.5px] uppercase tracking-wide text-text-4">{sourceLabel(finding.source)}</span>
+          <span className="section-label">{sourceLabel(finding.source)}</span>
         </div>
-        <div className="text-[12px] text-text-1 leading-snug break-words whitespace-pre-wrap">
+        <div className="text-sm text-text-1 leading-snug break-words whitespace-pre-wrap">
           {humanizeFindingText(finding.text)}
         </div>
       </div>
@@ -478,7 +492,7 @@ function Details({
       <button
         type="button"
         onClick={() => setOpen((v) => !v)}
-        className="flex items-center gap-2 text-[11px] text-text-3 hover:text-text-1 transition-colors"
+        className="flex items-center gap-2 text-xs text-text-3 hover:text-text-1 transition-colors"
       >
         <svg
           width="9"
@@ -489,31 +503,31 @@ function Details({
         >
           <path d="M4 2.5 8 6l-4 3.5" stroke="currentColor" strokeWidth="1.5" />
         </svg>
-        <span>Good to know — what else this touches, missing notes & style ({count})</span>
+        <span>Good to know. What else this touches, missing notes & style ({count})</span>
       </button>
       {open && (
         <div className={`mt-3 flex flex-col gap-3 ${inline ? "" : "overflow-auto pr-1 max-h-[40vh]"}`}>
           {impact.length > 0 && (
             <Section title={`What else this touches · ${impact.length}`}>
-              <div className="text-[10.5px] text-text-4 mb-1">
-                Other parts of the code that lean on what changed — worth a look, but not problems.
+              <div className="text-xs text-text-4 mb-1">
+                Other parts of the code that lean on what changed. Worth a look, but not problems.
               </div>
               <ul className="flex flex-col gap-0.5">
                 {impact.slice(0, 80).map((n, i) => (
-                  <li key={i} className="text-[11.5px] font-mono text-text-2 px-2 py-1 rounded hover:bg-bg-2">
+                  <li key={i} className="text-sm font-mono text-text-2 px-2 py-1 rounded hover:bg-state-hover">
                     <span className="text-amber mr-2">↳</span>
                     {n}
                   </li>
                 ))}
                 {impact.length > 80 && (
-                  <li className="text-[10.5px] text-text-4 px-2">… and {impact.length - 80} more</li>
+                  <li className="text-xs text-text-4 px-2">… and {impact.length - 80} more</li>
                 )}
               </ul>
             </Section>
           )}
           {unverifiedTotal > 0 && (
             <Section title={`Changes with no note · ${unverifiedTotal}`}>
-              <div className="text-[10.5px] text-text-4 mb-1">
+              <div className="text-xs text-text-4 mb-1">
                 Some logic changed without a note saying why. Adding a quick note keeps the
                 history clear for later.
               </div>
@@ -525,8 +539,8 @@ function Details({
                       key={kind}
                       className="flex items-center gap-2 px-2.5 py-1.5 rounded border border-line-soft bg-bg-1"
                     >
-                      <span className="text-[11.5px] text-text-1 capitalize">{kind}</span>
-                      <span className="ml-auto text-[11px] text-text-3 tabular-nums">{n}</span>
+                      <span className="text-sm text-text-1 capitalize">{kind}</span>
+                      <span className="ml-auto text-xs text-text-3 tabular-nums">{n}</span>
                     </li>
                   ))}
               </ul>
@@ -534,22 +548,22 @@ function Details({
           )}
           {taste.length > 0 && (
             <Section title={`Style · ${taste.length}`}>
-              <div className="text-[10.5px] text-text-4 mb-1">
-                Small style suggestions Aura picked up from this project — not problems,
+              <div className="text-xs text-text-4 mb-1">
+                Small style suggestions Aura picked up from this project, not problems,
                 just gentle nudges.
               </div>
               <ul className="flex flex-col gap-0.5">
                 {taste.slice(0, 40).map((t, i) => (
                   <li
                     key={i}
-                    className="text-[11.5px] font-mono text-text-2 px-2 py-1 rounded hover:bg-bg-2 break-words whitespace-pre-wrap"
+                    className="text-sm font-mono text-text-2 px-2 py-1 rounded hover:bg-state-hover break-words whitespace-pre-wrap"
                   >
                     <span className="text-amber mr-2">🧪</span>
                     {t}
                   </li>
                 ))}
                 {taste.length > 40 && (
-                  <li className="text-[10.5px] text-text-4 px-2">
+                  <li className="text-xs text-text-4 px-2">
                     … and {taste.length - 40} more
                   </li>
                 )}
@@ -565,7 +579,7 @@ function Details({
 function Section({ title, children }: { title: string; children: React.ReactNode }) {
   return (
     <div>
-      <div className="text-[10.5px] uppercase tracking-wide text-text-4 mb-1">{title}</div>
+      <div className="section-label mb-1">{title}</div>
       {children}
     </div>
   );

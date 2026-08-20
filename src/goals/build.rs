@@ -43,7 +43,8 @@ pub fn prove_active_on_commit(root: &Path, commit_sha: &str) -> Vec<BuildProof> 
         None => return Vec::new(),
     };
     let title = task_title(root, &task_uuid).unwrap_or_default();
-    prove_task_on_commit(root, Some(&task_uuid), &title, commit_sha)
+    // One repo, one place: the ledger and the reasons are both this root.
+    prove_task_on_commit(root, root, Some(&task_uuid), &title, commit_sha)
 }
 
 /// Prove a **specific** task's goal(s) against `commit_sha` and record a run
@@ -64,8 +65,20 @@ pub fn prove_active_on_commit(root: &Path, commit_sha: &str) -> Vec<BuildProof> 
 /// committed code is reachable from the main repo. When there's genuinely no
 /// snapshot to check (verdict `unknown`), no run is recorded: "Not checked"
 /// then means exactly that, not a dropped result.
+///
+/// `work_root` is the checkout the code was actually built in, and it is a
+/// *separate* argument from `ledger_root` on purpose. The one-time
+/// decomposition is grounded in the reasons the agent logged, and those live in
+/// the working checkout's `.aura/intent_log.jsonl` — while the ledger is the
+/// main repo's, shared by every worktree. Reading the reasons from the ledger
+/// root is how a node ends up graded against a *different* crew's intent: three
+/// loops in three worktrees all append to their own logs, but only one of them
+/// is the main repo's, so whichever crew committed last supplies the reasons for
+/// everybody. The requirements then describe someone else's work and the node's
+/// own code scores zero — a confident, wrong `not_wired`.
 pub fn prove_task_on_commit(
     ledger_root: &Path,
+    work_root: &Path,
     task_uuid: Option<&str>,
     task_title: &str,
     commit_sha: &str,
@@ -98,22 +111,25 @@ pub fn prove_task_on_commit(
         return Vec::new();
     }
 
-    prove_goals(ledger_root, goals, commit_sha)
+    prove_goals(ledger_root, work_root, goals, commit_sha)
 }
 
 /// Decompose-once / prove-on-build for an explicit set of goals against
-/// `commit_sha`, recording a run per goal into `root`'s ledger. Shared by the
+/// `commit_sha`, recording a run per goal into `ledger_root`'s ledger and
+/// grounding the decomposition in `work_root`'s reasons. Shared by the
 /// active-task ([`prove_active_on_commit`]) and explicit-task
 /// ([`prove_task_on_commit`]) entry points.
 fn prove_goals(
-    root: &Path,
+    ledger_root: &Path,
+    work_root: &Path,
     goals: Vec<super::model::GoalRecord>,
     commit_sha: &str,
 ) -> Vec<BuildProof> {
     let mut proofs = Vec::new();
 
-    // The live reasons behind this commit — what the agent just logged.
-    let reasons = latest_intent(root);
+    // The live reasons behind this commit — what the agent just logged, in the
+    // checkout it worked in.
+    let reasons = latest_intent(work_root);
     let short = short_sha(commit_sha);
 
     for goal in goals {
@@ -127,7 +143,7 @@ fn prove_goals(
                         decomposed_at: store::now_millis(),
                         model: Some("auditor".to_string()),
                     };
-                    let _ = store::set_decomposition(root, &goal.id, decomp);
+                    let _ = store::set_decomposition(ledger_root, &goal.id, decomp);
                     (reqs, true)
                 }
                 // No model reachable — skip, best-effort. A later manual/app
@@ -136,8 +152,13 @@ fn prove_goals(
             },
         };
 
-        // 3. Prove against the just-committed code (AST-only, free).
-        let outcome = GsdEngine::prove_requirements(&goal.text, &requirements);
+        // 3. Prove against the just-committed code (AST-only, free) — anchored
+        // to THIS commit, not "the newest snapshot in the repo". `refs/notes/aura`
+        // is one store shared by every worktree and branch, so while a crew loop
+        // builds three branches at once the newest note is whoever committed last
+        // *anywhere*. Grading a goal against a sibling branch's code reports a
+        // confident, wrong zero and throws the work away.
+        let outcome = GsdEngine::prove_requirements_at(&goal.text, &requirements, commit_sha);
         let verdict_str = outcome["verdict"].as_str().unwrap_or("unknown");
         if verdict_str == "unknown" {
             continue; // couldn't check (no snapshot) — don't record a misleading run
@@ -161,7 +182,7 @@ fn prove_goals(
             files,
             at: store::now_millis(),
         };
-        let _ = store::record_run(root, &goal.id, run);
+        let _ = store::record_run(ledger_root, &goal.id, run);
 
         proofs.push(BuildProof { goal_text: goal.text.clone(), verdict, ok, total, freshly_decomposed });
     }
@@ -189,6 +210,53 @@ fn task_title(root: &Path, uuid: &str) -> Option<String> {
 fn task_seq(root: &Path, uuid: &str) -> Option<u64> {
     let t = crate::board::get_task(root, uuid).ok().flatten()?;
     t.get("sequence_id").and_then(serde_json::Value::as_u64)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::Path;
+
+    fn write_intent(root: &Path, intent: &str) {
+        let dir = root.join(".aura");
+        std::fs::create_dir_all(&dir).unwrap();
+        let line = serde_json::json!({ "agent_id": "claude", "intent": intent }).to_string();
+        std::fs::write(dir.join("intent_log.jsonl"), format!("{line}\n")).unwrap();
+    }
+
+    /// Three crew loops run in three worktrees and all record their proofs into
+    /// the *main* repo's ledger, but each logs its reasons into its own
+    /// checkout. So the ledger root and the working root hold different intents
+    /// at the same moment, and grounding a decomposition in the ledger root's
+    /// intent describes another crew's work — which is how a node that really
+    /// did build its goal comes back a confident `not_wired` and, with
+    /// `--rollback`, gets erased.
+    #[test]
+    fn reasons_come_from_the_checkout_the_work_happened_in() {
+        let ledger = tempfile::tempdir().unwrap();
+        let work = tempfile::tempdir().unwrap();
+
+        // The main repo's log carries whichever crew committed most recently.
+        write_intent(ledger.path(), "cloud: one org-selection helper");
+        // This node's own checkout carries what this node actually did.
+        write_intent(work.path(), "window: every entry point names its place");
+
+        assert_eq!(
+            super::latest_intent(work.path()).as_deref(),
+            Some("window: every entry point names its place"),
+        );
+        // The bug, stated as an assertion: reading the ledger root here is what
+        // hands a window node the cloud node's reasons.
+        assert_ne!(super::latest_intent(ledger.path()), super::latest_intent(work.path()));
+    }
+
+    /// A checkout that has logged nothing yields no reasons rather than
+    /// borrowing someone else's — decomposition then falls back to the goal
+    /// text alone, which is vague but honest.
+    #[test]
+    fn a_checkout_with_no_log_has_no_reasons_to_lend() {
+        let empty = tempfile::tempdir().unwrap();
+        assert_eq!(super::latest_intent(empty.path()), None);
+    }
 }
 
 fn short_sha(sha: &str) -> String {

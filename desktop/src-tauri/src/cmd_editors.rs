@@ -173,40 +173,43 @@ pub async fn editors_list() -> Result<Vec<EditorInfo>, String> {
 /// `"default"` defers to the OS file association.
 #[tauri::command]
 pub async fn editor_open(path: String, editor_id: String) -> Result<(), String> {
-    let target = PathBuf::from(&path);
-    if !target.exists() {
-        return Err(format!("path does not exist: {path}"));
-    }
-
-    if editor_id == "default" {
-        return open_with_os_default(&target);
-    }
-
-    let spec = EDITORS
-        .iter()
-        .find(|s| s.id == editor_id)
-        .ok_or_else(|| format!("unknown editor: {editor_id}"))?;
-
-    // Prefer the CLI shim — it opens the exact target and reuses a window.
-    for c in spec.cli {
-        if let Some(bin) = which(c) {
-            let mut cmd = Command::new(&bin);
-            cmd.arg(&target);
-            return run_detached(cmd);
+    crate::blocking::run(move || {
+        let target = PathBuf::from(&path);
+        if !target.exists() {
+            return Err(format!("path does not exist: {path}"));
         }
-    }
 
-    // macOS fallback: launch the bundle via `open -a`.
-    #[cfg(target_os = "macos")]
-    {
-        if let Some(app) = mac_app_path(spec.app_names) {
-            let mut cmd = Command::new("open");
-            cmd.arg("-a").arg(&app).arg(&target);
-            return run_detached(cmd);
+        if editor_id == "default" {
+            return open_with_os_default(&target);
         }
-    }
 
-    Err(format!("{} is not installed", spec.name))
+        let spec = EDITORS
+            .iter()
+            .find(|s| s.id == editor_id)
+            .ok_or_else(|| format!("unknown editor: {editor_id}"))?;
+
+        // Prefer the CLI shim — it opens the exact target and reuses a window.
+        for c in spec.cli {
+            if let Some(bin) = which(c) {
+                let mut cmd = Command::new(&bin);
+                cmd.arg(&target);
+                return run_detached(cmd);
+            }
+        }
+
+        // macOS fallback: launch the bundle via `open -a`.
+        #[cfg(target_os = "macos")]
+        {
+            if let Some(app) = mac_app_path(spec.app_names) {
+                let mut cmd = Command::new("open");
+                cmd.arg("-a").arg(&app).arg(&target);
+                return run_detached(cmd);
+            }
+        }
+
+        Err(format!("{} is not installed", spec.name))
+    })
+    .await
 }
 
 /// Open a path in the OS-associated application.

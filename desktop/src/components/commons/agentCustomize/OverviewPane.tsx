@@ -58,12 +58,11 @@ export function OverviewPane({
           >
             <Sparkles size={20} />
           </div>
-          <h1 className="text-[19px] font-semibold text-text-1">
+          <h1 className="text-xl font-semibold text-text-1">
             Customize your agent
           </h1>
-          <p className="mx-auto mt-1.5 max-w-md text-[12.5px] leading-relaxed text-text-3">
-            Tell it what you want in plain words, or set things up by hand below
-            — who does the work, what it can reach, and how you stay protected.
+          <p className="mx-auto mt-1.5 max-w-md text-base leading-relaxed text-text-3">
+            Tell it what you want in plain words, or set things up by hand below, who does the work, what it can reach, and how you stay protected.
           </p>
         </div>
 
@@ -82,10 +81,10 @@ export function OverviewPane({
                 : "Install a coding agent to use this"
             }
             disabled={!target}
-            className="w-full resize-none bg-transparent px-2 pt-1.5 text-[13px] leading-relaxed text-text-1 placeholder:text-text-4 focus:outline-none disabled:opacity-60"
+            className="w-full resize-none bg-transparent px-2 pt-1.5 text-base leading-relaxed text-text-1 placeholder:text-text-4 focus:outline-none disabled:opacity-60"
           />
           <div className="flex items-center justify-between px-1 pt-1">
-            <span className="text-[10.5px] text-text-4">
+            <span className="text-xs text-text-4">
               {target
                 ? `${target.label} will pick this up`
                 : "No agent installed yet"}
@@ -94,7 +93,7 @@ export function OverviewPane({
               type="button"
               onClick={submit}
               disabled={!draft.trim() || !target}
-              className="inline-flex items-center gap-1.5 rounded-md px-3 py-1.5 text-[12px] font-medium text-white transition-[filter] hover:brightness-110 disabled:opacity-40"
+              className="inline-flex items-center gap-1.5 rounded-md px-3 py-1.5 text-sm font-medium text-white transition-[filter] hover:brightness-110 disabled:opacity-40"
               style={{ background: "var(--color-accent)" }}
             >
               Send
@@ -175,17 +174,17 @@ function CategoryCard({
     <button
       type="button"
       onClick={onClick}
-      className="group flex flex-col gap-2 rounded-lg border border-line-soft bg-bg-0 shadow-[var(--shadow-card)] p-3.5 text-left transition-colors hover:border-line-strong hover:bg-bg-2/50"
+      className="group flex flex-col gap-2 rounded-lg border border-line-soft bg-bg-0 shadow-[var(--shadow-card)] p-3.5 text-left transition-colors hover:border-line-strong hover:bg-state-hover"
     >
       <div className="flex items-center justify-between">
         <span className="flex items-center gap-2 text-text-2">
           {icon}
-          <span className="text-[13px] font-medium text-text-1">{label}</span>
+          <span className="text-base font-medium text-text-1">{label}</span>
         </span>
         {meta}
       </div>
-      <p className="text-[11.5px] leading-relaxed text-text-4">{blurb}</p>
-      <span className="mt-0.5 inline-flex items-center gap-1 text-[11px] text-text-4 transition-colors group-hover:text-accent">
+      <p className="text-sm leading-relaxed text-text-4">{blurb}</p>
+      <span className="mt-0.5 inline-flex items-center gap-1 text-xs text-text-4 transition-colors group-hover:text-accent">
         Open
         <ArrowRight
           size={12}

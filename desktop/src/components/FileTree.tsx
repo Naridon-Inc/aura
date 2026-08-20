@@ -24,8 +24,10 @@ import {
   X,
 } from "lucide-react";
 import { api, type DirEntry, type EditorInfo } from "../lib/api";
+import { loadDirList, reloadDirList } from "../lib/dirListCache";
 import { beginInAppFileDrag, endInAppFileDrag } from "../lib/osFileDrop";
 import { useDebouncedValue } from "../lib/useDebouncedValue";
+import { cn } from "../lib/utils";
 import { AsciiSpinner } from "./ui/ascii-spinner";
 import { FileIcon } from "./FileIcon";
 import {
@@ -49,6 +51,7 @@ import {
   ContextMenuTrigger,
 } from "./ui/context-menu";
 import { Input } from "./ui/input";
+import { basename } from "../lib/paths";
 
 type FileTreeProps = {
   root: string;
@@ -64,6 +67,10 @@ type FileTreeProps = {
 type Node = DirEntry & {
   depth: number;
   children: Node[] | null; // null = not loaded yet
+  /** Folder this row lives in, shown dimmed beside the name. Set only on
+   *  search hits, where the row is lifted out of the tree and the name
+   *  alone doesn't say which of the seven `mod.rs` files it is. */
+  hint?: string;
 };
 
 /** Inline editor state — either renaming an existing path, or creating
@@ -114,14 +121,16 @@ export function FileTree({ root, selected, onSelect, onSelectSplit }: FileTreePr
     setLoading(true);
     setError(null);
     try {
-      const rootEntries = await api.listDir(root);
+      // `reload*` and not `load*`: this runs because something changed on disk,
+      // and a listing already in flight was started before it did.
+      const rootEntries = await reloadDirList(root);
       const rootNodes = rootEntries.map((e) => toNode(e, 0));
       // Re-expand previously-open dirs depth-first.
       async function expand(nodes: Node[]) {
         for (const n of nodes) {
           if (n.is_dir && expandedRef.current.has(n.path)) {
             try {
-              const kids = await api.listDir(n.path);
+              const kids = await reloadDirList(n.path);
               n.children = kids.map((e) => toNode(e, n.depth + 1));
               await expand(n.children);
             } catch {
@@ -132,6 +141,7 @@ export function FileTree({ root, selected, onSelect, onSelectSplit }: FileTreePr
       }
       await expand(rootNodes);
       setTree(rootNodes);
+      setIndex(null); // paths may have moved — re-index on the next search
     } catch (e) {
       setError(String(e));
     } finally {
@@ -172,7 +182,7 @@ export function FileTree({ root, selected, onSelect, onSelectSplit }: FileTreePr
       expandedRef.current.add(node.path);
       if (node.children == null) {
         try {
-          const kids = await api.listDir(node.path);
+          const kids = await loadDirList(node.path);
           node.children = kids.map((e) => toNode(e, node.depth + 1));
         } catch {
           node.children = [];
@@ -187,7 +197,8 @@ export function FileTree({ root, selected, onSelect, onSelectSplit }: FileTreePr
   async function reloadFolder(folderPath: string): Promise<void> {
     const node = findNode(tree, folderPath);
     try {
-      const kids = await api.listDir(folderPath);
+      // Same reason as reloadAll: the caller just wrote into this folder.
+      const kids = await reloadDirList(folderPath);
       const nextChildren = kids.map((e) =>
         toNode(e, (node?.depth ?? 0) + 1),
       );
@@ -219,7 +230,7 @@ export function FileTree({ root, selected, onSelect, onSelectSplit }: FileTreePr
       const node = findNode(tree, target);
       if (node && node.is_dir && node.children == null) {
         try {
-          const kids = await api.listDir(target);
+          const kids = await loadDirList(target);
           node.children = kids.map((e) => toNode(e, node.depth + 1));
           setTree([...tree]);
         } catch {
@@ -245,7 +256,7 @@ export function FileTree({ root, selected, onSelect, onSelectSplit }: FileTreePr
       if (from === destDir) continue;
       if (destDir === from || destDir.startsWith(from + "/")) continue; // into self/child
       if (parentOf(from) === destDir) continue; // already here
-      const dest = `${destDir}/${basenameOf(from)}`;
+      const dest = `${destDir}/${basename(from)}`;
       try {
         await api.fsRename(from, dest);
         moved++;
@@ -382,9 +393,59 @@ export function FileTree({ root, selected, onSelect, onSelectSplit }: FileTreePr
   }
 
   const debouncedQuery = useDebouncedValue(query, 120);
+  const needle = debouncedQuery.trim().toLowerCase();
+
+  // Searching walks the whole project, not just the folders you happen to
+  // have opened — the box says "Search files" and has to mean it. The path
+  // index is the same one the @-mention picker uses; it's fetched the first
+  // time you type and thrown away when the tree reloads or the repo changes.
+  const [index, setIndex] = useState<string[] | null>(null);
+  const [indexing, setIndexing] = useState(false);
+  // Guards the in-flight fetch. A ref, not state — as a dep it would re-run
+  // this effect the moment it flipped and tear down the very request it
+  // exists to protect, leaving the spinner up forever. `rootRef` is what
+  // makes a late reply from a repo you've since left land nowhere.
+  const indexingRef = useRef(false);
+  const rootRef = useRef(root);
+  useEffect(() => {
+    rootRef.current = root;
+    indexingRef.current = false;
+    setIndex(null);
+  }, [root]);
+  useEffect(() => {
+    if (!needle || index !== null || indexingRef.current) return;
+    indexingRef.current = true;
+    setIndexing(true);
+    const forRoot = root;
+    api
+      .fsFindFiles(forRoot)
+      .then((paths) => {
+        if (rootRef.current === forRoot) setIndex(paths);
+      })
+      .catch(() => {
+        // No index (not a git repo, or git is unavailable) — fall back to
+        // filtering what's already on screen rather than showing nothing.
+        if (rootRef.current === forRoot) setIndex([]);
+      })
+      .finally(() => {
+        indexingRef.current = false;
+        setIndexing(false);
+      });
+  }, [needle, root, index]);
+
+  const search = useMemo(
+    () =>
+      needle && index && index.length > 0
+        ? searchRows(index, root, needle)
+        : null,
+    [needle, index, root],
+  );
   const filtered = useMemo(
-    () => filterTree(tree, expandedRef.current, debouncedQuery.trim().toLowerCase()),
-    [tree, debouncedQuery, /* re-run on tick */ editor],
+    () =>
+      search
+        ? search.rows
+        : filterTree(tree, expandedRef.current, needle),
+    [tree, needle, search, /* re-run on tick */ editor],
   );
 
   function onRowClick(node: Node, e: React.MouseEvent) {
@@ -443,6 +504,21 @@ export function FileTree({ root, selected, onSelect, onSelectSplit }: FileTreePr
           </div>
         ) : error ? (
           <div className="text-red text-xs px-3 py-2">{error}</div>
+        ) : needle && indexing && index === null ? (
+          <div className="text-text-3 text-xs px-3 py-2 inline-flex items-center gap-1.5">
+            <AsciiSpinner /> Searching the project…
+          </div>
+        ) : needle && filtered.length === 0 ? (
+          <div className="px-3 py-3 space-y-1.5">
+            <div className="text-text-2 text-xs">
+              No file is named “{debouncedQuery.trim()}”.
+            </div>
+            <div className="text-text-4 text-2xs leading-[15px]">
+              This searches file and folder names. To look for the words{" "}
+              <span className="text-text-3">inside</span> your files, press
+              Enter.
+            </div>
+          </div>
         ) : (
           <FlatList
             rows={filtered}
@@ -467,6 +543,12 @@ export function FileTree({ root, selected, onSelect, onSelectSplit }: FileTreePr
             onEditorCommit={commitEditor}
             onEditorCancel={() => setEditor(null)}
           />
+        )}
+        {search && search.total > search.rows.length && (
+          <div className="text-text-4 text-2xs px-3 py-2 border-t border-line-soft">
+            Showing the closest {search.rows.length} of {search.total} matches.
+            Type more of the name to narrow it down.
+          </div>
         )}
       </div>
       <AlertDialog
@@ -502,7 +584,7 @@ export function FileTree({ root, selected, onSelect, onSelectSplit }: FileTreePr
                   {": "}
                   {pendingDelete.paths
                     .slice(0, 5)
-                    .map((p) => basenameOf(p))
+                    .map((p) => basename(p))
                     .join(", ")}
                   {pendingDelete.paths.length > 5
                     ? `, and ${pendingDelete.paths.length - 5} more`
@@ -532,12 +614,6 @@ function parentOf(path: string): string | null {
   const idx = path.lastIndexOf("/");
   return idx <= 0 ? null : path.slice(0, idx);
 }
-
-function basenameOf(path: string): string {
-  const idx = path.lastIndexOf("/");
-  return idx < 0 ? path : path.slice(idx + 1);
-}
-
 function findNode(nodes: Node[], path: string): Node | null {
   for (const n of nodes) {
     if (n.path === path) return n;
@@ -594,6 +670,66 @@ function filterTree(
   return rows;
 }
 
+/** How many search hits we're willing to put on screen. Past a few hundred
+ *  rows the list stops being an answer and becomes a second problem; the
+ *  footer says how many were left out so the count is never silently wrong. */
+const SEARCH_LIMIT = 300;
+
+/** Turn the whole-project path index into rows for `query`. Hits are lifted
+ *  out of the tree and shown flat — their folders may not be loaded, and a
+ *  flat list is what you actually want when you're looking for one file.
+ *
+ *  Ranking answers "which of these did they mean": the file *named* what you
+ *  typed beats one that merely contains it, which beats one where only a
+ *  folder matched. Within a tier the shorter name wins, then the shallower
+ *  path — so typing `auth` puts `src/auth.rs` above `migrations/041_…_auth…`
+ *  instead of letting the alphabet decide. */
+function searchRows(
+  index: string[],
+  root: string,
+  query: string,
+): { rows: Node[]; total: number } {
+  type Hit = { rel: string; name: string; tier: number };
+  const scored: Hit[] = [];
+  for (const rel of index) {
+    const slash = rel.lastIndexOf("/");
+    const name = slash >= 0 ? rel.slice(slash + 1) : rel;
+    const lower = name.toLowerCase();
+    const tier =
+      lower === query
+        ? 0
+        : lower.startsWith(query)
+          ? 1
+          : lower.includes(query)
+            ? 2
+            : rel.toLowerCase().includes(query)
+              ? 3
+              : -1;
+    if (tier < 0) continue;
+    scored.push({ rel, name, tier });
+  }
+  scored.sort(
+    (a, b) =>
+      a.tier - b.tier ||
+      a.name.length - b.name.length ||
+      a.rel.split("/").length - b.rel.split("/").length ||
+      a.rel.localeCompare(b.rel),
+  );
+  const rows = scored.slice(0, SEARCH_LIMIT).map(({ rel }) => {
+    const slash = rel.lastIndexOf("/");
+    return {
+      name: slash >= 0 ? rel.slice(slash + 1) : rel,
+      path: `${root.replace(/\/$/, "")}/${rel}`,
+      is_dir: false,
+      git_status: null,
+      depth: 0,
+      children: null,
+      hint: slash >= 0 ? rel.slice(0, slash) : undefined,
+    } satisfies Node;
+  });
+  return { rows, total: scored.length };
+}
+
 function childRows(node: Node, expanded: Set<string>, query: string): Node[] {
   if (!node.children) return [];
   const out: Node[] = [];
@@ -639,9 +775,19 @@ function FileTreeToolbar(props: {
     );
   };
 
+  // Three match toggles that only modify a search you haven't typed yet are
+  // three controls doing nothing, and they were holding 78px of the field
+  // open to do it. They arrive with the query.
+  const searching = props.query.length > 0;
+
   return (
-    <div className="flex flex-col gap-1.5 px-2 py-1.5 border-b border-line-soft">
-      <div className="relative flex-1">
+    // One row, not two. The four verbs used to sit on a line of their own
+    // under a full-width field — four 24px buttons pinned left and roughly
+    // 200px of nothing beside them, a whole bar spent on a quarter of a bar's
+    // worth of controls. They fit beside the field, which is where the rest
+    // of the app already keeps its verbs.
+    <div className="flex items-center gap-1 px-2 py-1.5 border-b border-line-soft">
+      <div className="relative min-w-0 flex-1">
         <Search
           className="absolute left-1.5 top-1/2 -translate-y-1/2 text-text-4 z-10"
           size={11}
@@ -655,44 +801,49 @@ function FileTreeToolbar(props: {
               runContentSearch();
             }
           }}
-          placeholder="Search files — Enter for contents"
-          className="h-7 pl-6 pr-[78px] text-[11.5px]"
+          placeholder="Search files"
+          // The old placeholder carried "— Enter for contents", which was the
+          // only place the app admitted that Enter searches inside the files.
+          // It no longer fits a shared row, so the sentence moves here and
+          // says the whole thing rather than a clipped half of it.
+          title="Search file names here. Press Enter to search inside the files themselves."
+          className={cn("h-7 pl-6 text-sm", searching ? "pr-[78px]" : "pr-2")}
         />
-        <div className="absolute right-1 top-1/2 -translate-y-1/2 flex items-center gap-0.5">
-          <SearchToggle
-            active={caseSensitive}
-            onClick={() => setCaseSensitive((v) => !v)}
-            title="Match case"
-          >
-            Aa
-          </SearchToggle>
-          <SearchToggle
-            active={wholeWord}
-            onClick={() => setWholeWord((v) => !v)}
-            title="Match whole word"
-          >
-            <span className="underline underline-offset-1">ab</span>
-          </SearchToggle>
-          <SearchToggle
-            active={regex}
-            onClick={() => setRegex((v) => !v)}
-            title="Use regular expression"
-          >
-            .*
-          </SearchToggle>
-          {props.query && (
+        {searching && (
+          <div className="absolute right-1 top-1/2 -translate-y-1/2 flex items-center gap-0.5">
+            <SearchToggle
+              active={caseSensitive}
+              onClick={() => setCaseSensitive((v) => !v)}
+              title="Match case"
+            >
+              Aa
+            </SearchToggle>
+            <SearchToggle
+              active={wholeWord}
+              onClick={() => setWholeWord((v) => !v)}
+              title="Match whole word"
+            >
+              <span className="underline underline-offset-1">ab</span>
+            </SearchToggle>
+            <SearchToggle
+              active={regex}
+              onClick={() => setRegex((v) => !v)}
+              title="Use regular expression"
+            >
+              .*
+            </SearchToggle>
             <button
               type="button"
               onClick={() => props.onQuery("")}
-              className="w-[18px] h-[18px] inline-flex items-center justify-center rounded text-text-4 hover:text-text-1 hover:bg-bg-hover"
+              className="w-[18px] h-[18px] inline-flex items-center justify-center rounded text-text-4 hover:text-text-1 hover:bg-state-hover"
               title="Clear"
             >
               <X size={11} />
             </button>
-          )}
-        </div>
+          </div>
+        )}
       </div>
-      <div className="flex items-center gap-0.5">
+      <div className="flex shrink-0 items-center gap-0.5">
         <ToolbarButton title="New File" onClick={props.onNewFile}>
           <FilePlus size={12} />
         </ToolbarButton>
@@ -719,7 +870,7 @@ function ToolbarButton(props: {
     <button
       type="button"
       onClick={props.onClick}
-      className="w-6 h-6 inline-flex items-center justify-center rounded text-text-3 hover:text-text-1 hover:bg-bg-hover"
+      className="w-6 h-6 inline-flex items-center justify-center rounded text-text-3 hover:text-text-1 hover:bg-state-hover"
       title={props.title}
     >
       {props.children}
@@ -742,10 +893,10 @@ function SearchToggle(props: {
       title={props.title}
       aria-pressed={props.active}
       onClick={props.onClick}
-      className={`w-[18px] h-[18px] inline-flex items-center justify-center rounded text-[9.5px] font-semibold leading-none transition-colors ${
+      className={`w-[18px] h-[18px] inline-flex items-center justify-center rounded text-2xs font-semibold leading-none transition-colors ${
         props.active
           ? "text-accent bg-accent/15"
-          : "text-text-4 hover:text-text-1 hover:bg-bg-hover"
+          : "text-text-4 hover:text-text-1 hover:bg-state-hover"
       }`}
     >
       {props.children}
@@ -974,12 +1125,12 @@ function Row(props: {
               return; // moved too far for a click
             handlers.onRowClick(node, e);
           }}
-          className={`flex items-center h-7 cursor-pointer text-[12.5px] ${
+          className={`flex items-center h-7 cursor-pointer text-base ${
             dragOver
               ? "bg-accent/10 outline outline-1 -outline-offset-1 outline-accent"
               : highlighted
                 ? "bg-bg-card"
-                : "hover:bg-bg-hover"
+                : "hover:bg-state-hover"
           }`}
           style={{ paddingLeft: 8 + indent, paddingRight: 8 }}
           title={node.path}
@@ -1010,12 +1161,17 @@ function Row(props: {
               />
             )}
           </span>
-          <span
-            className={`flex-1 truncate ${
-              highlighted ? "text-text-1 font-medium" : "text-text-2"
-            }`}
-          >
-            {node.name}
+          <span className="flex-1 min-w-0 flex items-baseline gap-1.5">
+            <span
+              className={`truncate ${
+                highlighted ? "text-text-1 font-medium" : "text-text-2"
+              }`}
+            >
+              {node.name}
+            </span>
+            {node.hint && (
+              <span className="text-2xs text-text-4 truncate">{node.hint}</span>
+            )}
           </span>
           {badge}
         </div>
@@ -1114,7 +1270,7 @@ function EditorRow(props: {
   }, [props.initial]);
   return (
     <div
-      className="flex items-center h-7 text-[12.5px] bg-bg-card"
+      className="flex items-center h-7 text-base bg-bg-card"
       style={{ paddingLeft: 8 + props.depth * 12, paddingRight: 8 }}
     >
       <span style={{ width: 2, marginRight: 6 }} />
@@ -1141,27 +1297,46 @@ function EditorRow(props: {
           else if (e.key === "Escape") props.onCancel();
         }}
         placeholder={props.isFolder ? "Folder name" : "File name"}
-        className="h-6 flex-1 text-[12px] px-1.5"
+        className="h-6 flex-1 text-sm px-1.5"
       />
     </div>
   );
 }
 
+// One capital letter in a 12px gutter, and nothing anywhere that says what
+// it stands for — a person who has never used git reads "M" and learns
+// nothing. Every mark now carries the sentence it stands for, on hover and
+// to a screen reader, in the words someone who doesn't know git would use.
+//
+// The letters themselves follow the editor convention (M/A/U/D), which is
+// why `?` — git's mark for a file it isn't tracking — displays as "U" for
+// untracked. That is also why a conflict shows "C": git's own letter for
+// unmerged is `U`, and two different things wearing one letter in the same
+// gutter is how you end up committing a file with conflict markers in it.
+const STATUS_MARK: Record<
+  string,
+  { label: string; tone: string; means: string }
+> = {
+  M: { label: "M", tone: "text-amber", means: "Changed. You've edited this since the last save point" },
+  A: { label: "A", tone: "text-green", means: "Added. New, and already marked to go into the next save point" },
+  "?": { label: "U", tone: "text-text-4", means: "New. This file isn't being tracked yet" },
+  D: { label: "D", tone: "text-red", means: "Deleted" },
+  R: { label: "R", tone: "text-amber", means: "Renamed or moved" },
+  U: { label: "C", tone: "text-red", means: "Conflict. Two versions disagree here and one of them has to win" },
+};
+
 function statusBadge(status: string | null) {
   if (!status) return null;
-  const map: Record<string, string> = {
-    M: "text-amber",
-    A: "text-green",
-    "?": "text-text-4",
-    D: "text-red",
-  };
-  const label: Record<string, string> = { M: "M", A: "A", "?": "U", D: "D" };
+  const mark = STATUS_MARK[status];
   return (
     <span
-      className={`text-[10px] font-medium ${map[status] ?? "text-text-3"}`}
+      className={`text-2xs font-medium ${mark?.tone ?? "text-text-3"}`}
       style={{ width: 12, textAlign: "right" }}
+      title={mark?.means}
+      aria-label={mark?.means}
+      role={mark ? "img" : undefined}
     >
-      {label[status] ?? "·"}
+      {mark?.label ?? "·"}
     </span>
   );
 }

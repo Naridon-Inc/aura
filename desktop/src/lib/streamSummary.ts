@@ -9,6 +9,7 @@
 // empty stream yields `null` and the caller renders nothing.
 
 import type { StreamEvent } from "./api";
+import { relativeAgeFromDelta } from "./relativeTime";
 
 /** The most recent meaningful signal in an agent's stream, condensed to one
  *  line: a running tool, a streaming assistant reply, or the last prompt.
@@ -53,16 +54,5 @@ function truncate(s: string, n: number): string {
 
 /** "5s ago" / "3m ago" / "2h ago" / "4d ago" from a seconds-ago delta. */
 export function relAge(s: number): string {
-  if (s < 60) return `${s}s ago`;
-  if (s < 3600) return `${Math.floor(s / 60)}m ago`;
-  if (s < 86400) return `${Math.floor(s / 3600)}h ago`;
-  return `${Math.floor(s / 86400)}d ago`;
-}
-
-/** Suffix-less form ("5s" / "3m" / "2h" / "4d") for inline "last activity 3m". */
-export function relAgeShort(s: number): string {
-  if (s < 60) return `${s}s`;
-  if (s < 3600) return `${Math.floor(s / 60)}m`;
-  if (s < 86400) return `${Math.floor(s / 3600)}h`;
-  return `${Math.floor(s / 86400)}d`;
+  return relativeAgeFromDelta(s);
 }

@@ -28,14 +28,24 @@ import {
   type IntentRow,
   type TeamMember,
 } from "../../lib/api";
-import { agentDisplayLabel } from "../../lib/agentIdentity";
+import { fetchSessions } from "../../lib/sessionsCache";
+import { fetchIntentRows } from "../../lib/intentCache";
+import { agentDisplayLabel, isAutomationIdentity } from "../../lib/agentIdentity";
+import { intentTypeChip } from "../../lib/intentTypeLabels";
 import { AgentIcon } from "../agent/AgentIcon";
 import { Button } from "../ui/button";
+import { ErrorState, LoadingState } from "../ui/state";
+import {
+  deriveTeamSyncState,
+  teamEmptyCopy,
+  type TeamSyncState,
+} from "../../lib/teamFeedState";
 import { initialsOf, relTimeFromTs } from "./usageProviders";
 import {
   collapseAutoStubSessions,
   type SessionDisplayRow,
 } from "../../lib/sessionMeta";
+import { fetchTeam } from "../../lib/teamCache";
 
 const DAY_MS = 86_400_000;
 
@@ -179,12 +189,18 @@ function ActivityCard({
   nowSecs,
   dirty,
   onOpen,
+  showSignedChip,
 }: {
   display: SessionDisplayRow;
   nowSecs: number;
   /** Normalized set of files the user has uncommitted right now. */
   dirty: Set<string>;
   onOpen: (row: IntentRow) => void;
+  /** Whether the green "Signed" chip earns its place on THIS feed. When every
+   *  change in view is signed, the header says so once and the chip is 178
+   *  identical green pills that distinguish nothing. The "Not signed"
+   *  exception always shows — that one is the actionable half. */
+  showSignedChip: boolean;
 }) {
   const { row, editCount } = display;
   const label = agentDisplayLabel(row.agent_id || "unknown");
@@ -220,14 +236,14 @@ function ActivityCard({
     <button
       type="button"
       onClick={() => onOpen(row)}
-      className="group flex w-full items-start gap-2.5 px-3 py-2.5 text-left hover:bg-bg-2"
+      className="group flex w-full items-start gap-2.5 px-3 py-2.5 text-left hover:bg-state-hover"
     >
       {/* Person avatar — compact. The human teammate this change is attributed
           to (resolved from the signing key), not the AI that typed it. Falls
           back to a neutral mark when we can't yet name the teammate. */}
       <span className="mt-px shrink-0">
         <span
-          className="flex h-[18px] w-[18px] items-center justify-center rounded-full border border-line-soft text-[8px] font-semibold"
+          className="flex h-[18px] w-[18px] items-center justify-center rounded-full border border-line-soft text-2xs font-semibold"
           style={{
             background: "var(--color-bg-2)",
             color: personName ? "var(--color-text-3)" : "var(--color-text-4)",
@@ -242,7 +258,7 @@ function ActivityCard({
       <span className="min-w-0 flex-1">
         {/* Attribution — quiet + compact: who, via which AI, what file. The
             person still leads, but small; the change message below is the lead. */}
-        <span className="flex min-w-0 flex-wrap items-center gap-x-1.5 gap-y-0.5 text-[11px] leading-snug text-text-4">
+        <span className="flex min-w-0 flex-wrap items-center gap-x-1.5 gap-y-0.5 text-xs leading-snug text-text-4">
           <span className="font-medium text-text-2">
             {personName ?? "Unknown teammate"}
           </span>
@@ -251,26 +267,34 @@ function ActivityCard({
             <AgentIcon agentId={row.agent_id || "unknown"} label={label} size={12} />
             {label}
           </span>
-          <span>{leadFile ? "· changed" : "· logged a change"}</span>
+          {/* Which file, when we know it. When we don't, the line simply ends
+              at the agent: this used to fall through to "· logged a change",
+              which printed on every row of a feed whose own subtitle already
+              says these are changes — and on THIS project that is every row,
+              because the shared log carries no changeset files. The intent
+              underneath is the change; naming it twice said nothing. */}
           {leadFile ? (
-            <span className="truncate font-mono text-text-3">
-              {leadFile}
-              {moreFiles > 0 ? (
-                <span className="ml-1 font-sans">+{moreFiles} more</span>
-              ) : null}
-            </span>
+            <>
+              <span>· changed</span>
+              <span className="truncate font-mono text-text-3">
+                {leadFile}
+                {moreFiles > 0 ? (
+                  <span className="ml-1 font-sans">+{moreFiles} more</span>
+                ) : null}
+              </span>
+            </>
           ) : null}
         </span>
 
         {/* The WHY — the author's own words, promoted to the visual lead. */}
         {row.intent ? (
-          <span className="mt-1 block truncate text-[12.5px] font-medium leading-snug text-text-1">
+          <span className="mt-1 block truncate text-base font-medium leading-snug text-text-1">
             {oneLine(row.intent)}
           </span>
         ) : null}
 
         {/* Meta row: time · churn · seal · overlap · type. */}
-        <span className="mt-1.5 flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1 text-[11px] text-text-4">
+        <span className="mt-1.5 flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1 text-xs text-text-4">
           <span>{rel}</span>
           {churn.files > 0 ? (
             <>
@@ -279,7 +303,7 @@ function ActivityCard({
                 {churn.files} {churn.files === 1 ? "file" : "files"}
               </span>
               {churn.hasChurn ? (
-                <span className="font-mono text-[10px]">
+                <span className="font-mono text-2xs">
                   <span className="text-accent-green">+{churn.adds}</span>
                   <span className="text-text-4"> / </span>
                   <span className="text-text-3">−{churn.dels}</span>
@@ -298,45 +322,55 @@ function ActivityCard({
             </>
           ) : null}
 
-          {/* Genuine-record seal — green tick when sealed, muted otherwise. */}
+          {/* Genuine-record seal. "Not signed" is always shown — it is the
+              exception, and the one a reader needs to act on. The green
+              "Signed" only shows when the feed is MIXED: on a healthy project
+              every row is signed, and a green pill repeated on all 178 rows
+              distinguishes nothing while shouting on every line. The header
+              carries the all-signed claim once instead. */}
           {sealed ? (
-            <span
-              className="inline-flex items-center gap-1 rounded-full px-1.5 py-px text-[10px] text-accent-green"
-              style={{
-                background: "color-mix(in srgb, var(--color-accent-green) 12%, transparent)",
-              }}
-              title="Aura sealed exactly what the AI changed and why — this record can't be altered."
-            >
-              <SealIcon />
-              Sealed
-            </span>
+            showSignedChip ? (
+              <span
+                className="inline-flex items-center gap-1 rounded-full px-1.5 py-px text-2xs text-accent-green"
+                style={{
+                  background: "color-mix(in srgb, var(--color-accent-green) 12%, transparent)",
+                }}
+                title="Aura sealed exactly what the AI changed and why. This record can't be altered."
+              >
+                <SealIcon />
+                Signed
+              </span>
+            ) : null
           ) : (
             <span
-              className="rounded-full border border-line-soft px-1.5 py-px text-[10px] text-text-4"
-              title="No genuine-record seal on this change yet."
+              className="rounded-full border border-line-soft px-1.5 py-px text-2xs text-text-4"
+              title="Aura hasn't sealed this change yet, so there's no tamper-proof record of what it did."
             >
-              Not sealed
+              Not signed
             </span>
           )}
 
           {/* Overlap warning — someone's AI touched a file you have open. */}
           {overlaps ? (
             <span
-              className="inline-flex items-center gap-1 rounded-full px-1.5 py-px text-[10px]"
+              className="inline-flex items-center gap-1 rounded-full px-1.5 py-px text-2xs"
               style={{
                 color: "var(--color-accent)",
                 background: "color-mix(in srgb, var(--color-accent) 12%, transparent)",
               }}
-              title="This change touches a file you have uncommitted edits in — review before you save over it."
+              title="This change touches a file you have uncommitted edits in. Review before you save over it."
             >
               <OverlapIcon />
               Touches your work
             </span>
           ) : null}
 
+          {/* What kind of change it was, in words. The raw value is a CamelCase
+              enum ("FeatureAdd"), which is not English and never belongs on a
+              surface written for people who did not write the code. */}
           {row.intent_type ? (
-            <span className="rounded border border-line-soft px-1.5 py-px text-[10px] text-text-4">
-              {row.intent_type}
+            <span className="rounded border border-line-soft px-1.5 py-px text-2xs text-text-4">
+              {intentTypeChip(row.intent_type)}
             </span>
           ) : null}
         </span>
@@ -350,14 +384,19 @@ function ActivityCard({
  *  card lives in exactly one place, the Trace Overview. Caps at five faces
  *  with a "+N" overflow; renders nothing for a solo project. */
 function RosterStrip({ roster }: { roster: TeamMember[] }) {
-  if (roster.length <= 1) return null;
+  // People only. Aura's own agent (ai@aura.vcs) and the checkpointer commit
+  // under real git identities, so they were sitting in a strip captioned "who's
+  // on this project" and inflating its count — this repo showed six faces for
+  // four humans.
+  const people = roster.filter((m) => !isAutomationIdentity(m.name, m.email));
+  if (people.length <= 1) return null;
   const MAX = 5;
-  const shown = roster.slice(0, MAX);
-  const overflow = roster.length - shown.length;
+  const shown = people.slice(0, MAX);
+  const overflow = people.length - shown.length;
   return (
     <div
       className="flex items-center"
-      title={`${roster.length} on this project`}
+      title={`${people.length} on this project`}
     >
       <div className="flex -space-x-1.5">
         {shown.map((m) => {
@@ -365,7 +404,7 @@ function RosterStrip({ roster }: { roster: TeamMember[] }) {
           return (
             <span
               key={m.handle || m.email || name}
-              className="flex h-[22px] w-[22px] items-center justify-center rounded-full border border-bg-content text-[9.5px] font-semibold text-text-2"
+              className="flex h-[22px] w-[22px] items-center justify-center rounded-full border border-bg-content text-2xs font-semibold text-text-2"
               style={{ background: "var(--color-bg-2)" }}
               title={name}
               aria-hidden="true"
@@ -376,47 +415,19 @@ function RosterStrip({ roster }: { roster: TeamMember[] }) {
         })}
       </div>
       {overflow > 0 ? (
-        <span className="ml-1.5 text-[11px] text-text-4">+{overflow}</span>
+        <span className="ml-1.5 text-xs text-text-4">+{overflow}</span>
       ) : null}
     </div>
   );
 }
 
-/** What the feed can honestly tell the user about WHY it looks the way it does.
- *  Derived from real signals only — Aura sign-in, whether live sync is on, and
- *  how many distinct people's activity is actually present — never guessed.
- *   • checking    — still resolving sign-in/sync.
- *   • signed_out  — not signed in to Aura, so the ledger stays on this machine
- *                   and teammates' activity can't reach the feed (by design).
- *   • sync_off    — signed in, but live sync isn't on for this project yet.
- *   • waiting     — signed in + syncing, but only one person's activity so far.
- *   • working     — more than one teammate's activity is flowing. */
-export type TeamSyncState =
-  | "checking"
-  | "signed_out"
-  | "sync_off"
-  | "waiting"
-  | "working";
-
-export function deriveTeamSyncState(opts: {
-  signedIn: boolean | null;
-  syncEnabled: boolean | null;
-  distinctDevelopers: number;
-}): TeamSyncState {
-  const { signedIn, syncEnabled, distinctDevelopers } = opts;
-  if (signedIn === null) return "checking";
-  // The login gate (the durable fix): without an Aura sign-in the ledger never
-  // leaves this computer, so a teammate's activity simply can't be here. That
-  // is the intended privacy default, not a fault to alarm about.
-  if (!signedIn) return "signed_out";
-  if (!syncEnabled) return "sync_off";
-  return distinctDevelopers > 1 ? "working" : "waiting";
-}
-
 /** The self-explaining empty state. Instead of a blank "no activity" it names
  *  WHY the feed is empty and offers the one action that fixes it — sign in, or
- *  turn on sync — in plain language. Sign-in and live-sync are both real,
- *  wired actions; nothing here is a placeholder. */
+ *  turn on sync — in plain language. Every word comes from `teamEmptyCopy`,
+ *  which answers for all six states; this used to name three of them and let
+ *  the other three fall through to a reassurance, including the state where
+ *  the sign-in check hadn't come back yet. Sign-in and live-sync are both
+ *  real, wired actions; nothing here is a placeholder. */
 function TeamActivityEmptyState({
   state,
   onSignIn,
@@ -428,32 +439,28 @@ function TeamActivityEmptyState({
   onEnableSync: () => void;
   enabling: boolean;
 }) {
-  let title = "You're all set";
-  let body =
-    "As you and your teammates work, every AI change lands here — who made it, why, and whether it's a sealed, genuine record.";
-  let cta: { label: string; onClick: () => void; busy?: boolean } | null = null;
+  const copy = teamEmptyCopy(state);
 
-  if (state === "signed_out") {
-    title = "See your team's activity";
-    body =
-      "Sign in to Aura and every teammate's AI changes show up here — who changed what, and why. Until you do, your activity stays on this computer only.";
-    cta = { label: "Sign in to Aura", onClick: onSignIn };
-  } else if (state === "sync_off") {
-    title = "Turn on team activity";
-    body =
-      "You're signed in. Turn on live sync for this project and your team's AI changes will flow in here as everyone works.";
-    cta = {
-      label: enabling ? "Turning on…" : "Turn on live sync",
-      onClick: onEnableSync,
-      busy: enabling,
-    };
-  }
+  // Still reading. The app's one block loader, never a headline — a state
+  // that hasn't been read is not an answer.
+  if (copy.tone === "waiting") return <LoadingState label={copy.body} />;
+
+  const cta =
+    copy.cta === "signin"
+      ? { label: "Sign in to Aura", onClick: onSignIn, busy: false }
+      : copy.cta === "sync"
+        ? {
+            label: enabling ? "Turning on…" : "Turn on live sync",
+            onClick: onEnableSync,
+            busy: enabling,
+          }
+        : null;
 
   return (
     <div className="flex h-full flex-col items-center justify-center px-8 text-center">
-      <span className="text-[13px] text-text-2">{title}</span>
-      <span className="mt-1.5 max-w-[24rem] text-[12px] leading-relaxed text-text-4">
-        {body}
+      <span className="text-base text-text-2">{copy.title}</span>
+      <span className="mt-1.5 max-w-[24rem] text-sm leading-relaxed text-text-4">
+        {copy.body}
       </span>
       {cta ? (
         <Button
@@ -490,9 +497,9 @@ function SyncNotice({
   const signedOut = state === "signed_out";
   return (
     <div className="flex items-center justify-between gap-3 border-b border-line-soft bg-bg-1 px-4 py-2">
-      <span className="min-w-0 text-[11.5px] leading-snug text-text-3">
+      <span className="min-w-0 text-sm leading-snug text-text-3">
         {signedOut
-          ? "You're seeing only your own activity — sign in so your team's changes sync here."
+          ? "You're seeing only your own activity. Sign in so your team's changes sync here."
           : "Live sync is off, so only your activity shows. Turn it on to see your team."}
       </span>
       <Button
@@ -586,16 +593,24 @@ export function TeamActivityFeedView({
     <div className="flex h-full min-h-0 flex-col bg-bg-content">
       {/* Header */}
       <div className="flex shrink-0 items-center justify-between border-b border-line-soft px-4 py-2.5">
-        <div className="flex flex-col gap-0.5">
-          <span className="text-[13px] font-medium leading-none text-text-1">
-            Team activity
-          </span>
-          <span className="text-[11px] leading-none text-text-4">
-            {total === 0
-              ? "Who on your team changed what — and why"
-              : `${total} ${total === 1 ? "change" : "changes"} · ${sealedCount} sealed`}
-          </span>
-        </div>
+        {/* The count and the trust claim — stated once, here, rather than as a
+            chip on every row. When everything is signed the old line printed
+            the same number twice ("178 changes · 178 sealed"), which is the
+            normal case and taught nothing; when some aren't, the SHORTFALL is
+            what a reader needs, not the tally of what's fine.
+
+            It used to sit under "Team activity" in 14px — the words on the tab
+            you clicked and on the sidebar row above it, a third time. Only the
+            line that says something survives. */}
+        <span className="text-xs leading-none text-text-4">
+          {total === 0
+            ? "Who on your team changed what, and why"
+            : `${total} ${total === 1 ? "change" : "changes"} · ${
+                sealedCount === total
+                  ? "all signed by Aura"
+                  : `${total - sealedCount} not signed`
+              }`}
+        </span>
         <div className="flex items-center gap-2.5">
           {/* Who's on this project — a thin presence strip. The live "Right
               now / what they're doing" detail lives once, on the Overview;
@@ -619,14 +634,17 @@ export function TeamActivityFeedView({
       {/* Body */}
       <div className="min-h-0 flex-1 overflow-y-auto">
         {error ? (
-          <div className="px-4 py-4 text-[12px] text-text-3">
-            Couldn&rsquo;t load team activity.
-            <span className="mt-1 block font-mono text-[11px] text-text-4">
-              {error}
-            </span>
-          </div>
+          // Both of these were hand-rolled — a bare "Loading…" with no block
+          // loader, and the raw error text in mono under a sentence with no
+          // way to retry. They now use the same two primitives every other
+          // surface uses, so a stall and a failure look the same everywhere.
+          <ErrorState
+            title="Couldn’t load team activity"
+            message={error}
+            onRetry={onRefresh}
+          />
         ) : loading && rows.length === 0 ? (
-          <div className="px-4 py-4 text-[12px] text-text-4">Loading…</div>
+          <LoadingState label="Gathering what your team changed…" />
         ) : total === 0 ? (
           <TeamActivityEmptyState
             state={syncState}
@@ -648,10 +666,10 @@ export function TeamActivityFeedView({
             {groups.map((g) => (
               <div key={g.key}>
                 <div className="sticky top-0 z-[1] flex items-baseline gap-2 border-b border-line-soft bg-bg-content/95 px-4 py-1.5 backdrop-blur">
-                  <span className="text-[11px] font-medium uppercase tracking-wide text-text-3">
+                  <span className="section-label">
                     {g.label}
                   </span>
-                  <span className="text-[11px] text-text-4">
+                  <span className="text-xs text-text-4">
                     {g.rows.length}
                   </span>
                 </div>
@@ -663,6 +681,7 @@ export function TeamActivityFeedView({
                       nowSecs={nowSecs}
                       dirty={dirty}
                       onOpen={onOpenSession}
+                      showSignedChip={sealedCount < total}
                     />
                   ))}
                 </div>
@@ -715,8 +734,8 @@ export function TeamActivityFeed({
       // Claude sessions are best-effort enrichment for the collapse — their
       // absence just means no folding, never a failed load.
       const [data, sessions] = await Promise.all([
-        api.auraIntentRecent(repoRoot, 200),
-        api.claudeListSessions(repoRoot).catch(() => [] as ClaudeSession[]),
+        fetchIntentRows(repoRoot, 200),
+        fetchSessions(repoRoot).catch(() => [] as ClaudeSession[]),
       ]);
       if (!aliveRef.current) return;
       setRows(Array.isArray(data) ? data : []);
@@ -735,7 +754,7 @@ export function TeamActivityFeed({
     // and never surfaces as the pane-level error.
     void (async () => {
       try {
-        const team = await api.teamLoad(repoRoot);
+        const team = await fetchTeam(repoRoot);
         if (aliveRef.current) setRoster(team?.members ?? []);
       } catch {
         if (aliveRef.current) setRoster([]);
@@ -839,6 +858,9 @@ export function TeamActivityFeed({
   }, [resolvedRows]);
 
   const syncState = deriveTeamSyncState({
+    // With no project open the settings probe never runs, so `signedIn` stays
+    // null forever — which used to render as a permanent reassurance.
+    hasProject: !!repoRoot,
     signedIn,
     syncEnabled,
     distinctDevelopers,

@@ -60,6 +60,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use crate::cloud_session_sync::{cloud_origin, read_credentials};
 use crate::cmd_device::{effective_identity, effective_room_id, room_id_for_repo};
+use crate::cloud_org::OrgScoped;
 
 const TEAM_DIR: &str = ".aura/team";
 const TEAM_JSON: &str = "team.json";
@@ -1388,10 +1389,49 @@ fn repo_identity_override(repo_root: &str) -> Option<(String, String)> {
 // `upstream/<default-branch>` and tag the resulting members as
 // `Ancestor`. Authors who appear in both walks are tagged `Both`. See
 // `walk_upstream_authors` for the strategy rationale.
+/// How long a history walk stays good for. The roster is derived from every
+/// commit ever authored, so it moves about as often as somebody commits — a
+/// handful of seconds of staleness is invisible, and it is the difference
+/// between one `git log --all` per window and one per caller.
+const AUTHOR_WALK_TTL_SECS: u64 = 10;
+
+/// TTL cache for the author walks, keyed by the exact walk that produced them
+/// (`repo_root` for the direct walk, `repo_root\0remote` for an upstream one).
+fn author_walk_cache() -> &'static std::sync::Mutex<BTreeMap<String, (u64, Vec<GitAuthor>)>> {
+    static CACHE: std::sync::OnceLock<std::sync::Mutex<BTreeMap<String, (u64, Vec<GitAuthor>)>>> =
+        std::sync::OnceLock::new();
+    CACHE.get_or_init(|| std::sync::Mutex::new(BTreeMap::new()))
+}
+
+/// Run `walk` unless the same walk answered within [`AUTHOR_WALK_TTL_SECS`].
+///
+/// Worth having because the roster is not read by one screen. Team, Commons
+/// and the Scribble panel each load it on their own, two of them re-poll it
+/// every 15 seconds, and `team_identity` re-runs the whole thing a second time
+/// on top of whatever `team_load` just did — so opening the app used to walk
+/// all of history several times over within a second or two of itself.
+fn cached_author_walk(key: &str, walk: impl FnOnce() -> Vec<GitAuthor>) -> Vec<GitAuthor> {
+    let now = now_secs().max(0) as u64;
+    if let Ok(cache) = author_walk_cache().lock() {
+        if let Some((walked_at, authors)) = cache.get(key) {
+            if now.saturating_sub(*walked_at) < AUTHOR_WALK_TTL_SECS {
+                return authors.clone();
+            }
+        }
+    }
+    let authors = walk();
+    if let Ok(mut cache) = author_walk_cache().lock() {
+        cache.insert(key.to_string(), (now, authors.clone()));
+    }
+    authors
+}
+
 fn sync_with_git(repo_root: &str) -> Result<TeamManifest, String> {
-    let direct_authors = walk_git_authors(repo_root);
+    let direct_authors = cached_author_walk(repo_root, || walk_git_authors(repo_root));
     let ancestor_authors = match detect_upstream_remote(repo_root) {
-        Some(remote) => walk_upstream_authors(repo_root, &remote),
+        Some(remote) => cached_author_walk(&format!("{repo_root}\0{remote}"), || {
+            walk_upstream_authors(repo_root, &remote)
+        }),
         None => Vec::new(),
     };
 
@@ -1602,7 +1642,10 @@ fn github_owner_repo(repo_root: &str) -> Option<(String, String)> {
 /// token), and silently returns `None` off GitHub.
 #[tauri::command]
 pub async fn repo_github_owner(repo_root: String) -> Option<String> {
-    github_owner_repo(&repo_root).map(|(owner, _repo)| owner)
+    crate::blocking::run(move || {
+        github_owner_repo(&repo_root).map(|(owner, _repo)| owner)
+    })
+    .await
 }
 
 /// A GitHub repo collaborator who holds edit rights (push or stronger).
@@ -1703,143 +1746,146 @@ pub async fn team_sync_collaborators(
     repo_root: String,
     force: Option<bool>,
 ) -> Result<TeamManifest, String> {
-    let mut manifest = sync_with_git(&repo_root)?;
-    let now = now_secs();
-    if !force.unwrap_or(false) && now - manifest.collaborators_synced_at < 300 {
-        return Ok(manifest);
-    }
+    crate::blocking::run(move || {
+        let mut manifest = sync_with_git(&repo_root)?;
+        let now = now_secs();
+        if !force.unwrap_or(false) && now - manifest.collaborators_synced_at < 300 {
+            return Ok(manifest);
+        }
 
-    let (local_email, _) = git_local_identity(&repo_root);
-    let local_login = local_github_login(&repo_root);
-    let mut local_is_committer = false;
+        let (local_email, _) = git_local_identity(&repo_root);
+        let local_login = local_github_login(&repo_root);
+        let mut local_is_committer = false;
 
-    // (a) If the local user is already a committer, tag their github_login
-    //     now so the collaborator loop recognises them and skips the dup.
-    if let Some(login) = local_login.as_ref() {
-        if !local_email.is_empty() {
+        // (a) If the local user is already a committer, tag their github_login
+        //     now so the collaborator loop recognises them and skips the dup.
+        if let Some(login) = local_login.as_ref() {
+            if !local_email.is_empty() {
+                if let Some(m) = manifest
+                    .members
+                    .iter_mut()
+                    .find(|m| m.email.eq_ignore_ascii_case(&local_email))
+                {
+                    local_is_committer = true;
+                    if m.github_login.is_none() {
+                        m.github_login = Some(login.clone());
+                    }
+                }
+            }
+        }
+
+        for collab in fetch_edit_collaborators(&repo_root) {
+            let login_lc = collab.login.to_lowercase();
+            // Prefer an existing real member (committer/presence) over any
+            // prior synthetic row: match by recorded github_login, then by
+            // handle == login, then by email local-part == login.
+            let real = manifest.members.iter_mut().find(|m| {
+                m.source != TeamMemberSource::Collaborator
+                    && (m
+                        .github_login
+                        .as_deref()
+                        .map(|g| g.eq_ignore_ascii_case(&collab.login))
+                        .unwrap_or(false)
+                        || m.handle == login_lc
+                        || handle_from_email(&m.email) == login_lc)
+            });
+            if let Some(m) = real {
+                // Real contributor — annotate GitHub identity + role only.
+                if m.github_login.is_none() {
+                    m.github_login = Some(collab.login.clone());
+                }
+                m.repo_role = Some(collab.role.clone());
+                continue;
+            }
+            // Otherwise upsert the synthetic collaborator row.
+            let synth_email = format!("{login_lc}@users.noreply.github.com");
             if let Some(m) = manifest
                 .members
                 .iter_mut()
-                .find(|m| m.email.eq_ignore_ascii_case(&local_email))
+                .find(|m| m.email.eq_ignore_ascii_case(&synth_email))
             {
-                local_is_committer = true;
-                if m.github_login.is_none() {
-                    m.github_login = Some(login.clone());
-                }
-            }
-        }
-    }
-
-    for collab in fetch_edit_collaborators(&repo_root) {
-        let login_lc = collab.login.to_lowercase();
-        // Prefer an existing real member (committer/presence) over any
-        // prior synthetic row: match by recorded github_login, then by
-        // handle == login, then by email local-part == login.
-        let real = manifest.members.iter_mut().find(|m| {
-            m.source != TeamMemberSource::Collaborator
-                && (m
-                    .github_login
-                    .as_deref()
-                    .map(|g| g.eq_ignore_ascii_case(&collab.login))
-                    .unwrap_or(false)
-                    || m.handle == login_lc
-                    || handle_from_email(&m.email) == login_lc)
-        });
-        if let Some(m) = real {
-            // Real contributor — annotate GitHub identity + role only.
-            if m.github_login.is_none() {
+                m.repo_role = Some(collab.role.clone());
                 m.github_login = Some(collab.login.clone());
+                m.source = TeamMemberSource::Collaborator;
+            } else {
+                manifest.members.push(TeamMember {
+                    email: synth_email,
+                    name: collab.login.clone(),
+                    handle: login_lc,
+                    commits: 0,
+                    first_seen: now,
+                    last_seen: 0,
+                    claimed: false,
+                    admin: false,
+                    activity_text: None,
+                    status_emoji: None,
+                    voice_channel: None,
+                    source: TeamMemberSource::Collaborator,
+                    also_emails: Vec::new(),
+                    github_login: Some(collab.login.clone()),
+                    repo_role: Some(collab.role.clone()),
+                });
             }
-            m.repo_role = Some(collab.role.clone());
-            continue;
         }
-        // Otherwise upsert the synthetic collaborator row.
-        let synth_email = format!("{login_lc}@users.noreply.github.com");
-        if let Some(m) = manifest
-            .members
-            .iter_mut()
-            .find(|m| m.email.eq_ignore_ascii_case(&synth_email))
-        {
-            m.repo_role = Some(collab.role.clone());
-            m.github_login = Some(collab.login.clone());
-            m.source = TeamMemberSource::Collaborator;
-        } else {
-            manifest.members.push(TeamMember {
-                email: synth_email,
-                name: collab.login.clone(),
-                handle: login_lc,
-                commits: 0,
-                first_seen: now,
-                last_seen: 0,
-                claimed: false,
-                admin: false,
-                activity_text: None,
-                status_emoji: None,
-                voice_channel: None,
-                source: TeamMemberSource::Collaborator,
-                also_emails: Vec::new(),
-                github_login: Some(collab.login.clone()),
-                repo_role: Some(collab.role.clone()),
-            });
-        }
-    }
 
-    // (b) If the local user hasn't committed but is one of these
-    //     collaborators, alias their real git email onto the matching row
-    //     so this machine is recognised as that person (network-free).
-    if !local_is_committer && !local_email.is_empty() {
-        if let Some(login) = local_login.as_ref() {
-            if let Some(m) = manifest.members.iter_mut().find(|m| {
-                m.github_login
-                    .as_deref()
-                    .map(|g| g.eq_ignore_ascii_case(login))
-                    .unwrap_or(false)
-            }) {
-                if !m
-                    .also_emails
-                    .iter()
-                    .any(|a| a.eq_ignore_ascii_case(&local_email))
-                {
-                    m.also_emails.push(local_email.clone());
+        // (b) If the local user hasn't committed but is one of these
+        //     collaborators, alias their real git email onto the matching row
+        //     so this machine is recognised as that person (network-free).
+        if !local_is_committer && !local_email.is_empty() {
+            if let Some(login) = local_login.as_ref() {
+                if let Some(m) = manifest.members.iter_mut().find(|m| {
+                    m.github_login
+                        .as_deref()
+                        .map(|g| g.eq_ignore_ascii_case(login))
+                        .unwrap_or(false)
+                }) {
+                    if !m
+                        .also_emails
+                        .iter()
+                        .any(|a| a.eq_ignore_ascii_case(&local_email))
+                    {
+                        m.also_emails.push(local_email.clone());
+                    }
                 }
             }
         }
-    }
 
-    // Cleanup: drop synthetic Collaborator rows whose handle is now held
-    // by a real member — happens once a collaborator makes their first
-    // commit under a different email and `sync_with_git` enrolls them.
-    let real_handles: std::collections::HashSet<String> = manifest
-        .members
-        .iter()
-        .filter(|m| m.source != TeamMemberSource::Collaborator)
-        .map(|m| m.handle.clone())
-        .collect();
-    manifest
-        .members
-        .retain(|m| m.source != TeamMemberSource::Collaborator || !real_handles.contains(&m.handle));
+        // Cleanup: drop synthetic Collaborator rows whose handle is now held
+        // by a real member — happens once a collaborator makes their first
+        // commit under a different email and `sync_with_git` enrolls them.
+        let real_handles: std::collections::HashSet<String> = manifest
+            .members
+            .iter()
+            .filter(|m| m.source != TeamMemberSource::Collaborator)
+            .map(|m| m.handle.clone())
+            .collect();
+        manifest
+            .members
+            .retain(|m| m.source != TeamMemberSource::Collaborator || !real_handles.contains(&m.handle));
 
-    // Re-apply owner promotion in case a synthetic row is the owner.
-    for m in manifest.members.iter_mut() {
-        if is_owner_email(&m.email) {
-            m.admin = true;
-            m.claimed = true;
+        // Re-apply owner promotion in case a synthetic row is the owner.
+        for m in manifest.members.iter_mut() {
+            if is_owner_email(&m.email) {
+                m.admin = true;
+                m.claimed = true;
+            }
         }
-    }
 
-    manifest.members.sort_by(|a, b| b.last_seen.cmp(&a.last_seen));
-    // A login may have just been attached to a member above; fold it into
-    // the handle now so the roster shows the GitHub username immediately,
-    // not on the next load.
-    normalize_member_handles(&mut manifest);
-    // A login stamped onto a committer above may now match a synthetic
-    // collaborator seat (or a second git email that already carried that
-    // login) — collapse them so the freshly-synced roster is dup-free on this
-    // pass, not only after the next `sync_with_git`.
-    collapse_duplicate_members(&mut manifest);
-    manifest.collaborators_synced_at = now;
-    write_team(&repo_root, &manifest)?;
-    Ok(manifest)
+        manifest.members.sort_by(|a, b| b.last_seen.cmp(&a.last_seen));
+        // A login may have just been attached to a member above; fold it into
+        // the handle now so the roster shows the GitHub username immediately,
+        // not on the next load.
+        normalize_member_handles(&mut manifest);
+        // A login stamped onto a committer above may now match a synthetic
+        // collaborator seat (or a second git email that already carried that
+        // login) — collapse them so the freshly-synced roster is dup-free on this
+        // pass, not only after the next `sync_with_git`.
+        collapse_duplicate_members(&mut manifest);
+        manifest.collaborators_synced_at = now;
+        write_team(&repo_root, &manifest)?;
+        Ok(manifest)
+    })
+    .await
 }
 
 // ── Tauri commands: team ─────────────────────────────────────────────
@@ -1848,14 +1894,19 @@ pub async fn team_sync_collaborators(
 pub async fn team_load(repo_root: String) -> Result<TeamManifest, String> {
     // Local-first: derive the manifest from git history + on-disk JSON.
     // This always succeeds even when offline.
-    let mut manifest = sync_with_git(&repo_root)?;
+    let local_root = repo_root.clone();
+    let mut manifest = crate::blocking::run(move || sync_with_git(&local_root)).await?;
     // Cloud presence: best-effort heartbeat + fetch so machines that
     // haven't committed yet still appear in the list. Errors are
     // swallowed — offline / self-hosted-without-presence is fine.
     let _ = announce_presence(&repo_root).await;
     if let Ok(entries) = fetch_presence(&repo_root).await {
-        merge_presence_into_manifest(&mut manifest, &entries);
-        let _ = write_team(&repo_root, &manifest);
+        manifest = crate::blocking::run(move || {
+            merge_presence_into_manifest(&mut manifest, &entries);
+            let _ = write_team(&repo_root, &manifest);
+            manifest
+        })
+        .await;
     }
     Ok(manifest)
 }
@@ -2080,7 +2131,7 @@ async fn announce_presence(repo_root: &str) -> Result<(), String> {
     // server can enforce membership once AURA_ROOMS_REQUIRE_AUTH is on.
     let mut req = client.post(&url).json(&body);
     if let Some(token) = cloud_api_token() {
-        req = req.bearer_auth(token);
+        req = req.bearer_auth(token).org_scoped();
     }
     let resp = req
         .send()
@@ -2099,7 +2150,7 @@ async fn fetch_presence(repo_root: &str) -> Result<Vec<PresenceEntry>, String> {
     let url = format!("{origin}/api/v1/room/{room_id}/presence");
     let mut req = client.get(&url);
     if let Some(token) = cloud_api_token() {
-        req = req.bearer_auth(token);
+        req = req.bearer_auth(token).org_scoped();
     }
     let resp = req
         .send()
@@ -2179,33 +2230,36 @@ fn merge_presence_into_manifest(manifest: &mut TeamManifest, presence: &[Presenc
 
 #[tauri::command]
 pub async fn team_identity(repo_root: String) -> Result<TeamIdentity, String> {
-    let manifest = sync_with_git(&repo_root)?;
-    let (email, name) = git_local_identity(&repo_root);
-    let handle = handle_from_email(&email);
-    // Match against `email` AND each member's `also_emails`, case-insensitively,
-    // so a teammate enrolled under one address but committing under another
-    // (or recognised purely as a GitHub collaborator) is still seen as "in
-    // team" without a network round-trip.
-    let member = canonical_member_for_email(&manifest.members, &email);
-    let login = account_login(&repo_root);
-    let (effective_handle, effective_name_raw) =
-        resolve_handle(&repo_root, &manifest.members, &email, login.as_deref());
-    let effective_name = if effective_name_raw.is_empty() {
-        name.clone()
-    } else {
-        effective_name_raw
-    };
-    Ok(TeamIdentity {
-        email,
-        handle,
-        name,
-        in_team: member.is_some(),
-        claimed: member.map(|m| m.claimed).unwrap_or(false),
-        admin: member.map(|m| m.admin).unwrap_or(false),
-        effective_handle,
-        effective_name,
-        account_login: login,
+    crate::blocking::run(move || {
+        let manifest = sync_with_git(&repo_root)?;
+        let (email, name) = git_local_identity(&repo_root);
+        let handle = handle_from_email(&email);
+        // Match against `email` AND each member's `also_emails`, case-insensitively,
+        // so a teammate enrolled under one address but committing under another
+        // (or recognised purely as a GitHub collaborator) is still seen as "in
+        // team" without a network round-trip.
+        let member = canonical_member_for_email(&manifest.members, &email);
+        let login = account_login(&repo_root);
+        let (effective_handle, effective_name_raw) =
+            resolve_handle(&repo_root, &manifest.members, &email, login.as_deref());
+        let effective_name = if effective_name_raw.is_empty() {
+            name.clone()
+        } else {
+            effective_name_raw
+        };
+        Ok(TeamIdentity {
+            email,
+            handle,
+            name,
+            in_team: member.is_some(),
+            claimed: member.map(|m| m.claimed).unwrap_or(false),
+            admin: member.map(|m| m.admin).unwrap_or(false),
+            effective_handle,
+            effective_name,
+            account_login: login,
+        })
     })
+    .await
 }
 
 /// Read the current per-repo identity override, if any. Used by the
@@ -2254,51 +2308,54 @@ pub fn identity_override_clear(repo_root: String) -> Result<(), String> {
 // claimer becomes admin. Idempotent — re-running just re-asserts.
 #[tauri::command]
 pub async fn team_claim(repo_root: String) -> Result<TeamManifest, String> {
-    let mut manifest = sync_with_git(&repo_root)?;
-    let (email, name) = git_local_identity(&repo_root);
-    if email.is_empty() {
-        return Err("git user.email is not configured for this repo".to_string());
-    }
-    let has_admin = manifest.members.iter().any(|m| m.admin);
-    let mut found = false;
-    for m in manifest.members.iter_mut() {
-        if m.email == email {
-            m.claimed = true;
-            if !has_admin {
-                m.admin = true;
-            }
-            if !name.is_empty() {
-                m.name = name.clone();
-            }
-            found = true;
-            break;
+    crate::blocking::run(move || {
+        let mut manifest = sync_with_git(&repo_root)?;
+        let (email, name) = git_local_identity(&repo_root);
+        if email.is_empty() {
+            return Err("git user.email is not configured for this repo".to_string());
         }
-    }
-    if !found {
-        // User has never committed but still wants a seat. Insert them.
-        manifest.members.push(TeamMember {
-            email: email.clone(),
-            name: if name.is_empty() { handle_from_email(&email) } else { name },
-            handle: handle_from_email(&email),
-            commits: 0,
-            first_seen: now_secs(),
-            last_seen: now_secs(),
-            claimed: true,
-            admin: !has_admin || is_owner_email(&email),
-            activity_text: None,
-            status_emoji: None,
-            voice_channel: None,
-            // A self-claim with no git history is a Direct teammate —
-            // they're explicitly taking a seat on this fork, not an
-            // inherited upstream contributor.
-            source: TeamMemberSource::Direct,
-            also_emails: Vec::new(),
-            github_login: None,
-            repo_role: None,
-        });
-    }
-    write_team(&repo_root, &manifest)?;
-    Ok(manifest)
+        let has_admin = manifest.members.iter().any(|m| m.admin);
+        let mut found = false;
+        for m in manifest.members.iter_mut() {
+            if m.email == email {
+                m.claimed = true;
+                if !has_admin {
+                    m.admin = true;
+                }
+                if !name.is_empty() {
+                    m.name = name.clone();
+                }
+                found = true;
+                break;
+            }
+        }
+        if !found {
+            // User has never committed but still wants a seat. Insert them.
+            manifest.members.push(TeamMember {
+                email: email.clone(),
+                name: if name.is_empty() { handle_from_email(&email) } else { name },
+                handle: handle_from_email(&email),
+                commits: 0,
+                first_seen: now_secs(),
+                last_seen: now_secs(),
+                claimed: true,
+                admin: !has_admin || is_owner_email(&email),
+                activity_text: None,
+                status_emoji: None,
+                voice_channel: None,
+                // A self-claim with no git history is a Direct teammate —
+                // they're explicitly taking a seat on this fork, not an
+                // inherited upstream contributor.
+                source: TeamMemberSource::Direct,
+                also_emails: Vec::new(),
+                github_login: None,
+                repo_role: None,
+            });
+        }
+        write_team(&repo_root, &manifest)?;
+        Ok(manifest)
+    })
+    .await
 }
 
 /// True when the local git identity maps to an admin member (or is a
@@ -2337,46 +2394,49 @@ pub async fn team_set_admin(
     target_email: String,
     admin: bool,
 ) -> Result<TeamManifest, String> {
-    let target = target_email.trim().to_lowercase();
-    if target.is_empty() {
-        return Err("target email is required".to_string());
-    }
-    let mut manifest = match read_team(&repo_root) {
-        Some(m) => m,
-        None => sync_with_git(&repo_root)?,
-    };
-    if !local_caller_is_admin(&repo_root, &manifest) {
-        return Err("admin only".to_string());
-    }
-    if !admin && is_owner_email(&target) {
-        return Err("the repo owner can't be removed as admin".to_string());
-    }
-    if !admin {
-        let admin_count = manifest.members.iter().filter(|m| m.admin).count();
-        let target_is_admin = manifest.members.iter().any(|m| {
-            m.admin
-                && (m.email.eq_ignore_ascii_case(&target)
-                    || m.also_emails.iter().any(|a| a.eq_ignore_ascii_case(&target)))
-        });
-        if target_is_admin && admin_count <= 1 {
-            return Err("can't remove the last admin — transfer admin first".to_string());
+    crate::blocking::run(move || {
+        let target = target_email.trim().to_lowercase();
+        if target.is_empty() {
+            return Err("target email is required".to_string());
         }
-    }
-    let mut found = false;
-    for m in manifest.members.iter_mut() {
-        if m.email.eq_ignore_ascii_case(&target)
-            || m.also_emails.iter().any(|a| a.eq_ignore_ascii_case(&target))
-        {
-            m.admin = admin;
-            found = true;
-            break;
+        let mut manifest = match read_team(&repo_root) {
+            Some(m) => m,
+            None => sync_with_git(&repo_root)?,
+        };
+        if !local_caller_is_admin(&repo_root, &manifest) {
+            return Err("admin only".to_string());
         }
-    }
-    if !found {
-        return Err("no team member with that email".to_string());
-    }
-    write_team(&repo_root, &manifest)?;
-    Ok(manifest)
+        if !admin && is_owner_email(&target) {
+            return Err("the repo owner can't be removed as admin".to_string());
+        }
+        if !admin {
+            let admin_count = manifest.members.iter().filter(|m| m.admin).count();
+            let target_is_admin = manifest.members.iter().any(|m| {
+                m.admin
+                    && (m.email.eq_ignore_ascii_case(&target)
+                        || m.also_emails.iter().any(|a| a.eq_ignore_ascii_case(&target)))
+            });
+            if target_is_admin && admin_count <= 1 {
+                return Err("can't remove the last admin — transfer admin first".to_string());
+            }
+        }
+        let mut found = false;
+        for m in manifest.members.iter_mut() {
+            if m.email.eq_ignore_ascii_case(&target)
+                || m.also_emails.iter().any(|a| a.eq_ignore_ascii_case(&target))
+            {
+                m.admin = admin;
+                found = true;
+                break;
+            }
+        }
+        if !found {
+            return Err("no team member with that email".to_string());
+        }
+        write_team(&repo_root, &manifest)?;
+        Ok(manifest)
+    })
+    .await
 }
 
 /// Hand the admin role to another member and step down — atomically, so
@@ -2390,49 +2450,52 @@ pub async fn team_transfer_admin(
     repo_root: String,
     to_email: String,
 ) -> Result<TeamManifest, String> {
-    let to = to_email.trim().to_lowercase();
-    if to.is_empty() {
-        return Err("recipient email is required".to_string());
-    }
-    let mut manifest = match read_team(&repo_root) {
-        Some(m) => m,
-        None => sync_with_git(&repo_root)?,
-    };
-    if !local_caller_is_admin(&repo_root, &manifest) {
-        return Err("admin only".to_string());
-    }
-    let (caller_email, _) = git_local_identity(&repo_root);
-    if to.eq_ignore_ascii_case(&caller_email) {
-        return Err("you already hold admin".to_string());
-    }
-    {
-        let recipient = manifest.members.iter_mut().find(|m| {
-            m.email.eq_ignore_ascii_case(&to)
-                || m.also_emails.iter().any(|a| a.eq_ignore_ascii_case(&to))
-        });
-        match recipient {
-            Some(m) => {
-                m.admin = true;
-                m.claimed = true;
-            }
-            None => return Err("no team member with that email".to_string()),
+    crate::blocking::run(move || {
+        let to = to_email.trim().to_lowercase();
+        if to.is_empty() {
+            return Err("recipient email is required".to_string());
         }
-    }
-    if !is_owner_email(&caller_email) {
-        for m in manifest.members.iter_mut() {
-            if m.email.eq_ignore_ascii_case(&caller_email)
-                || m
-                    .also_emails
-                    .iter()
-                    .any(|a| a.eq_ignore_ascii_case(&caller_email))
-            {
-                m.admin = false;
-                break;
+        let mut manifest = match read_team(&repo_root) {
+            Some(m) => m,
+            None => sync_with_git(&repo_root)?,
+        };
+        if !local_caller_is_admin(&repo_root, &manifest) {
+            return Err("admin only".to_string());
+        }
+        let (caller_email, _) = git_local_identity(&repo_root);
+        if to.eq_ignore_ascii_case(&caller_email) {
+            return Err("you already hold admin".to_string());
+        }
+        {
+            let recipient = manifest.members.iter_mut().find(|m| {
+                m.email.eq_ignore_ascii_case(&to)
+                    || m.also_emails.iter().any(|a| a.eq_ignore_ascii_case(&to))
+            });
+            match recipient {
+                Some(m) => {
+                    m.admin = true;
+                    m.claimed = true;
+                }
+                None => return Err("no team member with that email".to_string()),
             }
         }
-    }
-    write_team(&repo_root, &manifest)?;
-    Ok(manifest)
+        if !is_owner_email(&caller_email) {
+            for m in manifest.members.iter_mut() {
+                if m.email.eq_ignore_ascii_case(&caller_email)
+                    || m
+                        .also_emails
+                        .iter()
+                        .any(|a| a.eq_ignore_ascii_case(&caller_email))
+                {
+                    m.admin = false;
+                    break;
+                }
+            }
+        }
+        write_team(&repo_root, &manifest)?;
+        Ok(manifest)
+    })
+    .await
 }
 
 /// Admin command — link a secondary git email to a team member's
@@ -2447,65 +2510,68 @@ pub async fn team_alias_add(
     target_handle: String,
     alias_email: String,
 ) -> Result<TeamManifest, String> {
-    let alias = alias_email.trim().to_lowercase();
-    if alias.is_empty() || !alias.contains('@') {
-        return Err("alias email looks invalid".to_string());
-    }
-    let target = target_handle.trim().to_lowercase();
-    if target.is_empty() {
-        return Err("target handle is required".to_string());
-    }
-    let mut manifest = match read_team(&repo_root) {
-        Some(m) => m,
-        None => sync_with_git(&repo_root)?,
-    };
-
-    // Authorise: caller must be either an admin in the manifest OR the
-    // owner of the target handle. Without this, anyone in the repo
-    // could silently absorb anyone else's email.
-    let (caller_email, _) = git_local_identity(&repo_root);
-    let caller_is_admin = manifest.members.iter().any(|m| {
-        m.admin && m.email.eq_ignore_ascii_case(&caller_email)
-    });
-    let caller_is_owner = manifest.members.iter().any(|m| {
-        m.handle.eq_ignore_ascii_case(&target)
-            && (m.email.eq_ignore_ascii_case(&caller_email)
-                || m.also_emails
-                    .iter()
-                    .any(|a| a.eq_ignore_ascii_case(&caller_email)))
-    });
-    if !caller_is_admin && !caller_is_owner {
-        return Err("admin or self-owner only".to_string());
-    }
-
-    // Refuse to steal an alias from another member: if the email is
-    // already a primary or alias on someone else's record, bail.
-    let collision = manifest.members.iter().any(|m| {
-        !m.handle.eq_ignore_ascii_case(&target)
-            && (m.email.eq_ignore_ascii_case(&alias)
-                || m.also_emails.iter().any(|a| a.eq_ignore_ascii_case(&alias)))
-    });
-    if collision {
-        return Err("email already claimed by another member".to_string());
-    }
-
-    let mut found = false;
-    for m in manifest.members.iter_mut() {
-        if m.handle.eq_ignore_ascii_case(&target) {
-            if !m.email.eq_ignore_ascii_case(&alias)
-                && !m.also_emails.iter().any(|a| a.eq_ignore_ascii_case(&alias))
-            {
-                m.also_emails.push(alias.clone());
-            }
-            found = true;
-            break;
+    crate::blocking::run(move || {
+        let alias = alias_email.trim().to_lowercase();
+        if alias.is_empty() || !alias.contains('@') {
+            return Err("alias email looks invalid".to_string());
         }
-    }
-    if !found {
-        return Err(format!("no member with handle @{target}"));
-    }
-    write_team(&repo_root, &manifest)?;
-    Ok(manifest)
+        let target = target_handle.trim().to_lowercase();
+        if target.is_empty() {
+            return Err("target handle is required".to_string());
+        }
+        let mut manifest = match read_team(&repo_root) {
+            Some(m) => m,
+            None => sync_with_git(&repo_root)?,
+        };
+
+        // Authorise: caller must be either an admin in the manifest OR the
+        // owner of the target handle. Without this, anyone in the repo
+        // could silently absorb anyone else's email.
+        let (caller_email, _) = git_local_identity(&repo_root);
+        let caller_is_admin = manifest.members.iter().any(|m| {
+            m.admin && m.email.eq_ignore_ascii_case(&caller_email)
+        });
+        let caller_is_owner = manifest.members.iter().any(|m| {
+            m.handle.eq_ignore_ascii_case(&target)
+                && (m.email.eq_ignore_ascii_case(&caller_email)
+                    || m.also_emails
+                        .iter()
+                        .any(|a| a.eq_ignore_ascii_case(&caller_email)))
+        });
+        if !caller_is_admin && !caller_is_owner {
+            return Err("admin or self-owner only".to_string());
+        }
+
+        // Refuse to steal an alias from another member: if the email is
+        // already a primary or alias on someone else's record, bail.
+        let collision = manifest.members.iter().any(|m| {
+            !m.handle.eq_ignore_ascii_case(&target)
+                && (m.email.eq_ignore_ascii_case(&alias)
+                    || m.also_emails.iter().any(|a| a.eq_ignore_ascii_case(&alias)))
+        });
+        if collision {
+            return Err("email already claimed by another member".to_string());
+        }
+
+        let mut found = false;
+        for m in manifest.members.iter_mut() {
+            if m.handle.eq_ignore_ascii_case(&target) {
+                if !m.email.eq_ignore_ascii_case(&alias)
+                    && !m.also_emails.iter().any(|a| a.eq_ignore_ascii_case(&alias))
+                {
+                    m.also_emails.push(alias.clone());
+                }
+                found = true;
+                break;
+            }
+        }
+        if !found {
+            return Err(format!("no member with handle @{target}"));
+        }
+        write_team(&repo_root, &manifest)?;
+        Ok(manifest)
+    })
+    .await
 }
 
 /// Admin command — drop a previously-linked alias email from a team
@@ -2520,61 +2586,64 @@ pub async fn team_alias_remove(
     target_handle: String,
     alias_email: String,
 ) -> Result<TeamManifest, String> {
-    let alias = alias_email.trim().to_lowercase();
-    if alias.is_empty() {
-        return Err("alias email required".to_string());
-    }
-    let target = target_handle.trim().to_lowercase();
-    if target.is_empty() {
-        return Err("target handle is required".to_string());
-    }
-    let mut manifest = match read_team(&repo_root) {
-        Some(m) => m,
-        None => sync_with_git(&repo_root)?,
-    };
-
-    let (caller_email, _) = git_local_identity(&repo_root);
-    let caller_is_admin = manifest.members.iter().any(|m| {
-        m.admin && m.email.eq_ignore_ascii_case(&caller_email)
-    });
-    let caller_is_owner = manifest.members.iter().any(|m| {
-        m.handle.eq_ignore_ascii_case(&target)
-            && (m.email.eq_ignore_ascii_case(&caller_email)
-                || m.also_emails
-                    .iter()
-                    .any(|a| a.eq_ignore_ascii_case(&caller_email)))
-    });
-    if !caller_is_admin && !caller_is_owner {
-        return Err("admin or self-owner only".to_string());
-    }
-
-    let mut found = false;
-    for m in manifest.members.iter_mut() {
-        if m.handle.eq_ignore_ascii_case(&target) {
-            let before = m.also_emails.len();
-            m.also_emails
-                .retain(|a| !a.eq_ignore_ascii_case(&alias));
-            if m.also_emails.len() != before {
-                found = true;
-            } else {
-                // Treat "alias wasn't there" as idempotent success so the
-                // UI can fire-and-forget without distinguishing the cases.
-                found = true;
-            }
-            break;
+    crate::blocking::run(move || {
+        let alias = alias_email.trim().to_lowercase();
+        if alias.is_empty() {
+            return Err("alias email required".to_string());
         }
-    }
-    if !found {
-        return Err(format!("no member with handle @{target}"));
-    }
-    // Un-sticking an alias also drops any force-merge that named it, so
-    // `collapse_duplicate_members` won't silently re-absorb the row we just
-    // detached on the next re-derive.
-    manifest
-        .identity_merges
-        .retain(|m| m.a != alias && m.b != alias);
-    write_team(&repo_root, &manifest)?;
-    Ok(manifest)
+        let target = target_handle.trim().to_lowercase();
+        if target.is_empty() {
+            return Err("target handle is required".to_string());
+        }
+        let mut manifest = match read_team(&repo_root) {
+            Some(m) => m,
+            None => sync_with_git(&repo_root)?,
+        };
+
+        let (caller_email, _) = git_local_identity(&repo_root);
+        let caller_is_admin = manifest.members.iter().any(|m| {
+            m.admin && m.email.eq_ignore_ascii_case(&caller_email)
+        });
+        let caller_is_owner = manifest.members.iter().any(|m| {
+            m.handle.eq_ignore_ascii_case(&target)
+                && (m.email.eq_ignore_ascii_case(&caller_email)
+                    || m.also_emails
+                        .iter()
+                        .any(|a| a.eq_ignore_ascii_case(&caller_email)))
+        });
+        if !caller_is_admin && !caller_is_owner {
+            return Err("admin or self-owner only".to_string());
+        }
+
+        let mut found = false;
+        for m in manifest.members.iter_mut() {
+            if m.handle.eq_ignore_ascii_case(&target) {
+                let before = m.also_emails.len();
+                m.also_emails
+                    .retain(|a| !a.eq_ignore_ascii_case(&alias));
+                if m.also_emails.len() != before {
+                    found = true;
+                } else {
+                    // Treat "alias wasn't there" as idempotent success so the
+                    // UI can fire-and-forget without distinguishing the cases.
+                    found = true;
+                }
+                break;
+            }
+        }
+        if !found {
+            return Err(format!("no member with handle @{target}"));
+        }
+        // Un-sticking an alias also drops any force-merge that named it, so
+        // `collapse_duplicate_members` won't silently re-absorb the row we just
+        // detached on the next re-derive.
+        manifest
+            .identity_merges
+            .retain(|m| m.a != alias && m.b != alias);
+        write_team(&repo_root, &manifest)?;
+        Ok(manifest)
+    })
+    .await
 }
 
 /// Lookup the canonical handle for an arbitrary email by walking the
@@ -2589,11 +2658,14 @@ pub async fn canonical_handle_for_email(
     repo_root: String,
     email: String,
 ) -> Result<Option<String>, String> {
-    let manifest = match read_team(&repo_root) {
-        Some(m) => m,
-        None => sync_with_git(&repo_root)?,
-    };
-    Ok(canonical_member_for_email(&manifest.members, &email).map(|m| m.handle.clone()))
+    crate::blocking::run(move || {
+        let manifest = match read_team(&repo_root) {
+            Some(m) => m,
+            None => sync_with_git(&repo_root)?,
+        };
+        Ok(canonical_member_for_email(&manifest.members, &email).map(|m| m.handle.clone()))
+    })
+    .await
 }
 
 // ── Duplicate-member suggestion (weak-signal, human-confirmed) ───────
@@ -2909,14 +2981,17 @@ fn compute_duplicate_suggestions(
 pub async fn team_identity_suggest_duplicates(
     repo_root: String,
 ) -> Result<Vec<DuplicateSuggestion>, String> {
-    let manifest = match read_team(&repo_root) {
-        Some(m) => m,
-        None => sync_with_git(&repo_root)?,
-    };
-    Ok(compute_duplicate_suggestions(
-        &manifest.members,
-        &manifest.identity_splits,
-    ))
+    crate::blocking::run(move || {
+        let manifest = match read_team(&repo_root) {
+            Some(m) => m,
+            None => sync_with_git(&repo_root)?,
+        };
+        Ok(compute_duplicate_suggestions(
+            &manifest.members,
+            &manifest.identity_splits,
+        ))
+    })
+    .await
 }
 
 /// Caller must be an admin OR one of the people implicated in the group — so a
@@ -2960,77 +3035,80 @@ pub async fn team_identity_confirm_duplicate(
     survivor_email: String,
     merged_emails: Vec<String>,
 ) -> Result<TeamManifest, String> {
-    let survivor = survivor_email.trim().to_lowercase();
-    if survivor.is_empty() || !survivor.contains('@') {
-        return Err("survivor email looks invalid".to_string());
-    }
-    let merged: Vec<String> = merged_emails
-        .iter()
-        .map(|e| e.trim().to_lowercase())
-        .filter(|e| !e.is_empty() && *e != survivor)
-        .collect();
-    if merged.is_empty() {
-        return Err("nothing to merge".to_string());
-    }
-
-    let mut manifest = match read_team(&repo_root) {
-        Some(m) => m,
-        None => sync_with_git(&repo_root)?,
-    };
-
-    let mut involved = merged.clone();
-    involved.push(survivor.clone());
-    authorize_identity_edit(&manifest, &repo_root, &involved)?;
-
-    // Find the survivor row (by primary or alias).
-    let survivor_idx = manifest.members.iter().position(|m| {
-        m.email.eq_ignore_ascii_case(&survivor)
-            || m.also_emails.iter().any(|a| a.eq_ignore_ascii_case(&survivor))
-    });
-    let survivor_idx = match survivor_idx {
-        Some(i) => i,
-        None => return Err("survivor is not a member of this team".to_string()),
-    };
-
-    // Record every merged email as an alias on the survivor. `collapse` will
-    // then union the owning rows into the survivor on the shared email token.
-    for e in &merged {
-        let already = manifest.members[survivor_idx]
-            .email
-            .eq_ignore_ascii_case(e)
-            || manifest.members[survivor_idx]
-                .also_emails
-                .iter()
-                .any(|a| a.eq_ignore_ascii_case(e));
-        if !already {
-            manifest.members[survivor_idx].also_emails.push(e.clone());
+    crate::blocking::run(move || {
+        let survivor = survivor_email.trim().to_lowercase();
+        if survivor.is_empty() || !survivor.contains('@') {
+            return Err("survivor email looks invalid".to_string());
         }
-    }
-
-    // Record each confirmed pairing durably. `also_emails` alone only survives
-    // a re-derive when the two rows share an email/login token; a GitHub handle
-    // paired with a personal Gmail shares neither, so the suggestion would come
-    // right back. `identity_merges` is the top-level, re-derive-proof record
-    // that `collapse_duplicate_members` force-unions on every load. Confirming a
-    // pair also clears any stale "different people" split for it — the human
-    // just said the opposite.
-    for e in &merged {
-        let pair = normalize_pair(&survivor, e);
-        manifest
-            .identity_splits
-            .retain(|s| !(s.a == pair.a && s.b == pair.b));
-        if !manifest
-            .identity_merges
+        let merged: Vec<String> = merged_emails
             .iter()
-            .any(|m| m.a == pair.a && m.b == pair.b)
-        {
-            manifest.identity_merges.push(pair);
+            .map(|e| e.trim().to_lowercase())
+            .filter(|e| !e.is_empty() && *e != survivor)
+            .collect();
+        if merged.is_empty() {
+            return Err("nothing to merge".to_string());
         }
-    }
 
-    collapse_duplicate_members(&mut manifest);
-    write_team(&repo_root, &manifest)?;
-    Ok(manifest)
+        let mut manifest = match read_team(&repo_root) {
+            Some(m) => m,
+            None => sync_with_git(&repo_root)?,
+        };
+
+        let mut involved = merged.clone();
+        involved.push(survivor.clone());
+        authorize_identity_edit(&manifest, &repo_root, &involved)?;
+
+        // Find the survivor row (by primary or alias).
+        let survivor_idx = manifest.members.iter().position(|m| {
+            m.email.eq_ignore_ascii_case(&survivor)
+                || m.also_emails.iter().any(|a| a.eq_ignore_ascii_case(&survivor))
+        });
+        let survivor_idx = match survivor_idx {
+            Some(i) => i,
+            None => return Err("survivor is not a member of this team".to_string()),
+        };
+
+        // Record every merged email as an alias on the survivor. `collapse` will
+        // then union the owning rows into the survivor on the shared email token.
+        for e in &merged {
+            let already = manifest.members[survivor_idx]
+                .email
+                .eq_ignore_ascii_case(e)
+                || manifest.members[survivor_idx]
+                    .also_emails
+                    .iter()
+                    .any(|a| a.eq_ignore_ascii_case(e));
+            if !already {
+                manifest.members[survivor_idx].also_emails.push(e.clone());
+            }
+        }
+
+        // Record each confirmed pairing durably. `also_emails` alone only survives
+        // a re-derive when the two rows share an email/login token; a GitHub handle
+        // paired with a personal Gmail shares neither, so the suggestion would come
+        // right back. `identity_merges` is the top-level, re-derive-proof record
+        // that `collapse_duplicate_members` force-unions on every load. Confirming a
+        // pair also clears any stale "different people" split for it — the human
+        // just said the opposite.
+        for e in &merged {
+            let pair = normalize_pair(&survivor, e);
+            manifest
+                .identity_splits
+                .retain(|s| !(s.a == pair.a && s.b == pair.b));
+            if !manifest
+                .identity_merges
+                .iter()
+                .any(|m| m.a == pair.a && m.b == pair.b)
+            {
+                manifest.identity_merges.push(pair);
+            }
+        }
+
+        collapse_duplicate_members(&mut manifest);
+        write_team(&repo_root, &manifest)?;
+        Ok(manifest)
+    })
+    .await
 }
 
 /// Reject a suggestion: record that two emails belong to DIFFERENT people so the
@@ -3042,35 +3120,38 @@ pub async fn team_identity_reject_duplicate(
     email_a: String,
     email_b: String,
 ) -> Result<TeamManifest, String> {
-    let a = email_a.trim().to_lowercase();
-    let b = email_b.trim().to_lowercase();
-    if a.is_empty() || b.is_empty() || a == b {
-        return Err("two distinct emails required".to_string());
-    }
+    crate::blocking::run(move || {
+        let a = email_a.trim().to_lowercase();
+        let b = email_b.trim().to_lowercase();
+        if a.is_empty() || b.is_empty() || a == b {
+            return Err("two distinct emails required".to_string());
+        }
 
-    let mut manifest = match read_team(&repo_root) {
-        Some(m) => m,
-        None => sync_with_git(&repo_root)?,
-    };
-    authorize_identity_edit(&manifest, &repo_root, &[a.clone(), b.clone()])?;
+        let mut manifest = match read_team(&repo_root) {
+            Some(m) => m,
+            None => sync_with_git(&repo_root)?,
+        };
+        authorize_identity_edit(&manifest, &repo_root, &[a.clone(), b.clone()])?;
 
-    // Normalise: a <= b so the pair dedupes regardless of rejection order.
-    let (lo, hi) = if a <= b { (a, b) } else { (b, a) };
-    // Calling this pair "different people" must also drop any prior force-merge
-    // for it, so the two records can never disagree (a split always wins, but
-    // leaving a stale merge behind is confusing).
-    manifest
-        .identity_merges
-        .retain(|m| !(m.a == lo && m.b == hi));
-    let exists = manifest
-        .identity_splits
-        .iter()
-        .any(|s| s.a == lo && s.b == hi);
-    if !exists {
-        manifest.identity_splits.push(IdentitySplit { a: lo, b: hi });
-    }
-    write_team(&repo_root, &manifest)?;
-    Ok(manifest)
+        // Normalise: a <= b so the pair dedupes regardless of rejection order.
+        let (lo, hi) = if a <= b { (a, b) } else { (b, a) };
+        // Calling this pair "different people" must also drop any prior force-merge
+        // for it, so the two records can never disagree (a split always wins, but
+        // leaving a stale merge behind is confusing).
+        manifest
+            .identity_merges
+            .retain(|m| !(m.a == lo && m.b == hi));
+        let exists = manifest
+            .identity_splits
+            .iter()
+            .any(|s| s.a == lo && s.b == hi);
+        if !exists {
+            manifest.identity_splits.push(IdentitySplit { a: lo, b: hi });
+        }
+        write_team(&repo_root, &manifest)?;
+        Ok(manifest)
+    })
+    .await
 }
 
 // ── conversation addressing ──────────────────────────────────────────
@@ -3223,55 +3304,64 @@ pub async fn chat_list(
     }
     let after = after_ts.unwrap_or(0);
 
-    // Roster + local identity, resolved ONCE. `read_team` is a single file
-    // read; `sync_with_git` (the cold fallback) walks git history, which is far
-    // too heavy to repeat per channel on a 30-second poll.
-    let members = read_team(&repo_root)
-        .or_else(|| sync_with_git(&repo_root).ok())
-        .map(|m| m.members)
-        .unwrap_or_default();
-    let (git_email, _) = git_local_identity(&repo_root);
-    let login = account_login(&repo_root);
-    let self_aliases = local_handle_aliases(&repo_root, &members, &git_email, login.as_deref());
-    // Every address this conversation has been spelled by — see the section
-    // note above. Just the one entry whenever nobody's handle ever changed.
-    let addresses = conversation_channels(&channel, &members, &self_aliases);
+    let local_root = repo_root.clone();
+    let local_channel = channel.clone();
+    let (addresses, self_aliases, mut out, mut seen_ids) =
+        crate::blocking::run(move || {
+            // Roster + local identity, resolved ONCE. `read_team` is a single file
+            // read; `sync_with_git` (the cold fallback) walks git history, which is far
+            // too heavy to repeat per channel on a 30-second poll.
+            let members = read_team(&local_root)
+                .or_else(|| sync_with_git(&local_root).ok())
+                .map(|m| m.members)
+                .unwrap_or_default();
+            let (git_email, _) = git_local_identity(&local_root);
+            let login = account_login(&local_root);
+            let self_aliases =
+                local_handle_aliases(&local_root, &members, &git_email, login.as_deref());
+            // Every address this conversation has been spelled by — see the section
+            // note above. Just the one entry whenever nobody's handle ever changed.
+            let addresses = conversation_channels(&local_channel, &members, &self_aliases);
 
-    let mut out: Vec<ChatMessage> = Vec::new();
-    // id-based dedup — the previous (handle, body, ts±60s) heuristic
-    // dropped legitimate duplicate-content messages sent within a minute
-    // of each other. Local + cloud rows are the same message, just
-    // discovered through different paths; the id is canonical.
-    let mut seen_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
-    for address in &addresses {
-        let path = channel_path(&repo_root, address);
-        // A missing or unreadable file is ordinary, not fatal: this device may
-        // simply never have written here, and an address that predates a
-        // rename has no file at all. Ending the read on it is what left the
-        // conversation blank — the cloud pass below still holds the history.
-        let Ok(f) = fs::File::open(&path) else {
-            continue;
-        };
-        for line in BufReader::new(f).lines() {
-            let line = match line {
-                Ok(l) => l,
-                Err(_) => continue,
-            };
-            if line.trim().is_empty() {
-                continue;
+            let mut out: Vec<ChatMessage> = Vec::new();
+            // id-based dedup — the previous (handle, body, ts±60s) heuristic
+            // dropped legitimate duplicate-content messages sent within a minute
+            // of each other. Local + cloud rows are the same message, just
+            // discovered through different paths; the id is canonical.
+            let mut seen_ids: std::collections::HashSet<String> =
+                std::collections::HashSet::new();
+            for address in &addresses {
+                let path = channel_path(&local_root, address);
+                // A missing or unreadable file is ordinary, not fatal: this device may
+                // simply never have written here, and an address that predates a
+                // rename has no file at all. Ending the read on it is what left the
+                // conversation blank — the cloud pass below still holds the history.
+                let Ok(f) = fs::File::open(&path) else {
+                    continue;
+                };
+                for line in BufReader::new(f).lines() {
+                    let line = match line {
+                        Ok(l) => l,
+                        Err(_) => continue,
+                    };
+                    if line.trim().is_empty() {
+                        continue;
+                    }
+                    let msg: ChatMessage = match serde_json::from_str(&line) {
+                        Ok(m) => m,
+                        Err(_) => continue,
+                    };
+                    if msg.ts < after {
+                        continue;
+                    }
+                    if seen_ids.insert(msg.id.clone()) {
+                        out.push(msg);
+                    }
+                }
             }
-            let msg: ChatMessage = match serde_json::from_str(&line) {
-                Ok(m) => m,
-                Err(_) => continue,
-            };
-            if msg.ts < after {
-                continue;
-            }
-            if seen_ids.insert(msg.id.clone()) {
-                out.push(msg);
-            }
-        }
-    }
+            (addresses, self_aliases, out, seen_ids)
+        })
+        .await;
     // Cloud merge — best effort. Adds messages from teammates on other
     // machines AND server-assigned seqs for our own pending rows. The
     // id is the authoritative dedup key for cross-machine collapses,
@@ -3350,68 +3440,71 @@ pub struct SendArgs {
 
 #[tauri::command]
 pub async fn chat_send(args: SendArgs) -> Result<ChatMessage, String> {
-    let SendArgs {
-        repo_root,
-        channel,
-        body,
-        from_handle,
-        from_name,
-        thread_parent,
-        is_agent,
-    } = args;
-    let channel = slugify_channel(&channel);
-    if channel.is_empty() {
-        return Err("empty channel".to_string());
-    }
-    if body.trim().is_empty() {
-        return Err("empty body".to_string());
-    }
-    let manifest = sync_with_git(&repo_root)?;
-    let (handle, name) = match (from_handle, from_name) {
-        (Some(h), Some(n)) => (h.to_lowercase(), n),
-        (Some(h), None) => (h.to_lowercase(), h.clone()),
-        _ => {
-            // resolve_handle layers per-repo override → roster alias →
-            // email-local-part fallback. Substituting it here means a
-            // user with `mubasheer.ck@hotmail.com` locally still appears
-            // as `@mck` after `mck`'s `also_emails` is updated, with no
-            // git config change required.
-            let (email, gname) = git_local_identity(&repo_root);
-            let (h, n) = resolve_handle(
-                &repo_root,
-                &manifest.members,
-                &email,
-                account_login(&repo_root).as_deref(),
-            );
-            let final_name = if !n.is_empty() {
-                n
-            } else if !gname.is_empty() {
-                gname
-            } else {
-                h.clone()
-            };
-            (h, final_name)
+    crate::blocking::run(move || {
+        let SendArgs {
+            repo_root,
+            channel,
+            body,
+            from_handle,
+            from_name,
+            thread_parent,
+            is_agent,
+        } = args;
+        let channel = slugify_channel(&channel);
+        if channel.is_empty() {
+            return Err("empty channel".to_string());
         }
-    };
-    let mentions = parse_mentions(&body, &manifest.members);
-    let msg = ChatMessage {
-        id: random_id(),
-        channel: channel.clone(),
-        ts: now_secs(),
-        from_handle: handle,
-        from_name: name,
-        body,
-        mentions,
-        thread_parent,
-        is_agent: is_agent.unwrap_or(false),
-        delivery_status: "pending".to_string(),
-        seq: None,
-        // Our own local echo is self by construction — no device tiebreaker
-        // needed. The cloud stamps the real device id server-side; when this
-        // same row is later re-fetched it arrives populated.
-        from_device_id: None,
-    };
-    persist_and_deliver(&repo_root, msg)
+        if body.trim().is_empty() {
+            return Err("empty body".to_string());
+        }
+        let manifest = sync_with_git(&repo_root)?;
+        let (handle, name) = match (from_handle, from_name) {
+            (Some(h), Some(n)) => (h.to_lowercase(), n),
+            (Some(h), None) => (h.to_lowercase(), h.clone()),
+            _ => {
+                // resolve_handle layers per-repo override → roster alias →
+                // email-local-part fallback. Substituting it here means a
+                // user with `mubasheer.ck@hotmail.com` locally still appears
+                // as `@mck` after `mck`'s `also_emails` is updated, with no
+                // git config change required.
+                let (email, gname) = git_local_identity(&repo_root);
+                let (h, n) = resolve_handle(
+                    &repo_root,
+                    &manifest.members,
+                    &email,
+                    account_login(&repo_root).as_deref(),
+                );
+                let final_name = if !n.is_empty() {
+                    n
+                } else if !gname.is_empty() {
+                    gname
+                } else {
+                    h.clone()
+                };
+                (h, final_name)
+            }
+        };
+        let mentions = parse_mentions(&body, &manifest.members);
+        let msg = ChatMessage {
+            id: random_id(),
+            channel: channel.clone(),
+            ts: now_secs(),
+            from_handle: handle,
+            from_name: name,
+            body,
+            mentions,
+            thread_parent,
+            is_agent: is_agent.unwrap_or(false),
+            delivery_status: "pending".to_string(),
+            seq: None,
+            // Our own local echo is self by construction — no device tiebreaker
+            // needed. The cloud stamps the real device id server-side; when this
+            // same row is later re-fetched it arrives populated.
+            from_device_id: None,
+        };
+        persist_and_deliver(&repo_root, msg)
+    })
+    .await
 }
 
 /// Shared rail primitive: durably record `msg` on its channel (append
@@ -3881,74 +3974,77 @@ pub async fn team_channel_create(
     visibility: Option<String>,
     members: Option<Vec<String>>,
 ) -> Result<TeamManifest, String> {
-    let slug = slugify_channel(&name);
-    if slug.is_empty() {
-        return Err("invalid channel name".to_string());
-    }
-    let mut manifest = sync_with_git(&repo_root)?;
-    let existed = manifest.channels.iter().any(|c| c == &slug);
-    if !existed {
-        manifest.channels.push(slug.clone());
-    }
-
-    // Only seed visibility meta for a genuinely *new* channel. `create`
-    // is intentionally ungated (any member can make a channel), so we
-    // must not let it privatise/hijack a channel that already exists —
-    // changing an existing channel's visibility goes through the
-    // admin-gated `team_channel_update`.
-    let want_private = !existed
-        && visibility
-            .as_deref()
-            .map(|v| v.eq_ignore_ascii_case("private"))
-            .unwrap_or(false);
-    if want_private {
-        let (creator, _) = git_local_identity(&repo_root);
-        let creator = creator.trim().to_lowercase();
-        let mut allow: Vec<String> = members
-            .unwrap_or_default()
-            .into_iter()
-            .map(|e| e.trim().to_lowercase())
-            .filter(|e| !e.is_empty())
-            .collect();
-        // The creator is always a member + channel admin of a channel
-        // they just made private — otherwise they'd lock themselves out.
-        if !creator.is_empty() && !allow.iter().any(|e| e == &creator) {
-            allow.push(creator.clone());
+    crate::blocking::run(move || {
+        let slug = slugify_channel(&name);
+        if slug.is_empty() {
+            return Err("invalid channel name".to_string());
         }
-        allow.sort();
-        allow.dedup();
-        manifest.channel_meta.push(ChannelMeta {
-            slug: slug.clone(),
-            visibility: "private".to_string(),
-            members: allow,
-            admins: if creator.is_empty() {
-                Vec::new()
-            } else {
-                vec![creator.clone()]
-            },
-            topic: None,
-            tabs: Vec::new(),
-            created_at: now_secs(),
-            created_by: if creator.is_empty() {
-                None
-            } else {
-                Some(creator)
-            },
-        });
-    }
+        let mut manifest = sync_with_git(&repo_root)?;
+        let existed = manifest.channels.iter().any(|c| c == &slug);
+        if !existed {
+            manifest.channels.push(slug.clone());
+        }
 
-    // `want_private` implies `!existed`, so this writes exactly when the
-    // channel (and possibly its seeded meta) is new.
-    if !existed {
-        write_team(&repo_root, &manifest)?;
-    }
-    // Touch the file so listings show it even with zero messages.
-    ensure_dirs(&repo_root).map_err(|e| e.to_string())?;
-    let path = channel_path(&repo_root, &slug);
-    if !path.exists() {
-        let _ = fs::File::create(&path);
-    }
-    Ok(manifest)
+        // Only seed visibility meta for a genuinely *new* channel. `create`
+        // is intentionally ungated (any member can make a channel), so we
+        // must not let it privatise/hijack a channel that already exists —
+        // changing an existing channel's visibility goes through the
+        // admin-gated `team_channel_update`.
+        let want_private = !existed
+            && visibility
+                .as_deref()
+                .map(|v| v.eq_ignore_ascii_case("private"))
+                .unwrap_or(false);
+        if want_private {
+            let (creator, _) = git_local_identity(&repo_root);
+            let creator = creator.trim().to_lowercase();
+            let mut allow: Vec<String> = members
+                .unwrap_or_default()
+                .into_iter()
+                .map(|e| e.trim().to_lowercase())
+                .filter(|e| !e.is_empty())
+                .collect();
+            // The creator is always a member + channel admin of a channel
+            // they just made private — otherwise they'd lock themselves out.
+            if !creator.is_empty() && !allow.iter().any(|e| e == &creator) {
+                allow.push(creator.clone());
+            }
+            allow.sort();
+            allow.dedup();
+            manifest.channel_meta.push(ChannelMeta {
+                slug: slug.clone(),
+                visibility: "private".to_string(),
+                members: allow,
+                admins: if creator.is_empty() {
+                    Vec::new()
+                } else {
+                    vec![creator.clone()]
+                },
+                topic: None,
+                tabs: Vec::new(),
+                created_at: now_secs(),
+                created_by: if creator.is_empty() {
+                    None
+                } else {
+                    Some(creator)
+                },
+            });
+        }
+
+        // `want_private` implies `!existed`, so this writes exactly when the
+        // channel (and possibly its seeded meta) is new.
+        if !existed {
+            write_team(&repo_root, &manifest)?;
+        }
+        // Touch the file so listings show it even with zero messages.
+        ensure_dirs(&repo_root).map_err(|e| e.to_string())?;
+        let path = channel_path(&repo_root, &slug);
+        if !path.exists() {
+            let _ = fs::File::create(&path);
+        }
+        Ok(manifest)
+    })
+    .await
 }
 
 /// True when the local user may administer the given channel: either a
@@ -4005,48 +4101,51 @@ pub async fn team_channel_update(
     visibility: Option<String>,
     topic: Option<String>,
 ) -> Result<TeamManifest, String> {
-    let slug = slugify_channel(&slug);
-    if slug.is_empty() {
-        return Err("invalid channel".to_string());
-    }
-    let mut manifest = match read_team(&repo_root) {
-        Some(m) => m,
-        None => sync_with_git(&repo_root)?,
-    };
-    if !manifest.channels.iter().any(|c| c == &slug) {
-        return Err("no such channel".to_string());
-    }
-    if !caller_can_admin_channel(&repo_root, &manifest, &slug) {
-        return Err("admin only".to_string());
-    }
-    let (caller_email, _) = git_local_identity(&repo_root);
-    let caller_email = caller_email.trim().to_lowercase();
-    let meta = channel_meta_mut(&mut manifest, &slug);
-    if let Some(v) = visibility {
-        let v = v.trim().to_lowercase();
-        if v != "open" && v != "private" {
-            return Err("visibility must be 'open' or 'private'".to_string());
+    crate::blocking::run(move || {
+        let slug = slugify_channel(&slug);
+        if slug.is_empty() {
+            return Err("invalid channel".to_string());
         }
-        if v == "private" {
-            if !caller_email.is_empty() && !meta.members.iter().any(|e| e.eq_ignore_ascii_case(&caller_email)) {
-                meta.members.push(caller_email.clone());
-            }
-            if !caller_email.is_empty() && !meta.admins.iter().any(|e| e.eq_ignore_ascii_case(&caller_email)) {
-                meta.admins.push(caller_email.clone());
-            }
-        }
-        meta.visibility = v;
-    }
-    if let Some(t) = topic {
-        let t = t.trim();
-        meta.topic = if t.is_empty() {
-            None
-        } else {
-            Some(t.to_string())
+        let mut manifest = match read_team(&repo_root) {
+            Some(m) => m,
+            None => sync_with_git(&repo_root)?,
         };
-    }
-    write_team(&repo_root, &manifest)?;
-    Ok(manifest)
+        if !manifest.channels.iter().any(|c| c == &slug) {
+            return Err("no such channel".to_string());
+        }
+        if !caller_can_admin_channel(&repo_root, &manifest, &slug) {
+            return Err("admin only".to_string());
+        }
+        let (caller_email, _) = git_local_identity(&repo_root);
+        let caller_email = caller_email.trim().to_lowercase();
+        let meta = channel_meta_mut(&mut manifest, &slug);
+        if let Some(v) = visibility {
+            let v = v.trim().to_lowercase();
+            if v != "open" && v != "private" {
+                return Err("visibility must be 'open' or 'private'".to_string());
+            }
+            if v == "private" {
+                if !caller_email.is_empty() && !meta.members.iter().any(|e| e.eq_ignore_ascii_case(&caller_email)) {
+                    meta.members.push(caller_email.clone());
+                }
+                if !caller_email.is_empty() && !meta.admins.iter().any(|e| e.eq_ignore_ascii_case(&caller_email)) {
+                    meta.admins.push(caller_email.clone());
+                }
+            }
+            meta.visibility = v;
+        }
+        if let Some(t) = topic {
+            let t = t.trim();
+            meta.topic = if t.is_empty() {
+                None
+            } else {
+                Some(t.to_string())
+            };
+        }
+        write_team(&repo_root, &manifest)?;
+        Ok(manifest)
+    })
+    .await
 }
 
 /// Add a member (by email) to a private channel's allow-list. No-op on an
@@ -4058,27 +4157,30 @@ pub async fn team_channel_member_add(
     slug: String,
     email: String,
 ) -> Result<TeamManifest, String> {
-    let slug = slugify_channel(&slug);
-    let email = email.trim().to_lowercase();
-    if slug.is_empty() || email.is_empty() {
-        return Err("channel and email are required".to_string());
-    }
-    let mut manifest = match read_team(&repo_root) {
-        Some(m) => m,
-        None => sync_with_git(&repo_root)?,
-    };
-    if !manifest.channels.iter().any(|c| c == &slug) {
-        return Err("no such channel".to_string());
-    }
-    if !caller_can_admin_channel(&repo_root, &manifest, &slug) {
-        return Err("admin only".to_string());
-    }
-    let meta = channel_meta_mut(&mut manifest, &slug);
-    if !meta.members.iter().any(|e| e.eq_ignore_ascii_case(&email)) {
-        meta.members.push(email);
-    }
-    write_team(&repo_root, &manifest)?;
-    Ok(manifest)
+    crate::blocking::run(move || {
+        let slug = slugify_channel(&slug);
+        let email = email.trim().to_lowercase();
+        if slug.is_empty() || email.is_empty() {
+            return Err("channel and email are required".to_string());
+        }
+        let mut manifest = match read_team(&repo_root) {
+            Some(m) => m,
+            None => sync_with_git(&repo_root)?,
+        };
+        if !manifest.channels.iter().any(|c| c == &slug) {
+            return Err("no such channel".to_string());
+        }
+        if !caller_can_admin_channel(&repo_root, &manifest, &slug) {
+            return Err("admin only".to_string());
+        }
+        let meta = channel_meta_mut(&mut manifest, &slug);
+        if !meta.members.iter().any(|e| e.eq_ignore_ascii_case(&email)) {
+            meta.members.push(email);
+        }
+        write_team(&repo_root, &manifest)?;
+        Ok(manifest)
+    })
+    .await
 }
 
 /// Remove a member from a private channel's allow-list. Refuses to remove
@@ -4090,27 +4192,30 @@ pub async fn team_channel_member_remove(
     slug: String,
     email: String,
 ) -> Result<TeamManifest, String> {
-    let slug = slugify_channel(&slug);
-    let email = email.trim().to_lowercase();
-    if slug.is_empty() || email.is_empty() {
-        return Err("channel and email are required".to_string());
-    }
-    let mut manifest = match read_team(&repo_root) {
-        Some(m) => m,
-        None => sync_with_git(&repo_root)?,
-    };
-    if !caller_can_admin_channel(&repo_root, &manifest, &slug) {
-        return Err("admin only".to_string());
-    }
-    if let Some(meta) = manifest.channel_meta.iter_mut().find(|c| c.slug == slug) {
-        if meta.visibility == "private" && meta.members.len() <= 1 {
-            return Err("can't remove the last member of a private channel".to_string());
+    crate::blocking::run(move || {
+        let slug = slugify_channel(&slug);
+        let email = email.trim().to_lowercase();
+        if slug.is_empty() || email.is_empty() {
+            return Err("channel and email are required".to_string());
         }
-        meta.members.retain(|e| !e.eq_ignore_ascii_case(&email));
-        meta.admins.retain(|e| !e.eq_ignore_ascii_case(&email));
-        write_team(&repo_root, &manifest)?;
-    }
-    Ok(manifest)
+        let mut manifest = match read_team(&repo_root) {
+            Some(m) => m,
+            None => sync_with_git(&repo_root)?,
+        };
+        if !caller_can_admin_channel(&repo_root, &manifest, &slug) {
+            return Err("admin only".to_string());
+        }
+        if let Some(meta) = manifest.channel_meta.iter_mut().find(|c| c.slug == slug) {
+            if meta.visibility == "private" && meta.members.len() <= 1 {
+                return Err("can't remove the last member of a private channel".to_string());
+            }
+            meta.members.retain(|e| !e.eq_ignore_ascii_case(&email));
+            meta.admins.retain(|e| !e.eq_ignore_ascii_case(&email));
+            write_team(&repo_root, &manifest)?;
+        }
+        Ok(manifest)
+    })
+    .await
 }
 
 /// Promote or demote a channel-level admin (by email). Channel admins can
@@ -4125,37 +4230,40 @@ pub async fn team_channel_admin_set(
     email: String,
     is_admin: bool,
 ) -> Result<TeamManifest, String> {
-    let slug = slugify_channel(&slug);
-    let email = email.trim().to_lowercase();
-    if slug.is_empty() || email.is_empty() {
-        return Err("channel and email are required".to_string());
-    }
-    let mut manifest = match read_team(&repo_root) {
-        Some(m) => m,
-        None => sync_with_git(&repo_root)?,
-    };
-    if !manifest.channels.iter().any(|c| c == &slug) {
-        return Err("no such channel".to_string());
-    }
-    if !caller_can_admin_channel(&repo_root, &manifest, &slug) {
-        return Err("admin only".to_string());
-    }
-    let meta = channel_meta_mut(&mut manifest, &slug);
-    if is_admin {
-        if !meta.admins.iter().any(|e| e.eq_ignore_ascii_case(&email)) {
-            meta.admins.push(email.clone());
+    crate::blocking::run(move || {
+        let slug = slugify_channel(&slug);
+        let email = email.trim().to_lowercase();
+        if slug.is_empty() || email.is_empty() {
+            return Err("channel and email are required".to_string());
         }
-        // A channel admin must be able to see the channel they administer.
-        if meta.visibility == "private"
-            && !meta.members.iter().any(|e| e.eq_ignore_ascii_case(&email))
-        {
-            meta.members.push(email);
+        let mut manifest = match read_team(&repo_root) {
+            Some(m) => m,
+            None => sync_with_git(&repo_root)?,
+        };
+        if !manifest.channels.iter().any(|c| c == &slug) {
+            return Err("no such channel".to_string());
         }
-    } else {
-        meta.admins.retain(|e| !e.eq_ignore_ascii_case(&email));
-    }
-    write_team(&repo_root, &manifest)?;
-    Ok(manifest)
+        if !caller_can_admin_channel(&repo_root, &manifest, &slug) {
+            return Err("admin only".to_string());
+        }
+        let meta = channel_meta_mut(&mut manifest, &slug);
+        if is_admin {
+            if !meta.admins.iter().any(|e| e.eq_ignore_ascii_case(&email)) {
+                meta.admins.push(email.clone());
+            }
+            // A channel admin must be able to see the channel they administer.
+            if meta.visibility == "private"
+                && !meta.members.iter().any(|e| e.eq_ignore_ascii_case(&email))
+            {
+                meta.members.push(email);
+            }
+        } else {
+            meta.admins.retain(|e| !e.eq_ignore_ascii_case(&email));
+        }
+        write_team(&repo_root, &manifest)?;
+        Ok(manifest)
+    })
+    .await
 }
 
 /// Hard ceiling on custom tabs per channel — the header strip is finite
@@ -4212,54 +4320,57 @@ pub async fn team_channel_tab_add(
     label: String,
     url: String,
 ) -> Result<TeamManifest, String> {
-    let slug = slugify_channel(&slug);
-    if slug.is_empty() {
-        return Err("invalid channel".to_string());
-    }
-    let label = validate_tab_label(&label)?;
-    let url = validate_tab_url(&url)?;
-    let mut manifest = match read_team(&repo_root) {
-        Some(m) => m,
-        None => sync_with_git(&repo_root)?,
-    };
-    if !manifest.channels.iter().any(|c| c == &slug) {
-        return Err("no such channel".to_string());
-    }
-    let (caller_email, _) = git_local_identity(&repo_root);
-    let caller_email = caller_email.trim().to_lowercase();
-    let ts = now_secs();
-    let meta = channel_meta_mut(&mut manifest, &slug);
-    if meta.tabs.len() >= CHANNEL_TABS_MAX {
-        return Err(format!(
-            "channel already has {CHANNEL_TABS_MAX} tabs — remove one first"
-        ));
-    }
-    if meta.tabs.iter().any(|t| t.url.eq_ignore_ascii_case(&url)) {
-        return Err("that URL is already a tab on this channel".to_string());
-    }
-    // Stable unique id without a uuid dependency: timestamp + a content
-    // hash, with the tab count folded in so two adds in the same second
-    // can't collide.
-    let id = {
-        use std::collections::hash_map::DefaultHasher;
-        use std::hash::{Hash, Hasher};
-        let mut h = DefaultHasher::new();
-        (&label, &url, ts, meta.tabs.len()).hash(&mut h);
-        format!("tab-{ts}-{:08x}", (h.finish() & 0xffff_ffff) as u32)
-    };
-    meta.tabs.push(ChannelTabDef {
-        id,
-        label,
-        url,
-        added_by: if caller_email.is_empty() {
-            None
-        } else {
-            Some(caller_email)
-        },
-        created_at: ts,
-    });
-    write_team(&repo_root, &manifest)?;
-    Ok(manifest)
+    crate::blocking::run(move || {
+        let slug = slugify_channel(&slug);
+        if slug.is_empty() {
+            return Err("invalid channel".to_string());
+        }
+        let label = validate_tab_label(&label)?;
+        let url = validate_tab_url(&url)?;
+        let mut manifest = match read_team(&repo_root) {
+            Some(m) => m,
+            None => sync_with_git(&repo_root)?,
+        };
+        if !manifest.channels.iter().any(|c| c == &slug) {
+            return Err("no such channel".to_string());
+        }
+        let (caller_email, _) = git_local_identity(&repo_root);
+        let caller_email = caller_email.trim().to_lowercase();
+        let ts = now_secs();
+        let meta = channel_meta_mut(&mut manifest, &slug);
+        if meta.tabs.len() >= CHANNEL_TABS_MAX {
+            return Err(format!(
+                "channel already has {CHANNEL_TABS_MAX} tabs — remove one first"
+            ));
+        }
+        if meta.tabs.iter().any(|t| t.url.eq_ignore_ascii_case(&url)) {
+            return Err("that URL is already a tab on this channel".to_string());
+        }
+        // Stable unique id without a uuid dependency: timestamp + a content
+        // hash, with the tab count folded in so two adds in the same second
+        // can't collide.
+        let id = {
+            use std::collections::hash_map::DefaultHasher;
+            use std::hash::{Hash, Hasher};
+            let mut h = DefaultHasher::new();
+            (&label, &url, ts, meta.tabs.len()).hash(&mut h);
+            format!("tab-{ts}-{:08x}", (h.finish() & 0xffff_ffff) as u32)
+        };
+        meta.tabs.push(ChannelTabDef {
+            id,
+            label,
+            url,
+            added_by: if caller_email.is_empty() {
+                None
+            } else {
+                Some(caller_email)
+            },
+            created_at: ts,
+        });
+        write_team(&repo_root, &manifest)?;
+        Ok(manifest)
+    })
+    .await
 }
 
 /// Remove a custom tab from a channel by id. Open to any team member,
@@ -4271,24 +4382,27 @@ pub async fn team_channel_tab_remove(
     slug: String,
     tab_id: String,
 ) -> Result<TeamManifest, String> {
-    let slug = slugify_channel(&slug);
-    if slug.is_empty() || tab_id.trim().is_empty() {
-        return Err("channel and tab id are required".to_string());
-    }
-    let mut manifest = match read_team(&repo_root) {
-        Some(m) => m,
-        None => sync_with_git(&repo_root)?,
-    };
-    let Some(meta) = manifest.channel_meta.iter_mut().find(|c| c.slug == slug) else {
-        return Err("no such tab".to_string());
-    };
-    let before = meta.tabs.len();
-    meta.tabs.retain(|t| t.id != tab_id);
-    if meta.tabs.len() == before {
-        return Err("no such tab".to_string());
-    }
-    write_team(&repo_root, &manifest)?;
-    Ok(manifest)
+    crate::blocking::run(move || {
+        let slug = slugify_channel(&slug);
+        if slug.is_empty() || tab_id.trim().is_empty() {
+            return Err("channel and tab id are required".to_string());
+        }
+        let mut manifest = match read_team(&repo_root) {
+            Some(m) => m,
+            None => sync_with_git(&repo_root)?,
+        };
+        let Some(meta) = manifest.channel_meta.iter_mut().find(|c| c.slug == slug) else {
+            return Err("no such tab".to_string());
+        };
+        let before = meta.tabs.len();
+        meta.tabs.retain(|t| t.id != tab_id);
+        if meta.tabs.len() == before {
+            return Err("no such tab".to_string());
+        }
+        write_team(&repo_root, &manifest)?;
+        Ok(manifest)
+    })
+    .await
 }
 
 /// Delete a non-core channel: drops it from the flat list, its meta, and
@@ -4299,27 +4413,30 @@ pub async fn team_channel_delete(
     repo_root: String,
     slug: String,
 ) -> Result<TeamManifest, String> {
-    let slug = slugify_channel(&slug);
-    if slug.is_empty() {
-        return Err("invalid channel".to_string());
-    }
-    if CORE_CHANNELS.contains(&slug.as_str()) {
-        return Err("can't delete a built-in channel".to_string());
-    }
-    let mut manifest = match read_team(&repo_root) {
-        Some(m) => m,
-        None => sync_with_git(&repo_root)?,
-    };
-    if !caller_can_admin_channel(&repo_root, &manifest, &slug) {
-        return Err("admin only".to_string());
-    }
-    manifest.channels.retain(|c| c != &slug);
-    manifest.channel_meta.retain(|c| c.slug != slug);
-    write_team(&repo_root, &manifest)?;
-    // Best-effort removal of the backing log; absence is fine.
-    let path = channel_path(&repo_root, &slug);
-    let _ = fs::remove_file(&path);
-    Ok(manifest)
+    crate::blocking::run(move || {
+        let slug = slugify_channel(&slug);
+        if slug.is_empty() {
+            return Err("invalid channel".to_string());
+        }
+        if CORE_CHANNELS.contains(&slug.as_str()) {
+            return Err("can't delete a built-in channel".to_string());
+        }
+        let mut manifest = match read_team(&repo_root) {
+            Some(m) => m,
+            None => sync_with_git(&repo_root)?,
+        };
+        if !caller_can_admin_channel(&repo_root, &manifest, &slug) {
+            return Err("admin only".to_string());
+        }
+        manifest.channels.retain(|c| c != &slug);
+        manifest.channel_meta.retain(|c| c.slug != slug);
+        write_team(&repo_root, &manifest)?;
+        // Best-effort removal of the backing log; absence is fine.
+        let path = channel_path(&repo_root, &slug);
+        let _ = fs::remove_file(&path);
+        Ok(manifest)
+    })
+    .await
 }
 
 // ── Cloud chat fan-out (unauth rooms) ────────────────────────────────
@@ -4480,7 +4597,7 @@ async fn post_cloud_chat(repo_root: &str, msg: &ChatMessage) -> Result<(), Strin
     let url = format!("{origin}/api/v1/room/{room_id}/messages");
     let mut req = client.post(&url).json(&body);
     if let Some(token) = cloud_api_token() {
-        req = req.bearer_auth(token);
+        req = req.bearer_auth(token).org_scoped();
     }
     let resp = req
         .send()
@@ -4547,7 +4664,7 @@ async fn fetch_cloud_chat(
     let client = http_client().ok_or_else(|| "http client".to_string())?;
     let mut req = client.get(&url);
     if let Some(token) = cloud_api_token() {
-        req = req.bearer_auth(token);
+        req = req.bearer_auth(token).org_scoped();
     }
     let resp = req
         .send()
@@ -4623,7 +4740,7 @@ async fn fetch_cloud_chat_since(
     let client = http_client().ok_or_else(|| "http client".to_string())?;
     let mut req = client.get(&url);
     if let Some(token) = cloud_api_token() {
-        req = req.bearer_auth(token);
+        req = req.bearer_auth(token).org_scoped();
     }
     let resp = req
         .send()
@@ -4747,6 +4864,63 @@ pub struct ChatDoctorReport {
     /// by the banner to render "Active" instead of "Switch".
     #[serde(default)]
     pub identity_override_active: bool,
+    /// The GitHub account signed in on this machine (`gh api user`), or
+    /// `None` when `gh` is absent or signed out.
+    ///
+    /// This block exists so the identity picker can only ever offer a
+    /// roster seat the local user has *evidence* of owning. The roster in
+    /// `.aura/team/team.json` is rebuilt from `git log` and travels with
+    /// the repo, so anyone who clones a project inherits the whole team's
+    /// names — enumerating those names as things you might "be" hands a
+    /// stranger somebody else's identity. A signed-in GitHub login that
+    /// matches a seat's recorded `github_login` is a real claim; the
+    /// mere presence of a seat in the file is not.
+    #[serde(default)]
+    pub github_login: Option<String>,
+    /// Handle of the roster seat whose `github_login` matches the
+    /// signed-in GitHub account, when there is one.
+    #[serde(default)]
+    pub github_member_handle: Option<String>,
+    /// That seat's primary email, so the picker can persist the same
+    /// address teammates already see on their messages.
+    #[serde(default)]
+    pub github_member_email: Option<String>,
+    /// That seat's display name.
+    #[serde(default)]
+    pub github_member_name: Option<String>,
+}
+
+/// Everything `chat_doctor` can answer without touching the network,
+/// gathered in one hop onto the blocking pool.
+///
+/// This is a struct rather than the tuple it grew out of because half its
+/// fields are `Option<String>` identity values sitting next to each other:
+/// positionally swapping two of them would compile clean and ship a user
+/// the wrong person's handle, which is precisely the failure this file is
+/// hardening against. Named fields make that mistake unrepresentable.
+struct LocalChatFacts {
+    raw_origin: Option<String>,
+    room_id: String,
+    room_id_source: String,
+    normalised: Option<String>,
+    email: String,
+    name: String,
+    handle: String,
+    identity: crate::cmd_device::DeviceIdentity,
+    roster_email_match: bool,
+    canonical_handle: Option<String>,
+    canonical_email: Option<String>,
+    alias_emails: Vec<String>,
+    identity_override_active: bool,
+    github_login: Option<String>,
+    github_member_handle: Option<String>,
+    github_member_email: Option<String>,
+    github_member_name: Option<String>,
+    channels: Vec<String>,
+    local_message_count: usize,
+    outbox_pending: usize,
+    outbox_failed: usize,
+    outbox_last_error: Option<String>,
 }
 
 #[tauri::command]
@@ -4755,85 +4929,157 @@ pub async fn chat_doctor(repo_root: String) -> Result<ChatDoctorReport, String> 
         normalise_origin_url, read_origin_url, read_repo_override, room_id_for_repo,
     };
 
-    let path = Path::new(&repo_root);
-    let raw_origin = read_origin_url(path);
-    let room_id = room_id_for_repo(path);
-    // Source precedence mirrors room_id_for_repo: an override file in the
-    // repo wins over git origin which wins over the path-hash fallback.
-    // Surfacing this lets the Doctor explain *why* two clones diverge.
-    let room_id_source = if read_repo_override(path).is_some() {
-        "repo-override".to_string()
-    } else if raw_origin.is_some() {
-        "git-origin".to_string()
-    } else {
-        "local-path-hash".to_string()
-    };
-    let normalised = raw_origin.as_deref().map(normalise_origin_url);
+    let local_root = repo_root.clone();
+    let facts = crate::blocking::run(move || {
+        let path = Path::new(&local_root);
+        let raw_origin = read_origin_url(path);
+        let room_id = room_id_for_repo(path);
+        // Source precedence mirrors room_id_for_repo: an override file in the
+        // repo wins over git origin which wins over the path-hash fallback.
+        // Surfacing this lets the Doctor explain *why* two clones diverge.
+        let room_id_source = if read_repo_override(path).is_some() {
+            "repo-override".to_string()
+        } else if raw_origin.is_some() {
+            "git-origin".to_string()
+        } else {
+            "local-path-hash".to_string()
+        };
+        let normalised = raw_origin.as_deref().map(normalise_origin_url);
 
-    let (email, name) = git_local_identity(&repo_root);
-    let handle = handle_from_email(&email);
-    let identity = effective_identity(path).unwrap_or_else(|_| crate::cmd_device::DeviceIdentity {
-        device_id: String::new(),
-        display_name: String::new(),
-        email: String::new(),
-    });
+        let (email, name) = git_local_identity(&local_root);
+        let handle = handle_from_email(&email);
+        let identity =
+            effective_identity(path).unwrap_or_else(|_| crate::cmd_device::DeviceIdentity {
+                device_id: String::new(),
+                display_name: String::new(),
+                email: String::new(),
+            });
 
-    // Resolve the canonical identity against the roster + per-repo
-    // override so the Doctor can surface the warning amber banner when
-    // git email doesn't match any roster primary (the classic
-    // "messages don't reach @mck because I'm sending as @mubasheer.ck"
-    // failure mode).
-    let manifest = read_team(&repo_root).unwrap_or_else(|| TeamManifest {
-        team_id: derive_team_id(&repo_root),
-        repo_root: repo_root.clone(),
-        created_at: now_secs(),
-        members: Vec::new(),
-        channel_meta: Vec::new(),
-        channels: Vec::new(),
-        collaborators_synced_at: 0,
-        identity_splits: Vec::new(),
-        identity_merges: Vec::new(),
-    });
-    let roster_email_match = manifest
-        .members
-        .iter()
-        .any(|m| m.email.eq_ignore_ascii_case(&email));
-    let canonical_member = canonical_member_for_email(&manifest.members, &email);
-    let canonical_handle = canonical_member.map(|m| m.handle.clone());
-    let canonical_email = canonical_member.map(|m| m.email.clone());
-    let alias_emails = canonical_member
-        .map(|m| m.also_emails.clone())
-        .unwrap_or_default();
-    let identity_override_active = repo_identity_override(&repo_root).is_some();
+        // Resolve the canonical identity against the roster + per-repo
+        // override so the Doctor can surface the warning amber banner when
+        // git email doesn't match any roster primary (the classic
+        // "messages don't reach @mck because I'm sending as @mubasheer.ck"
+        // failure mode).
+        let manifest = read_team(&local_root).unwrap_or_else(|| TeamManifest {
+            team_id: derive_team_id(&local_root),
+            repo_root: local_root.clone(),
+            created_at: now_secs(),
+            members: Vec::new(),
+            channel_meta: Vec::new(),
+            channels: Vec::new(),
+            collaborators_synced_at: 0,
+            identity_splits: Vec::new(),
+            identity_merges: Vec::new(),
+        });
+        let roster_email_match = manifest
+            .members
+            .iter()
+            .any(|m| m.email.eq_ignore_ascii_case(&email));
+        let canonical_member = canonical_member_for_email(&manifest.members, &email);
+        let canonical_handle = canonical_member.map(|m| m.handle.clone());
+        let canonical_email = canonical_member.map(|m| m.email.clone());
+        let alias_emails = canonical_member
+            .map(|m| m.also_emails.clone())
+            .unwrap_or_default();
+        let identity_override_active = repo_identity_override(&local_root).is_some();
 
-    // List channels by scanning .aura/team/chat/*.jsonl.
-    let chat_dir = team_dir(&repo_root).join(CHAT_DIR);
-    let mut channels: Vec<String> = Vec::new();
-    let mut local_message_count: usize = 0;
-    if let Ok(entries) = fs::read_dir(&chat_dir) {
-        for entry in entries.flatten() {
-            let p = entry.path();
-            if p.extension().and_then(|x| x.to_str()) == Some("jsonl") {
-                if let Some(stem) = p.file_stem().and_then(|x| x.to_str()) {
-                    channels.push(stem.to_string());
-                }
-                if let Ok(f) = fs::File::open(&p) {
-                    let reader = BufReader::new(f);
-                    local_message_count += reader.lines().filter_map(|l| l.ok()).filter(|l| !l.trim().is_empty()).count();
+        // The second (and for a fresh clone with no git identity, the
+        // only) way a seat can be proven yours: the GitHub account signed
+        // in on this machine is recorded on it. `account_login` is
+        // memoised per process, so this costs one `gh api user` at most.
+        let github_login = account_login(&local_root);
+        let github_member = github_login
+            .as_deref()
+            .and_then(|login| member_for_github_login(&manifest.members, login));
+        let github_member_handle = github_member.map(|m| m.handle.clone());
+        let github_member_email = github_member.map(|m| m.email.clone());
+        let github_member_name = github_member.map(|m| m.name.clone());
+
+        // List channels by scanning .aura/team/chat/*.jsonl.
+        let chat_dir = team_dir(&local_root).join(CHAT_DIR);
+        let mut channels: Vec<String> = Vec::new();
+        let mut local_message_count: usize = 0;
+        if let Ok(entries) = fs::read_dir(&chat_dir) {
+            for entry in entries.flatten() {
+                let p = entry.path();
+                if p.extension().and_then(|x| x.to_str()) == Some("jsonl") {
+                    if let Some(stem) = p.file_stem().and_then(|x| x.to_str()) {
+                        channels.push(stem.to_string());
+                    }
+                    if let Ok(f) = fs::File::open(&p) {
+                        let reader = BufReader::new(f);
+                        local_message_count += reader
+                            .lines()
+                            .filter_map(|l| l.ok())
+                            .filter(|l| !l.trim().is_empty())
+                            .count();
+                    }
                 }
             }
         }
-    }
-    channels.sort();
+        channels.sort();
 
-    // Outbox snapshot.
-    let outbox = outbox_load(&repo_root);
-    let outbox_pending = outbox.iter().filter(|e| !e.failed).count();
-    let outbox_failed = outbox.iter().filter(|e| e.failed).count();
-    let outbox_last_error = outbox
-        .iter()
-        .filter_map(|e| e.last_error.clone())
-        .next_back();
+        // Outbox snapshot.
+        let outbox = outbox_load(&local_root);
+        let outbox_pending = outbox.iter().filter(|e| !e.failed).count();
+        let outbox_failed = outbox.iter().filter(|e| e.failed).count();
+        let outbox_last_error = outbox
+            .iter()
+            .filter_map(|e| e.last_error.clone())
+            .next_back();
+
+        LocalChatFacts {
+            raw_origin,
+            room_id,
+            room_id_source,
+            normalised,
+            email,
+            name,
+            handle,
+            identity,
+            roster_email_match,
+            canonical_handle,
+            canonical_email,
+            alias_emails,
+            identity_override_active,
+            github_login,
+            github_member_handle,
+            github_member_email,
+            github_member_name,
+            channels,
+            local_message_count,
+            outbox_pending,
+            outbox_failed,
+            outbox_last_error,
+        }
+    })
+    .await;
+
+    // Destructured by name, so the identity fields below can't be crossed.
+    let LocalChatFacts {
+        raw_origin,
+        room_id,
+        room_id_source,
+        normalised,
+        email,
+        name,
+        handle,
+        identity,
+        roster_email_match,
+        canonical_handle,
+        canonical_email,
+        alias_emails,
+        identity_override_active,
+        github_login,
+        github_member_handle,
+        github_member_email,
+        github_member_name,
+        channels,
+        local_message_count,
+        outbox_pending,
+        outbox_failed,
+        outbox_last_error,
+    } = facts;
 
     // Reach the cloud — GET the general channel as a 1-message probe.
     let origin = room_origin();
@@ -4908,6 +5154,10 @@ pub async fn chat_doctor(repo_root: String) -> Result<ChatDoctorReport, String> 
         canonical_email,
         alias_emails,
         identity_override_active,
+        github_login,
+        github_member_handle,
+        github_member_email,
+        github_member_name,
     })
 }
 
@@ -5735,5 +5985,61 @@ mod tests {
             !out.contains("identity_splits"),
             "manifest with no splits must not gain the key: {out}"
         );
+    }
+
+    fn author(email: &str) -> GitAuthor {
+        GitAuthor {
+            name: "Test".into(),
+            email: email.into(),
+            commits: 1,
+            first_seen: 0,
+            last_seen: 0,
+            source: TeamMemberSource::Direct,
+        }
+    }
+
+    // The roster is derived from every commit ever authored, and three
+    // surfaces plus a 15-second poll each ask for it independently. Without a
+    // window, opening the app walks all of history several times inside a
+    // second.
+    #[test]
+    fn repeated_asks_for_the_same_roster_walk_history_once() {
+        let key = "walk-once-test";
+        let mut walks = 0;
+        for _ in 0..5 {
+            let authors = cached_author_walk(key, || {
+                walks += 1;
+                vec![author("a@example.com")]
+            });
+            assert_eq!(authors.len(), 1);
+        }
+        assert_eq!(walks, 1, "history should have been walked exactly once");
+    }
+
+    // Different repos are different rosters. A cache that answered one repo's
+    // question with another's would put the wrong people on the team.
+    #[test]
+    fn a_second_repo_gets_its_own_walk() {
+        let mut walked: Vec<String> = Vec::new();
+        for key in ["repo-a-test", "repo-b-test"] {
+            let _ = cached_author_walk(key, || {
+                walked.push(key.to_string());
+                vec![author(&format!("{key}@example.com"))]
+            });
+        }
+        assert_eq!(walked, vec!["repo-a-test", "repo-b-test"]);
+    }
+
+    // The upstream walk is a different question about the same repo, so it
+    // must not be served the direct walk's answer.
+    #[test]
+    fn the_upstream_walk_is_not_confused_with_the_direct_one() {
+        let root = "fork-test";
+        let direct = cached_author_walk(root, || vec![author("mine@example.com")]);
+        let upstream = cached_author_walk(&format!("{root}\0upstream"), || {
+            vec![author("theirs@example.com")]
+        });
+        assert_eq!(direct[0].email, "mine@example.com");
+        assert_eq!(upstream[0].email, "theirs@example.com");
     }
 }

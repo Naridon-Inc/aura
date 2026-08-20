@@ -9,10 +9,15 @@ use notify::{Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 use std::fs;
 use std::io::{BufRead, BufReader};
 use std::path::Path;
-use std::sync::mpsc::channel;
+use std::sync::mpsc::{channel, RecvTimeoutError};
 use std::sync::{Arc, Mutex};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use uuid::Uuid;
+
+/// How often the watch loop wakes up to confirm the tree it was pointed at is
+/// still there. Long enough to be free, short enough that an abandoned daemon
+/// is gone within a minute of the directory it was watching.
+const LIVENESS_INTERVAL: Duration = Duration::from_secs(30);
 
 /// The background daemon is silent by default. Per-file and per-AST-node tracing
 /// is opt-in via `AURA_DAEMON_VERBOSE=1` — without this gate the per-node "Found …"
@@ -22,6 +27,63 @@ fn daemon_verbose() -> bool {
     std::env::var("AURA_DAEMON_VERBOSE")
         .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
         .unwrap_or(false)
+}
+
+/// Set this to stop `aura init` leaving a watcher behind.
+pub const NO_DAEMON_ENV: &str = "AURA_NO_DAEMON";
+
+/// Whether `init` may start a watcher over the tree it just prepared.
+///
+/// A watcher is the right default for a checkout someone is about to work in,
+/// and exactly wrong for a throwaway one. The daemon outlives the `init`
+/// process that started it and keeps its own parser and AST cache, so a test
+/// suite that inits thirty temporary repositories leaves thirty resident
+/// watchers behind — every run, over directories that were deleted seconds
+/// later, for as long as the machine stays up.
+pub fn autostart_allowed() -> bool {
+    autostart_allowed_with(std::env::var(NO_DAEMON_ENV).ok().as_deref())
+}
+
+/// The rule, split out from the environment so it can be stated as a test.
+/// Presence is the signal, as with every other opt-out in this crate, but an
+/// explicit `0` / `false` / `no` reads as "don't disable it" — a harness that
+/// exports `AURA_NO_DAEMON=0` means the opposite of silence, and honouring the
+/// bare presence there would silently ignore what it asked for.
+pub(crate) fn autostart_allowed_with(value: Option<&str>) -> bool {
+    match value {
+        None => true,
+        Some(v) => matches!(v.trim(), "" | "0" | "false" | "no"),
+    }
+}
+
+/// The PID of a watcher daemon already running over `root`, if there is one.
+///
+/// Starting a second watcher on a tree that already has one is pure waste:
+/// both parse every save, both write snapshots, and nothing tells them apart
+/// afterwards. Callers that auto-start the daemon (`aura init`) ask first.
+///
+/// Identity is the process's working directory, because that is exactly what
+/// the daemon watches — `aura daemon` takes no path argument and always
+/// watches where it was started.
+pub fn daemon_watching(root: &Path) -> Option<u32> {
+    use sysinfo::System;
+    let want = fs::canonicalize(root).ok()?;
+    let mut sys = System::new();
+    sys.refresh_processes(sysinfo::ProcessesToUpdate::All, true);
+    sys.processes().values().find_map(|p| {
+        let is_daemon = p.name().to_string_lossy().contains("aura")
+            && p.cmd()
+                .iter()
+                .any(|a| a.to_string_lossy() == "daemon");
+        if !is_daemon {
+            return None;
+        }
+        // A process is only a duplicate if it is watching *this* tree.
+        match p.cwd() {
+            Some(cwd) if cwd == want => Some(p.pid().as_u32()),
+            _ => None,
+        }
+    })
 }
 
 pub struct ContinuousTracker {
@@ -53,12 +115,26 @@ impl ContinuousTracker {
         }
     }
 
-    /// Starts watching the specified directory indefinitely
+    /// Starts watching the specified directory until it goes away.
     pub fn watch(&self, path_str: &str) -> notify::Result<()> {
+        self.watch_every(path_str, LIVENESS_INTERVAL)
+    }
+
+    /// `watch`, with the idle-wakeup period as an argument so the "the tree
+    /// went away, stop" path can be exercised in a test without waiting out
+    /// the production interval.
+    pub(crate) fn watch_every(&self, path_str: &str, idle: Duration) -> notify::Result<()> {
         let (tx, rx) = channel();
 
         let mut watcher = RecommendedWatcher::new(tx, notify::Config::default())?;
         watcher.watch(Path::new(path_str), RecursiveMode::Recursive)?;
+
+        // Resolve the watched tree to an absolute path up front, while it is
+        // certainly still there. The liveness check below cannot use the
+        // relative `path_str`: the daemon is normally started with "." and a
+        // deleted directory still resolves through the process's own cwd
+        // handle, so `Path::new(".").exists()` answers `true` forever.
+        let root = fs::canonicalize(path_str).unwrap_or_else(|_| Path::new(path_str).to_path_buf());
 
         let mode_label = if self.live_mode { " + Live Mode" } else { "" };
         println!("[Aura Daemon] Watching {} for continuous semantic changes{mode_label}...", path_str);
@@ -68,14 +144,32 @@ impl ContinuousTracker {
             println!("[Aura Live] User: {} | Branch: {} | Repo: {}", git_user(), current_branch(), repo_name());
         }
 
-        for res in rx {
-            match res {
-                Ok(event) => self.handle_event(event),
-                Err(e) => println!("Watcher error: {:?}", e),
+        // `for res in rx` blocks forever, which is right while there is a tree
+        // to watch and wrong once there isn't: when the directory is deleted,
+        // FSEvents simply stops delivering — no event, no error — so the loop
+        // parks on an empty channel for the rest of the machine's uptime. That
+        // is how a run of `aura init` in a scratch directory leaves a daemon
+        // behind, each one holding its own parser and AST cache; they pile up
+        // across runs until something notices the memory. Wake periodically
+        // and stop when the tree we were asked to watch is gone.
+        loop {
+            match rx.recv_timeout(idle) {
+                Ok(Ok(event)) => self.handle_event(event),
+                Ok(Err(e)) => println!("Watcher error: {:?}", e),
+                Err(RecvTimeoutError::Timeout) => {
+                    if !root.exists() {
+                        println!(
+                            "[Aura Daemon] {} no longer exists — nothing left to watch, stopping.",
+                            root.display()
+                        );
+                        return Ok(());
+                    }
+                }
+                // The watcher hung up: no further events can arrive, so
+                // waiting for one is waiting for nothing.
+                Err(RecvTimeoutError::Disconnected) => return Ok(()),
             }
         }
-
-        Ok(())
     }
 
     /// Read the latest intent from the intent log to link snapshots to AI context
@@ -300,6 +394,11 @@ impl ContinuousTracker {
             intent_vector: None,
             intent_vector_model: None,
             env_fingerprint: None,
+            // The watcher parses whatever changed on disk rather than walking
+            // the index, so it has no blob OIDs to record. Left empty on
+            // purpose: an auto-save checkpoint simply doesn't seed the parse
+            // cache, and the next real capture parses from source.
+            file_oids: std::collections::HashMap::new(),
         };
 
         if let Ok(repo) = Repository::open(".") {
@@ -311,5 +410,98 @@ impl ContinuousTracker {
                 Err(_) => eprintln!("  --> Failed to write continuous micro-state to Git."),
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::mpsc::sync_channel;
+    use std::thread;
+
+    /// The other half of the same leak: a watcher that was never started
+    /// cannot outlive anything. `init` is run by test harnesses dozens of
+    /// times per suite, in directories that exist for a few seconds each.
+    #[test]
+    fn a_harness_can_ask_init_to_leave_no_watcher_behind() {
+        assert!(autostart_allowed_with(None), "the default is a watcher");
+        assert!(!autostart_allowed_with(Some("1")));
+        assert!(!autostart_allowed_with(Some("true")));
+        // Presence is the signal, so any other value counts too — someone
+        // setting this is telling us what they want, not typing a keyword.
+        assert!(!autostart_allowed_with(Some("yes please")));
+    }
+
+    #[test]
+    fn setting_it_to_zero_asks_for_the_watcher_not_against_it() {
+        // A harness that exports `AURA_NO_DAEMON=0` means the opposite of
+        // silence; reading bare presence here would ignore what it asked for.
+        assert!(autostart_allowed_with(Some("0")));
+        assert!(autostart_allowed_with(Some("false")));
+        assert!(autostart_allowed_with(Some("no")));
+        assert!(autostart_allowed_with(Some("  ")), "an empty value is not a request");
+    }
+
+    /// The daemon must not outlive the directory it was pointed at.
+    ///
+    /// This is the leak that put dozens of idle `aura daemon` processes on a
+    /// developer machine: every `aura init` run in a scratch directory left
+    /// one behind, and the old `for res in rx` loop had no way to notice the
+    /// tree had been deleted out from under it.
+    #[test]
+    fn stops_once_the_watched_tree_is_deleted() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path().to_path_buf();
+        // Keep the directory alive past the TempDir guard so this test — not
+        // the drop order — decides when it disappears.
+        let dir = dir.into_path();
+
+        let parser = match SemanticParser::new() {
+            Ok(p) => p,
+            // The parser needs its grammars; without them there is nothing to
+            // test here, and failing would be reporting the wrong defect.
+            Err(_) => return,
+        };
+        let tracker = ContinuousTracker::new(parser);
+
+        let (done_tx, done_rx) = sync_channel(1);
+        let watched = root.clone();
+        thread::spawn(move || {
+            let r = tracker.watch_every(
+                watched.to_str().expect("utf-8 path"),
+                Duration::from_millis(50),
+            );
+            let _ = done_tx.send(r.is_ok());
+        });
+
+        // Let the watcher get as far as its first idle wakeup, then take the
+        // tree away.
+        thread::sleep(Duration::from_millis(150));
+        let _ = fs::remove_dir_all(&dir);
+
+        let returned = done_rx
+            .recv_timeout(Duration::from_secs(10))
+            .expect("watch() should return once its directory is gone");
+        assert!(returned, "watch() should return Ok, not an error");
+    }
+
+    /// The liveness check has to resolve the path before the directory can go
+    /// away — a relative "." keeps resolving through the process's own cwd
+    /// handle long after the directory is unlinked.
+    #[test]
+    fn a_deleted_absolute_path_reads_as_gone() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = fs::canonicalize(dir.path()).expect("canonicalize");
+        assert!(root.exists());
+        drop(dir);
+        assert!(!root.exists(), "an absolute path to a deleted dir is gone");
+    }
+
+    /// Nothing is watching a directory that has never had a daemon, so `init`
+    /// is free to start one.
+    #[test]
+    fn no_daemon_reported_for_an_unwatched_directory() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        assert_eq!(daemon_watching(dir.path()), None);
     }
 }

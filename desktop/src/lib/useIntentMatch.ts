@@ -6,8 +6,10 @@
 // alignment math).
 //
 // Backing CLI: `aura intent-vs-actual show <sha> --json` returns the
-// full report. We only need `banner` ("aligned" | "drift" | "diverged")
-// + `alignment_score`, so the cache keeps a slim record per sha.
+// full report. A dot needs three things out of it — `banner`,
+// `alignment_score`, and enough of `stated` to tell whether the reason
+// was written independently of the change (lib/intentBasis) — so the
+// cache keeps that slim record per sha rather than the whole report.
 //
 // Cache is module-scoped + session-lived. Commits are immutable so a
 // score for `<sha>` is true forever — no TTL, no invalidation. Inflight
@@ -15,6 +17,7 @@
 
 import { useEffect, useState } from "react";
 import { api } from "./api";
+import { intentBasis, type IntentBasis } from "./intentBasis";
 
 export type IntentBanner = "aligned" | "drift" | "diverged" | "unknown";
 
@@ -23,6 +26,11 @@ export type IntentMatch = {
   banner: IntentBanner;
   /** 0..1 — fraction of changed identifiers that appear in stated intent. */
   score: number;
+  /** What the score was computed against. A dot can only claim a match when
+   *  this says the reason was written independently of the change — see
+   *  lib/intentBasis. Cached with the rest because it is derived from the
+   *  same one CLI call. */
+  basis: IntentBasis;
   /** True until the underlying `aura intent-vs-actual show` resolves. */
   loading: boolean;
 };
@@ -54,6 +62,7 @@ async function fetchOne(repoRoot: string, sha: string): Promise<IntentMatch> {
           sha,
           banner: "unknown",
           score: 0,
+          basis: "none",
           loading: false,
         };
         announce(sha, m);
@@ -62,6 +71,8 @@ async function fetchOne(repoRoot: string, sha: string): Promise<IntentMatch> {
       const parsed = JSON.parse(r.stdout) as {
         banner?: string;
         alignment_score?: number;
+        commit_message?: string;
+        stated?: { intent?: string; source?: string | null }[];
       };
       const banner: IntentBanner = (parsed.banner === "aligned" ||
       parsed.banner === "drift" ||
@@ -72,6 +83,13 @@ async function fetchOne(repoRoot: string, sha: string): Promise<IntentMatch> {
         sha,
         banner,
         score: typeof parsed.alignment_score === "number" ? parsed.alignment_score : 0,
+        basis: intentBasis(
+          (parsed.stated ?? []).map((s) => ({
+            intent: s.intent ?? "",
+            source: s.source,
+          })),
+          parsed.commit_message,
+        ),
         loading: false,
       };
       announce(sha, m);
@@ -81,6 +99,7 @@ async function fetchOne(repoRoot: string, sha: string): Promise<IntentMatch> {
         sha,
         banner: "unknown",
         score: 0,
+        basis: "none",
         loading: false,
       };
       announce(sha, m);
@@ -98,10 +117,10 @@ export function useIntentMatch(
   sha: string | null | undefined,
 ): IntentMatch {
   const [state, setState] = useState<IntentMatch>(() => {
-    if (!sha) return { sha: "", banner: "unknown", score: 0, loading: false };
+    if (!sha) return { sha: "", banner: "unknown", score: 0, basis: "none", loading: false };
     const hit = cache.get(sha);
     if (hit) return hit;
-    return { sha, banner: "unknown", score: 0, loading: true };
+    return { sha, banner: "unknown", score: 0, basis: "none", loading: true };
   });
 
   useEffect(() => {
@@ -111,7 +130,7 @@ export function useIntentMatch(
       setState(hit);
       return;
     }
-    setState({ sha, banner: "unknown", score: 0, loading: true });
+    setState({ sha, banner: "unknown", score: 0, basis: "none", loading: true });
 
     let set = listeners.get(sha);
     if (!set) {
@@ -141,7 +160,7 @@ export function invalidateIntentMatch(sha: string) {
 /** Imperative single-sha fetch (cached + inflight-deduped, same as the hook
  *  uses). For callers that need to score several commits at once — e.g. a
  *  feature's Drift across all its commits — where a per-sha hook can't run in a
- *  loop. Resolves to the slim {banner, score} record; never throws. */
+ *  loop. Resolves to the slim {banner, score, basis} record; never throws. */
 export function fetchIntentMatch(repoRoot: string, sha: string): Promise<IntentMatch> {
   const hit = cache.get(sha);
   if (hit) return Promise.resolve(hit);

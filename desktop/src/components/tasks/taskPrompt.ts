@@ -49,6 +49,17 @@ export function buildTaskAgentPrompt(task: Task, childTasks: Task[] = []): strin
     lines.push(desc);
   }
 
+  // The plan the task was filed with, if any — so the agent follows the stated
+  // steps and reports progress against them rather than inventing its own path.
+  const steps = task.steps ?? [];
+  if (steps.length) {
+    lines.push("");
+    lines.push("### Plan");
+    for (const s of steps) {
+      lines.push(`- [${s.done ? "x" : " "}] ${s.text}`);
+    }
+  }
+
   if (childTasks.length) {
     lines.push("");
     lines.push("### Sub-tasks");

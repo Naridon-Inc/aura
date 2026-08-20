@@ -222,6 +222,9 @@ pub async fn lane_spawn(
         // No per-lane model/effort override — keep the agent on its default.
         None,
         None,
+        // A lane is a worktree, and a worktree is a directory on this laptop.
+        // The agent's hands have to be where its files are.
+        None,
     )
     .await
     {
@@ -255,7 +258,9 @@ pub async fn lane_list(
     repo_root: String,
 ) -> Result<Vec<Lane>, String> {
     let mut lanes = Vec::new();
-    for (path, branch, agent) in enumerate_lane_worktrees(&repo_root) {
+    let worktrees =
+        crate::blocking::run(move || enumerate_lane_worktrees(&repo_root)).await;
+    for (path, branch, agent) in worktrees {
         // A live PTY session opened in this lane reports `repo_root ==
         // lane_path` (that's what we passed as the cwd at spawn). Pick the
         // most-recently-active matching session's id for `term_id`.
@@ -299,23 +304,30 @@ pub async fn lane_discard(
     // Resolve the lane's worktree path from its branch. We re-enumerate
     // rather than trust a frontend-supplied path so discard can't be
     // pointed at an arbitrary directory.
-    let lane = enumerate_lane_worktrees(&repo_root)
-        .into_iter()
-        .find(|(_, branch, _)| branch == &lane_id);
-    let Some((path, branch, _agent)) = lane else {
+    let inspect_root = repo_root.clone();
+    let lane = crate::blocking::run(move || -> Result<Option<(String, String, usize)>, String> {
+        let lane = enumerate_lane_worktrees(&inspect_root)
+            .into_iter()
+            .find(|(_, branch, _)| branch == &lane_id);
+        let Some((path, branch, _agent)) = lane else {
+            return Ok(None);
+        };
+
+        let dirty = if force { 0 } else { count_dirty(&path)? };
+        Ok(Some((path, branch, dirty)))
+    })
+    .await?;
+    let Some((path, branch, dirty)) = lane else {
         // Unknown lane — treat as already-gone so the UI's optimistic
         // removal isn't blocked by a stale entry.
         return Ok(DiscardResult::Discarded);
     };
 
     // Dirty-guard. Refuse to delete in-flight work unless forced.
-    if !force {
-        let dirty = count_dirty(&path)?;
-        if dirty > 0 {
-            return Ok(DiscardResult::Dirty {
-                changed_files: dirty,
-            });
-        }
+    if dirty > 0 {
+        return Ok(DiscardResult::Dirty {
+            changed_files: dirty,
+        });
     }
 
     // Close any live agent PTY session running in this lane so we don't
@@ -327,21 +339,24 @@ pub async fn lane_discard(
         let _ = crate::cmd_agent_pty::agent_pty_close(state.clone(), sess.session_id).await;
     }
 
-    // Remove the worktree (atomic rename + detached rm). This frees the
-    // branch's worktree lock so the branch delete below can succeed.
-    remove_managed_worktree(&repo_root, &path)?;
+    crate::blocking::run(move || {
+        // Remove the worktree (atomic rename + detached rm). This frees the
+        // branch's worktree lock so the branch delete below can succeed.
+        remove_managed_worktree(&repo_root, &path)?;
 
-    // Delete the lane branch. `-D` (force) because a lane branch is never
-    // meant to outlive its lane — the user discarding the lane is the
-    // explicit signal that its commits (if any) aren't wanted here.
-    // Best-effort: a missing branch (already pruned) isn't an error worth
-    // failing the discard over.
-    let _ = std::process::Command::new("git")
-        .args(["branch", "-D", &branch])
-        .current_dir(&repo_root)
-        .output();
+        // Delete the lane branch. `-D` (force) because a lane branch is never
+        // meant to outlive its lane — the user discarding the lane is the
+        // explicit signal that its commits (if any) aren't wanted here.
+        // Best-effort: a missing branch (already pruned) isn't an error worth
+        // failing the discard over.
+        let _ = std::process::Command::new("git")
+            .args(["branch", "-D", &branch])
+            .current_dir(&repo_root)
+            .output();
 
-    Ok(DiscardResult::Discarded)
+        Ok(DiscardResult::Discarded)
+    })
+    .await
 }
 
 #[cfg(test)]

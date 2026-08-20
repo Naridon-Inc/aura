@@ -32,8 +32,8 @@ export function ActivitySection({ events, isOpen, onToggle, onOpenFile }: Props)
           been in this project recently — say that, rather than leaving a blank
           panel that reads as broken. */}
       {events.length === 0 && (
-        <div className="px-2 py-1.5 text-[11px] text-text-4">
-          Quiet — nobody has touched this project in the last day.
+        <div className="px-2 py-1.5 text-xs text-text-4">
+          Quiet. Nobody has touched this project in the last day.
         </div>
       )}
       {events.map((e) => {
@@ -48,24 +48,24 @@ export function ActivitySection({ events, isOpen, onToggle, onOpenFile }: Props)
               <button
                 type="button"
                 onClick={() => e.file && onOpenFile?.(e.file)}
-                className="group w-full flex items-center gap-2 px-2 py-1 rounded-sm hover:bg-bg-2/60 transition-colors min-w-0 text-left"
+                className="group w-full flex items-center gap-2 px-2 py-1 rounded-sm hover:bg-state-hover transition-colors min-w-0 text-left"
               >
                 <ActorMark actor={e.actor} isAgent={e.is_agent} size={18} />
                 <span className="flex-1 min-w-0 flex items-baseline gap-1.5">
-                  <span className="text-[11.5px] text-text-2 font-medium shrink-0">
+                  <span className="text-sm text-text-2 font-medium shrink-0">
                     {actorShort(e.actor)}
                   </span>
-                  <span className="text-[11px] text-text-3 truncate min-w-0">
+                  <span className="text-xs text-text-3 truncate min-w-0">
                     {status}
                   </span>
                 </span>
                 {e.verified && <VerifiedTick />}
-                <span className="shrink-0 text-[10px] text-text-4 tabular-nums">
+                <span className="shrink-0 text-2xs text-text-4 tabular-nums">
                   {agoFromTs(e.ts)}
                 </span>
               </button>
             </TooltipTrigger>
-            <TooltipContent side="left" className="text-[10.5px]">
+            <TooltipContent side="left" className="text-xs">
               <div className="font-medium mb-0.5 truncate max-w-[260px]">
                 {e.actor}
                 {e.is_agent ? " · agent" : ""}

@@ -26,7 +26,6 @@ import {
   verdictFromOutcome,
   type GoalRecord,
   type GoalRun,
-  type GoalVerdict,
 } from "../../lib/goalStore";
 import { ProofBreakdown } from "./ProofBreakdown";
 import { computeFeatureSignals } from "../../lib/featureSignals";
@@ -34,28 +33,8 @@ import { useFeatureDrift } from "../../lib/useFeatureDrift";
 import { FeatureGates } from "./FeatureGates";
 import { FeatureHistory } from "./FeatureHistory";
 import { FeatureRoles } from "./FeatureRoles";
-
-const VERDICT: Record<
-  GoalVerdict,
-  { label: string; color: string }
-> = {
-  verified: { label: "Reached", color: "var(--color-accent-green)" },
-  partial: { label: "Partly there", color: "var(--color-amber)" },
-  not_wired: { label: "Not reached", color: "var(--color-red)" },
-  unknown: { label: "Not checked", color: "var(--color-text-4)" },
-};
-
-function relAge(ms: number): string {
-  const s = Math.max(0, Math.floor((Date.now() - ms) / 1000));
-  if (s < 60) return "just now";
-  const m = Math.floor(s / 60);
-  if (m < 60) return `${m}m ago`;
-  const h = Math.floor(m / 60);
-  if (h < 24) return `${h}h ago`;
-  const d = Math.floor(h / 24);
-  if (d < 30) return `${d}d ago`;
-  return `${Math.floor(d / 30)}mo ago`;
-}
+import { relativeAge } from "../../lib/relativeTime";
+import { VERDICT } from "../../lib/goalVerdict";
 
 export function GoalProbe({
   repoRoot,
@@ -182,16 +161,16 @@ export function GoalProbe({
         />
         <div className="min-w-0 flex-1">
           <div className="flex items-center gap-2">
-            <span className="text-[12px] font-medium" style={{ color: tone.color }}>
+            <span className="text-sm font-medium" style={{ color: tone.color }}>
               {tone.label}
             </span>
             {r.total > 0 ? (
-              <span className="text-[10.5px] text-text-4 tabular-nums">
+              <span className="text-xs text-text-4 tabular-nums">
                 {r.ok}/{r.total} in place
               </span>
             ) : null}
             {r.at != null ? (
-              <span className="text-[10.5px] text-text-5">· checked {relAge(r.at)}</span>
+              <span className="text-xs text-text-5">· checked {relativeAge(r.at)}</span>
             ) : null}
             <div className="ml-auto flex items-center gap-1">
               <Button
@@ -221,14 +200,14 @@ export function GoalProbe({
                   type="button"
                   onClick={onRemove}
                   title="Remove goal"
-                  className="rounded px-1.5 py-0.5 text-[11px] text-text-5 hover:bg-bg-2 hover:text-red"
+                  className="rounded px-1.5 py-0.5 text-xs text-text-5 hover:bg-state-hover hover:text-red"
                 >
                   ✕
                 </button>
               ) : null}
             </div>
           </div>
-          <p className="mt-1 text-[13px] leading-snug text-text-1">{goal.text}</p>
+          <p className="mt-1 text-base leading-snug text-text-1">{goal.text}</p>
           {/* Why it's not there yet, and whether the agent called it done when
               the code says otherwise — both in plain words, real signals only. */}
           <ClaimBand reason={reason} claim={claim} />
@@ -250,14 +229,14 @@ export function GoalProbe({
           that is the current result of running it. */}
       {goal.acceptance && goal.acceptance.length > 0 ? (
         <div className="border-t border-line-soft px-3.5 py-2.5">
-          <div className="mb-1.5 text-[10px] uppercase tracking-wider text-text-4">
+          <div className="section-label mb-1.5">
             How we&apos;ll check this
           </div>
           <ul className="flex flex-col gap-1">
             {goal.acceptance.map((c, i) => (
               <li
                 key={i}
-                className="flex items-start gap-2 text-[12px] text-text-2"
+                className="flex items-start gap-2 text-sm text-text-2"
               >
                 <span
                   aria-hidden
@@ -275,7 +254,7 @@ export function GoalProbe({
           Verify, or auto-filled on the Summary. This is the "what does 4/4 in
           place actually mean" answer, in the user's own words. */}
       {err ? (
-        <div className="border-t border-line-soft px-3.5 py-2 font-mono text-[11px] text-red break-words">
+        <div className="border-t border-line-soft px-3.5 py-2 font-mono text-xs text-red break-words">
           {err}
         </div>
       ) : outcome && outcome.checks.length > 0 ? (
@@ -289,11 +268,11 @@ export function GoalProbe({
       {goal.taskId ? (
         <div className="flex flex-wrap items-center gap-1.5 border-t border-line-soft px-3.5 py-2">
           {goal.taskSeq != null && goal.taskSeq > 0 ? (
-            <span className="rounded border border-line-soft px-1.5 py-0.5 font-mono text-[10px] text-text-3">
+            <span className="rounded border border-line-soft px-1.5 py-0.5 font-mono text-2xs text-text-3">
               AURA-{goal.taskSeq}
             </span>
           ) : (
-            <span className="rounded border border-line-soft px-1.5 py-0.5 text-[10px] text-text-3">
+            <span className="rounded border border-line-soft px-1.5 py-0.5 text-2xs text-text-3">
               linked task
             </span>
           )}
@@ -330,7 +309,7 @@ function ClaimBand({
 }) {
   if (!reason && !claim) return null;
   if (!claim) {
-    return <p className="mt-2 text-[11.5px] leading-snug text-text-3">{reason}</p>;
+    return <p className="mt-2 text-sm leading-snug text-text-3">{reason}</p>;
   }
   const accent =
     claim.tone === "gap"
@@ -347,15 +326,15 @@ function ClaimBand({
         border: `1px solid color-mix(in oklab, ${accent} 22%, transparent)`,
       }}
     >
-      <span aria-hidden className="mt-px shrink-0 text-[12px]" style={{ color: accent }}>
+      <span aria-hidden className="mt-px shrink-0 text-sm" style={{ color: accent }}>
         {icon}
       </span>
       <div className="min-w-0 flex-1">
-        <p className="text-[12px] font-medium leading-snug" style={{ color: accent }}>
+        <p className="text-sm font-medium leading-snug" style={{ color: accent }}>
           {claim.text}
         </p>
         {reason ? (
-          <p className="mt-0.5 text-[11.5px] leading-snug text-text-3">{reason}</p>
+          <p className="mt-0.5 text-sm leading-snug text-text-3">{reason}</p>
         ) : null}
       </div>
     </div>

@@ -11,7 +11,6 @@
 //! [appearance]
 //! theme = "dark"        # dark | light | system
 //! variant = "default"   # default | modal | ember
-//! ade_v2 = true         # ADE redesign is the default surface
 //! font_size = 13
 //!
 //! [editor]
@@ -24,12 +23,16 @@
 //! bell = false
 //! cursor_blink = true
 //! scrollback = 5000
+//! font_size = 12          # omitted → this platform's terminal default
 //!
 //! [flags]
 //! intent_inspector = false
 //! provenance_replay = false
 //! manager_worktrees = false
 //! show_token_savings = true
+//!
+//! [workspace]
+//! open_in = "code"        # code | chat | an agent CLI id (claude, codex, …)
 //! ```
 
 use serde::{Deserialize, Serialize};
@@ -49,6 +52,7 @@ pub struct AppSettings {
     pub terminal: TerminalPrefs,
     pub flags: FlagPrefs,
     pub hud: HudPrefs,
+    pub workspace: WorkspacePrefs,
 }
 
 impl Default for AppSettings {
@@ -59,6 +63,40 @@ impl Default for AppSettings {
             terminal: TerminalPrefs::default(),
             flags: FlagPrefs::default(),
             hud: HudPrefs::default(),
+            workspace: WorkspacePrefs::default(),
+        }
+    }
+}
+
+/// What a freshly-made copy of a project opens into.
+///
+/// Launching a workspace always landed in an Aura chat seeded with the
+/// objective. That is right when you want Aura to drive and wrong every other
+/// time: a copy made to read code, or one you want Claude Code or Codex to work
+/// in, arrived holding a conversation you then had to close. The landing is a
+/// preference now, and the default is to open nothing.
+///
+/// `open_in` is a single string so a value the running build doesn't recognise
+/// degrades to the default instead of failing to parse — a settings.toml
+/// written by a newer build, or naming an agent CLI since uninstalled, still
+/// loads. `landing_for` in the frontend does that resolution.
+///
+/// Recognised values:
+///   - `"code"`  — land in the copy and open nothing. The default.
+///   - `"chat"`  — an Aura chat, seeded with the objective (the old behaviour).
+///   - any agent CLI id (`"claude"`, `"codex"`, `"gemini"`, `"cursor"`,
+///     `"kimi"`, `"opencode"`, `"pi"`) — that CLI's terminal in the new copy,
+///     with the objective typed in for it.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct WorkspacePrefs {
+    pub open_in: String,
+}
+
+impl Default for WorkspacePrefs {
+    fn default() -> Self {
+        Self {
+            open_in: "code".into(),
         }
     }
 }
@@ -68,10 +106,8 @@ impl Default for AppSettings {
 pub struct Appearance {
     /// dark | light | system
     pub theme: String,
-    /// default | modal | ember
+    /// amber | modal | ember | emerald
     pub variant: String,
-    /// ADE surface-redesign master flag (forces the ember pack on).
-    pub ade_v2: bool,
     /// Monaco editor font size in px.
     pub font_size: u16,
 }
@@ -80,13 +116,11 @@ impl Default for Appearance {
     fn default() -> Self {
         Self {
             theme: "dark".into(),
-            variant: "default".into(),
-            // ADE surface redesign is the default surface now. The frontend
-            // runs a one-time migration (settingsStore.migrateAdeV2Default)
-            // that flips existing installs which persisted the opt-in's
-            // `ade_v2 = false`; this keeps a freshly-seeded/back-end default
-            // consistent with that.
-            ade_v2: true,
+            // `amber` is the app's one style pack. This used to seed
+            // "default" — the pre-redesign palette — which the frontend then
+            // resolved back to amber anyway, so a fresh settings.toml named a
+            // pack the app never painted.
+            variant: "amber".into(),
             font_size: 13,
         }
     }
@@ -118,6 +152,12 @@ pub struct TerminalPrefs {
     pub bell: bool,
     pub cursor_blink: bool,
     pub scrollback: u32,
+    /// Type size in terminal panes, in px. `None` — the state a user who
+    /// has never touched it is in — means "whatever this platform's
+    /// terminal normally uses", which is 12 on macOS and 14 elsewhere,
+    /// resolved in `Terminal.tsx`. Storing a number here instead would
+    /// freeze one platform's default into a file that syncs to the other.
+    pub font_size: Option<u32>,
     /// Id of the profile a new terminal launches with when the user
     /// hasn't picked one explicitly. `None` → the auto-seeded `$SHELL`
     /// profile (see `cmd_terminal_profiles::terminal_profile_list`).
@@ -137,6 +177,7 @@ impl Default for TerminalPrefs {
             bell: false,
             cursor_blink: true,
             scrollback: 5000,
+            font_size: None,
             default_profile: None,
             shell_integration: true,
             profiles: Vec::new(),
@@ -309,19 +350,22 @@ where
 /// before writing the first TOML.
 #[tauri::command]
 pub async fn settings_prefs_load() -> Result<Option<AppSettings>, String> {
-    let path = settings_path()?;
-    if !path.exists() {
-        return Ok(None);
-    }
-    let raw =
-        fs::read_to_string(&path).map_err(|e| format!("read {}: {e}", path.display()))?;
-    let parsed = toml::from_str::<AppSettings>(&raw)
-        .map_err(|e| format!("parse {}: {e}", path.display()))?;
-    Ok(Some(parsed))
+    crate::blocking::run(move || {
+        let path = settings_path()?;
+        if !path.exists() {
+            return Ok(None);
+        }
+        let raw =
+            fs::read_to_string(&path).map_err(|e| format!("read {}: {e}", path.display()))?;
+        let parsed = toml::from_str::<AppSettings>(&raw)
+            .map_err(|e| format!("parse {}: {e}", path.display()))?;
+        Ok(Some(parsed))
+    })
+    .await
 }
 
 /// Persist the prefs the frontend owns. The JS `settingsStore` models only
-/// appearance / editor / flags + the three terminal toggles — it has no
+/// appearance / editor / flags + the terminal look-and-feel fields — it has no
 /// concept of terminal launch *profiles*, the *default profile*, or the
 /// shell-integration switch, which the `terminal_profile_*` commands write
 /// into the SAME document. So we must NOT blindly write the whole incoming
@@ -336,11 +380,56 @@ pub async fn settings_prefs_save(settings: AppSettings) -> Result<(), String> {
         disk.editor = settings.editor;
         disk.flags = settings.flags;
         disk.hud = settings.hud;
+        disk.workspace = settings.workspace;
         disk.terminal.bell = settings.terminal.bell;
         disk.terminal.cursor_blink = settings.terminal.cursor_blink;
         disk.terminal.scrollback = settings.terminal.scrollback;
+        disk.terminal.font_size = settings.terminal.font_size;
         // disk.terminal.{profiles, default_profile, shell_integration}
         // are backend-owned — left as loaded from disk.
         Ok(())
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A settings file from before `[workspace]` existed — every earlier build
+    /// wrote one — has to keep opening, at the documented default.
+    #[test]
+    fn a_file_written_before_this_setting_existed_still_reads() {
+        let older = r#"
+[appearance]
+font_size = 14
+"#;
+        let s: AppSettings = toml::from_str(older).expect("older file must parse");
+        assert_eq!(s.workspace.open_in, "code");
+    }
+
+    /// `open_in` is a loose string precisely so this holds: a value written by
+    /// a build that knows a landing this one doesn't must survive being read
+    /// and written back, rather than failing to parse or being silently reset.
+    /// An older build downgrading a newer setting is the failure this prevents.
+    #[test]
+    fn a_landing_this_build_has_never_heard_of_survives_a_round_trip() {
+        let newer = r#"
+[workspace]
+open_in = "some-agent-from-the-future"
+"#;
+        let s: AppSettings = toml::from_str(newer).expect("newer file must parse");
+        assert_eq!(s.workspace.open_in, "some-agent-from-the-future");
+
+        let back = toml::to_string(&s).expect("must re-serialize");
+        let again: AppSettings = toml::from_str(&back).expect("round trip must parse");
+        assert_eq!(again.workspace.open_in, "some-agent-from-the-future");
+    }
+
+    /// The default is the code, not the chat. Pinned because it is the whole
+    /// behaviour change — a new copy stopped opening a chat nobody asked for —
+    /// and a default is the easiest thing to flip back by accident.
+    #[test]
+    fn a_new_copy_opens_nothing_unless_asked() {
+        assert_eq!(AppSettings::default().workspace.open_in, "code");
+    }
 }

@@ -7,12 +7,22 @@
 //
 // On mount we also call `permission_list_pending` once so a card that
 // fired before the listener attached still shows up.
+//
+// ⚠ NOTHING RENDERS THAT CARD TODAY. `usePermissionPrompts` and
+// `decidePrompt` have no callers anywhere in src/, so a pending prompt
+// arrives on the event topic and is never shown to anyone. This file is
+// kept — rather than swept with the other unreferenced modules — because
+// it is the working half of a safety surface, and the missing half is a
+// chat-side card, not a rewrite. Whoever picks that up: read a channel's
+// prompts with `usePermissionPrompts(channel)` and answer with
+// `decidePrompt(id, "allow" | "allow_always" | "deny")`.
 
 import { useEffect, useState } from "react";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { invoke } from "@tauri-apps/api/core";
 import { api, type PermissionPrompt } from "./api";
 import { notify } from "./notifications";
+import { truncate } from "./truncate";
 
 type Entry = {
   /** All in-flight prompts globally — per-channel filtering happens at
@@ -50,7 +60,7 @@ async function attach() {
       // Surface OS notification when window is unfocused. Dedupe by
       // prompt_id so any redundant emit (HMR, replay) only pings once.
       notify({
-        title: `Aura — ${ev.payload.tool_name} wants permission`,
+        title: `Aura · ${ev.payload.tool_name} wants permission`,
         body: shortInputPreview(ev.payload.tool_name, ev.payload.input),
         dedupeKey: `permission:${ev.payload.prompt_id}`,
       }).catch(() => {});
@@ -118,7 +128,7 @@ function shortInputPreview(name: string, input: unknown): string {
   if (!input || typeof input !== "object") return "";
   const obj = input as Record<string, unknown>;
   if (name === "Bash" && typeof obj.command === "string") {
-    return obj.command.length > 100 ? obj.command.slice(0, 97) + "…" : obj.command;
+    return truncate(obj.command, 100);
   }
   if (typeof obj.file_path === "string") return obj.file_path;
   if (typeof obj.url === "string") return obj.url;

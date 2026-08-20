@@ -86,7 +86,7 @@ export function BulkActionToolbar({
       aria-label="Bulk task actions"
       className="absolute bottom-3 left-1/2 -translate-x-1/2 z-30 bg-bg-content border border-line-soft rounded-lg shadow-lg shadow-black/30 px-3 py-2 flex items-center gap-2 max-w-[640px]"
     >
-      <span className="text-[12px] text-text-2 font-medium pr-1">
+      <span className="text-sm text-text-2 font-medium pr-1">
         {selectedIds.length} selected
       </span>
       <span className="w-px h-5 bg-line-soft" />
@@ -98,14 +98,14 @@ export function BulkActionToolbar({
           size="xs"
           onClick={() => setPickerOpen(pickerOpen === "state" ? null : "state")}
           disabled={busy != null}
-          className="text-[11.5px]"
+          className="text-sm"
         >
           {busy === "state" ? "Moving…" : "Move state"}
         </Button>
         {pickerOpen === "state" && (
           <div className="absolute bottom-full mb-1 left-0 min-w-[160px] bg-bg-content border border-line-soft rounded shadow-lg py-1 max-h-64 overflow-y-auto">
             {taskStates.length === 0 ? (
-              <div className="text-[11px] text-text-5 px-2 py-1">
+              <div className="text-xs text-text-5 px-2 py-1">
                 Catalog empty
               </div>
             ) : (
@@ -119,7 +119,7 @@ export function BulkActionToolbar({
                       api.tasksBulkStateChange(repoRoot, selectedIds, s.id),
                     );
                   }}
-                  className="w-full text-left text-[12px] px-2 py-1 text-text-2 hover:bg-bg-2 hover:text-text-1 flex items-center gap-2"
+                  className="w-full text-left text-sm px-2 py-1 text-text-2 hover:bg-state-hover hover:text-text-1 flex items-center gap-2"
                 >
                   <span
                     className="w-2 h-2 rounded-full"
@@ -142,7 +142,7 @@ export function BulkActionToolbar({
             setPickerOpen(pickerOpen === "assign" ? null : "assign")
           }
           disabled={busy != null}
-          className="text-[11.5px]"
+          className="text-sm"
         >
           {busy === "assign" ? "Assigning…" : "Assign"}
         </Button>
@@ -156,13 +156,13 @@ export function BulkActionToolbar({
                   api.tasksBulkAssign(repoRoot, selectedIds, []),
                 );
               }}
-              className="w-full text-left text-[12px] px-2 py-1 text-text-2 hover:bg-bg-2 hover:text-text-1 italic"
+              className="w-full text-left text-sm px-2 py-1 text-text-2 hover:bg-state-hover hover:text-text-1 italic"
             >
               Clear assignees
             </button>
             <div className="border-t border-line-soft/50 my-1" />
             {members.length === 0 ? (
-              <div className="text-[11px] text-text-5 px-2 py-1">
+              <div className="text-xs text-text-5 px-2 py-1">
                 No team members
               </div>
             ) : (
@@ -176,7 +176,7 @@ export function BulkActionToolbar({
                       api.tasksBulkAssign(repoRoot, selectedIds, [m.handle]),
                     );
                   }}
-                  className="w-full text-left text-[12px] px-2 py-1 text-text-2 hover:bg-bg-2 hover:text-text-1"
+                  className="w-full text-left text-sm px-2 py-1 text-text-2 hover:bg-state-hover hover:text-text-1"
                 >
                   {m.handle}
                 </button>
@@ -193,7 +193,7 @@ export function BulkActionToolbar({
           size="xs"
           onClick={() => setPickerOpen(pickerOpen === "label" ? null : "label")}
           disabled={busy != null}
-          className="text-[11.5px]"
+          className="text-sm"
         >
           {busy === "label" ? "Labeling…" : "Set labels"}
         </Button>
@@ -207,13 +207,13 @@ export function BulkActionToolbar({
                   api.tasksBulkLabel(repoRoot, selectedIds, []),
                 );
               }}
-              className="w-full text-left text-[12px] px-2 py-1 text-text-2 hover:bg-bg-2 hover:text-text-1 italic"
+              className="w-full text-left text-sm px-2 py-1 text-text-2 hover:bg-state-hover hover:text-text-1 italic"
             >
               Strip all labels
             </button>
             <div className="border-t border-line-soft/50 my-1" />
             {taskLabels.length === 0 ? (
-              <div className="text-[11px] text-text-5 px-2 py-1">
+              <div className="text-xs text-text-5 px-2 py-1">
                 Catalog empty
               </div>
             ) : (
@@ -227,7 +227,7 @@ export function BulkActionToolbar({
                       api.tasksBulkLabel(repoRoot, selectedIds, [l.id]),
                     );
                   }}
-                  className="w-full text-left text-[12px] px-2 py-1 text-text-2 hover:bg-bg-2 hover:text-text-1 flex items-center gap-2"
+                  className="w-full text-left text-sm px-2 py-1 text-text-2 hover:bg-state-hover hover:text-text-1 flex items-center gap-2"
                 >
                   <span
                     className="w-2 h-2 rounded-full"
@@ -252,7 +252,7 @@ export function BulkActionToolbar({
           )
         }
         disabled={busy != null}
-        className="text-[11.5px]"
+        className="text-sm"
       >
         {busy === "archive" ? "Archiving…" : "Archive"}
       </Button>
@@ -261,7 +261,7 @@ export function BulkActionToolbar({
         type="button"
         onClick={() => setConfirmingDelete(true)}
         disabled={busy != null}
-        className="text-[11.5px] px-2 py-1 rounded bg-red/15 hover:bg-red/25 text-red hover:text-red disabled:opacity-40"
+        className="text-sm px-2 py-1 rounded bg-red/15 hover:bg-red/25 text-red hover:text-red disabled:opacity-40"
       >
         Delete
       </button>
@@ -271,7 +271,7 @@ export function BulkActionToolbar({
         size="icon-sm"
         onClick={onCleared}
         disabled={busy != null}
-        className="ml-1 text-[11px] text-text-5 hover:text-text-2"
+        className="ml-1 text-xs text-text-5 hover:text-text-2"
         aria-label="Clear selection"
       >
         ×
@@ -279,7 +279,7 @@ export function BulkActionToolbar({
 
       {/* Inline status (success or per-task failure summary) */}
       {result && (
-        <div className="ml-2 text-[10.5px] leading-snug">
+        <div className="ml-2 text-xs leading-snug">
           {result.errors.length === 0 ? (
             <span className="text-text-2">
               {result.affected.length} updated
@@ -292,13 +292,13 @@ export function BulkActionToolbar({
         </div>
       )}
       {error && (
-        <div className="ml-2 text-[10.5px] text-red leading-snug">
+        <div className="ml-2 text-xs text-red leading-snug">
           {error}
         </div>
       )}
 
       {confirmingDelete && (
-        <div className="absolute bottom-full mb-2 right-2 bg-bg-content border border-line-soft rounded shadow-lg px-3 py-2 flex flex-col gap-2 text-[11.5px]">
+        <div className="absolute bottom-full mb-2 right-2 bg-bg-content border border-line-soft rounded shadow-lg px-3 py-2 flex flex-col gap-2 text-sm">
           <span className="text-text-1">
             Delete {selectedIds.length} task
             {selectedIds.length > 1 ? "s" : ""}?

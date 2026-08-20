@@ -144,7 +144,7 @@ export function humanizeGitError(raw: string): string {
       : "That branch is open in another parallel copy. Switch to that copy instead.";
   }
   if (/would be overwritten|local changes|commit your changes or stash/i.test(s))
-    return "You have changes here you haven't committed yet — they'd be overwritten. Commit them first, then switch.";
+    return "You have changes here you haven't committed yet. They'd be overwritten. Commit them first, then switch.";
   if (/did not match any|unknown revision|invalid reference|pathspec/i.test(s))
     return "Branch not found.";
   if (/already exists/i.test(s)) return "A branch with that name already exists.";

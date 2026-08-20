@@ -16,21 +16,32 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { api, type PrComment, type PrDetail, type PrLabel } from "../../lib/api";
 import { fetchPrList } from "../../lib/prsCache";
+import {
+  fetchPrComments,
+  getPrCommentsCached,
+  invalidatePrComments,
+} from "../../lib/prCommentsCache";
+import { monogram } from "../../lib/monogram";
 import { PrStackRail } from "./PrStackRail";
 import { PrDescriptionCard } from "./PrDescriptionCard";
+import { requestPrAuthoring } from "../dialogs/PrAuthoringDialog";
 import { PrDiscussionCard } from "./PrDiscussionCard";
 import { PrRightRail, type ChecksSummary, type ThreadCounts } from "./PrRightRail";
+import { requestPrMerge } from "./PrApprovalBar";
 import { LabelChip } from "./PrLabelsCard";
 import { PrFilesSection } from "./PrFilesSection";
 import { PrThreadColumn, PrThreadProvider } from "./PrThreadColumn";
 import { PrFeatureRollup } from "./PrFeatureRollup";
 import { Churn } from "../diff/Churn";
+import { relativeAgeFromIso } from "../../lib/relativeTime";
 
 type Props = {
   repoRoot: string;
   prNumber: number;
   detail: PrDetail;
   checks: ChecksSummary | null;
+  /** Override the rail's merge action. Defaults to asking the page's own
+   *  approval bar to open its merge panel, which is where merging lives. */
   onMerge?: () => void;
 };
 
@@ -42,18 +53,31 @@ export function PrOverviewTab({
   onMerge,
 }: Props) {
   const [viewer, setViewer] = useState<string>("");
-  const [mergeWhenReady, setMergeWhenReady] = useState(false);
   const [labels, setLabels] = useState<PrLabel[]>([]);
-  const [comments, setComments] = useState<PrComment[]>([]);
+  // Seeded from the cache so reopening a PR paints its discussion instead of
+  // flashing empty for a GitHub round trip. `null` there means nothing known
+  // yet — an empty array is a real answer (a PR nobody has commented on).
+  const [comments, setComments] = useState<PrComment[]>(
+    () => getPrCommentsCached(repoRoot, prNumber) ?? [],
+  );
 
-  const refreshComments = useCallback(async () => {
-    try {
-      const list = await api.prCommentsList(repoRoot, prNumber);
-      setComments(list);
-    } catch {
-      // Network blip — keep prior list.
-    }
-  }, [repoRoot, prNumber]);
+  // `fresh` is for the case where this tab is the reason the list changed:
+  // somebody just posted from one of the cards below, and a stale-while-
+  // revalidate answer from a moment ago would be missing their own comment,
+  // which reads as the post having failed.
+  const refreshComments = useCallback(
+    async (fresh = false) => {
+      try {
+        const list = fresh
+          ? await invalidatePrComments(repoRoot, prNumber)
+          : await fetchPrComments(repoRoot, prNumber);
+        setComments(list);
+      } catch {
+        // Network blip — keep prior list.
+      }
+    },
+    [repoRoot, prNumber],
+  );
 
   useEffect(() => {
     void refreshComments();
@@ -154,7 +178,7 @@ export function PrOverviewTab({
     <PrThreadProvider
       repoRoot={repoRoot}
       prNumber={prNumber}
-      onPosted={() => void refreshComments()}
+      onPosted={() => void refreshComments(true)}
     >
       <div className="h-full w-full overflow-y-auto bg-bg-content">
         <div
@@ -168,7 +192,20 @@ export function PrOverviewTab({
               prNumber={prNumber}
               viewer={viewer}
             />
-            <PrDescriptionCard body={detail.body ?? ""} />
+            <PrDescriptionCard
+              body={detail.body ?? ""}
+              onEdit={() =>
+                requestPrAuthoring({
+                  mode: "edit",
+                  repoRoot,
+                  number: prNumber,
+                  title: detail.title,
+                  body: detail.body,
+                  baseBranch: detail.base_ref,
+                  draft: detail.is_draft,
+                })
+              }
+            />
             {/* The feature thread rolled up to this PR — is the thing this branch
                 set out to build actually finished? Scoped to the PR's own commits;
                 renders nothing until a proven goal is threaded to them. */}
@@ -187,7 +224,7 @@ export function PrOverviewTab({
               diff={detail.diff ?? ""}
               diffError={detail.diff_error ?? null}
               comments={comments}
-              onPosted={() => void refreshComments()}
+              onPosted={() => void refreshComments(true)}
               auraReview={detail.aura_review}
             />
           </main>
@@ -197,9 +234,7 @@ export function PrOverviewTab({
               detail={detail}
               checks={checks}
               stackReadyCount={stackReadyCount}
-              onMerge={onMerge}
-              mergeWhenReady={mergeWhenReady}
-              onToggleMergeWhenReady={() => setMergeWhenReady((v) => !v)}
+              onMerge={onMerge ?? (() => requestPrMerge(repoRoot, prNumber))}
               repoRoot={repoRoot}
               prNumber={prNumber}
               labels={labels}
@@ -227,10 +262,10 @@ function PrTitleHeader({
   const repoSlug = parseRepoSlug(detail.url);
   return (
     <header className="space-y-3">
-      <div className="text-[11.5px] text-text-4 font-mono tracking-wide">
+      <div className="text-sm text-text-4 font-mono tracking-wide">
         {repoSlug ? `${repoSlug} ` : ""}#{detail.number}
       </div>
-      <h1 className="text-[28px] font-semibold text-text-1 leading-[1.2] tracking-[-0.01em]">
+      <h1 className="text-2xl font-semibold text-text-1 leading-[1.2] tracking-[-0.01em]">
         {detail.title}
       </h1>
       {labels.length > 0 && (
@@ -240,19 +275,19 @@ function PrTitleHeader({
           ))}
         </div>
       )}
-      <div className="flex flex-wrap items-center gap-3 text-[12px] text-text-3 pt-2">
+      <div className="flex flex-wrap items-center gap-3 text-sm text-text-3 pt-2">
         <div className="flex items-center gap-2">
           <Avatar name={detail.author} />
           <span className="text-text-2 font-medium">{detail.author}</span>
         </div>
-        <span className="font-mono px-2 py-0.5 rounded bg-bg-2 text-text-2 text-[11px]">
+        <span className="font-mono px-2 py-0.5 rounded bg-bg-2 text-text-2 text-xs">
           {detail.head_ref}
         </span>
         <span className="text-text-4">→</span>
-        <span className="font-mono px-2 py-0.5 rounded bg-bg-2 text-text-2 text-[11px]">
+        <span className="font-mono px-2 py-0.5 rounded bg-bg-2 text-text-2 text-xs">
           {detail.base_ref}
         </span>
-        <span className="ml-auto flex items-center gap-3.5 tabular-nums text-text-4 text-[12px]">
+        <span className="ml-auto flex items-center gap-3.5 tabular-nums text-text-4 text-sm">
           <span>
             {detail.files.length} file{detail.files.length === 1 ? "" : "s"}
           </span>
@@ -265,9 +300,10 @@ function PrTitleHeader({
 }
 
 function Avatar({ name }: { name: string }) {
-  const initial = (name || "?").charAt(0).toUpperCase();
+  // One monogram for the whole app — see lib/monogram.
+  const initial = monogram(name);
   return (
-    <span className="w-6 h-6 rounded-full bg-violet/30 text-violet flex items-center justify-center text-[11px] font-bold">
+    <span className="w-6 h-6 rounded-full bg-violet/30 text-violet flex items-center justify-center text-xs font-bold">
       {initial}
     </span>
   );
@@ -282,13 +318,6 @@ function parseRepoSlug(url: string): string | null {
 }
 
 function formatAge(iso: string): string {
-  if (!iso) return "—";
-  const t = Date.parse(iso);
-  if (Number.isNaN(t)) return "—";
-  const diff = Math.floor((Date.now() - t) / 1000);
-  if (diff < 60) return "<1m";
-  if (diff < 3600) return `${Math.floor(diff / 60)}m`;
-  if (diff < 86400) return `${Math.floor(diff / 3600)}h`;
-  if (diff < 2592000) return `${Math.floor(diff / 86400)}d`;
-  return `${Math.floor(diff / 2592000)}mo`;
+  // One ladder for the whole app — see lib/relativeTime.
+  return relativeAgeFromIso(iso, { style: "compact", empty: "—" });
 }

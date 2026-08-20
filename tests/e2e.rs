@@ -55,9 +55,17 @@ impl TestRepo {
         self.dir.path().to_path_buf()
     }
 
+    /// Run `aura` in this repo. No watcher daemon is ever started: `init`
+    /// normally leaves one running over the tree it prepared, which for a
+    /// temporary repo means a resident process watching a directory that is
+    /// deleted seconds later — dozens per suite run, accumulating for as long
+    /// as the machine is up. They also raced this suite: a watcher snapshots
+    /// every save it sees, so `test_snapshot_guard_detects_unsnapshotted_edits`
+    /// failed whenever one got to the file before the assertion did.
     fn aura(&self, args: &[&str]) -> std::process::Output {
         Command::new(aura_binary())
             .args(args)
+            .env("AURA_NO_DAEMON", "1")
             .current_dir(self.dir.path())
             .output()
             .expect("Failed to run aura")
@@ -172,16 +180,16 @@ macro_rules! assert_aura {
     };
 }
 
+/// The binary cargo built for *this* test run.
+///
+/// This used to prefer `target/release/aura`, then `target/debug/aura`, then
+/// whatever `aura` was on PATH — so a release build left lying around from an
+/// earlier day was what the suite actually exercised, silently, and a green run
+/// said nothing about the code being tested. `CARGO_BIN_EXE_aura` is cargo's
+/// own answer to the question (the merge-driver suite next door already asks it
+/// that way), and it cannot go stale.
 fn aura_binary() -> String {
-    let release = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("target/release/aura");
-    if release.exists() {
-        return release.to_string_lossy().to_string();
-    }
-    let debug = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("target/debug/aura");
-    if debug.exists() {
-        return debug.to_string_lossy().to_string();
-    }
-    "aura".to_string()
+    env!("CARGO_BIN_EXE_aura").to_string()
 }
 
 // ── Checkpoint Tests ──

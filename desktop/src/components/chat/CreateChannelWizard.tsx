@@ -114,7 +114,7 @@ export function CreateChannelWizard({ onCancel, onSubmit }: Props) {
         onKeyDown={onBodyKeyDown}
       >
         <div className="flex w-full max-w-[720px] flex-col gap-8">
-          <h1 className="text-[18px] font-medium leading-7 text-text-1">
+          <h1 className="text-xl font-medium leading-7 text-text-1">
             New channel
           </h1>
 

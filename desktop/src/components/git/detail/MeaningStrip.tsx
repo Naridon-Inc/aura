@@ -98,14 +98,14 @@ export function MeaningStrip({ meanings }: { meanings: Meaning[] }) {
 
   return (
     <div className="rounded-lg border border-line-soft bg-bg-1/40 px-4 py-3">
-      <div className="flex items-center gap-1.5 text-[11px] uppercase tracking-wide text-text-4">
+      <div className="section-label flex items-center gap-1.5">
         <Sparkles size={12} className="text-accent" />
         What these functions mean
       </div>
       {/* The honest caveat, in the UI itself: this is today's meaning of the
           functions this version touched, a single baseline — not a snapshot of
           what they meant at the moment of this commit. */}
-      <p className="mt-1 text-[11px] leading-relaxed text-text-4">
+      <p className="mt-1 text-xs leading-relaxed text-text-4">
         In plain terms, this version touched the parts of the app below. This is
         what they mean today.
       </p>
@@ -118,13 +118,13 @@ export function MeaningStrip({ meanings }: { meanings: Meaning[] }) {
               aria-hidden
             />
             <div className="min-w-0">
-              <span className="text-[12.5px] font-medium text-text-1">
+              <span className="text-base font-medium text-text-1">
                 {m.entry.title}
               </span>
               {m.entry.summary.trim() ? (
-                <span className="text-[12px] text-text-3">
+                <span className="text-sm text-text-3">
                   {" "}
-                  — {m.entry.summary.trim()}
+                  · {m.entry.summary.trim()}
                 </span>
               ) : null}
             </div>
@@ -132,7 +132,7 @@ export function MeaningStrip({ meanings }: { meanings: Meaning[] }) {
         ))}
       </div>
       {extra > 0 ? (
-        <div className="mt-2 text-[11px] text-text-4">
+        <div className="mt-2 text-xs text-text-4">
           + {extra} more part{extra === 1 ? "" : "s"} of the app.
         </div>
       ) : null}

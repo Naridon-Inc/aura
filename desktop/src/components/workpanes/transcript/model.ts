@@ -15,18 +15,16 @@
 
 import type { StreamEvent } from "../../../lib/api";
 import { stripSteeringDirective } from "../../../lib/steeringDirective";
+import { relativeAge } from "../../../lib/relativeTime";
+import { compactNumber } from "../../../lib/compactNumber";
+import { formatCost } from "../../../lib/money";
+import { basename } from "../../../lib/paths";
+import { clockTime } from "../../../lib/clockTime";
+import { sentenceCase } from "../../../lib/textCase";
 
 // ── tool classification ──────────────────────────────────────────────
 
 export type ToolKind = "edit" | "bash" | "read" | "other";
-
-/** Last path segment — "src/foo/bar.rs" → "bar.rs". */
-export function basename(p: string): string {
-  const t = (p ?? "").replace(/[/\\]+$/, "");
-  if (!t) return "";
-  const parts = t.split(/[/\\]+/);
-  return parts[parts.length - 1] || t;
-}
 
 /** Title-case a raw tool slug for the "Other" bucket — "web_fetch" → "Web
  *  fetch", "mcp__aura-vcs__aura_status" → "aura status". */
@@ -37,7 +35,7 @@ export function humanizeTool(name: string): string {
   s = s.replace(/^aura[_-]?/i, "aura ");
   s = s.replace(/[_-]+/g, " ").trim();
   if (!s) return name;
-  return s.charAt(0).toUpperCase() + s.slice(1);
+  return sentenceCase(s);
 }
 
 /** Render template for a tool row — distinct from `kind` (the filter bucket).
@@ -355,8 +353,8 @@ export function foldItems(events: StreamEvent[]): Item[] {
         if (Number.isFinite(e.duration_ms)) {
           bits.push(`${(e.duration_ms / 1000).toFixed(1)}s`);
         }
-        if (e.total_tokens != null) bits.push(`${fmtTokens(e.total_tokens)} tok`);
-        if (e.cost_usd != null) bits.push(`$${e.cost_usd.toFixed(2)}`);
+        if (e.total_tokens != null) bits.push(`${compactNumber(e.total_tokens)} tok`);
+        if (e.cost_usd != null) bits.push(formatCost(e.cost_usd));
         items.push({
           type: "system",
           key,
@@ -377,31 +375,12 @@ export function foldItems(events: StreamEvent[]): Item[] {
   return items;
 }
 
-export function fmtTokens(n: number): string {
-  if (!Number.isFinite(n) || n <= 0) return "0";
-  if (n < 1000) return String(n);
-  if (n < 1_000_000) return `${(n / 1000).toFixed(n < 10_000 ? 1 : 0)}k`;
-  return `${(n / 1_000_000).toFixed(1)}M`;
-}
-
 /** Compact "5d ago" style age, extending formatRelativeAge past hours into
  *  days/weeks (the reference shows day-scale ages). Returns "" for a missing
  *  timestamp so the caller can omit it rather than print a fake time. */
 export function relAge(ts: number, now: number): string {
-  if (!ts || ts <= 0) return "";
-  const secs = Math.max(0, Math.floor((now - ts) / 1000));
-  if (secs < 45) return "just now";
-  const mins = Math.floor(secs / 60);
-  if (mins < 60) return `${mins}m ago`;
-  const hrs = Math.floor(mins / 60);
-  if (hrs < 24) return `${hrs}h ago`;
-  const days = Math.floor(hrs / 24);
-  if (days < 7) return `${days}d ago`;
-  const weeks = Math.floor(days / 7);
-  if (weeks < 5) return `${weeks}w ago`;
-  const months = Math.floor(days / 30);
-  if (months < 12) return `${months}mo ago`;
-  return `${Math.floor(days / 365)}y ago`;
+  // One ladder for the whole app — see lib/relativeTime.
+  return relativeAge(ts, { now });
 }
 
 /** Absolute wall-clock for a message — "2:34 PM" — from a captured timestamp.
@@ -411,7 +390,7 @@ export function relAge(ts: number, now: number): string {
 export function fmtClock(ts: number): string {
   if (!ts || ts <= 0) return "";
   try {
-    return new Date(ts).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
+    return clockTime(ts);
   } catch {
     return "";
   }

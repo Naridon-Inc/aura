@@ -84,7 +84,7 @@ const REGISTRY: AgentIdentity[] = [
     tag: "PI",
     accent: COLOR.pi,
     defaultRole: "sub",
-    blurb: "Provider-agnostic terminal harness — BYO key, runs Claude / GPT / Gemini / local models.",
+    blurb: "Provider-agnostic terminal harness. BYO key, runs Claude / GPT / Gemini / local models.",
   },
   // Scout specialists — Architecture / Security / UX.
   {
@@ -188,6 +188,38 @@ export function agentDisplayLabel(agentId: string | null | undefined): string {
   }
   const at = canonical.indexOf("@");
   return at > 0 ? canonical.slice(0, at) : canonical;
+}
+
+/** Is this git author a machine rather than a teammate?
+ *
+ *  Surfaces that count people — the team roster, the cost breakdown — otherwise
+ *  list Aura's own committing identity and the checkpointer alongside humans,
+ *  which in a *cost* view reads as "these two colleagues are your biggest
+ *  spenders". They aren't colleagues, and their spend already belongs to
+ *  whoever ran them.
+ *
+ *  Deliberately narrow: calling a real person a bot is far worse than missing
+ *  one, so this matches only identities that cannot be human.
+ *  `@users.noreply.github.com` is explicitly NOT a match — that is GitHub's
+ *  private-email host for real accounts. */
+export function isAutomationIdentity(
+  name: string | null | undefined,
+  email: string | null | undefined,
+): boolean {
+  const n = (name ?? "").trim().toLowerCase();
+  const e = (email ?? "").trim().toLowerCase();
+  // GitHub App convention: dependabot[bot], github-actions[bot], …
+  if (n.includes("[bot]") || e.includes("[bot]")) return true;
+  const at = e.lastIndexOf("@");
+  if (at < 0) return false;
+  const host = e.slice(at + 1);
+  // Aura's own agent commits as ai@aura.vcs.
+  if (host === "aura.vcs") return true;
+  // A bare `noreply` host is a placeholder no mail server owns — our
+  // checkpointer@noreply. Real GitHub privacy addresses end in
+  // users.noreply.github.com and are excluded by the exact match.
+  if (host === "noreply" || host === "localhost") return true;
+  return false;
 }
 
 /** Tailwind/CSS-friendly token: `color-mix(in srgb, <accent> X%, <base>)`

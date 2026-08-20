@@ -19,7 +19,10 @@
 
 import { useEffect, useMemo, useState, type KeyboardEvent } from "react";
 
+import { Inbox } from "lucide-react";
+
 import { FullscreenOverlay } from "../FullscreenOverlay";
+import { BoardEmpty } from "../board";
 import { Button } from "../ui/button";
 import { Checkbox } from "../ui/checkbox";
 import { Field } from "../ui/field";
@@ -241,7 +244,7 @@ export function CreateSprintWizard({
             />
           ) : (
             <>
-              <h1 className="text-[18px] font-medium leading-7 text-text-1">
+              <h1 className="text-xl font-medium leading-7 text-text-1">
                 New sprint
               </h1>
 
@@ -312,11 +315,11 @@ export function CreateSprintWizard({
 
                 <div className="flex items-center justify-between gap-3 rounded-lg bg-bg-content p-3 border border-line-soft">
                   <div className="min-w-0">
-                    <div className="text-[13px] font-medium text-text-1">
+                    <div className="text-base font-medium text-text-1">
                       Make this the active sprint
                     </div>
-                    <div className="mt-0.5 text-[13px] leading-[20.8px] text-text-3">
-                      Only one sprint is active at a time — the board opens to it.
+                    <div className="mt-0.5 text-base leading-[20.8px] text-text-3">
+                      Only one sprint is active at a time. The board opens to it.
                     </div>
                   </div>
                   <Switch
@@ -354,28 +357,34 @@ function ScopeStep({
   return (
     <>
       <div className="flex items-baseline justify-between gap-3">
-        <h1 className="text-[18px] font-medium leading-7 text-text-1">
+        <h1 className="text-xl font-medium leading-7 text-text-1">
           Pull in scope
         </h1>
-        <span className="text-[12px] text-text-4 tabular-nums">
+        <span className="text-sm text-text-4 tabular-nums">
           {count} item{count === 1 ? "" : "s"}
           {points > 0 ? ` · ${points} pts` : ""}
         </span>
       </div>
 
       {candidates.length === 0 ? (
-        <div className="rounded-lg border border-dashed border-line-soft px-4 py-10 text-center text-[12.5px] text-text-5">
-          Backlog is empty — nothing to pull in. You can add tasks to the
-          sprint later from the board.
-        </div>
+        /* No action: creating work mid-wizard would abandon the sprint you're
+           halfway through setting up. The line says the door stays open. */
+        <BoardEmpty
+          icon={Inbox}
+          title="Nothing waiting to pull in"
+          /* Was "no unassigned work", which in this app already means work with
+             nobody's name on it — the left rail has a row called exactly that.
+             This list is about sprints, not owners. */
+          body="Every unfinished task is already in a sprint. You can start this one now and pull work in whenever it turns up."
+        />
       ) : (
         <div className="flex flex-col gap-3">
-          <div className="flex items-center gap-2 text-[11.5px]">
+          <div className="flex items-center gap-2 text-sm">
             <Button
               variant="ghost"
               size="xs"
               onClick={onSelectAll}
-              className="text-[11.5px] text-text-4 hover:text-text-1"
+              className="text-sm text-text-4 hover:text-text-1"
             >
               Select all
             </Button>
@@ -384,12 +393,15 @@ function ScopeStep({
               variant="ghost"
               size="xs"
               onClick={onClear}
-              className="text-[11.5px] text-text-4 hover:text-text-1"
+              className="text-sm text-text-4 hover:text-text-1"
             >
               Clear
             </Button>
+            {/* "141 in backlog" was a different backlog from the one the left
+                rail counts at 25. There, Backlog is a status; here it meant
+                "not in a sprint". Say the second one. */}
             <span className="ml-auto text-text-5">
-              {candidates.length} in backlog
+              {candidates.length} not in a sprint
             </span>
           </div>
           <ul className="flex max-h-[42vh] flex-col gap-0.5 overflow-y-auto rounded-lg border border-line-soft bg-bg-content p-1.5">
@@ -398,8 +410,8 @@ function ScopeStep({
               return (
                 <li key={t.id}>
                   <label
-                    className={`flex cursor-pointer items-center gap-2.5 rounded px-2 py-1.5 text-[12.5px] ${
-                      on ? "bg-accent-soft" : "hover:bg-bg-2"
+                    className={`flex cursor-pointer items-center gap-2.5 rounded px-2 py-1.5 text-base ${
+                      on ? "bg-accent-soft" : "hover:bg-state-hover"
                     }`}
                   >
                     <Checkbox
@@ -415,7 +427,7 @@ function ScopeStep({
                       {t.title || "(untitled)"}
                     </span>
                     {typeof t.estimate === "number" && t.estimate > 0 && (
-                      <span className="shrink-0 text-[10.5px] text-text-5 tabular-nums">
+                      <span className="shrink-0 text-xs text-text-5 tabular-nums">
                         {t.estimate} pts
                       </span>
                     )}

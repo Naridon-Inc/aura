@@ -210,7 +210,7 @@ export function TimelineScrubber({
           />
           {/* Floating timestamp pill, parked on the spine just above the track. */}
           {model.moments[selectedIndex] && (
-            <div className="absolute bottom-full left-1/2 mb-2.5 -translate-x-1/2 whitespace-nowrap rounded-full border border-line-soft bg-bg-1/95 px-2.5 py-1 text-[10px] font-medium tabular-nums text-text-2 shadow-[0_2px_10px_rgba(0,0,0,0.28)] backdrop-blur">
+            <div className="absolute bottom-full left-1/2 mb-2.5 -translate-x-1/2 whitespace-nowrap rounded-full border border-line-soft bg-bg-1/95 px-2.5 py-1 text-2xs font-medium tabular-nums text-text-2 shadow-[0_2px_10px_rgba(0,0,0,0.28)] backdrop-blur">
               {momentStamp(model.moments[selectedIndex].ts)}
             </div>
           )}
@@ -231,7 +231,7 @@ export function TimelineScrubber({
       {/* Day ticks — calendar anchors under the track. Collapsed to the first
           handful + last so a long history doesn't crowd; the scrub itself is
           continuous regardless. */}
-      <div className="relative mt-1.5 h-4 text-[10px] text-text-4">
+      <div className="relative mt-1.5 h-4 text-2xs text-text-4">
         {pickDayTicks(model).map((d) => (
           <span
             key={d.key}

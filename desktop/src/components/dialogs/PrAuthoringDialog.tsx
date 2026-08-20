@@ -164,7 +164,7 @@ export function PrAuthoringDialogHost() {
         </>
       }
     >
-      <div className="space-y-3 text-[11.5px]">
+      <div className="space-y-3 text-sm">
         {!editing && request && (
           <div className="rounded border border-line-soft bg-bg-1 px-2.5 py-2 text-text-3">
             Source branch{" "}
@@ -172,7 +172,7 @@ export function PrAuthoringDialogHost() {
           </div>
         )}
         <label className="block space-y-1">
-          <span className="text-[10.5px] uppercase tracking-wider text-text-4">
+          <span className="section-label">
             Title
           </span>
           <Input
@@ -186,7 +186,7 @@ export function PrAuthoringDialogHost() {
           />
         </label>
         <label className="block space-y-1">
-          <span className="text-[10.5px] uppercase tracking-wider text-text-4">
+          <span className="section-label">
             Description
           </span>
           <Textarea
@@ -198,14 +198,14 @@ export function PrAuthoringDialogHost() {
           />
         </label>
         <label className="block space-y-1">
-          <span className="text-[10.5px] uppercase tracking-wider text-text-4">
+          <span className="section-label">
             Target branch
           </span>
           <select
             value={baseBranch}
             onChange={(e) => setBaseBranch(e.target.value)}
             disabled={busy}
-            className="h-8 w-full rounded border border-line bg-bg-1 px-2 text-[12px] text-text-1 outline-none focus:border-text-4"
+            className="h-8 w-full rounded border border-line bg-bg-1 px-2 text-sm text-text-1 outline-none focus:border-text-4"
           >
             {!editing && <option value="">Repository default</option>}
             {branchOptions.map((branch) => (
@@ -226,12 +226,12 @@ export function PrAuthoringDialogHost() {
           Keep this pull request as a draft
         </label>
         {error && (
-          <div role="alert" className="text-[11px] text-red">
+          <div role="alert" className="text-xs text-red">
             {error}
           </div>
         )}
         {!editing && (
-          <div className="text-[10.5px] text-text-5">
+          <div className="text-xs text-text-5">
             Creating the pull request pushes the source branch first.
           </div>
         )}

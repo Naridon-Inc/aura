@@ -52,7 +52,7 @@ const NAV: CustomizeNavItem[] = [
   {
     id: "overview",
     label: "Overview",
-    blurb: "Start here — describe a change, or set things up by hand.",
+    blurb: "Start here. Describe a change, or set things up by hand.",
     icon: <Sparkles size={15} />,
   },
   {
@@ -89,13 +89,16 @@ const NAV: CustomizeNavItem[] = [
     id: "addons",
     label: "Add-ons",
     blurb:
-      "Extend what Aura can do — plugins built for it, plus editor add-ons from the VS Code world.",
+      "Extend what Aura can do. Plugins built for it, plus editor add-ons from the VS Code world.",
     icon: <Blocks size={15} />,
   },
   {
     id: "hooks",
     label: "Safety net",
-    blurb: "Keep a recoverable record of every change.",
+    // Not "every change" — every commit. See HooksPane, where the same
+    // feature had grown four descriptions across two panes and only the
+    // one that said "commit" was true of the git hooks behind it.
+    blurb: "Keep a recoverable record of every commit.",
     icon: <ShieldCheck size={15} />,
   },
 ];
@@ -154,8 +157,8 @@ export function AgentCustomizations({
             <div key={group.heading ?? `g-${gi}`} className={gi > 0 ? "mt-5" : ""}>
               {group.heading ? (
                 <div
-                  className={`mb-1.5 px-2 text-[10.5px] font-semibold uppercase tracking-wide ${
-                    group.muted ? "text-text-5" : "text-text-4"
+                  className={`section-label mb-1.5 px-2 ${
+                    group.muted ? "text-text-5" : ""
                   }`}
                 >
                   {group.heading}
@@ -265,12 +268,12 @@ function SidebarRow({
     <button
       type="button"
       onClick={onClick}
-      className={`flex w-full items-center gap-2.5 rounded-md px-2 py-1.5 text-left text-[12.5px] transition-colors ${
+      className={`flex w-full items-center gap-2.5 rounded-md px-2 py-1.5 text-left text-base transition-colors ${
         active
           ? "bg-[color-mix(in_srgb,var(--color-accent)_14%,transparent)] font-medium text-text-1"
           : muted
-            ? "text-text-4 hover:bg-bg-2 hover:text-text-2"
-            : "text-text-3 hover:bg-bg-2 hover:text-text-1"
+            ? "text-text-4 hover:bg-state-hover hover:text-text-2"
+            : "text-text-3 hover:bg-state-hover hover:text-text-1"
       }`}
       style={active ? { color: "var(--color-accent)" } : undefined}
     >

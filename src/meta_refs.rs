@@ -412,31 +412,51 @@ fn run_verify(
         for issue in &report.issues {
             println!("  {} {}", "✗".red(), issue);
         }
-        println!(
+        // `proofs` and `proven` are different numbers: a commit can carry a
+        // proof that says its goals were never wired up. Printing only the
+        // first as "proven" is how a not_wired verdict read as a pass.
+        let mut roll = format!(
             "{} {} commits · {} with intent · {} proven",
             "meta verify".bold(),
             report.commits,
             report.intent_covered,
             report.proven,
         );
+        if report.partial > 0 {
+            roll.push_str(&format!(" · {} partial", report.partial));
+        }
+        let unproven = report.proofs.saturating_sub(report.proven + report.partial);
+        if unproven > 0 {
+            roll.push_str(&format!(" · {} not wired", unproven));
+        }
+        println!("{}", roll);
+        if report.truncated {
+            println!(
+                "  {} showing the most recent {} commits — history continues past this",
+                "·".dimmed(),
+                report.commits,
+            );
+        }
         if !report.ok {
-            println!("  {} binding issues found — see above", "✗".red());
+            println!("  {} issues found — see above", "✗".red());
         }
     }
 
     if !report.ok {
         return Err(format!(
-            "verify failed: {} commit(s) carry a mis-bound proof note",
+            "verify failed: {} commit(s) carry a proof note that is mis-bound or unreadable",
             report.issues.len()
         )
         .into());
     }
     if strict {
-        let unproven = report.commits.saturating_sub(report.proven);
-        if unproven > 0 {
+        // Gates on `proofs` — "does a proof exist here", which is what this
+        // check has always meant. `proven` now means the verdict said yes.
+        let missing = report.commits.saturating_sub(report.proofs);
+        if missing > 0 {
             return Err(format!(
                 "verify --strict: {} of {} commit(s) lack a proof note",
-                unproven, report.commits
+                missing, report.commits
             )
             .into());
         }

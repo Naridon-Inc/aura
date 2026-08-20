@@ -62,6 +62,15 @@ pub fn registered_roots() -> Vec<String> {
         .collect()
 }
 
+/// Every registered workspace, newest-first, with its label and id intact.
+/// `registered_roots` above answers "which paths?" for background work;
+/// this answers "which projects?" for anything that has to *name* them —
+/// the Aura brain's control-plane tools resolve a project the user mentioned
+/// in passing ("the Naridon one") against these labels.
+pub fn registered_projects() -> Vec<ProjectEntry> {
+    read_all()
+}
+
 fn read_all() -> Vec<ProjectEntry> {
     let Some(path) = registry_path() else {
         return vec![];

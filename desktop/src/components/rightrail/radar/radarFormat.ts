@@ -4,24 +4,19 @@
 // noise-damping; this is purely cosmetic mapping.
 
 import type { RadarCollision } from "../../../lib/api";
+import { relativeAge, relativeAgeFromDelta } from "../../../lib/relativeTime";
 
 /** Compact "now" / "5s" / "3m" / "2h" / "4d" from a millisecond age. */
 export function agoFromMs(ms: number | null | undefined): string {
+  // One ladder for the whole app — see lib/relativeTime. This copy stopped at
+  // days, so a zone nobody had touched for a year read "412d".
   if (ms == null || ms < 0) return "—";
-  const secs = Math.floor(ms / 1000);
-  if (secs < 5) return "now";
-  if (secs < 60) return `${secs}s`;
-  const mins = Math.floor(secs / 60);
-  if (mins < 60) return `${mins}m`;
-  const hrs = Math.floor(mins / 60);
-  if (hrs < 24) return `${hrs}h`;
-  return `${Math.floor(hrs / 24)}d`;
+  return relativeAgeFromDelta(ms / 1000, { style: "compact" });
 }
 
 /** Compact age from a Unix-millisecond timestamp (the event `ts`). */
 export function agoFromTs(tsMs: number | null | undefined): string {
-  if (!tsMs) return "—";
-  return agoFromMs(Date.now() - tsMs);
+  return relativeAge(tsMs ?? 0, { style: "compact", empty: "—" });
 }
 
 /** A small glyph per awareness kind — mirrors the CLI feed glyphs so the two

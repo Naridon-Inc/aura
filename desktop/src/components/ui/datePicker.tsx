@@ -17,17 +17,23 @@ function toIsoDate(value: Date | null): string {
 export interface DatePickerProps {
   value: string;
   onChange: (next: string) => void;
-  placeholder?: string;
-  align?: "start" | "center" | "end";
+  /** Names the control for screen readers and as the trigger's tooltip. An
+   *  empty date picker renders as a bare calendar icon, so without this there
+   *  is nothing to say which date it sets. */
+  label?: string;
   className?: string;
   disabled?: boolean;
 }
 
+// Deliberately no `placeholder` prop. There used to be one — declared,
+// accepted, and dropped on the floor, because the underlying control is an
+// aria date field that renders its own empty state and takes no placeholder.
+// Both call sites passed "—" and got nothing. Callers that want to say a date
+// is unset say it themselves, next to the picker, in words.
 export function DatePicker({
   value,
   onChange,
-  placeholder: _placeholder,
-  align: _align,
+  label,
   className,
   disabled,
 }: DatePickerProps) {
@@ -39,6 +45,7 @@ export function DatePicker({
       isDisabled={disabled}
       size="small"
       shouldCloseOnSelect
+      aria-label={label}
     />
   );
 }

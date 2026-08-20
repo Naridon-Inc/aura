@@ -3,4 +3,11 @@ name = "aura-prdiff"
 version = "0.1.0"
 edition = "2021"
 
+# Standalone, dependency-free. Shared by the local `aura review post` path
+# (aura-cli) and the cloud PR-review path (aura-cloud) so both anchor inline
+# comments to real diff lines the same way.
+# (Vendored into the public monorepo, where this crate is a member of the
+# root workspace. The standalone [workspace] table it carries in its own repo
+# is stripped on sync — an empty table here would declare a second root.)
+
 [dependencies]

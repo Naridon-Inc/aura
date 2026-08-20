@@ -14,6 +14,7 @@
 // truth. This is just a "look before you leap" surface.
 
 import { api, type StreamEvent } from "./api";
+import { basename } from "./paths";
 
 const COMMIT_WINDOW_MS = 30 * 60 * 1000;
 const PAIR_WINDOW_MS = 60_000;
@@ -104,9 +105,4 @@ function extractFilePath(input: unknown): string | null {
   const obj = input as Record<string, unknown>;
   const fp = obj.file_path ?? obj.filePath ?? obj.path;
   return typeof fp === "string" ? fp : null;
-}
-
-function basename(p: string): string {
-  const idx = Math.max(p.lastIndexOf("/"), p.lastIndexOf("\\"));
-  return idx >= 0 ? p.slice(idx + 1) : p;
 }

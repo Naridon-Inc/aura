@@ -1,0 +1,38 @@
+[Unit]
+Description=Aura Runner — drains the cloud a2a backlog so work started from the phone runs with the laptop off
+Documentation=https://github.com/MHASK/aura-sovereign/blob/master/aura-runner/aws/README.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ubuntu
+# aura + claude read their dotfiles/creds relative to HOME; pin it so the
+# daemon behaves the same as an interactive `ubuntu` shell.
+Environment=HOME=/home/ubuntu
+Environment=PATH=/usr/local/bin:/usr/bin:/bin:/home/ubuntu/.cargo/bin:/home/ubuntu/.local/bin
+WorkingDirectory=/opt/aura-runner/repo
+# runner.env carries the non-secret loop config + the cloud/runner tokens.
+# agent.env carries ANTHROPIC_API_KEY and is optional (`-`) so the unit still
+# loads if the operator drives claude via a subscription login instead.
+EnvironmentFile=/etc/aura-runner/runner.env
+EnvironmentFile=-/etc/aura-runner/agent.env
+# $AURA_RUNNER_MODE is UNbraced on purpose: systemd word-splits it, so provision
+# can set it to either "--all-projects" (drain every project, each in its own
+# workspace) or "--repo owner/name" (pin to one). Empty → single-repo auto mode
+# over the WorkingDirectory checkout.
+ExecStart=/usr/local/bin/aura runner serve \
+  --agent ${AURA_RUNNER_AGENT} \
+  $AURA_RUNNER_MODE \
+  --lease-secs ${AURA_RUNNER_LEASE_SECS} \
+  --poll-secs ${AURA_RUNNER_POLL_SECS}
+# A crashed cycle is never fatal — restart and pick the backlog back up. Any
+# task that was mid-flight has its lease expire and is reclaimed next cycle.
+Restart=always
+RestartSec=15
+# Coding tasks can run the target repo's own builds/tests; keep the box
+# responsive to SSH by de-prioritising the loop slightly.
+Nice=5
+
+[Install]
+WantedBy=multi-user.target

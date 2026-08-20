@@ -13,11 +13,11 @@
 // card (PrRightRail) so both surfaces speak the same plain language.
 
 const RULES: [RegExp, string][] = [
-  [/^Protected Node Deleted\s*:?\s*/i, "A protected piece of code was deleted — "],
-  [/^Protected Node Modified\s*:?\s*/i, "A protected piece of code was changed — "],
-  [/^Forbidden Call\s*:?\s*/i, "A call that isn't allowed here — "],
-  [/^Forbidden\s*:?\s*/i, "Not allowed here — "],
-  [/^Layer Violation\s*:?\s*/i, "This crosses an architectural boundary — "],
+  [/^Protected Node Deleted\s*:?\s*/i, "A protected piece of code was deleted. "],
+  [/^Protected Node Modified\s*:?\s*/i, "A protected piece of code was changed. "],
+  [/^Forbidden Call\s*:?\s*/i, "A call that isn't allowed here. "],
+  [/^Forbidden\s*:?\s*/i, "Not allowed here. "],
+  [/^Layer Violation\s*:?\s*/i, "This crosses an architectural boundary. "],
 ];
 
 export function humanizeFindingText(text: string): string {

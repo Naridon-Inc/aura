@@ -26,12 +26,18 @@
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { api, type ClipEntry } from "../../lib/api";
+import { relativeAge } from "../../lib/relativeTime";
 import { removeClip, saveFilePath, useClips } from "../../lib/clipsStore";
 import {
   getCachedThumbnail,
   loadThumbnail,
   subscribeThumbnail,
 } from "../../lib/clipsThumbnails";
+import { ClipboardList } from "lucide-react";
+import { EmptyState } from "../ui/state";
+import { useDismiss } from "../../lib/useDismiss";
+import { formatBytes } from "../../lib/bytes";
+import { askConfirm } from "../ui/ask";
 
 // Shared hook — fetches the clip's full data URL once, downsamples to
 // a ~96px thumbnail, caches the result, and shares it across every
@@ -151,15 +157,15 @@ export function ClipsTray() {
     >
       <button
         type="button"
-        title={total === 0 ? "Clipboard tray (empty)" : `Clipboard tray — ${total} item${total === 1 ? "" : "s"}`}
+        title={total === 0 ? "Clipboard tray (empty)" : `Clipboard tray · ${total} item${total === 1 ? "" : "s"}`}
         onClick={() => setPanelOpen((v) => !v)}
-        className="absolute inset-0 group rounded-lg hover:bg-bg-2 transition-colors"
+        className="absolute inset-0 group rounded-lg hover:bg-state-hover transition-colors"
         style={{ overflow: "visible" }}
       >
         <FolderArt slots={slots} hover={fanActive} />
         {total > 0 && (
           <span
-            className="absolute pointer-events-none flex items-center justify-center text-[9px] font-semibold tabular-nums"
+            className="absolute pointer-events-none flex items-center justify-center text-2xs font-semibold tabular-nums"
             style={{
               top: 1,
               right: 1,
@@ -525,21 +531,7 @@ function ClipsPanel({
   onClose: () => void;
 }) {
   const wrapRef = useRef<HTMLDivElement>(null);
-  useEffect(() => {
-    const onDoc = (e: MouseEvent) => {
-      if (!wrapRef.current?.contains(e.target as Node)) onClose();
-    };
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") onClose();
-    };
-    const t = window.setTimeout(() => document.addEventListener("mousedown", onDoc), 0);
-    document.addEventListener("keydown", onKey);
-    return () => {
-      window.clearTimeout(t);
-      document.removeEventListener("mousedown", onDoc);
-      document.removeEventListener("keydown", onKey);
-    };
-  }, [onClose]);
+  useDismiss(true, onClose, wrapRef, { defer: true });
 
   return (
     <div
@@ -548,16 +540,21 @@ function ClipsPanel({
       style={{ width: 320, maxHeight: 420 }}
     >
       <header className="flex items-center gap-2 px-3 h-8 border-b border-line-soft">
-        <span className="text-text-2 text-[11.5px] font-medium uppercase tracking-wider flex-1">
+        <span className="section-label flex-1">
           Clipboard
         </span>
-        <span className="text-text-4 text-[10.5px] tabular-nums">
+        <span className="text-text-4 text-xs tabular-nums">
           {entries.length}
         </span>
       </header>
       <div className="flex-1 overflow-y-auto py-1.5">
         {entries.length === 0 ? (
-          <EmptyState />
+          <EmptyState
+            icon={ClipboardList}
+            title="No clips yet"
+            size="sm"
+            body="Paste a screenshot anywhere in Aura, or drag a file onto the tray icon. Whatever lands here is kept somewhere an agent can read, so you can hand it straight to one."
+          />
         ) : (
           entries.map((clip) => (
             <ClipRow key={clip.id} clip={clip} />
@@ -571,27 +568,24 @@ function ClipsPanel({
           <button
             type="button"
             onClick={async () => {
-              if (window.confirm("Clear all clips? This cannot be undone.")) {
+              if (
+                await askConfirm({
+                  title: "Clear all clips?",
+                  body: "This can't be undone.",
+                  confirmLabel: "Clear all",
+                  tone: "danger",
+                })
+              ) {
                 const { clearClips } = await import("../../lib/clipsStore");
                 await clearClips();
               }
             }}
-            className="text-text-4 hover:text-text-1 hover:bg-bg-2 text-[10.5px] px-2 h-6 rounded transition-colors"
+            className="text-text-4 hover:text-text-1 hover:bg-state-hover text-xs px-2 h-6 rounded transition-colors"
           >
             Clear all
           </button>
         )}
       </footer>
-    </div>
-  );
-}
-
-function EmptyState() {
-  return (
-    <div className="px-3 py-6 text-[11px] text-text-4 leading-relaxed">
-      No clips yet. Paste a screenshot anywhere in Aura, or drag a file onto
-      the tray icon. Anything you drop here is kept somewhere an agent can
-      read, so you can hand it straight to one.
     </div>
   );
 }
@@ -607,7 +601,7 @@ function PickFileButton() {
           await saveFilePath(picked);
         }
       }}
-      className="flex items-center gap-1.5 text-text-2 hover:text-text-1 hover:bg-bg-2 text-[10.5px] px-2 h-6 rounded transition-colors"
+      className="flex items-center gap-1.5 text-text-2 hover:text-text-1 hover:bg-state-hover text-xs px-2 h-6 rounded transition-colors"
     >
       <PlusGlyph />
       <span>Add file…</span>
@@ -636,13 +630,13 @@ function ClipRow({ clip }: { clip: ClipEntry }) {
         );
         e.dataTransfer.effectAllowed = "copy";
       }}
-      className="flex items-center gap-2 px-2 py-1.5 hover:bg-bg-2 cursor-grab active:cursor-grabbing transition-colors"
+      className="flex items-center gap-2 px-2 py-1.5 hover:bg-state-hover cursor-grab active:cursor-grabbing transition-colors"
     >
       <RowThumb clip={clip} />
       <div className="flex-1 min-w-0">
-        <div className="text-text-1 text-[11.5px] truncate">{clip.name}</div>
-        <div className="text-text-4 text-[10px] flex items-center gap-1.5">
-          <span>{formatSize(clip.size)}</span>
+        <div className="text-text-1 text-sm truncate">{clip.name}</div>
+        <div className="text-text-4 text-2xs flex items-center gap-1.5">
+          <span>{formatBytes(clip.size)}</span>
           <span>·</span>
           <span>{formatAge(clip.created_at)}</span>
         </div>
@@ -654,7 +648,7 @@ function ClipRow({ clip }: { clip: ClipEntry }) {
           e.stopPropagation();
           removeClip(clip.id);
         }}
-        className="h-5 w-5 grid place-items-center flex-shrink-0 rounded text-text-4 hover:text-text-1 hover:bg-bg-2 transition-colors"
+        className="h-5 w-5 grid place-items-center flex-shrink-0 rounded text-text-4 hover:text-text-1 hover:bg-state-hover transition-colors"
       >
         <TimesGlyph />
       </button>
@@ -714,22 +708,9 @@ function extOf(name: string): string {
   if (dot < 0) return "";
   return name.slice(dot + 1);
 }
-
-function formatSize(b: number): string {
-  if (b < 1024) return `${b} B`;
-  if (b < 1024 * 1024) return `${(b / 1024).toFixed(1)} KB`;
-  return `${(b / (1024 * 1024)).toFixed(1)} MB`;
-}
-
 function formatAge(ms: number): string {
-  const diff = Date.now() - ms;
-  const m = Math.floor(diff / 60000);
-  if (m < 1) return "just now";
-  if (m < 60) return `${m}m ago`;
-  const h = Math.floor(m / 60);
-  if (h < 24) return `${h}h ago`;
-  const d = Math.floor(h / 24);
-  return `${d}d ago`;
+  // One ladder for the whole app — see lib/relativeTime.
+  return relativeAge(ms);
 }
 
 /** Window-level paste capture — call from App.tsx once at mount. Any

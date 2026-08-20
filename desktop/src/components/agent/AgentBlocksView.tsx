@@ -29,7 +29,7 @@ export function AgentBlocksView({ sessionId }: Props) {
   if (pairs.length === 0) {
     return (
       <div className="h-full w-full flex items-center justify-center">
-        <div className="text-text-4 text-[12px]">
+        <div className="text-text-4 text-sm">
           send a prompt to start the conversation
         </div>
       </div>

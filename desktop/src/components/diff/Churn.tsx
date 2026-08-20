@@ -63,7 +63,7 @@ export function Churn({
   return (
     <span
       className={cn(
-        "inline-flex shrink-0 items-center gap-1 whitespace-nowrap font-mono text-[11px] tabular-nums",
+        "inline-flex shrink-0 items-center gap-1 whitespace-nowrap font-mono text-xs tabular-nums",
         !coloured && "text-text-3",
         className,
       )}

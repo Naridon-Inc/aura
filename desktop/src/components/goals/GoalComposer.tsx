@@ -55,9 +55,9 @@ export function GoalComposer({
       <button
         type="button"
         onClick={() => setOpen(true)}
-        className="flex items-center gap-1.5 rounded-md border border-dashed border-line-soft px-2.5 py-1.5 text-[12px] text-text-3 transition-colors hover:border-line hover:text-text-1"
+        className="flex items-center gap-1.5 rounded-md border border-dashed border-line-soft px-2.5 py-1.5 text-sm text-text-3 transition-colors hover:border-line hover:text-text-1"
       >
-        <span className="text-[13px] leading-none">+</span>
+        <span className="text-base leading-none">+</span>
         {cta}
       </button>
     );
@@ -74,7 +74,7 @@ export function GoalComposer({
           else if (e.key === "Escape") setOpen(false);
         }}
         placeholder={placeholder}
-        className="min-w-0 flex-1 bg-transparent px-1.5 py-1 text-[13px] text-text-1 placeholder:text-text-5 focus:outline-none"
+        className="min-w-0 flex-1 bg-transparent px-1.5 py-1 text-base text-text-1 placeholder:text-text-5 focus:outline-none"
       />
       <Button
         type="button"

@@ -102,17 +102,66 @@ pub struct StatedIntent {
     pub agent_id: String,
     pub intent: String,
     pub intent_type: Option<String>,
+    /// Where the text came from when nobody called `log-intent` — see
+    /// `IntentRow::source`. Carried out to callers because this whole report
+    /// is a comparison between this text and the AST, and a `brain_inferred`
+    /// line was written from that AST: it matches by construction, so
+    /// "aligned" over one is not the independent check it looks like.
+    pub source: Option<String>,
 }
 
-/// Compute the report for a single commit.
+/// Split `base...head` / `base..head` into its endpoints, or `None` when
+/// the spec names a single commit. The bool is git's three-dot form: the
+/// old side is then the merge base rather than the base tip, which is what
+/// a pull request means by "what this branch adds". Refnames can't contain
+/// `..`, so finding the separator is unambiguous — but the three-dot form
+/// has to be tested first, since `..` is a substring of `...`.
+///
+/// An open-ended endpoint takes git's own default of `HEAD`, so `main...`
+/// and `..HEAD` both work the way they do on the command line.
+fn parse_range(spec: &str) -> Option<(String, String, bool)> {
+    let (base, head, three_dot) = match spec.split_once("...") {
+        Some((b, h)) => (b, h, true),
+        None => match spec.split_once("..") {
+            Some((b, h)) => (b, h, false),
+            None => return None,
+        },
+    };
+    let base = base.trim();
+    let head = head.trim();
+    // `HEAD~1..HEAD` is a single-commit spelling of the same thing, but it
+    // still resolves correctly through the range path, so no special case.
+    Some((
+        if base.is_empty() { "HEAD".into() } else { base.to_string() },
+        if head.is_empty() { "HEAD".into() } else { head.to_string() },
+        three_dot,
+    ))
+}
+
+/// Compute the report for a single commit — or for a whole range.
 ///
 /// `sha_or_ref` accepts anything `revparse_single` understands — a full
 /// SHA, a short SHA, `HEAD`, `HEAD~1`, branch names, etc. The intent log
 /// is sampled in a ±3600s window around `committer_time` since intents
 /// are typically logged seconds before the commit lands.
+///
+/// It also accepts a RANGE, in git's own two spellings: `base...head`
+/// (everything head added since the two diverged — what a pull request
+/// actually proposes) and `base..head` (base's tip straight across to
+/// head's, no merge-base). A range reports on head's commit metadata,
+/// because that is the tip the range lands on, but the semantic delta —
+/// which pieces were added, changed, removed — spans the whole range.
+/// Without this a pull request could only be read one commit at a time,
+/// which is not how anyone reads one.
 pub fn run(sha_or_ref: &str) -> Result<IntentVsActualReport, Box<dyn std::error::Error>> {
     let repo = Repository::open(".")?;
-    let obj = repo.revparse_single(sha_or_ref)?;
+
+    // Split a range spec before revparsing: `revparse_single` doesn't
+    // understand `a..b`, so a range has to be resolved as two endpoints.
+    let range = parse_range(sha_or_ref);
+    let head_ref = range.as_ref().map(|(_, h, _)| h.as_str()).unwrap_or(sha_or_ref);
+
+    let obj = repo.revparse_single(head_ref)?;
     let commit = obj
         .as_commit()
         .cloned()
@@ -129,12 +178,23 @@ pub fn run(sha_or_ref: &str) -> Result<IntentVsActualReport, Box<dyn std::error:
         .unwrap_or("unknown")
         .to_string();
 
-    // Diff against first parent (or empty tree for root commit).
     let new_tree = commit.tree()?;
-    let parent_tree = commit
-        .parent(0)
-        .ok()
-        .and_then(|p| p.tree().ok());
+    // The old side: for a range, the base endpoint (the merge base, for
+    // the three-dot form); otherwise the first parent, or the empty tree
+    // for a root commit.
+    let parent_tree = match &range {
+        Some((base, _, three_dot)) => {
+            let base_commit = repo.revparse_single(base)?.peel_to_commit()?;
+            let old = if *three_dot {
+                let merge_base = repo.merge_base(base_commit.id(), commit.id())?;
+                repo.find_commit(merge_base)?
+            } else {
+                base_commit
+            };
+            old.tree().ok()
+        }
+        None => commit.parent(0).ok().and_then(|p| p.tree().ok()),
+    };
 
     let mut opts = DiffOptions::new();
     let diff = repo.diff_tree_to_tree(parent_tree.as_ref(), Some(&new_tree), Some(&mut opts))?;
@@ -251,6 +311,7 @@ pub fn run(sha_or_ref: &str) -> Result<IntentVsActualReport, Box<dyn std::error:
             agent_id: r.agent_id.clone(),
             intent: r.intent.clone(),
             intent_type: r.intent_type.clone(),
+            source: r.source.clone(),
         })
         .collect();
 

@@ -56,7 +56,7 @@ export function McpServersPane({
     <PaneScroll>
       <PaneIntro
         title="Connections"
-        blurb="Let your agent work in the tools you already use — issue trackers, error monitors, databases. Switch a connection on to make it available, off to cut access."
+        blurb="Let your agent work in the tools you already use. Issue trackers, error monitors, databases. Switch a connection on to make it available, off to cut access."
         action={
           <Button size="sm" variant="subtle" onClick={manage} className="gap-1">
             <Settings2 size={14} />
@@ -68,15 +68,10 @@ export function McpServersPane({
         <PaneSpinner label="Loading connections…" />
       ) : mcp.length === 0 ? (
         <EmptyHint
-          icon={<Plug size={22} />}
+          icon={Plug}
           title="No connections yet"
-          body="Connect a tool so your agent can read and act in it — like creating an issue or checking an error."
-          action={
-            <Button size="sm" onClick={manage} className="gap-1">
-              <Plug size={14} />
-              Add a connection
-            </Button>
-          }
+          body="Connect a tool so your agent can read and act in it, like creating an issue or checking an error."
+          action={{ label: "Add a connection", onClick: manage, icon: Plug }}
         />
       ) : (
         <Card>
@@ -89,15 +84,15 @@ export function McpServersPane({
             >
               <Plug size={15} className="shrink-0 text-text-4" />
               <div className="min-w-0 flex-1">
-                <div className="truncate text-[12.5px] font-medium text-text-1">
+                <div className="truncate text-base font-medium text-text-1">
                   {row.name}
                 </div>
-                <div className="truncate text-[11.5px] text-text-4">
+                <div className="truncate text-sm text-text-4">
                   {row.description || row.server_url || row.command}
                 </div>
               </div>
               {busy === row.name ? (
-                <AsciiSpinner className="shrink-0 text-[14px]" />
+                <AsciiSpinner className="shrink-0 text-md" />
               ) : (
                 <Switch
                   checked={row.enabled}

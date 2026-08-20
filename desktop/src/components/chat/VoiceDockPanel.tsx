@@ -72,6 +72,9 @@ import {
   type SoundboardSeed,
 } from "../../lib/soundboard";
 import type { SoundboardClip } from "../../lib/api";
+import { useDismiss } from "../../lib/useDismiss";
+import { Kbd } from "../ui/kbd";
+import { basename } from "../../lib/paths";
 
 export function VoiceDockPanel({
   currentRepoRoot = null,
@@ -119,17 +122,7 @@ export function VoiceDockPanel({
   // Soundboard popover.
   const [boardOpen, setBoardOpen] = useState(false);
   const boardAnchorRef = useRef<HTMLDivElement | null>(null);
-  useEffect(() => {
-    if (!boardOpen) return;
-    const onDown = (ev: MouseEvent) => {
-      const node = boardAnchorRef.current;
-      if (!node) return;
-      if (ev.target instanceof Node && node.contains(ev.target)) return;
-      setBoardOpen(false);
-    };
-    window.addEventListener("mousedown", onDown);
-    return () => window.removeEventListener("mousedown", onDown);
-  }, [boardOpen]);
+  useDismiss(boardOpen, () => setBoardOpen(false), boardAnchorRef);
 
   if (!snap.active && !snap.connecting) return null;
   // Repo-scope guard: hide when the caller is a per-repo surface and the
@@ -148,7 +141,7 @@ export function VoiceDockPanel({
   const channelLabel = snap.channel
     ? `#${snap.channelName ?? snap.channel}`
     : "Huddle";
-  const repoLabel = snap.repoRoot ? shortRepoName(snap.repoRoot) : "";
+  const repoLabel = snap.repoRoot ? basename(snap.repoRoot) : "";
   const connecting = snap.connecting && !snap.active;
   const accent = connecting
     ? "var(--color-amber)"
@@ -223,7 +216,7 @@ export function VoiceDockPanel({
         type="button"
         onClick={openCallStage}
         className="flex min-w-0 flex-1 items-center gap-2 text-left transition-opacity hover:opacity-90"
-        title={`Open call view — ${channelLabel}${repoLabel ? ` / ${repoLabel}` : ""}`}
+        title={`Open call view. ${channelLabel}${repoLabel ? ` / ${repoLabel}` : ""}`}
       >
         <span
           className={`flex shrink-0 ${connecting ? "animate-pulse" : ""}`}
@@ -234,13 +227,13 @@ export function VoiceDockPanel({
         </span>
         <span className="flex min-w-0 flex-col leading-tight">
           <span
-            className="truncate text-[11.5px] font-semibold"
+            className="truncate text-sm font-semibold"
             style={{ color: accent }}
           >
             {connecting ? "Connecting…" : "Voice Connected"}
           </span>
           <span
-            className="block truncate text-[10px]"
+            className="block truncate text-2xs"
             style={{ color: "var(--color-text-3)" }}
           >
             <span style={{ color: "var(--color-text-2)" }}>{channelLabel}</span>
@@ -459,13 +452,13 @@ function SoundboardPopover({
         className="flex items-center justify-between px-3 py-1.5"
         style={{ color: "var(--color-text-3)" }}
       >
-        <span className="text-[10.5px] font-semibold uppercase tracking-wider">
+        <span className="section-label">
           Soundboard
         </span>
         <button
           type="button"
           onClick={onPickFile}
-          className="flex items-center gap-1 rounded px-1.5 py-0.5 text-[10.5px] hover:bg-bg-2"
+          className="flex items-center gap-1 rounded px-1.5 py-0.5 text-xs hover:bg-state-hover"
           title="Upload an audio clip"
         >
           <Upload size={11} />
@@ -495,7 +488,7 @@ function SoundboardPopover({
         ))}
         {userClips.length === 0 ? (
           <div
-            className="px-3 py-3 text-center text-[10.5px]"
+            className="px-3 py-3 text-center text-xs"
             style={{ color: "var(--color-text-4)" }}
           >
             Upload short mp3 / wav clips (≤2 MB) for your team.
@@ -519,7 +512,7 @@ function SoundboardPopover({
       </div>
       {error && (
         <div
-          className="px-3 py-1.5 text-[10.5px]"
+          className="px-3 py-1.5 text-xs"
           style={{
             background: "color-mix(in srgb, var(--color-red) 12%, transparent)",
             color: "var(--color-red)",
@@ -550,16 +543,16 @@ function SoundboardRow({
 }) {
   return (
     <div
-      className="flex items-center gap-2 px-3 py-1.5 hover:bg-bg-2"
+      className="flex items-center gap-2 px-3 py-1.5 hover:bg-state-hover"
       style={{ color: "var(--color-text-2)" }}
     >
       <button
         type="button"
         onClick={onPlay}
-        className="flex flex-1 items-center gap-2 text-left text-[11.5px]"
+        className="flex flex-1 items-center gap-2 text-left text-sm"
         disabled={playing}
       >
-        <span className="text-[14px]" aria-hidden>
+        <span className="text-md" aria-hidden>
           {emoji}
         </span>
         <span className="flex-1 truncate" style={{ color: "var(--color-text-1)" }}>
@@ -567,30 +560,21 @@ function SoundboardRow({
         </span>
         {playing && (
           <span
-            className="text-[10px]"
+            className="text-2xs"
             style={{ color: "var(--color-accent-green)" }}
           >
             playing…
           </span>
         )}
         {hotkey !== undefined && (
-          <kbd
-            className="rounded px-1 py-0.5 text-[9.5px] tabular-nums"
-            style={{
-              background: "var(--color-bg-2)",
-              color: "var(--color-text-3)",
-              border: "1px solid var(--color-line-soft)",
-            }}
-          >
-            {hotkey}
-          </kbd>
+          <Kbd className="tabular-nums">{hotkey}</Kbd>
         )}
       </button>
       {onDelete && (
         <button
           type="button"
           onClick={onDelete}
-          className="flex h-5 w-5 items-center justify-center rounded text-[10px] opacity-50 hover:bg-bg-2 hover:opacity-100"
+          className="flex h-5 w-5 items-center justify-center rounded text-2xs opacity-50 hover:bg-state-hover hover:opacity-100"
           title="Delete clip"
           aria-label="Delete clip"
         >
@@ -633,7 +617,7 @@ function BarBtn({
           ? "text-[var(--color-red)] hover:bg-[color-mix(in_srgb,var(--color-red)_16%,transparent)]"
           : on
             ? ""
-            : "text-text-3 hover:bg-bg-3 hover:text-text-1")
+            : "text-text-3 hover:bg-state-hover hover:text-text-1")
       }
       style={
         on && !danger
@@ -650,11 +634,3 @@ function BarBtn({
   );
 }
 
-// Pretty-print the repo root for the secondary context line. Trims to
-// the last path segment so the bar stays compact at narrow widths.
-function shortRepoName(repoRoot: string): string {
-  const trimmed = repoRoot.replace(/\/+$/, "");
-  const idx = trimmed.lastIndexOf("/");
-  if (idx === -1) return trimmed;
-  return trimmed.slice(idx + 1) || trimmed;
-}

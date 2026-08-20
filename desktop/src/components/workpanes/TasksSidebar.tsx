@@ -1,32 +1,77 @@
-// TasksSidebar — the wide left-rail companion to the TasksBoard
-// workpane. Mounts in the app's second-rail slot when Tasks is the
-// active workpane (same slot the PR Inbox uses) so it gets the full
-// breathing room that the previous in-board 220px aside denied it.
+// The Tasks rail — which slice of the work you're looking at.
 //
-// Visual language follows InboxSidebar (FilterItem rows: dot + label
-// + count) but the content matches Plane.so's secondary nav: a header
-// row, a prominent "+ New task" CTA, then sections for Your work /
-// Status / Cycles / Modules.
+// Rebuilt on places/PlaceRail, which is the right-hand Changes panel's shape:
+// collapsible groups with a count on the header, groups that hide themselves
+// when they hold nothing, the one thing a group makes revealed on hover.
 //
-// State is driven through `tasksFilterStore` (module-level shared
-// store) so the TasksBoard picks up sidebar selections without needing
-// React context or prop drilling.
+// What went, and why:
+//   • The 16px "Tasks" heading. The app rail says Tasks one column left, the
+//     workpane tab says Tasks, and you clicked one of them to get here.
+//   • The full-width "New task ⌘N" button. The board's header has a New task
+//     button 200px away; two primaries for one act is a choice you shouldn't
+//     have to make. The shortcut still works — it's the board's.
+//   • The gear beside it, which went to global Settings — not a task control.
+//   • The palette dots. "My tasks" wore violet, Active amber, Overdue rose,
+//     Workstreams violet again: five hues carrying no meaning you could look
+//     up, next to statuses that wear the real `TaskStateRing`. Rows that name
+//     an idea get that idea's glyph; rows that name a grouping get none.
+//
+// What arrived: the project picker. Everything listed here belongs to a
+// project, and the rail used to show whatever the app had open with no way to
+// say "the other one" — so choosing the project is part of using the rail.
+// "All projects" is offered because the board honours it (see TasksBoard's
+// scope handling), not as a label.
+//
+// State still flows through `tasksFilterStore` so the board picks up
+// selections without prop drilling or context.
 
-import { useCallback, useEffect, useMemo, useState } from "react";
-import { Plus, RefreshCw, Settings } from "lucide-react";
 import {
-  api,
-  type Task,
-  type TaskStatus,
-  type Cycle,
-  type Module,
-} from "../../lib/api";
+  useCallback,
+  useEffect,
+  useMemo,
+  useState,
+  type ReactNode,
+} from "react";
 import {
-  setTasksSharedSidebar,
+  AlarmClock,
+  CircleDashed,
+  ListChecks,
+  Loader,
+  Plus,
+  User,
+} from "lucide-react";
+
+import { api, type Cycle, type Module, type Task } from "../../lib/api";
+import { fetchCycles, fetchModules } from "../../lib/tasksCache";
+import {
+  setTasksSharedCrew,
   setTasksSharedCycleId,
+  setTasksSharedGoal,
   setTasksSharedModuleId,
+  setTasksSharedSidebar,
   useTasksSharedFilters,
 } from "../../lib/tasksFilterStore";
+import {
+  ALL_PROJECTS,
+  isAllProjects,
+  loadTasksForRoots,
+  rootsForScope,
+  rootsKeyOf,
+  scopeValueOf,
+  setProjectScope,
+  useKnownProjects,
+  useProjectScope,
+} from "../../lib/projectRoots";
+import {
+  PlaceRail,
+  PlaceRailGroup,
+  PlaceRailRow,
+  PlaceRailScope,
+} from "../places/PlaceRail";
+import { SprintRailGroup } from "../tasks/SprintRailGroup";
+import { WorkRailGroups } from "../tasks/WorkRailGroups";
+import { TASK_COLUMNS } from "../tasks/taskColumns";
+import { TaskStateRing } from "../tasks/taskGlyphs";
 import { Button } from "../ui/button";
 
 type Props = {
@@ -34,57 +79,46 @@ type Props = {
   /** Resolved git handle for the current user. Used for the "My tasks"
    *  bucket and `@me` resolution in the shared filter. */
   currentHandle?: string;
-  /** Optional close handler — wired the same way InboxSidebar does it,
-   *  so the user can collapse the rail back to the regular code
-   *  sidebar. */
-  onClose?: () => void;
-  /** Fired whenever the user picks a filter / cycle / module or hits New
-   *  task. The host opens/focuses the TasksBoard center pane so the
-   *  selection has a visible effect even when another tab (e.g. Standup)
-   *  is in front. Without this the sidebar mutates the filter store but
-   *  the board never surfaces. */
+  /** Fired whenever the user picks a filter / sprint / workstream. The host
+   *  opens or focuses the board so the selection has a visible effect even
+   *  when another tab is in front. Without this the rail mutates the filter
+   *  store and the board never surfaces. */
   onActivate?: () => void;
 };
 
-const STATUS_LABEL: Record<TaskStatus, string> = {
-  backlog: "Backlog",
-  in_progress: "In Progress",
-  in_review: "In Review",
-  done: "Done",
-};
-
-const STATUS_ORDER: TaskStatus[] = [
-  "backlog",
-  "in_progress",
-  "in_review",
-  "done",
-];
-
-const STATUS_DOT: Record<TaskStatus, string> = {
-  backlog: "bg-text-5",
-  in_progress: "bg-amber-400",
-  in_review: "bg-sky-400",
-  done: "bg-emerald-500",
-};
-
-export function TasksSidebar({
-  repoRoot,
-  currentHandle,
-  onClose,
-  onActivate,
-}: Props) {
+export function TasksSidebar({ repoRoot, currentHandle, onActivate }: Props) {
   const shared = useTasksSharedFilters();
+  const scope = useProjectScope();
+  const projects = useKnownProjects(repoRoot);
   const [tasks, setTasks] = useState<Task[]>([]);
   const [cycles, setCycles] = useState<Cycle[]>([]);
   const [modules, setModules] = useState<Module[]>([]);
   const [loading, setLoading] = useState(true);
 
+  // The roots this rail is counting. Exactly what the board draws — the two
+  // read the same scope, so the numbers here and the cards there are the same
+  // claim about the same set.
+  const roots = useMemo(
+    () => rootsForScope(scope, repoRoot, projects),
+    [scope, repoRoot, projects],
+  );
+  const rootsKey = rootsKeyOf(roots);
+
+  // Sprints and workstreams are per-project catalogs; under All projects there
+  // is no single one to list, so those groups stand down rather than merging
+  // eight projects' sprints into a list where two can share a name.
+  const single = roots.length === 1 ? roots[0]! : null;
+
   const refresh = useCallback(async () => {
     try {
       const [t, c, m] = await Promise.all([
-        api.tasksList(repoRoot).catch(() => [] as Task[]),
-        api.tasksCyclesList(repoRoot).catch(() => [] as Cycle[]),
-        api.tasksModulesList(repoRoot).catch(() => [] as Module[]),
+        loadTasksForRoots(roots),
+        single
+          ? fetchCycles(single).catch(() => [] as Cycle[])
+          : Promise.resolve([] as Cycle[]),
+        single
+          ? fetchModules(single).catch(() => [] as Module[])
+          : Promise.resolve([] as Module[]),
       ]);
       setTasks(t);
       setCycles(c);
@@ -92,19 +126,21 @@ export function TasksSidebar({
     } finally {
       setLoading(false);
     }
-  }, [repoRoot]);
+    // rootsKey stands in for `roots` — a new array identity every render would
+    // restart the poll below on every keystroke elsewhere in the app.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [rootsKey, single]);
 
   useEffect(() => {
     void refresh();
-    // Re-poll modestly — the board itself drives its own fetches when
-    // the user mutates tasks; this polls to pick up sibling edits from
-    // CLI / agent runs / other clients.
+    // Re-poll modestly — the board drives its own fetches when the user
+    // mutates a task; this picks up sibling edits from CLI / agent runs.
     const id = window.setInterval(() => void refresh(), 30_000);
     return () => window.clearInterval(id);
   }, [refresh]);
 
-  // Listen for the broadcast the board fires after a successful task
-  // create / patch / delete so the counts stay live without polling.
+  // The board broadcasts after a successful create / patch / delete so these
+  // counts stay live without waiting on the poll.
   useEffect(() => {
     const onMutate = () => void refresh();
     window.addEventListener("aura:tasks:mutated", onMutate);
@@ -136,8 +172,7 @@ export function TasksSidebar({
       } else if (t.status === "done") out.done += 1;
       if (
         currentHandle &&
-        (t.assignee === currentHandle ||
-          t.assignee_ids.includes(currentHandle))
+        (t.assignee === currentHandle || t.assignee_ids.includes(currentHandle))
       ) {
         out.mine += 1;
       }
@@ -149,11 +184,50 @@ export function TasksSidebar({
     return out;
   }, [tasks, currentHandle]);
 
+  // How many tasks each workstream actually holds. Derived from the tasks
+  // themselves rather than the catalog's `task_ids` mirror, so a stale mirror
+  // can't put a number on screen the board would disagree with. (The sprint
+  // rows count the same way — SprintRailGroup does its own tally off the same
+  // list.)
+  const moduleCounts = useMemo(() => {
+    const out = new Map<string, number>();
+    for (const t of tasks) {
+      if (t.module_id) out.set(t.module_id, (out.get(t.module_id) ?? 0) + 1);
+    }
+    return out;
+  }, [tasks]);
+
+  const [addingWorkstream, setAddingWorkstream] = useState(false);
+  const [workstreamName, setWorkstreamName] = useState("");
+  const [workstreamErr, setWorkstreamErr] = useState<string | null>(null);
+
+  async function createWorkstream() {
+    const name = workstreamName.trim();
+    if (!name || !single) return;
+    // Same slug shape the label catalog and the state catalog use, so ids stay
+    // readable on disk and in a task's `module_id`.
+    const id =
+      name
+        .toLowerCase()
+        .replace(/[^a-z0-9]+/g, "-")
+        .replace(/^-+|-+$/g, "") || `workstream-${modules.length + 1}`;
+    setWorkstreamErr(null);
+    try {
+      await api.tasksModulesUpsert(single, { id, name, status: "planned" });
+      setWorkstreamName("");
+      setAddingWorkstream(false);
+      await refresh();
+    } catch (e) {
+      setWorkstreamErr(String(e));
+    }
+  }
+
   const f = shared.sidebar;
   const activeBucket = ((): string => {
     if (!f.status && !f.assignee) return "all";
     if (f.assignee?.includes("@me") && !f.status) return "mine";
     if (f.assignee?.includes("@unassigned") && !f.status) return "unassigned";
+    if (f.overdue) return "overdue";
     if (
       f.status?.length === 2 &&
       f.status.includes("in_progress") &&
@@ -169,262 +243,211 @@ export function TasksSidebar({
     setTasksSharedSidebar({ ...next });
   }
 
-  function fireNewTask() {
-    // Same channel the TasksBoard's New Task button listens on. Lets
-    // the sidebar's CTA pop the modal without needing direct access
-    // to the board's component instance.
-    onActivate?.();
-    window.dispatchEvent(new CustomEvent("aura:tasks:new"));
-  }
-
   return (
-    <aside className="h-full w-full flex flex-col">
-      {/* Header — 6px gutter so the New-task CTA's left edge lines up with
-          the row pills below, and the title (px-2 inside) lands at the
-          shared 14px content inset. */}
-      <div className="px-1.5 pt-2.5 pb-3 border-b-[0.5px] border-line-soft">
-        <div className="flex items-center gap-1 px-2">
-          <h3 className="flex-1 text-text-1 text-[12.5px] font-semibold tracking-tight">
-            Tasks
-          </h3>
-          <Button
-            type="button"
-            variant="ghost"
-            size="icon-sm"
-            onClick={() => void refresh()}
-            title="Refresh"
-            aria-label="Refresh"
-            className="text-text-4 hover:text-text-1"
-            disabled={loading}
-          >
-            <RefreshCw
-              className={`w-3.5 h-3.5 ${loading ? "animate-spin" : ""}`}
-              strokeWidth={1.5}
-              aria-hidden
-            />
-          </Button>
-          {onClose && (
+    <PlaceRail
+      scope={
+        <PlaceRailScope
+          value={scopeValueOf(scope, repoRoot, projects)}
+          onChange={(next) => {
+            // Picking a project resets every narrowing the rail holds — the
+            // sprint, the workstream, the goal, the crew. Each of those ids
+            // belongs to the project you just left, and carrying one across
+            // would filter the new board down to nothing with a row lit in
+            // the rail explaining why.
+            setTasksSharedCycleId(null);
+            setTasksSharedModuleId(null);
+            setTasksSharedGoal(null);
+            setTasksSharedCrew(null);
+            // Picking the project the app already has open means "no explicit
+            // scope" — compared against the FOLDED root, because that is the
+            // one the picker offered. Comparing against the raw checkout let a
+            // worktree store a scope pointing at its own project and then read
+            // as a different choice than it was.
+            setProjectScope(
+              next === scopeValueOf("", repoRoot, projects) ? "" : next,
+            );
+          }}
+          projects={projects}
+          all
+          disabled={loading && projects.length === 0}
+        />
+      }
+    >
+      <PlaceRailGroup title="Your work" count={counts.all}>
+        <PlaceRailRow
+          label="All tasks"
+          count={counts.all}
+          glyph={<ListChecks size={13} className="shrink-0 text-text-4" />}
+          active={activeBucket === "all"}
+          onClick={() => bucket({})}
+        />
+        {currentHandle && (
+          <PlaceRailRow
+            label="My tasks"
+            count={counts.mine}
+            glyph={<User size={13} className="shrink-0 text-text-4" />}
+            active={activeBucket === "mine"}
+            onClick={() => bucket({ assignee: ["@me"] })}
+          />
+        )}
+        {/* "Assigned to me" used to sit here: same count as "My tasks", same
+            onClick, and an `active` test against a bucket id the resolver
+            never returns — so clicking it lit the row above instead. */}
+        <PlaceRailRow
+          label="Unassigned"
+          count={counts.unassigned}
+          glyph={<CircleDashed size={13} className="shrink-0 text-text-4" />}
+          active={activeBucket === "unassigned"}
+          onClick={() => bucket({ assignee: ["@unassigned"] })}
+        />
+        <PlaceRailRow
+          label="Active"
+          count={counts.active}
+          glyph={<Loader size={13} className="shrink-0 text-text-4" />}
+          active={activeBucket === "active"}
+          onClick={() => bucket({ status: ["in_progress", "in_review"] })}
+        />
+        <PlaceRailRow
+          label="Overdue"
+          count={counts.overdue}
+          glyph={<AlarmClock size={13} className="shrink-0 text-text-4" />}
+          // Real now. This row used to route to Active and hardcode
+          // active={false}: you clicked "Overdue 3" and got the 51 in-progress
+          // tasks, with nothing selected to tell you where you'd landed.
+          // `overdue` is its own filter dimension because it needs a
+          // due_date < today predicate no slug list can express.
+          active={activeBucket === "overdue"}
+          onClick={() => bucket({ overdue: true })}
+        />
+      </PlaceRailGroup>
+
+      {/* The four statuses come from `TASK_COLUMNS` — the same list, in the
+          same order, with the same labels the board's lanes and the list's
+          groups use — and each wears the shared `TaskStateRing`. A status is
+          one idea; it must not be drawn one way in the rail and another on
+          the board. */}
+      <PlaceRailGroup title="Status" count={counts.all}>
+        {TASK_COLUMNS.map((col) => (
+          <PlaceRailRow
+            key={col.id}
+            label={col.label}
+            count={counts[col.id]}
+            glyph={<TaskStateRing statusId={col.id} />}
+            active={activeBucket === col.id}
+            onClick={() => bucket({ status: [col.id] })}
+          />
+        ))}
+      </PlaceRailGroup>
+
+      {/* Sprints. The list, and the two acts on a sprint that used to live on
+          the deleted Sprint lens — see tasks/SprintRailGroup. */}
+      <SprintRailGroup
+        repoRoot={single}
+        cycles={cycles}
+        tasks={tasks}
+        selectedId={shared.cycleId}
+        onSelect={(id) => {
+          onActivate?.();
+          setTasksSharedCycleId(id);
+        }}
+        onChanged={refresh}
+      />
+
+      {/* Workstreams — "Modules" in storage, which in a version-control app
+          reads as a code module. This is a named chunk of work that outlives
+          any one sprint, so it gets the word for that.
+
+          The `+` is the only way to make one anywhere in the product: the
+          store, the Tauri command and the task-detail picker were all built
+          and shipped, and nothing ever called the writer, so this group sat
+          on "No modules yet" forever with no door out of it. */}
+      <PlaceRailGroup
+        title="Workstreams"
+        count={modules.length}
+        empty={
+          single
+            ? "No workstreams yet. Group work that spans sprints."
+            : "Workstreams belong to one project. Pick a project to see them."
+        }
+        actions={
+          single ? (
             <Button
               type="button"
               variant="ghost"
               size="icon-sm"
-              onClick={onClose}
-              title="Close"
-              aria-label="Close"
+              onClick={() => setAddingWorkstream((v) => !v)}
+              title="New workstream"
+              aria-label="New workstream"
               className="text-text-4 hover:text-text-1"
             >
-              ✕
+              <Plus className="h-3.5 w-3.5" strokeWidth={1.5} aria-hidden />
             </Button>
-          )}
-        </div>
-        <div className="mt-2.5 flex items-center gap-1.5">
-          <Button
-            variant="accentSoft"
-            size="default"
-            onClick={fireNewTask}
-            className="flex-1 justify-start"
-          >
-            <Plus strokeWidth={2} aria-hidden />
-            <span className="flex-1 text-left">New task</span>
-            <span className="text-[10.5px] font-mono opacity-70">⌘N</span>
-          </Button>
-          <Button
-            variant="outline"
-            size="icon"
-            onClick={() => window.dispatchEvent(new CustomEvent("aura:open-settings"))}
-            title="Task settings"
-            aria-label="Task settings"
-          >
-            <Settings strokeWidth={1.6} aria-hidden />
-          </Button>
-        </div>
-      </div>
-
-      {/* Scroll body — 6px gutter so section headers + row content sit at
-          14px and every active pill insets from the rail edge (no full-bleed
-          highlight). */}
-      <div className="flex-1 overflow-y-auto px-1.5 pb-4">
-        {/* Your work */}
-        <Section title="Your work">
-          <FilterItem
-            label="All tasks"
-            count={counts.all}
-            dot={null}
-            active={activeBucket === "all"}
-            onClick={() => bucket({})}
-          />
-          {currentHandle && (
-            <FilterItem
-              label="My tasks"
-              count={counts.mine}
-              dot="bg-accent-violet"
-              active={activeBucket === "mine"}
-              onClick={() => bucket({ assignee: ["@me"] })}
-            />
-          )}
-          <FilterItem
-            label="Assigned to me"
-            count={counts.mine}
-            dot="bg-sky-400"
-            active={activeBucket === "mine-explicit"}
-            // Same predicate as "My tasks" for now — the board treats
-            // "@me" as the canonical self-bucket. Kept here as a Plane-
-            // parity surface; future split (own vs delegated) lands as
-            // a separate bucket id.
-            onClick={() => bucket({ assignee: ["@me"] })}
-          />
-          <FilterItem
-            label="Unassigned"
-            count={counts.unassigned}
-            dot="bg-text-4"
-            active={activeBucket === "unassigned"}
-            onClick={() => bucket({ assignee: ["@unassigned"] })}
-          />
-          <FilterItem
-            label="Active"
-            count={counts.active}
-            dot="bg-amber-400"
-            active={activeBucket === "active"}
-            onClick={() => bucket({ status: ["in_progress", "in_review"] })}
-          />
-          <FilterItem
-            label="Overdue"
-            count={counts.overdue}
-            dot="bg-rose-400"
-            active={false}
+          ) : null
+        }
+      >
+        {modules.map((m) => (
+          <PlaceRailRow
+            key={m.id}
+            label={m.name}
+            count={moduleCounts.get(m.id) ?? 0}
+            glyph={
+              <span
+                className="h-1.5 w-1.5 shrink-0 rounded-full bg-text-5"
+                aria-hidden
+              />
+            }
+            active={shared.moduleId === m.id}
             onClick={() => {
-              // Overdue isn't expressible as a single TaskViewFilters
-              // slice (it needs a due_date < today predicate). We
-              // store it in `q` as a marker the board can intercept —
-              // for now, route to Active and let the user sort by due.
-              bucket({ status: ["in_progress", "in_review"] });
+              onActivate?.();
+              setTasksSharedModuleId(shared.moduleId === m.id ? null : m.id);
             }}
           />
-        </Section>
-
-        {/* Status */}
-        <Section title="Status">
-          {STATUS_ORDER.map((s) => (
-            <FilterItem
-              key={s}
-              label={STATUS_LABEL[s]}
-              count={counts[s]}
-              dot={STATUS_DOT[s]}
-              active={activeBucket === s}
-              onClick={() => bucket({ status: [s] })}
-            />
-          ))}
-        </Section>
-
-        {/* Cycles */}
-        <Section
-          title="Cycles"
-          empty={cycles.length === 0 ? "No cycles yet" : null}
-        >
-          {cycles.map((c) => (
-            <FilterItem
-              key={c.id}
-              label={c.name}
-              count={0}
-              dot={c.status === "active" ? "bg-amber-400" : "bg-text-5"}
-              active={shared.cycleId === c.id}
-              onClick={() => {
-                onActivate?.();
-                setTasksSharedCycleId(shared.cycleId === c.id ? null : c.id);
+        ))}
+        {addingWorkstream && (
+          <div className="px-2 pb-0.5 pt-1">
+            <input
+              autoFocus
+              value={workstreamName}
+              onChange={(e) => setWorkstreamName(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") void createWorkstream();
+                if (e.key === "Escape") {
+                  setAddingWorkstream(false);
+                  setWorkstreamName("");
+                  setWorkstreamErr(null);
+                }
               }}
-            />
-          ))}
-        </Section>
-
-        {/* Modules */}
-        <Section
-          title="Modules"
-          empty={modules.length === 0 ? "No modules yet" : null}
-        >
-          {modules.map((m) => (
-            <FilterItem
-              key={m.id}
-              label={m.name}
-              count={0}
-              dot="bg-violet-400"
-              active={shared.moduleId === m.id}
-              onClick={() => {
-                onActivate?.();
-                setTasksSharedModuleId(shared.moduleId === m.id ? null : m.id);
+              onBlur={() => {
+                if (!workstreamName.trim()) setAddingWorkstream(false);
               }}
+              placeholder="Name it, then press Enter"
+              aria-label="New workstream name"
+              className="w-full rounded-[4px] border-[0.5px] border-line-soft bg-bg-0 px-2 py-1 text-xs text-text-1 placeholder:text-text-5 focus:border-accent focus:outline-none"
             />
-          ))}
-        </Section>
-      </div>
-    </aside>
-  );
-}
-
-function Section({
-  title,
-  empty,
-  children,
-}: {
-  title: string;
-  empty?: string | null;
-  children?: React.ReactNode;
-}) {
-  return (
-    <div className="pt-1">
-      {/* Shared ADE section header (matches Trace) so every section in the
-          sidebar reads identically — same size, color, padding. */}
-      <div className="ade-sec-h">{title}</div>
-      <div className="flex flex-col gap-px">
-        {children}
-        {empty && (
-          <div className="px-2 py-1 text-[11px] text-text-5 italic">
-            {empty}
+            {workstreamErr && (
+              <div className="pt-1 text-2xs text-red">{workstreamErr}</div>
+            )}
           </div>
         )}
-      </div>
-    </div>
+      </PlaceRailGroup>
+
+      {/* Goals, crews and past runs — the loop half of this place. They used
+          to be a separate 340px column that only two of the four lenses stood
+          up, so switching lens swapped your navigation for a different one
+          holding different ideas about what "the work" is. It's one board: a
+          crew node carries the id of the card it was projected from, so a goal
+          slices the same tasks a sprint does, and picking one here narrows
+          every lens. See tasks/WorkRailGroups. */}
+      {/* No `onActivate`: the groups above narrow only what the board draws,
+          so picking one has to bring the board forward. A goal or a crew
+          narrows EVERY lens, so there is nothing to bring forward — you stay
+          where you are and what you're reading gets smaller. */}
+      <WorkRailGroups repoRoot={single} />
+    </PlaceRail>
   );
 }
 
-function FilterItem({
-  label,
-  count,
-  dot,
-  active,
-  onClick,
-}: {
-  label: string;
-  count: number;
-  dot: string | null;
-  active: boolean;
-  onClick: () => void;
-}) {
-  return (
-    <button
-      type="button"
-      onClick={onClick}
-      // Shared ADE row (matches Trace tools) — one padding/hover/active spec
-      // for every clickable sidebar row across sections.
-      className={`group ade-row${active ? " active" : ""}`}
-    >
-      {dot !== null && (
-        <span
-          className={`w-1.5 h-1.5 rounded-full flex-shrink-0 ${dot}`}
-          aria-hidden
-        />
-      )}
-      <span className="nm">{label}</span>
-      {count > 0 && (
-        <span
-          className={`inline-flex items-center justify-center min-w-[18px] h-[16px] px-1 rounded-[3px] text-[10px] tabular-nums transition-colors ${
-            active
-              ? "bg-bg-3 text-text-2"
-              : "bg-bg-0 text-text-4 group-hover:bg-bg-3"
-          }`}
-        >
-          {count}
-        </span>
-      )}
-    </button>
-  );
-}
+/** Re-exported so the board can say what scope it is in without importing the
+ *  store twice over. */
+export { ALL_PROJECTS, isAllProjects };
+export type { ReactNode };

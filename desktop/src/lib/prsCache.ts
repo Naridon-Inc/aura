@@ -23,6 +23,7 @@
 // spinner on every launch.
 
 import { api, type PrSummary } from "./api";
+import { setCache } from "./localStore";
 
 const STALE_MS = 30_000; // 30s: served fresh without refetch
 const EXPIRY_MS = 10 * 60_000; // 10m: beyond this, refetch blocking
@@ -69,7 +70,7 @@ function loadPersisted(repoRoot: string): Entry | null {
 
 function savePersisted(repoRoot: string, entry: Entry): void {
   try {
-    localStorage.setItem(
+    setCache(
       lsKey(repoRoot),
       JSON.stringify({ data: entry.data, fetchedAt: entry.fetchedAt }),
     );
@@ -208,6 +209,32 @@ export function subscribePrList(
     s.delete(cb);
     if (s.size === 0) subs.delete(repoRoot);
   };
+}
+
+/** The pull request a branch is currently *about*, picked out of the cached
+ *  list. Prefers the open one, then the most recently updated.
+ *
+ *  Both the review header and the Checks panel used to write this as a bare
+ *  `prs.find((p) => p.head_ref === branch)`. The fetch behind this cache asks
+ *  `gh` for `--state all`, so a branch carrying a superseded closed PR *and* a
+ *  live open one resolved to whichever GitHub happened to return first: the
+ *  Checks tab could open on a closed PR's title and description, offer to
+ *  update it, and report "PR closed without merging" while the real, open pull
+ *  request for that same branch sat in the list right below. */
+export function pickBranchPr(
+  prs: PrSummary[],
+  branch: string | null,
+): PrSummary | null {
+  if (!branch) return null;
+  const mine = prs.filter((p) => p.head_ref === branch);
+  const open = mine.find((p) => p.state.toLowerCase() === "open");
+  if (open) return open;
+  // No open PR on this branch — show the newest of what's left rather than the
+  // arbitrary first, so a re-opened-then-superseded branch reads in real order.
+  return (
+    mine.sort((a, b) => Date.parse(b.updated_at) - Date.parse(a.updated_at))[0] ??
+    null
+  );
 }
 
 /** Patch one PR in the cached list (for in-place updates after a label

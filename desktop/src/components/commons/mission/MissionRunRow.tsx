@@ -1,25 +1,25 @@
-// MissionRunRow — the single Activity/Board row, modelled on the Warp Oz
-// "Activity" list: [stage glyph] [muted handle] [title] … [harness] [status
-// chip]. One row component is reused by the Activity list (full width) and the
-// Board cards (compact), so a run looks the same wherever you meet it. Selecting
-// a row opens its detail/session panel.
+// MissionRunRow — one run as a row in Mission Control's list layout.
 //
-// Audience: non-engineers. The right-hand chip is always plain — "12m" while an
-// agent works, "Proven · 3/3 checks" when it lands, "Needs review", "Couldn't
-// finish" — never a raw verdict enum or a lease id.
+// Rendered through the app's shared list primitive (`BoardListRow`), so a run
+// in the list is built from exactly the parts a task in the Tasks list is built
+// from: leading identity (state glyph + mono handle), the title as the flexible
+// middle, then right-aligned property chips. A run and a task are the same
+// *kind* of object to a reader, and a second row anatomy would say otherwise.
+//
+// The stage glyph comes from `STAGE_GLYPH_GROUP` — the same map the board's
+// column headers read — so a run in the "Building" group and a card in the
+// "Building" lane wear the identical shape.
+//
+// Audience: non-engineers. The trailing chip is always plain — "12m" while an
+// agent works, "Proven · 3/3 checks" when it lands, "Needs review" — never a
+// raw verdict enum or a lease id. And it is silent whenever the group header
+// above the row has already said the same thing.
 
 import type { JSX, ReactNode } from "react";
-import {
-  CircleDashed,
-  Compass,
-  Code2,
-  GitPullRequestArrow,
-  CheckCircle2,
-  XCircle,
-  GitCommitHorizontal,
-} from "lucide-react";
+import { GitCommitHorizontal } from "lucide-react";
 
 import type { MissionRun } from "../../../lib/api";
+import { BoardListRow, StateGlyph } from "../../board";
 import { StatusChip } from "../../ui/statusChip";
 import { AgentBit } from "../crew/crewShared";
 import {
@@ -31,29 +31,16 @@ import {
   shortCommit,
   waitingOnLabel,
   STAGE_TONE,
-  type MissionStageId,
+  STAGE_GLYPH_GROUP,
 } from "./missionData";
-
-/** The lucide glyph that fronts each stage — matches the Oz Activity rows
- *  (dotted circle for triage, compass for planning, code for building, a
- *  pull-request mark for reviewing). */
-export const STAGE_GLYPH: Record<
-  MissionStageId,
-  (p: { size: number; color: string }) => JSX.Element
-> = {
-  triage: ({ size, color }) => <CircleDashed size={size} color={color} />,
-  planning: ({ size, color }) => <Compass size={size} color={color} />,
-  building: ({ size, color }) => <Code2 size={size} color={color} />,
-  reviewing: ({ size, color }) => (
-    <GitPullRequestArrow size={size} color={color} />
-  ),
-  done: ({ size, color }) => <CheckCircle2 size={size} color={color} />,
-  failed: ({ size, color }) => <XCircle size={size} color={color} />,
-};
 
 /** The trailing status chip for a run — one plain pill that says what matters
  *  for the stage it's in. Pure: it only reads the run + `now`. */
-export function runChip(run: MissionRun, now: number): ReactNode {
+export function runChip(
+  run: MissionRun,
+  now: number,
+  showProof: boolean,
+): ReactNode | null {
   const stage = deriveStage(run);
   if (stage === "building") {
     const e = elapsedLabel(run.startedAtMs, now);
@@ -63,10 +50,14 @@ export function runChip(run: MissionRun, now: number): ReactNode {
       </StatusChip>
     );
   }
-  if (stage === "failed") {
+  if (stage === "needsYou") {
+    // Amber, not the neutral the other queued rows wear: this is the one row
+    // in the list that will still be sitting here tomorrow if it's ignored.
+    // `waitingOn` says which kind of answer it wants.
+    const w = waitingOnLabel(run.waitingOn);
     return (
-      <StatusChip tone="red" dense>
-        Couldn't finish
+      <StatusChip tone="amber" dense>
+        {w || "waiting on you"}
       </StatusChip>
     );
   }
@@ -85,6 +76,10 @@ export function runChip(run: MissionRun, now: number): ReactNode {
     );
   }
   if (stage === "done") {
+    // "Not checked" on every finished row, when not one of them was checked, is
+    // the group header's sentence copied down the list. The list decides — see
+    // `proofWorthShowing`; the header carries that case via `stageHint`.
+    if (!showProof) return null;
     const p = proofPill(run.proof);
     return (
       <StatusChip tone={p.tone} dense dot={p.tone === "green"}>
@@ -92,115 +87,111 @@ export function runChip(run: MissionRun, now: number): ReactNode {
       </StatusChip>
     );
   }
-  // triage / planning — a calm muted hint, never a colored alarm
+  // Ready / Waiting / Paused / Couldn't finish — say only what the group header
+  // above doesn't. A blocked row names what it is waiting for, which varies; the
+  // rest have nothing to add and stay silent. This used to fall back to
+  // "Queued", printing it on all twenty-six rows of the Ready group at once —
+  // the same line the group header had already said, in the same eyeful. (The
+  // board card carried the identical fallback and lost it in 0259e4c68; the
+  // list kept it.)
   const w = waitingOnLabel(run.waitingOn);
+  if (!w || stage !== "planning") return null;
   return (
     <StatusChip tone="neutral" dense>
-      {w || "Queued"}
+      {w}
     </StatusChip>
   );
 }
 
-/** A tiny secondary line under the title for finished runs — the commit + how
- *  long ago — so the audit trail reads at a glance without opening the run. */
-function subline(run: MissionRun, now: number): ReactNode {
+/** The quiet audit bits a finished run carries: its commit and how long ago it
+ *  landed. Rendered as chips rather than a wrapped second line — the list
+ *  layout's whole job is density, and a row that wraps destroys it. Empty for a
+ *  run that hasn't finished, because there is nothing honest to show yet. */
+function auditChips(run: MissionRun, now: number): ReactNode[] {
   const stage = deriveStage(run);
   if (stage !== "done" && stage !== "reviewing" && stage !== "failed") {
-    return null;
+    return [];
   }
+  const out: ReactNode[] = [];
   const sha = shortCommit(run.commit);
-  const ago = endedAgoLabel(run.endedAtMs, now);
-  const bits: ReactNode[] = [];
   if (sha) {
-    bits.push(
+    out.push(
       <span
         key="sha"
-        className="inline-flex items-center gap-1 font-mono text-[10.5px] text-text-5"
+        className="inline-flex items-center gap-1 font-mono text-xs text-text-5"
+        title={run.commit ?? undefined}
       >
-        <GitCommitHorizontal size={11} />
+        <GitCommitHorizontal className="h-3 w-3" strokeWidth={1.5} aria-hidden />
         {sha}
       </span>,
     );
   }
+  const ago = endedAgoLabel(run.endedAtMs, now);
   if (ago) {
-    bits.push(
-      <span key="ago" className="text-[10.5px] text-text-5">
+    out.push(
+      <span key="ago" className="text-xs text-text-5">
         {ago}
       </span>,
     );
   }
-  if (bits.length === 0) return null;
-  return <div className="mt-0.5 flex items-center gap-2">{bits}</div>;
+  return out;
 }
 
 export function MissionRunRow(props: {
   run: MissionRun;
   now: number;
   selected?: boolean;
-  /** Hide the secondary commit/ago line (the Board cards stay one-line). */
+  /** Drop the commit / "2m ago" audit chips, for callers too tight to carry
+   *  them. The handle and the status chip always stay. */
   compact?: boolean;
+  /** Stamp the agent's logo on the row. The parent decides, because only it can
+   *  see whether the agents on this board differ — see `agentsWorthNaming`. */
+  showAgent?: boolean;
+  /** Say where a finished run stands on proof. The parent decides, because only
+   *  it can see whether the finished runs in this list differ on it — see
+   *  `proofWorthShowing`. */
+  showProof?: boolean;
   onSelect?: (run: MissionRun) => void;
-  /** Optional far-right action (Steer / Retry) the parent owns. */
+  /** Optional far-right action (Steer / Retry) the parent owns. Revealed on row
+   *  hover, like every other secondary affordance in the list layout. */
   trailing?: ReactNode;
 }): JSX.Element {
-  const { run, now, selected, compact, onSelect, trailing } = props;
+  const { run, now, selected, compact, showAgent, showProof, onSelect, trailing } =
+    props;
   const stage = deriveStage(run);
-  const tone = STAGE_TONE[stage];
-  const Glyph = STAGE_GLYPH[stage];
+
+  const chips: ReactNode[] = compact ? [] : auditChips(run, now);
+  if (run.agent && showAgent) {
+    chips.push(
+      <span key="agent" className="inline-flex items-center">
+        <AgentBit agentKind={run.agent} size={14} />
+      </span>,
+    );
+  }
+  const status = runChip(run, now, !!showProof);
+  if (status) chips.push(<span key="status">{status}</span>);
 
   return (
-    <div
-      role="button"
-      tabIndex={0}
-      onClick={() => onSelect?.(run)}
-      onKeyDown={(e) => {
-        if (e.key === "Enter" || e.key === " ") {
-          e.preventDefault();
-          onSelect?.(run);
-        }
-      }}
-      className={[
-        "group flex items-center gap-2.5 rounded-lg border px-2.5 py-2 text-left transition-colors",
-        "cursor-pointer outline-none focus-visible:ring-1 focus-visible:ring-accent",
-        selected
-          ? "border-transparent bg-bg-2"
-          : "border-transparent hover:bg-bg-2/60",
-      ].join(" ")}
-      style={
-        selected
-          ? { boxShadow: "inset 2px 0 0 0 var(--color-accent)" }
-          : undefined
+    <BoardListRow
+      selected={selected}
+      onSelect={() => onSelect?.(run)}
+      tooltip={run.title}
+      dataAttrs={{ "data-run-id": run.id }}
+      leading={
+        <>
+          <StateGlyph
+            group={STAGE_GLYPH_GROUP[stage]}
+            color={STAGE_TONE[stage]}
+            size={12}
+          />
+          <span className="w-20 flex-shrink-0 truncate font-mono text-xs tabular-nums text-text-3">
+            {shortRef(run)}
+          </span>
+        </>
       }
-      title={run.title}
-    >
-      <span className="grid h-5 w-5 shrink-0 place-items-center">
-        <Glyph size={15} color={tone} />
-      </span>
-
-      <span className="shrink-0 font-mono text-[10.5px] tabular-nums text-text-5">
-        {shortRef(run)}
-      </span>
-
-      <div className="min-w-0 flex-1">
-        <div className="truncate text-[12.5px] leading-tight text-text-2">
-          {run.title}
-        </div>
-        {!compact && subline(run, now)}
-      </div>
-
-      <AgentBit agentKind={run.agent} size={16} />
-
-      <span className="shrink-0">{runChip(run, now)}</span>
-
-      {trailing && (
-        <span
-          className="shrink-0"
-          onClick={(e) => e.stopPropagation()}
-          onKeyDown={(e) => e.stopPropagation()}
-        >
-          {trailing}
-        </span>
-      )}
-    </div>
+      title={run.title || "(untitled)"}
+      trailing={chips}
+      hoverActions={trailing}
+    />
   );
 }

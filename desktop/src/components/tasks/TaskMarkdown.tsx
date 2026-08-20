@@ -31,7 +31,7 @@ type Props = {
 export function TaskMarkdown({ source, members = [], className = "" }: Props) {
   return (
     <article
-      className={`task-md text-[12.5px] text-text-2 leading-relaxed break-words ${className}`}
+      className={`task-md text-base text-text-2 leading-relaxed break-words ${className}`}
     >
       <ReactMarkdown
         remarkPlugins={[remarkGfm, remarkCallouts]}
@@ -68,7 +68,7 @@ function mdComponents(members: TeamMember[]) {
     h1: ({ children, ...p }: any) => (
       <h1
         {...p}
-        className="text-[16px] font-semibold text-text-1 mt-4 mb-2 first:mt-0"
+        className="text-lg font-semibold text-text-1 mt-4 mb-2 first:mt-0"
       >
         {wrap(children)}
       </h1>
@@ -76,7 +76,7 @@ function mdComponents(members: TeamMember[]) {
     h2: ({ children, ...p }: any) => (
       <h2
         {...p}
-        className="text-[14.5px] font-semibold text-text-1 mt-4 mb-2 first:mt-0"
+        className="text-md font-semibold text-text-1 mt-4 mb-2 first:mt-0"
       >
         {wrap(children)}
       </h2>
@@ -84,7 +84,7 @@ function mdComponents(members: TeamMember[]) {
     h3: ({ children, ...p }: any) => (
       <h3
         {...p}
-        className="text-[13.5px] font-semibold text-text-1 mt-3 mb-1.5 first:mt-0"
+        className="text-md font-semibold text-text-1 mt-3 mb-1.5 first:mt-0"
       >
         {wrap(children)}
       </h3>
@@ -92,7 +92,7 @@ function mdComponents(members: TeamMember[]) {
     h4: ({ children, ...p }: any) => (
       <h4
         {...p}
-        className="text-[12.5px] font-semibold text-text-1 mt-3 mb-1 first:mt-0"
+        className="text-base font-semibold text-text-1 mt-3 mb-1 first:mt-0"
       >
         {wrap(children)}
       </h4>
@@ -100,7 +100,7 @@ function mdComponents(members: TeamMember[]) {
     h5: ({ children, ...p }: any) => (
       <h5
         {...p}
-        className="text-[12px] font-semibold text-text-1 mt-3 mb-1 first:mt-0 uppercase tracking-wide"
+        className="section-label mt-3 mb-1 first:mt-0"
       >
         {wrap(children)}
       </h5>
@@ -108,7 +108,7 @@ function mdComponents(members: TeamMember[]) {
     h6: ({ children, ...p }: any) => (
       <h6
         {...p}
-        className="text-[11.5px] font-semibold text-text-2 mt-3 mb-1 first:mt-0 uppercase tracking-wider"
+        className="section-label mt-3 mb-1 first:mt-0"
       >
         {wrap(children)}
       </h6>
@@ -169,7 +169,7 @@ function mdComponents(members: TeamMember[]) {
       if (inline ?? !className) {
         return (
           <code
-            className="bg-bg-2 text-text-1 px-1 py-px rounded text-[11.5px] font-mono"
+            className="bg-bg-2 text-text-1 px-1 py-px rounded text-sm font-mono"
             {...rest}
           >
             {children}
@@ -178,7 +178,7 @@ function mdComponents(members: TeamMember[]) {
       }
       return (
         <code
-          className={`${className ?? ""} block font-mono text-[11.5px]`}
+          className={`${className ?? ""} block font-mono text-sm`}
           {...rest}
         >
           {children}
@@ -188,14 +188,14 @@ function mdComponents(members: TeamMember[]) {
     pre: (p: any) => (
       <pre
         {...p}
-        className="bg-bg-2 border border-line-soft rounded-md my-2 p-2.5 overflow-x-auto text-[11.5px] font-mono"
+        className="bg-bg-2 border border-line-soft rounded-md my-2 p-2.5 overflow-x-auto text-sm font-mono"
       />
     ),
     table: ({ children, ...p }: any) => (
       <div className="my-2 overflow-x-auto">
         <table
           {...p}
-          className="border-collapse text-[12px] border border-line-soft rounded"
+          className="border-collapse text-sm border border-line-soft rounded"
         >
           {children}
         </table>

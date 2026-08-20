@@ -430,12 +430,10 @@ fn load_nodes(repo_root: &Path) -> (Vec<AstNode>, GraphSource, Option<u64>) {
 
     // Fallback: newest checkpoint (may be path-poor, but better than nothing).
     if let Ok(repo) = git2::Repository::open(repo_root) {
-        if let Ok(checkpoints) = CheckpointStore::get_all_checkpoints(&repo) {
-            if let Some(newest) = checkpoints.into_iter().next() {
-                if !newest.ast_nodes.is_empty() {
-                    let staleness = now_secs().saturating_sub(newest.timestamp);
-                    return (newest.ast_nodes, GraphSource::Checkpoint, Some(staleness));
-                }
+        if let Ok(Some(newest)) = CheckpointStore::latest_checkpoint(&repo) {
+            if !newest.ast_nodes.is_empty() {
+                let staleness = newest.age_secs();
+                return (newest.ast_nodes, GraphSource::Checkpoint, Some(staleness));
             }
         }
     }

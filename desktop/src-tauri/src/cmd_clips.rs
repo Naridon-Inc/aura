@@ -232,6 +232,31 @@ pub fn clips_copy_image_to_os(id: String) -> Result<(), String> {
     Ok(())
 }
 
+/// Does the OS clipboard currently hold an image?
+///
+/// Asked by the terminal's ⌘V path. A PTY carries bytes, so we cannot hand a
+/// screenshot to a coding agent through it — but Claude Code and Codex read
+/// the pasteboard themselves when they see Ctrl+V, so the correct move for an
+/// image is to forward that byte rather than paste text. We can't ask the
+/// webview: `navigator.clipboard.read()` needs a permission gesture in
+/// WKWebView and returns nothing useful for a screenshot, which is precisely
+/// why ⌘V looked like it did nothing while Ctrl+V worked.
+///
+/// False on any failure — the caller then falls back to the text paste, which
+/// is the behaviour that already worked.
+#[tauri::command]
+pub fn clipboard_has_image() -> bool {
+    let Ok(mut clipboard) = arboard::Clipboard::new() else {
+        return false;
+    };
+    // Text wins when both are present: a copied path or command is what the
+    // user meant to paste, and pasting it is non-destructive either way.
+    if clipboard.get_text().map(|t| !t.is_empty()).unwrap_or(false) {
+        return false;
+    }
+    clipboard.get_image().is_ok()
+}
+
 #[tauri::command]
 pub fn clips_remove(id: String) -> Result<(), String> {
     let dir = clips_dir()?;

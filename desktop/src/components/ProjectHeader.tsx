@@ -16,10 +16,10 @@ export function ProjectHeader({ name, path, branch }: ProjectHeaderProps) {
     <div className="flex flex-col gap-2 px-3 pt-3 pb-2 border-b border-line-soft flex-shrink-0">
       <div className="flex items-start gap-2">
         <div className="flex-1 min-w-0">
-          <div className="text-text-1 text-[13px] font-medium truncate" title={name}>
+          <div className="text-text-1 text-base font-medium truncate" title={name}>
             {name}
           </div>
-          <div className="text-text-3 text-[11px] truncate mt-0.5" title={path}>
+          <div className="text-text-3 text-xs truncate mt-0.5" title={path}>
             {prettyPath(path)}
           </div>
         </div>
@@ -34,7 +34,7 @@ export function ProjectHeader({ name, path, branch }: ProjectHeaderProps) {
 
 function BranchChip({ branch }: { branch: string }) {
   return (
-    <span className="inline-flex items-center gap-1 h-5 px-1.5 rounded bg-bg-2 text-text-2 text-[10.5px] font-medium max-w-[120px]">
+    <span className="inline-flex items-center gap-1 h-5 px-1.5 rounded bg-bg-2 text-text-2 text-xs font-medium max-w-[120px]">
       <svg width="10" height="10" viewBox="0 0 16 16" fill="none">
         <circle cx="4" cy="4" r="1.5" stroke="currentColor" strokeWidth="1.2" />
         <circle cx="12" cy="12" r="1.5" stroke="currentColor" strokeWidth="1.2" />

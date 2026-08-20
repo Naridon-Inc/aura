@@ -45,19 +45,26 @@ import {
   relativeTime,
 } from "./crewShared";
 import { agentDisplayLabel, canonicalAgentId } from "../../../lib/agentIdentity";
+import { percent } from "../../../lib/percent";
 
 type Lifecycle = "ready" | "working" | "blocked" | "paused" | "done" | "failed";
 
 /** Plain-language lifecycle → chip. Arctic-blue (blue tone) for ready, amber
  *  while an agent works, green for done, red for failed, muted for blocked or
- *  paused. */
+ *  paused.
+ *
+ *  The words are the Board's lane names, not a second set. This drawer opens
+ *  out of a lane, so a card lifted from "Ready" that lands under a chip saying
+ *  "Ready to start" — or lifted from "Waiting" under "Waiting on earlier work"
+ *  — is asking the reader to decide whether those are the same state. They
+ *  are. The lane's caption is where the longer sentence lives. */
 const LIFECYCLE_CHIP: Record<Lifecycle, ChipSpec> = {
-  ready: { tone: "blue", label: "Ready to start" },
-  working: { tone: "amber", label: "An agent is on it" },
-  blocked: { tone: "neutral", label: "Waiting on earlier work" },
-  paused: { tone: "neutral", label: "Paused — held back" },
+  ready: { tone: "blue", label: "Ready" },
+  working: { tone: "amber", label: "Building" },
+  blocked: { tone: "neutral", label: "Waiting" },
+  paused: { tone: "neutral", label: "Paused" },
   done: { tone: "green", label: "Done" },
-  failed: { tone: "red", label: "Failed" },
+  failed: { tone: "red", label: "Couldn’t finish" },
 };
 
 /** Plain-language lifecycle, derived from the node's status + whether its
@@ -221,7 +228,7 @@ export function CrewTaskDetail({
       <button
         type="button"
         onClick={onClose}
-        className="flex shrink-0 items-center gap-1.5 border-b border-line-soft px-3.5 py-2 text-left text-[11px] font-medium text-text-4 transition-colors hover:text-text-1"
+        className="flex shrink-0 items-center gap-1.5 border-b border-line-soft px-3.5 py-2 text-left text-xs font-medium text-text-4 transition-colors hover:text-text-1"
         title="Back to the worklist (Esc)"
       >
         <ArrowLeft size={13} />
@@ -230,7 +237,7 @@ export function CrewTaskDetail({
 
       {/* Header — the heading IS the task, with its state as a real chip. */}
       <div className="shrink-0 border-b border-line px-4 py-3.5">
-        <h2 className="text-[14.5px] font-semibold leading-snug text-text-1">
+        <h2 className="text-md font-semibold leading-snug text-text-1">
           {task.title}
         </h2>
         <div className="mt-2 flex flex-wrap items-center gap-1.5">
@@ -246,19 +253,19 @@ export function CrewTaskDetail({
         {/* Who & where — proper components, not a text run. */}
         <div className="space-y-3">
           <FactRow label="Agent">
-            <span className="inline-flex items-center gap-1.5 text-[12px] text-text-2">
+            <span className="inline-flex items-center gap-1.5 text-sm text-text-2">
               <AgentBit agentKind={task.agent_kind} size={16} />
               {agentLabel}
             </span>
           </FactRow>
           <FactRow label="Assignee">
             {task.assignee?.trim() ? (
-              <span className="inline-flex items-center gap-1.5 text-[12px] text-text-2">
+              <span className="inline-flex items-center gap-1.5 text-sm text-text-2">
                 <AssigneeBit name={task.assignee.trim()} size={16} />
                 {task.assignee.trim()}
               </span>
             ) : (
-              <span className="text-[12px] text-text-5">Nobody yet</span>
+              <span className="text-sm text-text-5">Nobody yet</span>
             )}
           </FactRow>
           {(place.goal ||
@@ -268,13 +275,17 @@ export function CrewTaskDetail({
             place.prd) && (
             <FactRow label="Where it sits">
               <div className="flex flex-wrap items-center gap-1.5">
+                {/* Every one of these is a place this task sits in, not a
+                    state it is in — so they share one quiet tone. They used to
+                    be violet, blue and grey side by side, three colours for
+                    one idea, and the violet was one of only two in the app. */}
                 {place.goal ? (
-                  <StatusChip tone="violet" dense className="max-w-full">
+                  <StatusChip tone="neutral" dense className="max-w-full">
                     <span className="min-w-0 truncate">Goal · {place.goal}</span>
                   </StatusChip>
                 ) : null}
                 {place.objective ? (
-                  <StatusChip tone="blue" dense className="max-w-full">
+                  <StatusChip tone="neutral" dense className="max-w-full">
                     <span className="min-w-0 truncate">{place.objective}</span>
                   </StatusChip>
                 ) : null}
@@ -298,7 +309,7 @@ export function CrewTaskDetail({
           )}
           {task.updated_at ? (
             <FactRow label="Last touched">
-              <span className="text-[12px] text-text-3">
+              <span className="text-sm text-text-3">
                 {relativeTime(task.updated_at)}
               </span>
             </FactRow>
@@ -318,7 +329,6 @@ export function CrewTaskDetail({
                 self={task}
                 flow={flow}
                 done={flowDone}
-                goal={place.goal}
                 byId={byId}
                 onOpen={onOpen}
               />
@@ -343,7 +353,7 @@ export function CrewTaskDetail({
         {/* Connections — the WHY behind the arrows on the board. */}
         {waitingOn.length > 0 || unblocks.length > 0 ? (
           <Section label="Connections">
-            <p className="mb-2.5 text-[11.5px] leading-relaxed text-text-4">
+            <p className="mb-2.5 text-sm leading-relaxed text-text-4">
               Arrows on the board show the order of work. This task can’t start
               until everything it’s <b className="text-text-3">waiting on</b> is
               done; finishing it frees the tasks it{" "}
@@ -396,22 +406,22 @@ export function CrewTaskDetail({
                 // of the old "not checked against a goal", which read as if the
                 // task had no goal at all.
                 <span
-                  className="inline-flex items-center gap-1.5 rounded-full border border-line-soft bg-bg-1/60 px-2 py-0.5 text-[11px] text-text-4"
+                  className="inline-flex items-center gap-1.5 rounded-full border border-line-soft bg-bg-1/60 px-2 py-0.5 text-xs text-text-4"
                   title="This task is part of a goal, but Aura hasn't confirmed it's met for this commit yet."
                 >
                   <CircleDashed size={11} />
                   Not confirmed yet
                 </span>
               ) : (
-                <span className="text-[11px] text-text-5">No goal set yet</span>
+                <span className="text-xs text-text-5">No goal set yet</span>
               )}
             </div>
             {best?.goalText ? (
-              <p className="mt-2 text-[11.5px] leading-relaxed text-text-3">
+              <p className="mt-2 text-sm leading-relaxed text-text-3">
                 Goal: {best.goalText}
               </p>
             ) : place.goal ? (
-              <p className="mt-2 text-[11.5px] leading-relaxed text-text-4">
+              <p className="mt-2 text-sm leading-relaxed text-text-4">
                 Goal: {place.goal}
               </p>
             ) : null}
@@ -420,14 +430,14 @@ export function CrewTaskDetail({
                 {best.files.slice(0, 8).map((f) => (
                   <li
                     key={f}
-                    className="truncate font-mono text-[10.5px] text-text-4"
+                    className="truncate font-mono text-xs text-text-4"
                     title={f}
                   >
                     {f}
                   </li>
                 ))}
                 {best.files.length > 8 ? (
-                  <li className="text-[10.5px] text-text-5">
+                  <li className="text-xs text-text-5">
                     +{best.files.length - 8} more
                   </li>
                 ) : null}
@@ -439,7 +449,7 @@ export function CrewTaskDetail({
         {/* Failed → the error. */}
         {life === "failed" && (task.error_message ?? "").trim() ? (
           <Section label="What went wrong">
-            <p className="whitespace-pre-wrap rounded-md border border-line-soft bg-bg-1/60 px-2.5 py-2 text-[11.5px] leading-relaxed text-red">
+            <p className="whitespace-pre-wrap rounded-md border border-line-soft bg-bg-1/60 px-2.5 py-2 text-sm leading-relaxed text-red">
               {task.error_message?.trim()}
             </p>
           </Section>
@@ -461,7 +471,7 @@ export function CrewTaskDetail({
                   : onSetStatus(task.id, "submitted")
               }
               className="gap-1.5"
-              title="Re-queue this task and run it again — an agent picks it up right away (or tells you what it's still waiting on)"
+              title="Re-queue this task and run it again. An agent picks it up right away (or tells you what it's still waiting on)"
             >
               <RotateCcw size={13} />
               Retry
@@ -472,7 +482,7 @@ export function CrewTaskDetail({
               size="sm"
               onClick={() => onSetStatus(task.id, "submitted")}
               className="gap-1.5"
-              title="Un-pause this task — put it back in the ready queue"
+              title="Un-pause this task. Put it back in the ready queue"
             >
               <Play size={13} />
               Resume
@@ -527,14 +537,14 @@ function StepTimeline({ task, life }: { task: LoopTask; life: Lifecycle }) {
     });
     steps.push({ label: "Working on it now", tone: "now" });
   } else if (life === "ready") {
-    steps.push({ label: "Ready — waiting for a free agent", tone: "now" });
+    steps.push({ label: "Ready. The crew picks it up next", tone: "now" });
   } else if (life === "blocked") {
     steps.push({ label: "Waiting on earlier work to finish", tone: "todo" });
   } else if (life === "paused") {
-    steps.push({ label: "Paused — held out of the queue, resumable", tone: "todo" });
+    steps.push({ label: "Paused. Held out of the queue, resumable", tone: "todo" });
   } else if (life === "failed") {
     steps.push({
-      label: "Run stopped — needs a retry",
+      label: "Run stopped. Needs a retry",
       sub: task.updated_at ? relativeTime(task.updated_at) : undefined,
       tone: "fail",
     });
@@ -562,11 +572,11 @@ function StepTimeline({ task, life }: { task: LoopTask; life: Lifecycle }) {
               {!last ? <span className="w-px flex-1 bg-line" /> : null}
             </div>
             <div className={last ? "pb-0" : "pb-2.5"}>
-              <div className="text-[12px] leading-tight text-text-2">
+              <div className="text-sm leading-tight text-text-2">
                 {s.label}
               </div>
               {s.sub ? (
-                <div className="mt-0.5 text-[10.5px] text-text-5">{s.sub}</div>
+                <div className="mt-0.5 text-xs text-text-5">{s.sub}</div>
               ) : null}
             </div>
           </li>
@@ -584,25 +594,28 @@ function FlowProgress({
   self,
   flow,
   done,
-  goal,
   byId,
   onOpen,
 }: {
   self: LoopTask;
   flow: LoopTask[];
   done: number;
-  goal: string | null;
   byId: Map<string, LoopTask>;
   onOpen: (id: string) => void;
 }) {
-  const pct = flow.length > 0 ? Math.round((done / flow.length) * 100) : 0;
+  const pct = percent(done, flow.length);
+  // No card around this. It already sits inside the Progress section, and the
+  // step checklist below draws its own box — so it was a bordered, shadowed
+  // box holding a bordered box. Its heading printed "Goal · <name>", which
+  // "Where it sits" had printed sixty pixels higher; what is left is the one
+  // thing neither of them says: how far along the flow is.
   return (
-    <div className="mt-3.5 rounded-lg border border-line-soft bg-bg-0 shadow-[var(--shadow-card)] p-2.5">
+    <div className="mt-3.5">
       <div className="flex items-center justify-between gap-2">
-        <span className="min-w-0 truncate text-[11.5px] font-medium text-text-3">
-          {goal ? `Goal · ${goal}` : "This flow"}
+        <span className="min-w-0 truncate text-sm text-text-4">
+          How far this flow has come
         </span>
-        <span className="shrink-0 text-[11px] tabular-nums text-text-4">
+        <span className="shrink-0 text-xs tabular-nums text-text-3">
           {done} of {flow.length} done
         </span>
       </div>
@@ -628,13 +641,13 @@ function FlowProgress({
                     type="button"
                     onClick={isSelf ? undefined : () => onOpen(t.id)}
                     className={`group flex w-full items-center gap-2 rounded-md px-1.5 py-1.5 text-left transition-colors ${
-                      isSelf ? "bg-accent/[0.08]" : "hover:bg-bg-1"
+                      isSelf ? "bg-accent/[0.08]" : "hover:bg-state-hover"
                     }`}
                     title={isSelf ? "This task" : `Open “${t.title}”`}
                   >
                     <StatusTick life={tl} />
                     <span
-                      className={`min-w-0 flex-1 truncate text-[12px] ${
+                      className={`min-w-0 flex-1 truncate text-sm ${
                         tl === "done"
                           ? "text-text-4 line-through decoration-text-5/40"
                           : "text-text-2 group-hover:text-text-1"
@@ -643,7 +656,7 @@ function FlowProgress({
                       {t.title}
                     </span>
                     {isSelf ? (
-                      <span className="shrink-0 text-[10px] font-medium text-accent">
+                      <span className="shrink-0 text-2xs font-medium text-accent">
                         this one
                       </span>
                     ) : (
@@ -674,7 +687,7 @@ function StatusTick({ life }: { life: Lifecycle }) {
   if (life === "working") {
     // TICK_COLOR.working is amber, which is the shared spinner's own colour —
     // so the one loader in the app covers this tick with nothing lost.
-    return <AsciiSpinner className="shrink-0 text-[12px]" />;
+    return <AsciiSpinner className="shrink-0 text-sm" />;
   }
   return (
     <span
@@ -693,7 +706,7 @@ function Section({
 }) {
   return (
     <section>
-      <div className="mb-2 text-[10.5px] font-semibold uppercase tracking-wide text-text-4">
+      <div className="mb-2 text-xs font-medium text-text-4">
         {label}
       </div>
       {children}
@@ -713,7 +726,7 @@ function FactRow({
 }) {
   return (
     <div className="flex flex-col gap-1">
-      <span className="text-[10.5px] font-medium uppercase tracking-wide text-text-5">
+      <span className="text-xs font-medium text-text-4">
         {label}
       </span>
       <div className="min-w-0">{children}</div>
@@ -740,14 +753,14 @@ function Collapsible({
       <button
         type="button"
         onClick={() => setOpen((o) => !o)}
-        className="flex w-full items-center gap-1.5 bg-bg-1/50 px-2.5 py-1.5 text-left transition-colors hover:bg-bg-1"
+        className="flex w-full items-center gap-1.5 bg-bg-1/50 px-2.5 py-1.5 text-left transition-colors hover:bg-state-hover"
       >
         <ChevronRight
           size={13}
           className={`shrink-0 text-text-5 transition-transform ${open ? "rotate-90" : ""}`}
         />
-        <span className="text-[11.5px] font-medium text-text-2">{title}</span>
-        <span className="rounded-full bg-bg-2 px-1.5 text-[10px] font-medium text-text-4">
+        <span className="text-sm font-medium text-text-2">{title}</span>
+        <span className="rounded-full bg-bg-2 px-1.5 text-2xs font-medium text-text-4">
           {count}
         </span>
       </button>
@@ -778,7 +791,7 @@ function DepList({
             <button
               type="button"
               onClick={() => onOpen(t.id)}
-              className="group w-full rounded-md px-1.5 py-1.5 text-left transition-colors hover:bg-bg-1"
+              className="group w-full rounded-md px-1.5 py-1.5 text-left transition-colors hover:bg-state-hover"
               title={`Open “${t.title}”`}
             >
               <div className="flex items-center gap-1.5">
@@ -786,7 +799,7 @@ function DepList({
                   className="h-[7px] w-[7px] shrink-0 rounded-full"
                   style={{ background: CREW_ACCENT[tl] }}
                 />
-                <span className="min-w-0 flex-1 truncate text-[12px] text-text-2 group-hover:text-text-1">
+                <span className="min-w-0 flex-1 truncate text-sm text-text-2 group-hover:text-text-1">
                   {t.title}
                 </span>
                 <ChevronRight
@@ -794,7 +807,7 @@ function DepList({
                   className="shrink-0 text-text-5 opacity-0 transition-opacity group-hover:opacity-100"
                 />
               </div>
-              <div className="mt-0.5 flex items-start gap-1 pl-[15px] text-[10.5px] leading-snug text-text-5">
+              <div className="mt-0.5 flex items-start gap-1 pl-[15px] text-xs leading-snug text-text-5">
                 <CornerDownRight size={10} className="mt-0.5 shrink-0" />
                 <span className="min-w-0">{connectionReason(self, t)}</span>
               </div>

@@ -25,7 +25,7 @@ import {
 // Shared uppercase count label above a group of checks.
 function GroupLabel({ title, count }: { title: string; count: number }) {
   return (
-    <div className="text-[10.5px] uppercase tracking-wider text-text-4 font-medium">
+    <div className="section-label">
       {title}
       <span className="ml-1.5 tabular-nums normal-case tracking-normal">{count}</span>
     </div>
@@ -50,9 +50,9 @@ export function ProofGroup({
         {checks.map((c, i) => (
           <li
             key={i}
-            className="flex items-start gap-2.5 text-[12px] px-2.5 py-1.5 rounded-md border border-line-soft bg-bg-1"
+            className="flex items-start gap-2.5 text-sm px-2.5 py-1.5 rounded-md border border-line-soft bg-bg-1"
           >
-            <span className="shrink-0 mt-px text-[11px]" style={{ color }} aria-hidden>
+            <span className="shrink-0 mt-px text-xs" style={{ color }} aria-hidden>
               {tone === "good" ? "✓" : "✗"}
             </span>
             <span className="flex-1 min-w-0 text-text-1" title={c.reason}>
@@ -91,24 +91,24 @@ export function MissingList({ outcome }: { outcome: ProveOutcome }) {
                 key={i}
                 className="flex items-center gap-2.5 rounded-md border border-line-soft bg-bg-1 px-2.5 py-1.5"
               >
-                <span className="shrink-0 text-[11px] text-red" aria-hidden>
+                <span className="shrink-0 text-xs text-red" aria-hidden>
                   ✗
                 </span>
                 <span
-                  className="flex-1 min-w-0 truncate text-[12px] text-text-1"
+                  className="flex-1 min-w-0 truncate text-sm text-text-1"
                   title={c.reason}
                 >
                   {capabilityPhrase(c)}
                 </span>
-                <span className="shrink-0 text-[10px] uppercase tracking-wide text-text-4">
+                <span className="section-label shrink-0">
                   {statusTag(c)}
                 </span>
                 <CopyFix text={finishInstruction(c, outcome.goal)} />
               </li>
             ))}
           </ul>
-          <p className="text-[11px] leading-snug text-text-4">
-            <span className="text-text-3">Why it matters — </span>
+          <p className="text-xs leading-snug text-text-4">
+            <span className="text-text-3">Why it matters. </span>
             {g.note}
           </p>
         </div>
@@ -135,7 +135,7 @@ function CopyFix({ text }: { text: string }) {
           /* clipboard blocked — the title still carries the instruction */
         }
       }}
-      className="shrink-0 text-[10.5px] font-medium transition-opacity hover:opacity-80"
+      className="shrink-0 text-xs font-medium transition-opacity hover:opacity-80"
       style={{ color: copied ? "var(--color-accent-green)" : "var(--color-blue)" }}
     >
       {copied ? "✓ copied" : "Fix →"}
@@ -163,7 +163,7 @@ function FinishTheRest({ outcome }: { outcome: ProveOutcome }) {
           /* clipboard blocked */
         }
       }}
-      className="self-start inline-flex items-center gap-1.5 rounded-md px-2.5 py-1.5 text-[11.5px] font-medium transition-colors"
+      className="self-start inline-flex items-center gap-1.5 rounded-md px-2.5 py-1.5 text-sm font-medium transition-colors"
       style={{
         background: copied
           ? "color-mix(in oklab, var(--color-accent-green) 14%, transparent)"
@@ -172,7 +172,7 @@ function FinishTheRest({ outcome }: { outcome: ProveOutcome }) {
       }}
     >
       <span aria-hidden>{copied ? "✓" : "↪"}</span>
-      {copied ? "Copied — paste it to your agent" : `Ask your agent to finish ${n === 1 ? "this" : `all ${n}`}`}
+      {copied ? "Copied. Paste it to your agent" : `Ask your agent to finish ${n === 1 ? "this" : `all ${n}`}`}
     </button>
   );
 }
@@ -185,7 +185,7 @@ export function HowYouKnow({ outcome }: { outcome: ProveOutcome }) {
       <button
         type="button"
         onClick={() => setOpen((v) => !v)}
-        className="flex items-center gap-2 text-[11px] text-text-3 hover:text-text-1 transition-colors"
+        className="flex items-center gap-2 text-xs text-text-3 hover:text-text-1 transition-colors"
       >
         <Caret open={open} />
         <span>Show how you know ({outcome.checks.length} checks)</span>
@@ -195,11 +195,11 @@ export function HowYouKnow({ outcome }: { outcome: ProveOutcome }) {
           {outcome.checks.map((c, i) => (
             <li
               key={i}
-              className={`flex items-start gap-2 px-2 py-1 rounded text-[11.5px] font-mono ${
+              className={`flex items-start gap-2 px-2 py-1 rounded text-sm font-mono ${
                 i % 2 === 0 ? "bg-bg-1/30" : ""
               }`}
             >
-              <span className={`shrink-0 mt-0.5 text-[11px] ${c.passed ? "text-green" : "text-red"}`}>
+              <span className={`shrink-0 mt-0.5 text-xs ${c.passed ? "text-green" : "text-red"}`}>
                 {c.passed ? "✓" : "✗"}
               </span>
               <span className="flex-1 min-w-0 truncate" title={c.reason}>
@@ -220,7 +220,7 @@ export function HowYouKnow({ outcome }: { outcome: ProveOutcome }) {
 // a method, not a claim. No AST jargon here; that's what HowYouKnow is for.
 function ProofHow() {
   return (
-    <p className="text-[11.5px] leading-relaxed text-text-4">
+    <p className="text-sm leading-relaxed text-text-4">
       Aura split this goal into the parts the code needs, then read the real code
       to confirm each part is there, isn&apos;t an empty placeholder, and connects
       to what it should. Each line below is one of those checks.

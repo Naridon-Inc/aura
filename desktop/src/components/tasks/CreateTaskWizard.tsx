@@ -24,6 +24,7 @@ import { ArrowRight } from "lucide-react";
 
 import { cn } from "../../lib/utils";
 import { FullscreenOverlay } from "../FullscreenOverlay";
+import { TASK_STATUS_OPTIONS } from "../../lib/taskStatus";
 import { AssigneePicker } from "../AssigneePicker";
 import { Button } from "../ui/button";
 import { Field } from "../ui/field";
@@ -75,7 +76,7 @@ type Props = {
   /** Push a partial update straight through (used by the Activity step's
    *  cards — e.g. bead mint). Same signature as the detail panel's onPatch. */
   onPatch?: (input: UpdateTaskInput) => Promise<void>;
-  /** Create a child task under the edited task (Sub-issues card). */
+  /** Create a child task under the edited task (Sub-tasks card). */
   onCreateChild?: (parentId: string, title: string) => Promise<void>;
 };
 
@@ -111,17 +112,6 @@ function buildEditSteps(showSubtasks: boolean): WizardStepMeta[] {
   ];
 }
 
-// Per-step heading text, keyed by step id so it stays correct no matter
-// which conditional steps are present.
-const STEP_HEADINGS: Record<string, string> = {
-  details: "Details",
-  assign: "Assign",
-  plan: "Plan",
-  subtasks: "Sub-tasks",
-  activity: "Activity",
-};
-const CREATE_HEADINGS = ["New task", "Assign", "Plan"];
-
 function Dot({ className }: { className?: string }) {
   return (
     <span
@@ -144,15 +134,24 @@ const PRIORITY_OPTS: SelectOption[] = [
   { value: "none", label: "None", icon: <Dot className="bg-text-5" /> },
 ];
 
-const STATUS_OPTS: SelectOption[] = [
-  { value: "backlog", label: "Backlog", icon: <Dot className="bg-text-5" /> },
-  { value: "in_progress", label: "In progress", icon: <Dot className="bg-accent" /> },
-  { value: "in_review", label: "In review", icon: <Dot className="bg-text-3" /> },
-  { value: "done", label: "Done", icon: <Dot className="bg-text-2" /> },
-];
+// One vocabulary for the whole app — see lib/taskStatus. The dots stay here:
+// they are this dropdown's own affordance, not part of what a status is
+// called.
+const STATUS_DOT: Record<string, string> = {
+  backlog: "bg-text-5",
+  in_progress: "bg-accent",
+  in_review: "bg-text-3",
+  done: "bg-text-2",
+};
+
+const STATUS_OPTS: SelectOption[] = TASK_STATUS_OPTIONS.map((s) => ({
+  value: s.id,
+  label: s.label,
+  icon: <Dot className={STATUS_DOT[s.id]} />,
+}));
 
 const AGENT_OPTS: SelectOption[] = [
-  { value: "", label: "— none —" },
+  { value: "", label: "No agent" },
   { value: "claude", label: "Claude", icon: <Dot className="bg-text-3" /> },
   { value: "gemini", label: "Gemini", icon: <Dot className="bg-text-3" /> },
   { value: "codex", label: "Codex", icon: <Dot className="bg-text-3" /> },
@@ -274,7 +273,7 @@ export function CreateTaskWizard({
   );
   const epicOpts = useMemo<SelectOption[]>(
     () => [
-      { value: "", label: "— none —" },
+      { value: "", label: "No parent epic" },
       ...epics.map((e) => ({ value: e.id, label: e.title })),
     ],
     [epics],
@@ -416,13 +415,10 @@ export function CreateTaskWizard({
         className="flex w-full flex-col items-center px-6 py-8 sm:py-10"
         onKeyDown={onBodyKeyDown}
       >
+        {/* No heading: the step strip above the body already names the step
+            you are on, and named it in the same words — "Assign" over
+            "Assign", "Plan" over "Plan". */}
         <div className="flex w-full max-w-[720px] flex-col gap-6">
-          <h1 className="text-[18px] font-medium leading-7 text-text-1">
-            {isEdit
-              ? STEP_HEADINGS[currentStepId] ?? currentStepId
-              : CREATE_HEADINGS[wizard.index]}
-          </h1>
-
           {currentStepId === "details" && (
             <div className="flex flex-col gap-5">
               <Field label="Title" htmlFor="ctw-title">
@@ -476,7 +472,7 @@ export function CreateTaskWizard({
               <Field
                 label="Assignees"
                 optional
-                description="Who owns this. Leave empty for unassigned."
+                description="Who owns this."
               >
                 <AssigneePicker
                   values={assigneeIds}
@@ -503,7 +499,7 @@ export function CreateTaskWizard({
                 label="Labels"
                 htmlFor="ctw-labels"
                 optional
-                description="Comma-separated, e.g. bug, frontend, p0."
+                description="Separate them with commas."
               >
                 <Input
                   id="ctw-labels"
@@ -540,7 +536,7 @@ export function CreateTaskWizard({
                   label="Estimate"
                   htmlFor="ctw-estimate"
                   optional
-                  hint="Hours or story points — whatever your team tracks."
+                  hint="Hours or story points. Whatever your team tracks."
                 >
                   <Input
                     id="ctw-estimate"
@@ -567,7 +563,7 @@ export function CreateTaskWizard({
                 htmlFor="ctw-epic"
                 optional
                 description={
-                  isEpic ? "Disabled — this task is itself an epic." : undefined
+                  isEpic ? "Disabled. This task is itself an epic." : undefined
                 }
               >
                 <Select
@@ -576,17 +572,17 @@ export function CreateTaskWizard({
                   onChange={setEpicId}
                   options={epicOpts}
                   disabled={isEpic}
-                  placeholder="— none —"
+                  placeholder="No parent epic"
                   aria-label="Parent epic"
                 />
               </Field>
 
               <div className="flex items-center justify-between gap-3 rounded-lg bg-bg-content p-3 border border-line-soft">
                 <div className="min-w-0">
-                  <div className="text-[13px] font-medium text-text-1">
+                  <div className="text-base font-medium text-text-1">
                     This is an epic
                   </div>
-                  <div className="mt-0.5 text-[13px] leading-[20.8px] text-text-3">
+                  <div className="mt-0.5 text-base leading-[20.8px] text-text-3">
                     Epics group child tasks and can't have a parent.
                   </div>
                 </div>

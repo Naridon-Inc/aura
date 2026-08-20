@@ -44,7 +44,7 @@ export const TOUR_STEPS: TourStep[] = [
     id: "welcome",
     eyebrow: "Get started",
     title: "This is a live sample workspace",
-    body: "Recipe Box — a real project, already set up — so you can see how Aura works before pointing it at your own code.",
+    body: "Recipe Box (a real project, already set up) so you can see how Aura works before pointing it at your own code.",
     placement: "center",
   },
   {
@@ -52,7 +52,7 @@ export const TOUR_STEPS: TourStep[] = [
     anchor: '[data-tour="workspace"]',
     eyebrow: "Workspace",
     title: "Your project, and every agent on it",
-    body: "One place for your code, your agents, and the history of every change. A terminal forgets when you close it — this doesn't. Switch or add projects here.",
+    body: "One place for your code, your agents, and the history of every change. A terminal forgets when you close it, this doesn't. Switch or add projects here.",
     placement: "bottom",
   },
   {
@@ -61,7 +61,7 @@ export const TOUR_STEPS: TourStep[] = [
     activate: true,
     eyebrow: "Build",
     title: "One chat drives your agent",
-    body: "Ask in plain English — “add a search box.” Your agent does the work and shows each step. There's a finished chat and a live one right here.",
+    body: "Ask in plain English. “add a search box.” Your agent does the work and shows each step. There's a finished chat and a live one right here.",
     placement: "right",
   },
   {
@@ -69,7 +69,7 @@ export const TOUR_STEPS: TourStep[] = [
     anchor: '[data-tour="brain"]',
     eyebrow: "Switch agents",
     title: "Same chat, any agent",
-    body: "Hand the conversation to Claude Code, Codex or Gemini — or run several at once. It's your Claude Code, just with a memory around it.",
+    body: "Hand the conversation to Claude Code, Codex or Gemini, or run several at once. It's your Claude Code, just with a memory around it.",
     placement: "top",
   },
   {
@@ -78,7 +78,7 @@ export const TOUR_STEPS: TourStep[] = [
     activate: true,
     eyebrow: "Trace",
     title: "The “why” behind every change",
-    body: "Not just what changed — why. Come back next week, or hand off to a teammate, and the project still makes sense.",
+    body: "Not just what changed. Why. Come back next week, or hand off to a teammate, and the project still makes sense.",
     placement: "right",
   },
   {

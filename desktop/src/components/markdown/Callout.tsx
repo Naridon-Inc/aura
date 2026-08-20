@@ -53,7 +53,7 @@ export function Callout({
       }}
     >
       <div
-        className="mb-1 flex items-center gap-1.5 text-[12px] font-semibold not-italic"
+        className="mb-1 flex items-center gap-1.5 text-sm font-semibold not-italic"
         style={{ color }}
       >
         <Icon size={14} strokeWidth={2.2} />

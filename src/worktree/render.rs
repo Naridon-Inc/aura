@@ -182,7 +182,12 @@ fn print_contention(rows: &[Contention]) {
         } else {
             "same checkout".yellow()
         };
-        println!("      {}  {}  {}", c.function.bold(), c.file.dimmed(), scope);
+        println!(
+            "      {}  {}  {}",
+            crate::sentinel::claim_label(&c.function, &c.file).bold(),
+            c.file.dimmed(),
+            scope
+        );
         // Two holders can share a checkout AND an agent name — the same CLI
         // run twice. Naming the session is the only way to tell them apart,
         // and it's what you need to release the stale one.
@@ -274,10 +279,10 @@ fn print_agent(a: &AgentPresence) {
     } else {
         // Name the symbols outright — "someone holds something" is the answer
         // this whole feature exists to stop giving.
-        let names: Vec<&str> = a
+        let names: Vec<String> = a
             .claims
             .iter()
-            .map(|c| c.function_name.as_str())
+            .map(|c| crate::sentinel::claim_label(&c.function_name, &c.file_path))
             .take(4)
             .collect();
         let more = a.claims.len().saturating_sub(names.len());

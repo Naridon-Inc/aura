@@ -14,15 +14,17 @@
 import { useEffect, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { api } from "../../lib/api";
+import { refreshSessions } from "../../lib/sessionsCache";
 import { openPopout } from "../../lib/popout";
+import type { TabMenuItem } from "../TabMenu";
 import type { AgentTab, WorkSplitDirection } from "../../lib/editorStore";
 import { treeLeaves, treePaneCount, useEditorStore } from "../../lib/editorStore";
 import { forgetAgentSession } from "../../lib/agentSessionStore";
 import { forgetAgentEvent } from "../../lib/agentEventStore";
 import {
   isOwnWorktreeSession,
-  ownWorktreeSessions,
   releaseResume,
+  resolveResumeTarget,
   tryClaimResume,
 } from "../../lib/agentSessionScope";
 import {
@@ -39,7 +41,8 @@ import { AgentTerminalView } from "./AgentTerminalView";
 import { AgentBlocksView } from "./AgentBlocksView";
 import { OpenAiCompatChatView } from "./OpenAiCompatChatView";
 import { NormalizedTranscript } from "./normalized/NormalizedTranscript";
-import { canNormalize } from "../../lib/agentProtocol";
+import { SharedSessionBand } from "../collab/SharedSessionBand";
+import { ShareSurfaceMount } from "../collab/share/ShareSurfaceMount";
 
 // Pane-action bridge. The agent-pane controls used to live in a header
 // bar inside this surface; they now live in the agent TAB's right-click
@@ -61,6 +64,7 @@ export type AgentPaneAction =
   | "open-story"
   | "toggle-blocks"
   | "toggle-transcript"
+  | "share"
   | "restart"
   | "stop";
 
@@ -84,15 +88,9 @@ export function dispatchAgentPaneAction(
 /** One descriptor in the agent-tab context menu. Rendered by Tabs.tsx as
  *  ContextMenuItems; produced here so the surface stays the single source
  *  of truth for which actions exist and how they fire. */
-export type AgentTabMenuItem =
-  | { kind: "separator" }
-  | {
-      kind: "item";
-      label: string;
-      onSelect: () => void;
-      disabled?: boolean;
-      tone?: "danger";
-    };
+/** The tab action list. One shape, one definition — this was a third
+ *  hand-written copy of `TabMenuItem`, identical field for field. */
+export type AgentTabMenuItem = TabMenuItem;
 
 /** Build the agent-tab right-click menu for a given tab. Mirrors the
  *  controls the old header bar carried (Memory/history, splits, detach,
@@ -114,7 +112,7 @@ export function buildAgentTabMenuItems(opts: {
   const items: AgentTabMenuItem[] = [];
   items.push({
     kind: "item",
-    label: "Memory — open history",
+    label: "Memory. Open history",
     onSelect: () => window.dispatchEvent(new Event("aura:open-history")),
   });
   items.push({ kind: "separator" });
@@ -150,6 +148,16 @@ export function buildAgentTabMenuItems(opts: {
     kind: "item",
     label: "Show / hide Blocks",
     onSelect: fire("toggle-blocks"),
+  });
+  items.push({ kind: "separator" });
+  // The only door into the session plane. It sits with the other things you do
+  // TO a session rather than in a toolbar, because sharing one is rare and
+  // deliberate — but until this line existed the whole plane was unreachable
+  // from the app, which made every surface behind it decorative.
+  items.push({
+    kind: "item",
+    label: "Share this session…",
+    onSelect: fire("share"),
   });
   items.push({ kind: "separator" });
   items.push({
@@ -206,12 +214,34 @@ function PtySurface({ tab, onClosePane }: AgentSurfaceProps) {
   // terminal keeps full width by default.
   const [sideView, setSideView] = useState<"blocks" | null>(null);
   // Main view: the live xterm (default — agent CLIs are full TUIs) or the
-  // engine-agnostic readable transcript built from the PARSED stream (clean,
-  // not raw bytes). The terminal stays mounted under the transcript so the
-  // PTY keeps streaming and answering happens there. Only offered when this
-  // agent has a wired normalizer (Claude today; more as adapters land).
-  const canChat = canNormalize(tab.agentId);
+  // readable transcript. The terminal stays mounted under the transcript so the
+  // PTY keeps streaming and answering happens there.
+  //
+  // This used to be gated on `canNormalize`, i.e. on the agent having a wired
+  // protocol adapter — which is Claude and nobody else. The effect was that
+  // every other CLI we ship (Gemini, Codex, Cursor, Kimi) had no Chat view at
+  // all: no toggle, no transcript, terminal or nothing. That gate was reasoning
+  // about the wrong thing. An adapter decides how RICH the transcript is (tool
+  // cards and result footers versus plain exchanges), not whether there is
+  // anything to show — the PTY layer frames every session into (prompt, output)
+  // block pairs with the ANSI already stripped, whatever protocol it speaks. So
+  // the Chat view is offered for any live PTY agent, and `NormalizedTranscript`
+  // picks the richest rendering that agent's stream can honestly support.
   const [mainView, setMainView] = useState<"terminal" | "chat">("terminal");
+  // The share/join/ports surface, opened from the tab menu. Held here rather
+  // than in a global because "which session" is the whole question, and this
+  // component is the only thing that knows it for this pane.
+  const [sharing, setSharing] = useState(false);
+
+  // A paused tab has no PTY and no event stream behind it, so neither view has
+  // anything to draw — and the paused pane lives INSIDE the terminal layer,
+  // which the chat view hides. Left switchable, picking Chat on a paused tab
+  // blanked the pane and took the Start button with it, so the one control
+  // that could bring the agent back was gone until you guessed to press
+  // Terminal again. Pin the view while dormant; the tab's own choice is
+  // remembered and comes back the moment it's live.
+  const paused = !!tab.dormant;
+  const view = paused ? "terminal" : mainView;
 
   useEffect(() => {
     bindChannelMeta(channel, { agentId: tab.agentId, repoRoot: tab.repoRoot });
@@ -233,6 +263,32 @@ function PtySurface({ tab, onClosePane }: AgentSurfaceProps) {
   // Gemini / Codex / Cursor have no cross-process resume protocol, so
   // we just spawn a fresh PTY in the same workspace and leave the CLI
   // to do whatever it can with its own local state.
+  // `dormant` is an assumption, not an observation. Every tab that comes back
+  // through a workspace snapshot is stamped cold, because the usual reason a
+  // snapshot exists is that the shell restarted and the children died with it.
+  // But the same snapshot rehydrates on an ordinary worktree switch, where the
+  // PTY is still very much running — so a live Claude Code session gets
+  // presented as paused, with a Start button for an agent that never stopped.
+  // Ask the process. If it answers, the assumption was wrong: clear the flag
+  // and let the normal live surface render.
+  useEffect(() => {
+    if (!tab.dormant) return;
+    let cancelled = false;
+    void (async () => {
+      try {
+        const alive = await api.agentPtyIsAlive(tab.sessionId);
+        if (!cancelled && alive) store.markAgentLive(tab.sessionId);
+      } catch {
+        // Daemon unreachable — leave the tab cold. A wrong "it's alive" would
+        // strand the user on a dead terminal with no way to restart it, which
+        // is strictly worse than one extra click on Start.
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [tab.dormant, tab.sessionId, store.markAgentLive]);
+
   useEffect(() => {
     // Cold restore: a tab rehydrated from a workspace snapshot comes back
     // dormant and must NOT auto-respawn — the user resumes it explicitly
@@ -256,6 +312,11 @@ function PtySurface({ tab, onClosePane }: AgentSurfaceProps) {
         if (cancelled || alive) return;
 
         let resumeId: string | undefined;
+        // Where the CLI actually gets spawned. Usually the tab's root, but a
+        // resumed conversation dictates it: Claude resolves `--resume` by
+        // launch cwd, so a session authored in a worktree only comes back if
+        // we relaunch inside that worktree. See lib/agentSessionScope.
+        let spawnCwd = tab.repoRoot;
         if (tab.agentId === "claude") {
           // Resume ONLY a session launched from THIS worktree. `claude_list_sessions`
           // unions sibling worktrees + the main checkout (so the manual /resume
@@ -269,30 +330,31 @@ function PtySurface({ tab, onClosePane }: AgentSurfaceProps) {
           // this tab actually appends to), then the channel pin — but a
           // candidate is honoured only if it belongs to this worktree. A
           // foreign or missing candidate → fresh, never a sibling's convo.
-          const own = await ownWorktreeSessions(tab.repoRoot);
-          if (cancelled) return;
-          const ownIds = new Set(own.map((s) => s.session_id));
           let cand: string | undefined;
           if (tab.resumeSessionId) cand = tab.resumeSessionId;
           if (!cand) {
             const pinned = readPersistedSession(channel);
             if (pinned?.session_id) cand = pinned.session_id;
           }
-          if (cand && ownIds.has(cand)) {
-            resumeId = cand;
-          } else if (!cand) {
-            // No binding/pin of our own: fall back to this worktree's newest
-            // meaningful session (skip empty single-greeting leftovers), never
-            // a sibling's.
-            const meaningful = own.find((s) => s.turn_count >= 2) ?? own[0];
-            if (meaningful?.session_id) resumeId = meaningful.session_id;
+          // No binding/pin of our own: fall back to this worktree's newest
+          // meaningful session, never a sibling's.
+          const target = await resolveResumeTarget(tab.repoRoot, cand, {
+            allowNewest: !cand,
+          });
+          if (cancelled) return;
+          if (target) {
+            resumeId = target.sessionId;
+            spawnCwd = target.cwd;
           }
           // Two tabs restoring together must not `--resume` the SAME session
           // (two PTYs, one conversation). First to claim it keeps it; a sibling
           // that lands on an in-flight id starts fresh. Released in the finally.
           if (resumeId) {
             if (tryClaimResume(tab.repoRoot, resumeId)) claimedResume = resumeId;
-            else resumeId = undefined;
+            else {
+              resumeId = undefined;
+              spawnCwd = tab.repoRoot;
+            }
           }
         } else if (tab.agentId === "gemini") {
           // Gemini's `--resume <id|index|latest>` is in the official CLI;
@@ -301,6 +363,43 @@ function PtySurface({ tab, onClosePane }: AgentSurfaceProps) {
           // provider also writes per-project session files under
           // `~/.gemini/tmp/<hash>/chats/` so the lookup is automatic.
           resumeId = "latest";
+        } else if (tab.agentId === "codex") {
+          // Codex had no branch here at all, so every restart spawned a
+          // bare `codex` REPL — the tab came back empty and the previous
+          // conversation was only reachable through the CLI's own picker.
+          // `codex resume <uuid>` re-opens it; the tab's own binding names
+          // the conversation, and failing that we ask for the newest
+          // rollout recorded *for this directory* (not `--last`, which is
+          // machine-wide and on a multi-worktree box is usually another
+          // project's session). No match → fresh, never a stranger's.
+          resumeId = tab.resumeSessionId ?? undefined;
+          if (!resumeId) {
+            resumeId = (await api.codexLatestSession(tab.repoRoot)) ?? undefined;
+            if (cancelled) return;
+          }
+        } else if (tab.agentId === "opencode") {
+          // Same rule, same reason: `opencode -s <id>` reopens a conversation,
+          // and OpenCode's session store is machine-wide, so "the newest one"
+          // on a box driving several worktrees is usually another project's.
+          // Scoped by the `directory` on the session row instead.
+          resumeId = tab.resumeSessionId ?? undefined;
+          if (!resumeId) {
+            resumeId =
+              (await api.opencodeLatestSession(tab.repoRoot)) ?? undefined;
+            if (cancelled) return;
+          }
+        } else if (tab.agentId === "pi") {
+          // `pi --session-id <id>` reopens that exact session, and unlike
+          // `--session` it neither prompts nor exits when the id is unknown —
+          // it starts a fresh session under that id, which is the only safe
+          // behaviour for a child nobody is watching. Pi keeps every session
+          // under one agent directory, so this asks for the newest one
+          // recorded FOR THIS directory rather than the newest on the box.
+          resumeId = tab.resumeSessionId ?? undefined;
+          if (!resumeId) {
+            resumeId = (await api.piLatestSession(tab.repoRoot)) ?? undefined;
+            if (cancelled) return;
+          }
         }
 
         console.log("[resume] spawning", {
@@ -309,11 +408,18 @@ function PtySurface({ tab, onClosePane }: AgentSurfaceProps) {
         });
         const handle = await api.agentPtyOpen(
           tab.agentId,
-          tab.repoRoot,
+          spawnCwd,
           80,
           24,
           resumeId,
           true,
+          undefined,
+          undefined,
+          // Back to the place this tab was already running in. Not where the
+          // window is standing: a tab whose agent lives on a machine keeps
+          // living there, and one that lives here doesn't get moved onto a
+          // box because the user happened to be looking at one.
+          tab.machineId,
         );
         if (cancelled || handle.id === tab.sessionId) return;
         // Drop the dead session's per-session caches before the id swap.
@@ -339,7 +445,11 @@ function PtySurface({ tab, onClosePane }: AgentSurfaceProps) {
         // next restart resumes THIS conversation again, not the repo's newest.
         // (replaceAgent also carries it forward; this re-asserts it against the
         // freshly-resolved id for the case where it came from the fallback.)
-        if (tab.agentId === "claude" && resumeId) {
+        // Codex binds the same way: the resolved rollout uuid is what
+        // `codex resume <uuid>` needs next time, and without the bind the
+        // tab would fall back to a directory scan that a newer sibling
+        // session could win.
+        if ((tab.agentId === "claude" || tab.agentId === "codex") && resumeId) {
           store.bindAgentResumeSession(handle.id, resumeId);
         }
       } catch (e) {
@@ -380,7 +490,7 @@ function PtySurface({ tab, onClosePane }: AgentSurfaceProps) {
       await new Promise((r) => setTimeout(r, 500));
       if (cancelled) return;
       try {
-        const list = await api.claudeListSessions(tab.repoRoot);
+        const list = await refreshSessions(tab.repoRoot);
         if (cancelled) return;
         // Follow/bind ONLY a session launched from THIS worktree. The list
         // unions sibling worktrees + the main checkout, and binding to a
@@ -444,9 +554,18 @@ function PtySurface({ tab, onClosePane }: AgentSurfaceProps) {
         // that survived a brief detach or a live in-flight turn — and re-check
         // after the await, since the watcher/live wire may have populated it
         // while we were reading.
+        //
+        // When the channel ISN'T empty we skip the replay, and the watcher below
+        // is then the only thing standing between the user and a hole in the
+        // transcript: it resumes from where this tab was last read to, which is
+        // why `tab.sessionId` goes to both calls.
         if (getChannelEvents(channel).length === 0) {
           try {
-            const history = await api.claudeLoadSession(mine.file_path);
+            const history = await api.claudeLoadSession(
+              mine.file_path,
+              undefined,
+              tab.sessionId,
+            );
             if (cancelled) return;
             if (getChannelEvents(channel).length === 0) {
               setResumedHistory(channel, history);
@@ -532,6 +651,10 @@ function PtySurface({ tab, onClosePane }: AgentSurfaceProps) {
         24,
         undefined,
         true,
+        undefined,
+        undefined,
+        // Restart means "this agent again", and this agent runs where it runs.
+        tab.machineId,
       );
       store.replaceAgent(tab.sessionId, {
         sessionId: handle.id,
@@ -574,6 +697,12 @@ function PtySurface({ tab, onClosePane }: AgentSurfaceProps) {
       const tabChannel = streamChannel(t.agentId, t.repoRoot);
       forgetAgentStream(tabChannel);
       let resumeId: string | undefined;
+      // The directory the CLI is launched in. A resumed conversation decides
+      // it — `claude --resume` resolves the id against the launch cwd, so a
+      // session the agent authored inside a worktree comes back only when we
+      // relaunch there. Starting it at the tab's root instead is what made
+      // "Start agent" open a blank REPL whose `/resume` list was empty too.
+      let spawnCwd = t.repoRoot;
       if (t.agentId === "claude") {
         // Precedence MUST match the mount-resume path (see the mount effect):
         //   1. this tab's OWN durable binding (`t.resumeSessionId`), then
@@ -600,11 +729,33 @@ function PtySurface({ tab, onClosePane }: AgentSurfaceProps) {
           if (pinned?.session_id) cand = pinned.session_id;
         }
         if (cand) {
-          const own = await ownWorktreeSessions(t.repoRoot);
-          if (own.some((s) => s.session_id === cand)) resumeId = cand;
+          const target = await resolveResumeTarget(t.repoRoot, cand);
+          if (target) {
+            resumeId = target.sessionId;
+            spawnCwd = target.cwd;
+          }
         }
       } else if (t.agentId === "gemini") {
         resumeId = "latest";
+      } else if (t.agentId === "codex") {
+        // Same rule as the mount path: this tab's own binding first, then
+        // the newest rollout Codex recorded FOR THIS directory. "Start
+        // agent" on a paused Codex tab used to fall through here with no
+        // resume id at all and open a blank REPL.
+        resumeId = t.resumeSessionId ?? undefined;
+        if (!resumeId) {
+          resumeId = (await api.codexLatestSession(t.repoRoot)) ?? undefined;
+        }
+      } else if (t.agentId === "opencode") {
+        resumeId = t.resumeSessionId ?? undefined;
+        if (!resumeId) {
+          resumeId = (await api.opencodeLatestSession(t.repoRoot)) ?? undefined;
+        }
+      } else if (t.agentId === "pi") {
+        resumeId = t.resumeSessionId ?? undefined;
+        if (!resumeId) {
+          resumeId = (await api.piLatestSession(t.repoRoot)) ?? undefined;
+        }
       }
       // No two tabs in a single "Start all" pass may resume the SAME session.
       // Tabs without their own `resumeSessionId` all fall back to the shared
@@ -616,16 +767,24 @@ function PtySurface({ tab, onClosePane }: AgentSurfaceProps) {
       // Passed only by startAllDormant — a lone single-tab respawn keeps its
       // pin-resume (no set → no dedup).
       if (resumeId && claimed) {
-        if (claimed.has(resumeId)) resumeId = undefined;
-        else claimed.add(resumeId);
+        if (claimed.has(resumeId)) {
+          resumeId = undefined;
+          spawnCwd = t.repoRoot;
+        } else claimed.add(resumeId);
       }
       const handle = await api.agentPtyOpen(
         t.agentId,
-        t.repoRoot,
+        spawnCwd,
         80,
         24,
         resumeId,
         true,
+        undefined,
+        undefined,
+        // "Start all" starts each tab where that tab lives — a workspace can
+        // hold agents on this laptop and on a box at once, and starting them
+        // together must not collapse them onto one computer.
+        t.machineId,
       );
       if (handle.id === t.sessionId) return;
       store.replaceAgent(t.sessionId, {
@@ -640,7 +799,7 @@ function PtySurface({ tab, onClosePane }: AgentSurfaceProps) {
       // Carry the durable per-tab binding onto the freshly-resolved session id
       // so the NEXT restart resumes THIS conversation again — mirrors the
       // mount-resume path's post-swap re-bind.
-      if (t.agentId === "claude" && resumeId) {
+      if ((t.agentId === "claude" || t.agentId === "codex") && resumeId) {
         store.bindAgentResumeSession(handle.id, resumeId);
       }
     } catch (e) {
@@ -679,7 +838,7 @@ function PtySurface({ tab, onClosePane }: AgentSurfaceProps) {
       sessionId: tab.sessionId,
       agentId: tab.agentId,
       label: tab.agentLabel,
-      title: `${tab.agentLabel} — ${shortRoot(tab.repoRoot)}`,
+      title: `${tab.agentLabel} · ${shortRoot(tab.repoRoot)}`,
     });
     store.closeAgent(tab.sessionId);
   }
@@ -724,7 +883,12 @@ function PtySurface({ tab, onClosePane }: AgentSurfaceProps) {
           setSideView((v) => (v === "blocks" ? null : "blocks"));
           break;
         case "toggle-transcript":
-          if (canChat) setMainView((v) => (v === "chat" ? "terminal" : "chat"));
+          // Nothing to flip to on a paused tab — see `view` above.
+          if (!tab.dormant)
+            setMainView((v) => (v === "chat" ? "terminal" : "chat"));
+          break;
+        case "share":
+          setSharing(true);
           break;
         case "restart":
           // restart() kills + re-spawns regardless of exited state, so it's
@@ -742,7 +906,7 @@ function PtySurface({ tab, onClosePane }: AgentSurfaceProps) {
     // fresh values (split membership, restarting flag, the close-pane
     // callback). splitAgent/stop/restart/detach read tab.sessionId, which
     // is in the dep list.
-  }, [tab.sessionId, inSplit, restarting, onClosePane, store.splitLayout]);
+  }, [tab.sessionId, tab.dormant, inSplit, restarting, onClosePane, store.splitLayout]);
 
   return (
     <div className="h-full w-full flex flex-col bg-bg-content">
@@ -751,6 +915,12 @@ function PtySurface({ tab, onClosePane }: AgentSurfaceProps) {
           now live in the agent TAB's right-click menu, and live status
           shows as a dot on the tab itself. The surface is terminal +
           optional Blocks drawer, nothing else. */}
+
+      {/* ...with one exception, and it earns the row: while this session is
+          shared, who else is in it and whether you may type changes what
+          this pane IS. It renders nothing when nobody is sharing, which is
+          almost always. */}
+      <SharedSessionBand agentSessionId={tab.sessionId} />
 
       {/* Terminal is the canonical surface — agent CLIs are full TUIs.
           Product context lives in the right-rail Story tab; the optional
@@ -763,10 +933,14 @@ function PtySurface({ tab, onClosePane }: AgentSurfaceProps) {
               typed the instant the user flips back. */}
           <div
             className="absolute inset-0"
-            style={{ visibility: mainView === "chat" ? "hidden" : "visible" }}
+            style={{ visibility: view === "chat" ? "hidden" : "visible" }}
           >
             <AgentTerminalView
               sessionId={tab.sessionId}
+              agentId={tab.agentId}
+              agentLabel={tab.agentLabel}
+              repoRoot={tab.repoRoot}
+              resumeSessionId={tab.resumeSessionId}
               dormant={tab.dormant}
               dormantCount={dormantTabs.length}
               onStartAll={dormantTabs.length > 1 ? startAllDormant : undefined}
@@ -778,7 +952,7 @@ function PtySurface({ tab, onClosePane }: AgentSurfaceProps) {
               onAutoRespawn={() => spawnTab(tab)}
             />
           </div>
-          {mainView === "chat" && (
+          {view === "chat" && (
             <div className="absolute inset-0">
               <NormalizedTranscript
                 channel={channel}
@@ -789,17 +963,21 @@ function PtySurface({ tab, onClosePane }: AgentSurfaceProps) {
               />
             </div>
           )}
-          {canChat && (
+          {/* Not while paused: the paused pane keeps its actions in a band at
+              the top right, and this toggle sat directly on top of "Start
+              agent" — same z-index, later in the DOM, so it won the paint and
+              covered the only button on the screen that does anything. */}
+          {!paused && (
             <div className="absolute top-2 right-2 z-10 flex items-center rounded-md overflow-hidden shadow-sm"
               style={{ border: "1px solid var(--color-line-soft)", background: "var(--color-bg-1)" }}
             >
               <ViewToggleButton
-                active={mainView === "terminal"}
+                active={view === "terminal"}
                 onClick={() => setMainView("terminal")}
                 label="Terminal"
               />
               <ViewToggleButton
-                active={mainView === "chat"}
+                active={view === "chat"}
                 onClick={() => setMainView("chat")}
                 label="Chat"
               />
@@ -815,6 +993,19 @@ function PtySurface({ tab, onClosePane }: AgentSurfaceProps) {
           </div>
         )}
       </div>
+
+      {/* Mounted only while open. The surface asks the cloud whether this
+          session is already shared the moment it appears, so keeping it
+          mounted-and-hidden would mean every agent tab in the app polling a
+          question nobody asked. */}
+      {sharing && (
+        <ShareSurfaceMount
+          sessionId={tab.sessionId}
+          repoRoot={tab.repoRoot}
+          title={`${tab.agentLabel} · ${shortRoot(tab.repoRoot)}`}
+          onClose={() => setSharing(false)}
+        />
+      )}
     </div>
   );
 }
@@ -837,7 +1028,7 @@ function ViewToggleButton({
     <button
       type="button"
       onClick={onClick}
-      className="px-2 h-6 text-[11px] font-medium transition-colors hover:text-text-1 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-accent/50"
+      className="px-2 h-6 text-xs font-medium transition-colors hover:text-text-1 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-accent/50"
       style={{
         background: active
           ? "color-mix(in srgb, var(--color-accent) 16%, transparent)"

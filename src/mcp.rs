@@ -1924,17 +1924,22 @@ impl McpServer {
                             },
                             {
                                 "name": "aura_task_create",
-                                "description": "Mint a new task on the shared Aura Tasks board (the same kanban the human sees, backed by .aura/tasks/tasks.json). The task lands on the board live with the next AURA-{n} handle. Use this to file follow-up work, break a request into trackable items, or hand yourself a TODO. Returns the full created task (including its id + AURA-{n} ref) so you can address it later with aura_task_update.",
+                                "description": "Mint a new task on the shared Aura Tasks board (the same kanban the human sees, backed by .aura/tasks/tasks.json — one directory, shared by humans, crew and every agent). The task lands on the board live with the next AURA-{n} handle. Returns the full created task (including its id + AURA-{n} ref) so you can address it later with aura_task_update.\n\nFILE A SHAPE, NOT A TITLE. A row that says only 'install pi harness' cannot be reported on: the board can say nothing about it except 'an agent is building this now'. Always pass `objective` and `steps`, and pass `depends_on` / `parent` whenever they are true. `steps` is what turns a status line into 'step 2 of 5 — wire the adapter', and it is why the human can tell a task that is nearly done from one that is stuck. If you cannot state the steps, you do not yet understand the task well enough to file it — work that out first.",
                                 "inputSchema": {
                                     "type": "object",
                                     "properties": {
                                         "title": { "type": "string", "description": "Short task title (required)." },
-                                        "description": { "type": "string", "description": "Optional longer body / acceptance criteria. Markdown ok." },
+                                        "description": { "type": "string", "description": "Longer body — context, constraints, anything the person picking this up needs and cannot infer. Markdown ok." },
+                                        "objective": { "type": "string", "description": "THE END GOAL: what is true when this is done, in one sentence, checkable by someone who wasn't here. Not a restatement of the title." },
+                                        "steps": { "type": "array", "items": { "type": "string" }, "description": "THE PLAN, in order. Each becomes a checkable line on the row and drives the status report ('step 2 of 5'). Aim for the real steps — 3 to 8 is usually right; one step means you have written the title twice." },
+                                        "depends_on": { "type": "array", "items": { "type": "string" }, "description": "THE STARTING POINT: tasks that must land before this can begin, as AURA-{n} handles or raw ids. Omit when it can start now." },
+                                        "parent": { "type": "string", "description": "The task this is a piece of (AURA-{n} or id) — makes it a SUB-TASK rather than another loose row on the pile. Use it when you break one request into several." },
                                         "status": { "type": "string", "description": "Starting column: backlog | todo | in_progress | in_review | done | cancelled. Default todo." },
                                         "priority": { "type": "string", "description": "urgent | high | medium | low | none. Default medium." },
-                                        "agent_assignee": { "type": "string", "description": "Optional AI agent to own it (claude, codex, gemini, …)." }
+                                        "agent_assignee": { "type": "string", "description": "Optional AI agent to own it (claude, codex, gemini, …)." },
+                                        "crew": { "type": "string", "description": "The crew this task belongs to (its slug, e.g. 'perf'). Gives the row a home: the board and the crew graph group it under this crew instead of the loose 'Unsorted' pile. Omit (or 'main') for the default crew. When you filed this while draining a crew, pass that crew's id." }
                                     },
-                                    "required": ["title"]
+                                    "required": ["title", "objective", "steps"]
                                 },
                                 "annotations": {
                                     "title": "Create Task",
@@ -2051,18 +2056,19 @@ impl McpServer {
                             },
                             {
                                 "name": "aura_worktree_say",
-                                "description": "Message another CHECKOUT of this repo by name — 'whoever is working in barcelona' — rather than by session id, which you rarely know. This is the coordination step when `aura_worktrees` shows contention: tell the other checkout what you are about to change before you change it. Use `main` to address the main checkout. Omit `to` to reach every agent in every checkout. Returns how many sessions can actually hear it, so 'delivered to nobody' never looks like success.",
+                                "description": "Message another agent in ANY checkout of this repo — by checkout ('whoever is working in barcelona'), by agent ('every codex'), or both ('codex@auckland') — rather than by session id, which you rarely know. This is the coordination step when `aura_worktrees` shows contention: tell the other agent what you are about to change before you change it. Use `main` to address the main checkout. Omit `to` to reach every agent in every checkout. Returns how many sessions can actually hear it, so 'delivered to nobody' never looks like success.",
                                 "inputSchema": {
                                     "type": "object",
                                     "properties": {
                                         "message": { "type": "string", "description": "What to say. Be concrete: the file/symbol and what you intend to do to it." },
-                                        "to": { "type": "string", "description": "Checkout name to address, e.g. 'barcelona', or 'main' for the main checkout. Omit to broadcast to every checkout." },
+                                        "to": { "type": "string", "description": "Checkout name ('barcelona', or 'main' for the main checkout), an agent name ('codex'), or one agent in one checkout ('codex@auckland'). Omit to broadcast to every checkout." },
+                                        "to_agent": { "type": "string", "description": "Optional: narrow to this agent kind — 'claude', 'codex', 'gemini'. Combines with `to` when `to` names a checkout." },
                                         "to_session": { "type": "string", "description": "Optional: a specific session_id, when you do know it. Takes precedence over `to`." }
                                     },
                                     "required": ["message"]
                                 },
                                 "annotations": {
-                                    "title": "Message a Checkout",
+                                    "title": "Message an Agent or Checkout",
                                     "readOnlyHint": false,
                                     "destructiveHint": false,
                                     "idempotentHint": false,
@@ -2072,11 +2078,12 @@ impl McpServer {
                             },
                             {
                                 "name": "aura_worktree_inbox",
-                                "description": "Read what other checkouts have said to this one. Each message names the checkout it came from, so you know which branch the sender is on. Marks them read. Call when a tool response reports unread sentinel messages, or before starting work in a repo with several live worktrees.",
+                                "description": "Read what other checkouts have said to this one, including anything addressed to you by agent name. Each message names the checkout it came from, so you know which branch the sender is on. Marks them read. Call when a tool response reports unread sentinel messages, or before starting work in a repo with several live worktrees.",
                                 "inputSchema": {
                                     "type": "object",
                                     "properties": {
-                                        "limit": { "type": "integer", "description": "Max messages to return (default 20)." }
+                                        "limit": { "type": "integer", "description": "Max messages to return (default 20)." },
+                                        "agent": { "type": "string", "description": "Your agent name ('claude', 'codex', 'gemini'). Pass it to collect mail addressed to you by name before your first claim lands." }
                                     }
                                 },
                                 "annotations": {
@@ -2084,6 +2091,46 @@ impl McpServer {
                                     "readOnlyHint": false,
                                     "destructiveHint": false,
                                     "idempotentHint": false,
+                                    "openWorldHint": false,
+                                    "auraCapability": "auto"
+                                }
+                            },
+                            {
+                                "name": "aura_worktree_assign",
+                                "description": "Hand a board task to an agent in another checkout — 'codex, in auckland, take AURA-42'. This is how one agent delegates real work to another across worktrees: it writes the address onto the task (so it is durable, shows up in the desktop app, and survives every session closing) AND messages the target agent so it finds out now. Name the agent, the checkout, or both. Returns how many live sessions heard it — 0 means the task is queued but nobody is running there yet, which is a normal, honest outcome, not a failure.",
+                                "inputSchema": {
+                                    "type": "object",
+                                    "properties": {
+                                        "task": { "type": "string", "description": "Task to assign: a uuid, an 'AURA-42' handle, or a bare sequence number." },
+                                        "to": { "type": "string", "description": "Agent to give it to — 'codex', 'claude', 'gemini'." },
+                                        "worktree": { "type": "string", "description": "Checkout the work is to happen in, e.g. 'auckland', or 'main' for the main checkout. Validated against the real checkout list, so a typo is refused rather than silently stranding the task." }
+                                    },
+                                    "required": ["task"]
+                                },
+                                "annotations": {
+                                    "title": "Assign a Task to an Agent",
+                                    "readOnlyHint": false,
+                                    "destructiveHint": false,
+                                    "idempotentHint": true,
+                                    "openWorldHint": false,
+                                    "auraCapability": "auto"
+                                }
+                            },
+                            {
+                                "name": "aura_worktree_mine",
+                                "description": "What has been assigned to YOU here — the board rows addressed to this checkout, for this agent or for the checkout at large, with done work filtered out. Call at session start in a worktree: another agent may have delegated work to you while you were not running, and the board is where that assignment waited.",
+                                "inputSchema": {
+                                    "type": "object",
+                                    "properties": {
+                                        "agent": { "type": "string", "description": "Answer as this agent — 'claude', 'codex', 'gemini'. Defaults to this session's own identity." },
+                                        "limit": { "type": "integer", "description": "Max tasks to return (default 20, 0 for all)." }
+                                    }
+                                },
+                                "annotations": {
+                                    "title": "My Assigned Tasks",
+                                    "readOnlyHint": true,
+                                    "destructiveHint": false,
+                                    "idempotentHint": true,
                                     "openWorldHint": false,
                                     "auraCapability": "auto"
                                 }
@@ -2261,6 +2308,8 @@ impl McpServer {
                     "aura_worktrees" => Self::tool_worktrees(args),
                     "aura_worktree_say" => Self::tool_worktree_say(args),
                     "aura_worktree_inbox" => Self::tool_worktree_inbox(args),
+                    "aura_worktree_assign" => Self::tool_worktree_assign(args),
+                    "aura_worktree_mine" => Self::tool_worktree_mine(args),
                     "aura_radar_emit" => Self::tool_radar_emit(args),
                     _ => json!({ "isError": true, "content": [{ "type": "text", "text": "Unknown tool" }] })
                 };
@@ -2547,7 +2596,7 @@ impl McpServer {
             Err(_) => return json!({ "content": [{ "type": "text", "text": "Not a git repository." }] }),
         };
 
-        if let Ok(checkpoints) = CheckpointStore::get_all_checkpoints(&repo) {
+        if let Ok(checkpoints) = CheckpointStore::latest_checkpoints(&repo, 10) {
             if !checkpoints.is_empty() {
                 // Build structured data, encode as TOON for token efficiency
                 let entries: Vec<Value> = checkpoints.iter().take(10).map(|c| {
@@ -2578,9 +2627,45 @@ impl McpServer {
             .map(str::to_string)
     }
 
+    /// A list-of-strings argument, forgiving about how a client spells it.
+    ///
+    /// The schema asks for an array, and most clients send one. Some send a
+    /// single string for a one-element list, and some send newline-separated
+    /// prose because that is how the model wrote the plan. All three mean the
+    /// same thing to the person reading the board, so all three are accepted —
+    /// the alternative is rejecting a well-formed task over JSON shape.
+    fn arg_strings(args: &Value, key: &str) -> Vec<String> {
+        let clean = |s: &str| s.trim().trim_start_matches(['-', '*', '•']).trim().to_string();
+        match args.get(key) {
+            Some(Value::Array(rows)) => rows
+                .iter()
+                .filter_map(|v| v.as_str())
+                .map(clean)
+                .filter(|s| !s.is_empty())
+                .collect(),
+            Some(Value::String(s)) => s
+                .lines()
+                .map(clean)
+                .filter(|s| !s.is_empty())
+                .collect(),
+            _ => Vec::new(),
+        }
+    }
+
     /// Standard MCP error envelope for the board/pages tools.
     fn board_err(msg: &str) -> Value {
         json!({ "isError": true, "content": [{ "type": "text", "text": msg }] })
+    }
+
+    /// Where the board lives: the repository root, so every checkout reads and
+    /// writes the SAME board.
+    ///
+    /// These tools used to pass `Path::new(".")` — the current directory —
+    /// which gave an agent in a linked worktree a private board no human and
+    /// no other agent ever opened. Adoption of any board already written that
+    /// way runs here, once, on the first access.
+    fn board_root() -> std::path::PathBuf {
+        crate::worktree::board_root::board_dir()
     }
 
     // ─── Tasks board — shared with the desktop app (.aura/tasks/tasks.json,
@@ -2594,7 +2679,7 @@ impl McpServer {
             .and_then(|v| v.as_u64())
             .map(|n| n as usize)
             .unwrap_or(50);
-        match crate::board::list_tasks(std::path::Path::new("."), status.as_deref(), limit) {
+        match crate::board::list_tasks(&Self::board_root(), status.as_deref(), limit) {
             Ok(list) => {
                 let body =
                     serde_json::to_string_pretty(&json!({ "count": list.len(), "tasks": list }))
@@ -2642,8 +2727,14 @@ impl McpServer {
             return Self::board_err("`message` is required.");
         };
         let to = Self::arg_str(&args, "to");
+        let to_agent = Self::arg_str(&args, "to_agent");
         let to_session = Self::arg_str(&args, "to_session");
-        let data = crate::worktree::api::say(&message, to.as_deref(), to_session.as_deref());
+        let data = crate::worktree::api::say(
+            &message,
+            to.as_deref(),
+            to_agent.as_deref(),
+            to_session.as_deref(),
+        );
         let body = serde_json::to_string_pretty(&data).unwrap_or_else(|_| "{}".into());
         json!({ "content": [{ "type": "text", "text": body }] })
     }
@@ -2654,7 +2745,31 @@ impl McpServer {
             .and_then(|v| v.as_u64())
             .map(|n| n as usize)
             .unwrap_or(20);
-        let data = crate::worktree::api::inbox(limit);
+        let agent = Self::arg_str(&args, "agent");
+        let data = crate::worktree::api::inbox(limit, agent.as_deref());
+        let body = serde_json::to_string_pretty(&data).unwrap_or_else(|_| "{}".into());
+        json!({ "content": [{ "type": "text", "text": body }] })
+    }
+
+    fn tool_worktree_assign(args: Value) -> Value {
+        let Some(task) = Self::arg_str(&args, "task") else {
+            return Self::board_err("`task` is required — a uuid, `AURA-42`, or a bare number.");
+        };
+        let to = Self::arg_str(&args, "to");
+        let worktree = Self::arg_str(&args, "worktree");
+        let data = crate::worktree::assign::assign(&task, to.as_deref(), worktree.as_deref());
+        let body = serde_json::to_string_pretty(&data).unwrap_or_else(|_| "{}".into());
+        json!({ "content": [{ "type": "text", "text": body }] })
+    }
+
+    fn tool_worktree_mine(args: Value) -> Value {
+        let agent = Self::arg_str(&args, "agent");
+        let limit = args
+            .get("limit")
+            .and_then(|v| v.as_u64())
+            .map(|n| n as usize)
+            .unwrap_or(20);
+        let data = crate::worktree::assign::mine(agent.as_deref(), limit);
         let body = serde_json::to_string_pretty(&data).unwrap_or_else(|_| "{}".into());
         json!({ "content": [{ "type": "text", "text": body }] })
     }
@@ -2683,7 +2798,7 @@ impl McpServer {
             Some(s) => s,
             None => return Self::board_err("`id` is required."),
         };
-        match crate::board::get_task(std::path::Path::new("."), &id) {
+        match crate::board::get_task(&Self::board_root(), &id) {
             Ok(Some(t)) => json!({ "content": [{ "type": "text", "text": serde_json::to_string_pretty(&t).unwrap_or_default() }] }),
             Ok(None) => Self::board_err(&format!("No task matching '{id}'.")),
             Err(e) => Self::board_err(&e),
@@ -2695,8 +2810,9 @@ impl McpServer {
             Some(s) => s,
             None => return Self::board_err("`id` is required."),
         };
-        // assignee / agent_assignee use the RAW arg (not arg_str): an explicit
-        // empty string means "unassign", which arg_str would swallow.
+        // assignee / agent_assignee / worktree use the RAW arg (not arg_str):
+        // an explicit empty string means "unassign", which arg_str would
+        // swallow.
         let unassignable = |key: &str| -> Option<Option<String>> {
             args.get(key).and_then(|v| v.as_str()).map(|v| {
                 if v.trim().is_empty() {
@@ -2711,8 +2827,9 @@ impl McpServer {
             priority: Self::arg_str(&args, "priority"),
             assignee: unassignable("assignee"),
             agent_assignee: unassignable("agent_assignee"),
+            worktree: unassignable("worktree"),
         };
-        match crate::board::update_task(std::path::Path::new("."), &id, patch) {
+        match crate::board::update_task(&Self::board_root(), &id, patch) {
             Ok(t) => json!({ "content": [{ "type": "text", "text": serde_json::to_string_pretty(&t).unwrap_or_default() }] }),
             Err(e) => Self::board_err(&e),
         }
@@ -2727,13 +2844,39 @@ impl McpServer {
         let status = Self::arg_str(&args, "status");
         let priority = Self::arg_str(&args, "priority");
         let agent_assignee = Self::arg_str(&args, "agent_assignee");
+        let worktree = Self::arg_str(&args, "worktree");
+        let objective = Self::arg_str(&args, "objective");
+        let steps = Self::arg_strings(&args, "steps");
+        let depends_on = Self::arg_strings(&args, "depends_on");
+        let parent = Self::arg_str(&args, "parent");
+        let crew = Self::arg_str(&args, "crew");
+        // The schema marks these required, but a client that ignores the
+        // schema still reaches this line, and a shapeless row is exactly what
+        // this tool exists to stop. Refusing with the reason is better than
+        // accepting one and leaving the board to explain itself later.
+        if objective.is_none() || steps.is_empty() {
+            return Self::board_err(
+                "A task needs an `objective` (what is true when it's done) and `steps` \
+                 (the plan, in order). Without them the board can only report \
+                 \"an agent is building this now\", which tells the human nothing. \
+                 If you can't state the steps yet, work the task out first, then file it.",
+            );
+        }
         match crate::board::create_task(
-            std::path::Path::new("."),
-            &title,
-            description.as_deref(),
-            status.as_deref(),
-            priority.as_deref(),
-            agent_assignee.as_deref(),
+            &Self::board_root(),
+            crate::board::NewTask {
+                title: &title,
+                description: description.as_deref(),
+                status: status.as_deref(),
+                priority: priority.as_deref(),
+                agent_assignee: agent_assignee.as_deref(),
+                worktree: worktree.as_deref(),
+                objective: objective.as_deref(),
+                steps,
+                depends_on,
+                parent: parent.as_deref(),
+                crew: crew.as_deref(),
+            },
         ) {
             Ok(t) => json!({ "content": [{ "type": "text", "text": serde_json::to_string_pretty(&t).unwrap_or_default() }] }),
             Err(e) => Self::board_err(&e),
@@ -2746,11 +2889,7 @@ impl McpServer {
     fn tool_pages_list(args: Value) -> Value {
         let scope = Self::arg_str(&args, "scope");
         let bucket = Self::arg_str(&args, "bucket");
-        match crate::board::list_notes(
-            std::path::Path::new("."),
-            scope.as_deref(),
-            bucket.as_deref(),
-        ) {
+        match crate::board::list_notes(&Self::board_root(), scope.as_deref(), bucket.as_deref()) {
             Ok(list) => {
                 let body =
                     serde_json::to_string_pretty(&json!({ "count": list.len(), "pages": list }))
@@ -2771,7 +2910,7 @@ impl McpServer {
             None => return Self::board_err("`id` is required."),
         };
         let bucket = Self::arg_str(&args, "bucket").unwrap_or_default();
-        match crate::board::read_note(std::path::Path::new("."), &scope, &bucket, &id) {
+        match crate::board::read_note(&Self::board_root(), &scope, &bucket, &id) {
             Ok(Some(n)) => json!({ "content": [{ "type": "text", "text": serde_json::to_string_pretty(&n).unwrap_or_default() }] }),
             Ok(None) => Self::board_err(&format!("No page '{id}' in scope '{scope}'.")),
             Err(e) => Self::board_err(&e),
@@ -2807,7 +2946,7 @@ impl McpServer {
             visibility: visibility.as_deref(),
             author: &author,
         };
-        match crate::board::write_note(std::path::Path::new("."), w) {
+        match crate::board::write_note(&Self::board_root(), w) {
             Ok(summary) => json!({ "content": [{ "type": "text", "text": serde_json::to_string_pretty(&summary).unwrap_or_default() }] }),
             Err(e) => Self::board_err(&e),
         }
@@ -3117,7 +3256,7 @@ impl McpServer {
         };
 
         let config = crate::config::ConfigManager::load();
-        let checkpoints = CheckpointStore::get_all_checkpoints(&repo).unwrap_or_default();
+        let checkpoints = CheckpointStore::latest_checkpoints(&repo, 1).unwrap_or_default();
 
         let mut tracked_count = 0;
         if let Some(latest) = checkpoints.first() {
@@ -3182,7 +3321,10 @@ impl McpServer {
             "dev_mode": config.dev_mode,
             "latest_checkpoint_id": checkpoints.first().map(|c| c.id.clone()),
             "logic_nodes_tracked": tracked_count,
-            "total_checkpoints": checkpoints.len(),
+            // Counted from the notes tree — `checkpoints` above is only the
+            // newest one, because reading them all to report a number costs
+            // the whole store.
+            "total_checkpoints": CheckpointStore::count(&repo),
             "session": session_data,
         });
 
@@ -3331,15 +3473,20 @@ impl McpServer {
 
         // Team sync: mothership connectivity + pending pulls + team knowledge
         {
-            let (online, ms, peers) = crate::live_sync::check_mothership();
-            if online {
+            let m = crate::live_sync::check_mothership_status();
+            if m.online {
                 let mut team = json!({
                     "mothership": "online",
-                    "latency_ms": ms,
-                    "peers": peers,
+                    "latency_ms": m.latency_ms,
+                    "peers": m.peers,
                 });
+                // Say when the latency was measured. A cached probe reported
+                // as live would read as a fresh measurement to the agent.
+                if m.age_ms > 0 {
+                    team["checked_ms_ago"] = json!(m.age_ms);
+                }
                 // Check for pending sync
-                if let Ok(sync) = crate::live_sync::fetch_sync_status() {
+                if let Ok(sync) = crate::live_sync::fetch_sync_status_cached() {
                     let pending = sync["pending_changes"].as_u64().unwrap_or(0);
                     if pending > 0 {
                         team["pending_pull"] = json!({
@@ -4358,7 +4505,8 @@ impl McpServer {
             Err(_) => return json!({ "isError": true, "content": [{ "type": "text", "text": "Not a git repository." }] }),
         };
 
-        let checkpoints = CheckpointStore::get_all_checkpoints(&repo).unwrap_or_default();
+        // Only the number is used below, and a count never needs the notes.
+        let total_checkpoints = CheckpointStore::count(&repo);
         let snapshots = SnapshotStore::get_all_snapshots();
 
         // Estimate token usage from tracked files
@@ -4384,7 +4532,7 @@ impl McpServer {
 
         let budget = json!({
             "tracked_files": tracked_files.len(),
-            "total_checkpoints": checkpoints.len(),
+            "total_checkpoints": total_checkpoints,
             "active_snapshots": snapshots.len(),
             "estimated_chars": total_chars,
             "estimated_tokens": estimated_tokens,
@@ -4452,17 +4600,15 @@ impl McpServer {
         let repo = Repository::open(".").ok();
         let mut ast_context = String::new();
         if let Some(ref repo) = repo {
-            if let Ok(checkpoints) = CheckpointStore::get_all_checkpoints(repo) {
-                if let Some(latest) = checkpoints.first() {
-                    // Filter nodes by identifier prefix matching the file
-                    let relevant_nodes: Vec<&crate::models::AstNode> = latest.ast_nodes.iter()
-                        .take(50) // limit to avoid huge output
-                        .collect();
-                    for node in &relevant_nodes {
-                        let ident = node.identifier.as_deref().unwrap_or("anon");
-                        let deps: Vec<String> = node.dependencies.iter().map(|d| d.name.clone()).collect();
-                        ast_context.push_str(&format!("  {} {} (calls: {})\n", node.kind, ident, deps.join(", ")));
-                    }
+            if let Ok(Some(latest)) = CheckpointStore::latest_checkpoint(repo) {
+                // Filter nodes by identifier prefix matching the file
+                let relevant_nodes: Vec<&crate::models::AstNode> = latest.ast_nodes.iter()
+                    .take(50) // limit to avoid huge output
+                    .collect();
+                for node in &relevant_nodes {
+                    let ident = node.identifier.as_deref().unwrap_or("anon");
+                    let deps: Vec<String> = node.dependencies.iter().map(|d| d.name.clone()).collect();
+                    ast_context.push_str(&format!("  {} {} (calls: {})\n", node.kind, ident, deps.join(", ")));
                 }
             }
         }
@@ -4580,8 +4726,13 @@ impl McpServer {
             report.push_str("  → Pruned excess snapshots\n");
         }
 
-        // 4. Git hooks
-        let hooks_ok = Path::new(".git/hooks/pre-commit").exists();
+        // 4. Git hooks. Resolved through git, not assumed: in a linked worktree
+        // `.git` is a file and `core.hooksPath` can point anywhere, so the old
+        // hard-coded path reported hooks missing in setups where they were
+        // installed and working.
+        let hooks_ok = crate::hook::HookInstaller::hooks_dir()
+            .join("pre-commit")
+            .exists();
         if hooks_ok {
             report.push_str("✓ Git hooks installed\n");
         } else {
@@ -5148,7 +5299,10 @@ impl McpServer {
     }
 
     /// Extract function names from a file using the semantic parser.
-    /// Falls back to a single file-level claim if parsing fails.
+    ///
+    /// Falls back to one whole-file claim when there is nothing to name — an
+    /// unparseable language, an extensionless file, a stylesheet. The marker is
+    /// path-free on purpose; see [`crate::sentinel::WHOLE_FILE`].
     fn extract_function_names(file_path: &str) -> Vec<String> {
         let ext = Path::new(file_path)
             .extension()
@@ -5156,17 +5310,17 @@ impl McpServer {
             .unwrap_or("");
 
         if ext.is_empty() {
-            return vec![format!("__file__{}", file_path)];
+            return vec![crate::sentinel::WHOLE_FILE.to_string()];
         }
 
         let source = match std::fs::read_to_string(file_path) {
             Ok(s) => s,
-            Err(_) => return vec![format!("__file__{}", file_path)],
+            Err(_) => return vec![crate::sentinel::WHOLE_FILE.to_string()],
         };
 
         let mut parser = match crate::parser::SemanticParser::new() {
             Ok(p) => p,
-            Err(_) => return vec![format!("__file__{}", file_path)],
+            Err(_) => return vec![crate::sentinel::WHOLE_FILE.to_string()],
         };
         match parser.parse_file(&source, ext) {
             Ok(nodes) => {
@@ -5175,12 +5329,12 @@ impl McpServer {
                     .filter_map(|n| n.identifier.clone())
                     .collect();
                 if names.is_empty() {
-                    vec![format!("__file__{}", file_path)]
+                    vec![crate::sentinel::WHOLE_FILE.to_string()]
                 } else {
                     names
                 }
             }
-            Err(_) => vec![format!("__file__{}", file_path)],
+            Err(_) => vec![crate::sentinel::WHOLE_FILE.to_string()],
         }
     }
 

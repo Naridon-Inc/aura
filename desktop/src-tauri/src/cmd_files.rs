@@ -74,49 +74,52 @@ const BINARY_SNIFF_BYTES: usize = 8192;
 
 #[tauri::command]
 pub async fn list_dir(path: String) -> Result<Vec<DirEntry>, String> {
-    let p = PathBuf::from(&path);
-    if !p.is_dir() {
-        return Err(format!("not a directory: {}", path));
-    }
-    // Resolve git status once for the whole directory so each entry lookup
-    // is O(1). For small dirs this is overkill; for repos it's the same
-    // cost as a single porcelain shell-out either way.
-    let status_map = git_status_map(&p);
+    crate::blocking::run(move || {
+        let p = PathBuf::from(&path);
+        if !p.is_dir() {
+            return Err(format!("not a directory: {}", path));
+        }
+        // Resolve git status once for the whole directory so each entry lookup
+        // is O(1). For small dirs this is overkill; for repos it's the same
+        // cost as a single porcelain shell-out either way.
+        let status_map = git_status_map(&p);
 
-    let mut entries: Vec<DirEntry> = fs::read_dir(&p)
-        .map_err(|e| e.to_string())?
-        .filter_map(|r| r.ok())
-        .filter_map(|e| {
-            let name = e.file_name().to_string_lossy().into_owned();
-            // VSCode-parity: show dotfiles (.env, .gitignore, .prettierrc,
-            // etc.) by default. Only the noise — .git internals, OS junk,
-            // and heavyweight tooling caches — stays hidden.
-            if is_always_hidden(&name) {
-                return None;
-            }
-            let entry_path = e.path();
-            let is_dir = entry_path.is_dir();
-            let status = status_map
-                .get(&entry_path)
-                .copied()
-                .map(|c| c.to_string());
-            Some(DirEntry {
-                path: entry_path.to_string_lossy().into_owned(),
-                name,
-                is_dir,
-                git_status: status,
+        let mut entries: Vec<DirEntry> = fs::read_dir(&p)
+            .map_err(|e| e.to_string())?
+            .filter_map(|r| r.ok())
+            .filter_map(|e| {
+                let name = e.file_name().to_string_lossy().into_owned();
+                // VSCode-parity: show dotfiles (.env, .gitignore, .prettierrc,
+                // etc.) by default. Only the noise — .git internals, OS junk,
+                // and heavyweight tooling caches — stays hidden.
+                if is_always_hidden(&name) {
+                    return None;
+                }
+                let entry_path = e.path();
+                let is_dir = entry_path.is_dir();
+                let status = status_map
+                    .get(&entry_path)
+                    .copied()
+                    .map(|c| c.to_string());
+                Some(DirEntry {
+                    path: entry_path.to_string_lossy().into_owned(),
+                    name,
+                    is_dir,
+                    git_status: status,
+                })
             })
-        })
-        .collect();
+            .collect();
 
-    // Directories first, then files; alphabetical inside each group. Same
-    // order every editor uses.
-    entries.sort_by(|a, b| match (a.is_dir, b.is_dir) {
-        (true, false) => std::cmp::Ordering::Less,
-        (false, true) => std::cmp::Ordering::Greater,
-        _ => a.name.to_lowercase().cmp(&b.name.to_lowercase()),
-    });
-    Ok(entries)
+        // Directories first, then files; alphabetical inside each group. Same
+        // order every editor uses.
+        entries.sort_by(|a, b| match (a.is_dir, b.is_dir) {
+            (true, false) => std::cmp::Ordering::Less,
+            (false, true) => std::cmp::Ordering::Greater,
+            _ => a.name.to_lowercase().cmp(&b.name.to_lowercase()),
+        });
+        Ok(entries)
+    })
+    .await
 }
 
 #[tauri::command]
@@ -364,44 +367,68 @@ fn is_meaningful_ignored(base: &str) -> bool {
 /// backend just supplies the haystack.
 #[tauri::command]
 pub async fn fs_find_files(repo_root: String) -> Vec<String> {
-    let cwd = PathBuf::from(&repo_root);
-    let run = |args: &[&str]| -> Vec<String> {
-        let Ok(out) = std::process::Command::new("git")
-            .args(args)
-            .current_dir(&cwd)
-            .output()
-        else {
-            return Vec::new();
+    crate::blocking::run(move || {
+        let cwd = PathBuf::from(&repo_root);
+        let run = |args: &[&str]| -> Vec<String> {
+            let Ok(out) = std::process::Command::new("git")
+                .args(args)
+                .current_dir(&cwd)
+                .output()
+            else {
+                return Vec::new();
+            };
+            if !out.status.success() {
+                return Vec::new();
+            }
+            String::from_utf8_lossy(&out.stdout)
+                .lines()
+                .filter(|s| !s.is_empty())
+                .map(|s| s.to_string())
+                .collect()
         };
-        if !out.status.success() {
-            return Vec::new();
+
+        // Tracked + untracked-but-not-ignored: the normal editable surface.
+        let mut paths = run(&["ls-files", "--cached", "--others", "--exclude-standard"]);
+
+        // …plus the few gitignored files worth opening — the `.env` family above
+        // all. `--ignored` (with an exclude flag) lists what the standard rules
+        // hide; we keep only the meaningful ones so caches stay out.
+        //
+        // `--directory` is load-bearing, not a tidy-up: without it git enumerates
+        // every ignored path individually, which on a repo carrying node_modules
+        // and Cargo's `target/` means ~470k lines and ~5s of wall clock — all of
+        // it allocated into a Vec and then thrown away, since only a handful of
+        // `.env` files survive the filter. With it git stops at the first wholly
+        // ignored directory and reports that one entry, taking the same listing
+        // to ~800 lines and ~40ms. The trade is deliberate: a `.env` buried
+        // *inside* a wholly ignored folder is no longer surfaced, which is the
+        // intent — those are caches and vendored trees, not files people edit.
+        for rel in run(&[
+            "ls-files",
+            "--others",
+            "--ignored",
+            "--exclude-standard",
+            "--directory",
+        ]) {
+            // Collapsed directories arrive with a trailing slash. They are not
+            // files and must never reach the picker.
+            if rel.ends_with('/') {
+                continue;
+            }
+            let is_env = Path::new(&rel)
+                .file_name()
+                .map(|n| is_meaningful_ignored(&n.to_string_lossy()))
+                .unwrap_or(false);
+            if is_env {
+                paths.push(rel);
+            }
         }
-        String::from_utf8_lossy(&out.stdout)
-            .lines()
-            .filter(|s| !s.is_empty())
-            .map(|s| s.to_string())
-            .collect()
-    };
 
-    // Tracked + untracked-but-not-ignored: the normal editable surface.
-    let mut paths = run(&["ls-files", "--cached", "--others", "--exclude-standard"]);
-
-    // …plus the few gitignored files worth opening — the `.env` family above
-    // all. `--ignored` (with an exclude flag) lists what the standard rules
-    // hide; we keep only the meaningful ones so caches stay out.
-    for rel in run(&["ls-files", "--others", "--ignored", "--exclude-standard"]) {
-        let is_env = Path::new(&rel)
-            .file_name()
-            .map(|n| is_meaningful_ignored(&n.to_string_lossy()))
-            .unwrap_or(false);
-        if is_env {
-            paths.push(rel);
-        }
-    }
-
-    paths.sort();
-    paths.dedup();
-    paths
+        paths.sort();
+        paths.dedup();
+        paths
+    })
+    .await
 }
 
 /// Open the OS file manager focused on `path`. macOS uses `open -R`
@@ -410,30 +437,33 @@ pub async fn fs_find_files(repo_root: String) -> Vec<String> {
 /// returned as the spawned command's stderr.
 #[tauri::command]
 pub async fn fs_reveal_in_finder(path: String) -> Result<(), String> {
-    let p = PathBuf::from(&path);
-    if !p.exists() {
-        return Err(format!("path does not exist: {path}"));
-    }
-    #[cfg(target_os = "macos")]
-    let out = std::process::Command::new("open")
-        .args(["-R"])
-        .arg(&p)
-        .output();
-    #[cfg(target_os = "windows")]
-    let out = std::process::Command::new("explorer")
-        .arg(format!("/select,{}", p.display()))
-        .output();
-    #[cfg(all(unix, not(target_os = "macos")))]
-    let out = {
-        // No standard "reveal" on Linux; open the containing folder.
-        let parent = p.parent().unwrap_or(&p);
-        std::process::Command::new("xdg-open").arg(parent).output()
-    };
-    match out {
-        Ok(o) if o.status.success() => Ok(()),
-        Ok(o) => Err(String::from_utf8_lossy(&o.stderr).into_owned()),
-        Err(e) => Err(e.to_string()),
-    }
+    crate::blocking::run(move || {
+        let p = PathBuf::from(&path);
+        if !p.exists() {
+            return Err(format!("path does not exist: {path}"));
+        }
+        #[cfg(target_os = "macos")]
+        let out = std::process::Command::new("open")
+            .args(["-R"])
+            .arg(&p)
+            .output();
+        #[cfg(target_os = "windows")]
+        let out = std::process::Command::new("explorer")
+            .arg(format!("/select,{}", p.display()))
+            .output();
+        #[cfg(all(unix, not(target_os = "macos")))]
+        let out = {
+            // No standard "reveal" on Linux; open the containing folder.
+            let parent = p.parent().unwrap_or(&p);
+            std::process::Command::new("xdg-open").arg(parent).output()
+        };
+        match out {
+            Ok(o) if o.status.success() => Ok(()),
+            Ok(o) => Err(String::from_utf8_lossy(&o.stderr).into_owned()),
+            Err(e) => Err(e.to_string()),
+        }
+    })
+    .await
 }
 
 #[tauri::command]
@@ -442,64 +472,67 @@ pub async fn git_diff(
     file: String,
     since_base: Option<bool>,
 ) -> Result<String, String> {
-    let cwd = PathBuf::from(&repo_root);
-    let p = PathBuf::from(&file);
-    let rel = p.strip_prefix(&cwd).unwrap_or(&p);
+    crate::blocking::run(move || {
+        let cwd = PathBuf::from(&repo_root);
+        let p = PathBuf::from(&file);
+        let rel = p.strip_prefix(&cwd).unwrap_or(&p);
 
-    // "All work since this worktree forked": this file's patch from the
-    // fork-base commit to the working tree (committed + uncommitted), via
-    // two-dot `git diff <base> -- <path>`. Only when a base actually resolves;
-    // otherwise fall through to the plain `git diff HEAD` path below.
-    if since_base == Some(true) {
-        if let Some(base) = crate::cmd_aura_fs::worktree_fork_base(&repo_root) {
-            let out = std::process::Command::new("git")
-                .args(["diff", &base, "--no-color", "--"])
-                .arg(rel)
-                .current_dir(&cwd)
-                .output()
-                .map_err(|e| e.to_string())?;
-            if out.status.success() {
-                let body = String::from_utf8_lossy(&out.stdout).into_owned();
-                if !body.trim().is_empty() {
-                    return Ok(body);
+        // "All work since this worktree forked": this file's patch from the
+        // fork-base commit to the working tree (committed + uncommitted), via
+        // two-dot `git diff <base> -- <path>`. Only when a base actually resolves;
+        // otherwise fall through to the plain `git diff HEAD` path below.
+        if since_base == Some(true) {
+            if let Some(base) = crate::cmd_aura_fs::worktree_fork_base(&repo_root) {
+                let out = std::process::Command::new("git")
+                    .args(["diff", &base, "--no-color", "--"])
+                    .arg(rel)
+                    .current_dir(&cwd)
+                    .output()
+                    .map_err(|e| e.to_string())?;
+                if out.status.success() {
+                    let body = String::from_utf8_lossy(&out.stdout).into_owned();
+                    if !body.trim().is_empty() {
+                        return Ok(body);
+                    }
+                    // Empty base diff falls through to the HEAD path below, which
+                    // also handles the brand-new-untracked-file case.
                 }
-                // Empty base diff falls through to the HEAD path below, which
-                // also handles the brand-new-untracked-file case.
             }
         }
-    }
 
-    let out = std::process::Command::new("git")
-        .args(["diff", "HEAD", "--no-color", "--"])
-        .arg(rel)
-        .current_dir(&cwd)
-        .output()
-        .map_err(|e| e.to_string())?;
-    if !out.status.success() {
-        return Ok(String::new());
-    }
-    let body = String::from_utf8_lossy(&out.stdout).into_owned();
-    if !body.trim().is_empty() {
-        return Ok(body);
-    }
-    // A brand-new untracked file is invisible to `git diff HEAD` (it isn't in
-    // the index OR the tree), so the diff comes back empty and the review pane
-    // shows nothing. Detect that case and synthesize an add-diff of the whole
-    // file via `git diff --no-index /dev/null <file>` so the reviewer actually
-    // sees the new contents. git uses exit code 1 to mean "differences found"
-    // here (not an error), so we accept both 0 and 1.
-    if git_is_untracked(&cwd, rel) {
-        let added = std::process::Command::new("git")
-            .args(["diff", "--no-color", "--no-index", "--", "/dev/null"])
+        let out = std::process::Command::new("git")
+            .args(["diff", "HEAD", "--no-color", "--"])
             .arg(rel)
             .current_dir(&cwd)
             .output()
             .map_err(|e| e.to_string())?;
-        if matches!(added.status.code(), Some(0) | Some(1)) {
-            return Ok(String::from_utf8_lossy(&added.stdout).into_owned());
+        if !out.status.success() {
+            return Ok(String::new());
         }
-    }
-    Ok(body)
+        let body = String::from_utf8_lossy(&out.stdout).into_owned();
+        if !body.trim().is_empty() {
+            return Ok(body);
+        }
+        // A brand-new untracked file is invisible to `git diff HEAD` (it isn't in
+        // the index OR the tree), so the diff comes back empty and the review pane
+        // shows nothing. Detect that case and synthesize an add-diff of the whole
+        // file via `git diff --no-index /dev/null <file>` so the reviewer actually
+        // sees the new contents. git uses exit code 1 to mean "differences found"
+        // here (not an error), so we accept both 0 and 1.
+        if git_is_untracked(&cwd, rel) {
+            let added = std::process::Command::new("git")
+                .args(["diff", "--no-color", "--no-index", "--", "/dev/null"])
+                .arg(rel)
+                .current_dir(&cwd)
+                .output()
+                .map_err(|e| e.to_string())?;
+            if matches!(added.status.code(), Some(0) | Some(1)) {
+                return Ok(String::from_utf8_lossy(&added.stdout).into_owned());
+            }
+        }
+        Ok(body)
+    })
+    .await
 }
 
 /// Is `rel` an untracked, non-ignored file in the repo at `cwd`? Uses
@@ -520,12 +553,15 @@ fn git_is_untracked(cwd: &Path, rel: &Path) -> bool {
 
 #[tauri::command]
 pub async fn git_status(repo_root: String) -> Result<HashMap<String, String>, String> {
-    let cwd = PathBuf::from(&repo_root);
-    let map = git_status_map(&cwd);
-    Ok(map
-        .into_iter()
-        .map(|(p, c)| (p.to_string_lossy().into_owned(), c.to_string()))
-        .collect())
+    crate::blocking::run(move || {
+        let cwd = PathBuf::from(&repo_root);
+        let map = git_status_map(&cwd);
+        Ok(map
+            .into_iter()
+            .map(|(p, c)| (p.to_string_lossy().into_owned(), c.to_string()))
+            .collect())
+    })
+    .await
 }
 
 /// Resolve the user's home dir as the default project root for first-run.
@@ -550,18 +586,21 @@ pub async fn current_dir() -> String {
 /// Active git branch name (HEAD short ref). Empty string if not a repo.
 #[tauri::command]
 pub async fn git_branch(repo_root: String) -> String {
-    let cwd = PathBuf::from(&repo_root);
-    let Ok(out) = std::process::Command::new("git")
-        .args(["rev-parse", "--abbrev-ref", "HEAD"])
-        .current_dir(&cwd)
-        .output()
-    else {
-        return String::new();
-    };
-    if !out.status.success() {
-        return String::new();
-    }
-    String::from_utf8_lossy(&out.stdout).trim().to_string()
+    crate::blocking::run(move || {
+        let cwd = PathBuf::from(&repo_root);
+        let Ok(out) = std::process::Command::new("git")
+            .args(["rev-parse", "--abbrev-ref", "HEAD"])
+            .current_dir(&cwd)
+            .output()
+        else {
+            return String::new();
+        };
+        if !out.status.success() {
+            return String::new();
+        }
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    })
+    .await
 }
 
 /// One branch row for the footer branch switcher.
@@ -582,63 +621,66 @@ pub struct GitBranchInfo {
 /// skipped. Empty vec if not a repo.
 #[tauri::command]
 pub async fn git_branches(repo_root: String) -> Vec<GitBranchInfo> {
-    let cwd = PathBuf::from(&repo_root);
-    // One for-each-ref call gives every field in a stable, tab-delimited
-    // form. `%(HEAD)` marks the current branch with `*`. Full `%(refname)`
-    // lets us tell locals (refs/heads) from remotes (refs/remotes) since
-    // the short name alone is ambiguous (both can contain slashes).
-    let fmt = "%(refname)\t%(refname:short)\t%(HEAD)\t%(upstream:short)\t%(contents:subject)";
-    let Ok(out) = std::process::Command::new("git")
-        .args([
-            "for-each-ref",
-            "--sort=-committerdate",
-            "--format",
-            fmt,
-            "refs/heads",
-            "refs/remotes",
-        ])
-        .current_dir(&cwd)
-        .output()
-    else {
-        return Vec::new();
-    };
-    if !out.status.success() {
-        return Vec::new();
-    }
-    let text = String::from_utf8_lossy(&out.stdout);
-    let mut branches = Vec::new();
-    for line in text.lines() {
-        let mut cols = line.split('\t');
-        let full = cols.next().unwrap_or("").trim();
-        let short = cols.next().unwrap_or("").trim().to_string();
-        let head = cols.next().unwrap_or("").trim();
-        let upstream = cols.next().unwrap_or("").trim();
-        let subject = cols.next().unwrap_or("").trim();
-        if short.is_empty() {
-            continue;
+    crate::blocking::run(move || {
+        let cwd = PathBuf::from(&repo_root);
+        // One for-each-ref call gives every field in a stable, tab-delimited
+        // form. `%(HEAD)` marks the current branch with `*`. Full `%(refname)`
+        // lets us tell locals (refs/heads) from remotes (refs/remotes) since
+        // the short name alone is ambiguous (both can contain slashes).
+        let fmt = "%(refname)\t%(refname:short)\t%(HEAD)\t%(upstream:short)\t%(contents:subject)";
+        let Ok(out) = std::process::Command::new("git")
+            .args([
+                "for-each-ref",
+                "--sort=-committerdate",
+                "--format",
+                fmt,
+                "refs/heads",
+                "refs/remotes",
+            ])
+            .current_dir(&cwd)
+            .output()
+        else {
+            return Vec::new();
+        };
+        if !out.status.success() {
+            return Vec::new();
         }
-        // Skip the `origin/HEAD -> origin/main` symbolic pointer; it isn't a
-        // real branch and would show as a duplicate of the default.
-        if short.ends_with("/HEAD") {
-            continue;
+        let text = String::from_utf8_lossy(&out.stdout);
+        let mut branches = Vec::new();
+        for line in text.lines() {
+            let mut cols = line.split('\t');
+            let full = cols.next().unwrap_or("").trim();
+            let short = cols.next().unwrap_or("").trim().to_string();
+            let head = cols.next().unwrap_or("").trim();
+            let upstream = cols.next().unwrap_or("").trim();
+            let subject = cols.next().unwrap_or("").trim();
+            if short.is_empty() {
+                continue;
+            }
+            // Skip the `origin/HEAD -> origin/main` symbolic pointer; it isn't a
+            // real branch and would show as a duplicate of the default.
+            if short.ends_with("/HEAD") {
+                continue;
+            }
+            branches.push(GitBranchInfo {
+                is_remote: full.starts_with("refs/remotes/"),
+                is_current: head == "*",
+                upstream: if upstream.is_empty() {
+                    None
+                } else {
+                    Some(upstream.to_string())
+                },
+                subject: if subject.is_empty() {
+                    None
+                } else {
+                    Some(subject.to_string())
+                },
+                name: short,
+            });
         }
-        branches.push(GitBranchInfo {
-            is_remote: full.starts_with("refs/remotes/"),
-            is_current: head == "*",
-            upstream: if upstream.is_empty() {
-                None
-            } else {
-                Some(upstream.to_string())
-            },
-            subject: if subject.is_empty() {
-                None
-            } else {
-                Some(subject.to_string())
-            },
-            name: short,
-        });
-    }
-    branches
+        branches
+    })
+    .await
 }
 
 /// A richly-detailed branch row for the Cmd-K branch switcher. One
@@ -689,73 +731,76 @@ fn parse_track(track: &str) -> (u32, u32) {
 /// vec if not a repo.
 #[tauri::command]
 pub async fn git_branches_rich(repo_root: String) -> Vec<GitBranchRich> {
-    let cwd = PathBuf::from(&repo_root);
-    // A unit-separator (\x1f, "US") between fields survives subjects and
-    // author names that themselves contain tabs; `%(upstream:track)` carries
-    // the ahead/behind summary so we never shell out per branch.
-    let fmt = "%(refname)\x1f%(refname:short)\x1f%(HEAD)\x1f%(upstream:short)\x1f%(upstream:track)\x1f%(authorname)\x1f%(committerdate:unix)\x1f%(contents:subject)";
-    let Ok(out) = std::process::Command::new("git")
-        .args([
-            "for-each-ref",
-            "--sort=-committerdate",
-            "--format",
-            fmt,
-            "refs/heads",
-            "refs/remotes",
-        ])
-        .current_dir(&cwd)
-        .output()
-    else {
-        return Vec::new();
-    };
-    if !out.status.success() {
-        return Vec::new();
-    }
-    let text = String::from_utf8_lossy(&out.stdout);
-    let mut branches = Vec::new();
-    for line in text.lines() {
-        let mut cols = line.split('\x1f');
-        let full = cols.next().unwrap_or("").trim();
-        let short = cols.next().unwrap_or("").trim().to_string();
-        let head = cols.next().unwrap_or("").trim();
-        let upstream = cols.next().unwrap_or("").trim();
-        let track = cols.next().unwrap_or("");
-        let author = cols.next().unwrap_or("").trim();
-        let committed = cols.next().unwrap_or("").trim();
-        let subject = cols.next().unwrap_or("").trim();
-        if short.is_empty() {
-            continue;
+    crate::blocking::run(move || {
+        let cwd = PathBuf::from(&repo_root);
+        // A unit-separator (\x1f, "US") between fields survives subjects and
+        // author names that themselves contain tabs; `%(upstream:track)` carries
+        // the ahead/behind summary so we never shell out per branch.
+        let fmt = "%(refname)\x1f%(refname:short)\x1f%(HEAD)\x1f%(upstream:short)\x1f%(upstream:track)\x1f%(authorname)\x1f%(committerdate:unix)\x1f%(contents:subject)";
+        let Ok(out) = std::process::Command::new("git")
+            .args([
+                "for-each-ref",
+                "--sort=-committerdate",
+                "--format",
+                fmt,
+                "refs/heads",
+                "refs/remotes",
+            ])
+            .current_dir(&cwd)
+            .output()
+        else {
+            return Vec::new();
+        };
+        if !out.status.success() {
+            return Vec::new();
         }
-        // Skip the `origin/HEAD -> origin/main` symbolic pointer.
-        if short.ends_with("/HEAD") {
-            continue;
+        let text = String::from_utf8_lossy(&out.stdout);
+        let mut branches = Vec::new();
+        for line in text.lines() {
+            let mut cols = line.split('\x1f');
+            let full = cols.next().unwrap_or("").trim();
+            let short = cols.next().unwrap_or("").trim().to_string();
+            let head = cols.next().unwrap_or("").trim();
+            let upstream = cols.next().unwrap_or("").trim();
+            let track = cols.next().unwrap_or("");
+            let author = cols.next().unwrap_or("").trim();
+            let committed = cols.next().unwrap_or("").trim();
+            let subject = cols.next().unwrap_or("").trim();
+            if short.is_empty() {
+                continue;
+            }
+            // Skip the `origin/HEAD -> origin/main` symbolic pointer.
+            if short.ends_with("/HEAD") {
+                continue;
+            }
+            let (ahead, behind) = parse_track(track);
+            branches.push(GitBranchRich {
+                is_remote: full.starts_with("refs/remotes/"),
+                is_current: head == "*",
+                upstream: if upstream.is_empty() {
+                    None
+                } else {
+                    Some(upstream.to_string())
+                },
+                ahead,
+                behind,
+                author: if author.is_empty() {
+                    None
+                } else {
+                    Some(author.to_string())
+                },
+                committed_at: committed.parse::<i64>().ok(),
+                subject: if subject.is_empty() {
+                    None
+                } else {
+                    Some(subject.to_string())
+                },
+                name: short,
+            });
         }
-        let (ahead, behind) = parse_track(track);
-        branches.push(GitBranchRich {
-            is_remote: full.starts_with("refs/remotes/"),
-            is_current: head == "*",
-            upstream: if upstream.is_empty() {
-                None
-            } else {
-                Some(upstream.to_string())
-            },
-            ahead,
-            behind,
-            author: if author.is_empty() {
-                None
-            } else {
-                Some(author.to_string())
-            },
-            committed_at: committed.parse::<i64>().ok(),
-            subject: if subject.is_empty() {
-                None
-            } else {
-                Some(subject.to_string())
-            },
-            name: short,
-        });
-    }
-    branches
+        branches
+    })
+    .await
 }
 
 /// Does `ref_path` (a fully-qualified ref like `refs/heads/x` or
@@ -813,43 +858,49 @@ fn checkout_args(cwd: &std::path::Path, branch: &str) -> Vec<String> {
 /// git's own stderr (e.g. "would be overwritten by checkout") for the UI.
 #[tauri::command]
 pub async fn git_checkout(repo_root: String, branch: String) -> Result<(), String> {
-    let cwd = PathBuf::from(&repo_root);
-    let args = checkout_args(&cwd, &branch);
-    let out = std::process::Command::new("git")
-        .args(&args)
-        .current_dir(&cwd)
-        .output()
-        .map_err(|e| e.to_string())?;
-    if out.status.success() {
-        return Ok(());
-    }
-    let err = String::from_utf8_lossy(&out.stderr).trim().to_string();
-    Err(if err.is_empty() {
-        "checkout failed".to_string()
-    } else {
-        err
+    crate::blocking::run(move || {
+        let cwd = PathBuf::from(&repo_root);
+        let args = checkout_args(&cwd, &branch);
+        let out = std::process::Command::new("git")
+            .args(&args)
+            .current_dir(&cwd)
+            .output()
+            .map_err(|e| e.to_string())?;
+        if out.status.success() {
+            return Ok(());
+        }
+        let err = String::from_utf8_lossy(&out.stderr).trim().to_string();
+        Err(if err.is_empty() {
+            "checkout failed".to_string()
+        } else {
+            err
+        })
     })
+    .await
 }
 
 /// Create a new branch from HEAD and switch to it (`git checkout -b`).
 /// Returns git's stderr on failure (e.g. name already exists).
 #[tauri::command]
 pub async fn git_create_branch(repo_root: String, name: String) -> Result<(), String> {
-    let cwd = PathBuf::from(&repo_root);
-    let out = std::process::Command::new("git")
-        .args(["checkout", "-b", &name])
-        .current_dir(&cwd)
-        .output()
-        .map_err(|e| e.to_string())?;
-    if out.status.success() {
-        return Ok(());
-    }
-    let err = String::from_utf8_lossy(&out.stderr).trim().to_string();
-    Err(if err.is_empty() {
-        "create branch failed".to_string()
-    } else {
-        err
+    crate::blocking::run(move || {
+        let cwd = PathBuf::from(&repo_root);
+        let out = std::process::Command::new("git")
+            .args(["checkout", "-b", &name])
+            .current_dir(&cwd)
+            .output()
+            .map_err(|e| e.to_string())?;
+        if out.status.success() {
+            return Ok(());
+        }
+        let err = String::from_utf8_lossy(&out.stderr).trim().to_string();
+        Err(if err.is_empty() {
+            "create branch failed".to_string()
+        } else {
+            err
+        })
     })
+    .await
 }
 
 /// Raw `origin` remote URL. Empty string if no remote or not a repo.
@@ -857,18 +908,21 @@ pub async fn git_create_branch(repo_root: String, name: String) -> Result<(), St
 /// (A2A task listing uses github_full_name as the scope key).
 #[tauri::command]
 pub async fn git_remote_origin(repo_root: String) -> String {
-    let cwd = PathBuf::from(&repo_root);
-    let Ok(out) = std::process::Command::new("git")
-        .args(["remote", "get-url", "origin"])
-        .current_dir(&cwd)
-        .output()
-    else {
-        return String::new();
-    };
-    if !out.status.success() {
-        return String::new();
-    }
-    String::from_utf8_lossy(&out.stdout).trim().to_string()
+    crate::blocking::run(move || {
+        let cwd = PathBuf::from(&repo_root);
+        let Ok(out) = std::process::Command::new("git")
+            .args(["remote", "get-url", "origin"])
+            .current_dir(&cwd)
+            .output()
+        else {
+            return String::new();
+        };
+        if !out.status.success() {
+            return String::new();
+        }
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    })
+    .await
 }
 
 #[derive(Serialize)]
@@ -885,22 +939,40 @@ pub struct WorktreeEntry {
     pub head_committed_at: Option<i64>,
 }
 
-/// `git worktree list --porcelain` parsed into structured rows. Empty
-/// list when the path isn't a git repo or git is unavailable. Used by
-/// the workspace rail to show sibling worktrees so multiple agents can
-/// be parked on different branches of the same project.
+/// `git worktree list --porcelain` parsed into structured rows. Used by the
+/// workspace rail to show sibling worktrees so multiple agents can be parked
+/// on different branches of the same project.
+///
+/// Errors are returned as `Err`, NOT as an empty list. That distinction is the
+/// whole point: a caller that can't tell "this project has no worktrees" from
+/// "git didn't answer just now" will cache the failure as truth and show an
+/// empty rail — which reads, to the person looking at it, as though their
+/// worktrees were deleted. They weren't; nothing here writes to disk. Say
+/// "I couldn't look" out loud and let the caller retry.
+///
+/// The git calls run on the blocking pool. This command is fanned out across
+/// every recent project at once, and `std::process::Command` parks the thread
+/// it runs on — doing that on async runtime threads is what makes the calls
+/// fail under load in the first place.
 #[tauri::command]
-pub async fn git_worktree_list(repo_root: String) -> Vec<WorktreeEntry> {
-    let cwd = PathBuf::from(&repo_root);
-    let Ok(out) = std::process::Command::new("git")
+pub async fn git_worktree_list(repo_root: String) -> Result<Vec<WorktreeEntry>, String> {
+    tokio::task::spawn_blocking(move || git_worktree_list_blocking(&repo_root))
+        .await
+        .map_err(|e| format!("worktree list task failed: {e}"))?
+}
+
+fn git_worktree_list_blocking(repo_root: &str) -> Result<Vec<WorktreeEntry>, String> {
+    let cwd = PathBuf::from(repo_root);
+    let out = std::process::Command::new("git")
         .args(["worktree", "list", "--porcelain"])
         .current_dir(&cwd)
         .output()
-    else {
-        return Vec::new();
-    };
+        .map_err(|e| format!("could not run git in {repo_root}: {e}"))?;
     if !out.status.success() {
-        return Vec::new();
+        return Err(format!(
+            "git worktree list failed in {repo_root}: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        ));
     }
     let body = String::from_utf8_lossy(&out.stdout);
     let mut entries: Vec<WorktreeEntry> = Vec::new();
@@ -978,7 +1050,7 @@ pub async fn git_worktree_list(repo_root: String) -> Vec<WorktreeEntry> {
             }
         }
     }
-    entries
+    Ok(entries)
 }
 
 /// Create a fresh worktree at `worktree_path` rooted at `repo_root`. If
@@ -992,22 +1064,25 @@ pub async fn git_worktree_add(
     worktree_path: String,
     branch: Option<String>,
 ) -> Result<String, String> {
-    let cwd = PathBuf::from(&repo_root);
-    let mut args = vec!["worktree".to_string(), "add".to_string()];
-    if let Some(b) = &branch {
-        args.push("-b".to_string());
-        args.push(b.clone());
-    }
-    args.push(worktree_path.clone());
-    let out = std::process::Command::new("git")
-        .args(&args)
-        .current_dir(&cwd)
-        .output()
-        .map_err(|e| format!("spawn git: {e}"))?;
-    if !out.status.success() {
-        return Err(String::from_utf8_lossy(&out.stderr).to_string());
-    }
-    Ok(worktree_path)
+    crate::blocking::run(move || {
+        let cwd = PathBuf::from(&repo_root);
+        let mut args = vec!["worktree".to_string(), "add".to_string()];
+        if let Some(b) = &branch {
+            args.push("-b".to_string());
+            args.push(b.clone());
+        }
+        args.push(worktree_path.clone());
+        let out = std::process::Command::new("git")
+            .args(&args)
+            .current_dir(&cwd)
+            .output()
+            .map_err(|e| format!("spawn git: {e}"))?;
+        if !out.status.success() {
+            return Err(String::from_utf8_lossy(&out.stderr).to_string());
+        }
+        Ok(worktree_path)
+    })
+    .await
 }
 
 /// `git worktree remove [--force] <path>`. `force=true` lets us cleanup
@@ -1019,21 +1094,24 @@ pub async fn git_worktree_remove(
     worktree_path: String,
     force: bool,
 ) -> Result<(), String> {
-    let cwd = PathBuf::from(&repo_root);
-    let mut args = vec!["worktree".to_string(), "remove".to_string()];
-    if force {
-        args.push("--force".to_string());
-    }
-    args.push(worktree_path.clone());
-    let out = std::process::Command::new("git")
-        .args(&args)
-        .current_dir(&cwd)
-        .output()
-        .map_err(|e| format!("spawn git: {e}"))?;
-    if !out.status.success() {
-        return Err(String::from_utf8_lossy(&out.stderr).to_string());
-    }
-    Ok(())
+    crate::blocking::run(move || {
+        let cwd = PathBuf::from(&repo_root);
+        let mut args = vec!["worktree".to_string(), "remove".to_string()];
+        if force {
+            args.push("--force".to_string());
+        }
+        args.push(worktree_path.clone());
+        let out = std::process::Command::new("git")
+            .args(&args)
+            .current_dir(&cwd)
+            .output()
+            .map_err(|e| format!("spawn git: {e}"))?;
+        if !out.status.success() {
+            return Err(String::from_utf8_lossy(&out.stderr).to_string());
+        }
+        Ok(())
+    })
+    .await
 }
 
 /// Outcome of a `git_worktree_rebase` attempt. `exit` is the raw exit
@@ -1059,50 +1137,53 @@ pub async fn git_worktree_rebase(
     worktree_path: String,
     onto_ref: String,
 ) -> Result<WorktreeRebaseResult, String> {
-    let cwd = PathBuf::from(&worktree_path);
-    if !cwd.is_dir() {
-        return Err(format!("worktree path is not a directory: {worktree_path}"));
-    }
-    let out = std::process::Command::new("git")
-        .args(["rebase", &onto_ref])
-        .current_dir(&cwd)
-        .output()
-        .map_err(|e| format!("spawn git rebase: {e}"))?;
-    let exit = out.status.code().unwrap_or(-1);
-    let mut diagnostic = String::new();
-    diagnostic.push_str(&String::from_utf8_lossy(&out.stdout));
-    if !out.stderr.is_empty() {
-        if !diagnostic.is_empty() {
-            diagnostic.push('\n');
+    crate::blocking::run(move || {
+        let cwd = PathBuf::from(&worktree_path);
+        if !cwd.is_dir() {
+            return Err(format!("worktree path is not a directory: {worktree_path}"));
         }
-        diagnostic.push_str(&String::from_utf8_lossy(&out.stderr));
-    }
-    if diagnostic.len() > 2048 {
-        diagnostic.truncate(2048);
-        diagnostic.push_str("…");
-    }
-    let mut conflicted_files = Vec::new();
-    if exit != 0 {
-        // `git diff --name-only --diff-filter=U` lists files with
-        // unmerged paths. Cheap follow-up; ignore failure.
-        if let Ok(d) = std::process::Command::new("git")
-            .args(["diff", "--name-only", "--diff-filter=U"])
+        let out = std::process::Command::new("git")
+            .args(["rebase", &onto_ref])
             .current_dir(&cwd)
             .output()
-        {
-            for line in String::from_utf8_lossy(&d.stdout).lines() {
-                let t = line.trim();
-                if !t.is_empty() {
-                    conflicted_files.push(t.to_string());
+            .map_err(|e| format!("spawn git rebase: {e}"))?;
+        let exit = out.status.code().unwrap_or(-1);
+        let mut diagnostic = String::new();
+        diagnostic.push_str(&String::from_utf8_lossy(&out.stdout));
+        if !out.stderr.is_empty() {
+            if !diagnostic.is_empty() {
+                diagnostic.push('\n');
+            }
+            diagnostic.push_str(&String::from_utf8_lossy(&out.stderr));
+        }
+        if diagnostic.len() > 2048 {
+            diagnostic.truncate(2048);
+            diagnostic.push_str("…");
+        }
+        let mut conflicted_files = Vec::new();
+        if exit != 0 {
+            // `git diff --name-only --diff-filter=U` lists files with
+            // unmerged paths. Cheap follow-up; ignore failure.
+            if let Ok(d) = std::process::Command::new("git")
+                .args(["diff", "--name-only", "--diff-filter=U"])
+                .current_dir(&cwd)
+                .output()
+            {
+                for line in String::from_utf8_lossy(&d.stdout).lines() {
+                    let t = line.trim();
+                    if !t.is_empty() {
+                        conflicted_files.push(t.to_string());
+                    }
                 }
             }
         }
-    }
-    Ok(WorktreeRebaseResult {
-        exit,
-        diagnostic,
-        conflicted_files,
+        Ok(WorktreeRebaseResult {
+            exit,
+            diagnostic,
+            conflicted_files,
+        })
     })
+    .await
 }
 
 /// One row from `git_branch_diff_files`. `status` is the porcelain
@@ -1129,48 +1210,51 @@ pub async fn git_branch_diff_files(
     base_ref: String,
     head_ref: String,
 ) -> Result<Vec<BranchDiffFile>, String> {
-    let cwd = PathBuf::from(&repo_root);
-    let range = format!("{base_ref}...{head_ref}");
-    let names = std::process::Command::new("git")
-        .args(["diff", "--name-status", "--no-renames", &range])
-        .current_dir(&cwd)
-        .output()
-        .map_err(|e| format!("spawn git diff --name-status: {e}"))?;
-    if !names.status.success() {
-        return Err(String::from_utf8_lossy(&names.stderr).to_string());
-    }
-    let mut rows: Vec<BranchDiffFile> = Vec::new();
-    for line in String::from_utf8_lossy(&names.stdout).lines() {
-        let mut parts = line.splitn(2, '\t');
-        let status = parts.next().unwrap_or("").to_string();
-        let path = parts.next().unwrap_or("").to_string();
-        if status.is_empty() || path.is_empty() {
-            continue;
+    crate::blocking::run(move || {
+        let cwd = PathBuf::from(&repo_root);
+        let range = format!("{base_ref}...{head_ref}");
+        let names = std::process::Command::new("git")
+            .args(["diff", "--name-status", "--no-renames", &range])
+            .current_dir(&cwd)
+            .output()
+            .map_err(|e| format!("spawn git diff --name-status: {e}"))?;
+        if !names.status.success() {
+            return Err(String::from_utf8_lossy(&names.stderr).to_string());
         }
-        rows.push(BranchDiffFile { path, status, additions: 0, deletions: 0 });
-    }
-    let stats = std::process::Command::new("git")
-        .args(["diff", "--numstat", "--no-renames", &range])
-        .current_dir(&cwd)
-        .output()
-        .map_err(|e| format!("spawn git diff --numstat: {e}"))?;
-    if stats.status.success() {
-        for line in String::from_utf8_lossy(&stats.stdout).lines() {
-            let mut parts = line.split('\t');
-            let add = parts.next().unwrap_or("0");
-            let del = parts.next().unwrap_or("0");
-            let path = parts.next().unwrap_or("");
-            // Binary files report `-` for both counts; treat as zero so
-            // the row still renders without panicking on parse.
-            let add: u64 = add.parse().unwrap_or(0);
-            let del: u64 = del.parse().unwrap_or(0);
-            if let Some(row) = rows.iter_mut().find(|r| r.path == path) {
-                row.additions = add;
-                row.deletions = del;
+        let mut rows: Vec<BranchDiffFile> = Vec::new();
+        for line in String::from_utf8_lossy(&names.stdout).lines() {
+            let mut parts = line.splitn(2, '\t');
+            let status = parts.next().unwrap_or("").to_string();
+            let path = parts.next().unwrap_or("").to_string();
+            if status.is_empty() || path.is_empty() {
+                continue;
+            }
+            rows.push(BranchDiffFile { path, status, additions: 0, deletions: 0 });
+        }
+        let stats = std::process::Command::new("git")
+            .args(["diff", "--numstat", "--no-renames", &range])
+            .current_dir(&cwd)
+            .output()
+            .map_err(|e| format!("spawn git diff --numstat: {e}"))?;
+        if stats.status.success() {
+            for line in String::from_utf8_lossy(&stats.stdout).lines() {
+                let mut parts = line.split('\t');
+                let add = parts.next().unwrap_or("0");
+                let del = parts.next().unwrap_or("0");
+                let path = parts.next().unwrap_or("");
+                // Binary files report `-` for both counts; treat as zero so
+                // the row still renders without panicking on parse.
+                let add: u64 = add.parse().unwrap_or(0);
+                let del: u64 = del.parse().unwrap_or(0);
+                if let Some(row) = rows.iter_mut().find(|r| r.path == path) {
+                    row.additions = add;
+                    row.deletions = del;
+                }
             }
         }
-    }
-    Ok(rows)
+        Ok(rows)
+    })
+    .await
 }
 
 /// Unified diff text for one file between two refs. Returns empty
@@ -1183,19 +1267,22 @@ pub async fn git_branch_diff_file(
     head_ref: String,
     file: String,
 ) -> String {
-    let cwd = PathBuf::from(&repo_root);
-    let range = format!("{base_ref}...{head_ref}");
-    let Ok(out) = std::process::Command::new("git")
-        .args(["diff", "--no-color", &range, "--", &file])
-        .current_dir(&cwd)
-        .output()
-    else {
-        return String::new();
-    };
-    if !out.status.success() {
-        return String::new();
-    }
-    String::from_utf8_lossy(&out.stdout).into_owned()
+    crate::blocking::run(move || {
+        let cwd = PathBuf::from(&repo_root);
+        let range = format!("{base_ref}...{head_ref}");
+        let Ok(out) = std::process::Command::new("git")
+            .args(["diff", "--no-color", &range, "--", &file])
+            .current_dir(&cwd)
+            .output()
+        else {
+            return String::new();
+        };
+        if !out.status.success() {
+            return String::new();
+        }
+        String::from_utf8_lossy(&out.stdout).into_owned()
+    })
+    .await
 }
 
 /// `git merge --no-ff <branch>` from the main repo's current HEAD.
@@ -1208,52 +1295,58 @@ pub async fn git_merge_branch(
     branch: String,
     message: Option<String>,
 ) -> Result<String, String> {
-    let cwd = PathBuf::from(&repo_root);
-    let mut args: Vec<String> = vec![
-        "merge".into(),
-        "--no-ff".into(),
-        branch.clone(),
-    ];
-    if let Some(m) = message {
-        args.push("-m".into());
-        args.push(m);
-    }
-    let out = std::process::Command::new("git")
-        .args(&args)
-        .current_dir(&cwd)
-        .output()
-        .map_err(|e| format!("spawn git merge: {e}"))?;
-    let combined = format!(
-        "{}{}",
-        String::from_utf8_lossy(&out.stdout),
-        String::from_utf8_lossy(&out.stderr),
-    );
-    if !out.status.success() {
-        return Err(combined);
-    }
-    Ok(combined)
+    crate::blocking::run(move || {
+        let cwd = PathBuf::from(&repo_root);
+        let mut args: Vec<String> = vec![
+            "merge".into(),
+            "--no-ff".into(),
+            branch.clone(),
+        ];
+        if let Some(m) = message {
+            args.push("-m".into());
+            args.push(m);
+        }
+        let out = std::process::Command::new("git")
+            .args(&args)
+            .current_dir(&cwd)
+            .output()
+            .map_err(|e| format!("spawn git merge: {e}"))?;
+        let combined = format!(
+            "{}{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr),
+        );
+        if !out.status.success() {
+            return Err(combined);
+        }
+        Ok(combined)
+    })
+    .await
 }
 
 /// `git show HEAD:<rel>` — the file as it exists in the most recent commit.
 /// Empty string when the file is untracked or HEAD doesn't exist yet.
 #[tauri::command]
 pub async fn git_show_head(repo_root: String, file: String) -> String {
-    let cwd = PathBuf::from(&repo_root);
-    let p = PathBuf::from(&file);
-    let rel = p.strip_prefix(&cwd).unwrap_or(&p);
-    let rel_str = rel.to_string_lossy();
-    let spec = format!("HEAD:{}", rel_str);
-    let Ok(out) = std::process::Command::new("git")
-        .args(["show", &spec])
-        .current_dir(&cwd)
-        .output()
-    else {
-        return String::new();
-    };
-    if !out.status.success() {
-        return String::new();
-    }
-    String::from_utf8_lossy(&out.stdout).into_owned()
+    crate::blocking::run(move || {
+        let cwd = PathBuf::from(&repo_root);
+        let p = PathBuf::from(&file);
+        let rel = p.strip_prefix(&cwd).unwrap_or(&p);
+        let rel_str = rel.to_string_lossy();
+        let spec = format!("HEAD:{}", rel_str);
+        let Ok(out) = std::process::Command::new("git")
+            .args(["show", &spec])
+            .current_dir(&cwd)
+            .output()
+        else {
+            return String::new();
+        };
+        if !out.status.success() {
+            return String::new();
+        }
+        String::from_utf8_lossy(&out.stdout).into_owned()
+    })
+    .await
 }
 
 /// Per-line blame for a single file. Shells `git blame --line-porcelain`
@@ -1276,119 +1369,131 @@ pub async fn git_blame_lines(
     repo_root: String,
     file: String,
 ) -> Vec<BlameLine> {
-    let cwd = PathBuf::from(&repo_root);
-    let p = PathBuf::from(&file);
-    let rel = p.strip_prefix(&cwd).unwrap_or(&p);
-    let Ok(out) = std::process::Command::new("git")
-        .args(["blame", "--line-porcelain", "--", &rel.to_string_lossy()])
-        .current_dir(&cwd)
-        .output()
-    else {
-        return Vec::new();
-    };
-    if !out.status.success() {
-        return Vec::new();
-    }
-    let text = String::from_utf8_lossy(&out.stdout);
+    crate::blocking::run(move || {
+        let cwd = PathBuf::from(&repo_root);
+        let p = PathBuf::from(&file);
+        let rel = p.strip_prefix(&cwd).unwrap_or(&p);
+        let Ok(out) = std::process::Command::new("git")
+            .args(["blame", "--line-porcelain", "--", &rel.to_string_lossy()])
+            .current_dir(&cwd)
+            .output()
+        else {
+            return Vec::new();
+        };
+        if !out.status.success() {
+            return Vec::new();
+        }
+        let text = String::from_utf8_lossy(&out.stdout);
 
-    // Porcelain layout: each line group starts with `<sha> <orig> <final>
-    // <count>`, followed by header lines (`author X`, `author-time T`,
-    // `summary S`, etc.), and ends with a tab-prefixed content line. We
-    // only keep one entry per `final` line number.
-    let mut out_lines: Vec<BlameLine> = Vec::new();
-    let mut cur_sha = String::new();
-    let mut cur_line: u32 = 0;
-    let mut cur_author = String::new();
-    let mut cur_ts: i64 = 0;
-    let mut cur_summary = String::new();
-    let mut have_header = false;
+        // Porcelain layout: each line group starts with `<sha> <orig> <final>
+        // <count>`, followed by header lines (`author X`, `author-time T`,
+        // `summary S`, etc.), and ends with a tab-prefixed content line. We
+        // only keep one entry per `final` line number.
+        let mut out_lines: Vec<BlameLine> = Vec::new();
+        let mut cur_sha = String::new();
+        let mut cur_line: u32 = 0;
+        let mut cur_author = String::new();
+        let mut cur_ts: i64 = 0;
+        let mut cur_summary = String::new();
+        let mut have_header = false;
 
-    for raw in text.lines() {
-        if raw.starts_with('\t') {
-            // Content line — this is the final marker for the current group.
-            if have_header && cur_line > 0 {
-                out_lines.push(BlameLine {
-                    line: cur_line,
-                    sha: cur_sha.clone(),
-                    author: cur_author.clone(),
-                    ts: cur_ts,
-                    summary: cur_summary.clone(),
-                });
+        for raw in text.lines() {
+            if raw.starts_with('\t') {
+                // Content line — this is the final marker for the current group.
+                if have_header && cur_line > 0 {
+                    out_lines.push(BlameLine {
+                        line: cur_line,
+                        sha: cur_sha.clone(),
+                        author: cur_author.clone(),
+                        ts: cur_ts,
+                        summary: cur_summary.clone(),
+                    });
+                }
+                have_header = false;
+                continue;
             }
-            have_header = false;
-            continue;
+            let mut parts = raw.splitn(2, ' ');
+            let head = parts.next().unwrap_or("");
+            let rest = parts.next().unwrap_or("");
+            // The header line has 4 space-separated tokens; everything else is
+            // a single key/value pair we care about a handful of.
+            if head.len() >= 7 && head.chars().all(|c| c.is_ascii_hexdigit()) {
+                // sha + " " + orig_line + " " + final_line + " " + count?
+                let mut tokens = raw.split_ascii_whitespace();
+                cur_sha = tokens.next().unwrap_or("").to_string();
+                let _orig = tokens.next();
+                cur_line = tokens
+                    .next()
+                    .and_then(|s| s.parse::<u32>().ok())
+                    .unwrap_or(0);
+                have_header = true;
+            } else if head == "author" {
+                cur_author = rest.to_string();
+            } else if head == "author-time" {
+                cur_ts = rest.parse::<i64>().unwrap_or(0);
+            } else if head == "summary" {
+                cur_summary = rest.to_string();
+            }
         }
-        let mut parts = raw.splitn(2, ' ');
-        let head = parts.next().unwrap_or("");
-        let rest = parts.next().unwrap_or("");
-        // The header line has 4 space-separated tokens; everything else is
-        // a single key/value pair we care about a handful of.
-        if head.len() >= 7 && head.chars().all(|c| c.is_ascii_hexdigit()) {
-            // sha + " " + orig_line + " " + final_line + " " + count?
-            let mut tokens = raw.split_ascii_whitespace();
-            cur_sha = tokens.next().unwrap_or("").to_string();
-            let _orig = tokens.next();
-            cur_line = tokens
-                .next()
-                .and_then(|s| s.parse::<u32>().ok())
-                .unwrap_or(0);
-            have_header = true;
-        } else if head == "author" {
-            cur_author = rest.to_string();
-        } else if head == "author-time" {
-            cur_ts = rest.parse::<i64>().unwrap_or(0);
-        } else if head == "summary" {
-            cur_summary = rest.to_string();
-        }
-    }
-    out_lines
+        out_lines
+    })
+    .await
 }
 
 /// Seconds since the most recent commit on HEAD. Returns -1 if not a repo.
 #[tauri::command]
 pub async fn git_last_commit_age(repo_root: String) -> i64 {
-    let cwd = PathBuf::from(&repo_root);
-    let Ok(out) = std::process::Command::new("git")
-        .args(["log", "-1", "--format=%ct"])
-        .current_dir(&cwd)
-        .output()
-    else {
-        return -1;
-    };
-    if !out.status.success() {
-        return -1;
-    }
-    let s = String::from_utf8_lossy(&out.stdout);
-    let Ok(ts) = s.trim().parse::<i64>() else {
-        return -1;
-    };
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs() as i64)
-        .unwrap_or(ts);
-    (now - ts).max(0)
+    crate::blocking::run(move || {
+        let cwd = PathBuf::from(&repo_root);
+        let Ok(out) = std::process::Command::new("git")
+            .args(["log", "-1", "--format=%ct"])
+            .current_dir(&cwd)
+            .output()
+        else {
+            return -1;
+        };
+        if !out.status.success() {
+            return -1;
+        }
+        let s = String::from_utf8_lossy(&out.stdout);
+        let Ok(ts) = s.trim().parse::<i64>() else {
+            return -1;
+        };
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(ts);
+        (now - ts).max(0)
+    })
+    .await
 }
 
 /// Stage one or more paths (relative to repo root or absolute). Returns
 /// the trimmed git stderr/stdout so the React side can surface failures.
 #[tauri::command]
 pub async fn git_stage(repo_root: String, paths: Vec<String>) -> Result<String, String> {
-    git_simple(&repo_root, "add", &paths)
+    crate::blocking::run(move || {
+        git_simple(&repo_root, "add", &paths)
+    })
+    .await
 }
 
 /// Unstage by resetting paths back to HEAD's index entry. Same surface as
 /// `git_stage` so the UI can call them symmetrically.
 #[tauri::command]
 pub async fn git_unstage(repo_root: String, paths: Vec<String>) -> Result<String, String> {
-    let cwd = PathBuf::from(&repo_root);
-    let mut args = vec!["reset".to_string(), "HEAD".to_string(), "--".to_string()];
-    args.extend(paths);
-    let out = std::process::Command::new("git")
-        .args(&args)
-        .current_dir(&cwd)
-        .output()
-        .map_err(|e| e.to_string())?;
-    git_output_result(&out)
+    crate::blocking::run(move || {
+        let cwd = PathBuf::from(&repo_root);
+        let mut args = vec!["reset".to_string(), "HEAD".to_string(), "--".to_string()];
+        args.extend(paths);
+        let out = std::process::Command::new("git")
+            .args(&args)
+            .current_dir(&cwd)
+            .output()
+            .map_err(|e| e.to_string())?;
+        git_output_result(&out)
+    })
+    .await
 }
 
 /// `git commit -m <message>` against whatever is currently staged. The
@@ -1396,71 +1501,77 @@ pub async fn git_unstage(repo_root: String, paths: Vec<String>) -> Result<String
 /// `-a` so the user keeps the explicit two-step VCS workflow.
 #[tauri::command]
 pub async fn git_commit(repo_root: String, message: String) -> Result<String, String> {
-    let cwd = PathBuf::from(&repo_root);
+    crate::blocking::run(move || {
+        let cwd = PathBuf::from(&repo_root);
 
-    // Auto-log intent from the commit message before invoking git so the
-    // pre-commit hook (which checks `.aura/.intent_logged`) doesn't fire
-    // a "no intent" abort. The user typed the commit message — that IS
-    // the intent. Best-effort: any IO failure is swallowed; the hook
-    // will still abort with its existing message if it can't find the
-    // marker.
-    let aura_dir = cwd.join(".aura");
-    if std::fs::create_dir_all(&aura_dir).is_ok() {
-        let _ = std::fs::write(aura_dir.join(".intent_logged"), "1");
-        let log_path = aura_dir.join("intent_log.jsonl");
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs())
-            .unwrap_or(0);
-        let line = serde_json::json!({
-            "agent_id": "aura-shell-commit",
-            "intent": message.trim(),
-            "timestamp": now,
-        });
-        if let Ok(mut f) = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&log_path)
-        {
-            use std::io::Write;
-            let _ = writeln!(f, "{}", line);
+        // Auto-log intent from the commit message before invoking git so the
+        // pre-commit hook (which checks `.aura/.intent_logged`) doesn't fire
+        // a "no intent" abort. The user typed the commit message — that IS
+        // the intent. Best-effort: any IO failure is swallowed; the hook
+        // will still abort with its existing message if it can't find the
+        // marker.
+        let aura_dir = cwd.join(".aura");
+        if std::fs::create_dir_all(&aura_dir).is_ok() {
+            let _ = std::fs::write(aura_dir.join(".intent_logged"), "1");
+            let log_path = aura_dir.join("intent_log.jsonl");
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0);
+            let line = serde_json::json!({
+                "agent_id": "aura-shell-commit",
+                "intent": message.trim(),
+                "timestamp": now,
+            });
+            if let Ok(mut f) = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&log_path)
+            {
+                use std::io::Write;
+                let _ = writeln!(f, "{}", line);
+            }
         }
-    }
 
-    let out = std::process::Command::new("git")
-        .args(["commit", "-m", &message])
-        .current_dir(&cwd)
-        .output()
-        .map_err(|e| e.to_string())?;
-    if !out.status.success() {
-        return Err(String::from_utf8_lossy(&out.stderr).trim().to_string());
-    }
-    Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
+        let out = std::process::Command::new("git")
+            .args(["commit", "-m", &message])
+            .current_dir(&cwd)
+            .output()
+            .map_err(|e| e.to_string())?;
+        if !out.status.success() {
+            return Err(String::from_utf8_lossy(&out.stderr).trim().to_string());
+        }
+        Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
+    })
+    .await
 }
 
 /// `git push` — set-upstream when the branch hasn't been published yet.
 /// Returns trimmed stdout/stderr so the caller can surface the result.
 #[tauri::command]
 pub async fn git_push(repo_root: String, set_upstream: bool) -> Result<String, String> {
-    let cwd = PathBuf::from(&repo_root);
-    let branch = current_branch(&cwd);
-    let mut args: Vec<String> = vec!["push".into()];
-    if set_upstream {
-        args.push("-u".into());
-        args.push("origin".into());
-        if let Some(b) = branch {
-            args.push(b);
+    crate::blocking::run(move || {
+        let cwd = PathBuf::from(&repo_root);
+        let branch = current_branch(&cwd);
+        let mut args: Vec<String> = vec!["push".into()];
+        if set_upstream {
+            args.push("-u".into());
+            args.push("origin".into());
+            if let Some(b) = branch {
+                args.push(b);
+            }
         }
-    }
-    let out = std::process::Command::new("git")
-        .args(&args)
-        .current_dir(&cwd)
-        .output()
-        .map_err(|e| e.to_string())?;
-    if !out.status.success() {
-        return Err(String::from_utf8_lossy(&out.stderr).trim().to_string());
-    }
-    Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
+        let out = std::process::Command::new("git")
+            .args(&args)
+            .current_dir(&cwd)
+            .output()
+            .map_err(|e| e.to_string())?;
+        if !out.status.success() {
+            return Err(String::from_utf8_lossy(&out.stderr).trim().to_string());
+        }
+        Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
+    })
+    .await
 }
 
 /// `git pull` against the configured upstream — fast-forward only by
@@ -1468,32 +1579,38 @@ pub async fn git_push(repo_root: String, set_upstream: bool) -> Result<String, S
 /// `git_fetch` + manual rebase via the chevron menu.
 #[tauri::command]
 pub async fn git_pull(repo_root: String) -> Result<String, String> {
-    let cwd = PathBuf::from(&repo_root);
-    let out = std::process::Command::new("git")
-        .args(["pull", "--ff-only"])
-        .current_dir(&cwd)
-        .output()
-        .map_err(|e| e.to_string())?;
-    if !out.status.success() {
-        return Err(String::from_utf8_lossy(&out.stderr).trim().to_string());
-    }
-    Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
+    crate::blocking::run(move || {
+        let cwd = PathBuf::from(&repo_root);
+        let out = std::process::Command::new("git")
+            .args(["pull", "--ff-only"])
+            .current_dir(&cwd)
+            .output()
+            .map_err(|e| e.to_string())?;
+        if !out.status.success() {
+            return Err(String::from_utf8_lossy(&out.stderr).trim().to_string());
+        }
+        Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
+    })
+    .await
 }
 
 /// `git fetch --all --prune` — refresh remote tracking refs without
 /// touching the working copy. Cheap; doesn't risk merge conflicts.
 #[tauri::command]
 pub async fn git_fetch(repo_root: String) -> Result<String, String> {
-    let cwd = PathBuf::from(&repo_root);
-    let out = std::process::Command::new("git")
-        .args(["fetch", "--all", "--prune"])
-        .current_dir(&cwd)
-        .output()
-        .map_err(|e| e.to_string())?;
-    if !out.status.success() {
-        return Err(String::from_utf8_lossy(&out.stderr).trim().to_string());
-    }
-    Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
+    crate::blocking::run(move || {
+        let cwd = PathBuf::from(&repo_root);
+        let out = std::process::Command::new("git")
+            .args(["fetch", "--all", "--prune"])
+            .current_dir(&cwd)
+            .output()
+            .map_err(|e| e.to_string())?;
+        if !out.status.success() {
+            return Err(String::from_utf8_lossy(&out.stderr).trim().to_string());
+        }
+        Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
+    })
+    .await
 }
 
 /// "Sync" = pull then push. Used by the CommitInput's primary action
@@ -1540,34 +1657,37 @@ pub async fn git_clone(
     parent_dir: String,
     name: Option<String>,
 ) -> Result<NewRepo, String> {
-    let url = url.trim().to_string();
-    if url.is_empty() {
-        return Err("Repository URL is required.".into());
-    }
-    let folder = name
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| repo_name_from_url(&url));
+    crate::blocking::run(move || {
+        let url = url.trim().to_string();
+        if url.is_empty() {
+            return Err("Repository URL is required.".into());
+        }
+        let folder = name
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| repo_name_from_url(&url));
 
-    let parent = PathBuf::from(&parent_dir);
-    fs::create_dir_all(&parent).map_err(|e| format!("create {}: {e}", parent.display()))?;
-    let dest = parent.join(&folder);
-    if dest.exists() && fs::read_dir(&dest).map(|mut d| d.next().is_some()).unwrap_or(false) {
-        return Err(format!("{} already exists and is not empty.", dest.display()));
-    }
+        let parent = PathBuf::from(&parent_dir);
+        fs::create_dir_all(&parent).map_err(|e| format!("create {}: {e}", parent.display()))?;
+        let dest = parent.join(&folder);
+        if dest.exists() && fs::read_dir(&dest).map(|mut d| d.next().is_some()).unwrap_or(false) {
+            return Err(format!("{} already exists and is not empty.", dest.display()));
+        }
 
-    let out = std::process::Command::new("git")
-        .args(["clone", "--progress", &url])
-        .arg(&dest)
-        .output()
-        .map_err(|e| format!("spawn git: {e}"))?;
-    if !out.status.success() {
-        return Err(String::from_utf8_lossy(&out.stderr).trim().to_string());
-    }
-    Ok(NewRepo {
-        root: dest.to_string_lossy().to_string(),
-        name: folder,
+        let out = std::process::Command::new("git")
+            .args(["clone", "--progress", &url])
+            .arg(&dest)
+            .output()
+            .map_err(|e| format!("spawn git: {e}"))?;
+        if !out.status.success() {
+            return Err(String::from_utf8_lossy(&out.stderr).trim().to_string());
+        }
+        Ok(NewRepo {
+            root: dest.to_string_lossy().to_string(),
+            name: folder,
+        })
     })
+    .await
 }
 
 /// Create a fresh git repository from scratch under `parent_dir/name`.
@@ -1576,48 +1696,51 @@ pub async fn git_clone(
 /// the app assumes a committed history exists).
 #[tauri::command]
 pub async fn git_init(parent_dir: String, name: String) -> Result<NewRepo, String> {
-    let folder = name.trim().to_string();
-    if folder.is_empty() {
-        return Err("Project name is required.".into());
-    }
-    let parent = PathBuf::from(&parent_dir);
-    fs::create_dir_all(&parent).map_err(|e| format!("create {}: {e}", parent.display()))?;
-    let dest = parent.join(&folder);
-    if dest.exists() && fs::read_dir(&dest).map(|mut d| d.next().is_some()).unwrap_or(false) {
-        return Err(format!("{} already exists and is not empty.", dest.display()));
-    }
-    fs::create_dir_all(&dest).map_err(|e| format!("create {}: {e}", dest.display()))?;
-
-    let run = |args: &[&str]| -> Result<(), String> {
-        let out = std::process::Command::new("git")
-            .args(args)
-            .current_dir(&dest)
-            .output()
-            .map_err(|e| format!("spawn git: {e}"))?;
-        if !out.status.success() {
-            return Err(String::from_utf8_lossy(&out.stderr).trim().to_string());
+    crate::blocking::run(move || {
+        let folder = name.trim().to_string();
+        if folder.is_empty() {
+            return Err("Project name is required.".into());
         }
-        Ok(())
-    };
+        let parent = PathBuf::from(&parent_dir);
+        fs::create_dir_all(&parent).map_err(|e| format!("create {}: {e}", parent.display()))?;
+        let dest = parent.join(&folder);
+        if dest.exists() && fs::read_dir(&dest).map(|mut d| d.next().is_some()).unwrap_or(false) {
+            return Err(format!("{} already exists and is not empty.", dest.display()));
+        }
+        fs::create_dir_all(&dest).map_err(|e| format!("create {}: {e}", dest.display()))?;
 
-    run(&["init"])?;
-    // -b main isn't universal across git versions; rename after init instead.
-    let _ = run(&["symbolic-ref", "HEAD", "refs/heads/main"]);
-    let readme = dest.join("README.md");
-    fs::write(&readme, format!("# {folder}\n"))
-        .map_err(|e| format!("write README: {e}"))?;
-    run(&["add", "README.md"])?;
-    run(&[
-        "-c",
-        "commit.gpgsign=false",
-        "commit",
-        "-m",
-        "Initial commit",
-    ])?;
-    Ok(NewRepo {
-        root: dest.to_string_lossy().to_string(),
-        name: folder,
+        let run = |args: &[&str]| -> Result<(), String> {
+            let out = std::process::Command::new("git")
+                .args(args)
+                .current_dir(&dest)
+                .output()
+                .map_err(|e| format!("spawn git: {e}"))?;
+            if !out.status.success() {
+                return Err(String::from_utf8_lossy(&out.stderr).trim().to_string());
+            }
+            Ok(())
+        };
+
+        run(&["init"])?;
+        // -b main isn't universal across git versions; rename after init instead.
+        let _ = run(&["symbolic-ref", "HEAD", "refs/heads/main"]);
+        let readme = dest.join("README.md");
+        fs::write(&readme, format!("# {folder}\n"))
+            .map_err(|e| format!("write README: {e}"))?;
+        run(&["add", "README.md"])?;
+        run(&[
+            "-c",
+            "commit.gpgsign=false",
+            "commit",
+            "-m",
+            "Initial commit",
+        ])?;
+        Ok(NewRepo {
+            root: dest.to_string_lossy().to_string(),
+            name: folder,
+        })
     })
+    .await
 }
 
 /// The starter files for each built-in template, as (relative path, body).
@@ -1664,60 +1787,84 @@ pub async fn scaffold_template(
     name: String,
     template: String,
 ) -> Result<NewRepo, String> {
-    let folder = name.trim().to_string();
-    if folder.is_empty() {
-        return Err("Project name is required.".into());
-    }
-    let files = template_files(&template, &folder)?;
-
-    let parent = PathBuf::from(&parent_dir);
-    fs::create_dir_all(&parent).map_err(|e| format!("create {}: {e}", parent.display()))?;
-    let dest = parent.join(&folder);
-    if dest.exists() && fs::read_dir(&dest).map(|mut d| d.next().is_some()).unwrap_or(false) {
-        return Err(format!("{} already exists and is not empty.", dest.display()));
-    }
-    fs::create_dir_all(&dest).map_err(|e| format!("create {}: {e}", dest.display()))?;
-
-    for (rel, body) in &files {
-        let path = dest.join(rel);
-        if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent).map_err(|e| format!("create {}: {e}", parent.display()))?;
+    crate::blocking::run(move || {
+        let folder = name.trim().to_string();
+        if folder.is_empty() {
+            return Err("Project name is required.".into());
         }
-        fs::write(&path, body).map_err(|e| format!("write {}: {e}", path.display()))?;
-    }
+        let files = template_files(&template, &folder)?;
 
-    let run = |args: &[&str]| -> Result<(), String> {
-        let out = std::process::Command::new("git")
-            .args(args)
-            .current_dir(&dest)
-            .output()
-            .map_err(|e| format!("spawn git: {e}"))?;
-        if !out.status.success() {
-            return Err(String::from_utf8_lossy(&out.stderr).trim().to_string());
+        let parent = PathBuf::from(&parent_dir);
+        fs::create_dir_all(&parent).map_err(|e| format!("create {}: {e}", parent.display()))?;
+        let dest = parent.join(&folder);
+        if dest.exists() && fs::read_dir(&dest).map(|mut d| d.next().is_some()).unwrap_or(false) {
+            return Err(format!("{} already exists and is not empty.", dest.display()));
         }
-        Ok(())
-    };
-    run(&["init"])?;
-    let _ = run(&["symbolic-ref", "HEAD", "refs/heads/main"]);
-    run(&["add", "."])?;
-    run(&[
-        "-c",
-        "commit.gpgsign=false",
-        "commit",
-        "-m",
-        "Initial commit",
-    ])?;
-    Ok(NewRepo {
-        root: dest.to_string_lossy().to_string(),
-        name: folder,
+        fs::create_dir_all(&dest).map_err(|e| format!("create {}: {e}", dest.display()))?;
+
+        for (rel, body) in &files {
+            let path = dest.join(rel);
+            if let Some(parent) = path.parent() {
+                fs::create_dir_all(parent).map_err(|e| format!("create {}: {e}", parent.display()))?;
+            }
+            fs::write(&path, body).map_err(|e| format!("write {}: {e}", path.display()))?;
+        }
+
+        let run = |args: &[&str]| -> Result<(), String> {
+            let out = std::process::Command::new("git")
+                .args(args)
+                .current_dir(&dest)
+                .output()
+                .map_err(|e| format!("spawn git: {e}"))?;
+            if !out.status.success() {
+                return Err(String::from_utf8_lossy(&out.stderr).trim().to_string());
+            }
+            Ok(())
+        };
+        run(&["init"])?;
+        let _ = run(&["symbolic-ref", "HEAD", "refs/heads/main"]);
+        run(&["add", "."])?;
+        run(&[
+            "-c",
+            "commit.gpgsign=false",
+            "commit",
+            "-m",
+            "Initial commit",
+        ])?;
+        Ok(NewRepo {
+            root: dest.to_string_lossy().to_string(),
+            name: folder,
+        })
     })
+    .await
 }
 
 /// Counts of commits the local branch is ahead/behind its upstream
 /// tracking ref. `has_upstream=false` when the branch hasn't been
 /// published yet — caller should render "Publish branch" instead of
-/// Push/Pull. Both counts default to zero on any git failure rather
-/// than bubbling — the CommitInput polls this on every tick.
+/// Push/Pull.
+///
+/// This used to be infallible: it returned the struct directly, and its
+/// own doc said "both counts default to zero on any git failure rather
+/// than bubbling — the CommitInput polls this on every tick". That
+/// sentence is the bug written down. Three unrelated failures all left
+/// through the same door:
+///
+///  * `git` couldn't be spawned at all (not on PATH, sandboxed, the
+///    directory gone) → `has_upstream: false`, which every caller reads
+///    as "this branch was never published". Four surfaces then offered a
+///    **Publish** button, and the one in the repo header ran
+///    `git push --set-upstream` on a branch that already had one.
+///  * `rev-list` failed or the repo was mid-rebase → `(0, 0)` with
+///    `has_upstream: true`, which is byte-for-byte the "in sync with the
+///    upstream branch" state. A command that errored rendered as a tick.
+///  * A count that wouldn't parse became `0` the same way.
+///
+/// None of the three could be told from a real answer, because there was
+/// no channel to tell them apart in. Now there is: a genuine missing
+/// upstream is `Ok(has_upstream: false)`, and anything that stopped us
+/// finding out is `Err` — which the TypeScript side surfaces as "couldn't
+/// check", never as a verdict about the branch.
 #[derive(Serialize)]
 pub struct AheadBehind {
     pub ahead: u32,
@@ -1727,46 +1874,64 @@ pub struct AheadBehind {
 }
 
 #[tauri::command]
-pub async fn git_ahead_behind(repo_root: String) -> AheadBehind {
-    let cwd = PathBuf::from(&repo_root);
-    let branch = current_branch(&cwd);
-    // Probe upstream via `rev-parse @{u}` — exits non-zero when
-    // none configured. Cheap and definitive.
-    let upstream_ok = std::process::Command::new("git")
-        .args(["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"])
-        .current_dir(&cwd)
-        .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false);
-    if !upstream_ok {
-        return AheadBehind {
-            ahead: 0,
-            behind: 0,
-            has_upstream: false,
-            branch,
-        };
-    }
-    let counts = std::process::Command::new("git")
-        .args(["rev-list", "--left-right", "--count", "@{u}...HEAD"])
-        .current_dir(&cwd)
-        .output()
-        .ok();
-    let (behind, ahead) = match counts {
-        Some(o) if o.status.success() => {
-            let s = String::from_utf8_lossy(&o.stdout);
-            let mut parts = s.split_whitespace();
-            let behind = parts.next().and_then(|n| n.parse().ok()).unwrap_or(0);
-            let ahead = parts.next().and_then(|n| n.parse().ok()).unwrap_or(0);
-            (behind, ahead)
+pub async fn git_ahead_behind(repo_root: String) -> Result<AheadBehind, String> {
+    crate::blocking::run(move || {
+        let cwd = PathBuf::from(&repo_root);
+        let branch = current_branch(&cwd);
+        // Probe upstream via `rev-parse @{u}` — exits non-zero when
+        // none configured. Cheap and definitive.
+        //
+        // A non-zero exit is the answer "no upstream". A failure to RUN the
+        // command is not an answer at all, and the two are different values
+        // now instead of the same `false`.
+        let probe = std::process::Command::new("git")
+            .args(["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"])
+            .current_dir(&cwd)
+            .output()
+            .map_err(|e| format!("couldn't run git in {}: {e}", cwd.display()))?;
+        if !probe.status.success() {
+            return Ok(AheadBehind {
+                ahead: 0,
+                behind: 0,
+                has_upstream: false,
+                branch,
+            });
         }
-        _ => (0, 0),
-    };
-    AheadBehind {
-        ahead,
-        behind,
-        has_upstream: true,
-        branch,
-    }
+        let counts = std::process::Command::new("git")
+            .args(["rev-list", "--left-right", "--count", "@{u}...HEAD"])
+            .current_dir(&cwd)
+            .output()
+            .map_err(|e| format!("couldn't run git in {}: {e}", cwd.display()))?;
+        if !counts.status.success() {
+            let why = String::from_utf8_lossy(&counts.stderr);
+            let why = why.trim();
+            return Err(if why.is_empty() {
+                "git couldn't count this branch against its upstream".to_string()
+            } else {
+                why.lines().next().unwrap_or(why).to_string()
+            });
+        }
+        // There IS an upstream and git answered, so a line we can't read is a
+        // broken answer, not a zero. Reporting it as 0/0 is what made "in sync"
+        // the resting state of every failure.
+        let s = String::from_utf8_lossy(&counts.stdout);
+        let mut parts = s.split_whitespace();
+        let mut count = |what: &str| -> Result<u32, String> {
+            parts
+                .next()
+                .and_then(|n| n.parse::<u32>().ok())
+                .ok_or_else(|| format!("git returned a {what} count we couldn't read: {:?}", s.trim()))
+        };
+        let behind = count("behind")?;
+        let ahead = count("ahead")?;
+        Ok(AheadBehind {
+            ahead,
+            behind,
+            has_upstream: true,
+            branch,
+        })
+    })
+    .await
 }
 
 fn current_branch(cwd: &Path) -> Option<String> {
@@ -1787,15 +1952,18 @@ fn current_branch(cwd: &Path) -> Option<String> {
 /// wired here — too easy to lose work).
 #[tauri::command]
 pub async fn git_discard(repo_root: String, paths: Vec<String>) -> Result<String, String> {
-    let cwd = PathBuf::from(&repo_root);
-    let mut args = vec!["checkout".to_string(), "--".to_string()];
-    args.extend(paths);
-    let out = std::process::Command::new("git")
-        .args(&args)
-        .current_dir(&cwd)
-        .output()
-        .map_err(|e| e.to_string())?;
-    git_output_result(&out)
+    crate::blocking::run(move || {
+        let cwd = PathBuf::from(&repo_root);
+        let mut args = vec!["checkout".to_string(), "--".to_string()];
+        args.extend(paths);
+        let out = std::process::Command::new("git")
+            .args(&args)
+            .current_dir(&cwd)
+            .output()
+            .map_err(|e| e.to_string())?;
+        git_output_result(&out)
+    })
+    .await
 }
 
 /// `git show <sha> --stat -p` — formatted patch + filesummary for a
@@ -1803,18 +1971,21 @@ pub async fn git_discard(repo_root: String, paths: Vec<String>) -> Result<String
 /// changes inline. Empty when the sha is unknown or git isn't available.
 #[tauri::command]
 pub async fn git_show_commit(repo_root: String, sha: String) -> String {
-    let cwd = PathBuf::from(&repo_root);
-    let Ok(out) = std::process::Command::new("git")
-        .args(["show", "--no-color", "--stat", "-p", &sha])
-        .current_dir(&cwd)
-        .output()
-    else {
-        return String::new();
-    };
-    if !out.status.success() {
-        return String::from_utf8_lossy(&out.stderr).into_owned();
-    }
-    String::from_utf8_lossy(&out.stdout).into_owned()
+    crate::blocking::run(move || {
+        let cwd = PathBuf::from(&repo_root);
+        let Ok(out) = std::process::Command::new("git")
+            .args(["show", "--no-color", "--stat", "-p", &sha])
+            .current_dir(&cwd)
+            .output()
+        else {
+            return String::new();
+        };
+        if !out.status.success() {
+            return String::from_utf8_lossy(&out.stderr).into_owned();
+        }
+        String::from_utf8_lossy(&out.stdout).into_owned()
+    })
+    .await
 }
 
 /// `git show <sha> --format=format: -- <file>` — the patch a single commit
@@ -1831,19 +2002,22 @@ pub async fn git_diff_at_commit(
     sha: String,
     file: String,
 ) -> Result<String, String> {
-    let cwd = PathBuf::from(&repo_root);
-    let p = PathBuf::from(&file);
-    let rel = p.strip_prefix(&cwd).unwrap_or(&p);
-    let out = std::process::Command::new("git")
-        .args(["show", &sha, "--no-color", "--format=format:", "--"])
-        .arg(rel)
-        .current_dir(&cwd)
-        .output()
-        .map_err(|e| e.to_string())?;
-    if !out.status.success() {
-        return Ok(String::new());
-    }
-    Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+    crate::blocking::run(move || {
+        let cwd = PathBuf::from(&repo_root);
+        let p = PathBuf::from(&file);
+        let rel = p.strip_prefix(&cwd).unwrap_or(&p);
+        let out = std::process::Command::new("git")
+            .args(["show", &sha, "--no-color", "--format=format:", "--"])
+            .arg(rel)
+            .current_dir(&cwd)
+            .output()
+            .map_err(|e| e.to_string())?;
+        if !out.status.success() {
+            return Ok(String::new());
+        }
+        Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+    })
+    .await
 }
 
 /// Render one file's NET change from a baseline commit to its current
@@ -1865,34 +2039,37 @@ pub async fn git_diff_base(
     base: String,
     file: String,
 ) -> Result<String, String> {
-    let cwd = PathBuf::from(&repo_root);
-    let p = PathBuf::from(&file);
-    let rel = p.strip_prefix(&cwd).unwrap_or(&p);
-    let out = std::process::Command::new("git")
-        .args(["diff", &base, "--no-color", "--"])
-        .arg(rel)
-        .current_dir(&cwd)
-        .output()
-        .map_err(|e| e.to_string())?;
-    if out.status.success() {
-        let body = String::from_utf8_lossy(&out.stdout).into_owned();
-        if !body.trim().is_empty() {
-            return Ok(body);
-        }
-    }
-    // Brand-new file the session created — show its full contents as an add.
-    if git_is_untracked(&cwd, rel) {
-        let added = std::process::Command::new("git")
-            .args(["diff", "--no-color", "--no-index", "--", "/dev/null"])
+    crate::blocking::run(move || {
+        let cwd = PathBuf::from(&repo_root);
+        let p = PathBuf::from(&file);
+        let rel = p.strip_prefix(&cwd).unwrap_or(&p);
+        let out = std::process::Command::new("git")
+            .args(["diff", &base, "--no-color", "--"])
             .arg(rel)
             .current_dir(&cwd)
             .output()
             .map_err(|e| e.to_string())?;
-        if matches!(added.status.code(), Some(0) | Some(1)) {
-            return Ok(String::from_utf8_lossy(&added.stdout).into_owned());
+        if out.status.success() {
+            let body = String::from_utf8_lossy(&out.stdout).into_owned();
+            if !body.trim().is_empty() {
+                return Ok(body);
+            }
         }
-    }
-    Ok(String::new())
+        // Brand-new file the session created — show its full contents as an add.
+        if git_is_untracked(&cwd, rel) {
+            let added = std::process::Command::new("git")
+                .args(["diff", "--no-color", "--no-index", "--", "/dev/null"])
+                .arg(rel)
+                .current_dir(&cwd)
+                .output()
+                .map_err(|e| e.to_string())?;
+            if matches!(added.status.code(), Some(0) | Some(1)) {
+                return Ok(String::from_utf8_lossy(&added.stdout).into_owned());
+            }
+        }
+        Ok(String::new())
+    })
+    .await
 }
 
 /// Per-file stats for one commit — the "Files changed" list in the History
@@ -1917,84 +2094,87 @@ pub struct GitCommitFileStat {
 /// with the numstat row.
 #[tauri::command]
 pub async fn git_commit_file_stats(repo_root: String, sha: String) -> Vec<GitCommitFileStat> {
-    let cwd = PathBuf::from(&repo_root);
-    let Ok(out) = std::process::Command::new("git")
-        .args([
-            "show",
-            "--no-color",
-            "--format=format:",
-            "--numstat",
-            "--name-status",
-            &sha,
-        ])
-        .current_dir(&cwd)
-        .output()
-    else {
-        return Vec::new();
-    };
-    if !out.status.success() {
-        return Vec::new();
-    }
-    let text = String::from_utf8_lossy(&out.stdout);
-
-    // numstat lines: `<added>\t<deleted>\t<path>` (binary: `-\t-\t<path>`).
-    // name-status lines: `<STATUS>\t<path>` (rename: `R<score>\t<old>\t<new>`).
-    // The two blocks are concatenated with `--numstat --name-status`, so a line
-    // is numstat when its first column parses as a count (or is the binary `-`)
-    // AND it has 3 tab-fields; everything else is a name-status line. We key
-    // both on the final path so they merge.
-    let mut status_by_path: HashMap<String, String> = HashMap::new();
-    let mut stats: Vec<GitCommitFileStat> = Vec::new();
-    let mut seen: HashMap<String, usize> = HashMap::new();
-
-    for line in text.lines() {
-        if line.trim().is_empty() {
-            continue;
+    crate::blocking::run(move || {
+        let cwd = PathBuf::from(&repo_root);
+        let Ok(out) = std::process::Command::new("git")
+            .args([
+                "show",
+                "--no-color",
+                "--format=format:",
+                "--numstat",
+                "--name-status",
+                &sha,
+            ])
+            .current_dir(&cwd)
+            .output()
+        else {
+            return Vec::new();
+        };
+        if !out.status.success() {
+            return Vec::new();
         }
-        let cols: Vec<&str> = line.split('\t').collect();
-        // numstat row: 3 columns, first two are counts (or `-` for binary).
-        let is_numstat = cols.len() == 3
-            && (cols[0] == "-" || cols[0].chars().all(|c| c.is_ascii_digit()))
-            && (cols[1] == "-" || cols[1].chars().all(|c| c.is_ascii_digit()));
-        if is_numstat {
-            let added = if cols[0] == "-" { -1 } else { cols[0].parse().unwrap_or(0) };
-            let deleted = if cols[1] == "-" { -1 } else { cols[1].parse().unwrap_or(0) };
-            let path = cols[2].to_string();
-            let idx = stats.len();
-            seen.insert(path.clone(), idx);
-            stats.push(GitCommitFileStat {
-                path,
-                status: "M".to_string(),
-                added,
-                deleted,
-            });
-        } else {
-            // name-status row. Rename/copy carries old + new; key on the new.
-            let status = cols.first().copied().unwrap_or("M");
-            let letter = status.chars().next().unwrap_or('M').to_string();
-            let path = cols.last().copied().unwrap_or("").to_string();
-            if !path.is_empty() {
-                status_by_path.insert(path, letter);
+        let text = String::from_utf8_lossy(&out.stdout);
+
+        // numstat lines: `<added>\t<deleted>\t<path>` (binary: `-\t-\t<path>`).
+        // name-status lines: `<STATUS>\t<path>` (rename: `R<score>\t<old>\t<new>`).
+        // The two blocks are concatenated with `--numstat --name-status`, so a line
+        // is numstat when its first column parses as a count (or is the binary `-`)
+        // AND it has 3 tab-fields; everything else is a name-status line. We key
+        // both on the final path so they merge.
+        let mut status_by_path: HashMap<String, String> = HashMap::new();
+        let mut stats: Vec<GitCommitFileStat> = Vec::new();
+        let mut seen: HashMap<String, usize> = HashMap::new();
+
+        for line in text.lines() {
+            if line.trim().is_empty() {
+                continue;
+            }
+            let cols: Vec<&str> = line.split('\t').collect();
+            // numstat row: 3 columns, first two are counts (or `-` for binary).
+            let is_numstat = cols.len() == 3
+                && (cols[0] == "-" || cols[0].chars().all(|c| c.is_ascii_digit()))
+                && (cols[1] == "-" || cols[1].chars().all(|c| c.is_ascii_digit()));
+            if is_numstat {
+                let added = if cols[0] == "-" { -1 } else { cols[0].parse().unwrap_or(0) };
+                let deleted = if cols[1] == "-" { -1 } else { cols[1].parse().unwrap_or(0) };
+                let path = cols[2].to_string();
+                let idx = stats.len();
+                seen.insert(path.clone(), idx);
+                stats.push(GitCommitFileStat {
+                    path,
+                    status: "M".to_string(),
+                    added,
+                    deleted,
+                });
+            } else {
+                // name-status row. Rename/copy carries old + new; key on the new.
+                let status = cols.first().copied().unwrap_or("M");
+                let letter = status.chars().next().unwrap_or('M').to_string();
+                let path = cols.last().copied().unwrap_or("").to_string();
+                if !path.is_empty() {
+                    status_by_path.insert(path, letter);
+                }
             }
         }
-    }
 
-    // Fold statuses onto the numstat rows by path; a name-status-only file
-    // (rare with both flags) is appended so nothing is dropped.
-    for (path, status) in &status_by_path {
-        if let Some(&idx) = seen.get(path) {
-            stats[idx].status = status.clone();
-        } else {
-            stats.push(GitCommitFileStat {
-                path: path.clone(),
-                status: status.clone(),
-                added: 0,
-                deleted: 0,
-            });
+        // Fold statuses onto the numstat rows by path; a name-status-only file
+        // (rare with both flags) is appended so nothing is dropped.
+        for (path, status) in &status_by_path {
+            if let Some(&idx) = seen.get(path) {
+                stats[idx].status = status.clone();
+            } else {
+                stats.push(GitCommitFileStat {
+                    path: path.clone(),
+                    status: status.clone(),
+                    added: 0,
+                    deleted: 0,
+                });
+            }
         }
-    }
 
-    stats
+        stats
+    })
+    .await
 }
 
 /// Two-letter porcelain status per path. `index` is the staged side
@@ -2010,39 +2190,42 @@ pub struct StatusEntry {
 
 #[tauri::command]
 pub async fn git_status_v2(repo_root: String) -> Vec<StatusEntry> {
-    let cwd = PathBuf::from(&repo_root);
-    let Ok(out) = std::process::Command::new("git")
-        .args(["status", "--porcelain=v1", "-z"])
-        .current_dir(&cwd)
-        .output()
-    else {
-        return Vec::new();
-    };
-    if !out.status.success() {
-        return Vec::new();
-    }
-    let text = String::from_utf8_lossy(&out.stdout);
-    let mut entries = Vec::new();
-    for chunk in text.split('\0') {
-        if chunk.len() < 4 {
-            continue;
-        }
-        let bytes = chunk.as_bytes();
-        let x = bytes[0] as char;
-        let y = bytes[1] as char;
-        let path_part = &chunk[3..];
-        let rel = if let Some(idx) = path_part.find(" -> ") {
-            &path_part[idx + 4..]
-        } else {
-            path_part
+    crate::blocking::run(move || {
+        let cwd = PathBuf::from(&repo_root);
+        let Ok(out) = std::process::Command::new("git")
+            .args(["status", "--porcelain=v1", "-z"])
+            .current_dir(&cwd)
+            .output()
+        else {
+            return Vec::new();
         };
-        entries.push(StatusEntry {
-            path: rel.to_string(),
-            index: if x == ' ' { String::new() } else { x.to_string() },
-            worktree: if y == ' ' { String::new() } else { y.to_string() },
-        });
-    }
-    entries
+        if !out.status.success() {
+            return Vec::new();
+        }
+        let text = String::from_utf8_lossy(&out.stdout);
+        let mut entries = Vec::new();
+        for chunk in text.split('\0') {
+            if chunk.len() < 4 {
+                continue;
+            }
+            let bytes = chunk.as_bytes();
+            let x = bytes[0] as char;
+            let y = bytes[1] as char;
+            let path_part = &chunk[3..];
+            let rel = if let Some(idx) = path_part.find(" -> ") {
+                &path_part[idx + 4..]
+            } else {
+                path_part
+            };
+            entries.push(StatusEntry {
+                path: rel.to_string(),
+                index: if x == ' ' { String::new() } else { x.to_string() },
+                worktree: if y == ' ' { String::new() } else { y.to_string() },
+            });
+        }
+        entries
+    })
+    .await
 }
 
 fn git_simple(repo_root: &str, sub: &str, paths: &[String]) -> Result<String, String> {
@@ -2116,8 +2299,25 @@ fn git_status_map(cwd: &Path) -> HashMap<PathBuf, char> {
             path_part
         };
         let full = root.join(rel);
+        // Order matters. A conflict has to be recognised BEFORE the A/D
+        // ladder, because git spells several of its unmerged states with the
+        // very letters that ladder is looking for. `AA` (both added) and `DD`
+        // (both deleted) are conflicts, not an add and a delete, and `UU`
+        // (both modified) used to fall past every arm into the `else` and
+        // come out as an ordinary modified file — so a file with conflict
+        // markers sitting in it looked exactly like one you had just edited.
+        //
+        // The unmerged set, in full, is: DD AU UD UA DU AA UU — which is
+        // "either side is U, or both sides carry the same letter".
+        let unmerged = x == 'U' || y == 'U' || (x == 'A' && y == 'A') || (x == 'D' && y == 'D');
         let ch = if x == '?' || y == '?' {
             '?'
+        } else if unmerged {
+            'U'
+        } else if x == 'R' || y == 'R' {
+            // A rename reported as "modified" sends you looking for an edit
+            // that was never made.
+            'R'
         } else if x == 'A' || y == 'A' {
             'A'
         } else if x == 'D' || y == 'D' {

@@ -158,6 +158,18 @@ pub fn list() -> Vec<WorktreeInfo> {
     parse_porcelain(&body)
 }
 
+/// The names you can address a checkout by — every linked worktree, plus the
+/// literal `main` for the main checkout, which has no name of its own.
+///
+/// Used to tell a checkout name from an agent name when someone types a bare
+/// word (`aura worktrees say … --to auckland` vs `--to codex`). One
+/// `git worktree list`, same as [`list`].
+pub fn checkout_names() -> Vec<String> {
+    let mut names: Vec<String> = list().into_iter().filter_map(|w| w.name).collect();
+    names.push("main".to_string());
+    names
+}
+
 /// Every checkout, plus its dirty-file count, drift from trunk, and when its
 /// HEAD last moved.
 ///

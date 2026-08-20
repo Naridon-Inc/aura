@@ -21,6 +21,8 @@ import {
 } from "react";
 import { api, type ManagerTask, type ManagerTaskStatus } from "../../lib/api";
 import { Button } from "../ui/button";
+import { plainPreview } from "../../lib/plainPreview";
+import { truncate } from "../../lib/truncate";
 
 type DagViewProps = {
   tasks: ManagerTask[];
@@ -134,7 +136,7 @@ export function DagView({
       <div className="flex flex-col gap-3 relative">
         {waves.map((wave, idx) => (
           <div key={idx}>
-            <div className="text-[10px] uppercase tracking-wide text-text-3 mb-1">
+            <div className="section-label mb-1">
               Wave {idx + 1}
             </div>
             <div className="flex flex-wrap gap-x-12 gap-y-2">
@@ -226,29 +228,32 @@ function ArrowHead({ x, y, angle, color }: { x: number; y: number; angle: number
 function EdgeTooltip({ edge, tasks }: { edge: EdgeGeom; tasks: ManagerTask[] }) {
   const parent = tasks.find((t) => t.id === edge.parentId);
   if (!parent) return null;
+  // Handovers are written by an agent, so they arrive as markdown. A tooltip
+  // four lines tall is no place for a heading marker. See plainPreview.ts.
   const summary = parent.summary?.trim();
+  const plainSummary = plainPreview(summary ?? "");
   const x = (edge.x1 + edge.x2) / 2;
   const y = (edge.y1 + edge.y2) / 2 + 14;
   return (
     <div
-      className="absolute z-20 pointer-events-none bg-bg-1 border border-line rounded shadow-lg px-2 py-1.5 text-[10.5px] max-w-xs"
+      className="absolute z-20 pointer-events-none bg-bg-1 border border-line rounded shadow-lg px-2 py-1.5 text-xs max-w-xs"
       style={{ left: x, top: y, transform: "translateX(-50%)" }}
     >
-      <div className="text-text-3 uppercase tracking-wide text-[9px] mb-0.5">
+      <div className="section-label mb-0.5">
         #{edge.parentId} → #{edge.childId} handover
       </div>
       {summary ? (
         <div className="text-text-1 whitespace-pre-wrap line-clamp-4">
-          {summary.length > 240 ? summary.slice(0, 240) + "…" : summary}
+          {truncate(plainSummary, 240)}
         </div>
       ) : (
         <div className="text-text-3 italic">
           {parent.status === "done"
             ? "(no summary captured)"
-            : "Waiting for upstream task to complete."}
+            : "Waiting on the task this one depends on."}
         </div>
       )}
-      <div className="text-text-3 text-[9px] mt-1">click for full prompt →</div>
+      <div className="text-text-3 text-2xs mt-1">click for full prompt →</div>
     </div>
   );
 }
@@ -291,7 +296,7 @@ function PromptPreviewModal({
         onClick={(e) => e.stopPropagation()}
       >
         <div className="flex items-center justify-between px-3 py-2 border-b border-line-soft">
-          <div className="text-[11px] text-text-3 uppercase tracking-wide">
+          <div className="section-label">
             Handover #{parentId} → #{childId}
           </div>
           <Button
@@ -309,7 +314,7 @@ function PromptPreviewModal({
           )}
           {error && <div className="text-red text-xs">{error}</div>}
           {text && (
-            <pre className="text-[11.5px] text-text-1 whitespace-pre-wrap font-mono">
+            <pre className="text-sm text-text-1 whitespace-pre-wrap font-mono">
               {text}
             </pre>
           )}

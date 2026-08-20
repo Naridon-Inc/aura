@@ -8,11 +8,20 @@
 
 import { type ClaudeSession, type IntentRow } from "./api";
 
-/** True for a guard auto-stub by its intent *text* alone (`[auto] …`). Used
- *  where only the prompt string is in hand (e.g. the per-commit Intent ↔ AST
- *  report, whose stated-intent rows carry no changeset). */
+/** The guard's current placeholder, agent_mutation_guard.rs:516 —
+ *  `"{agent_id} edited {n} file(s) — reason not captured yet"`. Pinned to the
+ *  Rust by a test, because the earlier `[auto] …` shape below is what this
+ *  check knew for months after the guard had stopped writing it. */
+const GUARD_STUB_TEXT = /\bedited \d+ file\(s\)\s*[—–-]\s*reason not captured yet\b/i;
+
+/** True for a guard auto-stub by its intent *text* alone — either the current
+ *  "<agent> edited N file(s) — reason not captured yet" or the legacy
+ *  "[auto] … backfill pending". Used where only the prompt string is in hand
+ *  (e.g. the per-commit Intent ↔ AST report, whose stated-intent rows carry no
+ *  changeset), so it has to know every shape the guard has ever written. */
 export function isAutoStubText(intent: string): boolean {
-  return (intent ?? "").trim().startsWith("[auto] ");
+  const text = (intent ?? "").trim();
+  return text.startsWith("[auto] ") || GUARD_STUB_TEXT.test(text);
 }
 
 /** True for the guard's auto-generated placeholder intents — the
@@ -20,6 +29,117 @@ export function isAutoStubText(intent: string): boolean {
  *  without logging intent. Real changeset, junk title. */
 export function isAutoStub(row: IntentRow): boolean {
   return row.changeset?.source === "guard_auto_stub" || isAutoStubText(row.intent);
+}
+
+// ── Where a row's "why" came from ────────────────────────────────────────────
+// The guard resolves a reason from three places, best first, and stamps which
+// one it used on `changeset.source` (agent_mutation_guard.rs:504-525):
+//
+//   session_prompt   your own words, read out of the live session transcript
+//   brain_inferred   Aura's model, given the diff and asked to write the reason
+//   guard_auto_stub  nothing was available — "<agent> edited N file(s)"
+//
+// Nothing on screen has ever read that field except `isAutoStub`, so all three
+// arrived looking the same: a sentence under the heading "Reason", inside a card
+// that says "Aura locked exactly what the AI changed and why."
+//
+// The middle one is the problem. Its prompt is "A coding agent changed these
+// files but didn't say why. Read the diff and write the reason as ONE terse line
+// … It becomes the 'why' in an audit trail" (agent_mutation_guard.rs:849). What
+// comes back is a description of the change, and it is presented as the reason
+// for the change. It also cannot fail the Intent ↔ AST check that is the point
+// of this product, because it was written FROM the AST — it agrees with the diff
+// by construction. An audit trail whose weakest rows are its most agreeable ones
+// is worse than one with holes in it, because you can see a hole.
+
+export type IntentProvenance = "stated" | "asked" | "inferred" | "uncaptured";
+
+/** Where this row's "why" came from — see the note above. A row with no
+ *  `source` came through `aura_log_intent` proper: somebody stated it. */
+export function intentProvenance(row: IntentRow): IntentProvenance {
+  if (isAutoStubText(row.intent)) return "uncaptured";
+  switch (row.changeset?.source) {
+    case "guard_auto_stub":
+      return "uncaptured";
+    case "brain_inferred":
+      return "inferred";
+    case "session_prompt":
+      return "asked";
+    default:
+      return "stated";
+  }
+}
+
+/** Provenance of a string a surface is about to *show*, which is not always the
+ *  provenance of `row.intent`: an auto-stub row has no reason of its own, so
+ *  both the list and the detail pane swap in the correlated session's prompt.
+ *  Pass that prompt if one was used — the caller knows, this can't.
+ *
+ *  Both callers used to work this out themselves. They agreed, which is the
+ *  only reason it wasn't already a bug. */
+export function displayedProvenance(
+  row: IntentRow,
+  borrowedPrompt: string | null | undefined,
+): IntentProvenance {
+  if (isAutoStub(row)) return borrowedPrompt ? "asked" : "uncaptured";
+  return intentProvenance(row);
+}
+
+/** Provenance of exactly what `sessionDisplayTitle` returns for this row, for
+ *  the list surfaces that call it. Kept beside that function so the two can't
+ *  drift into showing one thing and meaning another. */
+export function titleProvenance(
+  row: IntentRow,
+  sessions: ClaudeSession[],
+): IntentProvenance {
+  if (!isAutoStub(row)) return intentProvenance(row);
+  const s = correlateClaudeSession(row, sessions);
+  return displayedProvenance(row, s ? s.last_prompt || s.first_prompt : "");
+}
+
+/** The heading over the body text. Not "Reason" unless it is one.
+ *  `statedLabel` lets a surface keep its own wording for the ordinary case —
+ *  the Time Machine card says "Why this happened", which is right for a stated
+ *  reason and a bare falsehood over the other three. */
+export function provenanceLabel(p: IntentProvenance, statedLabel = "Reason"): string {
+  switch (p) {
+    case "asked":
+      return "What you asked for";
+    case "inferred":
+      return "Aura's read of the change";
+    case "uncaptured":
+      return "No reason was given";
+    default:
+      return statedLabel;
+  }
+}
+
+/** A one-or-two-word marker for a scan-list row, where there is no room to
+ *  explain and no time to read.
+ *
+ *  Only the inferred case gets one, and the rule is one bit: *did a machine
+ *  write this sentence?* A stated reason and a session prompt are both somebody's
+ *  words. An uncaptured row already announces itself — its title is literally
+ *  "Agent edited 3 files". Only the model's line arrives looking exactly like a
+ *  reason a person gave, so only it needs marking, and a marker on every row
+ *  would be a marker nobody reads. */
+export function provenanceTag(p: IntentProvenance): string {
+  return p === "inferred" ? "Aura's summary" : "";
+}
+
+/** One line under the body saying who wrote it, where that isn't obvious.
+ *  Empty for a stated reason — that's the ordinary case and needs no note. */
+export function provenanceNote(p: IntentProvenance): string {
+  switch (p) {
+    case "asked":
+      return "Taken from what you typed at the start of this session. Nobody wrote a reason for the change itself.";
+    case "inferred":
+      return "Nobody said why, so Aura read the change and wrote this. It describes what happened. Treat it as a summary, not as the reason.";
+    case "uncaptured":
+      return "The files changed while an agent was running and no reason was recorded.";
+    default:
+      return "";
+  }
 }
 
 // ±15 min around the run timestamp — wide enough to bracket a session that

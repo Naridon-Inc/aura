@@ -18,6 +18,122 @@ fn build_cloud_client() -> reqwest::blocking::Client {
     builder.build().unwrap_or_else(|_| reqwest::blocking::Client::new())
 }
 
+// ─── Probe cache ───────────────────────────────────────────────────────────
+// `aura status` is the first thing every agent runs and the first thing the
+// app renders. Everything local in it finishes in about 5ms; the mothership
+// presence probe is a full network round trip, and it measured 1517ms of a
+// 1550ms run. Nothing about "is the mothership reachable" changes between two
+// status calls a second apart, so the answer is written to disk under the repo
+// and cloud URL it was taken for, and reused for a few seconds.
+//
+// Two TTLs, because the two answers are not equally safe to hold on to.
+// Reporting "online" a few seconds late costs nothing. Reporting "offline" a
+// few seconds late hides exactly the transition someone is waiting on — the
+// network coming back — so a failure is held for much less time, even though
+// recomputing a failure is the expensive direction (it costs the timeout, not
+// a round trip).
+
+const PROBE_TTL_MS: u64 = 20_000;
+const PROBE_MISS_TTL_MS: u64 = 5_000;
+
+fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+
+/// A probe answer read back off disk, with how old it turned out to be.
+struct Cached {
+    value: serde_json::Value,
+    ok: bool,
+    age_ms: u64,
+}
+
+/// Small on-disk TTL cache for network probes. One file per key, because
+/// several agents run `aura status` against the same home directory at once
+/// and a single shared map would be a read-modify-write race. Writes land on a
+/// temp file and rename, so a reader never sees half an entry.
+struct ProbeCache {
+    /// `None` disables the cache entirely — no reads, no writes.
+    dir: Option<std::path::PathBuf>,
+}
+
+impl ProbeCache {
+    fn global() -> Self {
+        if std::env::var("AURA_NO_PROBE_CACHE").is_ok() {
+            return ProbeCache { dir: None };
+        }
+        let home = std::env::var("HOME").ok()
+            .or_else(|| std::env::var("USERPROFILE").ok());
+        ProbeCache {
+            dir: home.map(|h| std::path::PathBuf::from(h).join(".aura").join("cache")),
+        }
+    }
+
+    fn path(&self, key: &str) -> Option<std::path::PathBuf> {
+        // Keys carry a repo name, a branch and a URL, none of which are safe
+        // as a file name. Hash them — FNV-1a written out by hand rather than
+        // std's DefaultHasher, which makes no promise that the same input
+        // hashes the same way in a later release. This cache has to be
+        // readable by the binary that wrote it *and* by the next one.
+        let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+        for b in key.as_bytes() {
+            h ^= *b as u64;
+            h = h.wrapping_mul(0x0000_0100_0000_01b3);
+        }
+        self.dir.as_ref().map(|d| d.join(format!("probe-{:016x}.json", h)))
+    }
+
+    fn get(&self, key: &str, ttl_ms: u64, miss_ttl_ms: u64) -> Option<Cached> {
+        let path = self.path(key)?;
+        let raw = std::fs::read_to_string(&path).ok()?;
+        let entry: serde_json::Value = serde_json::from_str(&raw).ok()?;
+        let at_ms = entry["at_ms"].as_u64()?;
+        let ok = entry["ok"].as_bool()?;
+        // `checked_sub` and not a subtraction: an entry stamped in the future
+        // — a clock stepped by NTP, a laptop resumed from sleep — would
+        // otherwise look fresh forever.
+        let age_ms = now_ms().checked_sub(at_ms)?;
+        if age_ms >= if ok { ttl_ms } else { miss_ttl_ms } {
+            return None;
+        }
+        Some(Cached { value: entry.get("value")?.clone(), ok, age_ms })
+    }
+
+    fn put(&self, key: &str, ok: bool, value: serde_json::Value) {
+        self.put_at(key, now_ms(), ok, value);
+    }
+
+    fn put_at(&self, key: &str, at_ms: u64, ok: bool, value: serde_json::Value) {
+        let path = match self.path(key) { Some(p) => p, None => return };
+        if let Some(parent) = path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        let body = match serde_json::to_string(&json!({ "at_ms": at_ms, "ok": ok, "value": value })) {
+            Ok(b) => b,
+            Err(_) => return,
+        };
+        let tmp = path.with_extension(format!("tmp{}", std::process::id()));
+        if std::fs::write(&tmp, body).is_ok() && std::fs::rename(&tmp, &path).is_err() {
+            let _ = std::fs::remove_file(&tmp);
+        }
+    }
+}
+
+/// The mothership URL and token, or `None` when this machine was never
+/// pointed at one. Callers use the `None` to stay silent rather than to
+/// report "offline" — never configured is not the same as unreachable.
+fn mothership_target() -> Option<(String, String)> {
+    let config = ConfigManager::load();
+    let token = config.cloud_api_token
+        .or_else(|| std::env::var("AURA_CLOUD_TOKEN").ok())?;
+    match config.cloud_url {
+        Some(u) if !u.is_empty() => Some((u, token)),
+        _ => None,
+    }
+}
+
 /// Manages the daemon-to-cloud sync loop.
 /// Batches local events every SYNC_INTERVAL and POSTs to Aura Cloud.
 /// Sends heartbeats every HEARTBEAT_INTERVAL to maintain presence.
@@ -638,8 +754,42 @@ pub fn pull_function_bodies_opts(allow_red: bool) -> Result<serde_json::Value, S
         .map_err(|e| format!("Invalid JSON response: {}", e))
 }
 
-/// Get sync status from Aura Cloud.
+/// Get sync status from Aura Cloud, measuring now. For `aura sync status` and
+/// the MCP sync-status tool, whose whole job is to answer what is pending.
 pub fn fetch_sync_status() -> Result<serde_json::Value, String> {
+    fetch_sync_status_within(Duration::from_secs(5))
+}
+
+/// Same answer, reused for a few seconds. The MCP `aura_status` tool calls
+/// this right after the presence probe on every agent turn; with no cache and
+/// no timeout of its own it inherited the client's 10s, so the one call every
+/// agent makes first could sit for 13s before printing anything.
+pub fn fetch_sync_status_cached() -> Result<serde_json::Value, String> {
+    let cloud_url = match mothership_target() {
+        Some((u, _)) => u,
+        // Not configured: no key to cache under, and the call fails fast
+        // anyway on the missing token.
+        None => return fetch_sync_status_within(Duration::from_secs(3)),
+    };
+    let key = format!("sync|{}|{}|{}",
+        cloud_url.trim_end_matches('/'), repo_name(), current_branch());
+    let cache = ProbeCache::global();
+    if let Some(hit) = cache.get(&key, PROBE_TTL_MS, PROBE_MISS_TTL_MS) {
+        return if hit.ok {
+            Ok(hit.value)
+        } else {
+            Err(hit.value.as_str().unwrap_or("Cloud unreachable").to_string())
+        };
+    }
+    let result = fetch_sync_status_within(Duration::from_secs(3));
+    match &result {
+        Ok(v) => cache.put(&key, true, v.clone()),
+        Err(e) => cache.put(&key, false, json!(e)),
+    }
+    result
+}
+
+fn fetch_sync_status_within(timeout: Duration) -> Result<serde_json::Value, String> {
     let config = ConfigManager::load();
     let token = config.cloud_api_token
         .or_else(|| std::env::var("AURA_CLOUD_TOKEN").ok())
@@ -656,6 +806,7 @@ pub fn fetch_sync_status() -> Result<serde_json::Value, String> {
 
     let resp = client.get(&url)
         .header("Authorization", format!("Bearer {}", token))
+        .timeout(timeout)
         .send()
         .map_err(|e| format!("Cloud unreachable: {}", e))?;
 
@@ -1126,22 +1277,36 @@ pub fn extract_function_body(source: &str, function_name: &str) -> Option<String
 
 // ─── Mothership Connectivity Check ─────────────────────────────────────────
 
-/// Quick connectivity probe. Returns (reachable, latency_ms, peer_count).
-pub fn check_mothership() -> (bool, u64, u64) {
-    let config = ConfigManager::load();
-    let token = match config.cloud_api_token
-        .or_else(|| std::env::var("AURA_CLOUD_TOKEN").ok()) {
+/// What a connectivity probe answers, plus how old the answer is.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct MothershipStatus {
+    pub online: bool,
+    pub latency_ms: u64,
+    pub peers: u64,
+    /// 0 when this run measured it, non-zero when it came off the cache.
+    /// Callers must say so rather than reprint a latency nobody measured.
+    pub age_ms: u64,
+}
+
+const MOTHERSHIP_UNREACHABLE: MothershipStatus =
+    MothershipStatus { online: false, latency_ms: 0, peers: 0, age_ms: 0 };
+
+fn mothership_key(cloud_url: &str) -> String {
+    format!("mothership|{}|{}", cloud_url.trim_end_matches('/'), repo_name())
+}
+
+/// Measure now, whatever the cache says. For the commands whose entire job is
+/// to answer "can you reach the mothership at this moment" — `aura live`,
+/// `aura live status`, `aura team status`.
+pub fn check_mothership_fresh() -> MothershipStatus {
+    let (cloud_url, token) = match mothership_target() {
         Some(t) => t,
-        None => return (false, 0, 0),
-    };
-    let cloud_url = match config.cloud_url {
-        Some(ref u) if !u.is_empty() => u.clone(),
-        _ => return (false, 0, 0),
+        None => return MOTHERSHIP_UNREACHABLE,
     };
     let client = build_cloud_client();
     let start = std::time::Instant::now();
     let url = format!("{}/api/v1/live/presence?repo={}", cloud_url.trim_end_matches('/'), repo_name());
-    match client.get(&url)
+    let status = match client.get(&url)
         .header("Authorization", format!("Bearer {}", token))
         .timeout(Duration::from_secs(3))
         .send() {
@@ -1151,25 +1316,68 @@ pub fn check_mothership() -> (bool, u64, u64) {
                 .ok()
                 .and_then(|j| j["developers"].as_array().map(|a| a.len() as u64))
                 .unwrap_or(0);
-            (true, ms, peers)
+            MothershipStatus { online: true, latency_ms: ms, peers, age_ms: 0 }
         }
-        _ => (false, 0, 0),
-    }
+        _ => MOTHERSHIP_UNREACHABLE,
+    };
+    ProbeCache::global().put(&mothership_key(&cloud_url), status.online, json!({
+        "latency_ms": status.latency_ms,
+        "peers": status.peers,
+    }));
+    status
 }
 
-/// Print a one-line mothership status. Returns true if online.
-pub fn print_mothership_status_line() -> bool {
-    let config = ConfigManager::load();
-    let has_token = config.cloud_api_token.is_some()
-        || std::env::var("AURA_CLOUD_TOKEN").is_ok();
-    if !has_token || config.cloud_url.is_none() {
-        return false;
+/// Reuse a probe from the last few seconds if there is one. For the callers
+/// that print connectivity as a side note — `aura status` and the MCP status
+/// tool, which run on every agent turn and every app refresh.
+pub fn check_mothership_status() -> MothershipStatus {
+    let cloud_url = match mothership_target() {
+        Some((u, _)) => u,
+        None => return MOTHERSHIP_UNREACHABLE,
+    };
+    if let Some(hit) = ProbeCache::global()
+        .get(&mothership_key(&cloud_url), PROBE_TTL_MS, PROBE_MISS_TTL_MS)
+    {
+        return MothershipStatus {
+            online: hit.ok,
+            latency_ms: hit.value["latency_ms"].as_u64().unwrap_or(0),
+            peers: hit.value["peers"].as_u64().unwrap_or(0),
+            age_ms: hit.age_ms,
+        };
     }
-    let (online, ms, peers) = check_mothership();
-    if online {
-        println!("  {} Mothership: {} ({}ms, {} peer{})",
-            "●".green(), "online".green().bold(), ms, peers,
-            if peers == 1 { "" } else { "s" });
+    check_mothership_fresh()
+}
+
+/// Quick connectivity probe. Returns (reachable, latency_ms, peer_count).
+pub fn check_mothership() -> (bool, u64, u64) {
+    let s = check_mothership_status();
+    (s.online, s.latency_ms, s.peers)
+}
+
+/// Print a one-line mothership status, measuring it now. Returns true if online.
+pub fn print_mothership_status_line() -> bool {
+    mothership_target().is_some() && print_mothership_line(check_mothership_fresh())
+}
+
+/// Same line, but happy to reuse a recent probe. `aura status` is the first
+/// thing every agent runs; it should not spend a network round trip on a line
+/// it prints as context.
+pub fn print_mothership_status_line_cached() -> bool {
+    mothership_target().is_some() && print_mothership_line(check_mothership_status())
+}
+
+fn print_mothership_line(status: MothershipStatus) -> bool {
+    if status.online {
+        // Date the number when it is not this run's. Reprinting a cached
+        // latency as if it were live would be a lie about a measurement.
+        let latency = if status.age_ms >= 1000 {
+            format!("{}ms, checked {}s ago", status.latency_ms, status.age_ms / 1000)
+        } else {
+            format!("{}ms", status.latency_ms)
+        };
+        println!("  {} Mothership: {} ({}, {} peer{})",
+            "●".green(), "online".green().bold(), latency, status.peers,
+            if status.peers == 1 { "" } else { "s" });
         true
     } else {
         println!("  {} Mothership: {} (buffering locally)",
@@ -1204,6 +1412,25 @@ pub fn create_remote_zone(patterns: &[String], mode: &str, label: Option<&str>) 
         .json(&body)
         .send()
         .map_err(|e| format!("Cloud unreachable: {}", e))?;
+    decode_cloud_json(resp)
+}
+
+/// Turn a response into JSON, or into a sentence that says what went wrong.
+///
+/// `resp.json()` on its own reports the *decode* failure, which for any non-2xx
+/// is a description of the wrong problem: a cloud that doesn't serve this
+/// endpoint answered "Invalid response: error decoding response body", and the
+/// 404 underneath it never reached the user. Status first, then decode.
+fn decode_cloud_json(resp: reqwest::blocking::Response) -> Result<serde_json::Value, String> {
+    let status = resp.status();
+    if !status.is_success() {
+        let hint = match status.as_u16() {
+            401 | 403 => " — sign in again with `aura connect`",
+            404 => " — this cloud doesn't serve that endpoint",
+            _ => "",
+        };
+        return Err(format!("HTTP {}{}", status.as_u16(), hint));
+    }
     resp.json::<serde_json::Value>()
         .map_err(|e| format!("Invalid response: {}", e))
 }
@@ -1222,8 +1449,7 @@ pub fn fetch_remote_zones() -> Result<serde_json::Value, String> {
         .header("Authorization", format!("Bearer {}", token))
         .send()
         .map_err(|e| format!("Cloud unreachable: {}", e))?;
-    resp.json::<serde_json::Value>()
-        .map_err(|e| format!("Invalid response: {}", e))
+    decode_cloud_json(resp)
 }
 
 pub fn check_remote_zone(file_path: &str) -> Result<serde_json::Value, String> {
@@ -1241,8 +1467,7 @@ pub fn check_remote_zone(file_path: &str) -> Result<serde_json::Value, String> {
         .header("Authorization", format!("Bearer {}", token))
         .send()
         .map_err(|e| format!("Cloud unreachable: {}", e))?;
-    resp.json::<serde_json::Value>()
-        .map_err(|e| format!("Invalid response: {}", e))
+    decode_cloud_json(resp)
 }
 
 pub fn delete_remote_zone(zone_id: &str) -> Result<serde_json::Value, String> {
@@ -1259,8 +1484,7 @@ pub fn delete_remote_zone(zone_id: &str) -> Result<serde_json::Value, String> {
         .header("Authorization", format!("Bearer {}", token))
         .send()
         .map_err(|e| format!("Cloud unreachable: {}", e))?;
-    resp.json::<serde_json::Value>()
-        .map_err(|e| format!("Invalid response: {}", e))
+    decode_cloud_json(resp)
 }
 
 // ─── Team Knowledge (P2P) ──────────────────────────────────────────────────
@@ -1620,4 +1844,100 @@ pub fn read_latest_intent_prose(max_age_secs: u64) -> Option<String> {
         return Some(intent);
     }
     None
+}
+
+#[cfg(test)]
+mod probe_cache_tests {
+    use super::{Cached, ProbeCache, PROBE_MISS_TTL_MS, PROBE_TTL_MS, now_ms};
+    use serde_json::json;
+
+    /// A cache rooted in its own temp dir. Not `ProbeCache::global()` and no
+    /// env var, so these run in parallel with each other and with anything
+    /// else in the binary without touching the real ~/.aura/cache.
+    fn cache() -> (ProbeCache, tempfile::TempDir) {
+        let tmp = tempfile::tempdir().unwrap();
+        (ProbeCache { dir: Some(tmp.path().to_path_buf()) }, tmp)
+    }
+
+    fn value(hit: Option<Cached>) -> Option<serde_json::Value> {
+        hit.map(|c| c.value)
+    }
+
+    #[test]
+    fn a_recent_probe_comes_back_instead_of_the_network() {
+        let (c, _tmp) = cache();
+        c.put("mothership|x", true, json!({ "latency_ms": 42, "peers": 3 }));
+        let hit = c.get("mothership|x", PROBE_TTL_MS, PROBE_MISS_TTL_MS).unwrap();
+        assert!(hit.ok);
+        assert_eq!(hit.value["latency_ms"], 42);
+        assert_eq!(hit.value["peers"], 3);
+    }
+
+    #[test]
+    fn a_probe_past_its_ttl_does_not() {
+        let (c, _tmp) = cache();
+        c.put_at("mothership|x", now_ms() - PROBE_TTL_MS - 1, true, json!({ "latency_ms": 42 }));
+        assert!(value(c.get("mothership|x", PROBE_TTL_MS, PROBE_MISS_TTL_MS)).is_none());
+    }
+
+    #[test]
+    fn a_failure_goes_stale_sooner_than_a_success() {
+        // The whole point of the second TTL: at the same age, the "online"
+        // answer is still good and the "offline" answer is not, because the
+        // recovery is what someone is waiting to see.
+        let (c, _tmp) = cache();
+        let age = PROBE_MISS_TTL_MS + 1;
+        assert!(age < PROBE_TTL_MS, "the miss TTL must be the shorter one");
+        c.put_at("ok", now_ms() - age, true, json!({ "latency_ms": 42 }));
+        c.put_at("bad", now_ms() - age, false, json!("Cloud unreachable"));
+        assert!(value(c.get("ok", PROBE_TTL_MS, PROBE_MISS_TTL_MS)).is_some());
+        assert!(value(c.get("bad", PROBE_TTL_MS, PROBE_MISS_TTL_MS)).is_none());
+    }
+
+    #[test]
+    fn each_key_gets_its_own_answer() {
+        // Keys carry the repo and branch. One repo's answer must never be
+        // served for another's.
+        let (c, _tmp) = cache();
+        c.put("sync|repo-a|main", true, json!({ "pending_changes": 7 }));
+        c.put("sync|repo-b|main", true, json!({ "pending_changes": 0 }));
+        assert_eq!(c.get("sync|repo-a|main", PROBE_TTL_MS, PROBE_MISS_TTL_MS)
+            .unwrap().value["pending_changes"], 7);
+        assert_eq!(c.get("sync|repo-b|main", PROBE_TTL_MS, PROBE_MISS_TTL_MS)
+            .unwrap().value["pending_changes"], 0);
+        assert!(value(c.get("sync|repo-c|main", PROBE_TTL_MS, PROBE_MISS_TTL_MS)).is_none());
+    }
+
+    #[test]
+    fn a_hit_reports_how_old_it_is() {
+        let (c, _tmp) = cache();
+        c.put_at("mothership|x", now_ms() - 4_000, true, json!({ "latency_ms": 42 }));
+        let age = c.get("mothership|x", PROBE_TTL_MS, PROBE_MISS_TTL_MS).unwrap().age_ms;
+        assert!((3_500..=6_000).contains(&age), "age was {}ms", age);
+    }
+
+    #[test]
+    fn an_entry_stamped_in_the_future_is_ignored() {
+        // A clock stepped by NTP or a laptop resumed from sleep would
+        // otherwise leave an entry that never expires.
+        let (c, _tmp) = cache();
+        c.put_at("mothership|x", now_ms() + 60_000, true, json!({ "latency_ms": 42 }));
+        assert!(value(c.get("mothership|x", PROBE_TTL_MS, PROBE_MISS_TTL_MS)).is_none());
+    }
+
+    #[test]
+    fn a_disabled_cache_never_answers_and_never_writes() {
+        let c = ProbeCache { dir: None };
+        c.put("mothership|x", true, json!({ "latency_ms": 42 }));
+        assert!(value(c.get("mothership|x", PROBE_TTL_MS, PROBE_MISS_TTL_MS)).is_none());
+    }
+
+    #[test]
+    fn a_corrupt_entry_reads_as_a_miss_rather_than_a_panic() {
+        let (c, _tmp) = cache();
+        let path = c.path("mothership|x").unwrap();
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, "{ this is not json").unwrap();
+        assert!(value(c.get("mothership|x", PROBE_TTL_MS, PROBE_MISS_TTL_MS)).is_none());
+    }
 }

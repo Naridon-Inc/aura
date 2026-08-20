@@ -1,0 +1,27 @@
+[package]
+name        = "aura-env"
+version     = "0.1.0"
+edition     = "2021"
+license     = "Apache-2.0 OR MIT"
+description = "The declared environment of a project — toolchains, packages and services — versioned, signed, and applied identically to every place."
+repository  = "https://github.com/Naridon-Inc/aura"
+publish     = false
+
+[dependencies]
+# The signature is the same primitive every other sealed thing in Aura uses,
+# and the team registry it verifies against is the same git-tracked
+# `.aura/team/keys.jsonl` a signed intent block resolves through. A second
+# trust root for environments would be a second thing to get wrong.
+aura-attestation = { path = "../aura-attestation", default-features = false }
+# JCS RFC 8785 canonicalization — the bytes a signature covers must not
+# depend on which serializer wrote them.
+aura-blocks      = { path = "../aura-blocks" }
+
+serde      = { version = "1", features = ["derive"] }
+serde_json = "1"
+# The spec lives in the project's own `.aura/settings.toml`, beside the
+# `[worktree]` lifecycle it grew out of. Same parser the settings writer uses.
+toml_edit  = "0.22"
+sha2       = "0.10"
+hex        = "0.4"
+base64     = "0.22"

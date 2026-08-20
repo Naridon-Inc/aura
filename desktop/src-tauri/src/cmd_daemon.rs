@@ -140,18 +140,21 @@ pub async fn daemon_status(handle: State<'_, DaemonHandle>) -> Result<DaemonStat
 /// budget caps us at one shell per call, so we don't tail logs here.
 #[tauri::command]
 pub async fn daemon_spawn() -> Result<String, String> {
-    let out = std::process::Command::new("aura")
-        .args(["daemon", "start"])
-        .output()
-        .map_err(|e| format!("failed to spawn aura daemon: {}", e))?;
-    if !out.status.success() {
-        return Err(format!(
-            "daemon start exited {}: {}",
-            out.status.code().unwrap_or(-1),
-            String::from_utf8_lossy(&out.stderr)
-        ));
-    }
-    Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+    crate::blocking::run(move || {
+        let out = std::process::Command::new(crate::agent_event_listener::resolve_aura_bin())
+            .args(["daemon", "start"])
+            .output()
+            .map_err(|e| format!("failed to spawn aura daemon: {}", e))?;
+        if !out.status.success() {
+            return Err(format!(
+                "daemon start exited {}: {}",
+                out.status.code().unwrap_or(-1),
+                String::from_utf8_lossy(&out.stderr)
+            ));
+        }
+        Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+    })
+    .await
 }
 
 #[derive(Serialize)]

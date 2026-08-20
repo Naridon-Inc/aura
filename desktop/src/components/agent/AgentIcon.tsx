@@ -11,6 +11,7 @@ import claudeSvgRaw from "simple-icons/icons/claude.svg?raw";
 import geminiSvgRaw from "simple-icons/icons/googlegemini.svg?raw";
 import cursorSvgRaw from "simple-icons/icons/cursor.svg?raw";
 import { useResolvedTheme } from "../../lib/themeStore";
+import { letterMark } from "../../lib/monogram";
 import { AuraMark } from "../AuraMark";
 
 export type AgentBrand = {
@@ -137,6 +138,9 @@ const BRAND_FILES: Record<string, BrandFile> = {
   fleet:          { dark: "/app-icons/fleet.svg" },
   antigravity:    { dark: "/app-icons/antigravity.svg" },
   zed:            { dark: "/app-icons/zed.png" },
+  // No `pi` row, and it must stay that way until we ship a real asset: the
+  // substring fallback below would match "pi" inside "copilot" and paint the
+  // wrong brand on it. Pi falls through to the monogram, which is its own π.
 };
 
 function brandFileFor(agentId: string, theme: "dark" | "light"): string | null {
@@ -153,17 +157,34 @@ function brandFileFor(agentId: string, theme: "dark" | "light"): string | null {
   return null;
 }
 
+/** What the agent behind this mark is doing right now.
+ *
+ *  Live work used to be told by a coloured dot plus a spinner sitting next
+ *  to the mark — three glyphs saying one thing, and the amber "waiting" dot
+ *  read as an error. The state now lives on the mark itself: it breathes
+ *  while the agent works and wears a still ring when it needs you, so the
+ *  agent you recognise *is* the status light. */
+export type AgentRunState = "idle" | "working" | "attention";
+
 type Props = {
   agentId: string;
   label?: string;
   size?: number;
-  active?: boolean;
+  run?: AgentRunState;
+  /** Tooltip for the run state — "Working", "Waiting for your input". */
+  runTitle?: string;
 };
 
 // 16px square mark — looks like a small glyph in the picker, scales up
 // cleanly for the tab badge. Uses brand fg as foreground, brand bg as
 // fill, and a soft ring when this is the active selection.
-export function AgentIcon({ agentId, label, size = 16, active = false }: Props) {
+export function AgentIcon({
+  agentId,
+  label,
+  size = 16,
+  run = "idle",
+  runTitle,
+}: Props) {
   const brand = brandFor(agentId);
   const theme = useResolvedTheme();
   const id = agentId.toLowerCase();
@@ -171,16 +192,29 @@ export function AgentIcon({ agentId, label, size = 16, active = false }: Props) 
   // tile — the mark sits on the surrounding surface like a sticker so
   // the brand colors aren't fighting our accent tint.
   const hasBrandFile = brandFileFor(id, theme) !== null;
+  // Run state is carried by how the mark MOVES, never by a box drawn around
+  // it. The rings this used to paint — 1.5px for working, 1.5px for
+  // attention, 1px for selection — read as a stray outline boxing in the
+  // Claude and Codex logos rather than as a status: three different
+  // rectangles on a 14px glyph, in three different colours, all of them
+  // fighting the brand mark they surround. Working breathes; attention
+  // pulses; idle is simply still. Nothing gets a border.
+  const stateClass =
+    run === "working"
+      ? " aura-agent-working"
+      : run === "attention"
+        ? " aura-agent-attention"
+        : "";
   return (
     <span
-      className="inline-flex items-center justify-center flex-shrink-0"
+      className={`inline-flex items-center justify-center flex-shrink-0${stateClass}`}
+      title={runTitle}
       style={{
         width: size,
         height: size,
         borderRadius: Math.max(2, Math.round(size * 0.18)),
         background: hasBrandFile ? "transparent" : brand.bg,
         color: brand.fg,
-        boxShadow: active && !hasBrandFile ? `0 0 0 1px ${brand.ring}` : undefined,
       }}
     >
       <Glyph id={id} label={label} size={size} theme={theme} />
@@ -288,10 +322,19 @@ function Glyph({
     );
   }
 
-  // Generic: monogram letter.
+  // Generic: a monogram. One letter — `label` is the agent's whole name,
+  // so "Aider" and "Amp" came through here as AIDER and AMP, uppercased at
+  // 13px inside a 22px tile: they overflowed it and ran into the row's own
+  // name beside them in Settings.
   return (
-    <span style={{ fontSize: Math.round(size * 0.6), fontWeight: 600 }}>
-      {(label ?? id.charAt(0)).toUpperCase()}
+    <span
+      style={{
+        fontSize: Math.round(size * 0.56),
+        fontWeight: 600,
+        lineHeight: 1,
+      }}
+    >
+      {letterMark(label ?? id)}
     </span>
   );
 }

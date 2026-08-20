@@ -15,6 +15,7 @@ import { BrowserPopout } from "./BrowserPopout";
 import { ManagerSurface } from "./manager/ManagerSurface";
 import { Terminal } from "./Terminal";
 import { invoke } from "@tauri-apps/api/core";
+import { api } from "../lib/api";
 import type { PopoutParams } from "../lib/popout";
 
 const TITLES: Record<PopoutParams["kind"], string> = {
@@ -29,6 +30,69 @@ const TITLES: Record<PopoutParams["kind"], string> = {
   // the key exists only to satisfy the exhaustive PopoutKind record.
   workspace: "Workspace",
 };
+
+/** The agent terminal in a detached window.
+ *
+ *  The PTY lives in the Rust backend keyed by session id, so this view
+ *  attaches to the same app-global `agent-pty:<sid>` stream the in-app tab
+ *  used and the live session continues here uninterrupted. `dormant={false}`
+ *  → attach, don't show the cold "Start agent" overlay.
+ *
+ *  It withholds `onAutoRespawn` on purpose — a detached window must not
+ *  silently relaunch an agent that died. But that prop was also the Restart
+ *  button's implementation, so withholding it left a popped-out window with a
+ *  permanently greyed-out Restart and no way back. `onRestart` is the
+ *  explicit half: the session id lives in state so a restart can re-point
+ *  this window at the new PTY, since the URL param only names the first one.
+ */
+function PopoutAgent({
+  sessionId,
+  agentId,
+  repoRoot,
+  label,
+}: {
+  sessionId: string;
+  agentId?: string;
+  repoRoot: string;
+  label?: string;
+}) {
+  const [sid, setSid] = useState(sessionId);
+  const [restartErr, setRestartErr] = useState<string | null>(null);
+
+  // Without the agent id there is nothing to spawn — an older popout URL, or
+  // a kind that never carried one. Leaving `onRestart` undefined keeps the
+  // button honestly disabled rather than failing on click.
+  const restart = agentId
+    ? async () => {
+        setRestartErr(null);
+        try {
+          const handle = await api.agentPtyOpen(agentId, repoRoot, 80, 24, undefined, true);
+          setSid(handle.id);
+        } catch (e) {
+          setRestartErr(e instanceof Error ? e.message : String(e));
+        }
+      }
+    : undefined;
+
+  return (
+    <div className="flex-1 min-h-0 relative">
+      <AgentTerminalView
+        key={sid}
+        sessionId={sid}
+        agentId={agentId}
+        agentLabel={label}
+        repoRoot={repoRoot}
+        dormant={false}
+        onRestart={restart}
+      />
+      {restartErr && (
+        <div className="absolute inset-x-0 bottom-0 z-20 border-t border-red/30 bg-bg-1/95 px-4 py-2 text-xs text-red">
+          Couldn't restart the agent. {restartErr}
+        </div>
+      )}
+    </div>
+  );
+}
 
 function shortRoot(root: string): string {
   const parts = root.replace(/\/+$/, "").split("/");
@@ -101,15 +165,12 @@ export function PopoutRoot({ params }: { params: PopoutParams }) {
           />
         )}
         {params.kind === "agent" && params.sessionId && (
-          <div className="flex-1 min-h-0 relative">
-            {/* The PTY lives in the Rust backend keyed by session id; this
-                view attaches to the same `agent-pty:<sid>` stream the in-app
-                tab used (app-global emit), so the live session continues here
-                uninterrupted. dormant={false} → attach, don't show the cold
-                "Start agent" overlay. No onAutoRespawn — a detached window
-                doesn't silently relaunch a dead agent. */}
-            <AgentTerminalView sessionId={params.sessionId} dormant={false} />
-          </div>
+          <PopoutAgent
+            sessionId={params.sessionId}
+            agentId={params.agentId}
+            repoRoot={params.root}
+            label={params.label}
+          />
         )}
         {params.kind === "pr" && params.prNumber != null && (
           <PRDetailPane

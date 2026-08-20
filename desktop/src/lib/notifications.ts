@@ -10,6 +10,15 @@
 // Permission is requested lazily on first fire; macOS / Windows / GNOME
 // each show their own consent prompt. If the user denies, every later
 // `notify()` call just no-ops.
+//
+// Two delivery paths. On macOS everything goes through `os_notify` (Rust,
+// `os_notify.rs`) and the modern UserNotifications framework, because the
+// notification plugin's desktop path posts through an API macOS stopped
+// delivering years ago — every banner this app has ever "sent" on a Mac went
+// nowhere, and it dropped `actionTypeId`/`extra` on the way, so the inline
+// Reply never existed either. Everywhere else the plugin is the path: its
+// Linux and Windows backends deliver, and `os_notify_available` answers false
+// there so this file falls back without having to know the platform.
 
 import {
   isPermissionGranted,
@@ -18,6 +27,8 @@ import {
   requestPermission,
   sendNotification,
 } from "@tauri-apps/plugin-notification";
+import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 
 let permissionState: "unknown" | "granted" | "denied" = "unknown";
@@ -29,6 +40,22 @@ let permissionState: "unknown" | "granted" | "denied" = "unknown";
 // Memoizing the promise funnels every concurrent caller onto one request.
 let permissionInFlight: Promise<boolean> | null = null;
 const dedupe = new Map<string, number>();
+
+/** The Tauri event the native path emits for a tap or an inline reply. Mirrors
+ *  `ACTION_EVENT` in `os_notify.rs`. */
+const NATIVE_ACTION_EVENT = "notification://action";
+
+let nativeReady: Promise<boolean> | null = null;
+
+/** Does this build have a native OS path? Asked once and remembered — the
+ *  answer is a property of the platform and the bundle, neither of which
+ *  changes while the app is running. */
+function hasNativePath(): Promise<boolean> {
+  if (!nativeReady) {
+    nativeReady = invoke<boolean>("os_notify_available").catch(() => false);
+  }
+  return nativeReady;
+}
 
 async function ensurePermission(): Promise<boolean> {
   if (permissionState === "granted") return true;
@@ -77,13 +104,17 @@ export function isWindowFocused(): Promise<boolean> {
  *  attaches a registered action set (see {@link ensureChatReplyActionType}) so
  *  the notification can carry an inline Reply field; `extra` is an opaque
  *  payload round-tripped back to the {@link onChatReply} handler so it knows
- *  which repo/channel to post the reply into. */
+ *  which repo/channel to post the reply into.
+ *
+ *  `threadId` groups related notifications: ten messages in one channel become
+ *  one stack in Notification Center rather than ten banners to dismiss. */
 export async function notify(opts: {
   title: string;
   body?: string;
   dedupeKey?: string;
   sound?: string;
   actionTypeId?: string;
+  threadId?: string;
   extra?: Record<string, unknown>;
 }): Promise<void> {
   if (await isFocused()) return;
@@ -102,6 +133,23 @@ export async function notify(opts: {
         if (now - t >= 4000) dedupe.delete(k);
       }
     }
+  }
+  try {
+    // The native path asks for authorization itself, at startup, and keeps the
+    // answer in the OS rather than in this module — so there is nothing to
+    // request here and nothing that could deny after the fact.
+    if (await hasNativePath()) {
+      await invoke("os_notify", {
+        title: opts.title,
+        body: opts.body,
+        sound: opts.sound,
+        threadId: opts.threadId,
+        extra: opts.extra,
+      });
+      return;
+    }
+  } catch (err) {
+    console.warn("native notify failed, falling back:", err);
   }
   if (!(await ensurePermission())) return;
   try {
@@ -137,6 +185,10 @@ let replyActionsReady: Promise<void> | null = null;
 export function ensureChatReplyActionType(): Promise<void> {
   if (replyActionsReady) return replyActionsReady;
   replyActionsReady = (async () => {
+    // The native path registers its category in Rust at startup, before
+    // anything can post. `registerActionTypes` is a mobile-only command in the
+    // plugin anyway, so calling it on desktop only ever logged a rejection.
+    if (await hasNativePath()) return;
     try {
       await registerActionTypes([
         {
@@ -174,12 +226,40 @@ export type ChatReply = { text: string; extra: Record<string, unknown> };
 let replyListenerReady = false;
 
 /** Install the single global notification-action listener. `cb` fires only for
- *  chat notifications (tagged `extra.kind === "chat"`) that carry reply text;
- *  when the user taps the notification without typing, the window is focused
- *  instead so they can reply in-app. Idempotent. */
+ *  chat notifications (tagged `extra.kind === "chat"`). A tap with reply text
+ *  typed arrives with that text; a bare tap arrives with `text: ""` and the
+ *  window already focused — it still reaches `cb`, because "take me to this
+ *  message" is an intent the app has to act on and only the app knows where
+ *  that is. Idempotent. */
 export async function onChatReply(cb: (r: ChatReply) => void): Promise<void> {
   if (replyListenerReady) return;
   replyListenerReady = true;
+  if (await hasNativePath()) {
+    try {
+      await listen<{
+        action_id: string;
+        text: string;
+        extra: Record<string, unknown> | null;
+      }>(NATIVE_ACTION_EVENT, (ev) => {
+        const { action_id, text } = ev.payload;
+        // macOS names a bare tap `com.apple.UNNotificationDefaultActionIdentifier`
+        // and a swipe-away `…DismissActionIdentifier`. Dismissing is the one
+        // response that means "not now" — everything else is a request to go
+        // somewhere, so match the reply action and the default and ignore the
+        // rest.
+        if (action_id !== CHAT_REPLY_ACTION_ID && !action_id.endsWith("DefaultActionIdentifier"))
+          return;
+        const extra = ev.payload.extra ?? {};
+        if (extra["kind"] !== "chat") return;
+        const trimmed = text.trim();
+        if (!trimmed) void focusWindow();
+        cb({ text: trimmed, extra });
+      });
+    } catch (err) {
+      console.warn("native notification listen failed:", err);
+    }
+    return;
+  }
   try {
     await onAction((n) => {
       const payload = n as unknown as Record<string, unknown>;
@@ -192,10 +272,9 @@ export async function onChatReply(cb: (r: ChatReply) => void): Promise<void> {
         {}) as Record<string, unknown>;
       if (extra["kind"] !== "chat") return;
       const text = replyTextFrom(payload);
-      if (!text) {
-        void focusWindow();
-        return;
-      }
+      // Bare tap: bring the window forward. Replying inline deliberately does
+      // not — answering from the notification is how you stay where you are.
+      if (!text) void focusWindow();
       cb({ text, extra });
     });
   } catch (err) {

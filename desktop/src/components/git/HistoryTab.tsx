@@ -9,6 +9,7 @@ import { useEffect, useState } from "react";
 import { History } from "lucide-react";
 
 import { api, type ClaudeSession, type GraphCommit } from "../../lib/api";
+import { fetchSessions } from "../../lib/sessionsCache";
 import { CommitList } from "./CommitList";
 import { CommitDetailPane } from "./CommitDetailPane";
 
@@ -43,8 +44,7 @@ export function HistoryTab({ repoRoot }: { repoRoot: string }) {
     window.addEventListener("aura:git-changed", onGitChanged);
     // Sessions are best-effort — they only enrich the "Asked" beat; a failure
     // just falls back to the earliest logged intent.
-    api
-      .claudeListSessions(repoRoot)
+    fetchSessions(repoRoot)
       .then((s) => alive && setSessions(s))
       .catch(() => {});
     return () => {
@@ -56,7 +56,7 @@ export function HistoryTab({ repoRoot }: { repoRoot: string }) {
   return (
     <div className="flex h-full min-h-0">
       <div className="flex w-[360px] min-h-0 shrink-0 flex-col border-r border-line-soft">
-        <div className="flex items-center gap-2 border-b border-line-soft px-3.5 py-2 text-[11px] uppercase tracking-wider text-text-4">
+        <div className="section-label flex items-center gap-2 border-b border-line-soft px-3.5 py-2">
           <History size={13} />
           Saved versions
           {commits.length > 0 && (
@@ -79,7 +79,7 @@ export function HistoryTab({ repoRoot }: { repoRoot: string }) {
         {selected ? (
           <CommitDetailPane repoRoot={repoRoot} sha={selected} sessions={sessions} />
         ) : (
-          <div className="px-6 py-8 text-[12px] text-text-4">
+          <div className="px-6 py-8 text-sm text-text-4">
             Pick a saved version on the left to read its story.
           </div>
         )}

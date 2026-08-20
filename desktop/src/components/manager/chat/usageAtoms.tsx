@@ -11,35 +11,22 @@
 //!   • the primary/context bar fills in calm arctic-blue and only warms to
 //!     amber/red as it nears the wall — never a loud full-ink fill.
 
-/** Prettify a raw vendor-family id to its display casing WITHOUT translating it
- *  to a different word — we surface the real family value, only fixed up, so a
- *  "Provider" row never asserts something the snapshot didn't say. */
+import { agentName, vendorName } from "../../../lib/agentNames";
+
+/** The vendor behind a raw family id — who is billing you. We surface the real
+ *  family value, only named properly, so a "Provider" row never asserts
+ *  something the snapshot didn't say.
+ *
+ *  This pair — the company and the product — was the one distinction the six
+ *  agent-name tables actually needed, and the only place that drew it. Both
+ *  now come off the single table in lib/agentNames. */
 export function providerLabel(family: string): string {
-  const map: Record<string, string> = {
-    anthropic: "Anthropic",
-    openai: "OpenAI",
-    gemini: "Gemini",
-    kimi: "Kimi",
-  };
-  return map[family] ?? family.charAt(0).toUpperCase() + family.slice(1);
+  return vendorName(family);
 }
 
 /** The consumer brand for a family, used in the "<Provider> usage" title. */
 export function providerBrand(family: string): string {
-  const map: Record<string, string> = {
-    anthropic: "Claude",
-    openai: "GPT",
-    gemini: "Gemini",
-    kimi: "Kimi",
-  };
-  return map[family] ?? providerLabel(family);
-}
-
-/** Format a token count compactly: 1234 → "1.2k", 412000 → "412k". */
-export function formatTokens(n: number): string {
-  if (n < 1000) return String(n);
-  if (n < 1_000_000) return `${(n / 1000).toFixed(n < 10_000 ? 1 : 0)}k`;
-  return `${(n / 1_000_000).toFixed(1)}M`;
+  return agentName(family);
 }
 
 /** Fill color for a context/window bar: calm arctic-blue at rest, warming to
@@ -74,12 +61,12 @@ export function StatRow({
 }) {
   return (
     <div className="flex items-baseline justify-between gap-4 leading-tight">
-      <span className="text-[13px] text-text-2">{label}</span>
+      <span className="text-base text-text-2">{label}</span>
       <span
         className={
           strong
-            ? "text-[13px] font-semibold text-text-1 tabular-nums"
-            : "text-[13px] text-text-4 tabular-nums"
+            ? "text-base font-semibold text-text-1 tabular-nums"
+            : "text-base text-text-4 tabular-nums"
         }
       >
         {value}
@@ -93,8 +80,8 @@ export function StatRow({
 export function SectionHead({ title, meta }: { title: string; meta?: string }) {
   return (
     <div className="flex items-baseline justify-between gap-4">
-      <span className="text-[15px] font-semibold text-text-1">{title}</span>
-      {meta && <span className="text-[13px] text-text-3 tabular-nums">{meta}</span>}
+      <span className="text-lg font-semibold text-text-1">{title}</span>
+      {meta && <span className="text-base text-text-3 tabular-nums">{meta}</span>}
     </div>
   );
 }

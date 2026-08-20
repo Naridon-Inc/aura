@@ -20,7 +20,9 @@
 
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { onExternalAnchorClick } from "../../lib/openExternal";
-import { SquareArrowOutUpRight } from "lucide-react";
+import { shortDateFromSecs } from "../../lib/calendarDate";
+import { monogram } from "../../lib/monogram";
+import { AlertTriangle, ShieldCheck, SquareArrowOutUpRight } from "lucide-react";
 import { AsciiSpinner } from "../ui/ascii-spinner";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
@@ -35,6 +37,12 @@ import {
 import { fetchPrList } from "../../lib/prsCache";
 import { humanizeFindingText } from "../../lib/humanizeFinding";
 import {
+  noFindingsLine,
+  prReviewState,
+  prReviewTotal,
+} from "../../lib/prReviewState";
+import { EmptyState, ErrorState } from "../ui/state";
+import {
   fetchPrDetail,
   getPrDetailCached,
   invalidatePrDetail,
@@ -47,6 +55,12 @@ import {
   subscribePrComments,
 } from "../../lib/prCommentsCache";
 import { useEditorStore } from "../../lib/editorStore";
+import { startAuraJob, useAuraJobs } from "../../lib/auraJob";
+import {
+  updatePrJobId,
+  updatePrPrompt,
+  UPDATE_PR_HINT,
+} from "../../lib/worktreeActions";
 import { PrApprovalBar } from "../pr/PrApprovalBar";
 import { PrStackView } from "../pr/PrStackView";
 import { PrOverviewTab } from "../pr/PrOverviewTab";
@@ -68,6 +82,13 @@ import { GhErrorNotice } from "../github/GhErrorNotice";
 import { requestPrAuthoring } from "../dialogs/PrAuthoringDialog";
 import { Churn } from "../diff/Churn";
 import { detectLanguage } from "../../lib/fileLang";
+import { SplitDiffHeader, useStackedDiff } from "./SplitDiffHeader";
+import {
+  fetchChangeNoteReport,
+  resolvePrRange,
+} from "../../lib/changeNoteCache";
+import type { FileChangeNote } from "../../lib/api";
+import { relativeAgeFromIso } from "../../lib/relativeTime";
 
 type Props = {
   onClose: () => void;
@@ -101,6 +122,11 @@ export function PRDetailPane({ onClose, selOverride, embedded = false, onDetach 
   // A detached popout window seeds its PR via `selOverride`; the in-app
   // singleton tracks the editor store's current selection.
   const sel = selOverride ?? editor.selectedPr;
+  // Live background jobs for this repo. The PR you are READING is the one this
+  // pane can update with Aura, and `updatePrJobId` scopes the run to that PR —
+  // so the review rail and the header's Update button light up with this one
+  // when they mean the same pull request, and ignore it when they don't.
+  const job = useAuraJobs(sel?.repoRoot ?? "");
   const [data, setData] = useState<PrDetail | null>(null);
   const [comments, setComments] = useState<PrComment[]>([]);
   const [loading, setLoading] = useState(true);
@@ -370,10 +396,22 @@ export function PRDetailPane({ onClose, selOverride, embedded = false, onDetach 
     void refreshComments(true);
   }, [refresh, refreshComments]);
 
+  // The plain-language change story for this pull request, read as ONE change
+  // across base...head. Hooks can't sit below the `!sel` bail-out, so it runs
+  // here and simply yields nothing until there's a PR to describe.
+  const changeStory = usePrChangeStory(
+    sel?.repoRoot ?? null,
+    data?.base_ref ?? null,
+    data?.head_ref ?? null,
+  );
+  // The diff column sits between a file tree and the thread rail, so it can be
+  // narrow enough that Previous/New side by side stops being readable.
+  const [diffColRef, diffColNarrow] = useStackedDiff();
+
   if (!sel) {
     return (
       <FullscreenOverlay onClose={onClose} embedded={embedded}>
-        <div className="flex-1 flex items-center justify-center text-text-4 text-[12px]">
+        <div className="flex-1 flex items-center justify-center text-text-4 text-sm">
           No PR selected.
         </div>
       </FullscreenOverlay>
@@ -383,6 +421,11 @@ export function PRDetailPane({ onClose, selOverride, embedded = false, onDetach 
   const activeChunk = activePath ? (fileChunks.get(activePath) ?? "") : "";
   const activeFile = activePath
     ? (data?.files.find((f) => f.path === activePath) ?? null)
+    : null;
+  // What this file's change MEANS across the pull request, when the range
+  // resolved and the engine had something to say about this particular file.
+  const activeNote = activePath
+    ? (changeStory.noteByPath.get(activePath) ?? null)
     : null;
 
   const riskChip =
@@ -433,7 +476,7 @@ export function PRDetailPane({ onClose, selOverride, embedded = false, onDetach 
             <ReviewerPips reviewers={data.reviewers} />
           )}
           {refreshing && (
-            <AsciiSpinner className="text-[12px]" />
+            <AsciiSpinner className="text-sm" />
           )}
           {onDetach && (
             <Button
@@ -445,6 +488,16 @@ export function PRDetailPane({ onClose, selOverride, embedded = false, onDetach 
               <SquareArrowOutUpRight strokeWidth={1.75} aria-hidden />
               Detach
             </Button>
+          )}
+          {data && sel && data.state === "OPEN" && (
+            <UpdateWithAuraButton
+              repoRoot={sel.repoRoot}
+              prNumber={sel.number}
+              headRef={data.head_ref}
+              running={
+                job(updatePrJobId(sel.number))?.status === "running"
+              }
+            />
           )}
           {data && sel && data.state === "OPEN" && (
             <Button
@@ -512,7 +565,7 @@ export function PRDetailPane({ onClose, selOverride, embedded = false, onDetach 
     >
       {/* Body */}
       {loading && !data && cancelled ? (
-        <div className="flex-1 flex items-center justify-center text-[12px] space-y-2 flex-col">
+        <div className="flex-1 flex items-center justify-center text-sm space-y-2 flex-col">
           <div className="text-text-4">Load cancelled.</div>
           <Button
             variant="link"
@@ -521,19 +574,19 @@ export function PRDetailPane({ onClose, selOverride, embedded = false, onDetach 
               setCancelled(false);
               void refresh(true);
             }}
-            className="text-text-2 hover:text-text-1 text-[11px]"
+            className="text-text-2 hover:text-text-1 text-xs"
           >
             Retry
           </Button>
         </div>
       ) : loading && !data && slowLoad ? (
         <div className="flex-1 flex items-center justify-center flex-col gap-2">
-          <div className="text-text-3 text-[12px]">Loading PR…</div>
+          <div className="text-text-3 text-sm">Loading PR…</div>
           <Button
             variant="link"
             size="xs"
             onClick={() => setCancelled(true)}
-            className="text-text-4 hover:text-text-2 text-[11px]"
+            className="text-text-4 hover:text-text-2 text-xs"
           >
             Cancel
           </Button>
@@ -547,7 +600,7 @@ export function PRDetailPane({ onClose, selOverride, embedded = false, onDetach 
           onRetry={() => void refresh(true)}
         />
       ) : !data ? (
-        <div className="flex-1 flex items-center justify-center text-text-4 text-[12px]">
+        <div className="flex-1 flex items-center justify-center text-text-4 text-sm">
           No data.
         </div>
       ) : topTab === "overview" ? (
@@ -596,20 +649,38 @@ export function PRDetailPane({ onClose, selOverride, embedded = false, onDetach 
                   if (activePath) toggleViewed(activePath, v);
                 }}
               />
-              <div className="flex-1 min-h-0 overflow-auto">
+              <div ref={diffColRef} className="flex-1 min-h-0 overflow-auto">
                 {activePath ? (
-                  <FluidDiff
-                    repoRoot={sel.repoRoot}
-                    prNumber={sel.number}
-                    filePath={activePath}
-                    body={activeChunk}
-                    comments={comments}
-                    onPosted={() => {
-                      void refreshComments(true);
-                    }}
-                  />
+                  <>
+                    {/* MEANING FIRST, code second — the same order the Changes
+                        tab uses for a commit. What this file's pieces do now,
+                        what they used to do, and why, before a single line of
+                        patch. Absent when the range can't be resolved on this
+                        machine (an unfetched fork), in which case the diff
+                        below is still the whole truth. */}
+                    {changeStory.range && activeNote && (
+                      <SplitDiffHeader
+                        note={activeNote}
+                        when={changeStory.when}
+                        author={changeStory.author}
+                        repoRoot={sel.repoRoot}
+                        commit={changeStory.range}
+                        stacked={diffColNarrow}
+                      />
+                    )}
+                    <FluidDiff
+                      repoRoot={sel.repoRoot}
+                      prNumber={sel.number}
+                      filePath={activePath}
+                      body={activeChunk}
+                      comments={comments}
+                      onPosted={() => {
+                        void refreshComments(true);
+                      }}
+                    />
+                  </>
                 ) : (
-                  <div className="text-text-4 text-[12px] px-4 py-4">
+                  <div className="text-text-4 text-sm px-4 py-4">
                     Pick a file from the tree to see its diff.
                   </div>
                 )}
@@ -638,6 +709,61 @@ export function PRDetailPane({ onClose, selOverride, embedded = false, onDetach 
         </PrThreadProvider>
       )}
     </FullscreenOverlay>
+  );
+}
+
+/**
+ * "Update with Aura" — the same job the review rail and the header button run,
+ * offered where you actually read a pull request.
+ *
+ * Aura opens most of these PRs, and a PR it opened goes stale the moment more
+ * work lands on the branch: the diff follows the branch head automatically, the
+ * prose does not. So the title, the description, the blast-radius note and the
+ * reviewer checklist keep describing the PR as it was on the day it opened. The
+ * fix was already built — `updatePrPrompt` re-reviews the branch and rewrites
+ * the PR to match what it does now — but it was only reachable from the review
+ * rail, which is exactly the thing a PR tab takes off the screen.
+ *
+ * It runs on any open PR, not only Aura's. We don't record who opened a pull
+ * request, and gating on provenance we'd have to guess at would hide the button
+ * on half the PRs that need it. Rewriting a description to match the branch is
+ * worth doing whoever opened it.
+ */
+function UpdateWithAuraButton({
+  repoRoot,
+  prNumber,
+  headRef,
+  running,
+}: {
+  repoRoot: string;
+  prNumber: number;
+  headRef: string;
+  running: boolean;
+}) {
+  return (
+    <Button
+      variant="subtle"
+      size="xs"
+      disabled={running}
+      onClick={() =>
+        startAuraJob({
+          repoRoot,
+          id: updatePrJobId(prNumber),
+          title: `Update pull request #${prNumber}`,
+          text: updatePrPrompt(headRef, prNumber),
+        })
+      }
+      title={UPDATE_PR_HINT}
+    >
+      {running ? (
+        <>
+          <AsciiSpinner className="text-2xs" />
+          Updating…
+        </>
+      ) : (
+        "Update with Aura"
+      )}
+    </Button>
   );
 }
 
@@ -679,7 +805,7 @@ function RightTabs({
               commentCount > 0 ? (
                 <>
                   Threads
-                  <span className="text-[10.5px] tabular-nums text-ui-fg-subtle">
+                  <span className="text-xs tabular-nums text-text-2">
                     {commentCount}
                   </span>
                 </>
@@ -746,15 +872,15 @@ function PrConversation({
     <div className="flex-1 min-h-0 overflow-y-auto">
       <div className="mx-auto w-full max-w-[860px] px-4 py-4 flex flex-col gap-3">
         <div className="flex flex-col gap-1.5">
-          <h1 className="text-[20px] font-semibold text-text-1 leading-snug">
+          <h1 className="text-xl font-semibold text-text-1 leading-snug">
             {detail.title}
           </h1>
-          <div className="flex flex-wrap items-center gap-2 text-[12px] text-text-3">
+          <div className="flex flex-wrap items-center gap-2 text-sm text-text-3">
             <span className="tabular-nums">#{detail.number}</span>
             <span className="text-text-5">·</span>
             <span className="text-text-2">{detail.author}</span>
             <span className="text-text-5">·</span>
-            <span className="font-mono text-[11px] text-text-3">
+            <span className="font-mono text-xs text-text-3">
               {detail.head_ref} → {detail.base_ref}
             </span>
           </div>
@@ -799,7 +925,7 @@ function PrConversation({
             />
             <div className="mt-2 flex items-center gap-2">
               {error && (
-                <span className="mr-auto text-[11px] text-red-300 font-mono truncate">
+                <span className="mr-auto text-xs text-red-300 font-mono truncate">
                   {error}
                 </span>
               )}
@@ -839,22 +965,22 @@ function ConvEntry({
       <ConvAvatar author={author} />
       <div className="flex-1 min-w-0 rounded-lg border border-line-soft bg-bg-content overflow-hidden">
         <div className="flex items-center gap-2 px-3.5 h-9 border-b border-line-soft/60 bg-bg-1/40">
-          <span className="text-[12.5px] font-medium text-text-1 truncate">
+          <span className="text-base font-medium text-text-1 truncate">
             {author || "you"}
           </span>
-          <span className="text-[11.5px] text-text-4 flex-shrink-0">
+          <span className="text-sm text-text-4 flex-shrink-0">
             {relAge(createdAt)}
           </span>
           {context && (
             <span
-              className="ml-auto font-mono text-[11px] text-text-4 truncate"
+              className="ml-auto font-mono text-xs text-text-4 truncate"
               title={context}
             >
               {context}
             </span>
           )}
         </div>
-        <div className="px-3.5 py-3 text-[13px] text-text-2 leading-[1.6]">
+        <div className="px-3.5 py-3 text-base text-text-2 leading-[1.6]">
           {empty ? (
             <span className="text-text-4 italic">{emptyBody ?? "(empty)"}</span>
           ) : (
@@ -869,13 +995,14 @@ function ConvEntry({
 }
 
 function ConvAvatar({ author }: { author: string }) {
-  const initial = (author || "?").charAt(0).toUpperCase();
+  // One monogram for the whole app — see lib/monogram.
+  const initial = monogram(author);
   let h = 0;
   for (let i = 0; i < author.length; i++) h = (h * 31 + author.charCodeAt(i)) | 0;
   const hue = Math.abs(h) % 360;
   return (
     <span
-      className="mt-0.5 w-7 h-7 rounded-full flex items-center justify-center text-[11px] font-bold text-white flex-shrink-0"
+      className="mt-0.5 w-7 h-7 rounded-full flex items-center justify-center text-xs font-bold text-white flex-shrink-0"
       style={{ backgroundColor: author ? `hsl(${hue}, 42%, 40%)` : "var(--color-bg-3)" }}
       title={author || "you"}
     >
@@ -887,19 +1014,77 @@ function ConvAvatar({ author }: { author: string }) {
 // Compact relative-age label ("3h", "2d", "just now") for conversation
 // rows. Self-contained so the Conversation tab needs no shared time util.
 function relAge(iso: string): string {
-  const then = new Date(iso).getTime();
-  if (!Number.isFinite(then)) return "";
-  const secs = Math.max(0, Math.floor((Date.now() - then) / 1000));
-  if (secs < 45) return "just now";
-  const mins = Math.floor(secs / 60);
-  if (mins < 60) return `${mins}m`;
-  const hrs = Math.floor(mins / 60);
-  if (hrs < 24) return `${hrs}h`;
-  const days = Math.floor(hrs / 24);
-  if (days < 30) return `${days}d`;
-  const months = Math.floor(days / 30);
-  if (months < 12) return `${months}mo`;
-  return `${Math.floor(months / 12)}y`;
+  // One ladder for the whole app — see lib/relativeTime.
+  return relativeAgeFromIso(iso, { style: "compact" });
+}
+
+// ── The pull request's change story ──────────────────────────────────
+
+/** What a pull request did, per file, in words — the same account the Changes
+ *  tab gives a commit, for the whole `base...head` range. */
+type PrChangeStory = {
+  /** The resolved range spec, or null while probing / when unresolvable. It is
+   *  what the per-piece explanations key on, so it has to be the real one. */
+  range: string | null;
+  /** Per-file change notes by path. Empty until the engine answers. */
+  noteByPath: Map<string, FileChangeNote>;
+  /** The head commit's time and author — whose change this is, and when. */
+  when: number | null;
+  author: string | null;
+};
+
+const EMPTY_STORY: PrChangeStory = {
+  range: null,
+  noteByPath: new Map(),
+  when: null,
+  author: null,
+};
+
+/** Read a pull request as one change: which pieces it adds, changes and
+ *  removes in each file, so the Files tab can say what it MEANS rather than
+ *  only what text moved.
+ *
+ *  The engine already does this for a commit. A pull request is the same
+ *  question asked of a range, so it is the same call with a range spec — which
+ *  this resolves first, because a PR carries branch names and only some of
+ *  those exist on this machine. Everything degrades to null: an unresolvable
+ *  range, a repo without the engine, a PR against an unfetched fork all leave
+ *  the tab exactly as it was, showing the diff and claiming nothing. */
+function usePrChangeStory(
+  repoRoot: string | null,
+  baseRef: string | null,
+  headRef: string | null,
+): PrChangeStory {
+  const [story, setStory] = useState<PrChangeStory>(EMPTY_STORY);
+  useEffect(() => {
+    setStory(EMPTY_STORY);
+    if (!repoRoot || !baseRef || !headRef) return;
+    let alive = true;
+    void (async () => {
+      const range = await resolvePrRange(repoRoot, baseRef, headRef);
+      if (!alive || !range) return;
+      // Start writing the words for EVERY file in this pull request now, while
+      // the reader is still on the Overview tab — not one file at a time as
+      // they click through the tree. Queues and returns; nothing awaits it.
+      void api.prewarmChangeSummaries(repoRoot, range).catch(() => {});
+      try {
+        const report = await fetchChangeNoteReport(repoRoot, range);
+        if (!alive) return;
+        setStory({
+          range,
+          noteByPath: new Map(report.files.map((f) => [f.file, f])),
+          when: report.commit_time ?? null,
+          author: report.author?.trim() || null,
+        });
+      } catch {
+        // No story for this PR — the diff below still stands on its own.
+      }
+    })();
+    return () => {
+      alive = false;
+    };
+  }, [repoRoot, baseRef, headRef]);
+  return story;
 }
 
 // ── File tree ────────────────────────────────────────────────────────
@@ -922,7 +1107,7 @@ function FilesTabDiffHeader({
 }) {
   if (!path) {
     return (
-      <div className="h-9 px-3 flex items-center border-b border-line-soft text-[11px] text-text-4 flex-shrink-0">
+      <div className="h-9 px-3 flex items-center border-b border-line-soft text-xs text-text-4 flex-shrink-0">
         (no file selected)
       </div>
     );
@@ -930,12 +1115,12 @@ function FilesTabDiffHeader({
   const language = detectLanguage(path);
   return (
     <div className="h-9 px-3 flex items-center gap-2.5 border-b border-line-soft flex-shrink-0">
-      <span className="text-[12px] text-text-1 font-mono truncate" title={path}>
+      <span className="text-sm text-text-1 font-mono truncate" title={path}>
         {path}
       </span>
       {file && <Churn additions={file.additions} deletions={file.deletions} />}
-      {language && <span className="text-[11px] text-text-4">{language}</span>}
-      <label className="ml-auto flex items-center gap-1.5 text-[11.5px] text-text-3 cursor-pointer select-none flex-shrink-0">
+      {language && <span className="text-xs text-text-4">{language}</span>}
+      <label className="ml-auto flex items-center gap-1.5 text-sm text-text-3 cursor-pointer select-none flex-shrink-0">
         <input
           type="checkbox"
           checked={viewed}
@@ -977,34 +1162,34 @@ function FileTree({
   );
   return (
     <div className="w-[260px] flex-shrink-0 border-r border-line-soft flex flex-col">
-      <div className="h-7 px-3 flex items-center border-b border-line-soft text-[11px] text-text-2 font-medium uppercase tracking-wider gap-2 flex-shrink-0">
+      <div className="section-label h-7 px-3 flex items-center border-b border-line-soft gap-2 flex-shrink-0">
         <span>Files</span>
-        <span className="text-[11px] text-text-4 tabular-nums">{files.length}</span>
+        <span className="text-xs text-text-4 tabular-nums">{files.length}</span>
         {viewedCount > 0 && (
           <span
-            className="text-[10px] tabular-nums normal-case tracking-normal"
+            className="text-2xs tabular-nums normal-case tracking-normal"
             style={{ color: "var(--color-accent)" }}
             title={`${viewedCount} of ${files.length} files viewed`}
           >
             {viewedCount}/{files.length} viewed
           </span>
         )}
-        <span className="ml-auto flex items-center gap-1.5 text-[11px] tabular-nums">
+        <span className="ml-auto flex items-center gap-1.5 text-xs tabular-nums">
           <span className="text-green-400">+{totals.add}</span>
           <span className="text-red-400">−{totals.del}</span>
         </span>
       </div>
       <div className="flex-1 min-h-0 overflow-y-auto">
         {files.length === 0 ? (
-          <div className="text-text-4 text-[12px] px-3 py-4">no files</div>
+          <div className="text-text-4 text-sm px-3 py-4">no files</div>
         ) : (
           files.map((f) => (
             <button
               key={f.path}
               type="button"
               onClick={() => onSelect(f.path)}
-              className={`w-full flex items-center gap-2 px-3 py-1.5 hover:bg-bg-2 transition-colors text-left ${
-                f.path === activePath ? "bg-bg-2" : ""
+              className={`w-full flex items-center gap-2 px-3 py-1.5 hover:bg-state-hover transition-colors text-left ${
+                f.path === activePath ? "bg-state-selected" : ""
               }`}
               title={f.path}
             >
@@ -1014,14 +1199,14 @@ function FileTree({
                 <span className="w-3 flex-shrink-0" aria-hidden="true" />
               )}
               <span
-                className={`text-[12px] font-mono truncate flex-1 ${
+                className={`text-sm font-mono truncate flex-1 ${
                   viewedPaths.has(f.path) ? "text-text-4" : "text-text-1"
                 }`}
               >
                 {f.path}
               </span>
-              <span className="text-[10.5px] tabular-nums text-green-400">+{f.additions}</span>
-              <span className="text-[10.5px] tabular-nums text-red-400">−{f.deletions}</span>
+              <span className="text-xs tabular-nums text-green-400">+{f.additions}</span>
+              <span className="text-xs tabular-nums text-red-400">−{f.deletions}</span>
             </button>
           ))
         )}
@@ -1243,62 +1428,80 @@ function buildFindingGroups(
 
 function SemanticFindings({ detail }: { detail: PrDetail }) {
   const review = detail.aura_review;
-  // Prefer the engine's humanized cards (pr_humanize). Fall back to parsing
-  // the raw `*_violations` arrays when the review came from an older binary.
-  const humanFindings = review?.findings ?? [];
-  const changes = review?.changes ?? [];
-  const hasHumanized =
-    !!review &&
-    (humanFindings.length > 0 ||
-      changes.some((c) => !!c.why) ||
-      !!(review.summary && review.summary.trim()));
-
+  // What this panel is allowed to say, and when — see `prReviewState`. It used
+  // to answer straight off `review`, which was `null` for four different
+  // reasons, only one of which meant "there isn't one".
+  const state = prReviewState({
+    review,
+    reviewError: detail.aura_review_error,
+    base: detail.base_ref,
+  });
   const groups = useMemo(
-    () => (review && !hasHumanized ? buildFindingGroups(review) : []),
-    [review, hasHumanized],
+    () => (review && state.kind === "raw" ? buildFindingGroups(review) : []),
+    [review, state.kind],
   );
-  const total = hasHumanized
-    ? humanFindings.reduce((n, f) => n + Math.max(1, f.count), 0)
-    : groups.reduce((n, g) => n + g.count, 0);
+  const total = prReviewTotal(state);
 
   return (
     <div className="flex-1 min-h-0 flex flex-col">
-      <div className="h-7 px-3 flex items-center border-b border-line-soft text-[11px] text-text-2 font-medium uppercase tracking-wider gap-2 flex-shrink-0">
+      <div className="section-label h-7 px-3 flex items-center border-b border-line-soft gap-2 flex-shrink-0">
         <span>Findings</span>
-        {review && total > 0 && (
-          <span className="text-[10.5px] text-text-4 tabular-nums">{total}</span>
+        {total > 0 && (
+          <span className="text-xs text-text-4 tabular-nums">{total}</span>
         )}
-        {review && (
+        {/* The risk score counts findings — including the taste stream the
+            bridge used to drop. Only show it beside a list we actually drew,
+            so a score can never sit next to an empty panel again. */}
+        {review && (state.kind === "humanized" || state.kind === "raw") && (
           <span className="ml-auto">
             <RiskChip label={review.risk_label} score={review.risk_score} />
           </span>
         )}
       </div>
       <div className="flex-1 min-h-0 overflow-y-auto px-3 py-3">
-        {!review ? (
-          <div className="text-text-4 text-[12px] leading-relaxed">
-            No Aura review on disk for base{" "}
-            <span className="font-mono text-text-3">{detail.base_ref}</span>. Run{" "}
-            <span className="font-mono text-text-3">
-              aura pr-review --base {detail.base_ref} --json
-            </span>{" "}
-            to populate findings.
-          </div>
-        ) : hasHumanized ? (
-          <HumanizedReview
-            summary={review.summary}
-            findings={humanFindings}
-            changes={changes}
+        {state.kind === "failed" || state.kind === "unreadable" ? (
+          <ErrorState size="md" title={state.title} message={state.message} />
+        ) : state.kind === "absent" ? (
+          <EmptyState
+            size="md"
+            icon={ShieldCheck}
+            title={state.title}
+            body={state.body}
           />
-        ) : groups.length === 0 ? (
-          <div className="flex items-center gap-2 text-[12px] text-text-3">
-            <CleanCheckIcon />
-            No semantic findings — clean review.
-          </div>
-        ) : (
+        ) : state.kind === "humanized" ? (
+          <HumanizedReview
+            summary={review?.summary}
+            findings={review?.findings ?? []}
+            changes={review?.changes ?? []}
+            unverified={state.unverified}
+          />
+        ) : state.kind === "raw" ? (
           <FindingsList groups={groups} />
+        ) : (
+          <NoFindingsLine title={state.title} body={state.body} />
         )}
       </div>
+    </div>
+  );
+}
+
+/** The one place the app says a review turned up nothing — used by the raw
+ *  fallback and by the humanized surface, so they can't drift into saying
+ *  different things about the same review. */
+function NoFindingsLine({
+  title,
+  body,
+}: {
+  title: string;
+  body: string | null;
+}) {
+  return (
+    <div className="space-y-1">
+      <div className="flex items-center gap-2 text-sm text-text-3">
+        {body ? <AlertTriangle size={13} className="text-amber" /> : <CleanCheckIcon />}
+        {title}
+      </div>
+      {body && <p className="text-xs text-text-4 leading-relaxed pl-5">{body}</p>}
     </div>
   );
 }
@@ -1331,10 +1534,15 @@ function HumanizedReview({
   summary,
   findings,
   changes,
+  unverified,
 }: {
   summary?: string;
   findings: AuraHumanFinding[];
   changes: AuraChangeIntent[];
+  /** How many changed pieces the engine couldn't trace. Zero findings plus a
+   *  non-zero count here is not a clean review, and this panel used to say it
+   *  was. */
+  unverified: number;
 }) {
   const sorted = useMemo(
     () =>
@@ -1344,11 +1552,12 @@ function HumanizedReview({
     [findings],
   );
   const withWhy = useMemo(() => changes.filter((c) => !!c.why), [changes]);
+  const emptyLine = noFindingsLine(unverified);
 
   return (
     <div className="space-y-4">
       {summary && summary.trim() && (
-        <p className="text-[12.5px] leading-relaxed text-text-2">{summary.trim()}</p>
+        <p className="text-base leading-relaxed text-text-2">{summary.trim()}</p>
       )}
 
       {sorted.length > 0 ? (
@@ -1358,15 +1567,12 @@ function HumanizedReview({
           ))}
         </div>
       ) : (
-        <div className="flex items-center gap-2 text-[12px] text-text-3">
-          <CleanCheckIcon />
-          Nothing needs attention — clean review.
-        </div>
+        <NoFindingsLine title={emptyLine.title} body={emptyLine.body} />
       )}
 
       {withWhy.length > 0 && (
         <div className="pt-1">
-          <div className="text-[10.5px] uppercase tracking-wider text-text-4 mb-1.5">
+          <div className="section-label mb-1.5">
             Why these changes
           </div>
           <div className="space-y-1.5">
@@ -1392,25 +1598,25 @@ function HumanFindingCard({ finding }: { finding: AuraHumanFinding }) {
         <StatusChip tone={tone} dot dense>
           {HUMAN_SEVERITY_LABEL[finding.severity] ?? "FYI"}
         </StatusChip>
-        <span className="flex-1 min-w-0 text-[12.5px] font-medium text-text-1 leading-snug break-words">
+        <span className="flex-1 min-w-0 text-base font-medium text-text-1 leading-snug break-words">
           {finding.title}
         </span>
         {finding.count > 1 && (
-          <span className="flex-shrink-0 text-[10px] tabular-nums text-text-3 px-1.5 py-0.5 rounded-full bg-bg-2 border border-line-soft">
+          <span className="flex-shrink-0 text-2xs tabular-nums text-text-3 px-1.5 py-0.5 rounded-full bg-bg-2 border border-line-soft">
             ×{finding.count}
           </span>
         )}
       </div>
-      <p className="mt-1 text-[12px] leading-relaxed text-text-2 break-words">
+      <p className="mt-1 text-sm leading-relaxed text-text-2 break-words">
         {finding.detail}
       </p>
       {finding.suggestion && (
-        <p className="mt-1 text-[12px] leading-relaxed text-accent break-words">
+        <p className="mt-1 text-sm leading-relaxed text-accent break-words">
           → {finding.suggestion}
         </p>
       )}
       {loc && (
-        <div className="mt-1 text-[10.5px] font-mono text-text-4 break-words">
+        <div className="mt-1 text-xs font-mono text-text-4 break-words">
           {loc}
         </div>
       )}
@@ -1421,26 +1627,23 @@ function HumanFindingCard({ finding }: { finding: AuraHumanFinding }) {
 function WhyChangeRow({ change }: { change: AuraChangeIntent }) {
   const when =
     typeof change.when === "number" && change.when > 0
-      ? new Date(change.when * 1000).toLocaleDateString(undefined, {
-          month: "short",
-          day: "numeric",
-        })
+      ? shortDateFromSecs(change.when)
       : null;
   return (
     <div className="rounded-md border border-line-soft bg-bg-1/40 px-2.5 py-2">
       <div className="flex items-center gap-2 min-w-0">
-        <span className="flex-1 min-w-0 text-[12px] font-medium text-text-1 truncate">
+        <span className="flex-1 min-w-0 text-sm font-medium text-text-1 truncate">
           {change.file}
         </span>
-        <span className="flex-shrink-0 text-[10.5px] text-text-4">{change.what}</span>
+        <span className="flex-shrink-0 text-xs text-text-4">{change.what}</span>
       </div>
       {change.why && (
-        <p className="mt-1 text-[12px] leading-relaxed text-text-2 break-words">
+        <p className="mt-1 text-sm leading-relaxed text-text-2 break-words">
           {change.why}
         </p>
       )}
       {(change.who || when) && (
-        <div className="mt-1 text-[10.5px] text-text-4">
+        <div className="mt-1 text-xs text-text-4">
           {change.who ?? "—"}
           {when ? ` · ${when}` : ""}
         </div>
@@ -1485,7 +1688,7 @@ function FindingsList({ groups }: { groups: FindingGroup[] }) {
             <StatusChip tone={SEVERITY_TONE[sev]} dot dense>
               {SEVERITY_LABEL[sev]}
             </StatusChip>
-            <span className="text-[10.5px] text-text-4 tabular-nums">
+            <span className="text-xs text-text-4 tabular-nums">
               {rows.reduce((n, r) => n + r.count, 0)}
             </span>
           </div>
@@ -1515,7 +1718,7 @@ function FindingRow({ group }: { group: FindingGroup }) {
     <div className="rounded-md border border-line-soft bg-bg-1/40">
       <div
         className={`flex items-start gap-2 px-2.5 py-1.5 ${
-          drillable ? "cursor-pointer hover:bg-bg-2/40" : ""
+          drillable ? "cursor-pointer hover:bg-state-hover" : ""
         }`}
         onClick={drillable ? () => setOpen((v) => !v) : undefined}
       >
@@ -1526,15 +1729,15 @@ function FindingRow({ group }: { group: FindingGroup }) {
         ) : (
           <span className="w-2.5 flex-shrink-0" aria-hidden />
         )}
-        <span className="flex-1 min-w-0 text-[12px] text-text-1 leading-snug break-words">
+        <span className="flex-1 min-w-0 text-sm text-text-1 leading-snug break-words">
           {display}
         </span>
         <span className="flex-shrink-0 flex items-center gap-1.5 pt-0.5">
-          <span className="text-[10px] text-text-5" title={group.category}>
+          <span className="text-2xs text-text-5" title={group.category}>
             {categoryLabel(group.category)}
           </span>
           {group.count > 1 && (
-            <span className="text-[10px] tabular-nums text-text-3 px-1.5 py-0.5 rounded-full bg-bg-2 border border-line-soft">
+            <span className="text-2xs tabular-nums text-text-3 px-1.5 py-0.5 rounded-full bg-bg-2 border border-line-soft">
               ×{group.count}
             </span>
           )}
@@ -1547,15 +1750,15 @@ function FindingRow({ group }: { group: FindingGroup }) {
               key={i}
               className={
                 prose
-                  ? "text-[11px] text-text-3 leading-snug break-words pl-4"
-                  : "text-[11px] text-text-3 font-mono leading-snug break-words pl-4"
+                  ? "text-xs text-text-3 leading-snug break-words pl-4"
+                  : "text-xs text-text-3 font-mono leading-snug break-words pl-4"
               }
             >
               {prose ? humanizeFindingText(it) : it}
             </li>
           ))}
           {group.items.length > 50 && (
-            <li className="text-[10.5px] text-text-5 pl-4">
+            <li className="text-xs text-text-5 pl-4">
               +{group.items.length - 50} more…
             </li>
           )}
@@ -1623,7 +1826,7 @@ function ReviewerPips({
         <Pip key={r.login} login={r.login} approved={r.state === "APPROVED"} />
       ))}
       {overflow > 0 && (
-        <span className="relative w-6 h-6 rounded-full bg-bg-2 border border-bg-content text-text-3 text-[10px] font-bold flex items-center justify-center">
+        <span className="relative w-6 h-6 rounded-full bg-bg-2 border border-bg-content text-text-3 text-2xs font-bold flex items-center justify-center">
           +{overflow}
         </span>
       )}
@@ -1639,12 +1842,12 @@ function Pip({ login, approved }: { login: string; approved: boolean }) {
   return (
     <span
       title={`${login}${approved ? " ✓ approved" : ""}`}
-      className="relative w-6 h-6 rounded-full border-2 border-bg-content flex items-center justify-center text-[10px] font-bold text-white"
+      className="relative w-6 h-6 rounded-full border-2 border-bg-content flex items-center justify-center text-2xs font-bold text-white"
       style={{ backgroundColor: `hsl(${hue}, 45%, 38%)` }}
     >
       {initial}
       {approved && (
-        <span className="absolute -bottom-0.5 -right-0.5 w-3 h-3 rounded-full bg-green-500 border border-bg-content text-white text-[8px] font-bold flex items-center justify-center leading-none">
+        <span className="absolute -bottom-0.5 -right-0.5 w-3 h-3 rounded-full bg-green-500 border border-bg-content text-white text-2xs font-bold flex items-center justify-center leading-none">
           ✓
         </span>
       )}

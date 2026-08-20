@@ -12,6 +12,7 @@
 import { type ReactNode, useEffect, useState } from "react";
 import { api, type BlameLine, type OutlineNode } from "../lib/api";
 import { SymbolContextMenu } from "./SymbolContextMenu";
+import { relativeAgeFromSecs } from "../lib/relativeTime";
 
 type Props = {
   repoRoot: string;
@@ -86,7 +87,7 @@ export function EditorBreadcrumbs({
   const base = lastSlash >= 0 ? fileLabel.slice(lastSlash + 1) : fileLabel;
 
   return (
-    <div className="flex items-center gap-1.5 px-3 h-6 text-[11px] bg-bg-chrome border-b border-line-soft text-text-3 flex-shrink-0">
+    <div className="flex items-center gap-1.5 px-3 h-6 text-xs bg-bg-chrome border-b border-line-soft text-text-3 flex-shrink-0">
       {dir && (
         <>
           <span className="truncate text-text-4 font-mono">{dir}</span>
@@ -132,14 +133,8 @@ export function EditorBreadcrumbs({
 }
 
 function relAge(ts: number): string {
-  if (!ts) return "";
-  const diff = Math.max(0, Math.floor(Date.now() / 1000) - ts);
-  if (diff < 60) return `${diff}s`;
-  if (diff < 3600) return `${Math.floor(diff / 60)}m`;
-  if (diff < 86400) return `${Math.floor(diff / 3600)}h`;
-  if (diff < 604800) return `${Math.floor(diff / 86400)}d`;
-  if (diff < 2592000) return `${Math.floor(diff / 604800)}w`;
-  return `${Math.floor(diff / 2592000)}mo`;
+  // One ladder for the whole app — see lib/relativeTime.
+  return relativeAgeFromSecs(ts, { style: "compact" });
 }
 
 function Sep() {
@@ -152,7 +147,7 @@ function Sep() {
 // One neutral caption; the word already says which kind it is.
 function KindBadge({ kind }: { kind: string }) {
   return (
-    <span className="text-[10px] uppercase tracking-wider text-text-4">
+    <span className="section-label">
       {kind}
     </span>
   );

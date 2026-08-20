@@ -52,14 +52,37 @@ function applyUpdate(entry: Entry, ev: BlockUpdate) {
     entry.state = {
       blocks: prev.map((b) => (b.id === ev.block.id ? ev.block : b)),
     };
-  } else if (ev.op === "append") {
+  } else if (ev.op === "reframe") {
     entry.state = {
       blocks: prev.map((b) =>
-        b.id === ev.block_id ? { ...b, text: appendCapped(b.text, ev.text) } : b,
+        b.id === ev.block_id
+          ? { ...b, text: reframe(b.text, ev.drop_lines, ev.lines) }
+          : b,
       ),
     };
   }
   emit(entry);
+}
+
+/** Drop a block's last `dropLines` lines, then put `lines` in their place.
+ *
+ *  The mirror of `reframe_text` in `cmd_agent_pty.rs`, and it has to stay one:
+ *  the backend applies the same event to its own copy, and `agentPtyReplay`
+ *  hands that copy back on a remount. If the two disagree, the transcript you
+ *  are reading changes the moment you switch tabs and come back.
+ *
+ *  An update is only ever a rewrite because a terminal is not append-only —
+ *  a spinner, a progress bar and a status footer are all drawn over a line
+ *  that is already there. `dropLines` is 0 for ordinary streaming output,
+ *  which is nearly every update, so the usual path is still a plain append. */
+export function reframe(prev: string, dropLines: number, lines: string[]): string {
+  // `"".split("\n")` is `[""]`, not `[]` — an empty block has no lines, and
+  // treating it as one blank line puts a phantom newline at the top of every
+  // block's first update.
+  const kept = prev === "" ? [] : prev.split("\n");
+  kept.length = Math.max(0, kept.length - dropLines);
+  kept.push(...lines);
+  return capped(kept.join("\n"));
 }
 
 // Per-block character cap. A long Claude run can stream MB into a
@@ -71,11 +94,10 @@ function applyUpdate(entry: Entry, ev: BlockUpdate) {
 const BLOCK_CHAR_CAP = 256 * 1024;
 const TRIM_MARKER = "\n[…earlier output trimmed…]\n";
 
-function appendCapped(prev: string, next: string): string {
-  const combined = prev + next;
-  if (combined.length <= BLOCK_CHAR_CAP) return combined;
+function capped(text: string): string {
+  if (text.length <= BLOCK_CHAR_CAP) return text;
   const keep = BLOCK_CHAR_CAP - TRIM_MARKER.length;
-  return TRIM_MARKER + combined.slice(combined.length - keep);
+  return TRIM_MARKER + text.slice(text.length - keep);
 }
 
 async function attach(sessionId: string, entry: Entry) {

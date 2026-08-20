@@ -5,13 +5,48 @@
 //!
 //! Event ids follow `menu:<verb>` so React's listener can switch on
 //! a single channel.
+//!
+//! macOS ONLY, and the cfg is the whole point — see [`install`].
 
+#[cfg(target_os = "macos")]
 use tauri::menu::{
     AboutMetadata, Menu, MenuBuilder, MenuItemBuilder, PredefinedMenuItem, SubmenuBuilder,
 };
 use tauri::{App, AppHandle, Emitter, Wry};
 
-pub fn build(app: &App<Wry>) -> tauri::Result<Menu<Wry>> {
+/// Attach the menubar (macOS) and the `menu:<id>` event router (everywhere).
+///
+/// The router is unconditional: the HUD builds its own native popup menus at
+/// runtime (`hud::hud_menu`, `hud_workspace_menu`, `hud_agents_menu`) and their
+/// picks come back through this same `on_menu_event` channel on every platform.
+///
+/// The MENUBAR is macOS-only, and skipping it elsewhere is a bug fix, not a
+/// feature cut. `AppHandle::set_menu` is app-wide on macOS — it lands in the
+/// system menu bar at the top of the SCREEN. On Linux and Windows the same call
+/// falls through to a per-window menu (tauri `window/mod.rs`, `set_menu`), which
+/// on Linux is a GtkMenuBar packed into the window's own vbox and on Windows a
+/// Win32 menu bar in the frame. Either way it is a SECOND bar drawn inside our
+/// window, under the desktop's title bar, above a UI that already carries its
+/// own chrome strip (`TopBar`) — and on Linux the window is `transparent: true`
+/// (macOS needs it for the overlay title bar), which makes the toplevel
+/// app-paintable, so that strip has no opaque background of its own and its
+/// labels composite straight over the page. Two bars, one of them see-through.
+///
+/// Nothing is stranded by leaving it off: every item is in the command palette
+/// or the TopBar "More tools" menu, and each accelerator has an in-app twin in
+/// `lib/keymap.ts`, which is the only thing that runs the shortcuts here.
+pub fn install(app: &App<Wry>) -> tauri::Result<()> {
+    #[cfg(target_os = "macos")]
+    {
+        let menu = build(app)?;
+        app.set_menu(menu)?;
+    }
+    install_handler(app.handle());
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn build(app: &App<Wry>) -> tauri::Result<Menu<Wry>> {
     let h = app.handle();
 
     // ── App menu (macOS owns the leading position) ──
@@ -50,11 +85,13 @@ pub fn build(app: &App<Wry>) -> tauri::Result<Menu<Wry>> {
 
     // ── File menu ──
     let file_menu = SubmenuBuilder::new(h, "File")
-        .item(
-            &MenuItemBuilder::with_id("new_file", "New File")
-                .accelerator("CmdOrCtrl+N")
-                .build(h)?,
-        )
+        // No "New File". Nothing in the app can create one — there is no
+        // file-create command in the Tauri surface and no untitled-buffer
+        // concept — so the item did nothing, and worse, its CmdOrCtrl+N was
+        // swallowing the keystroke: AppKit resolves menu accelerators before
+        // the webview sees them, so the ⌘N the shortcut sheet advertises as
+        // "New chat" (App.tsx binds it to newSessionAction) never arrived.
+        // Dropping the item hands ⌘N back. Opening a project is ⌘O, below.
         .item(
             &MenuItemBuilder::with_id("open_file", "Open…")
                 .accelerator("CmdOrCtrl+O")
@@ -73,10 +110,26 @@ pub fn build(app: &App<Wry>) -> tauri::Result<Menu<Wry>> {
         )
         .build()?;
 
-    // ── Edit menu (rely on system items so cut/copy/paste work natively) ──
+    // ── Edit menu ──
+    // Cut/copy/paste/select-all stay predefined: those selectors do reach the
+    // focused field and work. Undo and redo cannot be. macOS runs an NSMenu key
+    // equivalent before the webview sees the key, so `PredefinedMenuItem::undo`
+    // swallowed ⌘Z and handed it to WKWebView's own undo manager — which knows
+    // nothing about Monaco's model or ProseMirror's history, so ⌘Z did nothing
+    // in the file editor or in Pages. These emit `menu:edit_undo` /
+    // `menu:edit_redo` instead, and `undoRouter.ts` hands the operation to
+    // whichever editor actually has focus.
     let edit_menu = SubmenuBuilder::new(h, "Edit")
-        .item(&PredefinedMenuItem::undo(h, None)?)
-        .item(&PredefinedMenuItem::redo(h, None)?)
+        .item(
+            &MenuItemBuilder::with_id("edit_undo", "Undo")
+                .accelerator("CmdOrCtrl+Z")
+                .build(h)?,
+        )
+        .item(
+            &MenuItemBuilder::with_id("edit_redo", "Redo")
+                .accelerator("CmdOrCtrl+Shift+Z")
+                .build(h)?,
+        )
         .separator()
         .item(&PredefinedMenuItem::cut(h, None)?)
         .item(&PredefinedMenuItem::copy(h, None)?)
@@ -92,11 +145,16 @@ pub fn build(app: &App<Wry>) -> tauri::Result<Menu<Wry>> {
                 .build(h)?,
         )
         .separator()
-        .item(
-            &MenuItemBuilder::with_id("toggle_sidebar", "Toggle Sidebar")
-                .accelerator("CmdOrCtrl+B")
-                .build(h)?,
-        )
+        // No accelerator on purpose. A macOS menu key-equivalent is handled in
+        // `performKeyEquivalent:`, before the responder chain — so an
+        // accelerator here swallows ⌘B from the webview entirely, and ⌘B
+        // collapsed the sidebar even while you were typing in the notes
+        // editor, the chat composer or a PR review comment (all three of
+        // which show a Bold button captioned "⌘B"). The in-app keymap owns
+        // ⌘B instead and skips it when focus is in an editable surface.
+        // The binding is still advertised in four places: both sidebar
+        // tooltips, the command palette, and the ⌘/ cheat-sheet.
+        .item(&MenuItemBuilder::with_id("toggle_sidebar", "Toggle Sidebar").build(h)?)
         .item(
             &MenuItemBuilder::with_id("toggle_terminal", "Toggle Terminal")
                 .accelerator("CmdOrCtrl+J")
@@ -108,12 +166,19 @@ pub fn build(app: &App<Wry>) -> tauri::Result<Menu<Wry>> {
                 .build(h)?,
         )
         .separator()
-        // ⌘R reloads the webview — the universally-expected refresh, and the
-        // escape hatch when a broken HMR update wedges the dev UI. Review-panel
-        // toggle keeps the R mnemonic on ⌘⌥R above.
+        // ⌘R runs the project, the way it does in every IDE — the app knows the
+        // command because it read the repo, and Run is one reserved terminal in
+        // the panel. Reload moves to ⌘⇧R: it is the escape hatch for a wedged
+        // UI, which is rarer than running the thing you are building. The
+        // Review-panel toggle keeps the R mnemonic on ⌘⌥R above.
+        .item(
+            &MenuItemBuilder::with_id("run_project", "Run Project")
+                .accelerator("CmdOrCtrl+R")
+                .build(h)?,
+        )
         .item(
             &MenuItemBuilder::with_id("reload_app", "Reload App")
-                .accelerator("CmdOrCtrl+R")
+                .accelerator("CmdOrCtrl+Shift+R")
                 .build(h)?,
         )
         .build()?;

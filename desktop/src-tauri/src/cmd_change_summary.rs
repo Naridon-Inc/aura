@@ -84,7 +84,7 @@ pub async fn summarize_file_change(
             diff_hash: String::new(),
         });
     }
-    let diff_hash = blake3::hash(diff.as_bytes()).to_hex().to_string();
+    let diff_hash = summary_key(&diff);
 
     // 1) Reuse a summary already computed for this exact diff.
     if let Some(hit) = cache_lookup(&cwd, &rel, &diff_hash, "").await {
@@ -237,19 +237,13 @@ pub async fn explain_change(
         None => single_file_diff(&repo_root, &rel).await,
     };
 
-    // Scope the hash so a working-tree explanation and a committed one for the
-    // same diff text never share a cache line.
-    let scope = commit.as_deref().unwrap_or("wt");
-    Ok(explain_from_diff(&cwd, &rel, &diff, scope).await)
+    Ok(explain_from_diff(&cwd, &rel, &diff).await)
 }
 
 /// Same before / what / why explanation, but for a diff the caller already
 /// holds — the raw unified diff of one file across a pull request's base..head
 /// range, which the PR review surface loads from `gh pr diff`. A PR file has no
-/// single commit to point at, so the hunk text is passed in directly. Cached
-/// under a `"pr"` scope keyed by the diff's own content-hash: re-opening the
-/// same PR file reuses the words, and a working-tree explanation for identical
-/// bytes never collides with it.
+/// single commit to point at, so the hunk text is passed in directly.
 #[tauri::command]
 pub async fn explain_change_diff(
     repo_root: String,
@@ -261,7 +255,7 @@ pub async fn explain_change_diff(
         return Err(format!("repo root does not exist: {repo_root}"));
     }
     let rel = rel_path(&cwd, &path);
-    Ok(explain_from_diff(&cwd, &rel, &diff, "pr").await)
+    Ok(explain_from_diff(&cwd, &rel, &diff).await)
 }
 
 /// Plain-language meaning for ONE changed piece — the per-node "New is this" /
@@ -342,12 +336,9 @@ pub async fn explain_symbols(
     if diff.trim().is_empty() {
         return Ok(Vec::new());
     }
-    // Same scoped hash the file-level explanation uses, so both share the cache
-    // file and neither a working-tree read nor a committed one ever collide.
-    let scope = commit.as_deref().unwrap_or("wt");
-    let diff_hash = blake3::hash(format!("{scope}\n{diff}").as_bytes())
-        .to_hex()
-        .to_string();
+    // Same content key the file-level explanation uses, so both share the cache
+    // file and a change explained once is explained everywhere it appears.
+    let diff_hash = summary_key(&diff);
 
     let mut out = Vec::with_capacity(symbols.len());
     // (symbol, side) pairs whose model line isn't cached yet — filled in the
@@ -389,6 +380,175 @@ pub async fn explain_symbols(
         spawn_symbol_backfill(cwd, rel, diff, diff_hash, jobs);
     }
     Ok(out)
+}
+
+/// Write the plain-language account of a change AS IT HAPPENS, rather than
+/// waiting for someone to open it.
+///
+/// Everything here was already computed lazily: you opened a file's changes, the
+/// generic placeholders showed, and the real sentences swapped in perhaps a
+/// minute later as the model wrote them one piece at a time. That minute was
+/// always avoidable — nothing about the work needs a reader present. The change
+/// is finished; the words could have been written the moment it landed.
+///
+/// So the shell calls this when a change is recorded (a commit lands, an agent
+/// finishes a turn) and it queues the same file-level and per-piece jobs, off
+/// the request path, with nobody waiting. By the time anyone looks, the words
+/// are in `.aura/change_summaries.jsonl` and the surface paints filled-in.
+/// Returns immediately with how many files were queued — it is fire-and-forget,
+/// never blocks its caller, and never errors when no model is reachable (the
+/// jobs simply find no backend and stop).
+///
+/// `commit` names what to describe: a sha, a `base...head` range, or omitted for
+/// the working tree as it stands. Per-piece lines need the AST symbol delta, so
+/// they are warmed for a commit or range (where the engine can diff two trees);
+/// a working-tree call warms the file-level before/what/why.
+#[tauri::command]
+pub async fn prewarm_change_summaries(
+    repo_root: String,
+    commit: Option<String>,
+) -> Result<usize, String> {
+    let cwd = PathBuf::from(&repo_root);
+    if !cwd.is_dir() {
+        return Err(format!("repo root does not exist: {repo_root}"));
+    }
+    let commit = commit.filter(|s| !s.trim().is_empty());
+    let files = changed_paths(&repo_root, commit.as_deref()).await;
+    if files.is_empty() {
+        return Ok(0);
+    }
+
+    // Symbols come from the engine's AST diff, which needs two trees to
+    // compare — so they exist for a commit or a range, not for a dirty tree.
+    let symbols_by_file = match commit.as_deref() {
+        Some(spec) => changed_symbols(&repo_root, spec).await,
+        None => Default::default(),
+    };
+
+    let queued = files.len();
+    tokio::spawn(async move {
+        for rel in files {
+            let diff = match commit.as_deref() {
+                Some(spec) => commit_file_diff(&repo_root, spec, &rel).await,
+                None => single_file_diff(&repo_root, &rel).await,
+            };
+            if diff.trim().is_empty() {
+                continue;
+            }
+            // The file-level angles. This resolves cache → model → deterministic
+            // and caches real model output, which is the whole point: run it
+            // now, with nobody waiting, and the reader's call is a cache hit.
+            explain_from_diff(&cwd, &rel, &diff).await;
+
+            // Then the per-piece "does now" / "used to do" lines — the ones the
+            // split header fills in a piece at a time. Same jobs the view-time
+            // path spawns, and the same in-flight claim stops the two from
+            // racing if someone opens the file mid-warm.
+            if let Some(syms) = symbols_by_file.get(&rel) {
+                let jobs: Vec<(SymbolInput, SymSide)> = syms
+                    .iter()
+                    .flat_map(|sym| {
+                        let mut sides = Vec::new();
+                        if sym.change != "deleted" {
+                            sides.push((sym.clone(), SymSide::Now));
+                        }
+                        if sym.change != "added" {
+                            sides.push((sym.clone(), SymSide::Before));
+                        }
+                        sides
+                    })
+                    .collect();
+                if !jobs.is_empty() {
+                    let key = summary_key(&diff);
+                    spawn_symbol_backfill(cwd.clone(), rel.clone(), diff, key, jobs);
+                }
+            }
+        }
+    });
+    Ok(queued)
+}
+
+/// The paths a change touched: a commit's or range's file list, or everything
+/// currently different from HEAD. Empty on any git failure — a warm that can't
+/// find its files simply does nothing.
+async fn changed_paths(repo_root: &str, spec: Option<&str>) -> Vec<String> {
+    let out = match spec {
+        Some(s) if s.contains("..") => {
+            Command::new("git")
+                .args(["diff", "--name-only", "--no-color", s])
+                .current_dir(repo_root)
+                .output()
+                .await
+        }
+        Some(s) => {
+            Command::new("git")
+                .args(["show", "--name-only", "--no-color", "--format=", s])
+                .current_dir(repo_root)
+                .output()
+                .await
+        }
+        None => {
+            Command::new("git")
+                .args(["diff", "--name-only", "--no-color", "HEAD"])
+                .current_dir(repo_root)
+                .output()
+                .await
+        }
+    };
+    let Ok(out) = out else { return Vec::new() };
+    if !out.status.success() {
+        return Vec::new();
+    }
+    String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .map(str::to_string)
+        .collect()
+}
+
+/// The AST symbol delta per file, read from the engine's own change-note. Only
+/// the fields the per-piece jobs need are pulled out; anything the engine can't
+/// parse (non-code files, sub-symbol edits) simply isn't in the map. A missing
+/// or failing CLI yields an empty map — the warm then covers file-level only.
+async fn changed_symbols(
+    repo_root: &str,
+    spec: &str,
+) -> std::collections::HashMap<String, Vec<SymbolInput>> {
+    let mut map = std::collections::HashMap::new();
+    let Ok(out) = Command::new(crate::agent_event_listener::resolve_aura_bin())
+        .args(["change-note", spec, "--json"])
+        .current_dir(repo_root)
+        .output()
+        .await
+    else {
+        return map;
+    };
+    if !out.status.success() {
+        return map;
+    }
+    let Ok(json) = serde_json::from_slice::<serde_json::Value>(&out.stdout) else {
+        return map;
+    };
+    let Some(files) = json.get("files").and_then(|f| f.as_array()) else {
+        return map;
+    };
+    for f in files {
+        let Some(path) = f.get("file").and_then(|p| p.as_str()) else {
+            continue;
+        };
+        let Some(syms) = f.get("symbols").and_then(|s| s.as_array()) else {
+            continue;
+        };
+        let parsed: Vec<SymbolInput> = syms
+            .iter()
+            .filter_map(|s| serde_json::from_value(s.clone()).ok())
+            .collect();
+        if !parsed.is_empty() {
+            map.insert(path.to_string(), parsed);
+        }
+    }
+    map
 }
 
 /// Cache tag for one piece's "does now" meaning — namespaced so it can't collide
@@ -576,22 +736,34 @@ fn plain_symbol_kind(kind: &str) -> &'static str {
     }
 }
 
-/// Core of both explanation commands: given a file's diff and a `scope` label
-/// that disambiguates its cache line (`"wt"`, a commit sha, or `"pr"`), produce
-/// the before/what/why explanation, resolving each angle cache → model →
+/// The cache key for everything written about one change: the hash of the diff
+/// itself, and nothing else.
+///
+/// This used to be salted with a "scope" — `"wt"` for a working-tree edit, the
+/// sha for a committed one, `"pr"` for a pull request — which meant the same
+/// bytes were filed under three different keys. The practical cost was that all
+/// the plain-language work done while an agent was still editing was thrown away
+/// the moment it committed: you would watch the words appear, commit, open the
+/// change, and wait for the model to write the identical sentences a second
+/// time. Same again when the change reached a pull request.
+///
+/// The diff IS the identity. A given patch means the same thing whether you are
+/// reading it dirty in your tree, at the commit that landed it, or in the pull
+/// request that proposes it — so it is described once and reused everywhere. The
+/// path is a separate cache column, so two files that happen to change
+/// identically still get their own lines.
+fn summary_key(diff: &str) -> String {
+    blake3::hash(diff.as_bytes()).to_hex().to_string()
+}
+
+/// Core of both explanation commands: given a file's diff, produce the
+/// before/what/why explanation, resolving each angle cache → model →
 /// deterministic and caching only real model output.
-async fn explain_from_diff(
-    cwd: &Path,
-    rel: &str,
-    diff: &str,
-    scope: &str,
-) -> ChangeExplanation {
+async fn explain_from_diff(cwd: &Path, rel: &str, diff: &str) -> ChangeExplanation {
     if diff.trim().is_empty() {
         return empty_explanation();
     }
-    let diff_hash = blake3::hash(format!("{scope}\n{diff}").as_bytes())
-        .to_hex()
-        .to_string();
+    let diff_hash = summary_key(diff);
 
     // A pure addition has no "before" — skip that angle entirely.
     let (_, dels) = count_changes(diff);
@@ -788,12 +960,25 @@ fn deterministic_angle(diff: &str, angle: ExplainAngle) -> String {
 /// The patch a single commit applied to one file. `git show` prints the
 /// commit's diff; `--format=` drops the commit header so only the hunk remains.
 async fn commit_file_diff(repo_root: &str, sha: &str, rel: &str) -> String {
-    if let Ok(out) = Command::new("git")
-        .args(["show", "--no-color", "--unified=3", "--format=", sha, "--", rel])
-        .current_dir(repo_root)
-        .output()
-        .await
-    {
+    // A pull request has no single commit to show — it is a range. `git show`
+    // rejects one, so a spec containing `..` goes to `git diff` instead, which
+    // reads both of git's range spellings natively (`a..b` compares the two
+    // tips; `a...b` compares from where they diverged, which is what a pull
+    // request proposes).
+    let out = if sha.contains("..") {
+        Command::new("git")
+            .args(["diff", "--no-color", "--unified=3", sha, "--", rel])
+            .current_dir(repo_root)
+            .output()
+            .await
+    } else {
+        Command::new("git")
+            .args(["show", "--no-color", "--unified=3", "--format=", sha, "--", rel])
+            .current_dir(repo_root)
+            .output()
+            .await
+    };
+    if let Ok(out) = out {
         if out.status.success() {
             return String::from_utf8_lossy(&out.stdout).into_owned();
         }

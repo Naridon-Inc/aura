@@ -67,19 +67,19 @@ export function CommitDetailPane({
 
   if (loading) {
     return (
-      <div className="px-6 py-8 text-[12px] text-text-4">
+      <div className="px-6 py-8 text-sm text-text-4">
         Reading this version’s story…
       </div>
     );
   }
   if (error) {
     return (
-      <div className="px-6 py-8 font-mono text-[11px] text-red">{error}</div>
+      <div className="px-6 py-8 font-mono text-xs text-red">{error}</div>
     );
   }
   if (!report) {
     return (
-      <div className="px-6 py-8 text-[12px] text-text-4">
+      <div className="px-6 py-8 text-sm text-text-4">
         Pick a saved version on the left to read its story.
       </div>
     );
@@ -121,7 +121,7 @@ export function CommitDetailPane({
               {picked ? (
                 <CommittedFileDiff repoRoot={repoRoot} sha={sha} path={picked} />
               ) : (
-                <div className="rounded-lg border border-dashed border-line-soft px-4 py-3 text-[12px] text-text-4">
+                <div className="rounded-lg border border-dashed border-line-soft px-4 py-3 text-sm text-text-4">
                   Pick a file above to read exactly what changed in it.
                 </div>
               )}

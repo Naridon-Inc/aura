@@ -257,11 +257,11 @@ function SemanticGraphInner({ repoRoot, onClose }: Props) {
   return (
     <div className="h-full w-full flex flex-col bg-bg-content">
       <header className="h-9 flex items-center px-4 border-b border-line-soft flex-shrink-0 gap-3">
-        <span className="text-text-2 text-[12px] font-medium uppercase tracking-wider">
+        <span className="section-label">
           Code Map
         </span>
         {graph && (
-          <span className="text-text-4 text-[10.5px] tabular-nums">
+          <span className="text-text-4 text-xs tabular-nums">
             {graph.stats.symbols} pieces · {graph.stats.files} files ·{" "}
             {graph.stats.communities} clusters · {graph.stats.gods} hubs ·{" "}
             {graph.stats.surprises} unexpected links
@@ -281,25 +281,25 @@ function SemanticGraphInner({ repoRoot, onClose }: Props) {
           type="button"
           onClick={onClose}
           title="Close"
-          className="ml-auto w-6 h-6 rounded text-text-4 hover:text-text-1 hover:bg-bg-2 flex items-center justify-center"
+          className="ml-auto w-6 h-6 rounded text-text-4 hover:text-text-1 hover:bg-state-hover flex items-center justify-center"
         >
           ×
         </button>
       </header>
 
       {err && (
-        <div className="text-red-400 text-[11px] font-mono px-4 py-2 border-b border-line-soft">
+        <div className="text-red-400 text-xs font-mono px-4 py-2 border-b border-line-soft">
           {err}
         </div>
       )}
 
-      <div className="flex-shrink-0 border-b border-line-soft px-3 py-2 flex items-center gap-2 flex-wrap text-[11px]">
+      <div className="flex-shrink-0 border-b border-line-soft px-3 py-2 flex items-center gap-2 flex-wrap text-xs">
         <input
           type="search"
           value={search}
           onChange={(e) => setSearch(e.target.value)}
           placeholder="search for a piece or file…"
-          className="bg-bg-1 border border-line-soft rounded px-2 py-1 text-[11px] text-text-1 outline-none focus:border-text-4 w-56"
+          className="bg-bg-1 border border-line-soft rounded px-2 py-1 text-xs text-text-1 outline-none focus:border-text-4 w-56"
         />
         <KindFilter
           cur={kindFilter}
@@ -330,7 +330,7 @@ function SemanticGraphInner({ repoRoot, onClose }: Props) {
       <div className="flex-1 min-h-0 flex">
         <div className="flex-1 min-w-0 overflow-hidden bg-bg-1 relative">
           {loading || building ? (
-            <div className="absolute inset-0 flex items-center justify-center text-text-4 text-[12px]">
+            <div className="absolute inset-0 flex items-center justify-center text-text-4 text-sm">
               {building ? "building graph…" : "loading…"}
             </div>
           ) : filtered ? (
@@ -360,7 +360,7 @@ function SemanticGraphInner({ repoRoot, onClose }: Props) {
             label="Hubs"
             nodes={gods}
             onPick={focusNode}
-            empty="No hubs here yet — not enough connections to form one."
+            empty="No hubs here yet, not enough connections to form one."
           />
           <SurprisesPanel
             edges={surprises}
@@ -1054,7 +1054,7 @@ function CanvasOverlay({
   onUnpinAll: () => void;
 }) {
   return (
-    <div className="absolute bottom-3 left-3 flex items-center gap-1 text-[10.5px] text-text-3 bg-bg-1/85 backdrop-blur-sm border border-line-soft rounded px-1.5 py-1 pointer-events-auto shadow-sm">
+    <div className="absolute bottom-3 left-3 flex items-center gap-1 text-xs text-text-3 bg-bg-1/85 backdrop-blur-sm border border-line-soft rounded px-1.5 py-1 pointer-events-auto shadow-sm">
       <span className="tabular-nums min-w-9 text-center">
         {Math.round(scale * 100)}%
       </span>
@@ -1110,7 +1110,7 @@ function IconButton({
       aria-label={title}
       disabled={disabled || !onClick}
       onClick={onClick}
-      className="w-6 h-6 rounded flex items-center justify-center text-text-3 hover:text-text-1 hover:bg-bg-2 disabled:opacity-35 disabled:hover:bg-transparent disabled:hover:text-text-3"
+      className="w-6 h-6 rounded flex items-center justify-center text-text-3 hover:text-text-1 hover:bg-state-hover disabled:opacity-35 disabled:hover:bg-transparent disabled:hover:text-text-3"
     >
       {children}
     </button>
@@ -1140,7 +1140,7 @@ function SelectionPanel({
 }) {
   return (
     <div className="flex-shrink-0 max-h-[46%] flex flex-col border-b border-line-soft">
-      <div className="text-text-4 text-[10px] uppercase tracking-wider px-3 py-1.5 border-b border-line-soft flex items-center gap-2">
+      <div className="section-label px-3 py-1.5 border-b border-line-soft flex items-center gap-2">
         <span className="flex-1">Selection</span>
         <IconButton title="Fit selection" onClick={node ? onFocus : undefined} disabled={!node}>
           <Crosshair className="w-3.5 h-3.5" />
@@ -1150,7 +1150,7 @@ function SelectionPanel({
         </IconButton>
       </div>
       {!node ? (
-        <div className="text-text-4 text-[11px] px-3 py-2">Nothing selected — click a piece to see what it connects to.</div>
+        <div className="text-text-4 text-xs px-3 py-2">Nothing selected. Click a piece to see what it connects to.</div>
       ) : (
         <>
           <div className="px-3 py-2 border-b border-line-soft">
@@ -1160,19 +1160,19 @@ function SelectionPanel({
                 style={{ background: communityColor(node.community_id) }}
                 title="Colour groups pieces that work closely together"
               />
-              <div className="text-text-1 text-[12px] font-medium truncate" title={node.name}>
+              <div className="text-text-1 text-sm font-medium truncate" title={node.name}>
                 {node.name}
               </div>
             </div>
-            <div className="text-text-4 text-[10px] truncate mt-1" title={node.file}>
+            <div className="text-text-4 text-2xs truncate mt-1" title={node.file}>
               {node.kind} · {compactPath(node.file, node.line)}
             </div>
-            <div className="flex items-center gap-1.5 mt-2 text-[10px]">
+            <div className="flex items-center gap-1.5 mt-2 text-2xs">
               <span title="How many other pieces connect to this one">
                 <Badge>{node.degree} {node.degree === 1 ? "link" : "links"}</Badge>
               </span>
               {node.god && (
-                <span title="A hub — lots of other pieces depend on this one, so changes here ripple wide">
+                <span title="A hub. Lots of other pieces depend on this one, so changes here ripple wide">
                   <Badge tone="gold">hub</Badge>
                 </span>
               )}
@@ -1180,7 +1180,7 @@ function SelectionPanel({
           </div>
           <div className="overflow-y-auto min-h-0">
             {links.length === 0 ? (
-              <div className="text-text-4 text-[11px] px-3 py-2">
+              <div className="text-text-4 text-xs px-3 py-2">
                 Nothing connects to this piece.
               </div>
             ) : (
@@ -1189,17 +1189,17 @@ function SelectionPanel({
                   key={`${edge.from}-${edge.to}-${i}`}
                   type="button"
                   onClick={() => onPick(other.id)}
-                  className="w-full text-left px-3 py-1.5 hover:bg-bg-2 border-b border-line-soft last:border-b-0"
+                  className="w-full text-left px-3 py-1.5 hover:bg-state-hover border-b border-line-soft last:border-b-0"
                   title={`${edge.kind} ${direction === "out" ? "to" : "from"} ${other.id}`}
                 >
-                  <div className="flex items-center gap-1.5 text-[11px]">
+                  <div className="flex items-center gap-1.5 text-xs">
                     <span className="text-text-4">{direction === "out" ? "->" : "<-"}</span>
                     <span className="text-text-1 truncate flex-1">{other.name}</span>
                     {edge.surprise && (
-                      <span className="text-amber-400 text-[10px]" title="An unexpected link — these two pieces sit in different clusters but still depend on each other">unexpected</span>
+                      <span className="text-amber-400 text-2xs" title="An unexpected link. These two pieces sit in different clusters but still depend on each other">unexpected</span>
                     )}
                   </div>
-                  <div className="text-text-4 text-[10px] truncate">
+                  <div className="text-text-4 text-2xs truncate">
                     {edge.kind} · {other.kind} · {compactPath(other.file, other.line)}
                   </div>
                 </button>
@@ -1256,10 +1256,10 @@ function KindFilter({
             type="button"
             onClick={() => onToggle(k)}
             className={[
-              "px-1.5 py-0.5 text-[10.5px] rounded border",
+              "px-1.5 py-0.5 text-xs rounded border",
               active
                 ? "bg-bg-3 border-line text-text-1"
-                : "bg-bg-1 border-line-soft text-text-4 hover:bg-bg-2",
+                : "bg-bg-1 border-line-soft text-text-4 hover:bg-state-hover",
             ].join(" ")}
           >
             {label}
@@ -1285,7 +1285,7 @@ function CommunityFilter({
       onChange={(e) =>
         onPick(e.target.value === "" ? null : parseInt(e.target.value, 10))
       }
-      className="bg-bg-1 border border-line-soft rounded px-1.5 py-0.5 text-[10.5px] text-text-1 outline-none focus:border-text-4"
+      className="bg-bg-1 border border-line-soft rounded px-1.5 py-0.5 text-xs text-text-1 outline-none focus:border-text-4"
     >
       <option value="">all clusters ({count})</option>
       {Array.from({ length: count }).map((_, i) => (
@@ -1388,30 +1388,30 @@ function SidePanel({
 }) {
   return (
     <div className="flex-1 min-h-0 flex flex-col border-b border-line-soft">
-      <div className="text-text-4 text-[10px] uppercase tracking-wider px-3 py-1.5 border-b border-line-soft">
+      <div className="section-label px-3 py-1.5 border-b border-line-soft">
         {label}
       </div>
       <div className="overflow-y-auto flex-1">
         {nodes.length === 0 && (
-          <div className="text-text-4 text-[11px] px-3 py-2">{empty}</div>
+          <div className="text-text-4 text-xs px-3 py-2">{empty}</div>
         )}
         {nodes.map((n) => (
           <button
             key={n.id}
             type="button"
             onClick={() => onPick(n.id)}
-            className="w-full text-left px-3 py-1.5 hover:bg-bg-2 border-b border-line-soft last:border-b-0"
+            className="w-full text-left px-3 py-1.5 hover:bg-state-hover border-b border-line-soft last:border-b-0"
             title={n.id}
           >
             <div className="flex items-center gap-1.5">
-              <span className="text-text-1 text-[11.5px] font-medium truncate flex-1">
+              <span className="text-text-1 text-sm font-medium truncate flex-1">
                 {n.name}
               </span>
-              <span className="text-text-4 text-[10px] tabular-nums">
+              <span className="text-text-4 text-2xs tabular-nums">
                 {n.degree}
               </span>
             </div>
-            <div className="text-text-4 text-[10px] truncate">
+            <div className="text-text-4 text-2xs truncate">
               {n.kind} · {n.file}
               {n.line > 0 && `:${n.line}`}
             </div>
@@ -1437,13 +1437,13 @@ function SurprisesPanel({
   }, [allNodes]);
   return (
     <div className="flex-1 min-h-0 flex flex-col">
-      <div className="text-text-4 text-[10px] uppercase tracking-wider px-3 py-1.5 border-b border-line-soft">
+      <div className="section-label px-3 py-1.5 border-b border-line-soft">
         Unexpected links
       </div>
       <div className="overflow-y-auto flex-1">
         {edges.length === 0 && (
-          <div className="text-text-4 text-[11px] px-3 py-2">
-            Nothing unexpected — the clusters stay nicely separate.
+          <div className="text-text-4 text-xs px-3 py-2">
+            Nothing unexpected. The clusters stay nicely separate.
           </div>
         )}
         {edges.map((e, i) => {
@@ -1455,7 +1455,7 @@ function SurprisesPanel({
               key={i}
               className="px-3 py-1.5 border-b border-line-soft last:border-b-0"
             >
-              <div className="flex items-center gap-1 text-[11px]">
+              <div className="flex items-center gap-1 text-xs">
                 <button
                   type="button"
                   onClick={() => onPick(a.id)}
@@ -1472,7 +1472,7 @@ function SurprisesPanel({
                   {b.name}
                 </button>
               </div>
-              <div className="text-text-4 text-[10px] truncate">
+              <div className="text-text-4 text-2xs truncate">
                 {e.kind} · c{a.community_id} ↔ c{b.community_id}
               </div>
             </div>

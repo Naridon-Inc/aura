@@ -688,11 +688,15 @@ fn spawn_lane(
                     // Server-side tool-loop result chunk — only the native
                     // chat command emits these; lane streams never do. No-op.
                 }
-                Ok(ChatChunk::Reasoning { .. }) | Ok(ChatChunk::Usage { .. }) => {
-                    // Extended-thinking deltas and token-usage chunks are
-                    // chat-surface cosmetics (a disclosure block + a meter).
+                Ok(ChatChunk::Reasoning { .. })
+                | Ok(ChatChunk::Usage { .. })
+                | Ok(ChatChunk::Cost { .. }) => {
+                    // Extended-thinking deltas, token-usage and cost chunks are
+                    // chat-surface cosmetics (a disclosure block + two meters).
                     // A dispatched lane is a transcript, not a chat bubble —
-                    // there's nothing to render them into, so ignore them.
+                    // there's nothing to render them into, so ignore them. The
+                    // lane's spend is still recorded in the ledger by whoever
+                    // emitted the chunk; only the display is skipped.
                 }
                 Ok(ChatChunk::End { .. }) => break,
                 Ok(ChatChunk::Error { message }) => {

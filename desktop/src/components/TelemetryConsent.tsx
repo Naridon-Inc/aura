@@ -14,6 +14,7 @@
 
 import { useEffect, useState } from "react";
 import { api, type TelemetryConsent as Consent } from "../lib/api";
+import { trackActivation } from "../lib/track";
 import { Switch } from "./ui/switch";
 import { ToastActionButton, ToastCard, ToastStack } from "./ui/toast";
 
@@ -44,6 +45,9 @@ export function TelemetryConsent() {
     setSaving(true);
     try {
       await api.telemetrySetConsent(p, c);
+      // First step of the activation funnel. Safe to send after the answer
+      // lands: if they said no, the backend drops it on the floor.
+      trackActivation("consent_answered", { product: p, crash: c });
     } catch {
       /* best-effort — closing either way so we don't nag */
     } finally {
@@ -59,7 +63,7 @@ export function TelemetryConsent() {
         message={
           <>
             Aura can send anonymous notes about which features get used and when
-            something crashes — so we can see what&rsquo;s working and fix what
+            something crashes, so we can see what&rsquo;s working and fix what
             isn&rsquo;t. It <span className="text-text-1">never</span> sends your code,
             your files, what you type, or your name. You can change this anytime in
             Settings.
@@ -85,7 +89,7 @@ export function TelemetryConsent() {
             on={crash}
             onToggle={() => setCrash((v) => !v)}
             title="Crash reports"
-            hint="The most useful — tells us when Aura breaks so we can fix it for you."
+            hint="The most useful. Tells us when Aura breaks so we can fix it for you."
           />
           <Row
             on={product}
@@ -114,8 +118,8 @@ function Row({
     <div className="flex items-start gap-2.5">
       <Switch checked={on} onCheckedChange={onToggle} className="mt-px shrink-0" />
       <div className="min-w-0">
-        <div className="text-[12px] font-medium text-text-1">{title}</div>
-        <div className="text-[11px] leading-[1.45] text-text-3">{hint}</div>
+        <div className="text-sm font-medium text-text-1">{title}</div>
+        <div className="text-xs leading-[1.45] text-text-3">{hint}</div>
       </div>
     </div>
   );

@@ -75,15 +75,15 @@ export function MembersRail({
   return (
     <div className="h-full flex flex-col">
       <div className="flex-shrink-0 px-3 h-11 flex items-center border-b border-line-soft">
-        <div className="text-[10px] uppercase tracking-wider text-text-5 font-medium">
+        <div className="section-label">
           {conv.kind === "dm" ? "Details" : "Members"}
         </div>
       </div>
       <div className="flex-1 min-h-0 overflow-y-auto px-1 py-2">
         {conv.kind === "dm" ? (
-          <div className="px-2 text-[11px] text-text-3 leading-snug">
+          <div className="px-2 text-xs text-text-3 leading-snug">
             Direct message with{" "}
-            <span className="text-text-1">@{conv.name}</span>.
+            <span className="text-text-1">@{conv.handle ?? conv.name}</span>.
           </div>
         ) : (
           <>
@@ -96,7 +96,7 @@ export function MembersRail({
             )}
             <MyStatusEditor />
             <MembersGroup
-              label={`Online — ${online.length}`}
+              label={`Online · ${online.length}`}
               members={online}
               selfHandle={selfHandle}
               onDM={onDM}
@@ -106,7 +106,7 @@ export function MembersRail({
               online
             />
             <MembersGroup
-              label={`Offline — ${offline.length}`}
+              label={`Offline · ${offline.length}`}
               members={offline}
               selfHandle={selfHandle}
               onDM={onDM}
@@ -189,7 +189,7 @@ function MyStatusEditor() {
   if (open) {
     return (
       <div className="mx-2 mb-2 p-2 rounded-md border border-line-soft bg-bg-2/50">
-        <div className="text-[10px] uppercase tracking-wider text-text-5 font-medium pb-1.5">
+        <div className="section-label pb-1.5">
           Your status
         </div>
         <div className="flex items-center gap-1.5">
@@ -200,7 +200,7 @@ function MyStatusEditor() {
               setDraftEmoji([...e.target.value].slice(0, 2).join(""))
             }
             placeholder="🎯"
-            className="w-7 h-7 px-0 text-center text-[14px]"
+            className="w-7 h-7 px-0 text-center text-md"
             aria-label="Status emoji"
           />
           <Input
@@ -209,7 +209,7 @@ function MyStatusEditor() {
             maxLength={140}
             onChange={(e) => setDraftText(e.target.value)}
             placeholder="What's happening?"
-            className="flex-1 h-7 text-[11.5px]"
+            className="flex-1 h-7 text-sm"
             aria-label="Status text"
             onKeyDown={(e) => {
               if (e.key === "Enter" && !e.shiftKey) {
@@ -228,7 +228,7 @@ function MyStatusEditor() {
             size="xs"
             onClick={clear}
             disabled={busy || (!emoji && !text)}
-            className="px-1.5 text-[10.5px] text-text-4 hover:text-text-2"
+            className="px-1.5 text-xs text-text-4 hover:text-text-2"
           >
             Clear
           </Button>
@@ -237,7 +237,7 @@ function MyStatusEditor() {
               variant="ghost"
               size="xs"
               onClick={() => setOpen(false)}
-              className="text-[10.5px] text-text-3 hover:text-text-1"
+              className="text-xs text-text-3 hover:text-text-1"
             >
               Cancel
             </Button>
@@ -245,7 +245,7 @@ function MyStatusEditor() {
               type="button"
               onClick={save}
               disabled={busy}
-              className="px-2 py-0.5 text-[10.5px] rounded bg-accent/15 hover:bg-accent/25 text-accent"
+              className="px-2 py-0.5 text-xs rounded bg-accent/15 hover:bg-accent/25 text-accent"
             >
               Save
             </button>
@@ -259,16 +259,16 @@ function MyStatusEditor() {
     <button
       type="button"
       onClick={openEditor}
-      className="w-full flex items-center gap-2 px-3 py-1.5 text-left text-text-3 hover:text-text-1 hover:bg-bg-2 border-b border-line-soft/40 mb-1"
+      className="w-full flex items-center gap-2 px-3 py-1.5 text-left text-text-3 hover:text-text-1 hover:bg-state-hover border-b border-line-soft/40 mb-1"
       title="Set status"
     >
-      <span className="flex-shrink-0 text-[14px] leading-none">
-        {emoji || <span className="text-text-5 text-[11px]">+ Status</span>}
+      <span className="flex-shrink-0 text-md leading-none">
+        {emoji || <span className="text-text-5 text-xs">+ Status</span>}
       </span>
       {text ? (
-        <span className="flex-1 truncate text-[11px]">{text}</span>
+        <span className="flex-1 truncate text-xs">{text}</span>
       ) : emoji ? (
-        <span className="flex-1 truncate text-[11px] text-text-5">
+        <span className="flex-1 truncate text-xs text-text-5">
           Add a description…
         </span>
       ) : null}
@@ -298,7 +298,7 @@ function MembersGroup({
   if (members.length === 0) return null;
   return (
     <div className="mb-2">
-      <div className="px-2 text-[10px] uppercase tracking-wider text-text-5 font-medium pb-0.5">
+      <div className="section-label px-2 pb-0.5">
         {label}
       </div>
       {members.map((m) => {
@@ -323,9 +323,9 @@ function MembersGroup({
           isSelf
             ? `${m.name} (you)`
             : linked
-              ? `${m.name} — also you`
+              ? `${m.name}. Also you`
               : `DM @${m.handle}`,
-          accessOnly ? `Has ${roleLabel} access — no commits yet` : null,
+          accessOnly ? `Has ${roleLabel} access. No commits yet` : null,
           activityText ? `${statusEmoji ? statusEmoji + " " : ""}${activityText}` : null,
         ].filter(Boolean) as string[];
         return (
@@ -337,9 +337,9 @@ function MembersGroup({
             className={`w-full flex items-start gap-2 px-2 py-1 text-left ${
               isMe
                 ? "text-text-3"
-                : "text-text-3 hover:text-text-1 hover:bg-bg-2"
+                : "text-text-3 hover:text-text-1 hover:bg-state-hover"
             }`}
-            title={tooltipLines.join(" — ")}
+            title={tooltipLines.join(" · ")}
           >
             <span className="flex-shrink-0 relative mt-[1px]">
               <span
@@ -371,30 +371,30 @@ function MembersGroup({
             </span>
             <span className="flex-1 min-w-0">
               <span className="flex items-center gap-1">
-                <span className="flex-1 truncate text-[11.5px]">
+                <span className="flex-1 truncate text-sm">
                   {m.handle}
                   {isMe && <span className="text-text-5"> · you</span>}
                 </span>
                 {m.admin && (
-                  <span className="text-text-5 text-[9px] uppercase tracking-wider">
+                  <span className="section-label">
                     adm
                   </span>
                 )}
                 {accessOnly && (
                   <span
-                    className="text-text-5 text-[9px] uppercase tracking-wider"
-                    title={`Has ${roleLabel} access — no commits yet`}
+                    className="section-label"
+                    title={`Has ${roleLabel} access. No commits yet`}
                   >
                     access
                   </span>
                 )}
               </span>
               {hasStatus && activityText ? (
-                <span className="block truncate text-[10.5px] text-text-5 leading-tight">
+                <span className="block truncate text-xs text-text-5 leading-tight">
                   {activityText}
                 </span>
               ) : accessOnly ? (
-                <span className="block truncate text-[10.5px] text-text-5 leading-tight">
+                <span className="block truncate text-xs text-text-5 leading-tight">
                   Has {roleLabel} access
                 </span>
               ) : null}
@@ -408,15 +408,15 @@ function MembersGroup({
                 if (linked) onUnlinkSelf?.(m);
                 else onLinkSelf?.(m);
               }}
-              className={`absolute top-1 right-1.5 px-1.5 py-0.5 rounded text-[9.5px] leading-none border transition-opacity ${
+              className={`absolute top-1 right-1.5 px-1.5 py-0.5 rounded text-2xs leading-none border transition-opacity ${
                 linked
-                  ? "opacity-0 group-hover:opacity-100 border-line-soft text-text-4 hover:text-text-1 hover:bg-bg-2"
+                  ? "opacity-0 group-hover:opacity-100 border-line-soft text-text-4 hover:text-text-1 hover:bg-state-hover"
                   : "opacity-0 group-hover:opacity-100 border-accent/25 text-accent hover:bg-accent/10"
               }`}
               title={
                 linked
                   ? `Stop treating @${m.handle} as one of your accounts`
-                  : `This is also me — count @${m.handle}'s messages as mine (stays a separate teammate row)`
+                  : `This is also me. Count @${m.handle}'s messages as mine (stays a separate teammate row)`
               }
             >
               {linked ? "Not me" : "This is me"}

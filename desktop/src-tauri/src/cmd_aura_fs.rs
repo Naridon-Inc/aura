@@ -24,51 +24,54 @@ pub struct WaveFile {
 
 #[tauri::command]
 pub async fn aura_list_waves(repo_root: String) -> Result<Vec<WaveFile>, String> {
-    let dir = PathBuf::from(&repo_root).join(".aura").join("waves");
-    if !dir.is_dir() {
-        return Ok(vec![]);
-    }
-    let mut out = Vec::new();
-    let entries = fs::read_dir(&dir).map_err(|e| e.to_string())?;
-    for entry in entries.filter_map(|r| r.ok()) {
-        let path = entry.path();
-        if path.extension().and_then(|s| s.to_str()) != Some("xml") {
-            continue;
+    crate::blocking::run(move || {
+        let dir = PathBuf::from(&repo_root).join(".aura").join("waves");
+        if !dir.is_dir() {
+            return Ok(vec![]);
         }
-        let name = path
-            .file_name()
-            .and_then(|s| s.to_str())
-            .unwrap_or("")
+        let mut out = Vec::new();
+        let entries = fs::read_dir(&dir).map_err(|e| e.to_string())?;
+        for entry in entries.filter_map(|r| r.ok()) {
+            let path = entry.path();
+            if path.extension().and_then(|s| s.to_str()) != Some("xml") {
+                continue;
+            }
+            let name = path
+                .file_name()
+                .and_then(|s| s.to_str())
+                .unwrap_or("")
+                .to_string();
+            let body = fs::read_to_string(&path).unwrap_or_default();
+            let waves = body.matches("<wave").count();
+            let status = if body.contains("status=\"active\"") {
+                "active"
+            } else if body.contains("status=\"locked\"") {
+                "locked"
+            } else if body.contains("status=\"done\"") || body.contains("status=\"completed\"") {
+                "done"
+            } else {
+                "unknown"
+            }
             .to_string();
-        let body = fs::read_to_string(&path).unwrap_or_default();
-        let waves = body.matches("<wave").count();
-        let status = if body.contains("status=\"active\"") {
-            "active"
-        } else if body.contains("status=\"locked\"") {
-            "locked"
-        } else if body.contains("status=\"done\"") || body.contains("status=\"completed\"") {
-            "done"
-        } else {
-            "unknown"
+            let mtime = entry
+                .metadata()
+                .and_then(|m| m.modified())
+                .ok()
+                .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+                .map(|d| d.as_secs() as i64)
+                .unwrap_or(0);
+            out.push(WaveFile {
+                name,
+                path: path.to_string_lossy().into_owned(),
+                waves,
+                status,
+                mtime,
+            });
         }
-        .to_string();
-        let mtime = entry
-            .metadata()
-            .and_then(|m| m.modified())
-            .ok()
-            .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
-            .map(|d| d.as_secs() as i64)
-            .unwrap_or(0);
-        out.push(WaveFile {
-            name,
-            path: path.to_string_lossy().into_owned(),
-            waves,
-            status,
-            mtime,
-        });
-    }
-    out.sort_by(|a, b| b.mtime.cmp(&a.mtime));
-    Ok(out)
+        out.sort_by(|a, b| b.mtime.cmp(&a.mtime));
+        Ok(out)
+    })
+    .await
 }
 
 #[derive(Serialize, Deserialize, Clone)]
@@ -93,25 +96,28 @@ pub struct ImpactAlert {
 
 #[tauri::command]
 pub async fn aura_read_impacts(repo_root: String) -> Result<Vec<ImpactAlert>, String> {
-    let p = PathBuf::from(&repo_root).join(".aura").join("impacts.jsonl");
-    if !p.is_file() {
-        return Ok(vec![]);
-    }
-    let body = fs::read_to_string(&p).map_err(|e| e.to_string())?;
-    let mut out = Vec::new();
-    for line in body.lines() {
-        let line = line.trim();
-        if line.is_empty() {
-            continue;
+    crate::blocking::run(move || {
+        let p = PathBuf::from(&repo_root).join(".aura").join("impacts.jsonl");
+        if !p.is_file() {
+            return Ok(vec![]);
         }
-        if let Ok(a) = serde_json::from_str::<ImpactAlert>(line) {
-            if !a.resolved {
-                out.push(a);
+        let body = fs::read_to_string(&p).map_err(|e| e.to_string())?;
+        let mut out = Vec::new();
+        for line in body.lines() {
+            let line = line.trim();
+            if line.is_empty() {
+                continue;
+            }
+            if let Ok(a) = serde_json::from_str::<ImpactAlert>(line) {
+                if !a.resolved {
+                    out.push(a);
+                }
             }
         }
-    }
-    out.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
-    Ok(out)
+        out.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
+        Ok(out)
+    })
+    .await
 }
 
 // Flip `resolved: true` on the matched alert id and rewrite the file
@@ -120,49 +126,53 @@ pub async fn aura_read_impacts(repo_root: String) -> Result<Vec<ImpactAlert>, St
 // reconcile if we missed the row.
 #[tauri::command]
 pub async fn aura_resolve_impact(repo_root: String, alert_id: String) -> Result<(), String> {
-    let p = PathBuf::from(&repo_root).join(".aura").join("impacts.jsonl");
-    if !p.is_file() {
-        return Ok(());
-    }
-    let body = fs::read_to_string(&p).map_err(|e| e.to_string())?;
-    let mut lines: Vec<String> = Vec::new();
-    let mut changed = false;
-    let mut promoted: Option<ImpactAlert> = None;
-    for line in body.lines() {
-        let trimmed = line.trim();
-        if trimmed.is_empty() {
-            continue;
+    let record_root = repo_root.clone();
+    let promoted = crate::blocking::run(move || -> Result<Option<ImpactAlert>, String> {
+        let p = PathBuf::from(&repo_root).join(".aura").join("impacts.jsonl");
+        if !p.is_file() {
+            return Ok(None);
         }
-        match serde_json::from_str::<ImpactAlert>(trimmed) {
-            Ok(mut a) if a.id == alert_id && !a.resolved => {
-                // jj-style: dismissing a high/critical impact would
-                // erase the AST-level divergence forever. Persist it
-                // as a ConflictedNode so it survives until somebody
-                // actually resolves the underlying conflict.
-                if a.severity == "high" || a.severity == "critical" {
-                    promoted = Some(a.clone());
-                }
-                a.resolved = true;
-                let serialized =
-                    serde_json::to_string(&a).map_err(|e| e.to_string())?;
-                lines.push(serialized);
-                changed = true;
+        let body = fs::read_to_string(&p).map_err(|e| e.to_string())?;
+        let mut lines: Vec<String> = Vec::new();
+        let mut changed = false;
+        let mut promoted: Option<ImpactAlert> = None;
+        for line in body.lines() {
+            let trimmed = line.trim();
+            if trimmed.is_empty() {
+                continue;
             }
-            Ok(_) => lines.push(trimmed.to_string()),
-            Err(_) => lines.push(trimmed.to_string()),
+            match serde_json::from_str::<ImpactAlert>(trimmed) {
+                Ok(mut a) if a.id == alert_id && !a.resolved => {
+                    // jj-style: dismissing a high/critical impact would
+                    // erase the AST-level divergence forever. Persist it
+                    // as a ConflictedNode so it survives until somebody
+                    // actually resolves the underlying conflict.
+                    if a.severity == "high" || a.severity == "critical" {
+                        promoted = Some(a.clone());
+                    }
+                    a.resolved = true;
+                    let serialized = serde_json::to_string(&a).map_err(|e| e.to_string())?;
+                    lines.push(serialized);
+                    changed = true;
+                }
+                Ok(_) => lines.push(trimmed.to_string()),
+                Err(_) => lines.push(trimmed.to_string()),
+            }
         }
-    }
-    if !changed {
-        return Ok(());
-    }
-    let mut new_body = lines.join("\n");
-    new_body.push('\n');
-    let tmp = p.with_extension("jsonl.tmp");
-    fs::write(&tmp, new_body).map_err(|e| e.to_string())?;
-    fs::rename(&tmp, &p).map_err(|e| e.to_string())?;
+        if !changed {
+            return Ok(None);
+        }
+        let mut new_body = lines.join("\n");
+        new_body.push('\n');
+        let tmp = p.with_extension("jsonl.tmp");
+        fs::write(&tmp, new_body).map_err(|e| e.to_string())?;
+        fs::rename(&tmp, &p).map_err(|e| e.to_string())?;
+        Ok(promoted)
+    })
+    .await?;
     if let Some(alert) = promoted {
         crate::cmd_conflicts::aura_conflicts_record(
-            repo_root.clone(),
+            record_root,
             crate::cmd_conflicts::RecordConflictArgs {
                 file: alert.file,
                 identifier: alert.function,
@@ -192,14 +202,17 @@ pub struct SnapshotEntry {
 
 #[tauri::command]
 pub async fn aura_list_snapshots(repo_root: String) -> Result<Vec<SnapshotEntry>, String> {
-    let dir = PathBuf::from(&repo_root).join(".aura").join("snapshots");
-    if !dir.is_dir() {
-        return Ok(vec![]);
-    }
-    let mut out = Vec::new();
-    walk_snapshots(&dir, &mut out);
-    out.sort_by(|a, b| b.mtime.cmp(&a.mtime));
-    Ok(out)
+    crate::blocking::run(move || {
+        let dir = PathBuf::from(&repo_root).join(".aura").join("snapshots");
+        if !dir.is_dir() {
+            return Ok(vec![]);
+        }
+        let mut out = Vec::new();
+        walk_snapshots(&dir, &mut out);
+        out.sort_by(|a, b| b.mtime.cmp(&a.mtime));
+        Ok(out)
+    })
+    .await
 }
 
 #[derive(Serialize)]
@@ -218,23 +231,26 @@ pub async fn aura_list_snapshots_v2(
     limit: usize,
     before_mtime: Option<i64>,
 ) -> Result<SnapshotPage, String> {
-    let dir = PathBuf::from(&repo_root).join(".aura").join("snapshots");
-    if !dir.is_dir() {
-        return Ok(SnapshotPage { entries: vec![], has_more: false, oldest_mtime: 0 });
-    }
-    let limit = limit.max(1);
-    let mut all = Vec::new();
-    walk_snapshots(&dir, &mut all);
-    let total_before_filter = all.len();
-    if let Some(b) = before_mtime {
-        all.retain(|s| s.mtime < b);
-    }
-    all.sort_by(|a, b| b.mtime.cmp(&a.mtime));
-    let has_more = all.len() > limit
-        || (before_mtime.is_some() && total_before_filter > all.len() + limit);
-    all.truncate(limit);
-    let oldest_mtime = all.last().map(|s| s.mtime).unwrap_or(0);
-    Ok(SnapshotPage { entries: all, has_more, oldest_mtime })
+    crate::blocking::run(move || {
+        let dir = PathBuf::from(&repo_root).join(".aura").join("snapshots");
+        if !dir.is_dir() {
+            return Ok(SnapshotPage { entries: vec![], has_more: false, oldest_mtime: 0 });
+        }
+        let limit = limit.max(1);
+        let mut all = Vec::new();
+        walk_snapshots(&dir, &mut all);
+        let total_before_filter = all.len();
+        if let Some(b) = before_mtime {
+            all.retain(|s| s.mtime < b);
+        }
+        all.sort_by(|a, b| b.mtime.cmp(&a.mtime));
+        let has_more = all.len() > limit
+            || (before_mtime.is_some() && total_before_filter > all.len() + limit);
+        all.truncate(limit);
+        let oldest_mtime = all.last().map(|s| s.mtime).unwrap_or(0);
+        Ok(SnapshotPage { entries: all, has_more, oldest_mtime })
+    })
+    .await
 }
 
 // Count snapshots whose mtime >= `since_ts`. When None, defaults to
@@ -244,23 +260,26 @@ pub async fn aura_count_snapshots_today(
     repo_root: String,
     since_ts: Option<i64>,
 ) -> Result<u32, String> {
-    let dir = PathBuf::from(&repo_root).join(".aura").join("snapshots");
-    if !dir.is_dir() {
-        return Ok(0);
-    }
-    let threshold = match since_ts {
-        Some(t) => t,
-        None => {
-            let now = std::time::SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .map(|d| d.as_secs() as i64)
-                .unwrap_or(0);
-            now - (now % 86400)
+    crate::blocking::run(move || {
+        let dir = PathBuf::from(&repo_root).join(".aura").join("snapshots");
+        if !dir.is_dir() {
+            return Ok(0);
         }
-    };
-    let mut count = 0u32;
-    count_snapshots_after(&dir, threshold, &mut count);
-    Ok(count)
+        let threshold = match since_ts {
+            Some(t) => t,
+            None => {
+                let now = std::time::SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .map(|d| d.as_secs() as i64)
+                    .unwrap_or(0);
+                now - (now % 86400)
+            }
+        };
+        let mut count = 0u32;
+        count_snapshots_after(&dir, threshold, &mut count);
+        Ok(count)
+    })
+    .await
 }
 
 fn count_snapshots_after(dir: &PathBuf, threshold: i64, count: &mut u32) {
@@ -336,24 +355,27 @@ pub struct OrchAgent {
 
 #[tauri::command]
 pub async fn aura_read_orchestrate(repo_root: String) -> Result<Vec<OrchAgent>, String> {
-    let dir = PathBuf::from(&repo_root).join(".aura").join("orchestrate");
-    let mut out = Vec::new();
-    let Ok(entries) = fs::read_dir(&dir) else {
-        return Ok(out);
-    };
-    for entry in entries.filter_map(|r| r.ok()) {
-        let path = entry.path();
-        if path.extension().and_then(|s| s.to_str()) != Some("json") {
-            continue;
+    crate::blocking::run(move || {
+        let dir = PathBuf::from(&repo_root).join(".aura").join("orchestrate");
+        let mut out = Vec::new();
+        let Ok(entries) = fs::read_dir(&dir) else {
+            return Ok(out);
+        };
+        for entry in entries.filter_map(|r| r.ok()) {
+            let path = entry.path();
+            if path.extension().and_then(|s| s.to_str()) != Some("json") {
+                continue;
+            }
+            let body = fs::read_to_string(&path).unwrap_or_default();
+            if let Ok(arr) = serde_json::from_str::<Vec<OrchAgent>>(&body) {
+                out.extend(arr);
+            } else if let Ok(one) = serde_json::from_str::<OrchAgent>(&body) {
+                out.push(one);
+            }
         }
-        let body = fs::read_to_string(&path).unwrap_or_default();
-        if let Ok(arr) = serde_json::from_str::<Vec<OrchAgent>>(&body) {
-            out.extend(arr);
-        } else if let Ok(one) = serde_json::from_str::<OrchAgent>(&body) {
-            out.push(one);
-        }
-    }
-    Ok(out)
+        Ok(out)
+    })
+    .await
 }
 
 #[derive(Serialize)]
@@ -382,53 +404,56 @@ pub async fn aura_list_conflicts(repo_root: String) -> Result<Vec<ConflictItem>,
         }
     }
 
-    // Sentinel collisions
-    let sentinel_dir = PathBuf::from(&repo_root).join(".aura").join("sentinel");
-    if let Ok(entries) = fs::read_dir(&sentinel_dir) {
-        for entry in entries.filter_map(|r| r.ok()) {
-            let path = entry.path();
-            if path.extension().and_then(|s| s.to_str()) != Some("json") {
-                continue;
+    crate::blocking::run(move || {
+        // Sentinel collisions
+        let sentinel_dir = PathBuf::from(&repo_root).join(".aura").join("sentinel");
+        if let Ok(entries) = fs::read_dir(&sentinel_dir) {
+            for entry in entries.filter_map(|r| r.ok()) {
+                let path = entry.path();
+                if path.extension().and_then(|s| s.to_str()) != Some("json") {
+                    continue;
+                }
+                let body = fs::read_to_string(&path).unwrap_or_default();
+                let name = path
+                    .file_stem()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or("")
+                    .to_string();
+                if name.contains("collision") || name.contains("conflict") {
+                    out.push(ConflictItem {
+                        kind: "sentinel".into(),
+                        severity: "high".into(),
+                        label: name,
+                        detail: body.chars().take(120).collect(),
+                    });
+                }
             }
-            let body = fs::read_to_string(&path).unwrap_or_default();
-            let name = path
-                .file_stem()
-                .and_then(|s| s.to_str())
-                .unwrap_or("")
-                .to_string();
-            if name.contains("collision") || name.contains("conflict") {
+        }
+
+        // Git markers — `git diff --check` returns rows for any conflict marker.
+        let cwd = PathBuf::from(&repo_root);
+        if let Ok(check) = std::process::Command::new("git")
+            .args(["diff", "--check"])
+            .current_dir(&cwd)
+            .output()
+        {
+            let txt = String::from_utf8_lossy(&check.stdout);
+            for line in txt.lines() {
+                if line.trim().is_empty() {
+                    continue;
+                }
                 out.push(ConflictItem {
-                    kind: "sentinel".into(),
+                    kind: "git".into(),
                     severity: "high".into(),
-                    label: name,
-                    detail: body.chars().take(120).collect(),
+                    label: line.split(':').next().unwrap_or("merge marker").to_string(),
+                    detail: line.to_string(),
                 });
             }
         }
-    }
 
-    // Git markers — `git diff --check` returns rows for any conflict marker.
-    let cwd = PathBuf::from(&repo_root);
-    if let Ok(check) = std::process::Command::new("git")
-        .args(["diff", "--check"])
-        .current_dir(&cwd)
-        .output()
-    {
-        let txt = String::from_utf8_lossy(&check.stdout);
-        for line in txt.lines() {
-            if line.trim().is_empty() {
-                continue;
-            }
-            out.push(ConflictItem {
-                kind: "git".into(),
-                severity: "high".into(),
-                label: line.split(':').next().unwrap_or("merge marker").to_string(),
-                detail: line.to_string(),
-            });
-        }
-    }
-
-    Ok(out)
+        Ok(out)
+    })
+    .await
 }
 
 #[derive(Serialize)]
@@ -534,93 +559,170 @@ pub async fn git_diff_stats(
     repo_root: String,
     since_base: Option<bool>,
 ) -> Result<DiffStats, String> {
-    let cwd = PathBuf::from(&repo_root);
+    crate::blocking::run(move || diff_stats_blocking(&repo_root, since_base)).await
+}
 
-    // "All work since this worktree forked": diff the working tree against the
-    // fork-base commit (two-dot `git diff <base>` spans base → working tree, so
-    // it includes BOTH the commits made on the worktree branch and the
-    // still-uncommitted edits). Only when an actual base resolves; otherwise we
-    // fall through to the plain HEAD/status path below (byte-identical to the
-    // pre-feature behavior).
-    if since_base == Some(true) {
-        if let Some(base) = worktree_fork_base(&repo_root) {
-            let out = std::process::Command::new("git")
-                .args(["diff", &base, "--shortstat"])
-                .current_dir(&cwd)
-                .output()
-                .map_err(|e| e.to_string())?;
-            let stat = String::from_utf8_lossy(&out.stdout);
-            let mut added = 0u32;
-            let mut removed = 0u32;
-            for token in stat.split(',') {
-                let t = token.trim();
-                if let Some(n) = first_number(t) {
-                    if t.contains("insertion") {
-                        added = n;
-                    } else if t.contains("deletion") {
-                        removed = n;
+/// How many worktrees we will ask git about at once.
+///
+/// Every one of these is two `git` processes doing working-tree stat work, and
+/// the roster routinely holds dozens of worktrees of the *same* repository, so
+/// they contend on one object store and one disk. Unbounded, a 49-worktree
+/// roster spawns ~100 processes in a burst and the machine feels it. Bounded at
+/// the low end, the sweep takes longer than the badges are worth.
+///
+/// Eight keeps the disk busy without letting the burst become the thing you
+/// notice. The sweep is behind a 30-second refresh, so latency here is slack.
+const DIFF_STATS_BATCH_CONCURRENCY: usize = 8;
+
+/// One worktree's answer inside a batch.
+///
+/// `stats` is `None` when that worktree could not be read — most often because
+/// the path is gone, which happens routinely as worktrees are removed under a
+/// roster that is still holding the old list. It is deliberately NOT a zeroed
+/// `DiffStats`: "+0 −0" is a claim that the worktree is clean, and reporting a
+/// failed read as a clean tree is exactly the lie every caller's `catch` was
+/// written to prevent. A row with no answer shows no badge.
+#[derive(Serialize)]
+pub struct BatchedDiffStats {
+    pub repo_root: String,
+    pub stats: Option<DiffStats>,
+    pub error: Option<String>,
+}
+
+/// Working-tree diff stats for many worktrees in one call.
+///
+/// The Build roster shows a `+207 −1` badge per worktree and refreshes them
+/// together. Asked one path at a time, that is one IPC round-trip each — and on
+/// macOS a Tauri `invoke` is a fetch across a process boundary, sharing a queue
+/// with terminal keystrokes. Measured on a 49-worktree roster: 129 of the 131
+/// `git_diff_stats` calls the idle app made in 20 seconds were this one sweep,
+/// a quarter of all the IPC in the app. As one call it is one hop, and the
+/// per-worktree work runs concurrently here instead of serially through the
+/// frontend's event loop.
+#[tauri::command]
+pub async fn git_diff_stats_batch(
+    repo_roots: Vec<String>,
+    since_base: Option<bool>,
+) -> Vec<BatchedDiffStats> {
+    use futures_util::stream::{self, StreamExt};
+
+    // Never fails as a whole: one unreadable worktree must not blank the badges
+    // on the other forty-eight. Failure is per-row, and it is a row saying "I
+    // don't know" rather than a row saying "nothing changed".
+    stream::iter(repo_roots.into_iter().map(|root| async move {
+        let path = root.clone();
+        let result = crate::blocking::run(move || diff_stats_blocking(&root, since_base)).await;
+        match result {
+            Ok(stats) => BatchedDiffStats {
+                repo_root: path,
+                stats: Some(stats),
+                error: None,
+            },
+            Err(error) => BatchedDiffStats {
+                repo_root: path,
+                stats: None,
+                error: Some(error),
+            },
+        }
+    }))
+    .buffer_unordered(DIFF_STATS_BATCH_CONCURRENCY)
+    .collect()
+    .await
+}
+
+/// The actual git reads, synchronous. Shared by the single and batch commands
+/// so there is one definition of what a worktree's diff stats are — a second
+/// copy would drift, and the batch is the one the roster reads.
+fn diff_stats_blocking(repo_root: &str, since_base: Option<bool>) -> Result<DiffStats, String> {
+    {
+        let cwd = PathBuf::from(&repo_root);
+
+        // "All work since this worktree forked": diff the working tree against the
+        // fork-base commit (two-dot `git diff <base>` spans base → working tree, so
+        // it includes BOTH the commits made on the worktree branch and the
+        // still-uncommitted edits). Only when an actual base resolves; otherwise we
+        // fall through to the plain HEAD/status path below (byte-identical to the
+        // pre-feature behavior).
+        if since_base == Some(true) {
+            if let Some(base) = worktree_fork_base(&repo_root) {
+                let out = std::process::Command::new("git")
+                    .args(["diff", &base, "--shortstat"])
+                    .current_dir(&cwd)
+                    .output()
+                    .map_err(|e| e.to_string())?;
+                let stat = String::from_utf8_lossy(&out.stdout);
+                let mut added = 0u32;
+                let mut removed = 0u32;
+                for token in stat.split(',') {
+                    let t = token.trim();
+                    if let Some(n) = first_number(t) {
+                        if t.contains("insertion") {
+                            added = n;
+                        } else if t.contains("deletion") {
+                            removed = n;
+                        }
                     }
                 }
+                // The COUNT must come from the base diff itself (not `git status`),
+                // so committed-but-clean-in-the-worktree files are counted too.
+                // `--name-only` lists one path per changed file (renames collapse to
+                // a single line), which is exactly the file count we want.
+                let names = std::process::Command::new("git")
+                    .args(["diff", &base, "--name-only"])
+                    .current_dir(&cwd)
+                    .output()
+                    .map_err(|e| e.to_string())?;
+                let changed_files = String::from_utf8_lossy(&names.stdout)
+                    .lines()
+                    .filter(|l| !l.trim().is_empty())
+                    .count() as u32;
+                return Ok(DiffStats {
+                    changed_files,
+                    added,
+                    removed,
+                });
             }
-            // The COUNT must come from the base diff itself (not `git status`),
-            // so committed-but-clean-in-the-worktree files are counted too.
-            // `--name-only` lists one path per changed file (renames collapse to
-            // a single line), which is exactly the file count we want.
-            let names = std::process::Command::new("git")
-                .args(["diff", &base, "--name-only"])
-                .current_dir(&cwd)
-                .output()
-                .map_err(|e| e.to_string())?;
-            let changed_files = String::from_utf8_lossy(&names.stdout)
-                .lines()
-                .filter(|l| !l.trim().is_empty())
-                .count() as u32;
-            return Ok(DiffStats {
-                changed_files,
-                added,
-                removed,
-            });
         }
-    }
 
-    // shortstat parses "1 file changed, 5 insertions(+), 2 deletions(-)"
-    let out = std::process::Command::new("git")
-        .args(["diff", "--shortstat"])
-        .current_dir(&cwd)
-        .output()
-        .map_err(|e| e.to_string())?;
-    let stat = String::from_utf8_lossy(&out.stdout);
-    let mut added = 0u32;
-    let mut removed = 0u32;
-    let mut changed_files = 0u32;
-    for token in stat.split(',') {
-        let t = token.trim();
-        if let Some(n) = first_number(t) {
-            if t.contains("file") {
-                changed_files = n;
-            } else if t.contains("insertion") {
-                added = n;
-            } else if t.contains("deletion") {
-                removed = n;
+        // shortstat parses "1 file changed, 5 insertions(+), 2 deletions(-)"
+        let out = std::process::Command::new("git")
+            .args(["diff", "--shortstat"])
+            .current_dir(&cwd)
+            .output()
+            .map_err(|e| e.to_string())?;
+        let stat = String::from_utf8_lossy(&out.stdout);
+        let mut added = 0u32;
+        let mut removed = 0u32;
+        let mut changed_files = 0u32;
+        for token in stat.split(',') {
+            let t = token.trim();
+            if let Some(n) = first_number(t) {
+                if t.contains("file") {
+                    changed_files = n;
+                } else if t.contains("insertion") {
+                    added = n;
+                } else if t.contains("deletion") {
+                    removed = n;
+                }
             }
         }
+        // Untracked + staged-only files don't show up in `diff --shortstat`,
+        // so add the porcelain count to keep the chip honest.
+        if let Ok(porcelain) = std::process::Command::new("git")
+            .args(["status", "--porcelain"])
+            .current_dir(&cwd)
+            .output()
+        {
+            let body = String::from_utf8_lossy(&porcelain.stdout);
+            let porcelain_count = body.lines().filter(|l| !l.trim().is_empty()).count() as u32;
+            changed_files = changed_files.max(porcelain_count);
+        }
+        Ok(DiffStats {
+            changed_files,
+            added,
+            removed,
+        })
     }
-    // Untracked + staged-only files don't show up in `diff --shortstat`,
-    // so add the porcelain count to keep the chip honest.
-    if let Ok(porcelain) = std::process::Command::new("git")
-        .args(["status", "--porcelain"])
-        .current_dir(&cwd)
-        .output()
-    {
-        let body = String::from_utf8_lossy(&porcelain.stdout);
-        let porcelain_count = body.lines().filter(|l| !l.trim().is_empty()).count() as u32;
-        changed_files = changed_files.max(porcelain_count);
-    }
-    Ok(DiffStats {
-        changed_files,
-        added,
-        removed,
-    })
 }
 
 fn first_number(s: &str) -> Option<u32> {
@@ -645,47 +747,48 @@ pub async fn git_diff_stats_per_file(
     repo_root: String,
     since_base: Option<bool>,
 ) -> Result<Vec<FileDiffStat>, String> {
-    let cwd = PathBuf::from(&repo_root);
-    let mut out: Vec<FileDiffStat> = Vec::new();
+    crate::blocking::run(move || {
+        let cwd = PathBuf::from(&repo_root);
+        let mut out: Vec<FileDiffStat> = Vec::new();
 
-    // "All work since this worktree forked": per-file +/- vs the fork-base
-    // commit (committed + uncommitted, via two-dot `git diff <base>`). The
-    // untracked pass is skipped here because the base diff already includes
-    // newly-added files. Only when an actual base resolves; otherwise fall
-    // through to the plain HEAD path (byte-identical to the old behavior).
-    if since_base == Some(true) {
-        if let Some(base) = worktree_fork_base(&repo_root) {
-            let diff = std::process::Command::new("git")
-                .args(["diff", &base, "--numstat"])
-                .current_dir(&cwd)
-                .output()
-                .map_err(|e| e.to_string())?;
-            if diff.status.success() {
-                let body = String::from_utf8_lossy(&diff.stdout);
-                for line in body.lines() {
-                    let mut it = line.splitn(3, '\t');
-                    let add = it.next().unwrap_or("0");
-                    let del = it.next().unwrap_or("0");
-                    let raw_path = match it.next() {
-                        Some(p) => p,
-                        None => continue,
-                    };
-                    let path = if let Some(idx) = raw_path.rfind(" => ") {
-                        let after = &raw_path[idx + 4..];
-                        after.trim_end_matches('}').to_string()
-                    } else {
-                        raw_path.to_string()
-                    };
-                    out.push(FileDiffStat {
-                        path,
-                        additions: add.parse().unwrap_or(0),
-                        deletions: del.parse().unwrap_or(0),
-                    });
+        // "All work since this worktree forked": per-file +/- vs the fork-base
+        // commit (committed + uncommitted, via two-dot `git diff <base>`). The
+        // untracked pass is skipped here because the base diff already includes
+        // newly-added files. Only when an actual base resolves; otherwise fall
+        // through to the plain HEAD path (byte-identical to the old behavior).
+        if since_base == Some(true) {
+            if let Some(base) = worktree_fork_base(&repo_root) {
+                let diff = std::process::Command::new("git")
+                    .args(["diff", &base, "--numstat"])
+                    .current_dir(&cwd)
+                    .output()
+                    .map_err(|e| e.to_string())?;
+                if diff.status.success() {
+                    let body = String::from_utf8_lossy(&diff.stdout);
+                    for line in body.lines() {
+                        let mut it = line.splitn(3, '\t');
+                        let add = it.next().unwrap_or("0");
+                        let del = it.next().unwrap_or("0");
+                        let raw_path = match it.next() {
+                            Some(p) => p,
+                            None => continue,
+                        };
+                        let path = if let Some(idx) = raw_path.rfind(" => ") {
+                            let after = &raw_path[idx + 4..];
+                            after.trim_end_matches('}').to_string()
+                        } else {
+                            raw_path.to_string()
+                        };
+                        out.push(FileDiffStat {
+                            path,
+                            additions: add.parse().unwrap_or(0),
+                            deletions: del.parse().unwrap_or(0),
+                        });
+                    }
                 }
+                return Ok(out);
             }
-            return Ok(out);
         }
-    }
 
     // Tracked changes (staged + unstaged combined) vs HEAD. Numstat
     // emits "<add>\t<del>\t<path>" per line; binaries report "-\t-".
@@ -751,7 +854,9 @@ pub async fn git_diff_stats_per_file(
         }
     }
 
-    Ok(out)
+        Ok(out)
+    })
+    .await
 }
 
 // ── Intent log ────────────────────────────────────────────────────────
@@ -766,7 +871,15 @@ pub struct IntentEntry {
     pub id: String,
     #[serde(default)]
     pub timestamp: i64,
-    #[serde(default)]
+    /// Who logged it. `aura log-intent` and the MCP tool both write this as
+    /// `agent_id` — the CLI's own reader (`intent_query.rs`) keys off that
+    /// spelling, and on disk it is not close: 76 of 76 rows in one repo's
+    /// log and 442 of 448 in another are `agent_id`. This struct asked for
+    /// `agent`, got the serde default, and handed the UI an empty string for
+    /// every row — which is why Settings → Team → Activity grouped a week of
+    /// work under one author called "unknown", and why the `agent` filter in
+    /// `aura_read_intent_log_v2` could never match anything.
+    #[serde(default, alias = "agent_id")]
     pub agent: String,
     #[serde(default)]
     pub intent: String,
@@ -786,37 +899,40 @@ pub struct IntentEntry {
 
 #[tauri::command]
 pub async fn aura_read_intent_log(repo_root: String) -> Result<Vec<IntentEntry>, String> {
-    let p = PathBuf::from(&repo_root).join(".aura").join("intent_log.jsonl");
-    if !p.is_file() {
-        return Ok(vec![]);
-    }
-    let body = fs::read_to_string(&p).map_err(|e| e.to_string())?;
-    let mut out = Vec::new();
-    for (i, line) in body.lines().enumerate() {
-        let line = line.trim();
-        if line.is_empty() {
-            continue;
+    crate::blocking::run(move || {
+        let p = PathBuf::from(&repo_root).join(".aura").join("intent_log.jsonl");
+        if !p.is_file() {
+            return Ok(vec![]);
         }
-        match serde_json::from_str::<IntentEntry>(line) {
-            Ok(mut e) => {
-                if e.id.is_empty() {
-                    e.id = format!("i{i}");
+        let body = fs::read_to_string(&p).map_err(|e| e.to_string())?;
+        let mut out = Vec::new();
+        for (i, line) in body.lines().enumerate() {
+            let line = line.trim();
+            if line.is_empty() {
+                continue;
+            }
+            match serde_json::from_str::<IntentEntry>(line) {
+                Ok(mut e) => {
+                    if e.id.is_empty() {
+                        e.id = format!("i{i}");
+                    }
+                    out.push(e);
                 }
-                out.push(e);
-            }
-            Err(_) => {
-                // Permissive fallback: the line might be the older
-                // single-string format. Wrap it so it still appears.
-                out.push(IntentEntry {
-                    id: format!("i{i}"),
-                    intent: line.to_string(),
-                    ..Default::default()
-                });
+                Err(_) => {
+                    // Permissive fallback: the line might be the older
+                    // single-string format. Wrap it so it still appears.
+                    out.push(IntentEntry {
+                        id: format!("i{i}"),
+                        intent: line.to_string(),
+                        ..Default::default()
+                    });
+                }
             }
         }
-    }
-    out.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
-    Ok(out)
+        out.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
+        Ok(out)
+    })
+    .await
 }
 
 // Paginated reader. The intent log is append-only with timestamps that
@@ -840,54 +956,57 @@ pub async fn aura_read_intent_log_v2(
     before_ts: Option<i64>,
     agent: Option<String>,
 ) -> Result<IntentLogPage, String> {
-    let p = PathBuf::from(&repo_root).join(".aura").join("intent_log.jsonl");
-    if !p.is_file() {
-        return Ok(IntentLogPage { entries: vec![], has_more: false, oldest_ts: 0 });
-    }
-    let body = fs::read_to_string(&p).map_err(|e| e.to_string())?;
-    let limit = limit.max(1);
-    let agent_filter = agent.as_deref();
+    crate::blocking::run(move || {
+        let p = PathBuf::from(&repo_root).join(".aura").join("intent_log.jsonl");
+        if !p.is_file() {
+            return Ok(IntentLogPage { entries: vec![], has_more: false, oldest_ts: 0 });
+        }
+        let body = fs::read_to_string(&p).map_err(|e| e.to_string())?;
+        let limit = limit.max(1);
+        let agent_filter = agent.as_deref();
 
-    let mut out: Vec<IntentEntry> = Vec::with_capacity(limit);
-    let mut hit_limit = false;
-    // .lines() returns a DoubleEndedIterator over &str slices — reversing
-    // is constant-time per line. We enumerate from the original direction
-    // so synthetic ids stay stable across pages.
-    let lines: Vec<(usize, &str)> = body.lines().enumerate().collect();
-    for (i, raw) in lines.iter().rev() {
-        let line = raw.trim();
-        if line.is_empty() {
-            continue;
-        }
-        let mut entry: IntentEntry = match serde_json::from_str(line) {
-            Ok(e) => e,
-            Err(_) => IntentEntry {
-                id: format!("i{i}"),
-                intent: line.to_string(),
-                ..Default::default()
-            },
-        };
-        if entry.id.is_empty() {
-            entry.id = format!("i{i}");
-        }
-        if let Some(b) = before_ts {
-            if entry.timestamp >= b {
+        let mut out: Vec<IntentEntry> = Vec::with_capacity(limit);
+        let mut hit_limit = false;
+        // .lines() returns a DoubleEndedIterator over &str slices — reversing
+        // is constant-time per line. We enumerate from the original direction
+        // so synthetic ids stay stable across pages.
+        let lines: Vec<(usize, &str)> = body.lines().enumerate().collect();
+        for (i, raw) in lines.iter().rev() {
+            let line = raw.trim();
+            if line.is_empty() {
                 continue;
             }
-        }
-        if let Some(a) = agent_filter {
-            if entry.agent != a {
-                continue;
+            let mut entry: IntentEntry = match serde_json::from_str(line) {
+                Ok(e) => e,
+                Err(_) => IntentEntry {
+                    id: format!("i{i}"),
+                    intent: line.to_string(),
+                    ..Default::default()
+                },
+            };
+            if entry.id.is_empty() {
+                entry.id = format!("i{i}");
+            }
+            if let Some(b) = before_ts {
+                if entry.timestamp >= b {
+                    continue;
+                }
+            }
+            if let Some(a) = agent_filter {
+                if entry.agent != a {
+                    continue;
+                }
+            }
+            out.push(entry);
+            if out.len() >= limit {
+                hit_limit = true;
+                break;
             }
         }
-        out.push(entry);
-        if out.len() >= limit {
-            hit_limit = true;
-            break;
-        }
-    }
-    let oldest_ts = out.last().map(|e| e.timestamp).unwrap_or(0);
-    Ok(IntentLogPage { entries: out, has_more: hit_limit, oldest_ts })
+        let oldest_ts = out.last().map(|e| e.timestamp).unwrap_or(0);
+        Ok(IntentLogPage { entries: out, has_more: hit_limit, oldest_ts })
+    })
+    .await
 }
 
 // Stream-count rows whose timestamp >= `since_ts`. When `since_ts` is
@@ -903,49 +1022,52 @@ pub async fn aura_count_intents_today(
     agent: Option<String>,
     since_ts: Option<i64>,
 ) -> Result<u32, String> {
-    let p = PathBuf::from(&repo_root).join(".aura").join("intent_log.jsonl");
-    if !p.is_file() {
-        return Ok(0);
-    }
-    let threshold = match since_ts {
-        Some(t) => t,
-        None => {
-            let now = std::time::SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .map(|d| d.as_secs() as i64)
-                .unwrap_or(0);
-            now - (now % 86400)
+    crate::blocking::run(move || {
+        let p = PathBuf::from(&repo_root).join(".aura").join("intent_log.jsonl");
+        if !p.is_file() {
+            return Ok(0);
         }
-    };
-    let body = fs::read_to_string(&p).map_err(|e| e.to_string())?;
-    let mut count = 0u32;
-    for line in body.lines() {
-        let line = line.trim();
-        if line.is_empty() {
-            continue;
-        }
-        // Cheap path: extract the timestamp without parsing the full
-        // record. Falls back to full parse only when the cheap path
-        // misses (unusual key order).
-        let ts = quick_extract_i64(line, "\"timestamp\"")
-            .or_else(|| serde_json::from_str::<IntentEntry>(line).ok().map(|e| e.timestamp))
-            .unwrap_or(0);
-        if ts < threshold {
-            continue;
-        }
-        if let Some(a) = agent.as_deref() {
-            // Agent filter requires the parsed record. Only do it when
-            // the cheap timestamp filter passed.
-            let Ok(entry) = serde_json::from_str::<IntentEntry>(line) else {
-                continue;
-            };
-            if entry.agent != a {
+        let threshold = match since_ts {
+            Some(t) => t,
+            None => {
+                let now = std::time::SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .map(|d| d.as_secs() as i64)
+                    .unwrap_or(0);
+                now - (now % 86400)
+            }
+        };
+        let body = fs::read_to_string(&p).map_err(|e| e.to_string())?;
+        let mut count = 0u32;
+        for line in body.lines() {
+            let line = line.trim();
+            if line.is_empty() {
                 continue;
             }
+            // Cheap path: extract the timestamp without parsing the full
+            // record. Falls back to full parse only when the cheap path
+            // misses (unusual key order).
+            let ts = quick_extract_i64(line, "\"timestamp\"")
+                .or_else(|| serde_json::from_str::<IntentEntry>(line).ok().map(|e| e.timestamp))
+                .unwrap_or(0);
+            if ts < threshold {
+                continue;
+            }
+            if let Some(a) = agent.as_deref() {
+                // Agent filter requires the parsed record. Only do it when
+                // the cheap timestamp filter passed.
+                let Ok(entry) = serde_json::from_str::<IntentEntry>(line) else {
+                    continue;
+                };
+                if entry.agent != a {
+                    continue;
+                }
+            }
+            count += 1;
         }
-        count += 1;
-    }
-    Ok(count)
+        Ok(count)
+    })
+    .await
 }
 
 // ── Audit log ─────────────────────────────────────────────────────────
@@ -990,63 +1112,69 @@ pub async fn aura_read_audit_log_v2(
     limit: usize,
     before_ts: Option<i64>,
 ) -> Result<AuditLogPage, String> {
-    let p = PathBuf::from(&repo_root).join(".aura").join("audit.jsonl");
-    if !p.is_file() {
-        return Ok(AuditLogPage { entries: vec![], has_more: false, oldest_ts: 0 });
-    }
-    let body = fs::read_to_string(&p).map_err(|e| e.to_string())?;
-    let limit = limit.max(1);
-    let mut out: Vec<AuditEntry> = Vec::with_capacity(limit);
-    let mut hit_limit = false;
-    let lines: Vec<&str> = body.lines().collect();
-    for raw in lines.iter().rev() {
-        let line = raw.trim();
-        if line.is_empty() {
-            continue;
+    crate::blocking::run(move || {
+        let p = PathBuf::from(&repo_root).join(".aura").join("audit.jsonl");
+        if !p.is_file() {
+            return Ok(AuditLogPage { entries: vec![], has_more: false, oldest_ts: 0 });
         }
-        let entry: AuditEntry = match serde_json::from_str(line) {
-            Ok(e) => e,
-            Err(_) => AuditEntry {
-                summary: line.to_string(),
-                ..Default::default()
-            },
-        };
-        if let Some(b) = before_ts {
-            if entry.timestamp >= b {
+        let body = fs::read_to_string(&p).map_err(|e| e.to_string())?;
+        let limit = limit.max(1);
+        let mut out: Vec<AuditEntry> = Vec::with_capacity(limit);
+        let mut hit_limit = false;
+        let lines: Vec<&str> = body.lines().collect();
+        for raw in lines.iter().rev() {
+            let line = raw.trim();
+            if line.is_empty() {
                 continue;
             }
+            let entry: AuditEntry = match serde_json::from_str(line) {
+                Ok(e) => e,
+                Err(_) => AuditEntry {
+                    summary: line.to_string(),
+                    ..Default::default()
+                },
+            };
+            if let Some(b) = before_ts {
+                if entry.timestamp >= b {
+                    continue;
+                }
+            }
+            out.push(entry);
+            if out.len() >= limit {
+                hit_limit = true;
+                break;
+            }
         }
-        out.push(entry);
-        if out.len() >= limit {
-            hit_limit = true;
-            break;
-        }
-    }
-    let oldest_ts = out.last().map(|e| e.timestamp).unwrap_or(0);
-    Ok(AuditLogPage { entries: out, has_more: hit_limit, oldest_ts })
+        let oldest_ts = out.last().map(|e| e.timestamp).unwrap_or(0);
+        Ok(AuditLogPage { entries: out, has_more: hit_limit, oldest_ts })
+    })
+    .await
 }
 
 #[tauri::command]
 pub async fn aura_count_audit_unacked(repo_root: String) -> Result<u32, String> {
-    let p = PathBuf::from(&repo_root).join(".aura").join("audit.jsonl");
-    if !p.is_file() {
-        return Ok(0);
-    }
-    let body = fs::read_to_string(&p).map_err(|e| e.to_string())?;
-    let mut count = 0u32;
-    for line in body.lines() {
-        let line = line.trim();
-        if line.is_empty() {
-            continue;
+    crate::blocking::run(move || {
+        let p = PathBuf::from(&repo_root).join(".aura").join("audit.jsonl");
+        if !p.is_file() {
+            return Ok(0);
         }
-        let Ok(e) = serde_json::from_str::<AuditEntry>(line) else {
-            continue;
-        };
-        if !e.acknowledged && e.severity != "info" {
-            count += 1;
+        let body = fs::read_to_string(&p).map_err(|e| e.to_string())?;
+        let mut count = 0u32;
+        for line in body.lines() {
+            let line = line.trim();
+            if line.is_empty() {
+                continue;
+            }
+            let Ok(e) = serde_json::from_str::<AuditEntry>(line) else {
+                continue;
+            };
+            if !e.acknowledged && e.severity != "info" {
+                count += 1;
+            }
         }
-    }
-    Ok(count)
+        Ok(count)
+    })
+    .await
 }
 
 // Locate `"key": <int>` or `"key":<int>` and parse the integer. Tolerates
@@ -1094,42 +1222,45 @@ struct UsageRow {
 
 #[tauri::command]
 pub async fn aura_usage_summary(repo_root: String) -> Result<UsageSummary, String> {
-    let mut sum = UsageSummary::default();
-    let p = PathBuf::from(&repo_root).join(".aura").join("usage.jsonl");
-    if !p.is_file() {
-        return Ok(sum);
-    }
-    let now = std::time::SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs() as i64)
-        .unwrap_or(0);
-    let day_start = now - (now % 86400);
+    crate::blocking::run(move || {
+        let mut sum = UsageSummary::default();
+        let p = PathBuf::from(&repo_root).join(".aura").join("usage.jsonl");
+        if !p.is_file() {
+            return Ok(sum);
+        }
+        let now = std::time::SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0);
+        let day_start = now - (now % 86400);
 
-    let body = fs::read_to_string(&p).unwrap_or_default();
-    let mut counts: std::collections::HashMap<String, u32> = std::collections::HashMap::new();
-    for line in body.lines() {
-        let line = line.trim();
-        if line.is_empty() {
-            continue;
+        let body = fs::read_to_string(&p).unwrap_or_default();
+        let mut counts: std::collections::HashMap<String, u32> = std::collections::HashMap::new();
+        for line in body.lines() {
+            let line = line.trim();
+            if line.is_empty() {
+                continue;
+            }
+            let Ok(r) = serde_json::from_str::<UsageRow>(line) else {
+                continue;
+            };
+            if r.ts < day_start {
+                continue;
+            }
+            sum.tokens_in += r.in_tokens;
+            sum.tokens_out += r.out_tokens;
+            sum.cost_usd += r.cost_usd;
+            sum.calls += 1;
+            *counts.entry(r.model).or_insert(0) += 1;
         }
-        let Ok(r) = serde_json::from_str::<UsageRow>(line) else {
-            continue;
-        };
-        if r.ts < day_start {
-            continue;
-        }
-        sum.tokens_in += r.in_tokens;
-        sum.tokens_out += r.out_tokens;
-        sum.cost_usd += r.cost_usd;
-        sum.calls += 1;
-        *counts.entry(r.model).or_insert(0) += 1;
-    }
-    sum.model = counts
-        .into_iter()
-        .max_by_key(|(_, n)| *n)
-        .map(|(k, _)| k)
-        .unwrap_or_default();
-    Ok(sum)
+        sum.model = counts
+            .into_iter()
+            .max_by_key(|(_, n)| *n)
+            .map(|(k, _)| k)
+            .unwrap_or_default();
+        Ok(sum)
+    })
+    .await
 }
 
 // ── Recent commits (for History tab + #commits channel) ──────────────
@@ -1145,47 +1276,50 @@ pub struct CommitEntry {
 
 #[tauri::command]
 pub async fn git_recent_commits(repo_root: String, limit: u32) -> Result<Vec<CommitEntry>, String> {
-    let cwd = PathBuf::from(&repo_root);
-    let n = limit.clamp(1, 200);
-    let fmt = "%h\x1f%an\x1f%ct\x1f%s";
-    let out = std::process::Command::new("git")
-        .args([
-            "log",
-            &format!("-n{n}"),
-            &format!("--pretty=format:{fmt}"),
-        ])
-        .current_dir(&cwd)
-        .output()
-        .map_err(|e| e.to_string())?;
-    let txt = String::from_utf8_lossy(&out.stdout);
+    crate::blocking::run(move || {
+        let cwd = PathBuf::from(&repo_root);
+        let n = limit.clamp(1, 200);
+        let fmt = "%h\x1f%an\x1f%ct\x1f%s";
+        let out = std::process::Command::new("git")
+            .args([
+                "log",
+                &format!("-n{n}"),
+                &format!("--pretty=format:{fmt}"),
+            ])
+            .current_dir(&cwd)
+            .output()
+            .map_err(|e| e.to_string())?;
+        let txt = String::from_utf8_lossy(&out.stdout);
 
-    // Best-effort current branch tag for each row — no per-commit branch
-    // lookup (expensive); we just attach the current HEAD branch since
-    // `git log` here is HEAD-relative anyway.
-    let head_branch = std::process::Command::new("git")
-        .args(["rev-parse", "--abbrev-ref", "HEAD"])
-        .current_dir(&cwd)
-        .output()
-        .ok()
-        .and_then(|o| String::from_utf8(o.stdout).ok())
-        .map(|s| s.trim().to_string())
-        .unwrap_or_default();
+        // Best-effort current branch tag for each row — no per-commit branch
+        // lookup (expensive); we just attach the current HEAD branch since
+        // `git log` here is HEAD-relative anyway.
+        let head_branch = std::process::Command::new("git")
+            .args(["rev-parse", "--abbrev-ref", "HEAD"])
+            .current_dir(&cwd)
+            .output()
+            .ok()
+            .and_then(|o| String::from_utf8(o.stdout).ok())
+            .map(|s| s.trim().to_string())
+            .unwrap_or_default();
 
-    let mut commits = Vec::new();
-    for line in txt.lines() {
-        let parts: Vec<&str> = line.split('\x1f').collect();
-        if parts.len() < 4 {
-            continue;
+        let mut commits = Vec::new();
+        for line in txt.lines() {
+            let parts: Vec<&str> = line.split('\x1f').collect();
+            if parts.len() < 4 {
+                continue;
+            }
+            commits.push(CommitEntry {
+                sha: parts[0].to_string(),
+                author: parts[1].to_string(),
+                timestamp: parts[2].parse().unwrap_or(0),
+                subject: parts[3].to_string(),
+                branch: head_branch.clone(),
+            });
         }
-        commits.push(CommitEntry {
-            sha: parts[0].to_string(),
-            author: parts[1].to_string(),
-            timestamp: parts[2].parse().unwrap_or(0),
-            subject: parts[3].to_string(),
-            branch: head_branch.clone(),
-        });
-    }
-    Ok(commits)
+        Ok(commits)
+    })
+    .await
 }
 
 // ── Commit graph (Source Control topology view) ──────────────────────
@@ -1223,76 +1357,79 @@ pub async fn git_commit_graph(
     repo_root: String,
     limit: u32,
 ) -> Result<Vec<GraphCommit>, String> {
-    let cwd = PathBuf::from(&repo_root);
-    let n = limit.clamp(1, 1000);
+    crate::blocking::run(move || {
+        let cwd = PathBuf::from(&repo_root);
+        let n = limit.clamp(1, 1000);
 
-    // Remote names, so a decoration like `origin/feat/x` is classed as
-    // remote rather than mistaken for a local branch named with slashes
-    // (e.g. `feat/commons-platform`). One cheap call; empty on failure.
-    let remotes: Vec<String> = std::process::Command::new("git")
-        .args(["remote"])
-        .current_dir(&cwd)
-        .output()
-        .ok()
-        .and_then(|o| String::from_utf8(o.stdout).ok())
-        .map(|s| s.lines().map(|l| l.trim().to_string()).filter(|l| !l.is_empty()).collect())
-        .unwrap_or_default();
-
-    // %H full sha · %h short · %P parents (space-sep) · %an author ·
-    // %ae email · %ct commit-time · %s subject · %D decorations.
-    let fmt = "%H\x1f%h\x1f%P\x1f%an\x1f%ae\x1f%ct\x1f%s\x1f%D";
-    // Aura's own shadow/checkpoint branches (`entire/*`, `aura/*`) are
-    // machinery, not human history — excluding them keeps the graph
-    // readable (especially for non-engineers, who shouldn't see VCS
-    // internals). The `--exclude` globs must precede `--all`.
-    let out = std::process::Command::new("git")
-        .args([
-            "log",
-            "--exclude=refs/heads/entire/*",
-            "--exclude=refs/heads/aura/*",
-            "--exclude=refs/remotes/*/entire/*",
-            "--exclude=refs/remotes/*/aura/*",
-            "--all",
-            "--date-order",
-            &format!("-n{n}"),
-            &format!("--pretty=format:{fmt}"),
-        ])
-        .current_dir(&cwd)
-        .output()
-        .map_err(|e| e.to_string())?;
-    if !out.status.success() {
-        // Empty repo / not a git dir → empty graph, never a hard error
-        // (the rail just shows its empty state).
-        return Ok(Vec::new());
-    }
-    let txt = String::from_utf8_lossy(&out.stdout);
-
-    let mut commits = Vec::new();
-    for line in txt.lines() {
-        let parts: Vec<&str> = line.split('\x1f').collect();
-        if parts.len() < 7 {
-            continue;
-        }
-        let parents: Vec<String> = parts[2]
-            .split_whitespace()
-            .map(|s| s.to_string())
-            .collect();
-        let refs = parts
-            .get(7)
-            .map(|d| parse_decorations(d, &remotes))
+        // Remote names, so a decoration like `origin/feat/x` is classed as
+        // remote rather than mistaken for a local branch named with slashes
+        // (e.g. `feat/commons-platform`). One cheap call; empty on failure.
+        let remotes: Vec<String> = std::process::Command::new("git")
+            .args(["remote"])
+            .current_dir(&cwd)
+            .output()
+            .ok()
+            .and_then(|o| String::from_utf8(o.stdout).ok())
+            .map(|s| s.lines().map(|l| l.trim().to_string()).filter(|l| !l.is_empty()).collect())
             .unwrap_or_default();
-        commits.push(GraphCommit {
-            sha: parts[0].to_string(),
-            short: parts[1].to_string(),
-            parents,
-            author: parts[3].to_string(),
-            author_email: parts[4].to_string(),
-            timestamp: parts[5].parse().unwrap_or(0),
-            subject: parts[6].to_string(),
-            refs,
-        });
-    }
-    Ok(commits)
+
+        // %H full sha · %h short · %P parents (space-sep) · %an author ·
+        // %ae email · %ct commit-time · %s subject · %D decorations.
+        let fmt = "%H\x1f%h\x1f%P\x1f%an\x1f%ae\x1f%ct\x1f%s\x1f%D";
+        // Aura's own shadow/checkpoint branches (`entire/*`, `aura/*`) are
+        // machinery, not human history — excluding them keeps the graph
+        // readable (especially for non-engineers, who shouldn't see VCS
+        // internals). The `--exclude` globs must precede `--all`.
+        let out = std::process::Command::new("git")
+            .args([
+                "log",
+                "--exclude=refs/heads/entire/*",
+                "--exclude=refs/heads/aura/*",
+                "--exclude=refs/remotes/*/entire/*",
+                "--exclude=refs/remotes/*/aura/*",
+                "--all",
+                "--date-order",
+                &format!("-n{n}"),
+                &format!("--pretty=format:{fmt}"),
+            ])
+            .current_dir(&cwd)
+            .output()
+            .map_err(|e| e.to_string())?;
+        if !out.status.success() {
+            // Empty repo / not a git dir → empty graph, never a hard error
+            // (the rail just shows its empty state).
+            return Ok(Vec::new());
+        }
+        let txt = String::from_utf8_lossy(&out.stdout);
+
+        let mut commits = Vec::new();
+        for line in txt.lines() {
+            let parts: Vec<&str> = line.split('\x1f').collect();
+            if parts.len() < 7 {
+                continue;
+            }
+            let parents: Vec<String> = parts[2]
+                .split_whitespace()
+                .map(|s| s.to_string())
+                .collect();
+            let refs = parts
+                .get(7)
+                .map(|d| parse_decorations(d, &remotes))
+                .unwrap_or_default();
+            commits.push(GraphCommit {
+                sha: parts[0].to_string(),
+                short: parts[1].to_string(),
+                parents,
+                author: parts[3].to_string(),
+                author_email: parts[4].to_string(),
+                timestamp: parts[5].parse().unwrap_or(0),
+                subject: parts[6].to_string(),
+                refs,
+            });
+        }
+        Ok(commits)
+    })
+    .await
 }
 
 /// Parse git's `%D` decoration string into typed refs. Examples:
@@ -1383,67 +1520,70 @@ const VENDORED_EXCLUDES: &[&str] = &[
 
 #[tauri::command]
 pub async fn git_contributors(repo_root: String) -> Result<Vec<GitContributor>, String> {
-    let cwd = PathBuf::from(&repo_root);
-    let fmt = "%aN\x1f%aE\x1f%ct";
-    let mut args: Vec<String> = vec![
-        "log".into(),
-        "--all".into(),
-        format!("--pretty=format:{fmt}"),
-        "--".into(),
-        ".".into(),
-    ];
-    for ex in VENDORED_EXCLUDES {
-        args.push((*ex).to_string());
-    }
-    let out = std::process::Command::new("git")
-        .args(&args)
-        .current_dir(&cwd)
-        .output()
-        .map_err(|e| e.to_string())?;
-    let txt = String::from_utf8_lossy(&out.stdout);
+    crate::blocking::run(move || {
+        let cwd = PathBuf::from(&repo_root);
+        let fmt = "%aN\x1f%aE\x1f%ct";
+        let mut args: Vec<String> = vec![
+            "log".into(),
+            "--all".into(),
+            format!("--pretty=format:{fmt}"),
+            "--".into(),
+            ".".into(),
+        ];
+        for ex in VENDORED_EXCLUDES {
+            args.push((*ex).to_string());
+        }
+        let out = std::process::Command::new("git")
+            .args(&args)
+            .current_dir(&cwd)
+            .output()
+            .map_err(|e| e.to_string())?;
+        let txt = String::from_utf8_lossy(&out.stdout);
 
-    use std::collections::BTreeMap;
-    let mut by_email: BTreeMap<String, GitContributor> = BTreeMap::new();
-    for line in txt.lines() {
-        let parts: Vec<&str> = line.split('\x1f').collect();
-        if parts.len() < 3 {
-            continue;
-        }
-        let name = parts[0].trim().to_string();
-        let email = parts[1].trim().to_lowercase();
-        let ts: i64 = parts[2].parse().unwrap_or(0);
-        if email.is_empty() {
-            continue;
-        }
-        // Drop only the standard GitHub privacy address. Older code
-        // also rejected anything containing "noreply", which silently
-        // filtered out real teammates whose company addresses happen to
-        // contain that substring.
-        if email.ends_with("@users.noreply.github.com") {
-            continue;
-        }
-        let handle = email.split('@').next().unwrap_or(&email).to_string();
-        let entry = by_email
-            .entry(email.clone())
-            .or_insert_with(|| GitContributor {
-                name: name.clone(),
-                email: email.clone(),
-                commits: 0,
-                last_active: 0,
-                handle,
-            });
-        entry.commits += 1;
-        if ts > entry.last_active {
-            entry.last_active = ts;
-            // Prefer the most-recent display name for renames over time.
-            if !name.is_empty() {
-                entry.name = name;
+        use std::collections::BTreeMap;
+        let mut by_email: BTreeMap<String, GitContributor> = BTreeMap::new();
+        for line in txt.lines() {
+            let parts: Vec<&str> = line.split('\x1f').collect();
+            if parts.len() < 3 {
+                continue;
+            }
+            let name = parts[0].trim().to_string();
+            let email = parts[1].trim().to_lowercase();
+            let ts: i64 = parts[2].parse().unwrap_or(0);
+            if email.is_empty() {
+                continue;
+            }
+            // Drop only the standard GitHub privacy address. Older code
+            // also rejected anything containing "noreply", which silently
+            // filtered out real teammates whose company addresses happen to
+            // contain that substring.
+            if email.ends_with("@users.noreply.github.com") {
+                continue;
+            }
+            let handle = email.split('@').next().unwrap_or(&email).to_string();
+            let entry = by_email
+                .entry(email.clone())
+                .or_insert_with(|| GitContributor {
+                    name: name.clone(),
+                    email: email.clone(),
+                    commits: 0,
+                    last_active: 0,
+                    handle,
+                });
+            entry.commits += 1;
+            if ts > entry.last_active {
+                entry.last_active = ts;
+                // Prefer the most-recent display name for renames over time.
+                if !name.is_empty() {
+                    entry.name = name;
+                }
             }
         }
-    }
-    let mut list: Vec<GitContributor> = by_email.into_values().collect();
-    list.sort_by(|a, b| b.last_active.cmp(&a.last_active));
-    Ok(list)
+        let mut list: Vec<GitContributor> = by_email.into_values().collect();
+        list.sort_by(|a, b| b.last_active.cmp(&a.last_active));
+        Ok(list)
+    })
+    .await
 }
 
 // ── Semantic outline (functions/classes for the editor's right rail) ─
@@ -1465,58 +1605,61 @@ pub async fn aura_semantic_outline(
     repo_root: String,
     file: String,
 ) -> Result<Vec<OutlineNode>, String> {
-    // Try the CLI first.
-    let cwd = PathBuf::from(&repo_root);
-    if let Ok(out) = std::process::Command::new("aura")
-        .args(["semantic", "outline", &file])
-        .current_dir(&cwd)
-        .output()
-    {
-        if out.status.success() {
-            let txt = String::from_utf8_lossy(&out.stdout);
-            let mut nodes = Vec::new();
-            for line in txt.lines() {
-                let parts: Vec<&str> = line.splitn(3, ':').collect();
-                if parts.len() < 3 {
-                    continue;
+    crate::blocking::run(move || {
+        // Try the CLI first.
+        let cwd = PathBuf::from(&repo_root);
+        if let Ok(out) = std::process::Command::new(crate::agent_event_listener::resolve_aura_bin())
+            .args(["semantic", "outline", &file])
+            .current_dir(&cwd)
+            .output()
+        {
+            if out.status.success() {
+                let txt = String::from_utf8_lossy(&out.stdout);
+                let mut nodes = Vec::new();
+                for line in txt.lines() {
+                    let parts: Vec<&str> = line.splitn(3, ':').collect();
+                    if parts.len() < 3 {
+                        continue;
+                    }
+                    nodes.push(OutlineNode {
+                        kind: parts[0].trim().to_string(),
+                        name: parts[1].trim().to_string(),
+                        line: parts[2].trim().parse().unwrap_or(0),
+                    });
                 }
-                nodes.push(OutlineNode {
-                    kind: parts[0].trim().to_string(),
-                    name: parts[1].trim().to_string(),
-                    line: parts[2].trim().parse().unwrap_or(0),
-                });
-            }
-            if !nodes.is_empty() {
-                return Ok(nodes);
+                if !nodes.is_empty() {
+                    return Ok(nodes);
+                }
             }
         }
-    }
 
-    // Fallback: cheap regex scan. Catches Rust/TS/JS/Python at minimum.
-    let abs = if PathBuf::from(&file).is_absolute() {
-        PathBuf::from(&file)
-    } else {
-        cwd.join(&file)
-    };
-    let body = fs::read_to_string(&abs).unwrap_or_default();
-    let mut nodes = Vec::new();
-    for (i, line) in body.lines().enumerate() {
-        let trimmed = line.trim_start();
-        let lineno = (i + 1) as u32;
-        if let Some(name) = strip_prefix_word(trimmed, &["pub fn ", "fn ", "function ", "def ", "async fn "]) {
-            nodes.push(OutlineNode { kind: "fn".into(), name, line: lineno });
-        } else if let Some(name) = strip_prefix_word(trimmed, &["pub struct ", "struct ", "class ", "interface "]) {
-            nodes.push(OutlineNode { kind: "class".into(), name, line: lineno });
-        } else if let Some(name) = strip_prefix_word(trimmed, &["pub type ", "type "]) {
-            nodes.push(OutlineNode { kind: "type".into(), name, line: lineno });
-        } else if let Some(name) = strip_prefix_word(trimmed, &["pub const ", "const ", "let "]) {
-            // Only top-level lets (no leading whitespace).
-            if line.starts_with("pub const ") || line.starts_with("const ") || line.starts_with("let ") {
-                nodes.push(OutlineNode { kind: "const".into(), name, line: lineno });
+        // Fallback: cheap regex scan. Catches Rust/TS/JS/Python at minimum.
+        let abs = if PathBuf::from(&file).is_absolute() {
+            PathBuf::from(&file)
+        } else {
+            cwd.join(&file)
+        };
+        let body = fs::read_to_string(&abs).unwrap_or_default();
+        let mut nodes = Vec::new();
+        for (i, line) in body.lines().enumerate() {
+            let trimmed = line.trim_start();
+            let lineno = (i + 1) as u32;
+            if let Some(name) = strip_prefix_word(trimmed, &["pub fn ", "fn ", "function ", "def ", "async fn "]) {
+                nodes.push(OutlineNode { kind: "fn".into(), name, line: lineno });
+            } else if let Some(name) = strip_prefix_word(trimmed, &["pub struct ", "struct ", "class ", "interface "]) {
+                nodes.push(OutlineNode { kind: "class".into(), name, line: lineno });
+            } else if let Some(name) = strip_prefix_word(trimmed, &["pub type ", "type "]) {
+                nodes.push(OutlineNode { kind: "type".into(), name, line: lineno });
+            } else if let Some(name) = strip_prefix_word(trimmed, &["pub const ", "const ", "let "]) {
+                // Only top-level lets (no leading whitespace).
+                if line.starts_with("pub const ") || line.starts_with("const ") || line.starts_with("let ") {
+                    nodes.push(OutlineNode { kind: "const".into(), name, line: lineno });
+                }
             }
         }
-    }
-    Ok(nodes)
+        Ok(nodes)
+    })
+    .await
 }
 
 fn strip_prefix_word(s: &str, prefixes: &[&str]) -> Option<String> {
@@ -1547,46 +1690,49 @@ pub struct CliDetectResult {
 /// claude / codex / gemini / gh / etc. instead of optimistic placeholders.
 #[tauri::command]
 pub async fn cli_detect(name: String) -> Result<CliDetectResult, String> {
-    let which_out = std::process::Command::new("which")
-        .arg(&name)
-        .output()
-        .map_err(|e| e.to_string())?;
-    if !which_out.status.success() {
-        return Ok(CliDetectResult {
-            installed: false,
-            path: None,
-            version: None,
-        });
-    }
-    let path = String::from_utf8_lossy(&which_out.stdout).trim().to_string();
-    if path.is_empty() {
-        return Ok(CliDetectResult {
-            installed: false,
-            path: None,
-            version: None,
-        });
-    }
-    // Best-effort version grab. Different CLIs prefer different flags,
-    // so try --version first then fall back to -v. Cap the output at
-    // the first non-empty line — `gh --version` prints a banner.
-    let version = std::process::Command::new(&path)
-        .arg("--version")
-        .output()
-        .ok()
-        .and_then(|o| {
-            if !o.status.success() {
-                return None;
-            }
-            String::from_utf8_lossy(&o.stdout)
-                .lines()
-                .find(|l| !l.trim().is_empty())
-                .map(|l| l.trim().to_string())
-        });
-    Ok(CliDetectResult {
-        installed: true,
-        path: Some(path),
-        version,
+    crate::blocking::run(move || {
+        let which_out = std::process::Command::new("which")
+            .arg(&name)
+            .output()
+            .map_err(|e| e.to_string())?;
+        if !which_out.status.success() {
+            return Ok(CliDetectResult {
+                installed: false,
+                path: None,
+                version: None,
+            });
+        }
+        let path = String::from_utf8_lossy(&which_out.stdout).trim().to_string();
+        if path.is_empty() {
+            return Ok(CliDetectResult {
+                installed: false,
+                path: None,
+                version: None,
+            });
+        }
+        // Best-effort version grab. Different CLIs prefer different flags,
+        // so try --version first then fall back to -v. Cap the output at
+        // the first non-empty line — `gh --version` prints a banner.
+        let version = std::process::Command::new(&path)
+            .arg("--version")
+            .output()
+            .ok()
+            .and_then(|o| {
+                if !o.status.success() {
+                    return None;
+                }
+                String::from_utf8_lossy(&o.stdout)
+                    .lines()
+                    .find(|l| !l.trim().is_empty())
+                    .map(|l| l.trim().to_string())
+            });
+        Ok(CliDetectResult {
+            installed: true,
+            path: Some(path),
+            version,
+        })
     })
+    .await
 }
 
 #[cfg(test)]
@@ -1626,8 +1772,12 @@ mod perf_smoke {
         for i in 0..intents {
             let ts = now - (i as i64);
             let agent = if i % 2 == 0 { "claude" } else { "gemini" };
+            // `agent_id`, not `agent` — the spelling `aura log-intent`
+            // actually writes. This fixture used the one the struct wanted,
+            // so the agent-filter path benchmarked a filter that matched
+            // nothing in any real repo.
             s.push_str(&format!(
-                "{{\"id\":\"i{i}\",\"agent\":\"{agent}\",\"intent\":\"row {i}\",\"timestamp\":{ts}}}\n",
+                "{{\"id\":\"i{i}\",\"agent_id\":\"{agent}\",\"intent\":\"row {i}\",\"timestamp\":{ts}}}\n",
             ));
         }
         std::fs::write(&log, s).unwrap();
@@ -1803,5 +1953,64 @@ mod resolve_impact_tests {
         .unwrap();
         // No impacts.jsonl created — confirm we didn't crash.
         assert!(!dir.path().join(".aura/impacts.jsonl").exists());
+    }
+}
+
+#[cfg(test)]
+mod intent_author_tests {
+    //! Who wrote an intent, read off the shape the log is actually in.
+    //!
+    //! Settings → Team → Activity groups a week of intents by author. Driven
+    //! in a real window it showed every group under one author, "unknown" —
+    //! because `aura log-intent` writes `agent_id` and this struct asked for
+    //! `agent`, taking the serde default for all 76 of 76 rows in that repo's
+    //! log. The same silence turned the `agent` filter on the paginated
+    //! reader into a filter that can never match.
+    use super::*;
+    use std::io::Write;
+    use tempfile::tempdir;
+
+    /// A line in the shape `aura log-intent` and the MCP tool write today.
+    const REAL_ROW: &str = r#"{"agent_id":"claude","intent":"tightened the retry budget","timestamp":1785651321,"signed_block_id":"019fc11c-d986-7001-935e-0774b77963d6","key_id":"did:aura:key/MByIG90LiBg","intent_type":"Docs"}"#;
+    /// The older spelling, still on disk in small numbers. Must keep working.
+    const LEGACY_ROW: &str =
+        r#"{"agent":"gemini","intent":"split the loader","timestamp":1785651000}"#;
+
+    fn seed(root: &std::path::Path, lines: &[&str]) {
+        let aura = root.join(".aura");
+        std::fs::create_dir_all(&aura).unwrap();
+        let mut f = std::fs::File::create(aura.join("intent_log.jsonl")).unwrap();
+        for l in lines {
+            writeln!(f, "{}", l).unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn reads_the_author_off_agent_id() {
+        let dir = tempdir().unwrap();
+        seed(dir.path(), &[REAL_ROW, LEGACY_ROW]);
+        let rows = super::aura_read_intent_log(dir.path().to_string_lossy().into_owned())
+            .await
+            .unwrap();
+        assert_eq!(rows.len(), 2);
+        // Newest first.
+        assert_eq!(rows[0].agent, "claude");
+        assert_eq!(rows[1].agent, "gemini");
+    }
+
+    #[tokio::test]
+    async fn the_agent_filter_can_match_a_real_row() {
+        let dir = tempdir().unwrap();
+        seed(dir.path(), &[REAL_ROW, LEGACY_ROW]);
+        let page = super::aura_read_intent_log_v2(
+            dir.path().to_string_lossy().into_owned(),
+            50,
+            None,
+            Some("claude".to_string()),
+        )
+        .await
+        .unwrap();
+        assert_eq!(page.entries.len(), 1);
+        assert_eq!(page.entries[0].intent, "tightened the retry budget");
     }
 }

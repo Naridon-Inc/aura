@@ -359,12 +359,12 @@ export function LoungePanel({
     <div className="flex-1 h-full overflow-y-auto px-3 py-3 flex flex-col gap-3">
       {/* ── presence ── */}
       <section>
-        <div className="text-text-5 text-[10.5px] uppercase tracking-wide mb-1.5">
+        <div className="section-label mb-1.5">
           Here now{activeCount > 0 ? ` · ${activeCount}` : ""}
         </div>
         {presence.length === 0 ? (
-          <div className="text-text-5 text-[11.5px] leading-snug">
-            No teammates yet — presence appears as people and agents work
+          <div className="text-text-5 text-sm leading-snug">
+            No teammates yet. Presence appears as people and agents work
             in this repo.
           </div>
         ) : (
@@ -382,12 +382,12 @@ export function LoungePanel({
 
       {/* ── ship log ── */}
       <section>
-        <div className="text-text-5 text-[10.5px] uppercase tracking-wide mb-1.5">
+        <div className="section-label mb-1.5">
           Ship log
         </div>
         {shipLog.length === 0 ? (
-          <div className="text-text-5 text-[11.5px] leading-snug">
-            Quiet so far — commits land here as the team ships.
+          <div className="text-text-5 text-sm leading-snug">
+            Quiet so far. Commits land here as the team ships.
           </div>
         ) : (
           <div className="flex flex-col gap-2">
@@ -406,7 +406,7 @@ export function LoungePanel({
           </div>
         )}
         {reactError && (
-          <div className="mt-2 text-[11px] text-red leading-snug">
+          <div className="mt-2 text-xs text-red leading-snug">
             {reactError}
           </div>
         )}
@@ -446,7 +446,7 @@ function PresenceRowView({
       {...(onDM
         ? { type: "button" as const, onClick: onDM, title: `Message ${row.name}` }
         : {})}
-      className={`flex items-center gap-2 px-1 py-1 rounded hover:bg-bg-2 min-w-0 text-left w-full ${
+      className={`flex items-center gap-2 px-1 py-1 rounded hover:bg-state-hover min-w-0 text-left w-full ${
         onDM ? "cursor-pointer" : ""
       }`}
     >
@@ -454,28 +454,28 @@ function PresenceRowView({
       <div className="flex-1 min-w-0">
         <div className="flex items-center gap-1.5 min-w-0">
           <span
-            className={`text-[12px] truncate ${
+            className={`text-sm truncate ${
               row.tier === "away" ? "text-text-4" : "text-text-1"
             }`}
           >
             {row.name}
           </span>
           {row.statusEmoji && (
-            <span className="text-[11px] flex-shrink-0">{row.statusEmoji}</span>
+            <span className="text-xs flex-shrink-0">{row.statusEmoji}</span>
           )}
           {row.isAgent && (
-            <span className="flex-shrink-0 px-1 rounded text-[9px] font-semibold uppercase tracking-wide bg-bg-3 text-text-4 border border-line-soft leading-[14px]">
+            <span className="meta-tag">
               agent
             </span>
           )}
         </div>
         {row.status && (
-          <div className="text-text-4 text-[11px] truncate leading-snug">
+          <div className="text-text-4 text-xs truncate leading-snug">
             {row.status}
           </div>
         )}
       </div>
-      <span className="text-text-5 text-[10.5px] tabular-nums flex-shrink-0">
+      <span className="text-text-5 text-xs tabular-nums flex-shrink-0">
         {agoFromTs(row.lastTs)}
       </span>
     </Tag>
@@ -502,22 +502,22 @@ function ShipEntryView({
   return (
     <div className="rounded-lg border border-line-soft bg-bg-0 shadow-[var(--shadow-card)] px-2 py-1.5">
       <div className="flex items-center gap-1.5 min-w-0">
-        <span className="text-text-4 text-[11px] flex-shrink-0">
+        <span className="text-text-4 text-xs flex-shrink-0">
           {kindGlyph("committed")}
         </span>
-        <span className="text-text-1 text-[12px] font-medium truncate">
+        <span className="text-text-1 text-sm font-medium truncate">
           {actorShort(entry.actor)}
         </span>
         {entry.isAgent && (
-          <span className="flex-shrink-0 px-1 rounded text-[9px] font-semibold uppercase tracking-wide bg-bg-3 text-text-4 border border-line-soft leading-[14px]">
+          <span className="meta-tag">
             agent
           </span>
         )}
-        <span className="text-text-4 text-[11px] truncate">
+        <span className="text-text-4 text-xs truncate">
           shipped{entry.count > 1 ? ` ${entry.count} changes` : ""}
         </span>
         <span className="flex-1" />
-        <span className="text-text-5 text-[10.5px] tabular-nums flex-shrink-0">
+        <span className="text-text-5 text-xs tabular-nums flex-shrink-0">
           {agoFromTs(entry.ts)}
         </span>
       </div>
@@ -526,18 +526,18 @@ function ShipEntryView({
           {shown.map((it) => (
             <span
               key={it}
-              className="px-1.5 py-px rounded bg-bg-3 text-text-2 text-[10.5px] font-mono truncate max-w-[160px]"
+              className="px-1.5 py-px rounded bg-bg-3 text-text-2 text-xs font-mono truncate max-w-[160px]"
               title={it}
             >
               {it}
             </span>
           ))}
           {more > 0 && (
-            <span className="text-text-5 text-[10.5px]">+{more} more</span>
+            <span className="text-text-5 text-xs">+{more} more</span>
           )}
           {entry.branch && (
             <span
-              className="ml-auto text-text-5 text-[10.5px] truncate max-w-[120px]"
+              className="ml-auto text-text-5 text-xs truncate max-w-[120px]"
               title={entry.branch}
             >
               {entry.branch}
@@ -552,14 +552,14 @@ function ShipEntryView({
             type="button"
             onClick={() => onReact(c.emoji, c.mine)}
             title={c.who.join(", ")}
-            className={`px-1.5 py-px rounded-full text-[11px] leading-[18px] border transition-colors ${
+            className={`px-1.5 py-px rounded-full text-xs leading-[18px] border transition-colors ${
               c.mine
                 ? "bg-accent/15 border-accent/40 text-text-1"
                 : "bg-bg-3 border-line-soft text-text-2 hover:border-line-strong"
             }`}
           >
             {c.emoji}{" "}
-            <span className="tabular-nums text-[10px] text-text-4">
+            <span className="tabular-nums text-2xs text-text-4">
               {c.count}
             </span>
           </button>
@@ -569,7 +569,7 @@ function ShipEntryView({
           onClick={onTogglePicker}
           title="Add reaction"
           aria-label="Add reaction"
-          className="w-[22px] h-[20px] rounded-full border border-line-soft bg-bg-3 text-text-4 hover:text-text-1 hover:border-line-strong text-[11px] leading-none flex items-center justify-center"
+          className="w-[22px] h-[20px] rounded-full border border-line-soft bg-bg-3 text-text-4 hover:text-text-1 hover:border-line-strong text-xs leading-none flex items-center justify-center"
         >
           +
         </button>
@@ -582,7 +582,7 @@ function ShipEntryView({
                   key={emoji}
                   type="button"
                   onClick={() => onReact(emoji, mine)}
-                  className={`w-7 h-7 rounded flex items-center justify-center text-[15px] hover:bg-bg-2 ${
+                  className={`w-7 h-7 rounded flex items-center justify-center text-lg hover:bg-state-hover ${
                     mine ? "bg-accent/15" : ""
                   }`}
                 >

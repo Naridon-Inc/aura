@@ -26,6 +26,11 @@ import {
   SquareStack,
 } from "lucide-react";
 
+import {
+  boundsKey,
+  nativeWork,
+  type NativeBelief,
+} from "./browserHoleSync";
 import { RailBrowserAgent } from "./RailBrowserAgent";
 import { ArcSearchOverlay } from "./browser/ArcSearchOverlay";
 import { BrowserTabSwitcher } from "./browser/BrowserTabSwitcher";
@@ -104,7 +109,7 @@ function IconBtn({
       className={`flex items-center justify-center w-7 h-7 flex-shrink-0 rounded transition-colors disabled:opacity-30 disabled:pointer-events-none ${
         active
           ? "bg-bg-2 text-text-1"
-          : "text-text-3 hover:bg-bg-2 hover:text-text-1"
+          : "text-text-3 hover:bg-state-hover hover:text-text-1"
       }`}
     >
       {children}
@@ -121,6 +126,9 @@ export function RailBrowser() {
   // Last navSeq we navigated each tab to — so a server redirect (which updates
   // url without bumping navSeq) is never echoed back as a fresh navigation.
   const lastNav = useRef<Map<string, number>>(new Map());
+  // What the native layer has already been told, per tab, so a tick with
+  // nothing new to say stays silent.
+  const belief = useRef<Map<string, NativeBelief>>(new Map());
 
   // The search face's engine is remembered from last use; there's no visible
   // toggle in the simplified chrome (the search overlay can still switch it).
@@ -147,15 +155,23 @@ export function RailBrowser() {
   }, [tabs.length]);
 
   // The one place that drives the native webview.
-  const reconcile = useCallback(() => {
+  const reconcile = useCallback((resync = false) => {
     const state = getBrowserState();
     const tab = state.tabs.find((t) => t.id === state.activeId) ?? null;
     const rect = visibleRect(holeRef.current);
 
+    /** Hide a tab's native layer, unless we already believe it is hidden. */
+    const hide = (id: string) => {
+      if (!isCreated(id)) return;
+      if (!resync && belief.current.get(id)?.shown !== true) return;
+      belief.current.delete(id);
+      void browserHide(id);
+    };
+
     // Hole not rendered (search face / tab switcher / hidden rail), no tab, or
     // a start-page tab (no URL) → nothing to show.
     if (!tab || !tab.url || !rect) {
-      for (const t of state.tabs) if (isCreated(t.id)) void browserHide(t.id);
+      for (const t of state.tabs) hide(t.id);
       return;
     }
 
@@ -164,23 +180,29 @@ export function RailBrowser() {
       // can't open a second native layer for the same tab.
       markCreated(tab.id);
       lastNav.current.set(tab.id, tab.navSeq);
+      // Opening places and shows it, so that is what we believe until told
+      // otherwise — and if the open fails we believe nothing again.
+      belief.current.set(tab.id, { bounds: boundsKey(rect), shown: true });
       // Rail browser is narrow → request mobile views (iPhone Safari UA).
       void browserOpen(tab.id, tab.url, rect, true).catch(() => {
         unmarkCreated(tab.id);
         lastNav.current.delete(tab.id);
+        belief.current.delete(tab.id);
       });
     } else {
-      void browserSetBounds(tab.id, rect);
+      const work = nativeWork(belief.current.get(tab.id), rect, resync);
+      if (work.setBounds) void browserSetBounds(tab.id, rect);
       if ((lastNav.current.get(tab.id) ?? 0) < tab.navSeq) {
         lastNav.current.set(tab.id, tab.navSeq);
         void browserNavigate(tab.id, tab.url);
       }
-      void browserShow(tab.id);
+      if (work.show) void browserShow(tab.id);
+      belief.current.set(tab.id, { bounds: boundsKey(rect), shown: true });
     }
 
     // Every other live tab is off-screen — hide its native layer.
     for (const t of state.tabs) {
-      if (t.id !== tab.id && isCreated(t.id)) void browserHide(t.id);
+      if (t.id !== tab.id) hide(t.id);
     }
   }, []);
 
@@ -201,7 +223,14 @@ export function RailBrowser() {
     if (el) ro.observe(el);
     const onResize = () => reconcile();
     window.addEventListener("resize", onResize);
-    const iv = window.setInterval(reconcile, 400);
+    let ticks = 0;
+    const iv = window.setInterval(() => {
+      ticks += 1;
+      // Nine ticks out of ten cost a getBoundingClientRect and nothing else;
+      // the tenth (~every 4s) re-sends regardless, so the safety net still
+      // heals a native layer that moved without the DOM saying so.
+      reconcile(ticks % 10 === 0);
+    }, 400);
     return () => {
       ro.disconnect();
       window.removeEventListener("resize", onResize);
@@ -213,6 +242,9 @@ export function RailBrowser() {
   useEffect(
     () => () => {
       for (const t of getBrowserState().tabs) if (isCreated(t.id)) void browserHide(t.id);
+      // Unconditional above — on the way out we do not trust a belief we are
+      // about to throw away.
+      belief.current.clear();
     },
     [],
   );
@@ -292,7 +324,7 @@ export function RailBrowser() {
             <Search className="h-3.5 w-3.5 flex-shrink-0 text-text-4" />
           )}
           <span
-            className={`flex-1 min-w-0 truncate text-[12px] ${
+            className={`flex-1 min-w-0 truncate text-sm ${
               tab?.url ? "text-text-1" : "text-text-4"
             }`}
           >
@@ -304,7 +336,7 @@ export function RailBrowser() {
           <span className="relative flex items-center justify-center">
             <SquareStack className="h-4 w-4" />
             {tabs.length > 1 && (
-              <span className="absolute -top-2 -right-2.5 min-w-[14px] h-[14px] px-1 flex items-center justify-center rounded-full bg-accent text-[color:var(--color-accent-foreground)] text-[9px] font-semibold leading-none">
+              <span className="absolute -top-2 -right-2.5 min-w-[14px] h-[14px] px-1 flex items-center justify-center rounded-full bg-accent text-[color:var(--color-accent-foreground)] text-2xs font-semibold leading-none">
                 {tabs.length}
               </span>
             )}

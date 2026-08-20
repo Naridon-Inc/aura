@@ -35,7 +35,7 @@ export function AgentBadge({
   return (
     <span
       className={cn(
-        "inline-flex items-center gap-1 rounded bg-bg-2 px-1.5 py-px text-[10px] text-text-2",
+        "inline-flex items-center gap-1 rounded bg-bg-2 px-1.5 py-px text-2xs text-text-2",
         className,
       )}
       title={text}

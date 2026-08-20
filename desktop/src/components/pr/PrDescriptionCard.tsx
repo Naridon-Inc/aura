@@ -1,10 +1,11 @@
-// PrDescriptionCard — Stage 8B. Collapsible card that renders the
-// PR's body as Markdown using the project's existing react-markdown
-// install (with remark-gfm for tables / task lists / strikethrough).
+// PrDescriptionCard — the collapsible card that renders a pull request's body
+// as Markdown, using the project's existing react-markdown install (with
+// remark-gfm for tables / task lists / strikethrough).
 //
-// Edit affordance is a future hook to PrCommentComposer with the
-// rich-text toolbar (Stage 8C) — for now the button is a no-op
-// placeholder so the layout matches the Graphite screenshot.
+// `onEdit` opens the PR authoring dialog — the same one the pane header's Edit
+// opens, so there is one editor whichever Edit you reach for. It used to be a
+// no-op placeholder kept "so the layout matches the screenshot", which meant
+// the empty state told you to click a button that did nothing.
 
 import { useState } from "react";
 import { onExternalAnchorClick } from "../../lib/openExternal";
@@ -44,7 +45,7 @@ export function PrDescriptionCard({ body, onEdit }: Props) {
             />
           </svg>
         </button>
-        <span className="text-[12.5px] font-semibold text-text-1">
+        <span className="text-base font-semibold text-text-1">
           Description
         </span>
         <Button
@@ -62,7 +63,7 @@ export function PrDescriptionCard({ body, onEdit }: Props) {
           {empty ? (
             <DescriptionPlaceholder />
           ) : (
-            <div className="text-[12px] text-text-2 leading-[1.55]">
+            <div className="text-sm text-text-2 leading-[1.55]">
               <ReactMarkdown
                 remarkPlugins={[remarkGfm, remarkCallouts]}
                 components={MARKDOWN_COMPONENTS}
@@ -83,18 +84,18 @@ function DescriptionPlaceholder() {
   // reviewer landing on a PR with no description still has a frame to
   // ask the author about, instead of a flat "no description." line.
   return (
-    <div className="text-[13px] leading-[1.65] space-y-3">
+    <div className="text-base leading-[1.65] space-y-3">
       <div>
-        <div className="text-[13.5px] font-semibold text-text-3">
+        <div className="text-md font-semibold text-text-3">
           What changed?
         </div>
         <div className="text-text-4 italic">
-          The author didn't add a description. Click Edit to add one — start
+          The author didn't add a description. Click Edit to add one. Start
           with the high-level change.
         </div>
       </div>
       <div>
-        <div className="text-[13.5px] font-semibold text-text-3">Why?</div>
+        <div className="text-md font-semibold text-text-3">Why?</div>
         <div className="text-text-4 italic">
           What user need / bug / regression / decision motivated this change?
         </div>
@@ -108,17 +109,17 @@ function DescriptionPlaceholder() {
 // Tailwind-styled element so headings/code/lists render with hierarchy.
 export const MARKDOWN_COMPONENTS = {
   h1: (p: { children?: React.ReactNode }) => (
-    <h1 className="text-[19px] font-semibold text-text-1 mt-5 mb-2 first:mt-0">
+    <h1 className="text-xl font-semibold text-text-1 mt-5 mb-2 first:mt-0">
       {p.children}
     </h1>
   ),
   h2: (p: { children?: React.ReactNode }) => (
-    <h2 className="text-[16px] font-semibold text-text-1 mt-5 mb-2 first:mt-0">
+    <h2 className="text-lg font-semibold text-text-1 mt-5 mb-2 first:mt-0">
       {p.children}
     </h2>
   ),
   h3: (p: { children?: React.ReactNode }) => (
-    <h3 className="text-[14px] font-semibold text-text-1 mt-4 mb-1.5 first:mt-0">
+    <h3 className="text-md font-semibold text-text-1 mt-4 mb-1.5 first:mt-0">
       {p.children}
     </h3>
   ),
@@ -146,7 +147,7 @@ export const MARKDOWN_COMPONENTS = {
     );
   },
   pre: (p: { children?: React.ReactNode }) => (
-    <pre className="my-3 px-3 py-2.5 rounded-md bg-bg-1 border border-line-soft overflow-x-auto text-[12px] font-mono leading-[1.55]">
+    <pre className="my-3 px-3 py-2.5 rounded-md bg-bg-1 border border-line-soft overflow-x-auto text-sm font-mono leading-[1.55]">
       {p.children}
     </pre>
   ),
@@ -176,7 +177,7 @@ export const MARKDOWN_COMPONENTS = {
   ),
   table: (p: { children?: React.ReactNode }) => (
     <div className="my-3 overflow-x-auto rounded-md border border-line-soft">
-      <table className="w-full text-[12px] border-collapse">{p.children}</table>
+      <table className="w-full text-sm border-collapse">{p.children}</table>
     </div>
   ),
   th: (p: { children?: React.ReactNode }) => (

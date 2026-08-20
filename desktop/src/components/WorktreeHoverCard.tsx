@@ -18,9 +18,12 @@
 import { useEffect, useRef, useState } from "react";
 import * as Icons from "./Icons";
 import { api } from "../lib/api";
+import { fetchAheadBehind } from "../lib/gitStateCache";
 import { streamChannel, useAgentStream } from "../lib/agentStreamStore";
 import { relAge, summarizeEvents } from "../lib/streamSummary";
 import { AgentIcon } from "./agent/AgentIcon";
+import { CloudGlyph } from "./ui/cloud-glyph";
+import { labelForAgentId } from "../lib/useLiveAgentSessions";
 import { requestPrAuthoring } from "./dialogs/PrAuthoringDialog";
 import {
   askAuraToRun,
@@ -31,7 +34,7 @@ import {
   type WtAction,
 } from "../lib/worktreeActions";
 import type { WorktreeBadge } from "../lib/useWorktreeBadges";
-import type { WorktreeRef } from "./WorkspaceRail";
+import type { WorktreeRef } from "../lib/workspaceRef";
 
 /** One agent attached to the worktree — the roster's `LaneAgent` shape,
  *  restated locally so the card doesn't couple to the roster module. */
@@ -81,16 +84,23 @@ export function WorktreeHoverCard({
   // Ahead/behind vs upstream + origin — fetched on hover. `dirty` is known
   // instantly from the badge, so the action can show before this resolves and
   // upgrade (e.g. idle → Pull) once it lands.
-  const [ab, setAb] = useState<{ ahead: number; behind: number; up: boolean }>({
-    ahead: 0,
-    behind: 0,
-    up: false,
-  });
+  // `null` until the fetch lands. It used to be seeded `{0, 0, up: false}` —
+  // which is what a never-published branch genuinely looks like — so the card
+  // opened claiming this worktree had never been pushed, before the hover's
+  // own fetch had returned, and kept saying so if it failed.
+  const [ab, setAb] = useState<{
+    ahead: number;
+    behind: number;
+    up: boolean;
+  } | null>(null);
   const originRef = useRef<string>("");
   useEffect(() => {
     let cancelled = false;
-    void api
-      .gitAheadBehind(worktree.path)
+    // Through the cache: a board of copies is a row of these, and moving the
+    // pointer along it opens and closes them faster than git answers. Keyed by
+    // the copy's own path, so two cards for two worktrees still read separately
+    // — it only collapses the same card asked twice in a few seconds.
+    void fetchAheadBehind(worktree.path)
       .then((r) => {
         if (!cancelled)
           setAb({ ahead: r.ahead, behind: r.behind, up: r.has_upstream });
@@ -107,11 +117,16 @@ export function WorktreeHoverCard({
     };
   }, [worktree.path]);
 
+  // With `ab` still null every count is zero and `hasUpstream` is false, which
+  // `deriveWtAction` resolves to "no action" rather than to a claim — the card
+  // shows what the badge already knows (dirty) and upgrades when the read
+  // lands. That only holds because no arm of that fold fires on a false
+  // `hasUpstream`; it is not a general licence to pass zeros.
   const action: WtAction = deriveWtAction({
     dirty: hasDiff,
-    ahead: ab.ahead,
-    behind: ab.behind,
-    hasUpstream: ab.up,
+    ahead: ab?.ahead ?? 0,
+    behind: ab?.behind ?? 0,
+    hasUpstream: ab?.up ?? false,
     pr: badge?.pr ?? null,
   });
 
@@ -134,7 +149,36 @@ export function WorktreeHoverCard({
           ))}
         </div>
       ) : (
-        <div className="wt-hc-status">{ringLabel(ring)}</div>
+        // How much is uncommitted, in the one place with room for it. The
+        // roster row carries a dot for this; the numbers ride here, spelled
+        // out, because "+919 −148" on a 232px rail was eating the name of the
+        // copy it described.
+        <div className="wt-hc-status">
+          {ringLabel(ring)}
+          {hasDiff && (
+            <span className="wt-hc-churn">
+              {badge!.added > 0 && <span>{badge!.added} added</span>}
+              {badge!.added > 0 && badge!.removed > 0 && " · "}
+              {badge!.removed > 0 && <span>{badge!.removed} removed</span>}
+            </span>
+          )}
+        </div>
+      )}
+
+      {/* Where the work is. The row could only afford a glyph; here there is
+          room to say it, and it has to be said in both branches above — a copy
+          can have an agent open on this Mac *and* a job running on a box, and
+          reading only one of those is how you end up with two agents on one
+          branch. */}
+      {badge?.cloud && (
+        <div className="wt-hc-cloud">
+          <CloudGlyph size={13} pulse={badge.cloud.status !== "submitted"} />
+          <span>
+            {badge.cloud.status === "submitted"
+              ? `Queued for a machine. ${labelForAgentId(badge.cloud.agent)} hasn't picked it up yet`
+              : `${labelForAgentId(badge.cloud.agent)} is working on this branch on your machine in the cloud`}
+          </span>
+        </div>
       )}
 
       {/* Action row — the ONE thing this copy's git state is asking for, plus
@@ -299,7 +343,7 @@ function ActionButton({
               setMenu(false);
               run(
                 "Push branch",
-                `Push branch \`${branch}\` to its remote (set the upstream if it has none). Don't open a PR yet — just push. Report the result.`,
+                `Push branch \`${branch}\` to its remote (set the upstream if it has none). Don't open a PR yet, just push. Report the result.`,
               );
             }}
           >

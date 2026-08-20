@@ -16,8 +16,9 @@
 // checkbox — no headings, no nested blocks. Members + the caller's handle drive
 // per-block attribution / completion and colour known @mentions.
 
-import { useEffect, useState } from "react";
-import { api, type TeamMember } from "../../../lib/api";
+import { useCallback, useEffect, useState } from "react";
+import { type TeamMember } from "../../../lib/api";
+import { fetchTeam, fetchIdentity } from "../../../lib/teamCache";
 import { useVerticalSplit } from "../../../lib/useVerticalSplit";
 import { ScribbleSpace } from "./ScribbleSpace";
 
@@ -34,17 +35,25 @@ export function ScribblePanel({ repoRoot }: Props) {
   const [members, setMembers] = useState<TeamMember[]>([]);
   const [selfHandle, setSelfHandle] = useState("");
 
+  // The two spaces have identical mechanics, so the strip that teaches them —
+  // Enter starts the next line, `[]` turns one into a task — belongs to the
+  // panel, once. Each space used to print it in its own footer, which put the
+  // same nine words twice on one 630px rail. It goes the moment either space
+  // has a line in it.
+  const [teamWritten, setTeamWritten] = useState(false);
+  const [personalWritten, setPersonalWritten] = useState(false);
+  const onTeamWritten = useCallback((w: boolean) => setTeamWritten(w), []);
+  const onPersonalWritten = useCallback((w: boolean) => setPersonalWritten(w), []);
+
   // Roster + self identity — best-effort, degrade to empty. Drives per-block
   // attribution / completion and colours known @mentions.
   useEffect(() => {
     if (!repoRoot) return;
     let alive = true;
-    void api
-      .teamLoad(repoRoot)
+    void fetchTeam(repoRoot)
       .then((m) => alive && setMembers(m.members ?? []))
       .catch(() => {});
-    void api
-      .teamIdentity(repoRoot)
+    void fetchIdentity(repoRoot)
       .then((id) => {
         if (!alive) return;
         setSelfHandle(id.effective_handle || id.handle || "");
@@ -68,6 +77,7 @@ export function ScribblePanel({ repoRoot }: Props) {
             scope="team"
             members={members}
             selfHandle={selfHandle}
+            onWrittenChange={onTeamWritten}
           />
         </div>
       </div>
@@ -96,9 +106,16 @@ export function ScribblePanel({ repoRoot }: Props) {
             scope="personal"
             members={members}
             selfHandle={selfHandle}
+            onWrittenChange={onPersonalWritten}
           />
         </div>
       </div>
+
+      {!teamWritten && !personalWritten && (
+        <div className="flex-shrink-0 border-t border-line-soft/60 px-3 py-1 text-2xs text-text-5">
+          Enter starts a new line · type [] to make one a task
+        </div>
+      )}
     </div>
   );
 }
@@ -106,10 +123,8 @@ export function ScribblePanel({ repoRoot }: Props) {
 function SpaceHeader({ label, hint }: { label: string; hint: string }) {
   return (
     <div className="flex flex-shrink-0 items-baseline gap-2 border-b border-line-soft px-2.5 py-1.5">
-      <span className="text-[10px] font-semibold uppercase tracking-wider text-text-3">
-        {label}
-      </span>
-      <span className="text-[9.5px] text-text-5">{hint}</span>
+      <span className="text-xs font-medium text-text-3">{label}</span>
+      <span className="text-xs text-text-5">{hint}</span>
     </div>
   );
 }

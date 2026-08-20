@@ -6,24 +6,23 @@
  *  search bar, and the typing indicator. Moved verbatim out of the
  *  CommsPanel monolith; logic unchanged. */
 
-import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { useMemo, useRef, useState, type ReactNode } from "react";
 import {
   ChevronDown,
   File,
-  FileText,
   Headphones,
   Image as ImageIcon,
+  Info,
   Link2,
   MoreHorizontal,
   Search as SearchLucide,
-  Sparkles,
-  SquarePen,
 } from "lucide-react";
 import { type TeamMember } from "../../../lib/api";
 import {
   prettyName,
   previewBody,
   formatPinTime,
+  presenceForConversation,
   type Conversation,
   type Msg,
 } from "../domain";
@@ -43,6 +42,8 @@ import {
 } from "../../chat/FileAttachment";
 import { Avatar } from "./Avatar";
 import { onExternalAnchorClick } from "../../../lib/openExternal";
+import { useDismiss } from "../../../lib/useDismiss";
+import { sentenceCase } from "../../../lib/textCase";
 
 export function ChannelHeader({
   conv,
@@ -53,8 +54,7 @@ export function ChannelHeader({
   onToggleMembers,
   detailsOpen,
   onToggleDetails,
-  canvasOpen,
-  onToggleCanvas,
+  tabs,
   pinsOpen,
   onTogglePins,
   pinCount,
@@ -74,8 +74,12 @@ export function ChannelHeader({
   onToggleMembers: () => void;
   detailsOpen: boolean;
   onToggleDetails: () => void;
-  canvasOpen: boolean;
-  onToggleCanvas: () => void;
+  /** The conversation's section tabs (Messages / Canvas / Files & links /
+   *  Bookmarks / any custom ones). They ride INSIDE this row. They used to
+   *  be a 36px nav of their own directly beneath it, which put a tab strip
+   *  under a title bar under the pane's own tab strip: three bands of
+   *  chrome, ~110px, before the first message. */
+  tabs?: ReactNode;
   /** Move the whole chat into the wide center pane. Only the narrow ADE
    *  sidebar mount passes this; the center mount leaves it undefined. */
   onExpand?: () => void;
@@ -126,7 +130,14 @@ export function ChannelHeader({
           onClick={onToggleDetails}
         >
           {isDm ? (
-            <Avatar name={conv.name} size={20} presence="online" />
+            // Real presence, not "online" hardcoded — the rail one column left
+            // was already computing this from last_seen, so the header claimed
+            // a teammate was around while the row you clicked said otherwise.
+            <Avatar
+              name={conv.name}
+              size={20}
+              presence={presenceForConversation(conv, members)}
+            />
           ) : conv.private ? (
             <RailLockIcon />
           ) : (
@@ -135,6 +146,8 @@ export function ChannelHeader({
           <span>{prettyName(conv).replace(/^#/, "")}</span>
           <ChevronDown size={13} />
         </button>
+
+        {tabs}
 
         <div className="flex-1" />
 
@@ -205,24 +218,29 @@ export function ChannelHeader({
             )}
           </span>
         </HeaderIconButton>
-        <HeaderIconButton title="Channel recap" onClick={() => onRefresh()}>
-          <Sparkles size={15} />
+        {/* Re-reads the stream from disk. It used to wear the sparkle —
+            this app's AI glyph — under the title "Channel recap", and it
+            called `fetchActive`: no summary, no model, just a refetch.
+            Worse, "Recap" is a real and different destination one rail
+            over, so the button named a feature it wasn't. It's a reload,
+            so it says reload and wears the reload icon. The overflow menu
+            below no longer repeats it. */}
+        <HeaderIconButton title="Refresh messages" onClick={() => onRefresh()}>
+          <RefreshIcon />
         </HeaderIconButton>
-        {!isDm && (
-          <HeaderIconButton
-            title={canvasOpen ? "Close canvas" : "Open canvas"}
-            onClick={onToggleCanvas}
-            active={canvasOpen}
-          >
-            <FileText size={15} />
-          </HeaderIconButton>
-        )}
+        {/* The canvas button lived here and opened the canvas in the RIGHT
+            panel, while the "Canvas" tab in this same row — and the
+            composer's Canvas item — open it in the centre. Three doors, two
+            destinations, for one document. The two that agree survive. */}
+        {/* Details, behind an info glyph. It was a pencil — the compose
+            icon, in a chat app, on the header of a conversation you can
+            write in. It opens a read-only panel and writes nothing. */}
         <HeaderIconButton
           title={detailsOpen ? "Close details" : isDm ? "Open profile details" : "Open channel details"}
           onClick={onToggleDetails}
           active={detailsOpen}
         >
-          <SquarePen size={15} />
+          <Info size={15} />
         </HeaderIconButton>
         {onExpand && (
           <ChannelOverflowMenu
@@ -233,7 +251,6 @@ export function ChannelHeader({
             pinCount={pinCount}
             searchActive={searchActive}
             onToggleSearch={onToggleSearch}
-            onRefresh={onRefresh}
             onExpand={onExpand}
           />
         )}
@@ -276,17 +293,17 @@ export function ChannelSearchBar({
           }
         }}
         placeholder={placeholder}
-        className="flex-1 min-w-0 bg-transparent text-[12px] text-text-1 placeholder:text-text-4 outline-none"
+        className="flex-1 min-w-0 bg-transparent text-sm text-text-1 placeholder:text-text-4 outline-none"
       />
       {query.trim() && (
-        <span className="text-[10.5px] tabular-nums text-text-4 flex-shrink-0">
+        <span className="text-xs tabular-nums text-text-4 flex-shrink-0">
           {matchCount} {matchCount === 1 ? "match" : "matches"}
         </span>
       )}
       <button
         type="button"
         onClick={onClose}
-        className="w-6 h-6 rounded text-text-3 hover:text-text-1 hover:bg-bg-2 flex items-center justify-center flex-shrink-0"
+        className="w-6 h-6 rounded text-text-3 hover:text-text-1 hover:bg-state-hover flex items-center justify-center flex-shrink-0"
         title="Close search (Esc)"
         aria-label="Close search"
       >
@@ -306,8 +323,8 @@ export function ChannelSearchBar({
 function ChannelTabPlaceholder({ title, body }: { title: string; body: string }) {
   return (
     <div className="flex flex-1 flex-col items-center justify-center px-6 py-12 text-center">
-      <div className="text-text-1 text-[14px] font-medium">{title}</div>
-      <div className="mt-2 max-w-[360px] text-[11.5px] text-text-4 leading-snug">{body}</div>
+      <div className="text-text-1 text-md font-medium">{title}</div>
+      <div className="mt-2 max-w-[360px] text-sm text-text-4 leading-snug">{body}</div>
     </div>
   );
 }
@@ -402,7 +419,7 @@ export function ChannelFilesTab({
                 className={filter === value ? "is-active" : ""}
                 onClick={() => setFilter(value)}
               >
-                {value === "all" ? "All" : value[0].toUpperCase() + value.slice(1)}
+                {value === "all" ? "All" : sentenceCase(value)}
               </button>
             ))}
           </div>
@@ -518,13 +535,13 @@ export function ChannelBookmarksTab({
     return (
       <ChannelTabPlaceholder
         title="No bookmarks yet"
-        body="Pin a message (hover a message → pin) to bookmark it here — decisions, links, anything worth finding again."
+        body="Pin a message (hover a message → pin) to bookmark it here. Decisions, links, anything worth finding again."
       />
     );
   }
   return (
     <div className="flex-1 overflow-y-auto px-3 py-3">
-      <div className="text-[10.5px] uppercase tracking-wide text-text-3 font-semibold mb-2">
+      <div className="section-label mb-2">
         {pins.length} {pins.length === 1 ? "bookmark" : "bookmarks"}
       </div>
       <div className="flex flex-col gap-0.5">
@@ -538,17 +555,17 @@ export function ChannelBookmarksTab({
             return (
               <div
                 key={m.id}
-                className="group flex gap-2 rounded-md px-2 py-1.5 cursor-pointer border border-transparent hover:bg-bg-2 hover:border-line-soft/60"
+                className="group flex gap-2 rounded-md px-2 py-1.5 cursor-pointer border border-transparent hover:bg-state-hover hover:border-line-soft/60"
                 onClick={() => onJump(m.id)}
               >
                 <div className="flex-1 min-w-0">
-                  <div className="text-[11px] flex items-baseline gap-1.5">
+                  <div className="text-xs flex items-baseline gap-1.5">
                     <span className="font-medium text-text-1 truncate">{author}</span>
-                    <span className="text-text-4 text-[10px] tabular-nums">
+                    <span className="text-text-4 text-2xs tabular-nums">
                       {formatPinTime(m.ts)}
                     </span>
                   </div>
-                  <div className="text-[12px] text-text-2 line-clamp-2">
+                  <div className="text-sm text-text-2 line-clamp-2">
                     {preview || "(empty)"}
                   </div>
                 </div>
@@ -558,7 +575,7 @@ export function ChannelBookmarksTab({
                     e.stopPropagation();
                     onUnpin(m.id);
                   }}
-                  className="text-[10.5px] text-text-4 hover:text-text-1 shrink-0 self-start mt-0.5 opacity-0 group-hover:opacity-100"
+                  className="text-xs text-text-4 hover:text-text-1 shrink-0 self-start mt-0.5 opacity-0 group-hover:opacity-100"
                   title="Remove bookmark"
                 >
                   Remove
@@ -579,7 +596,7 @@ export function TypingIndicator({
   const slot = (
     <div
       data-slot="typing-indicator"
-      className="flex-shrink-0 px-3 text-[10.5px] text-text-4 leading-[18px] truncate flex items-center"
+      className="flex-shrink-0 px-3 text-xs text-text-4 leading-[18px] truncate flex items-center"
       style={{ height: 18 }}
     />
   );
@@ -592,7 +609,7 @@ export function TypingIndicator({
   return (
     <div
       data-slot="typing-indicator"
-      className="flex-shrink-0 px-3 text-[10.5px] text-text-4 leading-[18px] truncate flex items-center gap-1"
+      className="flex-shrink-0 px-3 text-xs text-text-4 leading-[18px] truncate flex items-center gap-1"
       style={{ height: 18 }}
     >
       <span aria-hidden>
@@ -637,7 +654,7 @@ function HeaderIconButton({
       className={`w-7 h-7 rounded flex items-center justify-center ${
         active
           ? "text-text-1 bg-bg-2"
-          : "text-text-4 hover:text-text-1 hover:bg-bg-2"
+          : "text-text-4 hover:text-text-1 hover:bg-state-hover"
       }`}
     >
       {children}
@@ -658,7 +675,6 @@ function ChannelOverflowMenu({
   pinCount,
   searchActive,
   onToggleSearch,
-  onRefresh,
   onExpand,
 }: {
   membersOpen: boolean;
@@ -668,26 +684,11 @@ function ChannelOverflowMenu({
   pinCount: number;
   searchActive: boolean;
   onToggleSearch: () => void;
-  onRefresh: () => void;
   onExpand?: () => void;
 }) {
   const [open, setOpen] = useState(false);
   const ref = useRef<HTMLDivElement>(null);
-  useEffect(() => {
-    if (!open) return;
-    function onDown(e: MouseEvent) {
-      if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false);
-    }
-    function onKey(e: KeyboardEvent) {
-      if (e.key === "Escape") setOpen(false);
-    }
-    document.addEventListener("mousedown", onDown);
-    document.addEventListener("keydown", onKey);
-    return () => {
-      document.removeEventListener("mousedown", onDown);
-      document.removeEventListener("keydown", onKey);
-    };
-  }, [open]);
+  useDismiss(open, () => setOpen(false), ref);
 
   const close = () => setOpen(false);
   return (
@@ -728,14 +729,10 @@ function ChannelOverflowMenu({
               close();
             }}
           />
-          <OverflowItem
-            label="Refresh"
-            icon={<RefreshIcon />}
-            onClick={() => {
-              onRefresh();
-              close();
-            }}
-          />
+          {/* Refresh used to live here too, one click deeper than the
+              button that now carries the same icon in the header. Two
+              entries for one action, and the header's was the one wearing
+              a different name. */}
           {onExpand && (
             <>
               <div className="my-1 h-px bg-line-soft" aria-hidden />
@@ -773,10 +770,10 @@ function OverflowItem({
       type="button"
       role="menuitem"
       onClick={onClick}
-      className={`flex w-full items-center gap-2 px-2.5 py-1.5 text-left text-[12px] ${
+      className={`flex w-full items-center gap-2 px-2.5 py-1.5 text-left text-sm ${
         active
           ? "text-text-1 bg-bg-2"
-          : "text-text-2 hover:bg-bg-2 hover:text-text-1"
+          : "text-text-2 hover:bg-state-hover hover:text-text-1"
       }`}
     >
       <span className="flex h-4 w-4 items-center justify-center text-text-4">
@@ -784,7 +781,7 @@ function OverflowItem({
       </span>
       <span className="flex-1 truncate">{label}</span>
       {badge && (
-        <span className="rounded-full border border-line-soft bg-bg-3 px-1.5 text-[10px] font-semibold tabular-nums text-text-2">
+        <span className="rounded-full border border-line-soft bg-bg-3 px-1.5 text-2xs font-semibold tabular-nums text-text-2">
           {badge}
         </span>
       )}

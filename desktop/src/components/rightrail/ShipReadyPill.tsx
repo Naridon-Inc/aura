@@ -45,7 +45,7 @@ export function ShipReadyPill({ repoRoot }: { repoRoot: string }) {
 
   const title =
     readiness.state === "attention"
-      ? "Something to look at before you ship — open for the detail and a full check."
+      ? "Something to look at before you ship. Open for the detail and a full check."
       : "No leaked secrets, no half-finished code. Click for the detail + a full check (build included).";
 
   return (
@@ -54,7 +54,7 @@ export function ShipReadyPill({ repoRoot }: { repoRoot: string }) {
       onClick={() =>
         window.dispatchEvent(new CustomEvent("aura:open-checks"))
       }
-      className={`flex items-center gap-1.5 text-[10.5px] transition-colors hover:text-text-1 ${tone.text}`}
+      className={`flex items-center gap-1.5 text-xs transition-colors hover:text-text-1 ${tone.text}`}
       title={title}
     >
       <span

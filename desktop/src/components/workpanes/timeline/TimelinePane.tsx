@@ -177,10 +177,10 @@ export function TimelinePane({ repoRoot }: { repoRoot: string }) {
   if (error) {
     return (
       <Centered>
-        <div className="text-[13px] text-text-2">
+        <div className="text-base text-text-2">
           Couldn’t read this project’s history.
         </div>
-        <div className="mt-1 max-w-md text-[11px] text-text-4">{error}</div>
+        <div className="mt-1 max-w-md text-xs text-text-4">{error}</div>
       </Centered>
     );
   }
@@ -189,19 +189,19 @@ export function TimelinePane({ repoRoot }: { repoRoot: string }) {
     return (
       <Centered>
         <ScrubberSkeleton />
-        <div className="mt-4 text-[12px] text-text-3">
+        <div className="mt-4 text-sm text-text-3">
           Reading the project’s history…
         </div>
         {slow && (
           <div className="mt-4 flex flex-col items-center gap-2.5">
-            <div className="max-w-xs text-[11px] leading-relaxed text-text-4">
-              Taking longer than usual — a large history or a busy engine. It’ll
+            <div className="max-w-xs text-xs leading-relaxed text-text-4">
+              Taking longer than usual. A large history or a busy engine. It’ll
               appear as soon as it’s ready.
             </div>
             <button
               type="button"
               onClick={() => setLoadNonce((n) => n + 1)}
-              className="rounded-md border border-line px-3 py-1.5 text-[11px] text-text-2 transition-colors hover:bg-bg-2 hover:text-text-1"
+              className="rounded-md border border-line px-3 py-1.5 text-xs text-text-2 transition-colors hover:bg-state-hover hover:text-text-1"
             >
               Try again
             </button>
@@ -214,12 +214,12 @@ export function TimelinePane({ repoRoot }: { repoRoot: string }) {
   if (model.moments.length === 0) {
     return (
       <Centered>
-        <div className="text-[14px] font-medium text-text-1">
+        <div className="text-md font-medium text-text-1">
           No history to replay yet
         </div>
-        <div className="mt-1.5 max-w-md text-[12px] leading-relaxed text-text-3">
+        <div className="mt-1.5 max-w-md text-sm leading-relaxed text-text-3">
           As you and your agents log reasons for changes, this timeline fills
-          itself — every moment, who made it, and the code it touched. Come back
+          itself. Every moment, who made it, and the code it touched. Come back
           after a few sessions to watch the project evolve.
         </div>
       </Centered>
@@ -245,8 +245,16 @@ export function TimelinePane({ repoRoot }: { repoRoot: string }) {
         {/* Chapters: the project's runs, chronological. Collapsible to a thin
             rail so the story gets the full width when you want it. */}
         {chaptersOpen ? (
-          <aside className="hidden w-[232px] flex-shrink-0 flex-col overflow-hidden border-r border-line bg-bg-1 md:flex">
-            <div className="sticky top-0 z-10 flex items-center justify-between bg-bg-1/95 py-2.5 pl-4 pr-2 text-[10px] uppercase tracking-wider text-text-4 backdrop-blur">
+          <aside
+            /* pb-44 matches the detail column's `h-44` spacer: the transport +
+               scrubber float over the FULL width of the pane, so this shortens
+               the scroll viewport to stop above them. Padding the list instead
+               only clears its last item — every chapter scrolling PAST the
+               controls still passed underneath them, on the one list whose job
+               is jumping between chapters. */
+            className="hidden w-[232px] flex-shrink-0 flex-col overflow-hidden border-r border-line bg-bg-1 pb-44 md:flex"
+          >
+            <div className="section-label sticky top-0 z-10 flex items-center justify-between bg-bg-1/95 py-2.5 pl-4 pr-2 backdrop-blur">
               <span>Chapters</span>
               <Button
                 type="button"
@@ -271,7 +279,7 @@ export function TimelinePane({ repoRoot }: { repoRoot: string }) {
                       className={`group mb-0.5 flex w-full flex-col items-start gap-0.5 rounded-md px-2.5 py-2 text-left transition-colors ${
                         active
                           ? "bg-[color-mix(in_oklab,var(--color-accent)_14%,transparent)]"
-                          : "hover:bg-bg-2"
+                          : "hover:bg-state-hover"
                       }`}
                     >
                       <div className="flex w-full items-center gap-1.5">
@@ -284,14 +292,14 @@ export function TimelinePane({ repoRoot }: { repoRoot: string }) {
                           }}
                         />
                         <span
-                          className={`min-w-0 flex-1 truncate text-[12px] ${
+                          className={`min-w-0 flex-1 truncate text-sm ${
                             active ? "text-text-1" : "text-text-2"
                           }`}
                         >
                           {s.title}
                         </span>
                       </div>
-                      <div className="pl-3 text-[10px] tabular-nums text-text-4">
+                      <div className="pl-3 text-2xs tabular-nums text-text-4">
                         {dayLabelOf(s.startTs)} · {s.momentIndices.length} step
                         {s.momentIndices.length === 1 ? "" : "s"}
                       </div>
@@ -310,7 +318,7 @@ export function TimelinePane({ repoRoot }: { repoRoot: string }) {
             className="hidden w-10 flex-shrink-0 flex-col items-center gap-2 border-r border-line bg-bg-1 pt-3 text-text-4 transition-colors hover:text-text-1 md:flex"
           >
             <ExpandIcon />
-            <span className="[writing-mode:vertical-rl] text-[10px] uppercase tracking-wider">
+            <span className="section-label [writing-mode:vertical-rl]">
               Chapters
             </span>
           </button>
@@ -355,12 +363,12 @@ export function TimelinePane({ repoRoot }: { repoRoot: string }) {
               <NextIcon />
             </TransportButton>
 
-            <div className="ml-1 text-[11px] tabular-nums text-text-3">
+            <div className="ml-1 text-xs tabular-nums text-text-3">
               <span className="text-text-1">{selectedIndex + 1}</span>
               <span className="text-text-4"> / {model.moments.length}</span>
             </div>
 
-            <div className="ml-auto truncate text-[11px] text-text-4">
+            <div className="ml-auto truncate text-xs text-text-4">
               {model.moments[selectedIndex] &&
                 dayLabelOf(model.moments[selectedIndex].ts)}
             </div>
@@ -419,7 +427,7 @@ function TransportButton({
       onClick={onClick}
       title={label}
       aria-label={label}
-      className="flex h-8 w-8 items-center justify-center rounded-md text-text-3 transition-colors hover:bg-bg-2 hover:text-text-1"
+      className="flex h-8 w-8 items-center justify-center rounded-md text-text-3 transition-colors hover:bg-state-hover hover:text-text-1"
     >
       {children}
     </button>

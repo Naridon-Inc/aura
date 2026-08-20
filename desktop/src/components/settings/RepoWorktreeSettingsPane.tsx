@@ -29,7 +29,7 @@ import {
 import { Button } from "../ui/button";
 import { Input } from "../ui/input";
 import { Textarea } from "../ui/textarea";
-import { Field, PaneHeader, Section, SelectField } from "./kit";
+import { Field, PaneIntro, Section, SelectField } from "./kit";
 
 const EMPTY: RepoWorktreeSettings = {
   setup: null,
@@ -198,17 +198,14 @@ export function RepoWorktreeSettingsPane({ repoRoot }: { repoRoot: string }) {
 
   return (
     <>
-      <PaneHeader
-        title="Copies & agents"
-        subtitle="When you hand work to an agent it gets its own private copy of this project, so its edits never touch your live files. These settings control how those copies are made and run."
-      />
+      <PaneIntro text="When you hand work to an agent it gets its own private copy of this project, so its edits never touch your live files. These settings control how those copies are made and run." />
 
       {loading ? (
         <LoadingState label="Loading this project's settings…" className="px-0 py-3" />
       ) : (
         <>
           {loadError && (
-            <div className="mb-3 text-[11.5px] text-red" role="alert">
+            <div className="mb-3 text-sm text-red" role="alert">
               Couldn't load these settings: {loadError}
             </div>
           )}
@@ -224,7 +221,7 @@ export function RepoWorktreeSettingsPane({ repoRoot }: { repoRoot: string }) {
                 spellCheck={false}
                 rows={3}
                 placeholder="npm install"
-                className="font-mono text-[11.5px]"
+                className="font-mono text-sm"
               />
             </Field>
             <Field
@@ -237,7 +234,7 @@ export function RepoWorktreeSettingsPane({ repoRoot }: { repoRoot: string }) {
                 spellCheck={false}
                 rows={3}
                 placeholder="npm run dev"
-                className="font-mono text-[11.5px]"
+                className="font-mono text-sm"
               />
             </Field>
             <Field
@@ -250,7 +247,7 @@ export function RepoWorktreeSettingsPane({ repoRoot }: { repoRoot: string }) {
                 spellCheck={false}
                 rows={3}
                 placeholder="docker compose down"
-                className="font-mono text-[11.5px]"
+                className="font-mono text-sm"
               />
             </Field>
             <Field
@@ -270,7 +267,7 @@ export function RepoWorktreeSettingsPane({ repoRoot }: { repoRoot: string }) {
                       value={script.command}
                       onChange={(event) => updateNamedScript(index, "command", event.target.value)}
                       placeholder="npm run dev"
-                      className="flex-1 font-mono text-[11.5px]"
+                      className="flex-1 font-mono text-sm"
                     />
                     <Button
                       type="button"
@@ -294,7 +291,11 @@ export function RepoWorktreeSettingsPane({ repoRoot }: { repoRoot: string }) {
           <Section title="New copies">
             <Field
               label="Start new copies from"
-              hint="Which branch new agent copies branch off. Blank = current branch."
+              // "Blank = current branch" outlived the text input it was
+              // written for. There is no blank to leave any more — the first
+              // option in the list IS "Current branch" — so the hint asked for
+              // something the control cannot do.
+              hint="The branch a new copy starts from. Current branch means whatever you have checked out when the copy is made."
             >
               <SelectField
                 value={form.base || "__current__"}
@@ -316,7 +317,7 @@ export function RepoWorktreeSettingsPane({ repoRoot }: { repoRoot: string }) {
             <Button onClick={() => void save()} disabled={saving}>
               {saving ? (
                 <>
-                  <AsciiSpinner className="text-[12px] leading-none" />
+                  <AsciiSpinner className="text-sm leading-none" />
                   Saving…
                 </>
               ) : (
@@ -324,13 +325,13 @@ export function RepoWorktreeSettingsPane({ repoRoot }: { repoRoot: string }) {
               )}
             </Button>
             {saved && !saveError && (
-              <span className="flex items-center gap-1 text-[11.5px] text-accent-green">
+              <span className="flex items-center gap-1 text-sm text-accent-green">
                 <Check className="h-3.5 w-3.5" />
                 Saved
               </span>
             )}
             {saveError && (
-              <span className="text-[11.5px] text-red" role="alert">
+              <span className="text-sm text-red" role="alert">
                 Couldn't save: {saveError}
               </span>
             )}
@@ -364,7 +365,7 @@ function CopyFilesField({
 
   return (
     <div className="flex flex-col gap-1.5 py-3">
-      <span className="text-[12px] font-medium text-text-2">
+      <span className="text-sm font-medium text-text-2">
         Files to copy into each new copy
       </span>
 
@@ -373,7 +374,7 @@ function CopyFilesField({
           {files.map((f) => (
             <span
               key={f}
-              className="inline-flex items-center gap-1.5 rounded-md border border-line-soft bg-bg-2 px-2 py-1 text-[11.5px] text-text-1"
+              className="inline-flex items-center gap-1.5 rounded-md border border-line-soft bg-bg-2 px-2 py-1 text-sm text-text-1"
             >
               <span className="font-mono">{f}</span>
               <Button
@@ -403,7 +404,7 @@ function CopyFilesField({
           }}
           placeholder=".env"
           spellCheck={false}
-          className="h-7 flex-1 font-mono text-[11.5px]"
+          className="h-7 flex-1 font-mono text-sm"
         />
         <Button
           variant="subtle"
@@ -421,9 +422,12 @@ function CopyFilesField({
         )}
       </div>
 
-      <span className="text-[11.5px] leading-snug text-text-4">
-        Files like .env that aren't in git but an agent's copy needs to run.
-        Supports .env*
+      {/* "Supports .env*" ended the sentence on a bare asterisk, which reads
+          as a footnote marker with no footnote. It is a wildcard, and saying
+          so costs one clause. */}
+      <span className="text-sm leading-snug text-text-4">
+        Files like .env that aren't in git but an agent's copy needs to run. End
+        a name with * to match a family — .env* also brings .env.local.
       </span>
     </div>
   );

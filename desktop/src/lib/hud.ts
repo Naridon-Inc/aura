@@ -136,7 +136,9 @@ export const HUD_IDLE_STATE: HudState = {
   statusText: "Idle",
   lastUser: null,
   lastAgent: null,
-  canSend: true,
+  // Idle means no conversation and no project — there is nowhere for a
+  // message to go. Callers that do have a root override this.
+  canSend: false,
   projects: [],
   activeRoot: null,
   agents: [],

@@ -13,6 +13,7 @@
 import { useCallback, useState } from "react";
 import { api } from "../../lib/api";
 import { Button } from "../ui/button";
+import { askConfirm } from "../ui/ask";
 
 export type BringBackState =
   | { kind: "idle" }
@@ -37,9 +38,11 @@ export function useBringBack(repoRoot: string) {
   const run = useCallback(
     async (symbol: string, relFile: string) => {
       if (
-        !window.confirm(
-          `Bring "${symbol}" in ${relFile} back to its previous saved version?\n\nOnly this one piece changes — the rest of your work stays exactly as it is. Aura saves a copy of the current code first, so you can undo this too.`,
-        )
+        !(await askConfirm({
+          title: `Bring "${symbol}" back to its previous saved version?`,
+          body: `In ${relFile}. Only this one piece changes. The rest of your work stays exactly as it is. Aura saves a copy of the current code first, so you can undo this too.`,
+          confirmLabel: "Bring it back",
+        }))
       ) {
         return;
       }
@@ -82,7 +85,7 @@ export function BringBackResult({
   if (state.kind === "idle") return null;
   if (state.kind === "busy") {
     return (
-      <div className="mt-3 rounded-lg border border-line-soft bg-bg-1 px-3.5 py-2.5 text-[12px] text-text-3">
+      <div className="mt-3 rounded-lg border border-line-soft bg-bg-1 px-3.5 py-2.5 text-sm text-text-3">
         Bringing <span className="font-mono text-text-1">{state.symbol}</span> back…
       </div>
     );
@@ -92,10 +95,10 @@ export function BringBackResult({
   return (
     <div className="mt-3 rounded-lg border border-line-soft bg-bg-1 px-3.5 py-3">
       <div className="flex items-center gap-2.5">
-        <span aria-hidden className="shrink-0 text-[12px] leading-none" style={{ color: fg }}>
+        <span aria-hidden className="shrink-0 text-sm leading-none" style={{ color: fg }}>
           {ok ? "✓" : "✗"}
         </span>
-        <span className="text-[13px] font-semibold text-text-1">
+        <span className="text-base font-semibold text-text-1">
           {ok ? "Brought back to its safe version" : "Couldn't bring it back"}
         </span>
         <Button
@@ -103,12 +106,12 @@ export function BringBackResult({
           variant="ghost"
           size="xs"
           onClick={onDismiss}
-          className="ml-auto text-[11px] text-text-4 hover:text-text-1"
+          className="ml-auto text-xs text-text-4 hover:text-text-1"
         >
           Dismiss
         </Button>
       </div>
-      <div className="mt-1.5 break-words text-[12px] leading-snug text-text-2">
+      <div className="mt-1.5 break-words text-sm leading-snug text-text-2">
         {state.kind === "ok" ? (
           <>
             <span className="font-mono text-text-1">{state.symbol}</span> in{" "}

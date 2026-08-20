@@ -41,10 +41,10 @@ export function SignInScreen({
   return (
     <OnboardingCenter>
       <div className="text-center">
-        <div className="text-[15px] font-semibold text-text-1">
+        <div className="text-lg font-semibold text-text-1">
           Welcome to Aura
         </div>
-        <div className="mt-1.5 text-[12.5px] text-text-3">
+        <div className="mt-1.5 text-base text-text-3">
           Sign in to get started
         </div>
       </div>
@@ -58,10 +58,10 @@ export function SignInScreen({
               type="button"
               disabled={busy && !active}
               onClick={() => (active ? signIn.cancel() : signIn.begin(p.id))}
-              className="group relative h-11 w-full inline-flex items-center justify-center gap-2.5 rounded-md border border-line-soft bg-bg-2 text-[13px] font-medium text-text-1 hover:bg-bg-3 hover:border-line-strong disabled:opacity-40 disabled:pointer-events-none transition-colors"
+              className="group relative h-11 w-full inline-flex items-center justify-center gap-2.5 rounded-md border border-line-soft bg-bg-2 text-base font-medium text-text-1 hover:bg-bg-3 hover:border-line-strong disabled:opacity-40 disabled:pointer-events-none transition-colors"
             >
               <span className="absolute left-3.5 inline-flex items-center">
-                {active ? <AsciiSpinner className="text-[13px] leading-none" /> : p.icon}
+                {active ? <AsciiSpinner className="text-base leading-none" /> : p.icon}
               </span>
               {active ? "Waiting for browser…" : p.label}
             </button>
@@ -70,7 +70,7 @@ export function SignInScreen({
       </div>
 
       {signIn.status === "waiting" && signIn.userCode ? (
-        <div className="mt-4 text-center text-[11.5px] text-text-3">
+        <div className="mt-4 text-center text-sm text-text-3">
           Approve in your browser. Code{" "}
           <span className="font-mono text-text-1 tracking-wider">
             {signIn.userCode}
@@ -87,13 +87,13 @@ export function SignInScreen({
       ) : null}
 
       {signIn.status === "approved" ? (
-        <div className="mt-4 inline-flex items-center gap-1.5 text-[11.5px] text-accent-green">
+        <div className="mt-4 inline-flex items-center gap-1.5 text-sm text-accent-green">
           <CheckIcon /> Signed in
         </div>
       ) : null}
 
       {signIn.status === "error" && signIn.error ? (
-        <div className="mt-4 max-w-[320px] text-center text-[11.5px] text-red">
+        <div className="mt-4 max-w-[320px] text-center text-sm text-red">
           {signIn.error}
         </div>
       ) : null}
@@ -109,7 +109,7 @@ export function SignInScreen({
         Skip for now
       </Button>
 
-      <div className="mt-6 max-w-[320px] text-center text-[10.5px] leading-relaxed text-text-5">
+      <div className="mt-6 max-w-[320px] text-center text-xs leading-relaxed text-text-5">
         By signing in, you agree to our{" "}
         <span className="text-text-4 underline underline-offset-2">
           Terms of Service

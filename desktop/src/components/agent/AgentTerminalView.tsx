@@ -8,13 +8,15 @@ import { Terminal as XTerm } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import { WebLinksAddon } from "@xterm/addon-web-links";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
-import { Play } from "lucide-react";
 import { api } from "../../lib/api";
+import { noteAgentTerminalTitle } from "../../lib/agentTerminalTitles";
 import { handleClipboardKey, mapKeyEvent } from "../../lib/terminalKeymap";
 import { registerFilePathLinks } from "../../lib/terminalLinks";
+import { openExternal } from "../../lib/openExternal";
 import { getSettings } from "../../lib/settingsStore";
 import { playTerminalBell } from "../../lib/terminalBell";
 import { Button } from "../ui/button";
+import { AgentPausedPane } from "./AgentPausedPane";
 
 const THEME = {
   background: "#0a0a0a",
@@ -42,6 +44,15 @@ const THEME = {
 
 type Props = {
   sessionId: string;
+  /** Which CLI this tab runs, its display name, and the checkout it runs in.
+   *  Only the paused pane needs them — it reads the agent's own transcript to
+   *  show what the conversation was about before offering to resume it. */
+  agentId?: string;
+  agentLabel?: string;
+  repoRoot?: string;
+  /** The agent's OWN session id this tab resumes (Claude's JSONL stem), not
+   *  our PTY `sessionId`. */
+  resumeSessionId?: string | null;
   /** Called when this view detects the PTY is gone — either dead at
    *  mount (post-restart / post-auto-update stale tab) or exited
    *  mid-session. The parent owns spawn, so it respawns with the same
@@ -50,6 +61,14 @@ type Props = {
    *  When unset, the view falls back to writing "[agent exited]" into
    *  the buffer (legacy behavior). */
   onAutoRespawn?: () => void | Promise<void>;
+  /** Restart this agent because the user asked — the "Restart" banner and
+   *  the dormant pane's "Start". Separate from `onAutoRespawn` because that
+   *  prop doubles as the *silent* relaunch policy: a detached window
+   *  deliberately withholds it so a dead agent never comes back on its own,
+   *  and that decision used to disable the explicit Restart button too.
+   *  Falls back to `onAutoRespawn` when unset, which is what the in-app
+   *  surface wants — there, one spawn serves both. */
+  onRestart?: () => void | Promise<void>;
   /** Cold/click-to-start. When true and the PTY is dead at mount, the
    *  view shows a "Start agent" affordance instead of silently
    *  respawning — a workspace restore must not relaunch a Claude
@@ -67,11 +86,19 @@ type Props = {
 
 export function AgentTerminalView({
   sessionId,
+  agentId,
+  agentLabel,
+  repoRoot,
+  resumeSessionId,
   dormant,
   dormantCount,
   onStartAll,
   onAutoRespawn,
+  onRestart,
 }: Props) {
+  // What an explicit Start/Restart click runs. Only the automatic paths
+  // below read `onAutoRespawn` directly.
+  const restart = onRestart ?? onAutoRespawn;
   const liveHostRef = useRef<HTMLDivElement>(null);
   const liveTermRef = useRef<XTerm | null>(null);
   // Cold restored tab whose PTY is gone — render the click-to-start
@@ -114,7 +141,12 @@ export function AgentTerminalView({
     const term = new XTerm({
       theme: THEME,
       fontFamily: "ui-monospace, SF Mono, Menlo, monospace",
-      fontSize: 12.5,
+      // 12.5 is this view's own tuning — half a point up on the shell
+      // terminal, to sit closer to chat text. It is a default, though, not
+      // a rule: this is a terminal pane, so a size chosen in Settings →
+      // Terminal applies here too. Anything else and the one surface people
+      // watch all day would be the one that ignored them.
+      fontSize: tprefs.font_size ?? 12.5,
       letterSpacing: 0,
       lineHeight: 1.25,
       cursorBlink: tprefs.cursor_blink,
@@ -127,10 +159,42 @@ export function AgentTerminalView({
     liveTermRef.current = term;
     const fit = new FitAddon();
     term.loadAddon(fit);
-    term.loadAddon(new WebLinksAddon());
+    // The addon's default handler is `window.open`, which a Tauri webview
+    // silently drops — the link underlines on hover and clicking does
+    // nothing, which is exactly what an agent printing a docs/PR URL looks
+    // like today. Route it through the opener plugin instead.
+    term.loadAddon(new WebLinksAddon((_e, uri) => void openExternal(uri)));
     registerFilePathLinks(term, () => repoRootRef.current);
+
+    // What the agent calls itself, forwarded to the tab strip.
+    //
+    // Claude Code sets the terminal title on startup and rewrites it as the
+    // session gets a subject; xterm parses OSC 0/2 already and hands us the
+    // string. We were dropping it on the floor, which is why every agent tab
+    // read "Claude Code" no matter what the agent was doing in it.
+    //
+    // The listener is not disposed by hand: it is bound to this terminal, and
+    // `term.dispose()` in this effect's cleanup takes it with it. What is NOT
+    // forgotten on cleanup is the title itself — this view unmounts every time
+    // you switch tabs, and dropping the title there would snap the pill back to
+    // "Claude Code" on the way past. The tab's own close does that instead
+    // (`clearAgentTerminalTitle`, in editorStore's `closeAgent`).
+    term.onTitleChange((title) => noteAgentTerminalTitle(sessionId, title));
+
     term.open(host);
     fit.fit();
+
+    // Take the keyboard the moment the terminal is on screen, the same way
+    // the plain shell does on tab switch. Without this an agent could put a
+    // question on screen — pi's "Trust project folder?", Claude's permission
+    // prompts — and every key you pressed went nowhere, because focus was
+    // still on whatever button started the session. Nothing looked broken;
+    // the agent just sat there waiting while you typed at it.
+    try {
+      term.focus();
+    } catch {
+      /* noop */
+    }
 
     // Snapshot the session's repo_root once so the link provider can
     // resolve relative paths against the agent's cwd. Best-effort — if
@@ -389,12 +453,12 @@ export function AgentTerminalView({
   }, [sessionId]);
 
   const handleStart = async () => {
-    if (!onAutoRespawn || starting || startingAll) return;
+    if (!restart || starting || startingAll) return;
     setStarting(true);
     try {
       // Spawns a fresh PTY upstream; replaceAgent swaps tab.sessionId so
       // this view remounts live (dormant cleared) and the overlay drops.
-      await onAutoRespawn();
+      await restart();
     } catch {
       // Spawn failed — let the user retry rather than stranding the tab.
       setStarting(false);
@@ -424,43 +488,18 @@ export function AgentTerminalView({
         onDrop={onDrop}
       />
       {showStart && (
-        <div
-          className="absolute inset-0 z-10 flex items-center justify-center"
-          style={{ background: "var(--color-bg-content)" }}
-        >
-          <div className="flex max-w-[320px] flex-col items-center gap-3 px-6 text-center">
-            <div className="flex h-10 w-10 items-center justify-center rounded-full border border-line-soft text-text-3">
-              <Play className="h-4 w-4" />
-            </div>
-            <div className="text-[13px] font-medium text-text-1">
-              Agent paused
-            </div>
-            <p className="text-[11.5px] leading-relaxed text-text-3">
-              Restored from your last session. Reopening a workspace no longer
-              relaunches agents automatically — start it when you need it.
-            </p>
-            <div className="flex items-center gap-2">
-              <Button
-                variant="accentSoft"
-                size="sm"
-                onClick={handleStart}
-                disabled={starting || startingAll || !onAutoRespawn}
-              >
-                {starting ? "Starting…" : "Start agent"}
-              </Button>
-              {onStartAll && (dormantCount ?? 0) > 1 && (
-                <Button
-                  variant="secondary"
-                  size="sm"
-                  onClick={handleStartAll}
-                  disabled={starting || startingAll}
-                >
-                  {startingAll ? "Starting…" : `Start all (${dormantCount})`}
-                </Button>
-              )}
-            </div>
-          </div>
-        </div>
+        <AgentPausedPane
+          agentId={agentId}
+          agentLabel={agentLabel}
+          repoRoot={repoRoot}
+          resumeSessionId={resumeSessionId}
+          dormantCount={dormantCount}
+          starting={starting}
+          startingAll={startingAll}
+          canStart={Boolean(restart)}
+          onStart={handleStart}
+          onStartAll={onStartAll ? handleStartAll : undefined}
+        />
       )}
       {exited && !showStart && (
         <div className="absolute inset-x-0 bottom-0 z-10 flex items-center gap-3 border-t border-line-soft bg-bg-1/95 px-4 py-2.5 backdrop-blur-sm">
@@ -470,16 +509,16 @@ export function AgentTerminalView({
             aria-hidden
           />
           <div className="min-w-0 flex-1">
-            <div className="text-[12px] font-medium text-text-2">Agent exited</div>
-            <div className="truncate text-[11px] text-text-4">
-              The session ended — Aura won't relaunch it automatically.
+            <div className="text-sm font-medium text-text-2">Agent exited</div>
+            <div className="truncate text-xs text-text-4">
+              The session ended. Aura won't relaunch it automatically.
             </div>
           </div>
           <Button
             variant="accentSoft"
             size="sm"
             onClick={handleStart}
-            disabled={starting || !onAutoRespawn}
+            disabled={starting || !restart}
           >
             {starting ? "Restarting…" : "Restart"}
           </Button>

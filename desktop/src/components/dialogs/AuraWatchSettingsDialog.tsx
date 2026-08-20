@@ -13,8 +13,9 @@ import {
   type WatchMode,
   type WatchStatus,
 } from "../../lib/api";
-import { PaneHeader, Section } from "../settings/kit";
+import { PaneIntro, Section } from "../settings/kit";
 import { AgentIcon } from "../agent/AgentIcon";
+import { ErrorNote, LoadingState } from "../ui/state";
 
 // localStorage key for the user's explicit "which AI fills in reasons"
 // pick. Value is the selector passed to aurawatchSetBackend:
@@ -28,33 +29,81 @@ const MODE_LABEL: Record<WatchMode, string> = {
   autonomous: "Fill it in for me",
 };
 
+/** The mode this machine last chose, read without a round trip.
+ *
+ *  App reads exactly this key to decide whether to watch at all, defaulting
+ *  to `nudge` — so it is already the answer, and asking the backend only
+ *  confirms it. Seeding from it is what stops the Mode row rendering with
+ *  nothing selected for the length of a Tauri call: three buttons, none of
+ *  them marked, on the one screen whose question is "is Aura watching?". */
+function storedMode(): WatchMode {
+  const raw = localStorage.getItem("aura.aurawatch.mode");
+  return raw === "off" || raw === "nudge" || raw === "autonomous"
+    ? raw
+    : "nudge";
+}
+
 export function AuraWatchPanel({ repoRoot }: { repoRoot: string }) {
   const [status, setStatus] = useState<WatchStatus | null>(null);
+  const [mode, setModeState] = useState<WatchMode>(storedMode);
   const [detection, setDetection] = useState<BackendDetection | null>(null);
+  /** Still probing. Distinct from "probed, found nothing": the list below is
+   *  a claim about this machine, and for the first moment of this pane it was
+   *  making that claim before anything had been looked at — no agent rows at
+   *  all, every key a hollow circle, then Claude Code · active a beat later. */
+  const [detecting, setDetecting] = useState(true);
+  /** The probe itself failed. Was swallowed, which left the same screen as
+   *  "nothing available" — an answer, and the wrong one. */
+  const [detectError, setDetectError] = useState<string | null>(null);
   const [pref, setPref] = useState<string | null>(() =>
     localStorage.getItem(PREF_KEY),
   );
   const [busy, setBusy] = useState(false);
+  const [attempt, setAttempt] = useState(0);
 
   useEffect(() => {
+    let alive = true;
     setBusy(true);
+    setDetecting(true);
+    setDetectError(null);
     const saved = localStorage.getItem(PREF_KEY);
     // Re-assert the persisted pick on the live session, then read back
     // status + detection. If no pick is saved we just read state.
     const prime = saved
       ? api.aurawatchSetBackend(repoRoot, saved).catch(() => null)
       : Promise.resolve(null);
-    prime
-      .then(() =>
-        Promise.all([api.aurawatchStatus(repoRoot), api.aurawatchDetect()]),
-      )
-      .then(([s, d]) => {
-        setStatus(s);
-        setDetection(d);
-      })
-      .catch(() => {})
-      .finally(() => setBusy(false));
-  }, [repoRoot]);
+    // Two independent reads. They were one `Promise.all` under one catch, so
+    // a failed probe also threw away the mode — and the catch was empty, so
+    // the pane just sat there looking loaded.
+    void prime.then(() => {
+      const s = api
+        .aurawatchStatus(repoRoot)
+        .then((r) => {
+          if (alive && r) {
+            setStatus(r);
+            setModeState(r.mode);
+          }
+        })
+        .catch(() => {});
+      const d = api
+        .aurawatchDetect()
+        .then((r) => {
+          if (alive) setDetection(r);
+        })
+        .catch((e) => {
+          if (alive) setDetectError(String(e?.message ?? e));
+        })
+        .finally(() => {
+          if (alive) setDetecting(false);
+        });
+      return Promise.all([s, d]).then(() => {
+        if (alive) setBusy(false);
+      });
+    });
+    return () => {
+      alive = false;
+    };
+  }, [repoRoot, attempt]);
 
   // Pick which AI fills in reasons. Persist the selector and ask the
   // backend to re-resolve. Re-detect after so the "active" marker moves
@@ -78,19 +127,27 @@ export function AuraWatchPanel({ repoRoot }: { repoRoot: string }) {
     }
   }
 
-  async function setMode(mode: WatchMode) {
+  async function setMode(next: WatchMode) {
+    // Shown before it is confirmed: this is a three-way switch, and a switch
+    // that doesn't move under the finger reads as broken. The backend is the
+    // authority and overwrites this the moment it answers.
+    const previous = mode;
+    setModeState(next);
     setBusy(true);
     try {
-      const s = await api.aurawatchSetMode(repoRoot, mode);
+      const s = await api.aurawatchSetMode(repoRoot, next);
       setStatus(s);
-      localStorage.setItem("aura.aurawatch.mode", mode);
+      setModeState(s.mode);
+      localStorage.setItem("aura.aurawatch.mode", next);
       // Let App resync its own auraWatchMode (footer chip + lifecycle
       // effect) now that Settings — not a dialog — owns this surface.
       window.dispatchEvent(
-        new CustomEvent("aura:aurawatch-mode", { detail: { mode } }),
+        new CustomEvent("aura:aurawatch-mode", { detail: { mode: next } }),
       );
     } catch {
-      // Display surfaced via the detection panel — silent here.
+      // Put the switch back rather than leave it showing a setting that was
+      // never applied.
+      setModeState(previous);
     } finally {
       setBusy(false);
     }
@@ -98,10 +155,7 @@ export function AuraWatchPanel({ repoRoot }: { repoRoot: string }) {
 
   return (
     <>
-      <PaneHeader
-        title="Change reasons"
-        subtitle="Every change should carry the reason behind it — the “why”. Aura watches quietly in the background and, when a change lands without one, it either reminds you or fills it in for you. It only reads what's already on your machine — it never installs or starts anything."
-      />
+      <PaneIntro text="Every change should carry the reason behind it, the “why”. Aura watches quietly in the background and, when a change lands without one, it either reminds you or fills it in for you. It only reads what's already on your machine. It never installs or starts anything." />
       <Section title="Mode">
         <div className="py-3">
           <div className="flex flex-wrap items-center gap-1">
@@ -111,22 +165,22 @@ export function AuraWatchPanel({ repoRoot }: { repoRoot: string }) {
                 type="button"
                 disabled={busy}
                 onClick={() => setMode(m)}
-                className={`h-7 rounded-md px-2.5 text-[11.5px] transition-colors ${
-                  status?.mode === m
+                className={`h-7 rounded-md px-2.5 text-sm transition-colors ${
+                  mode === m
                     ? "bg-accent/12 text-text-1"
-                    : "text-text-3 hover:bg-bg-2 hover:text-text-1"
+                    : "text-text-3 hover:bg-state-hover hover:text-text-1"
                 }`}
               >
                 {MODE_LABEL[m]}
               </button>
             ))}
           </div>
-          <p className="mt-2 text-[11px] leading-relaxed text-text-4">
-            <strong className="text-text-3">Off</strong> — Aura won't watch
+          <p className="mt-2 text-xs leading-relaxed text-text-4">
+            <strong className="text-text-3">Off</strong>. Aura won't watch
             for missing reasons.{" "}
-            <strong className="text-text-3">Remind me</strong> — when a change
+            <strong className="text-text-3">Remind me</strong>. When a change
             lands without a reason, a gentle card appears so you can add one.{" "}
-            <strong className="text-text-3">Fill it in for me</strong> — Aura
+            <strong className="text-text-3">Fill it in for me</strong>. Aura
             writes a best-guess reason for you, so nothing is ever left blank.
           </p>
         </div>
@@ -134,6 +188,29 @@ export function AuraWatchPanel({ repoRoot }: { repoRoot: string }) {
 
       <Section title="AI available to fill in reasons">
         <div className="py-3">
+          {detecting ? (
+            <LoadingState
+              size="sm"
+              label="Looking for what's already on this machine…"
+              className="px-0 py-2"
+            />
+          ) : detectError ? (
+            // Not the same screen as "nothing here can do it", which is what
+            // an empty list says and what a swallowed failure used to show.
+            <ErrorNote className="flex flex-wrap items-center gap-2">
+              <span>Aura couldn’t check what’s on this machine.</span>
+              <span className="font-mono text-xs opacity-80">
+                {detectError}
+              </span>
+              <button
+                type="button"
+                className="ml-auto rounded px-2 py-0.5 text-xs underline decoration-red/50 underline-offset-2 hover:decoration-red"
+                onClick={() => setAttempt((n) => n + 1)}
+              >
+                Try again
+              </button>
+            </ErrorNote>
+          ) : (
           <div className="space-y-1.5">
             {/* Installed coding agents you already have — the easiest
                 source: no key, no ollama, they're already signed in. */}
@@ -141,7 +218,7 @@ export function AuraWatchPanel({ repoRoot }: { repoRoot: string }) {
               <BackendRow
                 key={`agent:${a.kind}`}
                 label={a.label}
-                hint="already installed — no setup"
+                hint="already installed. No setup"
                 ok
                 active={
                   detection?.active === "agent_cli" &&
@@ -197,12 +274,13 @@ export function AuraWatchPanel({ repoRoot }: { repoRoot: string }) {
               disabled={busy}
             />
           </div>
-          <p className="mt-2.5 text-[11px] leading-relaxed text-text-4">
-            Aura can use a coding agent you already have installed — like Claude
-            Code, Gemini, or Codex — to write the reason for you. No key, no
+          )}
+          <p className="mt-2.5 text-xs leading-relaxed text-text-4">
+            Aura can use a coding agent you already have installed — Claude
+            Code, Gemini or Codex — to write the reason for you. No key, no
             extra setup: they're already signed in. You can also use a local
             model (Ollama) or an API key. Pick one above to make it the one Aura
-            uses. Aura never installs or starts anything — it only runs what's
+            uses. Aura never installs or starts anything. It only runs what's
             already on your machine. With nothing available, reminders still
             work; only auto-fill needs an AI.
           </p>
@@ -243,7 +321,7 @@ function BackendRow({
   const inner = (
     <>
       {agentId ? (
-        <AgentIcon agentId={agentId} label={label} size={15} active={active} />
+        <AgentIcon agentId={agentId} label={label} size={15} />
       ) : (
         <span className={ok ? "text-accent-green" : "text-text-5"}>
           {ok ? "✓" : "○"}
@@ -251,10 +329,10 @@ function BackendRow({
       )}
       <span className={ok ? "text-text-2" : "text-text-4"}>{label}</span>
       {hint && ok && (
-        <span className="text-[10px] text-text-5">· {hint}</span>
+        <span className="text-2xs text-text-5">· {hint}</span>
       )}
       {active && (
-        <span className="ml-auto text-[10px] uppercase tracking-wider text-accent">
+        <span className="ml-auto text-2xs text-accent">
           active
         </span>
       )}
@@ -262,7 +340,7 @@ function BackendRow({
   );
   if (!selectable) {
     return (
-      <div className="flex items-center gap-2 text-[11.5px] px-2 py-1">
+      <div className="flex items-center gap-2 text-sm px-2 py-1">
         {inner}
       </div>
     );
@@ -272,8 +350,8 @@ function BackendRow({
       type="button"
       disabled={disabled}
       onClick={onSelect}
-      className={`flex w-full items-center gap-2 rounded-md px-2 py-1 text-left text-[11.5px] transition-colors ${
-        active ? "bg-accent/12" : "hover:bg-bg-2"
+      className={`flex w-full items-center gap-2 rounded-md px-2 py-1 text-left text-sm transition-colors ${
+        active ? "bg-accent/12" : "hover:bg-state-hover"
       }`}
     >
       {inner}
@@ -292,10 +370,10 @@ function Stat({
 }) {
   return (
     <div className="flex flex-col items-start">
-      <span className="text-text-1 text-[15px] font-mono">
+      <span className="text-text-1 text-lg font-mono">
         {value === 0 ? empty : value}
       </span>
-      <span className="text-text-5 text-[10px] uppercase tracking-wider">
+      <span className="text-text-4 text-2xs">
         {label}
       </span>
     </div>

@@ -172,7 +172,7 @@ export function SessionTranscript({
       <div className="flex min-h-0 flex-1 flex-col">
         {narrow ? (
           <div className="flex shrink-0 items-center justify-between border-b border-line-soft px-3 py-1.5">
-            <span className="text-[11px] text-text-4">
+            <span className="text-xs text-text-4">
               {visible.length} of {items.length} steps
             </span>
             <Button
@@ -180,7 +180,7 @@ export function SessionTranscript({
               size="xs"
               type="button"
               onClick={() => setPanelOpen((v) => !v)}
-              className="text-[11px] text-text-3 hover:text-text-1"
+              className="text-xs text-text-3 hover:text-text-1"
             >
               Filters
             </Button>
@@ -188,19 +188,19 @@ export function SessionTranscript({
         ) : null}
         <div ref={scrollRef} className="min-h-0 flex-1 overflow-y-auto">
           {loading ? (
-            <div className="px-4 py-4 text-[12px] text-text-4">Loading…</div>
+            <div className="px-4 py-4 text-sm text-text-4">Loading…</div>
           ) : error ? (
-            <div className="px-4 py-4 text-[12px] text-text-3">
+            <div className="px-4 py-4 text-sm text-text-3">
               Couldn&rsquo;t load this session.
-              <span className="mt-1 block font-mono text-[11px] text-text-4">{error}</span>
+              <span className="mt-1 block font-mono text-xs text-text-4">{error}</span>
             </div>
           ) : items.length === 0 ? (
-            <div className="flex h-full items-center justify-center px-6 text-center text-[12px] text-text-4">
+            <div className="flex h-full items-center justify-center px-6 text-center text-sm text-text-4">
               Nothing was recorded for this run.
             </div>
           ) : visible.length === 0 ? (
-            <div className="flex h-full items-center justify-center px-6 text-center text-[12px] text-text-4">
-              Everything&rsquo;s hidden — turn a filter back on, on the right.
+            <div className="flex h-full items-center justify-center px-6 text-center text-sm text-text-4">
+              Everything&rsquo;s hidden. Turn a filter back on, on the right.
             </div>
           ) : (
             <div className="mx-auto flex max-w-[780px] flex-col px-4 py-5">

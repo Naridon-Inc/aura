@@ -71,7 +71,7 @@ export function InstructionsPane({
     <PaneScroll>
       <PaneIntro
         title="Instructions"
-        blurb="Standing rules every agent reads before it works on your project. Write them in plain English — they travel with the project, so your whole team's agents follow the same rules."
+        blurb="Standing rules every agent reads before it works on your project. Write them in plain English. They travel with the project, so your whole team's agents follow the same rules."
       />
 
       {/* Add a rule — the one primary action on this pane. */}
@@ -100,9 +100,9 @@ export function InstructionsPane({
         <PaneSpinner label="Loading your rules…" />
       ) : rules.length === 0 ? (
         <EmptyHint
-          icon={<BookOpen size={22} />}
+          icon={BookOpen}
           title="No house rules yet"
-          body="Add your first one above. A good rule is short and specific — the agent will follow it on every task."
+          body="Add your first one above. A good rule is short and specific. The agent will follow it on every task."
         />
       ) : (
         <Card>
@@ -117,7 +117,7 @@ export function InstructionsPane({
                 className="mt-1.5 h-1.5 w-1.5 shrink-0 rounded-full"
                 style={{ background: "var(--color-accent)" }}
               />
-              <div className="min-w-0 flex-1 text-[12.5px] leading-relaxed text-text-1">
+              <div className="min-w-0 flex-1 text-base leading-relaxed text-text-1">
                 {entry.content}
               </div>
               <button
@@ -137,20 +137,20 @@ export function InstructionsPane({
           honest and complete without inviting edits to machine-kept notes. */}
       {others.length > 0 ? (
         <div className="mt-6">
-          <div className="mb-2 text-[11px] font-medium uppercase tracking-[0.07em] text-text-4">
+          <div className="section-label mb-2">
             Also known about this project
           </div>
           <div className="space-y-3">
             {others.map((s) => (
               <Card key={s.name} className="px-3.5 py-3">
-                <div className="mb-1.5 text-[11.5px] font-medium capitalize text-text-2">
+                <div className="mb-1.5 text-sm font-medium capitalize text-text-2">
                   {s.name}
                 </div>
                 <ul className="space-y-1">
                   {s.entries.map((e) => (
                     <li
                       key={e.id}
-                      className="text-[12px] leading-relaxed text-text-3"
+                      className="text-sm leading-relaxed text-text-3"
                     >
                       {e.content}
                     </li>

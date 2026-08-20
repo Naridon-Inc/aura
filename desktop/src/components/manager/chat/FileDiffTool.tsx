@@ -23,9 +23,9 @@ import { configureMonacoDiagnostics } from "../../../lib/monacoDiagnostics";
 import { auraThemeName, ensureAuraThemes } from "../../../lib/monacoTheme";
 import { installMonacoEnvironment } from "../../../lib/monacoEnv";
 import { useResolvedTheme } from "../../../lib/themeStore";
-import { basename } from "./toolDescribe";
 import { StatusPip } from "./StatusLine";
 import type { ToolResult, ToolStatus } from "./types";
+import { basename } from "../../../lib/paths";
 
 installMonacoEnvironment();
 
@@ -154,7 +154,7 @@ export function FileDiffTool({
           </span>
         )}
         <span
-          className="shrink-0 tabular-nums text-[10.5px] flex items-center gap-1.5"
+          className="shrink-0 tabular-nums text-xs flex items-center gap-1.5"
           style={{ fontFamily: "var(--font-mono)" }}
         >
           {stats.added > 0 && (
@@ -173,7 +173,7 @@ export function FileDiffTool({
   // collapsible) above the Monaco side-by-side panel.
   return (
     <div
-      className="group overflow-hidden text-[12px]"
+      className="group overflow-hidden text-sm"
       style={{
         background: "var(--color-bg-1)",
         border: "1px solid var(--color-line)",
@@ -189,7 +189,7 @@ export function FileDiffTool({
         <StatusPip status={status} />
         <span className="aura-block-label shrink-0">{verb}</span>
         <span
-          className="min-w-0 truncate font-mono text-[11px]"
+          className="min-w-0 truncate font-mono text-xs"
           style={{ color: "var(--color-text-1)" }}
         >
           {label}
@@ -206,7 +206,7 @@ export function FileDiffTool({
           </span>
         )}
         <span
-          className="ml-auto shrink-0 tabular-nums text-[10.5px] flex items-center gap-1.5"
+          className="ml-auto shrink-0 tabular-nums text-xs flex items-center gap-1.5"
           style={{ fontFamily: "var(--font-mono)" }}
         >
           {stats.added > 0 && (
@@ -263,7 +263,7 @@ export function FileDiffTool({
 
 function DiffLoading() {
   return (
-    <div className="h-full w-full flex items-center justify-center gap-1.5 text-[11px] text-text-4">
+    <div className="h-full w-full flex items-center justify-center gap-1.5 text-xs text-text-4">
       <AsciiSpinner />
       Loading the changes…
     </div>

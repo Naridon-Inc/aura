@@ -35,6 +35,7 @@ use std::time::Duration;
 use colored::Colorize;
 use serde_json::json;
 
+use crate::push_credential;
 use crate::{cloud_http_client, recall_cloud_creds, recall_get, recall_post};
 
 /// Env var carrying the runner's own (RunnerAuth) token.
@@ -141,6 +142,15 @@ fn heartbeat(
     let _ = recall_post(client, &url, token, &body);
 }
 
+/// How a heartbeat says "this box can't sign its agent in".
+///
+/// The registry stores three things a runner reports — status, current task,
+/// version — and none of them has room for "healthy but unable to work". Rather
+/// than migrate the cloud for one flag, the note rides in on `current_task`
+/// behind a lead phrase the desktop matches (`CloudRunnerPanel.blockedNote`).
+/// Keep the two in step: the phrase is the whole contract.
+const AUTH_NOTE_LEAD: &str = "Needs sign-in";
+
 /// Run one `aura <args>` subprocess, streaming its output to our own
 /// stdout/stderr so the runner's log carries the agent transcript. Failures
 /// are logged, never fatal — one bad cycle shouldn't kill the supervisor.
@@ -184,10 +194,18 @@ fn work_cycle(bin: &Path, repo_root: &Path, opts: &ServeOpts) {
     run_sub(bin, repo_root, &pull);
 
     // 2. Drain the whole ready set (executes the agent, commits its work).
+    //    `--place cloud` is this box declaring what it is: it takes the nodes
+    //    marked for a machine in the cloud plus every unplaced one, and leaves
+    //    anything pinned `local` for the laptop that pinned it. Without the
+    //    flag a runner would happily claim work someone kept back because it
+    //    needs their keychain or their eyes.
     run_sub(
         bin,
         repo_root,
-        &["crew", "run", "--agent", &opts.agent, "--lease-secs", &lease, "--max", "0"],
+        &[
+            "crew", "run", "--agent", &opts.agent, "--lease-secs", &lease, "--max", "0",
+            "--place", "cloud",
+        ],
     );
 
     // 3. Push task status back up so the cloud graph (and the phone) reflect it.
@@ -201,10 +219,26 @@ fn work_cycle(bin: &Path, repo_root: &Path, opts: &ServeOpts) {
     if git {
         run_sub(bin, repo_root, &["crew", "sync", "--push-only"]);
     } else if git_has_remote(repo_root) {
-        match Command::new("git").args(["push"]).current_dir(repo_root).status() {
-            Ok(s) if s.success() => {}
-            Ok(_) => eprintln!("{} git push skipped (no upstream/creds)", "[runner]".dimmed()),
-            Err(_) => {}
+        // Report git's own reason. This used to print "skipped (no
+        // upstream/creds)" for *every* non-zero exit, which is a guess — and on
+        // the runner box it was the wrong one: the push was rejected as
+        // non-fast-forward, and the log sent whoever read it off to check
+        // credentials that were fine. A push that didn't happen is worth a line;
+        // a line naming the wrong cause is worse than none.
+        match Command::new("git").args(["push"]).current_dir(repo_root).output() {
+            Ok(o) if o.status.success() => {}
+            Ok(o) => {
+                let why = String::from_utf8_lossy(&o.stderr);
+                let line = why
+                    .lines()
+                    .map(str::trim)
+                    .find(|l| {
+                        !l.is_empty() && !l.starts_with("hint:") && !l.starts_with("To ")
+                    })
+                    .unwrap_or("git push failed");
+                eprintln!("{} git push failed: {}", "[runner]".dimmed(), line.dimmed());
+            }
+            Err(e) => eprintln!("{} couldn't run git push: {e}", "[runner]".dimmed()),
         }
     }
 }
@@ -286,6 +320,7 @@ fn pending_project_slugs(
 /// kill the whole multi-project cycle — the next cycle retries).
 fn ensure_workspace(bin: &Path, root: &Path, full_name: &str) -> Option<PathBuf> {
     let dir = root.join(full_name.replace('/', "__"));
+    let url = format!("https://github.com/{full_name}.git");
 
     if !dir.join(".git").exists() {
         // A leftover dir from a half-finished clone would make `git clone` fail
@@ -296,14 +331,18 @@ fn ensure_workspace(bin: &Path, root: &Path, full_name: &str) -> Option<PathBuf>
         if let Some(parent) = dir.parent() {
             let _ = std::fs::create_dir_all(parent);
         }
-        let url = format!("https://github.com/{full_name}.git");
         eprintln!(
             "{} cloning {} → {}",
             "[runner]".dimmed(),
             full_name.cyan(),
             dir.display()
         );
+        // The clone is the FIRST thing that needs a credential, and it used to
+        // be the one git call that named none at all — inheriting whatever the
+        // box happened to have. When this box knows which member it is acting
+        // for, the clone spends that member's own short-lived token.
         let ok = Command::new("git")
+            .args(member_git_args(bin))
             .args(["clone", &url])
             .arg(&dir)
             .status()
@@ -320,24 +359,92 @@ fn ensure_workspace(bin: &Path, root: &Path, full_name: &str) -> Option<PathBuf>
         // Best-effort refresh of remote refs; the crew run checks out / creates
         // its own branch, so we never force the working tree here.
         let _ = Command::new("git")
+            .args(member_git_args(bin))
             .args(["fetch", "--all", "--prune"])
             .current_dir(&dir)
             .status();
     }
 
-    // Idempotent: identity + hooks. `git config` is a no-op if already set to
-    // the same value; `aura enable` is safe to re-run.
-    let _ = Command::new("git")
-        .args(["config", "user.name", "Aura Runner"])
-        .current_dir(&dir)
-        .status();
-    let _ = Command::new("git")
-        .args(["config", "user.email", "runner@auravcs.com"])
-        .current_dir(&dir)
-        .status();
+    // Idempotent: identity, credential and hooks. `git config` is a no-op if
+    // already set to the same value; `aura enable` is safe to re-run.
+    attach_member_identity(&dir, bin, &url);
     let _ = Command::new(bin).args(["enable"]).current_dir(&dir).status();
 
     Some(dir)
+}
+
+/// The `-c` arguments that make one git invocation spend the acting member's
+/// own credential, or nothing at all when this box has not been told who it is
+/// acting for.
+///
+/// Empty rather than a fallback on purpose. Injecting the reset half of
+/// [`push_credential::git_config_args`] with no member behind it would clear
+/// whatever credential the box does have and break a push that works today.
+fn member_git_args(bin: &Path) -> Vec<String> {
+    if push_credential::acting_member().is_some() {
+        push_credential::git_config_args(bin)
+    } else {
+        Vec::new()
+    }
+}
+
+/// Give a checkout the acting member's credential and the acting member's
+/// commit identity, or leave it on the old shared-box behaviour and say so.
+///
+/// The two travel together deliberately. A per-member token with a box-wide
+/// author writes commits that push fine and belong to nobody, which is the
+/// half-fix that made the original problem hard to see: the work was on GitHub,
+/// under "Aura Runner", and no-one could tell whose it was.
+fn attach_member_identity(dir: &Path, bin: &Path, remote: &str) {
+    match push_credential::attach_to_checkout(dir, bin, remote) {
+        push_credential::Attached::Member { login, email } => {
+            eprintln!(
+                "{} pushing as {} <{}> on a short-lived token minted for them",
+                "[runner]".dimmed(),
+                login.cyan(),
+                email.dimmed()
+            );
+        }
+        push_credential::Attached::NoMember => {
+            legacy_shared_identity(dir);
+        }
+        push_credential::Attached::Refused(why) => {
+            eprintln!(
+                "{} no per-member push credential ({}) — commits will land under the shared runner identity",
+                "⚠".yellow(),
+                why
+            );
+            legacy_shared_identity(dir);
+        }
+    }
+}
+
+/// What every commit on a shared box used to be attributed to. Kept as the
+/// fallback so a box that has not been told which member it serves keeps
+/// working exactly as it did — it just stops being the default.
+fn legacy_shared_identity(dir: &Path) {
+    let _ = Command::new("git")
+        .args(["config", "user.name", "Aura Runner"])
+        .current_dir(dir)
+        .status();
+    let _ = Command::new("git")
+        .args(["config", "user.email", "runner@auravcs.com"])
+        .current_dir(dir)
+        .status();
+}
+
+/// The `origin` URL of a checkout — what a credential gets scoped against.
+fn origin_url(repo_root: &Path) -> Option<String> {
+    let out = Command::new("git")
+        .args(["remote", "get-url", "origin"])
+        .current_dir(repo_root)
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let url = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    (!url.is_empty()).then_some(url)
 }
 
 /// Multi-project work cycle: find every project with pending cloud work and
@@ -408,6 +515,32 @@ fn git_has_remote(repo_root: &Path) -> bool {
 }
 
 /// `aura runner serve` — the supervise loop.
+/// Where per-project workspaces go when nobody said.
+///
+/// The old answer was "beside the runner's own checkout", which is right when
+/// the runner was started from one — but a systemd unit's working directory is
+/// whatever the unit says, and if that isn't a checkout the `parent()` walk
+/// lands somewhere arbitrary. It produced `/workspaces`, at the filesystem
+/// root, and every clone then failed with a permission error that named git
+/// rather than the real cause.
+///
+/// So: beside the checkout when there genuinely is one, and otherwise under the
+/// home of the user the runner runs as — which exists and is writable by
+/// construction.
+fn default_workspaces_root(repo_root: &Path) -> PathBuf {
+    if repo_root.join(".git").exists() {
+        if let Some(parent) = repo_root.parent().filter(|p| !p.as_os_str().is_empty()) {
+            return parent.join("workspaces");
+        }
+    }
+    match std::env::var("HOME") {
+        Ok(h) if !h.trim().is_empty() => PathBuf::from(h).join("aura-workspaces"),
+        // No HOME at all is pathological, but falling back to the checkout is
+        // still better than a path anchored at `/`.
+        _ => repo_root.join("workspaces"),
+    }
+}
+
 pub fn serve(repo_root: &Path, opts: &ServeOpts) -> Result<(), Box<dyn std::error::Error>> {
     let client = cloud_http_client();
     let base = cloud_base();
@@ -423,13 +556,17 @@ pub fn serve(repo_root: &Path, opts: &ServeOpts) -> Result<(), Box<dyn std::erro
             .clone()
             .map(PathBuf::from)
             .or_else(|| std::env::var("AURA_RUNNER_WORKSPACES").ok().map(PathBuf::from))
-            .unwrap_or_else(|| {
-                repo_root
-                    .parent()
-                    .map(|p| p.join("workspaces"))
-                    .unwrap_or_else(|| repo_root.join("workspaces"))
-            });
-        let _ = std::fs::create_dir_all(&root);
+            .unwrap_or_else(|| default_workspaces_root(repo_root));
+        // Naming the directory matters more than the errno: a runner that can't
+        // create this fails every clone afterwards with "could not create
+        // leading directories", which reads like a git problem.
+        if let Err(e) = std::fs::create_dir_all(&root) {
+            eprintln!(
+                "[runner] can't use {} for project workspaces: {e}\n\
+                 [runner] set AURA_RUNNER_WORKSPACES (or --workspaces-root) to a writable directory",
+                root.display()
+            );
+        }
         root
     } else {
         repo_root.to_path_buf()
@@ -480,6 +617,24 @@ pub fn serve(repo_root: &Path, opts: &ServeOpts) -> Result<(), Box<dyn std::erro
         }
     };
 
+    // Single-repo mode never goes through `ensure_workspace`, so the one
+    // checkout it drains would keep the shared credential and the shared author
+    // while every auto-cloned workspace got the member's own. Same wiring, same
+    // place in the cycle — a box must not push as two different people
+    // depending on how it was started.
+    if !multi {
+        if push_credential::acting_member().is_some() {
+            match origin_url(repo_root) {
+                Some(remote) => attach_member_identity(repo_root, &bin, &remote),
+                None => eprintln!(
+                    "{} this checkout has no `origin`, so there is no remote to mint a \
+                     per-member credential for",
+                    "⚠".yellow()
+                ),
+            }
+        }
+    }
+
     println!(
         "{} serving {} · agent={} · poll={}s · {}{}",
         "•".cyan(),
@@ -497,6 +652,45 @@ pub fn serve(repo_root: &Path, opts: &ServeOpts) -> Result<(), Box<dyn std::erro
         if opts.once { " · once" } else { "" }
     );
 
+    // Can this box actually run the agent it just announced?
+    //
+    // An unauthenticated runner is the worst shape of broken: it registers, it
+    // heartbeats `idle`, and then it fails every task it claims with "Not
+    // logged in · Please run /login" — a sentence that lands on the task row
+    // and nowhere else. The board shows a healthy machine above a growing pile
+    // of failed work, and nothing on either screen connects the two.
+    //
+    // So ask once, before claiming anything, and put the answer in both places
+    // that matter: the operator's log, with the exact commands that fix it, and
+    // the heartbeat — which is the only channel the app reads, so it's the only
+    // way "this machine can't run Claude" reaches the person looking at it.
+    let auth_note: Option<String> = match crate::runner_creds::auth_for(&opts.agent) {
+        crate::runner_creds::AgentAuth::Ready(how) => {
+            println!("{} {} can sign in — {}", "✓".green(), opts.agent.bold(), how.dimmed());
+            None
+        }
+        crate::runner_creds::AgentAuth::Undetermined(why) => {
+            eprintln!("{} couldn't confirm {} can sign in: {}", "·".dimmed(), opts.agent, why.dimmed());
+            None
+        }
+        crate::runner_creds::AgentAuth::Missing => {
+            eprintln!(
+                "\n{} this box has no credential for {} — every task it claims will fail with \"Not logged in\".\n{}\n",
+                "⚠".yellow().bold(),
+                opts.agent.bold(),
+                crate::runner_creds::fix_hint(&opts.agent)
+            );
+            // Short, and in the words the app shows verbatim on the machine
+            // row. The leading phrase is a contract, not a sentence we happened
+            // to write: `CloudRunnerPanel.blockedNote` matches on it to decide
+            // that this row's status is the problem rather than "Ready".
+            Some(format!(
+                "{AUTH_NOTE_LEAD} — this machine has no credential for {}",
+                opts.agent
+            ))
+        }
+    };
+
     // Ctrl-C finishes the current cycle rather than tearing out mid-task. A
     // container SIGTERM that isn't caught still leaves any in-flight task safe:
     // its lease expires and another cycle/runner reclaims it.
@@ -510,14 +704,19 @@ pub fn serve(repo_root: &Path, opts: &ServeOpts) -> Result<(), Box<dyn std::erro
     }
 
     loop {
+        // A machine that can't authenticate says so on every idle beat rather
+        // than reporting the cycle it just went through the motions of. "Drained
+        // 3 projects" is true and misleading when all three failed for one
+        // reason the row could have named.
         if multi {
             hb("busy", "scanning projects for work");
             let n = multi_work_cycle(&bin, &client, &base, &workspaces_root, opts);
-            hb("idle", &format!("drained {n} project(s)"));
+            let done = format!("drained {n} project(s)");
+            hb("idle", auth_note.as_deref().unwrap_or(&done));
         } else {
             hb("busy", "draining crew backlog");
             work_cycle(&bin, repo_root, opts);
-            hb("idle", "");
+            hb("idle", auth_note.as_deref().unwrap_or(""));
         }
 
         if opts.once || !running.load(Ordering::SeqCst) {
@@ -582,6 +781,11 @@ pub fn register(opts: &RegisterOpts) -> Result<(), Box<dyn std::error::Error>> {
         |e| -> Box<dyn std::error::Error> {
             if e.contains("404") {
                 "The runner registry isn't deployed on this cloud yet (needs the `runners` feature). Ask an admin to deploy it, or run the crew loop directly with `aura crew run`.".into()
+            } else if e.contains("403") {
+                // Registering mints a machine credential, so the server allows
+                // it for org owners/admins only. Say that plainly — the raw
+                // 403 body is empty and reads like a broken token.
+                "Only an owner or admin of your org can register a runner. Ask one of them to run this, or to make you an admin.".into()
             } else {
                 e.into()
             }
@@ -622,4 +826,41 @@ pub fn status() -> Result<(), Box<dyn std::error::Error>> {
         if task.is_empty() { "idle".dimmed().to_string() } else { task.to_string() }
     );
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The regression this guards: a systemd unit whose WorkingDirectory is a
+    /// plain home directory made the `parent()` walk produce `/workspaces`,
+    /// and every clone afterwards failed with a permission error at the root
+    /// of the filesystem.
+    #[test]
+    fn a_working_directory_that_is_not_a_checkout_never_anchors_workspaces_at_the_root() {
+        let root = default_workspaces_root(Path::new("/home/ubuntu"));
+        assert!(
+            !root.starts_with("/workspaces"),
+            "workspaces must not land at the filesystem root, got {}",
+            root.display()
+        );
+        let home = PathBuf::from(std::env::var("HOME").expect("tests run with HOME set"));
+        assert!(
+            root.starts_with(&home),
+            "expected the fallback under {}, got {}",
+            home.display(),
+            root.display()
+        );
+    }
+
+    #[test]
+    fn a_real_checkout_still_gets_its_workspaces_sibling() {
+        // A hand-provisioned box runs from /opt/aura-runner/repo and expects
+        // /opt/aura-runner/workspaces; that layout must keep working.
+        let tmp = std::env::temp_dir().join("aura-ws-test-checkout");
+        let repo = tmp.join("repo");
+        std::fs::create_dir_all(repo.join(".git")).unwrap();
+        assert_eq!(default_workspaces_root(&repo), tmp.join("workspaces"));
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
 }

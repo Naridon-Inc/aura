@@ -13,6 +13,8 @@
 
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { onExternalAnchorClick } from "../../lib/openExternal";
+import { monogram } from "../../lib/monogram";
+import { isDeviceIdentity } from "../../lib/memberIdentity";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import {
   CheckCircle2,
@@ -40,10 +42,17 @@ import {
   type ReconcileSuggestion,
   type SyncOutcome,
 } from "../../lib/integrationsApi";
-import { api, type TeamMember } from "../../lib/api";
+import { type TeamMember } from "../../lib/api";
 import { pickPath } from "../../lib/nativeDialog";
 import { Button } from "../ui/button";
 import { Select } from "../ui/select";
+import { relativeAgeFromSecs } from "../../lib/relativeTime";
+import { shortPath } from "../../lib/paths";
+import { countOf } from "../../lib/plural";
+import { askConfirm } from "../ui/ask";
+import { fetchTeam } from "../../lib/teamCache";
+import { ErrorNote, ErrorState, LoadingState } from "../ui/state";
+import { PaneIntro } from "./kit";
 
 type Props = {
   /** Active repo root — used as the target for mirror bindings created
@@ -62,20 +71,41 @@ const PORT_BIND_HINT =
   "in ~/.aura/integrations.toml AND in the Atlassian developer console " +
   "(Authorization tab), then retry.";
 
+/** An error, and which card raised it. The pane used to keep one
+ *  string and print it in a banner below every card — so pressing
+ *  Connect on Jira put its failure ~470px further down the page, past
+ *  Linear and Beads, off-screen entirely once a connected Jira card
+ *  expands with mirrors and people. The click looked like it did
+ *  nothing. Tagging the error with its owner lets each card print its
+ *  own, next to the button that caused it. */
+type ScopedError = { kind: "jira" | "linear"; msg: string };
+
 export function IntegrationsTab({ repoRoot }: Props) {
   const [statuses, setStatuses] = useState<ConnectionStatus[]>([]);
   const [loading, setLoading] = useState(true);
   const [busyKind, setBusyKind] = useState<string | null>(null);
-  const [error, setError] = useState<string | null>(null);
+  const [error, setErrorState] = useState<ScopedError | null>(null);
+  // Separate from `error`: this one means we never found out what's
+  // connected. It must not render as "Not connected" — that's an
+  // answer, and we don't have one.
+  const [loadError, setLoadError] = useState<string | null>(null);
   const [fallbackUrl, setFallbackUrl] = useState<string | null>(null);
 
+  const setError = useCallback(
+    (kind: "jira" | "linear", msg: string | null) =>
+      setErrorState(msg === null ? null : { kind, msg }),
+    [],
+  );
+
   const refresh = useCallback(async () => {
-    setError(null);
+    setErrorState(null);
+    setLoadError(null);
     try {
       const rows = await integrationsApi.list();
       setStatuses(rows);
     } catch (e) {
-      setError(String(e));
+      setStatuses([]);
+      setLoadError(String(e));
     } finally {
       setLoading(false);
     }
@@ -108,7 +138,7 @@ export function IntegrationsTab({ repoRoot }: Props) {
   const connect = useCallback(
     async (kind: "jira" | "linear") => {
       setBusyKind(kind);
-      setError(null);
+      setError(kind, null);
       try {
         const next =
           kind === "jira"
@@ -118,24 +148,30 @@ export function IntegrationsTab({ repoRoot }: Props) {
         setFallbackUrl(null);
       } catch (e) {
         const msg = String(e);
-        // Promote the most-common operator error (port collision) to a
-        // hint inline below the button instead of a raw error blob.
-        if (msg.includes("bind 127.0.0.1")) {
-          setError(`${msg}\n\n${PORT_BIND_HINT}`);
+        if (msg.includes("connect cancelled")) {
+          // Pressing Cancel rejects the pending connect — that's the
+          // mechanism working, not a failure. It used to print
+          // "OAuth flow: connect cancelled" in red, telling the user
+          // their own click had gone wrong.
+          setError(kind, null);
+        } else if (msg.includes("bind 127.0.0.1")) {
+          // Promote the most-common operator error (port collision) to a
+          // hint inline below the button instead of a raw error blob.
+          setError(kind, `${msg}\n\n${PORT_BIND_HINT}`);
         } else {
-          setError(msg);
+          setError(kind, msg);
         }
       } finally {
         setBusyKind(null);
       }
     },
-    [],
+    [setError],
   );
 
   const disconnect = useCallback(
     async (kind: "jira" | "linear") => {
       setBusyKind(kind);
-      setError(null);
+      setError(kind, null);
       try {
         if (kind === "jira") {
           await integrationsApi.jiraDisconnect();
@@ -144,31 +180,34 @@ export function IntegrationsTab({ repoRoot }: Props) {
         }
         await refresh();
       } catch (e) {
-        setError(String(e));
+        setError(kind, String(e));
       } finally {
         setBusyKind(null);
       }
     },
-    [refresh],
+    [refresh, setError],
   );
 
   // Cancel fires the cancel signal Rust-side; the pending connect
   // promise will then reject with "connect cancelled" and that
   // catch-block clears busyKind. We don't await anything here so the
   // button stays clickable even if Rust takes a tick to respond.
-  const cancel = useCallback(async (kind: "jira" | "linear") => {
-    setError(null);
-    try {
-      if (kind === "jira") {
-        await integrationsApi.jiraCancel();
-      } else {
-        await integrationsApi.linearCancel();
+  const cancel = useCallback(
+    async (kind: "jira" | "linear") => {
+      setError(kind, null);
+      try {
+        if (kind === "jira") {
+          await integrationsApi.jiraCancel();
+        } else {
+          await integrationsApi.linearCancel();
+        }
+        setFallbackUrl(null);
+      } catch (e) {
+        setError(kind, String(e));
       }
-      setFallbackUrl(null);
-    } catch (e) {
-      setError(String(e));
-    }
-  }, []);
+    },
+    [setError],
+  );
 
   const jira = useMemo(
     () => statuses.find((s) => s.kind === "jira") ?? null,
@@ -180,51 +219,63 @@ export function IntegrationsTab({ repoRoot }: Props) {
   );
 
   return (
-    <div>
-      <div className="flex items-start gap-3 mb-6">
-        <div className="w-8 h-8 rounded-md bg-bg-2 flex items-center justify-center text-text-3">
-          <Plug className="w-4 h-4" />
-        </div>
-        <div className="flex-1">
-          <h2 className="text-[15px] font-semibold text-text-1 leading-tight">
-            Integrations
-          </h2>
-          <p className="text-[12px] text-text-4 mt-0.5">
-            Sync tasks two-way with external trackers. Credentials are read
-            from{" "}
-            <code className="text-text-3 px-1 py-px rounded bg-bg-2/60">
+    <>
+      {/* No title and no icon tile here. The pane's heading is printed by the
+          settings shell from the rail row you clicked — this block said
+          "Integrations" a second time, 40px under the first one, beside a
+          32px plug in a rounded chip that meant nothing the word didn't. */}
+      <PaneIntro
+        text={
+          <>
+            Sync tasks two-way with external trackers. Aura signs in through
+            an app you own, so each tracker takes a one-time setup on this
+            machine — its id and secret go in{" "}
+            <code className="rounded bg-bg-2/60 px-1 py-px text-text-2">
               ~/.aura/integrations.toml
-            </code>{" "}
-            — never committed to the repo.
-          </p>
-        </div>
-      </div>
+            </code>
+            , which never touches the repo.
+          </>
+        }
+      />
 
-      {loading && (
-        <div className="text-[12px] text-text-4 flex items-center gap-2">
-          <AsciiSpinner />
-          Loading integrations…
-        </div>
+      {loading && <LoadingState label="Looking at your trackers…" />}
+
+      {/* The list call is how we know whether anything is connected. When
+          it fails we know nothing — so we say that, with a way to ask
+          again, instead of drawing two cards that both claim "Not
+          connected". Beads still renders below: it's local, and a
+          keychain read failing has no bearing on a folder of issues. */}
+      {!loading && loadError && (
+        <ErrorState
+          title="Aura couldn't check your trackers."
+          message={loadError}
+          onRetry={() => void refresh()}
+          size="sm"
+        />
       )}
 
-      {!loading && (
+      {!loading && !loadError && (
         <JiraCard
           status={jira}
           repoRoot={repoRoot}
           busy={busyKind === "jira"}
+          fallbackUrl={busyKind === "jira" ? fallbackUrl : null}
+          error={error?.kind === "jira" ? error.msg : null}
           onConnect={() => connect("jira")}
           onCancel={() => cancel("jira")}
           onDisconnect={() => disconnect("jira")}
           onStatusUpdate={(next) => setStatuses((prev) => upsertStatus(prev, next))}
-          onError={setError}
+          onError={(msg) => setError("jira", msg)}
         />
       )}
 
-      {!loading && (
+      {!loading && !loadError && (
         <div className="mt-3">
           <LinearCard
             status={linear}
             busy={busyKind === "linear"}
+            fallbackUrl={busyKind === "linear" ? fallbackUrl : null}
+            error={error?.kind === "linear" ? error.msg : null}
             onConnect={() => connect("linear")}
             onCancel={() => cancel("linear")}
             onDisconnect={() => disconnect("linear")}
@@ -234,36 +285,48 @@ export function IntegrationsTab({ repoRoot }: Props) {
 
       {!loading && (
         <div className="mt-3">
-          <BeadsCard repoRoot={repoRoot} onError={setError} />
+          <BeadsCard repoRoot={repoRoot} />
         </div>
       )}
 
-      {fallbackUrl && (busyKind === "jira" || busyKind === "linear") && (
-        <div className="mt-3 text-[12px] text-text-4 flex items-center gap-2">
-          <span>Browser didn't open?</span>
-          <a
-            href={fallbackUrl}
-            target="_blank"
-            rel="noopener noreferrer"
-            onClick={onExternalAnchorClick}
-            className="text-text-2 hover:text-text-1 inline-flex items-center gap-1 hover:underline"
-          >
-            Open authorize URL <ExternalLink className="w-3 h-3" />
-          </a>
-        </div>
-      )}
+    </>
+  );
+}
 
-      {error && (
-        <div
-          role="alert"
-          className="mt-4 p-3 rounded-md border border-red/30 bg-red/5 text-[12px] text-red whitespace-pre-wrap"
-        >
-          <div className="flex items-start gap-2">
-            <TriangleAlert className="w-3.5 h-3.5 mt-0.5 flex-shrink-0" />
-            <span>{error}</span>
-          </div>
-        </div>
-      )}
+/** The "if the system browser didn't pop up, here's the link" fallback.
+ *  It used to live at the foot of the pane, under every card — so during
+ *  the one moment it matters, a flow you've just started on the first
+ *  card, it was below the fold. It belongs beside the spinner. */
+function AuthFallback({ url }: { url: string }) {
+  return (
+    <div className="text-sm text-text-4 flex items-center gap-2">
+      <span>Browser didn't open?</span>
+      <a
+        href={url}
+        target="_blank"
+        rel="noopener noreferrer"
+        onClick={onExternalAnchorClick}
+        className="text-text-2 hover:text-text-1 inline-flex items-center gap-1 hover:underline"
+      >
+        Open authorize URL <ExternalLink className="w-3 h-3" />
+      </a>
+    </div>
+  );
+}
+
+/** The red block a card prints when one of its own buttons failed.
+ *  Lives inside the card body so it lands next to the control that
+ *  raised it rather than at the foot of the pane. */
+function CardError({ msg }: { msg: string }) {
+  return (
+    <div
+      role="alert"
+      className="p-2.5 rounded-md border border-red/30 bg-red/5 text-sm text-red whitespace-pre-wrap"
+    >
+      <div className="flex items-start gap-2">
+        <TriangleAlert className="w-3.5 h-3.5 mt-0.5 flex-shrink-0" />
+        <span>{msg}</span>
+      </div>
     </div>
   );
 }
@@ -283,6 +346,8 @@ function JiraCard({
   status,
   repoRoot,
   busy,
+  fallbackUrl,
+  error,
   onConnect,
   onCancel,
   onDisconnect,
@@ -292,6 +357,8 @@ function JiraCard({
   status: ConnectionStatus | null;
   repoRoot: string;
   busy: boolean;
+  fallbackUrl: string | null;
+  error: string | null;
   onConnect: () => void;
   onCancel: () => void;
   onDisconnect: () => void;
@@ -299,26 +366,23 @@ function JiraCard({
   onError: (msg: string | null) => void;
 }) {
   const connected = status?.connected === true;
+  // No credentials on this machine — see `setupPrompt` below for why
+  // that has to change what the card offers, not just what it says.
+  const setUp = status?.configured !== false;
   return (
     <section className="rounded-lg bg-bg-0 shadow-[var(--shadow-card)] overflow-hidden">
       <header className="flex items-center gap-3 px-3 py-2.5 border-b border-line-soft">
         <JiraGlyph />
         <div className="flex-1 min-w-0">
-          <div className="text-[13px] font-medium text-text-1">Jira</div>
-          <div className="text-[11px] text-text-4">
-            Atlassian Cloud · OAuth 2.0 (3LO) · two-way sync
+          <div className="text-base font-medium text-text-1">Jira</div>
+          <div className="text-xs text-text-4">
+            Atlassian Cloud · two-way sync
           </div>
         </div>
-        {connected ? (
-          <span className="inline-flex items-center gap-1 text-[11px] text-accent-green bg-accent-green/10 px-2 py-0.5 rounded-full">
-            <CheckCircle2 className="w-3 h-3" /> Connected
-          </span>
-        ) : (
-          <span className="text-[11px] text-text-4">Not connected</span>
-        )}
+        <StatusChip connected={connected} setUp={setUp} />
       </header>
 
-      <div className="p-3 text-[12px] text-text-3 space-y-3">
+      <div className="p-3 text-sm text-text-3 space-y-3">
         {connected && status?.identity && (
           <div className="flex items-center gap-3">
             {status.identity.avatar_url ? (
@@ -328,16 +392,16 @@ function JiraCard({
                 className="w-7 h-7 rounded-full border border-line-soft"
               />
             ) : (
-              <div className="w-7 h-7 rounded-full bg-bg-2 flex items-center justify-center text-[10px] uppercase text-text-3">
+              <div className="w-7 h-7 rounded-full bg-bg-2 flex items-center justify-center text-2xs uppercase text-text-3">
                 {initials(status.identity.display_name)}
               </div>
             )}
             <div className="min-w-0">
-              <div className="text-text-1 text-[12px] truncate">
+              <div className="text-text-1 text-sm truncate">
                 {status.identity.display_name}
               </div>
               {status.identity.email && (
-                <div className="text-text-4 text-[11px] truncate">
+                <div className="text-text-4 text-xs truncate">
                   {status.identity.email}
                 </div>
               )}
@@ -347,14 +411,14 @@ function JiraCard({
 
         {connected && status?.sites && status.sites.length > 0 && (
           <div>
-            <div className="text-text-4 text-[10.5px] uppercase tracking-wide mb-1">
+            <div className="text-text-4 text-xs font-medium mb-1">
               Sites ({status.sites.length})
             </div>
             <ul className="space-y-1">
               {status.sites.map((s) => (
                 <li
                   key={s.cloud_id}
-                  className="flex items-center gap-2 text-[12px]"
+                  className="flex items-center gap-2 text-sm"
                 >
                   <LinkIcon className="w-3 h-3 text-text-4 flex-shrink-0" />
                   <a
@@ -366,7 +430,7 @@ function JiraCard({
                   >
                     {s.name}
                   </a>
-                  <span className="text-text-5 text-[11px] truncate">
+                  <span className="text-text-5 text-xs truncate">
                     {s.url.replace(/^https?:\/\//, "")}
                   </span>
                 </li>
@@ -393,16 +457,24 @@ function JiraCard({
         )}
 
         {connected && status?.expires_at && (
-          <div className="text-[11px] text-text-4">
+          <div className="text-xs text-text-4">
             Token refreshes in {formatExpiry(status.expires_at)}.
           </div>
         )}
 
-        {!connected && (
-          <p className="text-text-4 text-[12px]">
+        {!connected && setUp && (
+          <p className="text-text-4 text-sm">
             Connect Aura to your Atlassian site to mirror Jira issues into
             Tasks (status, assignee, priority, labels, comments).
           </p>
+        )}
+
+        {!connected && !setUp && (
+          <SetupNeeded
+            what="Jira"
+            where="the Atlassian developer console"
+            block="jira"
+          />
         )}
 
         <div className="flex items-center gap-2 pt-1">
@@ -414,47 +486,109 @@ function JiraCard({
               disabled={busy}
             >
               {busy ? (
-                <AsciiSpinner className="text-[11px] leading-none" />
+                <AsciiSpinner className="text-xs leading-none" />
               ) : (
                 <Unlink className="w-3 h-3" />
               )}
               Disconnect
             </Button>
           ) : (
-            <>
-              <Button
-                variant="default"
-                size="sm"
-                onClick={onConnect}
-                disabled={busy}
-              >
-                {busy ? (
-                  <AsciiSpinner className="text-[11px] leading-none" />
-                ) : (
-                  <Plug className="w-3 h-3" />
-                )}
-                {busy ? "Connecting…" : "Connect Jira"}
-              </Button>
-              {busy && (
-                // Cancel sits beside Connect while a flow is open. Aborts
-                // the loopback listener so the next attempt can rebind
-                // the port without waiting for the 5-minute server-side
-                // timeout (Atlassian error pages never redirect back).
+            setUp && (
+              <>
                 <Button
-                  type="button"
-                  variant="outline"
+                  variant="default"
                   size="sm"
-                  onClick={onCancel}
+                  onClick={onConnect}
+                  disabled={busy}
                 >
-                  <X className="w-3 h-3" />
-                  Cancel
+                  {busy ? (
+                    <AsciiSpinner className="text-xs leading-none" />
+                  ) : (
+                    <Plug className="w-3 h-3" />
+                  )}
+                  {busy ? "Connecting…" : "Connect Jira"}
                 </Button>
-              )}
-            </>
+                {busy && (
+                  // Cancel sits beside Connect while a flow is open. Aborts
+                  // the loopback listener so the next attempt can rebind
+                  // the port without waiting for the 5-minute server-side
+                  // timeout (Atlassian error pages never redirect back).
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="sm"
+                    onClick={onCancel}
+                  >
+                    <X className="w-3 h-3" />
+                    Cancel
+                  </Button>
+                )}
+              </>
+            )
           )}
         </div>
+
+        {fallbackUrl && <AuthFallback url={fallbackUrl} />}
+
+        {error && <CardError msg={error} />}
       </div>
     </section>
+  );
+}
+
+/** Connected / not connected / not set up here. The third state used to
+ *  be invisible: a machine with no credentials rendered exactly like one
+ *  waiting to be signed in, down to the primary Connect button. */
+function StatusChip({
+  connected,
+  setUp,
+}: {
+  connected: boolean;
+  setUp: boolean;
+}) {
+  if (connected) {
+    return (
+      <span className="inline-flex items-center gap-1 text-xs text-accent-green bg-accent-green/10 px-2 py-0.5 rounded-full shrink-0">
+        <CheckCircle2 className="w-3 h-3" /> Connected
+      </span>
+    );
+  }
+  return (
+    <span className="text-xs text-text-4 shrink-0">
+      {setUp ? "Not connected" : "Not set up here"}
+    </span>
+  );
+}
+
+/** What to show instead of a Connect button when this machine has no
+ *  credentials for the provider.
+ *
+ *  Aura signs in through an OAuth app *you* own — there's no Aura-hosted
+ *  client — so on a machine whose `integrations.toml` has no block for
+ *  the provider, pressing Connect can only ever fail. It used to do
+ *  exactly that: open nothing, then print `integration not configured:
+ *  missing [jira] block …` in a banner far below. Same information,
+ *  delivered as a failure the user had to trigger. Now the card says it
+ *  up front and doesn't offer the button. */
+function SetupNeeded({
+  what,
+  where,
+  block,
+}: {
+  what: string;
+  where: string;
+  block: string;
+}) {
+  return (
+    <p className="text-text-4 text-sm">
+      No {what} app is set up on this machine — that file has no{" "}
+      <code className="rounded bg-bg-2/60 px-1 py-px text-text-3">
+        [{block}]
+      </code>{" "}
+      section Aura can read, so there's nothing to sign in to. Create a{" "}
+      {what} app in {where}, put its id and secret there, and this card will
+      offer to connect.
+    </p>
   );
 }
 
@@ -466,37 +600,36 @@ function JiraCard({
 function LinearCard({
   status,
   busy,
+  fallbackUrl,
+  error,
   onConnect,
   onCancel,
   onDisconnect,
 }: {
   status: ConnectionStatus | null;
   busy: boolean;
+  fallbackUrl: string | null;
+  error: string | null;
   onConnect: () => void;
   onCancel: () => void;
   onDisconnect: () => void;
 }) {
   const connected = status?.connected === true;
+  const setUp = status?.configured !== false;
   return (
     <section className="rounded-lg bg-bg-0 shadow-[var(--shadow-card)] overflow-hidden">
       <header className="flex items-center gap-3 px-3 py-2.5 border-b border-line-soft">
         <LinearGlyph />
         <div className="flex-1 min-w-0">
-          <div className="text-[13px] font-medium text-text-1">Linear</div>
-          <div className="text-[11px] text-text-4">
-            Linear workspace · OAuth 2.0 · issue sync
+          <div className="text-base font-medium text-text-1">Linear</div>
+          <div className="text-xs text-text-4">
+            Linear workspace · issue sync
           </div>
         </div>
-        {connected ? (
-          <span className="inline-flex items-center gap-1 text-[11px] text-accent-green bg-accent-green/10 px-2 py-0.5 rounded-full">
-            <CheckCircle2 className="w-3 h-3" /> Connected
-          </span>
-        ) : (
-          <span className="text-[11px] text-text-4">Not connected</span>
-        )}
+        <StatusChip connected={connected} setUp={setUp} />
       </header>
 
-      <div className="p-3 text-[12px] text-text-3 space-y-3">
+      <div className="p-3 text-sm text-text-3 space-y-3">
         {connected && status?.identity && (
           <div className="flex items-center gap-3">
             {status.identity.avatar_url ? (
@@ -506,16 +639,16 @@ function LinearCard({
                 className="w-7 h-7 rounded-full border border-line-soft"
               />
             ) : (
-              <div className="w-7 h-7 rounded-full bg-bg-2 flex items-center justify-center text-[10px] uppercase text-text-3">
+              <div className="w-7 h-7 rounded-full bg-bg-2 flex items-center justify-center text-2xs uppercase text-text-3">
                 {initials(status.identity.display_name)}
               </div>
             )}
             <div className="min-w-0">
-              <div className="text-text-1 text-[12px] truncate">
+              <div className="text-text-1 text-sm truncate">
                 {status.identity.display_name}
               </div>
               {status.identity.email && (
-                <div className="text-text-4 text-[11px] truncate">
+                <div className="text-text-4 text-xs truncate">
                   {status.identity.email}
                 </div>
               )}
@@ -523,12 +656,20 @@ function LinearCard({
           </div>
         )}
 
-        {!connected && (
-          <p className="text-text-4 text-[12px]">
+        {!connected && setUp && (
+          <p className="text-text-4 text-sm">
             Connect Aura to your Linear workspace to bring issues into Tasks.
-            You'll approve access once in the browser — Aura never sees your
+            You'll approve access once in the browser. Aura never sees your
             password.
           </p>
+        )}
+
+        {!connected && !setUp && (
+          <SetupNeeded
+            what="Linear"
+            where="Linear's API settings"
+            block="linear"
+          />
         )}
 
         <div className="flex items-center gap-2 pt-1">
@@ -540,41 +681,47 @@ function LinearCard({
               disabled={busy}
             >
               {busy ? (
-                <AsciiSpinner className="text-[11px] leading-none" />
+                <AsciiSpinner className="text-xs leading-none" />
               ) : (
                 <Unlink className="w-3 h-3" />
               )}
               Disconnect
             </Button>
           ) : (
-            <>
-              <Button
-                variant="default"
-                size="sm"
-                onClick={onConnect}
-                disabled={busy}
-              >
-                {busy ? (
-                  <AsciiSpinner className="text-[11px] leading-none" />
-                ) : (
-                  <Plug className="w-3 h-3" />
-                )}
-                {busy ? "Connecting…" : "Connect Linear"}
-              </Button>
-              {busy && (
+            setUp && (
+              <>
                 <Button
-                  type="button"
-                  variant="outline"
+                  variant="default"
                   size="sm"
-                  onClick={onCancel}
+                  onClick={onConnect}
+                  disabled={busy}
                 >
-                  <X className="w-3 h-3" />
-                  Cancel
+                  {busy ? (
+                    <AsciiSpinner className="text-xs leading-none" />
+                  ) : (
+                    <Plug className="w-3 h-3" />
+                  )}
+                  {busy ? "Connecting…" : "Connect Linear"}
                 </Button>
-              )}
-            </>
+                {busy && (
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="sm"
+                    onClick={onCancel}
+                  >
+                    <X className="w-3 h-3" />
+                    Cancel
+                  </Button>
+                )}
+              </>
+            )
           )}
         </div>
+
+        {fallbackUrl && <AuthFallback url={fallbackUrl} />}
+
+        {error && <CardError msg={error} />}
       </div>
     </section>
   );
@@ -731,11 +878,13 @@ function MirrorsSection({
   const handleBackfill = useCallback(async () => {
     // Confirm because this can be a long-running full re-pull and
     // generates upstream API load against the user's Jira quota.
-    const ok = window.confirm(
-      `Re-pull every issue for ${mirrors.length} mirrored project${
+    const ok = await askConfirm({
+      title: `Re-pull every issue for ${mirrors.length} mirrored project${
         mirrors.length === 1 ? "" : "s"
-      }?\n\nUse this when parent/epic links or other fields look wrong — it clears the incremental cache and walks each project from scratch. Existing tasks keep their IDs.`,
-    );
+      }?`,
+      body: "Use this when parent/epic links or other fields look wrong. It clears the incremental cache and walks each project from scratch. Existing tasks keep their IDs.",
+      confirmLabel: "Re-pull everything",
+    });
     if (!ok) return;
     setBusyOp("backfill:all");
     onError(null);
@@ -756,10 +905,10 @@ function MirrorsSection({
   return (
     <div className="space-y-3">
       <label
-        className={`flex items-start gap-2 rounded-md border px-2.5 py-2 text-[12px] cursor-pointer transition-colors ${
+        className={`flex items-start gap-2 rounded-md border px-2.5 py-2 text-sm cursor-pointer transition-colors ${
           autoOn
             ? "border-accent-green/40 bg-accent-green/5"
-            : "border-line-soft bg-bg-2/30 hover:bg-bg-2/50"
+            : "border-line-soft bg-bg-2/30 hover:bg-state-hover"
         }`}
         title="When on, every Jira project on every site mirrors into this repo. New projects appear automatically within 5 min."
       >
@@ -771,31 +920,31 @@ function MirrorsSection({
           className="mt-0.5 accent-emerald-500"
         />
         <div className="flex-1 min-w-0">
-          <div className="text-text-1 text-[12px]">
+          <div className="text-text-1 text-sm">
             Auto-mirror every project into this repo
           </div>
-          <div className="text-text-4 text-[11px] mt-0.5">
+          <div className="text-text-4 text-xs mt-0.5">
             {autoOn ? (
               <>
-                On — {mirrors.length} project{mirrors.length === 1 ? "" : "s"}{" "}
+                On · {mirrors.length} project{mirrors.length === 1 ? "" : "s"}{" "}
                 across {sites.length} site{sites.length === 1 ? "" : "s"}. New
                 Jira projects appear here within 5&nbsp;min.
               </>
             ) : (
               <>
-                Off — pick projects manually below, or flip this on to import
+                Off. Pick projects manually below, or flip this on to import
                 everything (and keep it in sync with upstream).
               </>
             )}
           </div>
         </div>
         {busyOp === "auto-mirror" && (
-          <AsciiSpinner className="text-[12px] leading-none mt-0.5" />
+          <AsciiSpinner className="text-sm leading-none mt-0.5" />
         )}
       </label>
 
       <div className="flex items-center justify-between">
-        <div className="text-text-4 text-[10.5px] uppercase tracking-wide">
+        <div className="text-text-4 text-xs font-medium">
           Mirrored projects ({mirrors.length})
         </div>
         {mirrors.length > 0 && (
@@ -809,7 +958,7 @@ function MirrorsSection({
               title="Clear the incremental cache and re-pull every issue. Use when parent/epic links or other fields look wrong."
             >
               {busyOp === "backfill:all" ? (
-                <AsciiSpinner className="text-[11px] leading-none" />
+                <AsciiSpinner className="text-xs leading-none" />
               ) : (
                 <RefreshCw className="w-3 h-3" />
               )}
@@ -824,7 +973,7 @@ function MirrorsSection({
               title={`Sync every mirror targeting ${repoRoot}`}
             >
               {busyOp === "sync:all" ? (
-                <AsciiSpinner className="text-[11px] leading-none" />
+                <AsciiSpinner className="text-xs leading-none" />
               ) : (
                 <RefreshCw className="w-3 h-3" />
               )}
@@ -835,7 +984,7 @@ function MirrorsSection({
       </div>
 
       {mirrors.length === 0 && (
-        <div className="text-[11px] text-text-4">
+        <div className="text-xs text-text-4">
           No projects mirrored yet. Pick a project below to import its issues
           into this repo's Tasks.
         </div>
@@ -855,18 +1004,18 @@ function MirrorsSection({
             return (
               <li
                 key={`${m.cloud_id}:${m.project_key}`}
-                className="flex items-center gap-2 text-[12px] bg-bg-2/40 px-2 py-1.5 rounded border border-line-soft/60"
+                className="flex items-center gap-2 text-sm bg-bg-2/40 px-2 py-1.5 rounded border border-line-soft/60"
               >
-                <span className="px-1.5 py-0.5 rounded bg-[#2684FF]/15 text-[#2684FF] text-[10px] font-mono">
+                <span className="px-1.5 py-0.5 rounded bg-[#2684FF]/15 text-[#2684FF] text-2xs font-mono">
                   {m.project_key}
                 </span>
                 <span className="text-text-2 truncate">{m.project_name}</span>
-                <span className="text-text-5 text-[11px] truncate flex-1">
-                  → {shortRepoRoot(m.repo_root)}
+                <span className="text-text-5 text-xs truncate flex-1">
+                  → {shortPath(m.repo_root)}
                 </span>
                 {lastSyncedAt ? (
                   <span
-                    className="text-[10.5px] text-text-4"
+                    className="text-xs text-text-4"
                     title={`Last sync: ${new Date(lastSyncedAt * 1000).toLocaleString()}`}
                   >
                     {created}c · {updated}u
@@ -876,7 +1025,7 @@ function MirrorsSection({
                     · {timeAgo(lastSyncedAt)}
                   </span>
                 ) : (
-                  <span className="text-[10.5px] text-text-5">never synced</span>
+                  <span className="text-xs text-text-5">never synced</span>
                 )}
                 <Button
                   type="button"
@@ -888,7 +1037,7 @@ function MirrorsSection({
                   title="Remove mirror"
                 >
                   {isBusy ? (
-                    <AsciiSpinner className="text-[11px] leading-none" />
+                    <AsciiSpinner className="text-xs leading-none" />
                   ) : (
                     <Trash2 className="w-3 h-3" />
                   )}
@@ -912,9 +1061,9 @@ function MirrorsSection({
           return (
             <div
               key={s.cloud_id}
-              className="flex items-center gap-2 text-[12px]"
+              className="flex items-center gap-2 text-sm"
             >
-              <span className="text-text-4 text-[11px] truncate min-w-[6rem]">
+              <span className="text-text-4 text-xs truncate min-w-[6rem]">
                 {s.name}
               </span>
               <select
@@ -926,7 +1075,7 @@ function MirrorsSection({
                     [s.cloud_id]: e.target.value,
                   }))
                 }
-                className="flex-1 bg-bg-2/60 border border-line-soft rounded px-2 py-1 text-text-2 text-[12px]"
+                className="flex-1 bg-bg-2/60 border border-line-soft rounded px-2 py-1 text-text-2 text-sm"
               >
                 <option value="">
                   {loadingSite === s.cloud_id
@@ -935,7 +1084,7 @@ function MirrorsSection({
                 </option>
                 {available.map((p) => (
                   <option key={p.key} value={p.key}>
-                    {p.key} — {p.name}
+                    {p.key} · {p.name}
                   </option>
                 ))}
               </select>
@@ -946,7 +1095,7 @@ function MirrorsSection({
                 disabled={!selected || busyOp === opKey}
               >
                 {busyOp === opKey ? (
-                  <AsciiSpinner className="text-[11px] leading-none" />
+                  <AsciiSpinner className="text-xs leading-none" />
                 ) : (
                   <Plug className="w-3 h-3" />
                 )}
@@ -983,16 +1132,23 @@ function PeopleSection({
   const [reconciling, setReconciling] = useState(false);
   const [note, setNote] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
+  // A read that failed is not a read that came back empty. Without
+  // this, a broken list call fell through to the "nothing imported
+  // yet" copy below and told the user their Jira cards have no people
+  // on them — an answer we never got.
+  const [failed, setFailed] = useState(false);
 
   const load = useCallback(async () => {
+    setFailed(false);
     try {
       const [rows, team] = await Promise.all([
         integrationsApi.jiraUsersList(repoRoot),
-        api.teamLoad(repoRoot).catch(() => null),
+        fetchTeam(repoRoot).catch(() => null),
       ]);
       setLinks(rows);
       setMembers(team?.members ?? []);
     } catch (e) {
+      setFailed(true);
       onError(String(e));
     } finally {
       setLoading(false);
@@ -1100,8 +1256,28 @@ function PeopleSection({
 
   if (loading) {
     return (
-      <div className="pt-2 text-[11px] text-text-4 flex items-center gap-2">
+      <div className="pt-2 text-xs text-text-4 flex items-center gap-2">
         <AsciiSpinner /> Loading people…
+      </div>
+    );
+  }
+
+  if (failed) {
+    return (
+      <div className="pt-2">
+        <div className="flex items-center gap-2 text-text-4 text-xs font-medium mb-1">
+          <Users className="w-3 h-3" /> People
+        </div>
+        <ErrorNote className="text-xs">
+          Aura couldn't read who's on your Jira cards.{" "}
+          <button
+            type="button"
+            onClick={() => void load()}
+            className="underline underline-offset-2 hover:text-text-2"
+          >
+            Try again
+          </button>
+        </ErrorNote>
       </div>
     );
   }
@@ -1110,10 +1286,10 @@ function PeopleSection({
   if (links.length === 0) {
     return (
       <div className="pt-2">
-        <div className="flex items-center gap-2 text-text-4 text-[10.5px] uppercase tracking-wide mb-1">
+        <div className="flex items-center gap-2 text-text-4 text-xs font-medium mb-1">
           <Users className="w-3 h-3" /> People
         </div>
-        <p className="text-[11px] text-text-4">
+        <p className="text-xs text-text-4">
           Once you sync a project, the people assigned on those Jira cards show
           up here so you can match them to your teammates.
         </p>
@@ -1124,7 +1300,7 @@ function PeopleSection({
   return (
     <div className="pt-2 space-y-2.5">
       <div className="flex items-center justify-between">
-        <div className="flex items-center gap-2 text-text-4 text-[10.5px] uppercase tracking-wide">
+        <div className="flex items-center gap-2 text-text-4 text-xs font-medium">
           <Users className="w-3 h-3" /> People ({resolved.length}/{links.length}{" "}
           matched)
         </div>
@@ -1133,11 +1309,11 @@ function PeopleSection({
             type="button"
             onClick={runReconcile}
             disabled={reconciling}
-            className="inline-flex items-center gap-1.5 text-[11px] px-2 py-0.5 rounded border border-line text-text-2 hover:text-text-1 hover:bg-bg-2 disabled:opacity-50"
+            className="inline-flex items-center gap-1.5 text-xs px-2 py-0.5 rounded border border-line text-text-2 hover:text-text-1 hover:bg-state-hover disabled:opacity-50"
             title="Let Aura suggest the most likely teammate for each unmatched Jira person. You confirm each one."
           >
             {reconciling ? (
-              <AsciiSpinner className="text-[11px] leading-none" />
+              <AsciiSpinner className="text-xs leading-none" />
             ) : (
               <Sparkles className="w-3 h-3" />
             )}
@@ -1147,7 +1323,7 @@ function PeopleSection({
       </div>
 
       {unresolved.length > 0 && (
-        <p className="text-[11px] text-text-4">
+        <p className="text-xs text-text-4">
           {unresolved.length} Jira{" "}
           {unresolved.length === 1 ? "person isn't" : "people aren't"} matched to
           a teammate yet. Until then their Jira name shows on the card.
@@ -1167,17 +1343,17 @@ function PeopleSection({
             return (
               <li
                 key={l.account_id}
-                className="rounded border border-line-soft/60 bg-bg-2/40 px-2.5 py-2 text-[12px] space-y-1.5"
+                className="rounded border border-line-soft/60 bg-bg-2/40 px-2.5 py-2 text-sm space-y-1.5"
               >
                 <div className="flex items-center gap-2 min-w-0">
-                  <span className="px-1.5 py-0.5 rounded bg-[#2684FF]/15 text-[#2684FF] text-[10px]">
+                  <span className="px-1.5 py-0.5 rounded bg-[#2684FF]/15 text-[#2684FF] text-2xs">
                     Jira
                   </span>
                   <span className="text-text-1 truncate">
                     {l.display_name || l.account_id}
                   </span>
                   {l.email && (
-                    <span className="text-text-5 text-[11px] truncate">
+                    <span className="text-text-5 text-xs truncate">
                       {l.email}
                     </span>
                   )}
@@ -1201,7 +1377,7 @@ function PeopleSection({
                       disabled={linkBusy}
                     >
                       {linkBusy ? (
-                        <AsciiSpinner className="text-[11px] leading-none" />
+                        <AsciiSpinner className="text-xs leading-none" />
                       ) : (
                         <LinkIcon className="w-3 h-3" />
                       )}
@@ -1211,7 +1387,7 @@ function PeopleSection({
                 )}
 
                 {s && !s.suggested_handle && (
-                  <div className="text-[11px] text-text-4">{s.reason}</div>
+                  <div className="text-xs text-text-4">{s.reason}</div>
                 )}
 
                 <div className="flex items-center gap-2">
@@ -1226,11 +1402,16 @@ function PeopleSection({
                     placeholder="Pick a teammate by hand…"
                     options={pickableMembers.map((m) => ({
                       value: m.handle,
+                      // A device-keyed placeholder adds nothing to a picker
+                      // label — the name is what you recognise, and the UUID
+                      // would only make two rows look like different people.
                       label: `${m.name?.trim() || m.handle}${
-                        m.email ? ` · ${m.email}` : ""
+                        m.email && !isDeviceIdentity(m.email)
+                          ? ` · ${m.email}`
+                          : ""
                       }`,
                     }))}
-                    className="flex-1 text-[12px]"
+                    className="flex-1 text-sm"
                   />
                   <Button
                     variant="secondary"
@@ -1239,7 +1420,7 @@ function PeopleSection({
                     disabled={!picked || linkBusy}
                   >
                     {linkBusy ? (
-                      <AsciiSpinner className="text-[11px] leading-none" />
+                      <AsciiSpinner className="text-xs leading-none" />
                     ) : (
                       <LinkIcon className="w-3 h-3" />
                     )}
@@ -1259,7 +1440,7 @@ function PeopleSection({
             return (
               <li
                 key={l.account_id}
-                className="flex items-center gap-2 text-[12px] px-2 py-1"
+                className="flex items-center gap-2 text-sm px-2 py-1"
               >
                 <CheckCircle2 className="w-3 h-3 text-accent-green flex-shrink-0" />
                 <span className="text-text-2 truncate">
@@ -1269,7 +1450,7 @@ function PeopleSection({
                 <span className="text-text-1 truncate">
                   {nameForHandle(l.handle) ?? l.handle}
                 </span>
-                <span className="text-text-5 text-[10.5px] flex-1">
+                <span className="text-text-5 text-xs flex-1">
                   {l.via === "email"
                     ? "matched by email"
                     : l.via === "brain"
@@ -1283,10 +1464,10 @@ function PeopleSection({
                   onClick={() => unlink(l.account_id)}
                   disabled={unlinkBusy}
                   className="text-text-4 hover:text-red"
-                  title="Unmatch — sends this Jira person back to the list above"
+                  title="Unmatch. Sends this Jira person back to the list above"
                 >
                   {unlinkBusy ? (
-                    <AsciiSpinner className="text-[11px] leading-none" />
+                    <AsciiSpinner className="text-xs leading-none" />
                   ) : (
                     <Unlink className="w-3 h-3" />
                   )}
@@ -1298,33 +1479,16 @@ function PeopleSection({
       )}
 
       {note && (
-        <div className="text-[11px] text-accent-green flex items-center gap-1.5">
+        <div className="text-xs text-accent-green flex items-center gap-1.5">
           <CheckCircle2 className="w-3 h-3" /> {note}
         </div>
       )}
     </div>
   );
 }
-
-function shortRepoRoot(path: string): string {
-  // Trim a leading $HOME so the mirror row stays readable on long
-  // absolute paths. Tilde-substitution is purely cosmetic — the actual
-  // mirror stores the full path.
-  if (typeof window !== "undefined") {
-    // No HOME access in the renderer; fall back to last 2 segments.
-  }
-  const parts = path.split("/").filter(Boolean);
-  if (parts.length <= 2) return path;
-  return `…/${parts.slice(-2).join("/")}`;
-}
-
 function timeAgo(unixSecs: number): string {
-  const now = Math.floor(Date.now() / 1000);
-  const delta = Math.max(0, now - unixSecs);
-  if (delta < 60) return "just now";
-  if (delta < 3600) return `${Math.round(delta / 60)}m ago`;
-  if (delta < 86400) return `${Math.round(delta / 3600)}h ago`;
-  return `${Math.round(delta / 86400)}d ago`;
+  // One ladder for the whole app — see lib/relativeTime.
+  return relativeAgeFromSecs(unixSecs);
 }
 
 // Beads import card. Beads is a local, git-native tracker — there's no
@@ -1333,17 +1497,16 @@ function timeAgo(unixSecs: number): string {
 // a count first ("Found 42 issues") so nothing lands unexpectedly, then a
 // one-click bring-in that's safe to run twice (re-running updates the same
 // cards instead of making copies).
-function BeadsCard({
-  repoRoot,
-  onError,
-}: {
-  repoRoot: string;
-  onError: (msg: string | null) => void;
-}) {
+function BeadsCard({ repoRoot }: { repoRoot: string }) {
   const [source, setSource] = useState<string>("");
   const [preview, setPreview] = useState<BeadsPreview | null>(null);
   const [outcome, setOutcome] = useState<BeadsImportOutcome | null>(null);
   const [busy, setBusy] = useState<"preview" | "import" | null>(null);
+  // Beads keeps its own error rather than pushing one up to the pane:
+  // it's the last card, so a shared banner below it was the furthest
+  // thing on the page from the button that failed.
+  const [error, setError] = useState<string | null>(null);
+  const onError = setError;
 
   const choose = useCallback(async () => {
     onError(null);
@@ -1387,14 +1550,14 @@ function BeadsCard({
         <BeadsGlyph />
         <div className="flex-1 min-w-0">
           <div className="flex items-center gap-2">
-            <h3 className="text-[13px] font-semibold text-text-1">Beads</h3>
-            <span className="text-[10px] uppercase tracking-wide text-text-4 px-1.5 py-px rounded bg-bg-2">
+            <h3 className="text-base font-semibold text-text-1">Beads</h3>
+            <span className="text-2xs text-text-4 px-1.5 py-px rounded bg-bg-2">
               Local
             </span>
           </div>
-          <p className="text-[12px] text-text-4 mt-0.5">
+          <p className="text-sm text-text-4 mt-0.5">
             Bring issues from a Beads tracker onto this board. Everything stays
-            on your machine — no sign-in. Safe to run again later: it updates the
+            on your machine. No sign-in. Safe to run again later: it updates the
             same cards instead of making copies.
           </p>
 
@@ -1406,7 +1569,7 @@ function BeadsCard({
               disabled={busy !== null}
             >
               {busy === "preview" ? (
-                <AsciiSpinner className="text-[12px] leading-none" />
+                <AsciiSpinner className="text-sm leading-none" />
               ) : (
                 <FolderInput className="w-3.5 h-3.5" />
               )}
@@ -1419,7 +1582,7 @@ function BeadsCard({
                 disabled={busy !== null || preview.total === 0}
               >
                 {busy === "import" ? (
-                  <AsciiSpinner className="text-[12px] leading-none" />
+                  <AsciiSpinner className="text-sm leading-none" />
                 ) : (
                   <LinkIcon className="w-3.5 h-3.5" />
                 )}
@@ -1429,13 +1592,13 @@ function BeadsCard({
           </div>
 
           {source && (
-            <p className="mt-2 text-[11px] text-text-4 truncate" title={source}>
+            <p className="mt-2 text-xs text-text-4 truncate" title={source}>
               From: <code className="text-text-3">{source}</code>
             </p>
           )}
 
           {preview && !outcome && (
-            <p className="mt-1 text-[11px] text-text-4">
+            <p className="mt-1 text-xs text-text-4">
               Found <span className="text-text-2">{preview.total}</span> issue
               {preview.total === 1 ? "" : "s"} ({preview.open} open ·{" "}
               {preview.closed} done
@@ -1447,21 +1610,22 @@ function BeadsCard({
           )}
 
           {outcome && (
-            <div className="mt-2 text-[11px] flex items-start gap-1.5 text-accent-green">
+            <div className="mt-2 text-xs flex items-start gap-1.5 text-accent-green">
               <CheckCircle2 className="w-3.5 h-3.5 mt-px flex-shrink-0" />
               <span className="text-text-3">
                 Brought in <span className="text-text-1">{outcome.created}</span>{" "}
                 new · updated{" "}
                 <span className="text-text-1">{outcome.updated}</span>
-                {outcome.links > 0 ? ` · linked ${outcome.links} dependency` : ""}
-                {outcome.links > 1 ? "s" : ""}
+                {outcome.links > 0
+                  ? ` · linked ${countOf(outcome.links, "dependency")}`
+                  : ""}
                 {outcome.skipped > 0 ? ` · skipped ${outcome.skipped}` : ""}.
               </span>
             </div>
           )}
 
           {outcome && outcome.errors.length > 0 && (
-            <ul className="mt-1.5 text-[11px] text-amber/90 space-y-0.5">
+            <ul className="mt-1.5 text-xs text-amber/90 space-y-0.5">
               {outcome.errors.slice(0, 5).map((e, i) => (
                 <li key={i} className="truncate" title={e}>
                   • {e}
@@ -1473,6 +1637,12 @@ function BeadsCard({
                 </li>
               )}
             </ul>
+          )}
+
+          {error && (
+            <div className="mt-2">
+              <CardError msg={error} />
+            </div>
           )}
         </div>
       </div>
@@ -1532,12 +1702,9 @@ function LinearGlyph() {
 }
 
 function initials(name: string): string {
-  return name
-    .split(/\s+/)
-    .filter(Boolean)
-    .slice(0, 2)
-    .map((s) => s[0]!.toUpperCase())
-    .join("");
+  // One monogram for the whole app — see lib/monogram. This one returned an empty string
+  // for a blank name, so the avatar drew a ring with nothing inside it.
+  return monogram(name);
 }
 
 function formatExpiry(expiresAt: number): string {

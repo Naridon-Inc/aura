@@ -13,10 +13,12 @@
 //              priority and (when imported) a JIRA chip.
 
 import { useCallback, useEffect, useState } from "react";
-import { ListChecks, Loader2, Play, RefreshCw } from "lucide-react";
+import { ListChecks, Play, RefreshCw } from "lucide-react";
+
 import { AsciiSpinner } from "../ui/ascii-spinner";
 import { api } from "../../lib/api";
 import type { LoopTask, ReadyViewDto } from "../../lib/api";
+import { fetchReadyView } from "../../lib/loopCache";
 import { Button } from "../ui/button";
 import { StatusChip, type ChipTone } from "../ui/statusChip";
 
@@ -40,10 +42,10 @@ function LoopRow({ task, note }: { task: LoopTask; note?: string }) {
   return (
     <div className="flex items-start gap-2 px-2.5 py-1.5 rounded border border-line-soft bg-bg-1">
       <div className="min-w-0 flex-1">
-        <div className="text-[12px] text-text-1 leading-snug truncate" title={task.title}>
+        <div className="text-sm text-text-1 leading-snug truncate" title={task.title}>
           {task.title}
         </div>
-        {note && <div className="text-[10.5px] text-text-3 mt-0.5">{note}</div>}
+        {note && <div className="text-xs text-text-3 mt-0.5">{note}</div>}
       </div>
       <div className="flex items-center gap-1 shrink-0">
         {isJira && (
@@ -73,7 +75,7 @@ function Lane({
   if (count === 0) return null;
   return (
     <div className="flex flex-col gap-1">
-      <div className="text-[10px] uppercase tracking-wider text-text-3 flex items-center gap-1.5">
+      <div className="section-label flex items-center gap-1.5">
         {title}
         <span className="text-text-3/70">· {count}</span>
       </div>
@@ -92,7 +94,7 @@ export function LoopPanel({ repoRoot }: Props) {
     if (!repoRoot) return;
     setLoading(true);
     try {
-      setView(await api.loopReadyView(repoRoot));
+      setView(await fetchReadyView(repoRoot));
     } catch (e) {
       setNote(`Couldn't read the loop graph: ${String(e)}`);
     } finally {
@@ -129,7 +131,7 @@ export function LoopPanel({ repoRoot }: Props) {
       const r = await api.loopRunNative(repoRoot);
       setNote(
         r.dispatched.length === 0
-          ? "Nothing ready to dispatch — try Sync first."
+          ? "Nothing ready to dispatch. Try Sync first."
           : `Dispatched ${r.dispatched.length} into the Aura brain${r.ready_remaining > 0 ? ` · ${r.ready_remaining} more ready` : ""}.`,
       );
       await refresh();
@@ -149,9 +151,9 @@ export function LoopPanel({ repoRoot }: Props) {
     <div className="flex flex-col h-full min-h-0">
       <div className="px-3 py-2 border-b border-line-soft flex items-center gap-2">
         <ListChecks size={14} className="text-text-3 shrink-0" />
-        <span className="text-[11px] uppercase tracking-wider text-text-3 flex-1">Loop</span>
+        <span className="section-label flex-1">Loop</span>
         {counts && (
-          <span className="text-[10.5px] text-text-3">
+          <span className="text-xs text-text-3">
             {counts.ready} ready · {counts.working} working · {counts.blocked} blocked
           </span>
         )}
@@ -162,11 +164,10 @@ export function LoopPanel({ repoRoot }: Props) {
           disabled={!repoRoot || busy !== null}
           title="Project the task board (incl. Jira) into the dependency graph"
         >
-          {busy === "sync" ? (
-            <Loader2 size={12} className="animate-spin" />
-          ) : (
-            <RefreshCw size={12} />
-          )}
+          {/* This one is the refresh case: the glyph you pressed is already a
+              circular arrow, so it turns rather than being swapped out for a
+              different mark mid-press. */}
+          <RefreshCw size={12} className={busy === "sync" ? "animate-spin" : undefined} />
           <span className="ml-1">Sync</span>
         </Button>
         <Button
@@ -176,17 +177,16 @@ export function LoopPanel({ repoRoot }: Props) {
           disabled={!repoRoot || busy !== null || (counts?.ready ?? 0) === 0}
           title="Claim the ready set and dispatch it into the native Aura brain"
         >
-          {busy === "run" ? (
-            <Loader2 size={12} className="animate-spin" />
-          ) : (
-            <Play size={12} />
-          )}
+          {/* Run is not: its resting glyph is a triangle, and a spinning
+              triangle is nothing. So the house spinner takes over while the
+              dispatch is in flight. */}
+          {busy === "run" ? <AsciiSpinner size={12} /> : <Play size={12} />}
           <span className="ml-1">Run</span>
         </Button>
       </div>
 
       {note && (
-        <div className="px-3 py-1.5 text-[11px] text-text-2 border-b border-line-soft bg-bg-1">
+        <div className="px-3 py-1.5 text-xs text-text-2 border-b border-line-soft bg-bg-1">
           {note}
         </div>
       )}

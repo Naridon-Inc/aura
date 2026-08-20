@@ -105,7 +105,7 @@ export function NewProjectScreen({
         <AuraWordmark />
 
         <div className="mt-10 w-full">
-          <div className="text-[14px] font-semibold text-text-1">New Project</div>
+          <div className="text-md font-semibold text-text-1">New Project</div>
 
           {/* Location */}
           <div className="mt-5">
@@ -115,7 +115,7 @@ export function NewProjectScreen({
                 value={location}
                 onChange={(e) => setLocation(e.target.value)}
                 spellCheck={false}
-                className="flex-1 font-mono text-[12.5px]"
+                className="flex-1 font-mono text-base"
               />
               <Button
                 type="button"
@@ -147,8 +147,8 @@ export function NewProjectScreen({
                   ].join(" ")}
                 >
                   <span className={on ? "text-accent" : "text-text-3"}>{m.icon}</span>
-                  <span className="text-[12.5px] font-medium text-text-1">{m.label}</span>
-                  <span className="text-[10.5px] leading-tight text-text-4">{m.hint}</span>
+                  <span className="text-base font-medium text-text-1">{m.label}</span>
+                  <span className="text-xs leading-tight text-text-4">{m.hint}</span>
                 </button>
               );
             })}
@@ -164,7 +164,7 @@ export function NewProjectScreen({
                   onChange={(e) => setUrl(e.target.value)}
                   spellCheck={false}
                   placeholder="https:// or git@github.com:user/repo.git"
-                  className="font-mono text-[12.5px]"
+                  className="font-mono text-base"
                 />
                 <div className="mt-2">
                   <FieldLabel>Folder name (optional)</FieldLabel>
@@ -173,7 +173,7 @@ export function NewProjectScreen({
                     onChange={(e) => setName(e.target.value)}
                     spellCheck={false}
                     placeholder="defaults to the repo name"
-                    className="text-[12.5px]"
+                    className="text-base"
                   />
                 </div>
               </>
@@ -185,7 +185,7 @@ export function NewProjectScreen({
                   onChange={(e) => setName(e.target.value)}
                   spellCheck={false}
                   placeholder="my-project"
-                  className="text-[12.5px]"
+                  className="text-base"
                 />
                 {mode === "template" ? (
                   <div className="mt-2">
@@ -197,7 +197,7 @@ export function NewProjectScreen({
                           type="button"
                           onClick={() => setTemplate(t.id)}
                           className={[
-                            "h-8 px-3 rounded-md border text-[12px] transition-colors",
+                            "h-8 px-3 rounded-md border text-sm transition-colors",
                             template === t.id
                               ? "border-accent bg-accent-soft text-text-1"
                               : "border-line-soft bg-bg-2 text-text-3 hover:text-text-1 hover:bg-bg-3",
@@ -214,7 +214,7 @@ export function NewProjectScreen({
           </div>
 
           {error ? (
-            <div className="mt-3 text-[11.5px] text-red break-words">{error}</div>
+            <div className="mt-3 text-sm text-red break-words">{error}</div>
           ) : null}
 
           <div className="mt-5 flex items-center justify-end">
@@ -225,7 +225,7 @@ export function NewProjectScreen({
               disabled={!canSubmit}
               onClick={submit}
             >
-              {busy ? <AsciiSpinner className="text-[12px] leading-none" /> : null}
+              {busy ? <AsciiSpinner className="text-sm leading-none" /> : null}
               {mode === "clone" ? "Clone" : "Create"}
             </Button>
           </div>
@@ -237,6 +237,6 @@ export function NewProjectScreen({
 
 function FieldLabel({ children }: { children: React.ReactNode }) {
   return (
-    <div className="mb-1.5 text-[11px] font-medium text-text-3">{children}</div>
+    <div className="mb-1.5 text-xs font-medium text-text-3">{children}</div>
   );
 }

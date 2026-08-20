@@ -15,12 +15,13 @@
 import { useId, useMemo } from "react";
 import { AgentIcon } from "../agent/AgentIcon";
 import {
-  fmtCost,
-  fmtTokens,
   modelLabel,
   providerAccent,
   providerForModel,
 } from "./usageProviders";
+import { compactNumber } from "../../lib/compactNumber";
+import { formatCost } from "../../lib/money";
+import { percent } from "../../lib/percent";
 
 export type ModelSlice = {
   /** Raw model id (local) or provider+model (cloud) — used for keys. */
@@ -34,7 +35,7 @@ export type ModelSlice = {
   costUsd: number;
 };
 
-/** One stat in the hero — a big value over a dim uppercase caption, with an
+/** One stat in the hero — a big value over a dim caption, with an
  *  optional secondary line. Mirrors OverviewPane's StatCard rhythm but sized
  *  up for the hero. */
 function HeroStat({
@@ -50,17 +51,17 @@ function HeroStat({
 }) {
   return (
     <div className="flex flex-col">
-      <div className="text-[11px] uppercase tracking-wide text-text-4">
+      <div className="section-label">
         {caption}
       </div>
       <div
-        className="mt-1.5 text-[28px] font-semibold leading-none"
+        className="mt-1.5 text-2xl font-semibold leading-none"
         style={{ color: accent ?? "var(--color-text-1)" }}
       >
         {value}
       </div>
       {sub ? (
-        <div className="mt-1.5 text-[12px] text-text-3">{sub}</div>
+        <div className="mt-1.5 text-sm text-text-3">{sub}</div>
       ) : null}
     </div>
   );
@@ -91,28 +92,28 @@ export function UsageHero({
   return (
     <div className="rounded-lg border border-line-soft bg-bg-1 p-3">
       <div className="mb-3 flex items-baseline justify-between">
-        <span className="text-[11px] uppercase tracking-wide text-text-4">
+        <span className="section-label">
           Shared usage · {monthLabel}
         </span>
         {scopeNote ? (
-          <span className="text-[11px] text-text-4">{scopeNote}</span>
+          <span className="text-xs text-text-4">{scopeNote}</span>
         ) : null}
       </div>
       <div className="grid grid-cols-2 gap-3 sm:grid-cols-3">
         <HeroStat
           caption="This month · tokens"
-          value={fmtTokens(monthTotal)}
-          sub={`${fmtTokens(monthTokensIn)} in · ${fmtTokens(monthTokensOut)} out`}
+          value={compactNumber(monthTotal)}
+          sub={`${compactNumber(monthTokensIn)} in · ${compactNumber(monthTokensOut)} out`}
         />
         <HeroStat
           caption="This month · cost"
-          value={fmtCost(monthCostUsd)}
+          value={formatCost(monthCostUsd)}
           accent="var(--color-accent)"
         />
         <HeroStat
           caption={accumulatedLabel}
-          value={fmtTokens(accumulatedTokens)}
-          sub={fmtCost(accumulatedCostUsd)}
+          value={compactNumber(accumulatedTokens)}
+          sub={formatCost(accumulatedCostUsd)}
         />
       </div>
     </div>
@@ -176,11 +177,11 @@ export function CumulativeTrend({
   return (
     <div className="rounded-lg border border-line-soft bg-bg-1 p-3">
       <div className="mb-2 flex items-baseline justify-between">
-        <span className="text-[11px] uppercase tracking-wide text-text-4">
+        <span className="section-label">
           {caption}
         </span>
-        <span className="font-mono text-[11px] text-text-4">
-          {fmtTokens(peak)} cumulative
+        <span className="font-mono text-xs text-text-4">
+          {compactNumber(peak)} cumulative
         </span>
       </div>
       <svg
@@ -219,7 +220,7 @@ export function CumulativeTrend({
           />
         ) : null}
       </svg>
-      <div className="mt-1.5 flex items-center justify-between text-[11px] text-text-4">
+      <div className="mt-1.5 flex items-center justify-between text-xs text-text-4">
         <span>{points[0]?.label ?? ""}</span>
         <span>{points[points.length - 1]?.label ?? ""}</span>
       </div>
@@ -251,7 +252,7 @@ export function ModelSplitBar({
 
   return (
     <div className="rounded-lg border border-line-soft bg-bg-1 p-3">
-      <div className="mb-2.5 text-[11px] uppercase tracking-wide text-text-4">
+      <div className="section-label mb-2.5">
         {caption}
       </div>
       <div className="flex h-2.5 w-full overflow-hidden rounded-full bg-bg-2">
@@ -262,7 +263,7 @@ export function ModelSplitBar({
             <span
               key={s.key}
               className="block h-full"
-              title={`${s.label} · ${fmtTokens(s.total)} tokens · ${fmtCost(
+              title={`${s.label} · ${compactNumber(s.total)} tokens · ${formatCost(
                 s.costUsd,
               )}`}
               style={{
@@ -276,24 +277,24 @@ export function ModelSplitBar({
       </div>
       <div className="mt-3 flex flex-col gap-1.5">
         {ranked.withTotal.map((s) => {
-          const pct = ranked.grand > 0 ? (s.total / ranked.grand) * 100 : 0;
+          const pct = percent(s.total, ranked.grand);
           return (
             <div
               key={`legend-${s.key}`}
-              className="flex items-center gap-2 text-[12px]"
+              className="flex items-center gap-2 text-sm"
             >
               <AgentIcon agentId={s.providerId} size={14} />
               <span className="min-w-0 flex-1 truncate text-text-2">
                 {modelLabel(s.label)}
               </span>
-              <span className="shrink-0 font-mono text-[11px] text-text-4">
-                {fmtTokens(s.total)}
+              <span className="shrink-0 font-mono text-xs text-text-4">
+                {compactNumber(s.total)}
               </span>
-              <span className="w-9 shrink-0 text-right font-mono text-[11px] text-text-3">
-                {pct.toFixed(0)}%
+              <span className="w-9 shrink-0 text-right font-mono text-xs text-text-3">
+                {pct}%
               </span>
-              <span className="w-14 shrink-0 text-right font-mono text-[11px] text-text-3">
-                {fmtCost(s.costUsd)}
+              <span className="w-14 shrink-0 text-right font-mono text-xs text-text-3">
+                {formatCost(s.costUsd)}
               </span>
             </div>
           );

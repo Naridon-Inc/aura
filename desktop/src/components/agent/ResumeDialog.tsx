@@ -13,8 +13,11 @@
 
 import { useEffect, useMemo, useState } from "react";
 import { api, type ClaudeSession } from "../../lib/api";
+import { refreshSessions } from "../../lib/sessionsCache";
 import { setResumedHistory, setResumeSession } from "../../lib/agentStreamStore";
 import { AsciiSpinner } from "../ui/ascii-spinner";
+import { relativeAgeFromSecs } from "../../lib/relativeTime";
+import { sessionPromptTitle } from "../../lib/sessionPromptTitle";
 
 type Props = {
   channel: string;
@@ -55,8 +58,7 @@ export function ResumeDialog({ channel, repoRoot, open, onClose, onResumed }: Pr
     setError(null);
     setActiveIdx(0);
     setHidden(new Set());
-    api
-      .claudeListSessions(repoRoot)
+    refreshSessions(repoRoot)
       .then(setSessions)
       .catch((e) => setError(String(e)));
   }, [open, repoRoot]);
@@ -138,8 +140,8 @@ export function ResumeDialog({ channel, repoRoot, open, onClose, onResumed }: Pr
         onClick={(e) => e.stopPropagation()}
       >
         <header className="flex items-center gap-2 h-10 px-3 border-b border-line-soft bg-bg-chrome">
-          <span className="text-text-1 text-[12.5px] font-medium">Resume Claude session</span>
-          <span className="text-text-5 text-[10.5px] font-mono truncate">
+          <span className="text-text-1 text-base font-medium">Resume Claude session</span>
+          <span className="text-text-5 text-xs font-mono truncate">
             {shortRoot(repoRoot)}
           </span>
           {stale.length > 0 && (
@@ -151,10 +153,10 @@ export function ResumeDialog({ channel, repoRoot, open, onClose, onResumed }: Pr
                   ? "Hide sessions older than 24 hours"
                   : `Show ${stale.length} older session${stale.length === 1 ? "" : "s"} (>24h)`
               }
-              className={`ml-2 text-[10.5px] px-2 h-6 rounded transition-colors ${
+              className={`ml-2 text-xs px-2 h-6 rounded transition-colors ${
                 showOlder
-                  ? "bg-bg-card text-text-1 hover:bg-bg-hover"
-                  : "text-text-4 hover:text-text-1 hover:bg-bg-1"
+                  ? "bg-bg-card text-text-1 hover:bg-state-hover"
+                  : "text-text-4 hover:text-text-1 hover:bg-state-hover"
               }`}
             >
               {showOlder ? "Hide older" : `Show older · ${stale.length}`}
@@ -163,7 +165,7 @@ export function ResumeDialog({ channel, repoRoot, open, onClose, onResumed }: Pr
           <button
             type="button"
             onClick={onClose}
-            className="ml-auto text-text-4 hover:text-text-1 text-[11px] px-2 h-6 rounded hover:bg-bg-1 transition-colors"
+            className="ml-auto text-text-4 hover:text-text-1 text-xs px-2 h-6 rounded hover:bg-state-hover transition-colors"
             title="Close (Esc)"
           >
             ✕
@@ -172,23 +174,23 @@ export function ResumeDialog({ channel, repoRoot, open, onClose, onResumed }: Pr
 
         <div className="flex-1 min-h-0 overflow-y-auto">
           {sessions === null && !error && (
-            <div className="flex items-center gap-1.5 p-6 text-text-4 text-[12px]">
+            <div className="flex items-center gap-1.5 p-6 text-text-4 text-sm">
               <AsciiSpinner />
               Finding your past sessions…
             </div>
           )}
           {error && (
-            <div className="p-6 text-red text-[12px] font-mono whitespace-pre-wrap">
+            <div className="p-6 text-red text-sm font-mono whitespace-pre-wrap">
               {error}
             </div>
           )}
           {sessions && sessions.length === 0 && (
-            <div className="p-6 text-text-4 text-[12px]">
+            <div className="p-6 text-text-4 text-sm">
               no past Claude Code sessions for this workspace.
             </div>
           )}
           {sessions && sessions.length > 0 && visible.length === 0 && (
-            <div className="p-6 text-text-4 text-[12px] flex flex-col gap-2 items-start">
+            <div className="p-6 text-text-4 text-sm flex flex-col gap-2 items-start">
               <span>
                 All sessions for this workspace are older than 24h.
               </span>
@@ -196,7 +198,7 @@ export function ResumeDialog({ channel, repoRoot, open, onClose, onResumed }: Pr
                 <button
                   type="button"
                   onClick={() => setShowOlder(true)}
-                  className="text-[11.5px] text-accent hover:underline"
+                  className="text-sm text-accent hover:underline"
                 >
                   Show {stale.length} older session{stale.length === 1 ? "" : "s"} ↗
                 </button>
@@ -213,8 +215,8 @@ export function ResumeDialog({ channel, repoRoot, open, onClose, onResumed }: Pr
                 // cleanPrompt: scheduled-task / autonomous-loop turns
                 // arrive as raw <task-notification> XML and would
                 // otherwise dominate the row.
-                const lastClean = cleanPrompt(s.last_prompt);
-                const firstClean = cleanPrompt(s.first_prompt);
+                const lastClean = sessionPromptTitle(s.last_prompt);
+                const firstClean = sessionPromptTitle(s.first_prompt);
                 const title = lastClean || firstClean;
                 const nowSec = Math.floor(Date.now() / 1000);
                 const isStale =
@@ -225,15 +227,15 @@ export function ResumeDialog({ channel, repoRoot, open, onClose, onResumed }: Pr
                     onMouseEnter={() => setActiveIdx(i)}
                     onClick={() => pick(s)}
                     className={`flex items-start gap-3 px-3 py-2.5 cursor-pointer border-b border-line-soft/50 group ${
-                      i === activeIdx ? "bg-bg-card" : "hover:bg-bg-hover"
+                      i === activeIdx ? "bg-bg-card" : "hover:bg-state-hover"
                     } ${isStale ? "opacity-70" : ""}`}
                   >
                     <div className="flex-1 min-w-0">
-                      <div className="text-text-1 text-[12.5px] truncate flex items-center gap-2">
+                      <div className="text-text-1 text-base truncate flex items-center gap-2">
                         {isStale && (
                           <span
                             title="Last activity > 24h ago"
-                            className="text-[9.5px] uppercase tracking-wider text-text-4 border border-line-soft rounded px-1 py-0.5 flex-shrink-0"
+                            className="meta-tag"
                           >
                             stale
                           </span>
@@ -250,11 +252,11 @@ export function ResumeDialog({ channel, repoRoot, open, onClose, onResumed }: Pr
                       {firstClean &&
                         lastClean &&
                         firstClean !== lastClean && (
-                          <div className="text-text-4 text-[11px] truncate mt-0.5">
+                          <div className="text-text-4 text-xs truncate mt-0.5">
                             ↳ first: {firstClean}
                           </div>
                         )}
-                      <div className="flex items-center gap-2 mt-1 text-[10.5px]">
+                      <div className="flex items-center gap-2 mt-1 text-xs">
                         {s.cwd_rel && (
                           <span
                             className="font-mono px-1.5 py-px rounded text-text-3"
@@ -291,7 +293,7 @@ export function ResumeDialog({ channel, repoRoot, open, onClose, onResumed }: Pr
                         });
                       }}
                       title="Hide this session from the picker (keeps the on-disk transcript)"
-                      className="opacity-0 group-hover:opacity-100 focus-visible:opacity-100 transition-opacity text-text-4 hover:text-red text-[10.5px] px-1.5 py-0.5 rounded hover:bg-bg-hover flex-shrink-0 self-center focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-accent/50"
+                      className="opacity-0 group-hover:opacity-100 focus-visible:opacity-100 transition-opacity text-text-4 hover:text-red text-xs px-1.5 py-0.5 rounded hover:bg-state-hover flex-shrink-0 self-center focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-accent/50"
                     >
                       hide
                     </button>
@@ -302,7 +304,7 @@ export function ResumeDialog({ channel, repoRoot, open, onClose, onResumed }: Pr
           )}
         </div>
 
-        <footer className="flex items-center gap-2 h-9 px-3 border-t border-line-soft text-[10.5px] text-text-5">
+        <footer className="flex items-center gap-2 h-9 px-3 border-t border-line-soft text-xs text-text-5">
           <span>↑↓ navigate</span>
           <span>↵ resume</span>
           <span>esc close</span>
@@ -318,65 +320,7 @@ function shortRoot(root: string): string {
   return ".../" + parts.slice(-2).join("/");
 }
 
-// Strip system-injected XML wrappers (autonomous-loop / scheduled-task /
-// system-reminder / command-name turns) so the dialog row shows something
-// the user can recognize. The raw payloads are 200+ char XML blobs that
-// dominate the row otherwise. Falls back to a quiet label when there's
-// nothing meaningful inside the wrapper.
-function cleanPrompt(s: string | null | undefined): string {
-  if (!s) return "";
-  const trimmed = s.trim();
-  if (!trimmed) return "";
-
-  // <task-notification> from ScheduleWakeup / scheduled-task fires.
-  if (/^<task-notification[\s>]/i.test(trimmed)) {
-    const summary = trimmed.match(/<summary>([\s\S]*?)<\/summary>/i);
-    if (summary && summary[1].trim()) return `↻ scheduled · ${collapse(summary[1])}`;
-    return "↻ scheduled task";
-  }
-
-  // <task> from agent dispatch.
-  if (/^<task[\s>]/i.test(trimmed)) {
-    const desc = trimmed.match(/<description>([\s\S]*?)<\/description>/i);
-    if (desc && desc[1].trim()) return `▶ task · ${collapse(desc[1])}`;
-    return "▶ subagent task";
-  }
-
-  // <command-name> — slash-command dispatch.
-  if (/^<command-name>/i.test(trimmed)) {
-    const cmd = trimmed.match(/<command-name>([\s\S]*?)<\/command-name>/i);
-    if (cmd && cmd[1].trim()) return `/ ${collapse(cmd[1])}`;
-    return "/ command";
-  }
-
-  // <system-reminder> — runtime nag, not a real prompt.
-  if (/^<system-reminder>/i.test(trimmed)) {
-    return "(system reminder)";
-  }
-
-  // Autonomous-loop sentinel.
-  if (trimmed.includes("<<autonomous-loop")) {
-    return "↻ autonomous loop";
-  }
-
-  // Generic XML opener — keep the user from seeing raw markup.
-  if (trimmed.startsWith("<") && trimmed.endsWith(">") && trimmed.includes("</")) {
-    return "(system message)";
-  }
-
-  return collapse(trimmed);
-}
-
-function collapse(s: string): string {
-  const flat = s.replace(/\s+/g, " ").trim();
-  if (flat.length <= 160) return flat;
-  return flat.slice(0, 157) + "…";
-}
-
 function relAge(unixSecs: number): string {
-  const ageS = Math.max(0, Math.floor(Date.now() / 1000 - unixSecs));
-  if (ageS < 60) return `${ageS}s ago`;
-  if (ageS < 3600) return `${Math.floor(ageS / 60)}m ago`;
-  if (ageS < 86400) return `${Math.floor(ageS / 3600)}h ago`;
-  return `${Math.floor(ageS / 86400)}d ago`;
+  // One ladder for the whole app — see lib/relativeTime.
+  return relativeAgeFromSecs(unixSecs);
 }

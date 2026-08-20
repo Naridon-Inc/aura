@@ -98,25 +98,69 @@ export function pullPrompt(branch: string): string {
   );
 }
 
+// The whole "open a pull request" job, start to finish, with no stops to ask.
+// Clicking Create PR is the decision — so the prompt carries every step the
+// user would otherwise have had to do by hand first: look at what's actually
+// changed (including work that isn't committed yet), run the checks, then open
+// the PR. It ends at a real PR URL, not a half-done branch.
 export function createPrPrompt(
   branch: string,
   title: string,
   draft = false,
 ): string {
   return [
-    `Open a${draft ? " draft" : ""} pull request for the current branch \`${branch}\`${title ? ` ("${title}")` : ""}.`,
+    `Open a${draft ? " draft" : ""} pull request for the current branch \`${branch}\`${title ? ` ("${title}")` : ""}. Do the whole job yourself. Don't stop to ask me to confirm the steps.`,
     ``,
-    `First review the branch properly — don't just list files:`,
+    `Look at what actually changed first. Don't just list files:`,
     `1. Find the base branch with \`gh repo view --json defaultBranchRef --jq .defaultBranchRef.name\`.`,
-    `2. Run \`aura pr-review --base <that base> --json\` to get the semantic diff: the changed logic, the blast radius (what depends on what changed), the risk score, and any issues it flags.`,
-    `3. Skim the commits with \`git log <base>..HEAD\` so the description captures the actual intent.`,
+    `2. Check the working tree with \`git status --porcelain\` and \`git diff\`. If there are uncommitted changes that belong in this PR, commit them with a clear, accurate message describing what changed and why. Leave anything that's clearly unrelated (scratch files, local config) alone and say so.`,
+    `3. Read the branch's own diff against the base: \`git diff <base>...HEAD --stat\` then the parts that matter, and \`git log <base>..HEAD\` so the description captures the real intent.`,
     ``,
-    `Then:`,
+    `Then run the checks, and don't skip them:`,
+    `4. \`aura pr-review --base <that base> --json\`. The semantic diff: changed logic, blast radius (what depends on what changed), risk score, and any issues it flags.`,
+    `5. \`aura prove\`, which user-facing behaviours are actually wired end-to-end and which still have gaps.`,
+    ``,
+    `Then open it:`,
     `- Write a clear title and a plain-language description of WHAT changed and WHY, with a short "Blast radius / risk" note and a reviewer checklist.`,
-    `- If the review surfaced real problems, list them first under "⚠ Issues to resolve" and say whether they should block the PR.`,
-    `- Push the branch if it isn't up to date, then create the PR with \`gh pr create\`${draft ? " --draft" : ""}. Print the PR URL when you're done.`,
+    `- If the checks surfaced real problems, list them first under "⚠ Issues to resolve" and say whether they should block the PR. Real problems don't stop you opening it. They go in the description where a reviewer will see them.`,
+    `- Push the branch (set the upstream if it has none), then create the PR with \`gh pr create\`${draft ? " --draft" : ""}. If a PR already exists for this branch, update it instead of opening a second one.`,
+    `- Finish with the PR URL and two or three lines on what you did.`,
   ].join("\n");
 }
+
+/**
+ * The background-job id for "update this pull request with Aura".
+ *
+ * Scoped to the PR number, because three surfaces offer this and they don't
+ * always mean the same pull request: the header button and the review rail
+ * both act on the CURRENT BRANCH's PR, while an open PR tab acts on whichever
+ * PR you're reading. On a bare `"update-pr"` id, updating #400 from a tab made
+ * the rail spin "Updating…" over #422. Scoped, the three share one run when
+ * they mean one PR and stay silent when they don't.
+ */
+export function updatePrJobId(prNumber: number): string {
+  return `update-pr:${prNumber}`;
+}
+
+/**
+ * The hover for every "update this PR" control.
+ *
+ * Three surfaces offer the action and each had written its own: "Aura
+ * re-reviews the new commits and rewrites PR #400 — in the background, without
+ * touching your chat", "Aura re-reviews the branch and rewrites the title +
+ * description to match what it does now — in the background", and "Aura
+ * reconciles the PR title + description with what actually shipped — in the
+ * background". Three descriptions of one `updatePrPrompt` run, and the third
+ * said "reconciles", which is a word for the machinery rather than for what a
+ * person gets.
+ *
+ * It leads with the fact that this happens ON PRESS, because the thing this
+ * panel got wrong for a while was implying the opposite.
+ */
+export const UPDATE_PR_HINT =
+  "Rewrites the title and description to match what the branch does now. " +
+  "Aura re-reads the new commits first. Runs in the background; nothing " +
+  "happens until you press it.";
 
 // Refresh an EXISTING pull request after more work landed on its branch. The
 // PR's diff already tracks the branch head on every push — this is about the
@@ -124,11 +168,11 @@ export function createPrPrompt(
 // title/description to match what the branch now does, and leave a review note.
 export function updatePrPrompt(branch: string, prNumber: number): string {
   return [
-    `Update the existing pull request #${prNumber} for branch \`${branch}\` — more work has landed since it was opened.`,
+    `Update the existing pull request #${prNumber} for branch \`${branch}\`. More work has landed since it was opened.`,
     ``,
     `Review what actually changed:`,
     `1. Find the base branch with \`gh repo view --json defaultBranchRef --jq .defaultBranchRef.name\`.`,
-    `2. Push the branch if it has unpushed commits so the PR diff reflects the latest (the diff auto-tracks the branch head — you only need to push).`,
+    `2. Push the branch if it has unpushed commits so the PR diff reflects the latest (the diff auto-tracks the branch head. You only need to push).`,
     `3. Run \`aura pr-review --base <that base> --json\` for the current semantic diff, blast radius, risk score, and any new issues.`,
     `4. Read the PR's current title/body with \`gh pr view ${prNumber} --json title,body\` so you refresh rather than clobber it.`,
     ``,
@@ -150,27 +194,27 @@ export function updatePrPrompt(branch: string, prNumber: number): string {
 /** Ask Aura to run a semantic safety check on the current changes, in chat. */
 export function safetyCheckPrompt(): string {
   return [
-    `Run a safety check on my current changes — use \`aura pr-review\` against the branch's base.`,
+    `Run a safety check on my current changes. Use \`aura pr-review\` against the branch's base.`,
     `Tell me here, in plain language: any bugs, security issues, architecture/layer drift, or anything that doesn't match what I asked for.`,
-    `Do the analysis yourself and report inline — don't open a separate tab.`,
+    `Do the analysis yourself and report inline. Don't open a separate tab.`,
   ].join("\n");
 }
 
 /** Ask Aura to prove the branch's goals, in chat. */
 export function proveGoalsPrompt(): string {
   return [
-    `Prove the goals for this branch — run \`aura prove\` (or \`aura goal-trace\`).`,
+    `Prove the goals for this branch. Run \`aura prove\` (or \`aura goal-trace\`).`,
     `Tell me here which user-facing behaviors are actually wired up end-to-end and which still have gaps, in plain language.`,
-    `Report inline — don't open a separate tab.`,
+    `Report inline. Don't open a separate tab.`,
   ].join("\n");
 }
 
 /** Ask Aura to summarize attestations/provenance for recent work, in chat. */
 export function attestPrompt(): string {
   return [
-    `Show the attestations for my recent work — run \`aura attest\` (list + verify).`,
+    `Show the attestations for my recent work. Run \`aura attest\` (list + verify).`,
     `Summarize here what's signed and verified, and flag anything unsigned or failing verification.`,
-    `Report inline — don't open a separate tab.`,
+    `Report inline. Don't open a separate tab.`,
   ].join("\n");
 }
 
@@ -178,7 +222,7 @@ export function attestPrompt(): string {
 export function resolveConflictsPrompt(): string {
   return [
     `Resolve the current merge conflicts on this branch using Aura's conflict tools.`,
-    `Go file by file, choosing ours / theirs / a merged result as appropriate — ask me first if a choice looks risky or loses work.`,
+    `Go file by file, choosing ours / theirs / a merged result as appropriate. Ask me first if a choice looks risky or loses work.`,
     `Then continue the merge and walk me through what you did, here in chat.`,
   ].join("\n");
 }

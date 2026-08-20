@@ -22,6 +22,7 @@
 //! so the frontend doesn't care which backend produced them.
 
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use aura_agents::{InvokeMode, InvokeRequest, registry};
 use futures_util::StreamExt;
@@ -33,6 +34,7 @@ use tokio::io::{AsyncBufReadExt, BufReader};
 use super::super::{ChatRole, ManagerSession, PendingQuestion, QuestionKind, persist};
 use super::super::distill;
 use super::super::tokens;
+use super::place::Place;
 
 const MODEL: &str = "claude-sonnet-4-5-20250929";
 const MAX_TOKENS: u32 = 4096;
@@ -581,9 +583,13 @@ async fn run_anthropic(
         // handle it after the normal pass so all sibling tool_results are
         // collected first (Anthropic requires every tool_use to have a
         // matching tool_result in the next user message).
-        let project_root = {
+        // Where this turn's tools reach. Read once per pass rather than held
+        // across the loop, because the machine could have been forgotten
+        // between one tool call and the next and the answer should follow.
+        let place = {
             let s = state.lock().unwrap();
-            s.projects.first().map(|p| p.root.clone()).unwrap_or_default()
+            let root = s.projects.first().map(|p| p.root.clone()).unwrap_or_default();
+            Place::resolve(root, s.machine_id.as_deref())
         };
         let mut tool_results: Vec<Value> = vec![];
         let mut pending_question: Option<PendingQuestion> = None;
@@ -632,7 +638,7 @@ async fn run_anthropic(
                     continue;
                 }
                 let (content, is_error) =
-                    execute_tool(&app, &session_id, &state, &project_root, name, &input).await;
+                    execute_tool(&app, &session_id, &state, &place, name, &input).await;
                 emit(
                     &app,
                     &event_name,
@@ -771,6 +777,30 @@ pub(crate) fn maybe_compact_session_inner(
     }
 }
 
+/// What to tell the model about where its tools land.
+///
+/// Silent for a local conversation — that is the assumption every line of the
+/// base prompt already makes, and repeating it would spend tokens saying
+/// nothing. On a machine it is load-bearing: the project line above names a
+/// path on this laptop, and a model that took it literally would read
+/// `/Users/…` on a Linux box, get "not found", and conclude the code is
+/// missing rather than that it looked in the wrong place.
+fn place_note(place: &Place) -> String {
+    let Some(name) = place.machine_name() else {
+        return String::new();
+    };
+    format!(
+        "\n\nThis conversation's tools run on a connected machine, not on the \
+user's laptop. read_file, list_dir, bash, prove, review and rewind all act on \
+{name}, where the project is checked out at {root}. Paths are that machine's \
+paths — the project path listed above is where the conversation is filed on \
+the user's laptop, not somewhere you can read. You cannot spawn subagents \
+here; do the work yourself in this conversation.",
+        name = name,
+        root = place.root(),
+    )
+}
+
 fn build_request(state: &Arc<Mutex<ManagerSession>>) -> (Vec<Value>, String) {
     let s = state.lock().unwrap();
     // Reconstruct the conversation from the authoritative `session.chat`
@@ -813,7 +843,15 @@ fn build_request(state: &Arc<Mutex<ManagerSession>>) -> (Vec<Value>, String) {
     } else {
         format!("\n\nActive project(s):\n{}", project_lines.join("\n"))
     };
-    let system = format!("{}{}", SYSTEM_PROMPT, context);
+    // Where this conversation's hands are. Without this the model reads the
+    // project line above — a path on the user's laptop — and reasons about
+    // files at addresses that don't exist on the box, then reports success
+    // from tool output that came from somewhere else entirely.
+    let place = super::place::Place::resolve(
+        s.projects.first().map(|p| p.root.clone()).unwrap_or_default(),
+        s.machine_id.as_deref(),
+    );
+    let system = format!("{}{}{}", SYSTEM_PROMPT, context, place_note(&place));
     (messages, system)
 }
 
@@ -871,7 +909,7 @@ fn truncate(s: &str, max: usize) -> String {
     if s.len() <= max {
         s.to_string()
     } else {
-        let mut out = s[..max].to_string();
+        let mut out = crate::text::clip(s, max).to_string();
         out.push_str("\n\n…(truncated)");
         out
     }
@@ -1041,16 +1079,43 @@ fn tool_definitions() -> Value {
     ])
 }
 
+/// How long to let the `aura` binary work before giving up on it.
+///
+/// `prove` and `pr-review` walk a whole repository, so this is generous. It is
+/// not unlimited, because before `Place` existed these calls had no deadline at
+/// all: one that hung took the conversation with it, with nothing on screen to
+/// say why.
+const AURA_WAIT: Duration = Duration::from_secs(300);
+/// `aura ask` answers from an index that is already built.
+const ASK_WAIT: Duration = Duration::from_secs(120);
+
 async fn execute_tool(
     _app: &AppHandle,
     _session_id: &str,
     state: &Arc<Mutex<ManagerSession>>,
-    project_root: &str,
+    place: &Place,
     name: &str,
     input: &Value,
 ) -> (String, bool) {
+    // Where records go, as opposed to where code is edited. The board, the
+    // intent log and this session's own file belong to the project on this
+    // disk whichever machine is holding the working copy.
+    let project_root = place.here();
     match name {
         "spawn_subagent" => {
+            if let Some(box_name) = place.machine_name() {
+                // A subagent is a process on *this* machine, in a worktree on
+                // this disk. Started from a conversation whose code lives on a
+                // box, it would edit the wrong copy of the wrong branch and
+                // then report success. Refusing is the honest answer, and it
+                // names the two things that do work.
+                return (
+                    format!(
+                        "This conversation's code is on {box_name}; a subagent would run here, on your laptop, and edit the wrong copy. Do the work in this conversation, or start an agent session on {box_name} and hand it the task."
+                    ),
+                    true,
+                );
+            }
             let provider = input
                 .get("provider")
                 .and_then(|s| s.as_str())
@@ -1164,48 +1229,36 @@ async fn execute_tool(
         }
         "aura_ask" => {
             let q = input.get("question").and_then(|s| s.as_str()).unwrap_or("");
-            let out = tokio::process::Command::new("aura")
-                .args(["ask", q])
-                .current_dir(crate::spawn_dir::safe_spawn_dir(project_root))
-                .output()
-                .await;
-            match out {
-                Ok(o) if o.status.success() => {
-                    (String::from_utf8_lossy(&o.stdout).to_string(), false)
-                }
-                Ok(o) => (
-                    String::from_utf8_lossy(&o.stderr).to_string(),
-                    !o.status.success(),
-                ),
-                Err(e) => (format!("spawn aura: {e}"), true),
+            match place.aura(&["ask", q], ASK_WAIT).await {
+                Ok(o) if o.ok() => (o.stdout, false),
+                Ok(o) => (o.stderr, true),
+                Err(e) => (e, true),
             }
         }
+        // The four verbs that touch the world. Each one goes wherever this
+        // conversation's hands are, so the same tool card means the same thing
+        // in a chat on this laptop and a chat on a machine in Frankfurt.
         "read_file" => {
             let p = input.get("path").and_then(|s| s.as_str()).unwrap_or("");
-            let resolved = resolve_path(project_root, p);
-            match tokio::fs::read_to_string(&resolved).await {
-                Ok(s) => (truncate(&s, 8000), false),
-                Err(e) => (format!("read {}: {e}", resolved.display()), true),
+            match place.read(p, 8000).await {
+                Ok(s) => (s, false),
+                Err(e) => (e, true),
             }
         }
         "list_dir" => {
             let p = input.get("path").and_then(|s| s.as_str()).unwrap_or(".");
-            let resolved = resolve_path(project_root, p);
-            match tokio::fs::read_dir(&resolved).await {
-                Ok(mut rd) => {
-                    let mut entries = vec![];
-                    while let Ok(Some(e)) = rd.next_entry().await {
-                        let name = e.file_name().to_string_lossy().to_string();
-                        let is_dir = e
-                            .file_type()
-                            .await
-                            .map(|t| t.is_dir())
-                            .unwrap_or(false);
-                        entries.push(json!({ "name": name, "is_dir": is_dir }));
-                    }
-                    (json!({ "entries": entries }).to_string(), false)
-                }
-                Err(e) => (format!("list {}: {e}", resolved.display()), true),
+            match place.list(p).await {
+                Ok(entries) => (
+                    json!({
+                        "entries": entries
+                            .into_iter()
+                            .map(|e| json!({ "name": e.name, "is_dir": e.is_dir }))
+                            .collect::<Vec<_>>()
+                    })
+                    .to_string(),
+                    false,
+                ),
+                Err(e) => (e, true),
             }
         }
         "bash" => {
@@ -1214,22 +1267,17 @@ async fn execute_tool(
                 .get("timeout_secs")
                 .and_then(|v| v.as_u64())
                 .unwrap_or(30);
-            let fut = tokio::process::Command::new("sh")
-                .args(["-c", cmd])
-                .current_dir(crate::spawn_dir::safe_spawn_dir(project_root))
-                .output();
-            match tokio::time::timeout(std::time::Duration::from_secs(timeout), fut).await {
-                Ok(Ok(o)) => (
+            match place.sh(cmd, Duration::from_secs(timeout)).await {
+                Ok(o) => (
                     json!({
-                        "exit_code": o.status.code().unwrap_or(-1),
-                        "stdout": truncate(&String::from_utf8_lossy(&o.stdout), 4000),
-                        "stderr": truncate(&String::from_utf8_lossy(&o.stderr), 4000),
+                        "exit_code": o.code,
+                        "stdout": truncate(&o.stdout, 4000),
+                        "stderr": truncate(&o.stderr, 4000),
                     })
                     .to_string(),
-                    !o.status.success(),
+                    !o.ok(),
                 ),
-                Ok(Err(e)) => (format!("spawn: {e}"), true),
-                Err(_) => (format!("Timed out after {timeout}s: {cmd}"), true),
+                Err(e) => (e, true),
             }
         }
         // Self-verify loop — prove/review/rewind shell the `aura` binary in
@@ -1240,21 +1288,9 @@ async fn execute_tool(
             if goal.trim().is_empty() {
                 return ("prove requires a non-empty `goal`.".to_string(), true);
             }
-            let out = tokio::process::Command::new("aura")
-                .args(["prove", "--goal", goal])
-                .current_dir(crate::spawn_dir::safe_spawn_dir(project_root))
-                .output()
-                .await;
-            match out {
-                Ok(o) => {
-                    let body = format!(
-                        "{}{}",
-                        String::from_utf8_lossy(&o.stdout),
-                        String::from_utf8_lossy(&o.stderr)
-                    );
-                    (truncate(&body, 6000), !o.status.success())
-                }
-                Err(e) => (format!("spawn aura prove: {e}"), true),
+            match place.aura(&["prove", "--goal", goal], AURA_WAIT).await {
+                Ok(o) => (truncate(&format!("{}{}", o.stdout, o.stderr), 6000), !o.ok()),
+                Err(e) => (e, true),
             }
         }
         "review" => {
@@ -1262,22 +1298,20 @@ async fn execute_tool(
                 .get("base")
                 .and_then(|s| s.as_str())
                 .unwrap_or("main");
-            let out = tokio::process::Command::new("aura")
-                .args(["pr-review", "--base", base, "--json"])
-                .current_dir(crate::spawn_dir::safe_spawn_dir(project_root))
-                .output()
-                .await;
-            match out {
+            match place.aura(&["pr-review", "--base", base, "--json"], AURA_WAIT).await {
                 Ok(o) => {
-                    let stdout = String::from_utf8_lossy(&o.stdout);
-                    let body = if stdout.trim().is_empty() {
-                        String::from_utf8_lossy(&o.stderr).to_string()
+                    let failed = !o.ok();
+                    // `--json` writes the report to stdout; when the run itself
+                    // fell over there is nothing there and stderr is the only
+                    // account of why.
+                    let body = if o.stdout.trim().is_empty() {
+                        o.stderr
                     } else {
-                        stdout.to_string()
+                        o.stdout
                     };
-                    (truncate(&body, 6000), !o.status.success())
+                    (truncate(&body, 6000), failed)
                 }
-                Err(e) => (format!("spawn aura pr-review: {e}"), true),
+                Err(e) => (e, true),
             }
         }
         "rewind" => {
@@ -1303,21 +1337,9 @@ async fn execute_tool(
             if amnesia {
                 args.push("--amnesia");
             }
-            let out = tokio::process::Command::new("aura")
-                .args(&args)
-                .current_dir(crate::spawn_dir::safe_spawn_dir(project_root))
-                .output()
-                .await;
-            match out {
-                Ok(o) => {
-                    let body = format!(
-                        "{}{}",
-                        String::from_utf8_lossy(&o.stdout),
-                        String::from_utf8_lossy(&o.stderr)
-                    );
-                    (truncate(&body, 6000), !o.status.success())
-                }
-                Err(e) => (format!("spawn aura rewind: {e}"), true),
+            match place.aura(&args, AURA_WAIT).await {
+                Ok(o) => (truncate(&format!("{}{}", o.stdout, o.stderr), 6000), !o.ok()),
+                Err(e) => (e, true),
             }
         }
         _ => (format!("Unknown tool: {name}"), true),
@@ -1404,14 +1426,9 @@ fn parse_ask_user(input: &Value) -> (String, Vec<String>, QuestionKind) {
     (q, opts, shape)
 }
 
-fn resolve_path(project_root: &str, p: &str) -> std::path::PathBuf {
-    let path = std::path::Path::new(p);
-    if path.is_absolute() {
-        path.to_path_buf()
-    } else {
-        std::path::Path::new(project_root).join(p)
-    }
-}
+// `resolve_path` used to live here. It moved into `place`, which has to answer
+// the same question for two machines rather than one — keeping a second copy
+// would have meant a remote path and a local path resolving by different rules.
 
 // ── CLI brain ──────────────────────────────────────────────────────────
 //
@@ -1772,6 +1789,12 @@ async fn run_cli(
     let mut assistant_text = String::new();
     let mut captured_session_id: Option<String> = None;
 
+    // A plain-text CLI prints for a terminal, so its answer arrives wrapped in
+    // whatever that engine draws around a message (Kimi: a `• ` bullet block).
+    // Undo it as the lines come off stdout, before anything is streamed to the
+    // bubble or accumulated for the persisted turn.
+    let mut transcript = super::plain_cli_transcript::PlainCliTranscript::for_engine(&provider_id);
+
     if let Some(out) = stdout {
         let mut lines = BufReader::new(out).lines();
         while let Ok(Some(line)) = lines.next_line().await {
@@ -1844,6 +1867,7 @@ async fn run_cli(
                     }
                 }
             } else {
+                let line = transcript.line(&line);
                 assistant_text.push_str(&line);
                 assistant_text.push('\n');
                 emit(
@@ -2015,4 +2039,55 @@ fn parse_cli_final_result(v: &Value) -> Option<String> {
     v.get("result")
         .and_then(|s| s.as_str())
         .map(|s| s.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::cmd_machines::Machine;
+
+    fn a_box() -> Machine {
+        Machine {
+            id: "ubuntu@example.invalid:/home/ubuntu/naridon".into(),
+            name: "aura-runner".into(),
+            host: "example.invalid".into(),
+            user: "ubuntu".into(),
+            key_path: "/dev/null".into(),
+            box_kind: "mine".into(),
+            repo_path: Some("/home/ubuntu/naridon".into()),
+            repo_branch: None,
+            project_root: Some("/Users/me/naridon".into()),
+            org_slug: None,
+            forward_agent: false,
+            instance_id: None,
+            asleep_since: 0,
+            added_at: 0,
+            last_used_at: 0,
+        }
+    }
+
+    #[test]
+    fn a_local_conversation_is_told_nothing_extra() {
+        // Every line of the base prompt already assumes this laptop. Saying so
+        // again would be tokens spent on the default case.
+        let here = Place::Here { root: "/Users/me/naridon".into() };
+        assert_eq!(place_note(&here), "");
+    }
+
+    #[test]
+    fn a_remote_conversation_is_told_whose_disk_it_is_reading() {
+        let there = Place::Box {
+            machine: Box::new(a_box()),
+            root: "/home/ubuntu/naridon".into(),
+            here: "/Users/me/naridon".into(),
+        };
+        let note = place_note(&there);
+        assert!(note.contains("aura-runner"), "{note}");
+        // The path it should actually use, not the one on this laptop.
+        assert!(note.contains("/home/ubuntu/naridon"), "{note}");
+        assert!(!note.contains("/Users/me"), "{note}");
+        // And the one thing it must not try, since a subagent would run here
+        // and quietly edit the wrong copy.
+        assert!(note.contains("cannot spawn subagents"), "{note}");
+    }
 }

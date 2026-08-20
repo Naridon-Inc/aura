@@ -145,19 +145,19 @@ export function SessionGoals({
   if (GOALS_V2) {
     return (
       <section>
-        <h2 className="mb-2.5 text-[11px] font-medium uppercase tracking-wider text-text-3">
+        <h2 className="section-label mb-2.5">
           What you asked here
         </h2>
 
         {hasAsk && !askTracked ? (
           <div className="mb-2.5 rounded-md border border-line-soft bg-bg-1/40 px-3 py-2.5">
-            <div className="text-[13px] leading-snug text-text-1">{runLabel}</div>
+            <div className="text-base leading-snug text-text-1">{runLabel}</div>
             <div className="mt-2 flex items-center gap-2">
               {hasChanges ? (
                 // This run changed code → Aura proves the ask on its own; the
                 // verdict replaces this line as soon as the check finishes. No
                 // button to remember to click.
-                <span className="text-[11px] text-text-3">
+                <span className="text-xs text-text-3">
                   Checking whether the AI built this…
                 </span>
               ) : (
@@ -171,7 +171,7 @@ export function SessionGoals({
                   >
                     {busy ? "Checking…" : "Check whether the AI built this"}
                   </Button>
-                  <span className="text-[10.5px] text-text-4">
+                  <span className="text-xs text-text-4">
                     proves it against the code, right now
                   </span>
                 </>
@@ -179,7 +179,7 @@ export function SessionGoals({
             </div>
           </div>
         ) : !hasAsk && goals.length === 0 ? (
-          <p className="mb-2.5 text-[12.5px] leading-relaxed text-text-4">
+          <p className="mb-2.5 text-base leading-relaxed text-text-4">
             This run didn&apos;t record what it was asked to do. Add what it was meant to
             achieve and Aura checks whether the AI actually built it.
           </p>
@@ -201,16 +201,16 @@ export function SessionGoals({
   return (
     <section>
       <div className="mb-2.5 flex items-baseline justify-between gap-3">
-        <h2 className="text-[11px] font-medium uppercase tracking-wider text-text-3">Goals</h2>
+        <h2 className="section-label">Goals</h2>
         {goals.length > 0 ? (
-          <span className="text-[11px] text-text-4">
+          <span className="text-xs text-text-4">
             {goals.length} aligned with this run
           </span>
         ) : null}
       </div>
 
       {probes ?? (
-        <p className="mb-2.5 text-[12.5px] leading-relaxed text-text-4">
+        <p className="mb-2.5 text-base leading-relaxed text-text-4">
           No goals on this run yet. Describe what it was meant to do and Aura checks,
           right now, whether the AI actually built it.
         </p>

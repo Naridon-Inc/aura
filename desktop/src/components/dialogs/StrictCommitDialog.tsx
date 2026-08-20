@@ -44,7 +44,7 @@ export function StrictCommitDialog({
             variant="outline"
             size="xs"
             onClick={onContinue}
-            className="text-amber border-amber/40 hover:bg-bg-2"
+            className="text-amber border-amber/40 hover:bg-state-hover"
           >
             Continue anyway
           </Button>
@@ -54,7 +54,7 @@ export function StrictCommitDialog({
         </>
       }
     >
-      <div className="text-text-2 text-[12.5px] leading-relaxed space-y-2">
+      <div className="text-text-2 text-base leading-relaxed space-y-2">
         <p>
           {readiness?.unpaired ?? 0} change
           {(readiness?.unpaired ?? 0) === 1 ? "" : "s"} here don&apos;t have a
@@ -62,7 +62,7 @@ export function StrictCommitDialog({
           it&apos;ll hold this save until you add one.
         </p>
         {readiness?.files && readiness.files.length > 0 && (
-          <ul className="list-disc list-inside text-text-3 text-[11.5px] font-mono space-y-0.5">
+          <ul className="list-disc list-inside text-text-3 text-sm font-mono space-y-0.5">
             {readiness.files.map((f) => (
               <li key={f} className="truncate">
                 {f}

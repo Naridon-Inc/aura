@@ -43,6 +43,10 @@ const PTY_HISTORY_CAP: usize = 4 * 1024 * 1024;
 
 use portable_pty::{native_pty_system, CommandBuilder, MasterPty, PtySize};
 use serde::{Deserialize, Serialize};
+// One contract for "start something here", wherever here is — the same seam
+// the chat's tools and the session list already run on.
+use crate::manager::brain::place::Place;
+use crate::manager::brain::place_contract::Open;
 use tauri::{AppHandle, Emitter, Manager, State};
 use tauri_plugin_notification::NotificationExt;
 use tokio::sync::mpsc;
@@ -103,9 +107,108 @@ pub struct LiveAgentSession {
 #[derive(Serialize, Clone)]
 #[serde(tag = "op", rename_all = "lowercase")]
 pub enum BlockUpdate {
-    Open { block: BlockEnvelope },
-    Append { block_id: String, text: String },
-    Close { block: BlockEnvelope },
+    Open {
+        block: BlockEnvelope,
+    },
+    /// Rewrite the tail of a block: drop its last `drop_lines` lines, then put
+    /// `lines` in their place.
+    ///
+    /// This replaces a plain append because a terminal is not append-only. A
+    /// CLI's spinner, its progress bar and its status footer are all drawn by
+    /// returning to a line already on screen and painting over it, so an
+    /// append-only stream turns one spinner into a copy of itself per frame —
+    /// which is exactly what the agent chat used to show. `drop_lines` is 0
+    /// for ordinary streaming output, which is the overwhelming majority of
+    /// updates, so the common case is still a pure append by another name.
+    Reframe {
+        block_id: String,
+        drop_lines: usize,
+        lines: Vec<String>,
+    },
+    Close {
+        block: BlockEnvelope,
+    },
+}
+
+/// What changed between the transcript we last mirrored and the one the
+/// terminal holds now, in whole lines.
+#[derive(Debug, PartialEq, Eq)]
+struct TranscriptDelta {
+    /// Lines the terminal dropped off the top of its scrollback since we last
+    /// looked. Callers holding a line-index anchor shift it down by this much.
+    evicted: usize,
+    /// Trailing mirrored lines the terminal has since painted over.
+    rewrote: usize,
+    /// What goes in their place.
+    added: Vec<String>,
+}
+
+fn common_prefix(a: &[String], b: &[String]) -> usize {
+    let mut i = 0;
+    while i < a.len() && i < b.len() && a[i] == b[i] {
+        i += 1;
+    }
+    i
+}
+
+/// Diff two transcripts by line.
+///
+/// A terminal only ever changes its text in two ways: it drops lines off the
+/// top when scrollback fills, and it rewrites some suffix of what is on
+/// screen. So the whole diff is (how many fell off the top, how many of mine
+/// are stale, what replaces them) — no general edit-distance needed, and the
+/// usual answer is (0, 0, the new lines).
+fn transcript_delta(prev: &[String], next: &[String]) -> TranscriptDelta {
+    let mut evicted = 0;
+    let mut keep = common_prefix(prev, next);
+    // A grid at its scrollback limit loses a line off the top for every line
+    // it gains at the bottom, so the two transcripts stop starting at the same
+    // place and a naive prefix match reports that everything changed.
+    // Realign before believing that.
+    if keep == 0 && !prev.is_empty() && !next.is_empty() {
+        for shift in 1..prev.len() {
+            let k = common_prefix(&prev[shift..], next);
+            // One line in common is a coincidence — blank lines and repeated
+            // prompts match all over a transcript. A run of two is an
+            // alignment. The single-line case is only trusted when it is the
+            // whole of what we had left.
+            if k >= 2 || (k == 1 && prev.len() - shift == 1) {
+                evicted = shift;
+                keep = k;
+                break;
+            }
+        }
+    }
+    TranscriptDelta {
+        evicted,
+        rewrote: prev.len() - evicted - keep,
+        added: next[keep..].to_vec(),
+    }
+}
+
+/// Apply a [`BlockUpdate::Reframe`] to a block's text: drop its last
+/// `drop_lines` lines, then put `lines` in their place.
+///
+/// The frontend's block store implements the same contract against the same
+/// event, so this is deliberately the simplest statement of it — the two have
+/// to agree line for line or a repaint desyncs the copy the user is reading
+/// from the copy `agent_pty_blocks` replays after a remount.
+fn reframe_text(text: &mut String, drop_lines: usize, lines: &[String]) {
+    for _ in 0..drop_lines {
+        match text.rfind('\n') {
+            Some(at) => text.truncate(at),
+            None => {
+                text.clear();
+                break;
+            }
+        }
+    }
+    for line in lines {
+        if !text.is_empty() {
+            text.push('\n');
+        }
+        text.push_str(line);
+    }
 }
 
 /// Structured event emitted by an agent's plugin scripts (claude-code,
@@ -182,6 +285,28 @@ pub struct AgentPtySession {
     master: Mutex<Box<dyn MasterPty + Send>>,
     child: Mutex<Box<dyn portable_pty::Child + Send + Sync>>,
     blocks: Mutex<Vec<BlockEnvelope>>,
+    /// A shadow terminal fed the same bytes the child writes, so a block's
+    /// text can be *what the screen showed* rather than every byte that
+    /// produced it.
+    ///
+    /// This is the difference between a transcript and a byte log. A CLI
+    /// paints its spinner by returning to the start of a line and drawing
+    /// over it, and paints a menu by moving the cursor to each row rather
+    /// than emitting newlines. Keeping the printable characters and dropping
+    /// the cursor moves — which is all a stripper can do — turns the first
+    /// into one copy of the spinner per frame and the second into a single
+    /// run-on paragraph. Both were plainly visible in the chat view for every
+    /// agent without a protocol adapter. A grid resolves them the way the
+    /// user's own terminal does, because it is the same engine the terminal
+    /// pane renders.
+    grid: Mutex<aura_term_core::GridTerminal>,
+    /// Our copy of `grid`'s transcript, as of the last chunk — the baseline
+    /// each chunk's [`transcript_delta`] is measured against.
+    grid_lines: Mutex<Vec<String>>,
+    /// How many lines at the end of that transcript belong to
+    /// `current_block_id`. Bounds how far back a repaint is allowed to reach:
+    /// a block may rewrite its own tail, never a finished block's.
+    block_lines: Mutex<usize>,
     /// Id of the currently-open block, if any. Set when send_prompt
     /// opens an Output block; cleared when a ;D marker or a new prompt
     /// closes it.
@@ -255,6 +380,20 @@ pub struct AgentPtyRegistry {
     /// "{agent_id}@{repo_root}" -> session_id, so a second open() on the
     /// same key returns the existing session.
     by_key: Mutex<HashMap<String, String>>,
+    /// One in-flight `agent_pty_open` per key. The "is there already a
+    /// session for this key" check and the `by_key` insert that publishes
+    /// the answer sit far apart, with a CLI spawn in between — so two opens
+    /// racing on the same key both saw nothing, both spawned a child, and
+    /// the second insert overwrote the first's mapping. The first child was
+    /// then orphaned on a PTY nobody reads, which the user experiences as a
+    /// terminal that never prints. Holding this across check-and-insert
+    /// makes the second caller wait and then resume the first's session.
+    ///
+    /// The gate is only ever held for the duration of one open: a registry
+    /// lookup, a config-repair `spawn_blocking`, and the spawn itself. It
+    /// never awaits on the child's output, so it can't turn a quiet agent
+    /// into a hung second tab.
+    open_gates: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
     sessions: Mutex<HashMap<String, AgentPtySession>>,
     /// Parallel map for daemon-backed sessions. Looked up first by
     /// every mutating command — when present, route to daemon
@@ -278,6 +417,31 @@ pub struct AgentSyncInfo {
 impl AgentPtyRegistry {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// The open gate for `key`, created on first use. Callers hold the
+    /// returned `Arc` while they wait, which is what keeps
+    /// [`Self::release_open_gate`] from pruning an entry someone is queued on.
+    fn open_gate(&self, key: &str) -> Arc<tokio::sync::Mutex<()>> {
+        let mut gates = self.open_gates.lock().unwrap();
+        Arc::clone(gates.entry(key.to_string()).or_default())
+    }
+
+    /// Drop `key`'s gate once the releasing caller is the last reference.
+    /// A long-lived app opens an unbounded number of distinct keys — every
+    /// `force_new` open mints a fresh UUID one — so the map has to shed
+    /// finished entries or it grows for the life of the process. A strong
+    /// count above two means someone else is holding or queued on the gate,
+    /// and removing it would let them race against a caller who then made a
+    /// second, unrelated gate for the same key.
+    fn release_open_gate(&self, key: &str) {
+        let mut gates = self.open_gates.lock().unwrap();
+        let idle = gates
+            .get(key)
+            .is_some_and(|g| Arc::strong_count(g) <= 2);
+        if idle {
+            gates.remove(key);
+        }
     }
 
     /// Snapshot of every *live* agent session (in-process + daemon-backed)
@@ -329,7 +493,10 @@ impl AgentPtyRegistry {
     pub fn kill_all(&self) {
         let mut sessions = self.sessions.lock().unwrap();
         for (_, sess) in sessions.drain() {
-            let _ = sess.child.lock().unwrap().kill();
+            // Group hangup, not a bare SIGKILL of the CLI: a coding agent
+            // spawns its own tool subprocesses, and those are what carry on
+            // writing into a disconnected PTY when only their parent dies.
+            crate::pty_reap::hangup_and_reap(&mut **sess.child.lock().unwrap());
         }
         self.by_key.lock().unwrap().clear();
         // Drop every per-session history ring too. The read loops tee up
@@ -459,6 +626,87 @@ impl AgentPtyRegistry {
     }
 }
 
+/// Holds one key's open gate for the length of a single `agent_pty_open`,
+/// and prunes the registry entry on the way out. Written as a guard rather
+/// than a pair of calls because `agent_pty_open` returns from a dozen places
+/// — every `?` on a spawn failure is an exit that must still release.
+struct OpenGate<'a> {
+    registry: &'a AgentPtyRegistry,
+    key: String,
+    // Field order matters only for the lock, not the prune: `Drop::drop`
+    // runs before fields drop, so the count check below sees this guard's
+    // own reference. By then the caller has already published its session,
+    // so a newcomer that mints a fresh gate finds the session and resumes.
+    _guard: tokio::sync::OwnedMutexGuard<()>,
+}
+
+impl<'a> OpenGate<'a> {
+    async fn acquire(registry: &'a AgentPtyRegistry, key: &str) -> OpenGate<'a> {
+        let gate = registry.open_gate(key);
+        let guard = gate.lock_owned().await;
+        OpenGate {
+            registry,
+            key: key.to_string(),
+            _guard: guard,
+        }
+    }
+}
+
+impl Drop for OpenGate<'_> {
+    fn drop(&mut self) {
+        self.registry.release_open_gate(&self.key);
+    }
+}
+
+/// The name a machine holds this agent's session under.
+///
+/// Derived from the same ingredients as the dedup key rather than from a fresh
+/// id, because `tmux new -A` is what makes an agent on a box outlive its
+/// connection: start the same agent on the same project again — after a reload,
+/// after a flight, tomorrow, from another computer — and this name lands back
+/// in the session still running there instead of starting a second one beside
+/// it. A random name would leave the first one orphaned, still burning the
+/// machine's time, invisible to the tab that started it.
+fn tmux_nonce(agent_id: &str, resume: Option<&str>, force_new: bool, fresh: &str) -> String {
+    let mut out = agent_id.to_string();
+    // Resuming a different conversation is a different session, exactly as it
+    // is in the key.
+    if let Some(sid) = resume {
+        out.push('-');
+        out.push_str(&short(sid));
+    }
+    // And an explicit second Claude on one project is a second session, which
+    // must not attach to the first one's tmux and type into its buffer.
+    if force_new {
+        out.push('-');
+        out.push_str(&short(fresh));
+    }
+    out
+}
+
+/// Enough of an id to tell two sessions apart, short enough to read in a
+/// `tmux ls`.
+///
+/// A digest of the WHOLE id rather than a slice of the front of it. Session ids
+/// are not required to differ early — two claude conversations recorded in the
+/// same run can share a leading field — and two ids that collided here would
+/// name one tmux session, which means the second conversation opens into the
+/// first one's screen and types into its buffer.
+///
+/// FNV-1a written out rather than `DefaultHasher` because this name has to be
+/// the same string tomorrow, and after an upgrade: the standard hasher's
+/// algorithm is explicitly not promised across Rust releases, so a bump would
+/// silently orphan every session running on every machine.
+fn short(id: &str) -> String {
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for b in id.as_bytes() {
+        h ^= u64::from(*b);
+        h = h.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    // Folded to 32 bits: eight hex characters, always a name tmux will take.
+    format!("{:08x}", (h ^ (h >> 32)) as u32)
+}
+
 // ── tauri commands ──────────────────────────────────────────────────────
 
 /// `resume_session_id`, when set and `agent_id == "claude"`, spawns the
@@ -501,6 +749,12 @@ pub async fn agent_pty_open(
     // chip. `None` → provider default (byte-identical to pre-feature). Mapped
     // to each CLI's real mechanism inside `build_invocation`.
     effort: Option<String>,
+    // The place this agent's hands are: a connected machine's id, or `None` for
+    // this laptop. A named machine runs the CLI over there — same flags, held
+    // under tmux so it outlives the connection — while `repo_root` stays this
+    // laptop's path, because that is the project the tab is filed under and
+    // where the record of the work belongs whichever machine holds the code.
+    machine_id: Option<String>,
 ) -> Result<AgentSessionHandle, String> {
     // Reclaim any history ring left behind by a session that vanished
     // without a clean close (open-failure rollback, etc.) so the map
@@ -512,6 +766,12 @@ pub async fn agent_pty_open(
     // profile=alice must not re-attach to profile=bob's session.
     let profile_env =
         crate::cmd_profiles::build_profile_env(&repo_root, profile_name.as_deref());
+    // What this member holds for this project, on its way to the child's
+    // environment and nowhere else. Read here, one call before the spawn, so the
+    // values exist in this function and in the process that needs them — never
+    // in the prompt, the invocation, or anything that is written down. See
+    // `manager::brain::place_secrets`: a model cannot echo a secret it never saw.
+    let brokered = crate::manager::brain::place_secrets::boot_here(&repo_root);
     let effective_profile = profile_env
         .iter()
         .find(|(k, _)| k == "AURA_AGENT_PROFILE")
@@ -525,12 +785,36 @@ pub async fn agent_pty_open(
         (None, Some(p)) => format!("{agent_id}@{repo_root}~{p}"),
         (None, None) => format!("{agent_id}@{repo_root}"),
     };
+    // The place is part of what a session IS, so it is part of the key. Same
+    // agent, same project, one on the box and one here are two sessions with
+    // two sets of hands; without this the second open would re-attach to the
+    // first and the user would be typing into the wrong computer.
+    let machine = machine_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string);
+    let base_key = match &machine {
+        Some(m) => format!("{base_key}@@{m}"),
+        None => base_key,
+    };
     let force_new = force_new.unwrap_or(false);
+    // One nonce for both names below. The tmux session over there is named
+    // deterministically from the same ingredients as the key, so re-opening the
+    // same agent on the same project lands back in the session that is already
+    // running — after an app restart, after losing wifi, tomorrow.
+    let fresh = Uuid::new_v4().to_string();
     let key = if force_new {
-        format!("{base_key}#{}", Uuid::new_v4())
+        format!("{base_key}#{fresh}")
     } else {
         base_key
     };
+
+    // Serialize opens on this key from here to the insert below. A
+    // `force_new` key carries a fresh UUID and so can never collide, but it
+    // still takes its gate — that costs one uncontended lock and keeps the
+    // acquire/release pairing free of a special case.
+    let _open_gate = OpenGate::acquire(state.inner(), &key).await;
 
     // Resume if there's a live session for this key.
     let existing = if force_new {
@@ -565,20 +849,23 @@ pub async fn agent_pty_open(
                 resumed: true,
             });
         }
-        let alive = {
+        // One lock, one lookup. Testing liveness under one guard and then
+        // re-locking to read the fields left a window where another thread
+        // — `agent_pty_close`, `kill_all`, or the daemon purge — removed
+        // `sid`, and the second lookup's `.unwrap()` panicked inside a Tauri
+        // command. Take everything needed while the guard is held.
+        let live = {
             let sessions = state.sessions.lock().unwrap();
-            sessions
-                .get(&sid)
-                .map(|s| s.child.lock().unwrap().try_wait().ok().flatten().is_none())
-                .unwrap_or(false)
+            sessions.get(&sid).and_then(|s| {
+                let running = s.child.lock().unwrap().try_wait().ok().flatten().is_none();
+                running.then(|| (s.agent_id.clone(), s.repo_root.clone()))
+            })
         };
-        if alive {
-            let sessions = state.sessions.lock().unwrap();
-            let sess = sessions.get(&sid).unwrap();
+        if let Some((sess_agent_id, sess_repo_root)) = live {
             return Ok(AgentSessionHandle {
                 id: sid.clone(),
-                agent_id: sess.agent_id.clone(),
-                repo_root: sess.repo_root.clone(),
+                agent_id: sess_agent_id,
+                repo_root: sess_repo_root,
                 resumed: true,
             });
         }
@@ -634,7 +921,73 @@ pub async fn agent_pty_open(
     // (e.g. repair codex `service_tier` for this spawn). No-op for agents with
     // no rules or no wired channel.
     crate::agent_policy::apply_to_invocation(&agent_id, &mut inv);
-    let bin = inv.bin;
+
+    // Where this agent's hands are.
+    //
+    // A named machine is insisted upon rather than resolved. `Place::resolve`
+    // degrades a machine it can no longer find to this laptop, which is the
+    // right bargain for a conversation — better to keep answering than to end
+    // the chat over a forgotten box — and the wrong one for a spawn: the user
+    // asked for an agent over there, and quietly starting one here would set it
+    // loose on this disk while the tab still says the machine's name.
+    let place = match machine.as_deref() {
+        Some(id) => Some(Place::at_machine(id)?),
+        None => None,
+    };
+
+    // What to spawn. On this laptop that is the CLI and its argv, unchanged. On
+    // a machine it is `ssh` and the argv that gets us there — the CLI, the same
+    // flags, held under a named tmux session so the work outlives the
+    // connection, built by the one place contract rather than a second ssh line
+    // written here.
+    let (bin, args) = match &place {
+        None => (inv.bin.clone(), inv.args.clone()),
+        Some(p) => {
+            if profile_name.is_some() {
+                // An isolated session is a HOME swap on this disk. Over there it
+                // would silently do nothing and the agent would run as whoever
+                // the box logs in as — a wrong account is not something to find
+                // out from a commit.
+                return Err(format!(
+                    "An isolated session swaps the login on this laptop, so it can't be applied to {}. \
+                     That machine signs in as itself — start the agent on it without a profile, or start this one here.",
+                    p.label()
+                ));
+            }
+            let shell = p.open(&Open::Agent {
+                bin: inv.bin.clone(),
+                args: inv.args.clone(),
+                // The opening message is typed into the pty afterwards by
+                // `agent_pty_send_prompt`, exactly as it is locally. What the
+                // place decides is how the CLI is started, not how it's spoken
+                // to.
+                prompt: None,
+                session: Some(crate::cloudbox::script::session_name(
+                    "agent",
+                    &repo_root,
+                    &tmux_nonce(&agent_id, resume_session_id.as_deref(), force_new, &fresh),
+                )),
+            })?;
+            (shell.program, shell.args)
+        }
+    };
+
+    // Starting an agent is the product's core action, and until now nothing
+    // counted it — so "does anyone actually use this?" had no answer. Fires
+    // once the invocation is built and before either spawn path, so a real
+    // start is counted exactly once whichever path serves it, and a failed
+    // build isn't counted at all. Agent id and the two flags only; no repo,
+    // no path, no prompt.
+    let resumed = resume_session_id.is_some();
+    crate::telemetry::track(
+        "agent_started",
+        Some(serde_json::json!({
+            "agent": agent_id.as_str(),
+            "resumed": resumed,
+            "isolated_profile": effective_profile.is_some(),
+        })),
+    );
+    crate::telemetry::track_activation("agent_started");
 
     // T3.1 opt-in path: when AURA_USE_PTY_DAEMON=1, the PTY child
     // lives in the long-running aura-pty-daemon process (so it
@@ -646,10 +999,35 @@ pub async fn agent_pty_open(
         // Merge profile env into the daemon's env_extras list so the
         // daemon's CommandBuilder picks up HOME + GIT_AUTHOR_* the same
         // way the in-process path does below.
-        let mut env_extras = inv.env.clone();
-        for (k, v) in profile_env.iter().cloned() {
-            env_extras.push((k, v));
-        }
+        //
+        // A remote spawn takes none of it: the child here is `ssh`, and an
+        // environment set on this side of the wire is not the agent's — it
+        // reaches the box only if that box's sshd was configured to accept it,
+        // which is not something to quietly rely on. The agent over there runs
+        // under the machine's own login and its own config, and a HOME pointing
+        // at a directory on this laptop would be a path that doesn't exist.
+        // The member's brokered secrets are held back for the same reason and a
+        // sharper one: `boot_here` read them out of THIS laptop's vault, and
+        // pushing a secret into an ssh process that will not carry it is spend
+        // with no delivery. A place's own secrets reach it through the place.
+        //
+        // The one variable that does cross is `TERM`: ssh carries it to the far
+        // side, and without it the agent over there degrades to plain output and
+        // no line editing.
+        let env_extras = if place.is_some() {
+            vec![("TERM".to_string(), "xterm-256color".to_string())]
+        } else {
+            let mut env = inv.env.clone();
+            // Same order as the in-process path below: the member's brokered
+            // secrets, then the profile, which has the last word on HOME.
+            for (k, v) in brokered.pairs().iter().cloned() {
+                env.push((k, v));
+            }
+            for (k, v) in profile_env.iter().cloned() {
+                env.push((k, v));
+            }
+            env
+        };
         return open_via_daemon(
             &app,
             state,
@@ -659,7 +1037,7 @@ pub async fn agent_pty_open(
             rows,
             key,
             bin,
-            inv.args,
+            args,
             env_extras,
         )
         .await;
@@ -690,6 +1068,12 @@ pub async fn agent_pty_open(
     // the only one passing the root raw, so an empty/invalid `repo_root` here
     // made the child INHERIT the app's launch cwd (Aura's own tree in dev)
     // instead of landing in an inert place.
+    //
+    // On a remote spawn the child here is `ssh`, so this is where the *dial*
+    // runs, not where the agent does — the box's directory is already inside
+    // the command the place built. This laptop's project is still the right
+    // place to dial from: it is where the key path and the ssh config that
+    // reach that machine are written.
     cmd.cwd(crate::spawn_dir::safe_spawn_dir(&repo_root));
     // Without TERM most CLIs degrade to plain output and disable line
     // editing. Match what cmd_pty.rs sends to the regular shell.
@@ -698,6 +1082,17 @@ pub async fn agent_pty_open(
     cmd.env("AURA_MANAGER_SESSION_ID", &id);
     cmd.env("AURA_REPO_ROOT", &repo_root);
     cmd.env("AURA_AGENT_ID", &agent_id);
+    // Pin the session to THIS shell's socket. Without it `aura ask-user`
+    // falls back to the well-known path, which belongs to whichever
+    // shell bound it first — so on a machine running two (the installed
+    // app beside a dev build) a question could be posed to the wrong
+    // window, or to a socket file with nobody behind it.
+    cmd.env(
+        "AURA_SHELL_SOCKET",
+        crate::cmd_permission_socket::socket_path()
+            .to_string_lossy()
+            .as_ref(),
+    );
     // Negotiate the OSC 777 cli-agent protocol with the agent's plugin
     // scripts (aura-claude / aura-gemini / …). The plugin no-ops when
     // these env vars are missing, so non-Aura terminals never see the
@@ -708,6 +1103,17 @@ pub async fn agent_pty_open(
         AURA_CLI_AGENT_PROTOCOL_VERSION.to_string(),
     );
     cmd.env("AURA_CLIENT_VERSION", env!("CARGO_PKG_VERSION"));
+    // Point Claude Code at THIS Aura as its editor. Naming the port does two
+    // things at once: it turns auto-connect on, and it tells the CLI to trust
+    // that specific lock file without first proving Aura is one of its parent
+    // processes. Both matter here — an agent Aura launched is not always a
+    // child of the window it belongs to, and the tab it runs in may be
+    // pointed at a directory that isn't the lock file's workspace.
+    if let Some(bridge) = app.try_state::<std::sync::Arc<crate::ide_bridge::IdeBridgeState>>() {
+        if let Some(running) = bridge.running() {
+            cmd.env("CLAUDE_CODE_SSE_PORT", running.port.to_string());
+        }
+    }
     // Backup-channel URL for the agent's hook scripts (T2.3). The
     // listener binds on a random loopback port at startup and stashes
     // its base URL on managed state; we look it up here and inject
@@ -723,50 +1129,92 @@ pub async fn agent_pty_open(
             cmd.env("AURA_HOOK_NOTIFY_URL", url);
         }
     }
-    for arg in &inv.args {
+    for arg in &args {
         cmd.arg(arg);
     }
     eprintln!(
-        "[agent_pty_open] spawning {} {:?} (repo={}, resume_session_id={:?})",
-        bin, inv.args, repo_root, resume_session_id,
+        "[agent_pty_open] spawning {} {:?} (repo={}, place={}, resume_session_id={:?})",
+        bin,
+        args,
+        repo_root,
+        place.as_ref().map(Place::label).unwrap_or("this laptop"),
+        resume_session_id,
     );
-    // Inject the aura MCP server config for claude PTY tabs so the user
-    // gets all 50+ aura tools (`aura_log_intent`, `aura_snapshot`,
-    // `aura_pr_review`, `aura_prove`, `aura_rewind`, …) in claude's tool
-    // palette by default — without us touching their global ~/.claude.json
-    // or their repo's .mcp.json. Passed as a non-strict --mcp-config so
-    // the user's existing servers still load. Only claude supports this
-    // flag today; gemini / codex / cursor route MCP differently and are
-    // skipped here (they pick up aura tools via their own config paths if
-    // the user has wired them).
-    // Pin the agent CLI version (T3.2). Records `<bin> --version` on
-    // first spawn into ~/.aura/agent-versions.json; on subsequent
-    // spawns, mismatch fires `agent-version-changed` so the UI can
-    // surface a banner — our hook scripts are version-tied to a
-    // specific claude/gemini surface and a breaking bump silently
-    // breaks the OSC 777 channel otherwise. Best-effort, never fatal.
-    if let Some(store) = app.try_state::<crate::cmd_agent_versions::AgentVersionStore>() {
-        store.record_and_check(&app, &agent_id, &bin);
-    }
 
-    if agent_id == "claude" {
-        if let Some(cfg_path) = ensure_aura_mcp_config() {
-            cmd.arg("--mcp-config");
-            cmd.arg(cfg_path);
+    // The rest of the spawn wires the child into THIS laptop: a config file at
+    // a path on this disk, hook scripts stamped into this checkout, the version
+    // of the binary sitting here, an environment this process owns.
+    //
+    // None of it describes a process on a machine. The paths don't exist over
+    // there, the binary whose version we'd be recording is `ssh`, and the
+    // environment doesn't cross the wire. A box brings its own Aura wiring or
+    // hasn't got any yet — what we must not do is stamp this laptop's and let
+    // the tab imply the agent over there has tools it can't reach.
+    if place.is_none() {
+        // Pin the agent CLI version (T3.2). Records `<bin> --version` on
+        // first spawn into ~/.aura/agent-versions.json; on subsequent
+        // spawns, mismatch fires `agent-version-changed` so the UI can
+        // surface a banner — our hook scripts are version-tied to a
+        // specific claude/gemini surface and a breaking bump silently
+        // breaks the OSC 777 channel otherwise. Best-effort, never fatal.
+        if let Some(store) = app.try_state::<crate::cmd_agent_versions::AgentVersionStore>() {
+            store.record_and_check(&app, &agent_id, &bin);
         }
-        // Stamp the per-repo `.claude/settings.local.json` so claude
-        // wires our six hook scripts (SessionStart/Stop/Notification/
-        // PermissionRequest/UserPromptSubmit/PostToolUse) on its own.
-        // Idempotent — re-staging overwrites the script bodies but the
-        // settings merge de-dupes hook entries by exact path match.
-        let _ = ensure_aura_claude_hooks_stamped(&repo_root);
-    } else if agent_id == "gemini" {
-        // Gemini uses its own extension system (not settings hooks);
-        // staging into ~/.gemini/extensions/aura-gemini/ is enough for
-        // the CLI to auto-load the extension at startup.
-        let _ = ensure_aura_gemini_extension_stamped();
+
+        let wiring_agent = agent_id.clone();
+        let wiring_root = repo_root.clone();
+        let mcp_config = crate::blocking::run(move || {
+            if wiring_agent == "claude" {
+                let config = ensure_aura_mcp_config();
+                // Stamp the per-repo `.claude/settings.local.json` so claude
+                // wires our six hook scripts (SessionStart/Stop/Notification/
+                // PermissionRequest/UserPromptSubmit/PostToolUse) on its own.
+                // Idempotent — re-staging overwrites the script bodies but the
+                // settings merge de-dupes hook entries by exact path match.
+                let _ = ensure_aura_claude_hooks_stamped(&wiring_root);
+                config
+            } else if wiring_agent == "gemini" {
+                // Gemini uses its own extension system (not settings hooks);
+                // staging into ~/.gemini/extensions/aura-gemini/ is enough for
+                // the CLI to auto-load the extension at startup.
+                let _ = ensure_aura_gemini_extension_stamped();
+                None
+            } else {
+                None
+            }
+        })
+        .await;
+        // Inject the aura MCP server config for claude PTY tabs so the user
+        // gets all 50+ aura tools (`aura_log_intent`, `aura_snapshot`,
+        // `aura_pr_review`, `aura_prove`, `aura_rewind`, …) in claude's tool
+        // palette by default — without us touching their global ~/.claude.json
+        // or their repo's .mcp.json. Passed as a non-strict --mcp-config so
+        // the user's existing servers still load. Only claude supports this
+        // flag today; gemini / codex / cursor route MCP differently and are
+        // skipped here (they pick up aura tools via their own config paths if
+        // the user has wired them).
+        if agent_id == "claude" {
+            if let Some(cfg_path) = mcp_config {
+                cmd.arg("--mcp-config");
+                cmd.arg(cfg_path);
+            }
+        }
+        for (k, v) in &inv.env {
+            cmd.env(k, v);
+        }
+        // Profile env (HOME swap + GIT_AUTHOR_*/COMMITTER_*) goes last so it
+        // overrides anything inherited from the shell or set above.
+        for (k, v) in &profile_env {
+            cmd.env(k, v);
+        }
     }
     for (k, v) in &inv.env {
+        cmd.env(k, v);
+    }
+    // The member's brokered secrets. This is the only place their values are
+    // spent: onto the child, before it starts. Nothing above this line has seen
+    // one and nothing below it keeps one.
+    for (k, v) in brokered.pairs() {
         cmd.env(k, v);
     }
     // Profile env (HOME swap + GIT_AUTHOR_*/COMMITTER_*) goes last so it
@@ -792,6 +1240,12 @@ pub async fn agent_pty_open(
         master: Mutex::new(pair.master),
         child: Mutex::new(child),
         blocks: Mutex::new(Vec::new()),
+        // Same dimensions the child was handed, so the shadow terminal wraps
+        // where the real one wraps and a repaint lands on the cell the agent
+        // aimed at.
+        grid: Mutex::new(aura_term_core::GridTerminal::with_size(cols, rows)),
+        grid_lines: Mutex::new(Vec::new()),
+        block_lines: Mutex::new(0),
         raw_bytes: Mutex::new(Vec::with_capacity(BYTE_REPLAY_CAP)),
         current_block_id: Mutex::new(None),
         agent_id: agent_id.clone(),
@@ -956,6 +1410,12 @@ pub async fn agent_pty_open(
             *sess.last_byte_ms.lock().unwrap() = now_ms();
             let cur_id = sess.current_block_id.lock().unwrap().clone();
 
+            // Feed the shadow terminal before anything reads a block's text.
+            // It is the only thing here that sees the bytes as a *screen*
+            // rather than as a stream, and every repaint the agent performs
+            // has to have landed before we ask what the screen says.
+            sess.grid.lock().unwrap().apply_output(&bytes);
+
             let mut perf = OscPerf::default();
             for b in &bytes {
                 parser.advance(&mut perf, *b);
@@ -992,6 +1452,9 @@ pub async fn agent_pty_open(
                 };
                 sess.blocks.lock().unwrap().push(prompt_block.clone());
                 *sess.current_block_id.lock().unwrap() = Some(pid);
+                // A fresh block owns none of the transcript yet, so nothing a
+                // repaint does can reach into what came before it.
+                *sess.block_lines.lock().unwrap() = 0;
                 *sess.last_append_ms.lock().unwrap() = Some(now);
                 let _ = app_for_emit.emit(
                     &block_event,
@@ -1004,13 +1467,42 @@ pub async fn agent_pty_open(
             // Refresh cur_id since ;A may have rotated it.
             let cur_id = sess.current_block_id.lock().unwrap().clone();
 
-            // Stream printable text into the open Output (or Prompt
-            // when ;A has just opened one) block.
-            if !perf.pending_text.is_empty() {
+            // Stream what the screen now says into the open Output (or
+            // Prompt, when ;A has just opened one) block.
+            //
+            // Read off the shadow terminal rather than off the byte stream.
+            // The two disagree exactly where it matters: a spinner, a
+            // progress bar or a status footer is drawn by painting over a
+            // line that is already there, and the byte stream carries every
+            // frame while the screen carries only the last one.
+            let next_lines = sess.grid.lock().unwrap().transcript_lines();
+            let delta = {
+                let mut mirror = sess.grid_lines.lock().unwrap();
+                let d = transcript_delta(&mirror, &next_lines);
+                let prev_len = mirror.len();
+                *mirror = next_lines;
+                (d, prev_len)
+            };
+            let (delta, prev_len) = delta;
+            if !delta.added.is_empty() || delta.rewrote > 0 {
                 if let Some(bid) = &cur_id {
+                    let mut owned = sess.block_lines.lock().unwrap();
+                    // Eviction takes lines off the *top* of the transcript,
+                    // which belong to the oldest blocks first. Only what it
+                    // ate past those is this block's loss.
+                    let older = prev_len.saturating_sub(*owned);
+                    *owned = owned.saturating_sub(delta.evicted.saturating_sub(older));
+                    // A repaint may rewrite this block's own tail; it may not
+                    // reach back into a block that has already been closed and
+                    // read. Clamping here is what keeps a full-screen redraw
+                    // from rewriting the answer to the previous question.
+                    let drop_lines = delta.rewrote.min(*owned);
+                    *owned = *owned - drop_lines + delta.added.len();
+                    drop(owned);
+
                     let mut blocks = sess.blocks.lock().unwrap();
                     if let Some(b) = blocks.iter_mut().find(|b| &b.id == bid) {
-                        b.text.push_str(&perf.pending_text);
+                        reframe_text(&mut b.text, drop_lines, &delta.added);
                         // Cap per-block retained text. Replay sends the
                         // full block list to a remounting frontend, so
                         // a single long run could otherwise serialize
@@ -1036,9 +1528,10 @@ pub async fn agent_pty_open(
                     *sess.last_append_ms.lock().unwrap() = Some(now_ms());
                     let _ = app_for_emit.emit(
                         &block_event,
-                        BlockUpdate::Append {
+                        BlockUpdate::Reframe {
                             block_id: bid.clone(),
-                            text: perf.pending_text,
+                            drop_lines,
+                            lines: delta.added,
                         },
                     );
                 }
@@ -1071,6 +1564,7 @@ pub async fn agent_pty_open(
                 };
                 sess.blocks.lock().unwrap().push(output_block.clone());
                 *sess.current_block_id.lock().unwrap() = Some(oid);
+                *sess.block_lines.lock().unwrap() = 0;
                 *sess.last_append_ms.lock().unwrap() = Some(now);
                 let _ = app_for_emit.emit(
                     &block_event,
@@ -1138,6 +1632,7 @@ pub async fn agent_pty_open(
                             .emit(&block_event, BlockUpdate::Close { block: snap });
                     }
                     *sess.current_block_id.lock().unwrap() = None;
+                    *sess.block_lines.lock().unwrap() = 0;
                 }
             }
         }
@@ -1256,6 +1751,7 @@ pub async fn agent_pty_send_prompt(
         };
         sess.blocks.lock().unwrap().push(output_block.clone());
         *sess.current_block_id.lock().unwrap() = Some(output_block.id.clone());
+        *sess.block_lines.lock().unwrap() = 0;
         let _ = app.emit(
             &block_event,
             BlockUpdate::Open {
@@ -1301,11 +1797,13 @@ async fn open_via_daemon(
     args: Vec<String>,
     env_extras: Vec<(String, String)>,
 ) -> Result<AgentSessionHandle, String> {
-    // The daemon doesn't see Tauri-managed state, so we have to
-    // assemble the env here and pass it across the wire. This is
-    // the same set of vars `cmd.env(...)` would set on the in-process
-    // child; the daemon's open_session forwards them to portable-pty
-    // verbatim.
+    // The daemon doesn't see Tauri-managed state, so the vars that come
+    // from it get assembled here and passed across the wire; the daemon's
+    // open_session forwards them to portable-pty verbatim. Everything
+    // *ambient* — PATH, HOME, the keys a login shell exports — is layered
+    // in underneath by `client::open_session`, because the daemon's own
+    // environment is launchd's and is stale by construction. Between the
+    // two the daemon child sees what the in-process child below sees.
     let mut env: Vec<(String, String)> = Vec::with_capacity(8 + env_extras.len());
     let session_id_pre = Uuid::new_v4().to_string();
     env.push(("AURA_MANAGER_SESSION_ID".into(), session_id_pre.clone()));
@@ -1316,6 +1814,23 @@ async fn open_via_daemon(
         AURA_CLI_AGENT_PROTOCOL_VERSION.to_string(),
     ));
     env.push(("AURA_CLIENT_VERSION".into(), env!("CARGO_PKG_VERSION").into()));
+    // Editor control plane, same as the in-process path. The daemon child
+    // reaches the socket over loopback, so a daemon-backed agent gets tab
+    // control on equal terms with one Aura spawned itself.
+    if let Some(bridge) = app.try_state::<std::sync::Arc<crate::ide_bridge::IdeBridgeState>>() {
+        if let Some(running) = bridge.running() {
+            env.push(("CLAUDE_CODE_SSE_PORT".into(), running.port.to_string()));
+        }
+    }
+    // Same reason as the in-process path: the daemon is a separate
+    // process and would otherwise resolve the well-known socket, which
+    // may belong to a different shell entirely.
+    env.push((
+        "AURA_SHELL_SOCKET".into(),
+        crate::cmd_permission_socket::socket_path()
+            .to_string_lossy()
+            .into_owned(),
+    ));
     if let Some(listener) = app
         .try_state::<std::sync::Arc<crate::agent_event_listener::AgentEventListenerState>>()
     {
@@ -1461,6 +1976,7 @@ fn maybe_close_idle_output(
     drop(blocks);
     let _ = app.emit(block_event, BlockUpdate::Close { block: snap });
     *sess.current_block_id.lock().unwrap() = None;
+    *sess.block_lines.lock().unwrap() = 0;
     *sess.last_append_ms.lock().unwrap() = None;
 }
 
@@ -1574,6 +2090,10 @@ pub async fn agent_pty_resize(
             pixel_height: 0,
         })
         .map_err(|e| e.to_string());
+    // Keep the shadow terminal the same shape as the real one. A grid that
+    // still thinks it is 80 columns wide wraps text the agent placed at
+    // column 100, and every subsequent cursor move lands a row out.
+    sess.grid.lock().unwrap().resize(cols, rows);
     res
 }
 
@@ -1790,7 +2310,9 @@ pub async fn agent_pty_close(
     }
     let mut sessions = state.sessions.lock().unwrap();
     if let Some(sess) = sessions.remove(&session_id) {
-        let _ = sess.child.lock().unwrap().kill();
+        // See `pty_reap` — closing an agent tab has to stop the tools that
+        // agent launched, not just the CLI process holding the PTY.
+        crate::pty_reap::hangup_and_reap(&mut **sess.child.lock().unwrap());
         state.by_key.lock().unwrap().remove(&sess.key);
     }
     Ok(())
@@ -2304,9 +2826,14 @@ pub(crate) fn wire_agents_for_repo(repo_root: &str) -> bool {
 ///     scripts (see `aura-shell/plugins/aura-claude/`). Only ;D is
 ///     honored for 133 — ;A and ;B are synthesized by `send_prompt` so
 ///     we never double-bracket if the agent echoes the prompt back.
+///
+/// It no longer collects the printable text: a block's text comes off the
+/// session's shadow grid, which is the only thing here that can tell a
+/// repainted line from a new one. What survives is the part a grid throws
+/// away — the out-of-band markers the agent addresses to us rather than to
+/// the screen.
 #[derive(Default)]
 struct OscPerf {
-    pending_text: String,
     /// Set when the agent emits OSC 133 ;A — open a new Prompt block.
     osc133_prompt_start: bool,
     /// Set when the agent emits OSC 133 ;B — prompt-end / output-start.
@@ -2329,17 +2856,12 @@ struct OscPerf {
 }
 
 impl Perform for OscPerf {
-    fn print(&mut self, c: char) {
-        self.pending_text.push(c);
-    }
-    fn execute(&mut self, byte: u8) {
-        // Keep the line-shaping bytes — without them the UI view collapses
-        // multi-line answers into one wall of text. CSI/SGR/etc. are
-        // handled in csi_dispatch (dropped) so we don't keep ESC junk.
-        if byte == b'\n' || byte == b'\r' || byte == b'\t' {
-            self.pending_text.push(byte as char);
-        }
-    }
+    // print/execute: intentionally no-op. Text is the grid's job. This pass
+    // used to keep every printable character and the three line-shaping
+    // bytes, which is as close to a transcript as you can get without a
+    // screen — and not close enough: it cannot tell a line being redrawn from
+    // a line being written, so a spinner arrived as one copy per frame and a
+    // menu painted by cursor address arrived as a single run-on line.
     fn osc_dispatch(&mut self, params: &[&[u8]], _bel_terminated: bool) {
         if params.is_empty() {
             return;
@@ -2448,5 +2970,276 @@ impl OscPerf {
         if let Ok(ev) = serde_json::from_str::<CliAgentEvent>(text) {
             self.cli_agent_events.push(ev);
         }
+    }
+}
+
+#[cfg(test)]
+mod place_tests {
+    use super::*;
+    use crate::cloudbox::script::{is_session_name, session_name};
+
+    const FRESH: &str = "9f2c1e40-7b3a-4d51-8c6e-2a1b0d3f4e5a";
+
+    fn name(agent: &str, resume: Option<&str>, force_new: bool) -> String {
+        session_name("agent", "/Users/me/naridon", &tmux_nonce(agent, resume, force_new, FRESH))
+    }
+
+    #[test]
+    fn the_same_agent_on_the_same_project_comes_back_to_the_same_session() {
+        // The whole reason the name is derived rather than random: `tmux new -A`
+        // attaches to a session of this name if it exists. Two opens a week
+        // apart must produce the same string, or the second one starts a
+        // parallel agent beside a running one nobody can see.
+        assert_eq!(name("claude", None, false), name("claude", None, false));
+        assert!(name("claude", None, false).contains("naridon"));
+        assert!(name("claude", None, false).contains("claude"));
+    }
+
+    #[test]
+    fn a_second_claude_on_one_project_is_a_second_session() {
+        // "Start another one" is an explicit act. Attaching it to the first
+        // would put two people's keystrokes into one buffer.
+        assert_ne!(name("claude", None, true), name("claude", None, false));
+    }
+
+    #[test]
+    fn resuming_a_different_conversation_is_a_different_session() {
+        // Ids that agree for their first eight characters and differ later —
+        // taking the front of the string put both conversations on one screen.
+        assert_ne!(
+            name("claude", Some("ffb0f2b0-1111-4c1e-9a2f-000000000001"), false),
+            name("claude", Some("ffb0f2b0-2222-4c1e-9a2f-000000000002"), false),
+        );
+    }
+
+    #[test]
+    fn the_name_for_one_conversation_does_not_move() {
+        // Written out as a literal on purpose: this string is what a machine
+        // somewhere is holding a session under. A change to how it is derived
+        // orphans that session — still running, still costing, invisible to the
+        // tab that started it — so it has to be a deliberate act, not a
+        // refactor.
+        assert_eq!(
+            name("claude", Some("ffb0f2b0-1111-4c1e-9a2f-000000000001"), false),
+            "aura-agent-naridon-claude-739c4a6a",
+        );
+    }
+
+    #[test]
+    fn two_agents_on_one_project_do_not_share_a_session() {
+        assert_ne!(name("claude", None, false), name("gemini", None, false));
+    }
+
+    #[test]
+    fn every_name_this_produces_is_one_a_machine_will_take() {
+        // The name is addressed BY NAME in every tmux command after this, on
+        // someone else's computer. An id carrying a quote or a semicolon has to
+        // come out the far end as a name, not as a second command.
+        for (agent, resume) in [
+            ("claude", None),
+            ("cursor-agent", None),
+            ("claude", Some("a'b; rm -rf ~")),
+            ("claude", Some("../../etc/passwd")),
+        ] {
+            for force_new in [false, true] {
+                let n = name(agent, resume, force_new);
+                assert!(is_session_name(&n), "{n:?} is not a name tmux can hold");
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod open_gate_tests {
+    use super::*;
+    use std::time::Duration;
+
+    /// Long enough that a gate which is genuinely free is taken immediately,
+    /// short enough that the blocked case doesn't slow the suite down.
+    const BEAT: Duration = Duration::from_millis(50);
+
+    fn gate_count(reg: &AgentPtyRegistry) -> usize {
+        reg.open_gates.lock().unwrap().len()
+    }
+
+    #[tokio::test]
+    async fn a_second_open_on_the_same_key_waits_for_the_first() {
+        let reg = AgentPtyRegistry::new();
+        let first = OpenGate::acquire(&reg, "claude@/repo").await;
+
+        let blocked = tokio::time::timeout(BEAT, OpenGate::acquire(&reg, "claude@/repo")).await;
+        assert!(
+            blocked.is_err(),
+            "a second open on a key already being opened must wait, not spawn a second child"
+        );
+
+        drop(first);
+        let after = tokio::time::timeout(BEAT, OpenGate::acquire(&reg, "claude@/repo")).await;
+        assert!(after.is_ok(), "the gate must be released when the first open returns");
+    }
+
+    #[tokio::test]
+    async fn opens_on_different_keys_do_not_wait_on_each_other() {
+        let reg = AgentPtyRegistry::new();
+        let _claude = OpenGate::acquire(&reg, "claude@/repo").await;
+
+        let other = tokio::time::timeout(BEAT, OpenGate::acquire(&reg, "gemini@/repo")).await;
+        assert!(
+            other.is_ok(),
+            "the gate is per key — a different agent or repo must open concurrently"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_finished_open_leaves_no_entry_behind() {
+        let reg = AgentPtyRegistry::new();
+        {
+            let _held = OpenGate::acquire(&reg, "claude@/repo#one").await;
+            assert_eq!(gate_count(&reg), 1);
+        }
+        assert_eq!(
+            gate_count(&reg),
+            0,
+            "every force_new open mints a unique key; keeping them would grow forever"
+        );
+    }
+
+    #[test]
+    fn a_gate_someone_is_queued_on_survives_the_release() {
+        let reg = AgentPtyRegistry::new();
+        let queued = reg.open_gate("claude@/repo"); // a second opener, waiting
+        let holder = reg.open_gate("claude@/repo"); // the one about to release
+
+        reg.release_open_gate("claude@/repo");
+        assert_eq!(
+            gate_count(&reg),
+            1,
+            "pruning a gate someone is queued on would hand the next caller a fresh \
+             gate and let the two race again"
+        );
+
+        drop(queued);
+        reg.release_open_gate("claude@/repo");
+        assert_eq!(gate_count(&reg), 0);
+        drop(holder);
+    }
+
+}
+
+/// What a block says, after the terminal has finished changing its mind.
+///
+/// [`transcript_delta`] and [`reframe_text`] carry that contract between
+/// them, and the frontend's block store implements the second one again in
+/// TypeScript — so these cases are the specification both sides are written
+/// against. Every one of them is a shape the agent chat actually hit.
+#[cfg(test)]
+mod transcript_tests {
+    use super::*;
+
+    fn lines(v: &[&str]) -> Vec<String> {
+        v.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn ordinary_streaming_is_a_pure_append() {
+        let d = transcript_delta(&lines(&["one", "two"]), &lines(&["one", "two", "three"]));
+        assert_eq!(d.evicted, 0);
+        assert_eq!(d.rewrote, 0);
+        assert_eq!(d.added, lines(&["three"]));
+    }
+
+    #[test]
+    fn a_repainted_last_line_is_a_rewrite_of_exactly_that_line() {
+        // The spinner case, seen from here: the transcript's last line is a
+        // different string than it was, and nothing above it moved.
+        let d = transcript_delta(
+            &lines(&["Explain this codebase", "Working(3s)"]),
+            &lines(&["Explain this codebase", "Working(4s)"]),
+        );
+        assert_eq!(d.rewrote, 1);
+        assert_eq!(d.added, lines(&["Working(4s)"]));
+    }
+
+    #[test]
+    fn a_full_screen_redraw_rewrites_only_the_screen() {
+        let d = transcript_delta(
+            &lines(&["scrolled", "a", "b", "c"]),
+            &lines(&["scrolled", "x", "y", "z"]),
+        );
+        assert_eq!(d.evicted, 0);
+        assert_eq!(d.rewrote, 3);
+        assert_eq!(d.added, lines(&["x", "y", "z"]));
+    }
+
+    #[test]
+    fn lines_falling_off_the_top_are_reported_as_eviction_not_as_change() {
+        // A grid at its scrollback limit drops a line off the top for each
+        // one it gains. Read naively that looks like "everything changed",
+        // and the block would be rewritten with the whole session in it.
+        let d = transcript_delta(
+            &lines(&["gone", "a", "b", "c"]),
+            &lines(&["a", "b", "c", "d"]),
+        );
+        assert_eq!(d.evicted, 1);
+        assert_eq!(d.rewrote, 0);
+        assert_eq!(d.added, lines(&["d"]));
+    }
+
+    #[test]
+    fn a_single_line_in_common_is_not_mistaken_for_an_alignment() {
+        // Blank lines and repeated prompts match all over a transcript, so a
+        // one-line coincidence must not be read as a shift. Here nothing
+        // genuinely lines up, and saying so is the honest answer.
+        let d = transcript_delta(&lines(&["a", "", "b"]), &lines(&["", "q", "r"]));
+        assert_eq!(d.evicted, 0);
+        assert_eq!(d.rewrote, 3);
+        assert_eq!(d.added, lines(&["", "q", "r"]));
+    }
+
+    #[test]
+    fn the_first_output_of_a_block_is_all_addition() {
+        let d = transcript_delta(&[], &lines(&["hello"]));
+        assert_eq!(d.evicted, 0);
+        assert_eq!(d.rewrote, 0);
+        assert_eq!(d.added, lines(&["hello"]));
+    }
+
+    #[test]
+    fn reframe_replaces_the_tail_it_was_told_to() {
+        let mut text = String::from("one\ntwo\nthree");
+        reframe_text(&mut text, 1, &lines(&["THREE"]));
+        assert_eq!(text, "one\ntwo\nTHREE");
+    }
+
+    #[test]
+    fn reframe_can_empty_a_block_and_refill_it() {
+        let mut text = String::from("a\nb");
+        reframe_text(&mut text, 5, &lines(&["fresh"]));
+        assert_eq!(text, "fresh");
+    }
+
+    #[test]
+    fn reframe_with_nothing_to_drop_is_an_append() {
+        let mut text = String::from("a");
+        reframe_text(&mut text, 0, &lines(&["b", "c"]));
+        assert_eq!(text, "a\nb\nc");
+    }
+
+    #[test]
+    fn a_spinner_never_grows_the_block_it_lives_in() {
+        // The whole defect, end to end: ten repaints of one line leave one
+        // line. Before the grid this produced ten.
+        let mut text = String::new();
+        let mut mirror: Vec<String> = Vec::new();
+        for tick in 0..10 {
+            let next = lines(&["Explain this codebase"])
+                .into_iter()
+                .chain(std::iter::once(format!("Working({tick}s)")))
+                .collect::<Vec<_>>();
+            let d = transcript_delta(&mirror, &next);
+            reframe_text(&mut text, d.rewrote, &d.added);
+            mirror = next;
+        }
+        assert_eq!(text, "Explain this codebase\nWorking(9s)");
     }
 }

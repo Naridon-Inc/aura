@@ -11,6 +11,7 @@ import * as React from "react";
 import { GitBranch } from "lucide-react";
 import { api } from "../../../lib/api";
 import { worktreeParentName } from "../../../lib/workspaceLabel";
+import { CloudGlyph } from "../../ui/cloud-glyph";
 
 /** A single suggestion starter: leading glyph, short label, prefill prompt. */
 interface Suggestion {
@@ -104,7 +105,7 @@ const SUGGESTIONS: ReadonlyArray<Suggestion> = [
   {
     label: "Explain this codebase",
     prompt:
-      "Give me a tour of this codebase — the architecture and the main modules.",
+      "Give me a tour of this codebase. The architecture and the main modules.",
     glyph: <ExplainGlyph />,
   },
 ];
@@ -128,7 +129,7 @@ function SuggestionChip({
       onClick={interactive ? () => onPick?.(suggestion.prompt) : undefined}
       onMouseEnter={interactive ? () => setHover(true) : undefined}
       onMouseLeave={interactive ? () => setHover(false) : undefined}
-      className="inline-flex items-center gap-1.5 text-[12px] transition-colors"
+      className="inline-flex items-center gap-1.5 text-sm transition-colors"
       style={{
         background: hover ? "var(--color-bg-2)" : "transparent",
         border: "1px solid",
@@ -281,7 +282,7 @@ function ChatContextNote({
 
   return (
     <div
-      className="inline-flex items-center gap-1.5 text-[11.5px] leading-snug"
+      className="inline-flex items-center gap-1.5 text-sm leading-snug"
       style={{ color: "var(--color-text-3)" }}
     >
       <GitBranch size={12} style={{ color: "var(--color-text-4)" }} aria-hidden />
@@ -302,18 +303,26 @@ export function ChatEmptyState({
   onPick,
   projectLabel,
   repoRoot,
+  machineName,
 }: {
   onPick?: (prompt: string) => void;
   projectLabel?: string;
   repoRoot?: string;
+  /** Set when this conversation's hands are on a connected machine. Same
+   *  opening, same chips — the one line underneath changes, because the
+   *  working copy being described is over there. */
+  machineName?: string;
 }) {
-  const ctx = useChatContext(repoRoot);
+  // The local working-copy line is read from this laptop's git. On a
+  // conversation whose hands are on a box that would be a confident sentence
+  // about the wrong checkout, so we don't ask for it at all.
+  const ctx = useChatContext(machineName ? undefined : repoRoot);
 
   return (
     <div className="flex flex-col items-start gap-3 px-6 pt-10 pb-2 select-none">
       <div className="flex items-center gap-2">
         <BracketGlyph />
-        <span className="text-[12.5px]" style={{ color: "var(--color-text-3)" }}>
+        <span className="text-base" style={{ color: "var(--color-text-3)" }}>
           Ask Aura to plan a feature, hunt a bug, or explain the codebase.
         </span>
       </div>
@@ -322,11 +331,34 @@ export function ChatEmptyState({
           <SuggestionChip key={suggestion.label} suggestion={suggestion} onPick={onPick} />
         ))}
       </div>
-      {ctx ? (
+      {machineName ? (
+        <div className="mt-0.5">
+          <MachineNote machineName={machineName} />
+        </div>
+      ) : ctx ? (
         <div className="mt-0.5">
           <ChatContextNote ctx={ctx} projectLabel={projectLabel} repoRoot={repoRoot} />
         </div>
       ) : null}
+    </div>
+  );
+}
+
+/** The same quiet one-liner the local chat gets, saying the one thing that is
+ *  actually different: which disk the answers come from. Worth stating plainly
+ *  — everything else on screen is identical, which is the point, and that is
+ *  exactly what makes an unlabelled remote chat easy to mistake for a local
+ *  one. */
+function MachineNote({ machineName }: { machineName: string }) {
+  return (
+    <div
+      className="inline-flex items-center gap-1.5 text-sm leading-snug"
+      style={{ color: "var(--color-text-3)" }}
+    >
+      <CloudGlyph size={12} />
+      <span>
+        Reading and running on {machineName}. The conversation is kept here.
+      </span>
     </div>
   );
 }

@@ -9,6 +9,7 @@
 
 import { useEffect, useState } from "react";
 import { api, type CrashSummary } from "../lib/api";
+import { relativeAge } from "../lib/relativeTime";
 import { ToastActionButton, ToastCard, ToastStack } from "./ui/toast";
 
 const ACK_KEY = "aura.crashes.last_acked_ts_ms";
@@ -24,13 +25,8 @@ function setAckedTs(ts: number) {
 }
 
 function formatAge(ts: number): string {
-  const seconds = Math.max(0, Math.floor((Date.now() - ts) / 1000));
-  if (seconds < 60) return `${seconds}s ago`;
-  const minutes = Math.floor(seconds / 60);
-  if (minutes < 60) return `${minutes}m ago`;
-  const hours = Math.floor(minutes / 60);
-  if (hours < 24) return `${hours}h ago`;
-  return `${Math.floor(hours / 24)}d ago`;
+  // One ladder for the whole app — see lib/relativeTime.
+  return relativeAge(ts);
 }
 
 export function CrashRecoveryToast() {
@@ -78,7 +74,7 @@ export function CrashRecoveryToast() {
     } catch (e) {
       setReportPath(path);
       setReportText(
-        `Aura couldn't open this report. The file is at ${path} — you can open it in any text editor.\n\n${String(e)}`,
+        `Aura couldn't open this report. The file is at ${path}. You can open it in any text editor.\n\n${String(e)}`,
       );
     }
   };
@@ -89,11 +85,11 @@ export function CrashRecoveryToast() {
         <ToastCard
           tone="warning"
           title="Crash report"
-          message={<span className="break-all font-mono text-[11px]">{reportPath}</span>}
+          message={<span className="break-all font-mono text-xs">{reportPath}</span>}
           onDismiss={dismissAll}
           dismissTitle="Dismiss"
         >
-          <pre className="mt-2 max-h-80 overflow-auto whitespace-pre-wrap break-words rounded-[var(--radius-sm)] border border-line bg-bg-0 p-2 font-mono text-[11px] leading-[1.5] text-text-2">
+          <pre className="mt-2 max-h-80 overflow-auto whitespace-pre-wrap break-words rounded-[var(--radius-sm)] border border-line bg-bg-0 p-2 font-mono text-xs leading-[1.5] text-text-2">
             {reportText}
           </pre>
         </ToastCard>
@@ -106,7 +102,7 @@ export function CrashRecoveryToast() {
               <>
                 <span className="text-text-2">{top.panic_message}</span>
                 {top.location && (
-                  <span className="mt-1 block font-mono text-[11px] text-text-4">
+                  <span className="mt-1 block font-mono text-xs text-text-4">
                     at {top.location}
                   </span>
                 )}

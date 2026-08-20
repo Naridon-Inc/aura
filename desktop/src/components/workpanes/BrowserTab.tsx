@@ -248,13 +248,13 @@ export function BrowserTab({
                 inputRef.current?.blur();
               }
             }}
-            className="flex-1 min-w-0 bg-transparent outline-none text-[12.5px] text-text-1 placeholder:text-text-4"
+            className="flex-1 min-w-0 bg-transparent outline-none text-base text-text-1 placeholder:text-text-4"
           />
         </div>
 
         {onNewTab && (
           <ChromeBtn title="New browser tab" onClick={onNewTab}>
-            <span className="text-[15px] leading-none">+</span>
+            <span className="text-lg leading-none">+</span>
           </ChromeBtn>
         )}
         {onClose && (
@@ -277,7 +277,7 @@ export function BrowserTab({
             className="absolute inset-0 flex flex-col items-center justify-center gap-2 text-text-4 select-none"
           >
             <Globe className="h-7 w-7 opacity-40" />
-            <span className="text-[12.5px]">Enter an address to start browsing</span>
+            <span className="text-base">Enter an address to start browsing</span>
           </button>
         )}
       </div>
@@ -304,7 +304,7 @@ function ChromeBtn({
       title={title}
       disabled={disabled}
       onClick={onClick}
-      className="w-[22px] h-[22px] rounded flex items-center justify-center text-text-3 transition-colors disabled:opacity-30 disabled:pointer-events-none hover:bg-bg-hover hover:text-text-1"
+      className="w-[22px] h-[22px] rounded flex items-center justify-center text-text-3 transition-colors disabled:opacity-30 disabled:pointer-events-none hover:bg-state-hover hover:text-text-1"
     >
       {children}
     </button>

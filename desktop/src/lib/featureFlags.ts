@@ -197,23 +197,3 @@ export const TIMELINE_V2 = true;
  *  so in plain words — an idle radar shouldn't read as a broken one — and the
  *  file list keeps the rest of the panel. */
 export const AURA_RADAR_ENABLED = true;
-
-/** Crew cross-project — see your autonomous crews across EVERY open project,
- *  not just the one in focus (like Conductor's "All projects" + per-project
- *  tabs).
- *
- *  Crew's board (`CrewSurface`) is per-repo: it loads one project's
- *  `loop_ready_view`. This flag adds a project tab strip at the top of the
- *  surface — an "All projects" overview (each project as a card with its
- *  progress) plus one tab per project that has crew work. The whole thing is
- *  client-side aggregation: the known project roots (the backend
- *  `~/.aura/projects.json` registry, with the `aura.recents` list as a
- *  fallback) are each read once via `loop_ready_view` and merged in the
- *  frontend — no backend change, no new Rust.
- *
- *  Additive + reversible: with the flag OFF, CrewSurface is byte-for-byte the
- *  single-project board it is today (the open project only) — no project strip,
- *  no extra reads.
- *
- *  Flip to `true` to turn the cross-project view on. */
-export const CREW_CROSS_PROJECT = true;

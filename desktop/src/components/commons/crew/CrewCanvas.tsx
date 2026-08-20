@@ -41,42 +41,26 @@ import {
   CREW_NODE_H,
   CREW_PAD,
   CREW_CLUSTER_HEADER_H,
+  type BoardStepsByTaskId,
   type CrewCluster,
   type CrewClusterStat,
   type CrewGraphNode,
-  type CrewNodeStatus,
   type CrewObjective,
   type CrewRegion,
 } from "./crewGraphLayout";
 import { AssigneeBit } from "./crewShared";
 import { bestProof, proofForCommit, type CrewProof } from "./crewProof";
 import { CrewLiveTranscript } from "./CrewLiveTranscript";
+import { WORK_STATE, nodeState } from "../../../lib/workState";
+import { percent } from "../../../lib/percent";
 
 // A stable empty proof map, so a canvas mounted before the ledger loads (or in a
 // repo with no goals) never re-renders on an identity change.
 const EMPTY_PROOF: Map<string, CrewProof[]> = new Map();
 
-// Status shows as a small coloured dot only — no screaming border bars.
-// Arctic-blue = ready, amber = an agent's on it, green = done, muted =
-// waiting/queued. Green stays status-only.
-const STATUS_DOT: Record<CrewNodeStatus, string> = {
-  ready: "var(--color-accent)",
-  working: "var(--color-amber)",
-  done: "var(--color-accent-green)",
-  blocked: "var(--color-text-5)",
-  paused: "var(--color-text-5)",
-  other: "var(--color-text-5)",
-};
-// The same state in one plain word — shown on the card's hover card so "what
-// state is this in" reads without decoding the dot colour.
-const STATUS_WORD: Record<CrewNodeStatus, string> = {
-  ready: "Ready to start",
-  working: "An agent is on it",
-  done: "Done",
-  blocked: "Waiting on earlier work",
-  paused: "Paused — held back",
-  other: "Queued",
-};
+// Status shows as a small coloured dot only — no screaming border bars. Both
+// the dot and the word beside it come from lib/workState, so a node reads the
+// same here, in the plan sidebar and in the live transcript.
 // Muted, dark-friendly hues for PARALLEL branches that split off one step — not
 // decoration: a colour here means "this line shares an origin with its siblings,
 // they run side by side." Kept desaturated so the board stays calm. Final-step
@@ -102,6 +86,13 @@ const CREW_DONE_GREEN = "var(--color-accent-green)";
 // "fit to view" can actually frame the whole thing before you pan in.
 const MIN_ZOOM = 0.2;
 const MAX_ZOOM = 1.6;
+// …but do not *arrive* down there. Fitting is a means, not the goal: below
+// roughly half size the task titles stop being words, and this project's
+// fifty-one nodes fitted to 20% — the floor — so the graph opened as grey
+// confetti. Fit shrinks to READABLE_ZOOM and no further, then anchors the
+// first task top-left and lets you pan to the rest. Seeing part of a graph you
+// can read beats seeing all of one you can't.
+const READABLE_ZOOM = 0.55;
 const clampZoom = (z: number) => Math.min(MAX_ZOOM, Math.max(MIN_ZOOM, z));
 
 export function CrewCanvas({
@@ -111,10 +102,14 @@ export function CrewCanvas({
   proof = EMPTY_PROOF,
   onPlanOrder,
   ordering,
+  boardSteps,
 }: {
   view: ReadyViewDto;
   selectedId?: string | null;
   onSelect?: (id: string) => void;
+  /** Board-plan steps keyed by `board_task_id`, so a working node's story tells
+   *  its real step instead of the generic "an agent is building this now". */
+  boardSteps?: BoardStepsByTaskId;
   /** Commit → proofs, from the goals ledger. Lets each flow's Result block say
    *  how many finished steps are genuinely proven against their goal. */
   proof?: Map<string, CrewProof[]>;
@@ -131,8 +126,8 @@ export function CrewCanvas({
   // Unsorted), which stays shut as labelled bands you open one at a time.
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
   const layout = useMemo(
-    () => computeCrewGraphLayout(view, undefined, expanded),
-    [view, expanded],
+    () => computeCrewGraphLayout(view, undefined, expanded, boardSteps),
+    [view, expanded, boardSteps],
   );
   // The full chain the selected task belongs to — back to its roots and forward
   // to its ends — so picking one box lights the whole path, not just neighbours.
@@ -167,20 +162,26 @@ export function CrewCanvas({
     });
   }, []);
 
-  // Fit the whole graph into view, centred. Called on mount, on the "fit"
-  // button, and whenever the graph's size changes (a sync added nodes).
+  // Fit the graph into view — as much of it as stays readable. Called on
+  // mount, on the "fit" button, and whenever the graph's size changes (a sync
+  // added nodes). Whatever still overflows is centred if it fits on that axis
+  // and pinned to the start if it doesn't, so a too-big graph opens on its
+  // beginning rather than on its middle.
   const fitView = useCallback(() => {
     const el = containerRef.current;
     if (!el || layout.width === 0 || layout.height === 0) return;
     const vw = el.clientWidth;
     const vh = el.clientHeight;
-    const z = clampZoom(
-      Math.min(vw / layout.width, vh / layout.height, 1) * 0.92,
+    const z = Math.max(
+      READABLE_ZOOM,
+      clampZoom(Math.min(vw / layout.width, vh / layout.height, 1) * 0.92),
     );
+    const w = layout.width * z;
+    const h = layout.height * z;
     setZoom(z);
     setPan({
-      x: (vw - layout.width * z) / 2,
-      y: (vh - layout.height * z) / 2,
+      x: w <= vw ? (vw - w) / 2 : 16,
+      y: h <= vh ? (vh - h) / 2 : 16,
     });
   }, [layout.width, layout.height]);
 
@@ -549,7 +550,7 @@ export function CrewCanvas({
                   <div
                     key={`wave-${r.id}-${c.col}`}
                     data-node
-                    className="absolute flex items-center gap-1 text-[9px] font-semibold uppercase tracking-[0.07em] text-text-5"
+                    className="absolute flex items-center gap-1 text-xs font-medium text-text-4"
                     style={{ left: c.x, top: gm.labelY, width: CREW_NODE_W }}
                   >
                     <span>Wave {c.col + 1}</span>
@@ -596,7 +597,7 @@ export function CrewCanvas({
                 width: Math.max(layout.width - CREW_PAD * 2, CREW_NODE_W),
               }}
             >
-              <span className="text-[10.5px] font-semibold uppercase tracking-[0.08em] text-text-5">
+              <span className="text-xs font-medium text-text-4">
                 No set order yet · {layout.freeCount}{" "}
                 {layout.freeCount === 1 ? "task" : "tasks"}
               </span>
@@ -606,11 +607,11 @@ export function CrewCanvas({
                   type="button"
                   onClick={ordering ? undefined : onPlanOrder}
                   disabled={ordering}
-                  className="inline-flex items-center gap-1 rounded-full border border-line-soft px-2 py-0.5 text-[10.5px] font-medium text-text-3 hover:border-accent hover:text-accent disabled:opacity-60 disabled:hover:border-line-soft disabled:hover:text-text-3"
+                  className="inline-flex items-center gap-1 rounded-full border border-line-soft px-2 py-0.5 text-xs font-medium text-text-3 hover:border-accent hover:text-accent disabled:opacity-60 disabled:hover:border-line-soft disabled:hover:text-text-3"
                   title="Let the brain work out which of these must finish before which, and connect them"
                 >
                   {ordering ? (
-                    <AsciiSpinner className="text-[11px]" />
+                    <AsciiSpinner className="text-xs" />
                   ) : (
                     <Sparkles size={11} />
                   )}
@@ -664,7 +665,7 @@ export function CrewCanvas({
           <button
             type="button"
             onClick={fitView}
-            className="min-w-[42px] rounded px-1.5 py-1 text-[11px] tabular-nums text-text-3 hover:bg-bg-2"
+            className="min-w-[42px] rounded px-1.5 py-1 text-xs tabular-nums text-text-3 hover:bg-state-hover"
             title="Fit to view"
           >
             {Math.round(zoom * 100)}%
@@ -694,7 +695,7 @@ function CtrlButton({
     <button
       type="button"
       onClick={onClick}
-      className="grid h-6 w-6 place-items-center rounded text-text-4 hover:bg-bg-2 hover:text-text-1"
+      className="grid h-6 w-6 place-items-center rounded text-text-4 hover:bg-state-hover hover:text-text-1"
       title={label}
       aria-label={label}
     >
@@ -723,7 +724,7 @@ function CanvasNode({
   onWatch?: (id: string, title: string) => void;
 }) {
   const canonical = node.agentKind ? canonicalAgentId(node.agentKind) : null;
-  const dot = STATUS_DOT[node.status];
+  const state = WORK_STATE[nodeState(node.status)];
   const done = node.status === "done";
   const working = node.status === "working";
   return (
@@ -764,12 +765,12 @@ function CanvasNode({
             />
           </span>
         ) : (
-          <span className="grid h-4 w-4 shrink-0 place-items-center rounded-full bg-bg-2 text-[8px] font-medium text-text-5">
+          <span className="grid h-4 w-4 shrink-0 place-items-center rounded-full bg-bg-2 text-2xs font-medium text-text-5">
             ?
           </span>
         )}
         <span
-          className={`min-w-0 flex-1 truncate text-[12px] font-medium leading-tight ${
+          className={`min-w-0 flex-1 truncate text-sm font-medium leading-tight ${
             done ? "text-text-3 line-through decoration-text-5/50" : "text-text-1"
           }`}
         >
@@ -799,17 +800,17 @@ function CanvasNode({
                   onWatch(node.id, node.title);
                 }
               }}
-              title="Watch this agent work — open its live output"
+              title="Watch this agent work. Open its live output"
               className="shrink-0 cursor-pointer rounded-full p-0.5 text-text-4 hover:bg-accent/12 hover:text-accent"
             >
               {/* Spinner at rest, the watch glyph on card hover. Amber already
                   IS the "an agent is on it" colour, so the shared spinner needs
                   no per-node tint here. */}
-              <AsciiSpinner className="text-[11px] group-hover:hidden" />
+              <AsciiSpinner className="text-xs group-hover:hidden" />
               <RadioTower size={12} className="hidden group-hover:block" />
             </span>
           ) : (
-            <AsciiSpinner className="shrink-0 text-[11px]" />
+            <AsciiSpinner className="shrink-0 text-xs" />
           )
         ) : done ? (
           // A finished step reads as DONE at a glance — a solid green check, not
@@ -823,14 +824,14 @@ function CanvasNode({
         ) : (
           <span
             className="h-[7px] w-[7px] shrink-0 rounded-full"
-            style={{ background: dot }}
+            style={{ background: state.color }}
           />
         )}
       </div>
 
       {/* The story — what this task is doing / waiting on / delivered, in plain
           words. This is the line that evolves as the work moves. */}
-      <div className="truncate text-[10.5px] leading-snug text-text-4">
+      <div className="truncate text-xs leading-snug text-text-4">
         {node.story}
       </div>
 
@@ -839,17 +840,17 @@ function CanvasNode({
           where it sits in the flow. Sits below the card, doesn't catch the
           pointer, and only the hovered node's card lifts above its neighbours. */}
       <div className="pointer-events-none absolute left-0 top-full z-30 mt-1.5 hidden w-[260px] rounded-xl border border-line bg-bg-content p-3 text-left shadow-[var(--shadow-modal)] group-hover:block">
-        <div className="text-[12px] font-semibold leading-snug text-text-1">
+        <div className="text-sm font-semibold leading-snug text-text-1">
           {node.title}
         </div>
-        <div className="mt-1.5 flex items-center gap-1.5 text-[11px] text-text-3">
+        <div className="mt-1.5 flex items-center gap-1.5 text-xs text-text-3">
           <span
             className="h-[7px] w-[7px] shrink-0 rounded-full"
-            style={{ background: dot }}
+            style={{ background: state.color }}
           />
-          {STATUS_WORD[node.status]}
+          {state.hint}
         </div>
-        <div className="mt-1.5 flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px] text-text-4">
+        <div className="mt-1.5 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-text-4">
           <span className="inline-flex items-center gap-1">
             {canonical ? (
               <AgentIcon
@@ -871,7 +872,7 @@ function CanvasNode({
           ) : null}
         </div>
         {node.waitingCount > 0 || node.unblockCount > 0 ? (
-          <div className="mt-1.5 text-[11px] text-text-4">
+          <div className="mt-1.5 text-xs text-text-4">
             {node.waitingCount > 0
               ? `Waiting on ${node.waitingCount}`
               : ""}
@@ -880,7 +881,7 @@ function CanvasNode({
           </div>
         ) : null}
         {node.story ? (
-          <div className="mt-1.5 border-t border-line-soft pt-1.5 text-[11px] leading-snug text-text-3">
+          <div className="mt-1.5 border-t border-line-soft pt-1.5 text-xs leading-snug text-text-3">
             {node.story}
           </div>
         ) : null}
@@ -892,7 +893,7 @@ function CanvasNode({
 // Who's on it + a quiet progress bar — the shape of a group at a glance,
 // reused by goal regions and objective sections so every header reads the same.
 function RollupChips({ stat }: { stat: CrewClusterStat }) {
-  const pct = stat.total > 0 ? Math.round((stat.done / stat.total) * 100) : 0;
+  const pct = percent(stat.done, stat.total);
   return (
     <div className="flex shrink-0 items-center gap-2.5">
       {stat.agentKinds.slice(0, 3).map((ak) => {
@@ -902,7 +903,7 @@ function RollupChips({ stat }: { stat: CrewClusterStat }) {
         );
       })}
       {stat.assignees.length > 0 ? (
-        <span className="inline-flex items-center gap-1 text-[10.5px] text-text-4">
+        <span className="inline-flex items-center gap-1 text-xs text-text-4">
           <Users size={12} /> {stat.assignees.length}
         </span>
       ) : null}
@@ -943,14 +944,14 @@ function ObjectiveBand({ objective }: { objective: CrewObjective }) {
           <Flag size={15} />
         </span>
         <div className="min-w-0 flex-1">
-          <div className="text-[9.5px] font-semibold uppercase tracking-[0.1em] text-text-5">
+          <div className="text-xs font-medium text-text-4">
             Objective
           </div>
-          <div className="truncate text-[14px] font-semibold leading-tight text-text-1">
+          <div className="truncate text-md font-semibold leading-tight text-text-1">
             {objective.title}
           </div>
         </div>
-        <span className="hidden shrink-0 text-[10.5px] text-text-4 sm:block">
+        <span className="hidden shrink-0 text-xs text-text-4 sm:block">
           {objective.regionCount}{" "}
           {objective.regionCount === 1 ? "goal" : "goals"} · {stat.total}{" "}
           {stat.total === 1 ? "step" : "steps"}
@@ -988,7 +989,7 @@ function GoalBlock({ region, waves }: { region: CrewRegion; waves: number }) {
     >
       <div className="flex items-center gap-1.5 text-accent">
         <Flag size={12} />
-        <span className="text-[9.5px] font-semibold uppercase tracking-[0.1em]">
+        <span className="text-xs font-medium">
           Goal
         </span>
         {/* Who'll work it — the robots this flow's steps are handed to. */}
@@ -1008,10 +1009,10 @@ function GoalBlock({ region, waves }: { region: CrewRegion; waves: number }) {
           </span>
         ) : null}
       </div>
-      <div className="mt-1 line-clamp-2 text-[12px] font-semibold leading-tight text-text-1">
+      <div className="mt-1 line-clamp-2 text-sm font-semibold leading-tight text-text-1">
         {region.title}
       </div>
-      <div className="mt-auto pt-1 text-[10px] text-text-4">
+      <div className="mt-auto pt-1 text-2xs text-text-4">
         {stat.total} {stat.total === 1 ? "step" : "steps"}
         {waves > 1 ? ` · ${waves} waves` : ""}
       </div>
@@ -1032,7 +1033,7 @@ function ResultBlock({
   proven: number;
 }) {
   const { resultBlock: r, stat } = region;
-  const pct = stat.total > 0 ? Math.round((stat.done / stat.total) * 100) : 0;
+  const pct = percent(stat.done, stat.total);
   const complete = stat.total > 0 && stat.done === stat.total;
   const allProven = complete && proven === stat.done;
   return (
@@ -1051,10 +1052,10 @@ function ResultBlock({
         }`}
       >
         <CheckCircle2 size={12} />
-        <span className="text-[9.5px] font-semibold uppercase tracking-[0.1em]">
+        <span className="text-xs font-medium">
           Result
         </span>
-        <span className="ml-auto text-[14px] font-semibold tabular-nums text-text-1">
+        <span className="ml-auto text-md font-semibold tabular-nums text-text-1">
           {pct}%
         </span>
       </div>
@@ -1067,7 +1068,7 @@ function ResultBlock({
           }}
         />
       </div>
-      <div className="mt-auto pt-1.5 text-[10px] leading-snug">
+      <div className="mt-auto pt-1.5 text-2xs leading-snug">
         {allProven ? (
           <span className="font-medium text-accent-green">
             Delivered &amp; proven · {proven}/{stat.total} checks
@@ -1096,13 +1097,15 @@ function ClusterBox({
   onToggle: () => void;
 }) {
   const { stat } = cluster;
-  const pct = stat.total > 0 ? Math.round((stat.done / stat.total) * 100) : 0;
+  const pct = percent(stat.done, stat.total);
   const kindLabel =
     cluster.kind === "epic"
       ? "Epic"
       : cluster.kind === "sprint"
         ? "Sprint"
-        : "Loose tasks";
+        : cluster.kind === "crew"
+          ? "Crew"
+          : "Loose tasks";
   return (
     <div
       data-node
@@ -1117,7 +1120,7 @@ function ClusterBox({
       <button
         type="button"
         onClick={onToggle}
-        className="flex w-full items-center gap-2.5 rounded-2xl px-3 text-left hover:bg-bg-2/40"
+        className="flex w-full items-center gap-2.5 rounded-2xl px-3 text-left hover:bg-state-hover"
         style={{ height: CREW_CLUSTER_HEADER_H }}
         title={cluster.expanded ? "Collapse this group" : "Open this group"}
       >
@@ -1131,14 +1134,14 @@ function ClusterBox({
         </span>
         <div className="min-w-0 flex-1">
           <div className="flex items-center gap-2">
-            <span className="truncate text-[13px] font-semibold text-text-1">
+            <span className="truncate text-base font-semibold text-text-1">
               {cluster.title}
             </span>
-            <span className="shrink-0 rounded-full bg-bg-2 px-1.5 py-0.5 text-[9.5px] font-medium uppercase tracking-[0.06em] text-text-5">
+            <span className="shrink-0 rounded-full bg-bg-2 px-1.5 py-0.5 text-xs font-medium text-text-4">
               {kindLabel}
             </span>
           </div>
-          <div className="mt-0.5 truncate text-[10.5px] text-text-4">
+          <div className="mt-0.5 truncate text-xs text-text-4">
             {stat.total} {stat.total === 1 ? "task" : "tasks"}
             {stat.attention > 0 ? ` · ${stat.attention} need attention` : ""}
             {stat.done > 0 ? ` · ${stat.done} done` : ""}
@@ -1160,7 +1163,7 @@ function ClusterBox({
             );
           })}
           {stat.assignees.length > 0 ? (
-            <span className="inline-flex items-center gap-1 text-[10.5px] text-text-4">
+            <span className="inline-flex items-center gap-1 text-xs text-text-4">
               <Users size={12} /> {stat.assignees.length}
             </span>
           ) : null}
@@ -1182,7 +1185,7 @@ function ClusterBox({
 function CanvasEmpty() {
   return (
     <div className="flex h-full items-center justify-center">
-      <p className="text-[12px] text-text-5">Nothing to plot yet.</p>
+      <p className="text-sm text-text-5">Nothing to plot yet.</p>
     </div>
   );
 }

@@ -77,11 +77,15 @@ export function ScribbleSpace({
   scope,
   members,
   selfHandle,
+  onWrittenChange,
 }: {
   repoRoot: string;
   scope: Scope;
   members: TeamMember[];
   selfHandle: string;
+  /** Lifts "has anything ever been written here" so the panel can teach the
+   *  mechanics once across both spaces instead of once per space. */
+  onWrittenChange?: (written: boolean) => void;
 }) {
   const [blocks, setBlocks] = useState<Block[]>([]);
   const [loaded, setLoaded] = useState(false);
@@ -255,11 +259,20 @@ export function ScribbleSpace({
     () => blocks.filter((b) => b.isTask && !b.done && b.text.trim().length > 0).length,
     [blocks],
   );
+  // Nothing has ever been written here — the trailing draft doesn't count as
+  // content. Distinct from "written, but nothing is outstanding".
+  const written = useMemo(
+    () => blocks.some((b) => b.text.trim().length > 0),
+    [blocks],
+  );
+  useEffect(() => {
+    onWrittenChange?.(written);
+  }, [written, onWrittenChange]);
 
   if (!loaded) {
     return (
-      <div className="flex h-full items-center justify-center gap-1.5 text-[11px] text-text-4">
-        <AsciiSpinner className="text-[10px]" />
+      <div className="flex h-full items-center justify-center gap-1.5 text-xs text-text-4">
+        <AsciiSpinner className="text-2xs" />
         <span>Opening your notes…</span>
       </div>
     );
@@ -270,7 +283,7 @@ export function ScribbleSpace({
       {/* Pinned strip — many pins allowed; unpin inline. */}
       {pinned.length > 0 && (
         <div className="flex-shrink-0 border-b border-line-soft/60 bg-bg-2/40 px-2 py-1.5">
-          <div className="mb-1 flex items-center gap-1 px-1 text-[9px] font-semibold uppercase tracking-wider text-text-5">
+          <div className="mb-1 flex items-center gap-1 px-1 text-xs text-text-5">
             <Pin size={9} className="text-accent" /> Pinned
           </div>
           <div className="flex flex-col gap-0.5">
@@ -279,7 +292,7 @@ export function ScribbleSpace({
                 <InlineText
                   text={b.text}
                   members={members}
-                  className="min-w-0 flex-1 break-words text-[12px] leading-snug text-text-2"
+                  className="min-w-0 flex-1 break-words text-sm leading-snug text-text-2"
                 />
                 <button
                   type="button"
@@ -300,12 +313,17 @@ export function ScribbleSpace({
       <div className="min-h-0 flex-1 overflow-y-auto overflow-x-hidden py-1">
         {days.map((day) => (
           <div key={day.key} className="mb-1">
+            {/* A day header separates one day's writing from another's. On a
+                space nobody has written in there is one day, it holds one
+                empty draft, and the header dates a page with nothing on it. */}
+            {written && (
             <div className="sticky top-0 z-10 flex items-center gap-1.5 bg-bg-1/95 px-3 py-1 backdrop-blur">
-              <span className="text-[10px] font-semibold uppercase tracking-wider text-text-4">
+              <span className="text-xs font-medium text-text-4">
                 {dayLabel(day.ts, nowMs)}
               </span>
-              {!day.isToday && <span className="text-[9px] text-text-5">· read-only</span>}
+              {!day.isToday && <span className="text-xs text-text-5">· read-only</span>}
             </div>
+            )}
             <div className="px-1">
               {day.blocks.map((b) => (
                 <ScribbleBlock
@@ -328,12 +346,21 @@ export function ScribbleSpace({
         ))}
       </div>
 
-      {/* Footer — open task count. */}
-      <div className="flex-shrink-0 border-t border-line-soft/60 px-3 py-1 text-[10px] text-text-5">
-        {openCount === 0
-          ? "No open tasks"
-          : `${openCount} open task${openCount === 1 ? "" : "s"}`}
-      </div>
+      {/* Footer — this space's own open-task count, and nothing when there is
+          nothing to count. It used to read "No open tasks" on a space nobody
+          had ever written in: a true sentence, but an answer to a question the
+          reader hadn't asked yet, and the wrong noun for a surface whose job is
+          writing. The how-it-works hint that replaced it belongs to the PANEL,
+          which shows it once — the two spaces stacked here have identical
+          mechanics, so printing it in both footers said the same nine words
+          twice on one rail. */}
+      {written && (
+        <div className="flex-shrink-0 border-t border-line-soft/60 px-3 py-1 text-2xs text-text-5">
+          {openCount === 0
+            ? "No open tasks"
+            : `${openCount} open task${openCount === 1 ? "" : "s"}`}
+        </div>
+      )}
     </div>
   );
 }

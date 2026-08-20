@@ -4,10 +4,11 @@
 // in TeamTasksPanel — this is for humans tracking real work
 // (features, bugs, chores).
 //
-// Layout: header (title + view toggle + "+ New") above a four-column
-// kanban (Backlog / In Progress / In Review / Done). Cards click to a
-// right-side detail drawer for full edit. Drag-and-drop between
-// columns flips status (HTML5 drag, no extra dep).
+// Layout: one bar of chrome (how much work is on screen, the Filters and
+// Display menus, "+ New") above ONE list, grouped by whatever you picked —
+// status, by default. A row clicks to the detail pane for a full edit, and its
+// status tag sets the status in place, which is what dragging a card between
+// kanban lanes used to be for.
 
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import {
@@ -20,14 +21,8 @@ import {
   Bot,
   Mountain,
   Inbox,
-  Clock,
-  Timer,
-  Target,
-  Check,
   Plus,
-  List as ListIcon,
-  KanbanSquare,
-  GitBranch,
+  SquareArrowOutUpRight,
 } from "lucide-react";
 import {
   api,
@@ -38,8 +33,6 @@ import {
   type CreateTaskInput,
   type UpdateTaskInput,
   type Sprint,
-  type SprintInput,
-  type TaskView,
   type TaskViewFilters,
   type TaskViewGroupBy,
   type TaskViewOrderBy,
@@ -50,60 +43,79 @@ import {
   type Cycle,
   type Module,
 } from "../lib/api";
+import { fetchCycles, fetchModules, fetchTaskLabels, fetchTaskStates } from "../lib/tasksCache";
 import { trackFeature } from "../lib/track";
 import { peekCache, writeCache } from "../lib/resourceCache";
 import { Button } from "./ui/button";
-import { Input } from "./ui/input";
-import { Select } from "./ui/select";
-import { StatusChip } from "./ui/statusChip";
-import { AsciiSpinner } from "./ui/ascii-spinner";
-import { BoardColumnSkeleton } from "./ui/skeleton";
-import { MentionedText } from "./Mentions";
-import { AssigneeStack } from "./AssigneePicker";
 import { CreateTaskWizard } from "./tasks/CreateTaskWizard";
-import { CreateSprintWizard } from "./tasks/CreateSprintWizard";
-import { CloseSprintPanel, CARRY_TO_BACKLOG } from "./tasks/CloseSprintPanel";
 import { TaskDetailPane, TASK_EDIT_EVENT } from "./tasks/TaskDetailPane";
-import { StatePill } from "./tasks/StatePill";
+import { BoardEmpty, BoardFilteredEmpty } from "./board";
+import {
+  goToWork,
+  isCrewLens,
+  taskViewFor,
+  type WorkLens,
+} from "../lib/workRoute";
+import { WorkLensTabs } from "./tasks/WorkLensTabs";
+import { TasksBoardView } from "./tasks/TasksBoardView";
+import { TasksListView } from "./tasks/TasksListView";
 import { BulkActionToolbar } from "./tasks/BulkActionToolbar";
 import {
-  TasksFilterBar,
+  TasksAppliedFilters,
+  TasksControls,
   DEFAULT_DISPLAY_PROPS,
 } from "./tasks/TasksFilterBar";
 import {
-  TasksToolbarPill,
-  TasksToolbarButton,
-} from "./tasks/TasksToolbarPill";
-import {
-  TasksViewsBar,
-  slugifyViewName,
-} from "./tasks/TasksViewsBar";
-import { TaskPeekOverlay } from "./tasks/TaskPeekOverlay";
-import {
   useTaskShortcuts,
-  TASK_SHORTCUTS,
   type TaskShortcutAction,
 } from "./tasks/useTaskShortcuts";
 import {
-  Dialog,
-  DialogContent,
-  DialogHeader,
-  DialogTitle,
-} from "./ui/dialog";
-import {
   useTasksSharedFilters,
   clearTasksSharedFilters,
+  railBoardTaskIds,
+  setTasksSharedSidebar,
 } from "../lib/tasksFilterStore";
 import { useEditorStore } from "../lib/editorStore";
 import { openPopout } from "../lib/popout";
+import { SurfaceHeader } from "./ui/SurfaceHeader";
+import { askConfirm } from "./ui/ask";
+import { ShortcutsDialog } from "./dialogs/ShortcutsDialog";
+import {
+  loadTasksForRoots,
+  rootsForScope,
+  rootsKeyOf,
+  useKnownProjects,
+  useProjectScope,
+} from "../lib/projectRoots";
+import { fetchTeam } from "../lib/teamCache";
 
-// The composite the board caches under `tasks:${repoRoot}` so reopening
-// paints instantly (resourceCache) instead of refetching every open.
+// The composite the board caches under `tasks:${roots}` so reopening
+// paints instantly (resourceCache) instead of refetching every open. Keyed on
+// the roots rather than one root because All projects is a different set, and
+// two sets sharing a cache key means the wrong one paints on open.
+/** A task, remembering the project it was read out of. The tag survives into
+ *  the warm-open cache so a mutation made before the first refetch lands still
+ *  goes back to the right file. */
+type ScopedTask = Task & { __root?: string };
+
+/** First occurrence wins — the scope is ordered most-recently-opened first, so
+ *  the open project's spelling of a shared person or label is the one kept. */
+function dedupeBy<T>(rows: T[], key: (row: T) => string): T[] {
+  const seen = new Set<string>();
+  const out: T[] = [];
+  for (const r of rows) {
+    const k = key(r);
+    if (seen.has(k)) continue;
+    seen.add(k);
+    out.push(r);
+  }
+  return out;
+}
+
 type TasksBundle = {
-  tasks: Task[];
+  tasks: ScopedTask[];
   members: TeamMember[];
   sprints: Sprint[];
-  savedViews: TaskView[];
   taskStates: TaskState[];
   taskLabels: TaskLabel[];
   cycles: Cycle[];
@@ -125,34 +137,42 @@ type Props = {
    *  board off into a floating OS window (lib/popout.ts). Intentionally
    *  omitted inside the popout itself so it can't pop out of a popout. */
   onPopOut?: () => void;
+  /** The lens the host is showing, when the host owns it — the Tasks
+   *  destination does, so the choice survives a switch to Graph and back. Left
+   *  off (a workpane tab, the popout) the board keeps its own. */
+  lens?: WorkLens;
+  onLens?: (next: WorkLens) => void;
 };
 
-type ViewMode =
-  | "board"
-  | "list"
-  | "sprint";
+type ViewMode = "board" | "list";
 
-// Trimmed down to the three views that matter day-to-day: List, Board
-// (kanban), and Sprint. Calendar / Gantt / Roadmap / Epics / Spread
-// sheet were removed because they weren't shipping signal yet — the
-// kanban + sprint surfaces already cover the planning loop, and
-// re-adding the extras is cheap when there's real demand.
-const VIEW_MODES: {
-  id: ViewMode;
-  label: string;
-  Icon: typeof ListIcon;
-}[] = [
-  { id: "list", label: "List", Icon: ListIcon },
-  { id: "board", label: "Board", Icon: KanbanSquare },
-  { id: "sprint", label: "Sprint", Icon: Timer },
-];
-
-const COLUMNS: { id: TaskStatus; label: string }[] = [
-  { id: "backlog", label: "Backlog" },
-  { id: "in_progress", label: "In Progress" },
-  { id: "in_review", label: "In Review" },
-  { id: "done", label: "Done" },
-];
+// Down to the two drawings that matter day-to-day: List and Board (kanban).
+// Calendar / Gantt / Roadmap / Epics / Spreadsheet were removed because they
+// weren't shipping signal yet, and re-adding one is cheap when there's real
+// demand.
+//
+// Sprint went the same way, later and for a different reason: it wasn't a way
+// of looking at the work, it was a dashboard about a sprint — burndown,
+// capacity, velocity, at-risk, a pull-in drawer — sitting on a strip whose
+// other cells all answered "how do you want this drawn?". Picking a sprint in
+// the rail narrows List and Board to it, which is what a slice of the backlog
+// needs; the sprint's own lifecycle moved to the rail beside the sprints
+// (components/tasks/SprintRailGroup).
+//
+// "Cheap" is literal for the spreadsheet: it was a finished component
+// taking the props this board already holds (tasks, members,
+// displayProps, selectedId, onSelect, patchTask, quickCreate), left
+// sitting unimported for months along with the InteractiveTable shell
+// it rendered into. Both have now been deleted rather than left to
+// rot — `git log --diff-filter=D -- '*/TasksSpreadsheetView.tsx'`
+// names the commit that holds them whole.
+//
+// The header's option list is no longer declared here. This board's two
+// drawings are two of the THREE lenses on the work — the third being the
+// crew's Graph — and a strip that only offered this board's own would have
+// left the merged destination with two different-length switches depending on
+// which surface happened to be mounted. `WORK_LENSES` in lib/workRoute is the
+// single list; both surfaces render it.
 
 // Quick-start templates surfaced on the empty state. Each template
 // pre-fills the create dialog so a first task can ship in two clicks.
@@ -233,9 +253,40 @@ export function TasksBoard({
   onClose,
   currentHandle,
   embedded = false,
+  lens,
+  onLens,
+  onPopOut,
 }: Props) {
   // Embedded mode is always "open" — the workpane chrome controls visibility.
   const open = embedded ? true : openProp ?? false;
+
+  // ── Which projects this board is showing ────────────────────────────
+  //
+  // The rail's project picker writes one shared scope and this reads it, so
+  // the counts in the rail and the cards on the board are the same claim
+  // about the same set. Under "All projects" every known root is read and
+  // each task remembers where it came from, which is what lets a change made
+  // here go back to the file it came out of rather than to whichever project
+  // happens to be open.
+  const scope = useProjectScope();
+  const projects = useKnownProjects(repoRoot);
+  const roots = useMemo(
+    () => rootsForScope(scope, repoRoot, projects),
+    [scope, repoRoot, projects],
+  );
+  const rootsKey = rootsKeyOf(roots);
+  const multiRoot = roots.length > 1;
+  /** Where a new task lands, and whose per-project catalogs (sprints,
+   *  workstreams, saved views) the board shows. Under All projects that is
+   *  the project the app has open — a new task has to be filed somewhere. */
+  const primaryRoot = roots.length === 1 ? roots[0]! : repoRoot;
+  /** id → the project a task was read out of. A ref, not state: it changes
+   *  in lockstep with `tasks` and nothing renders from it directly. */
+  const taskRootRef = useRef<Map<string, string>>(new Map());
+  const rootOf = useCallback(
+    (id: string) => taskRootRef.current.get(id) ?? primaryRoot,
+    [primaryRoot],
+  );
   const [tasks, setTasks] = useState<Task[]>([]);
   const [members, setMembers] = useState<TeamMember[]>([]);
   const [sprints, setSprints] = useState<Sprint[]>([]);
@@ -244,36 +295,50 @@ export function TasksBoard({
   // canonical catalogs instead of synthesising them from raw strings.
   const [taskStates, setTaskStates] = useState<TaskState[]>([]);
   const [taskLabels, setTaskLabels] = useState<TaskLabel[]>([]);
-  // OO.4 — per-repo Cycle + Module catalogs. Mirror of taskStates/
-  // taskLabels: loaded alongside tasks so the detail panel and the
-  // sidebar surfaces can read off the same in-memory copy. The
-  // sidebar panels also re-fetch on demand via `sidebarRefreshKey`
-  // to pick up assign/unassign side effects elsewhere.
-  const [cycles, setCycles] = useState<Cycle[]>([]);
-  const [modules, setModules] = useState<Module[]>([]);
+  // The Cycle + Module catalogs are NOT held here. They were, back when
+  // this board handed them to a detail surface it owned; every surface that
+  // shows a cycle or module picker now loads its own (TaskDetailPane and the
+  // TasksSidebar rail both call `tasksCyclesList` directly), so a third copy
+  // on the board was a fetch nobody read and a staleness window nobody could
+  // see. The load below still writes them into the cached bundle — that
+  // shape is the board's warm-open snapshot, not a live read.
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [view, setView] = useState<ViewMode>(() => {
     try {
-      // One-shot migration: list view became the Plane-style default in
-      // this build. Without this nudge, every existing user keeps their
-      // cached "board" preference and never sees the new UX. Bumping a
-      // separate `viewMigration` key lets us flip the default exactly
-      // once — anyone who actively re-picks Board after the migration
-      // keeps Board on the next launch.
-      const migrated = localStorage.getItem("aura.tasksBoard.viewMigration");
-      if (migrated !== "list-default-v1") {
-        localStorage.setItem("aura.tasksBoard.viewMigration", "list-default-v1");
-        localStorage.setItem("aura.tasksBoard.view", "list");
-        return "list";
-      }
       const raw = localStorage.getItem("aura.tasksBoard.view") as ViewMode | null;
-      const valid: ViewMode[] = ["board", "list", "sprint"];
+      // Also the migration off the retired Sprint drawing: a stored "sprint"
+      // is no longer a view, so it falls back rather than rendering nothing.
+      const valid: ViewMode[] = ["board", "list"];
       return raw && valid.includes(raw) ? raw : "list";
     } catch {
       return "list";
     }
   });
+  // The lens the header strip shows, and what picking one does.
+  //
+  // The Tasks destination owns it — so switching to Graph and back returns you
+  // to the drawing you were on — and hands it down. Anywhere else (a workpane
+  // tab, the popout) the board owns its own, and the crew's lens is a
+  // navigation to the destination rather than a dead cell.
+  const activeLens: WorkLens = lens ?? view;
+  const chooseLens = (next: WorkLens) => {
+    if (onLens) {
+      onLens(next);
+      return;
+    }
+    if (isCrewLens(next)) {
+      goToWork(next);
+      return;
+    }
+    setView(taskViewFor(next));
+  };
+  // What the body draws. It has to come from the lens on screen, not from
+  // `view`: when the host owns the lens — the Tasks destination does — picking
+  // a cell calls `onLens` and never touches `view`, so a body reading `view`
+  // would go on drawing the lens you just left. The header would say List over
+  // a screen of lanes.
+  const drawing = taskViewFor(activeLens);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   /** OO.5 — multi-selection set used by the BulkActionToolbar. Backed
    *  by a plain Array (not Set) so React diffs cleanly across renders.
@@ -284,13 +349,13 @@ export function TasksBoard({
    *  scope. Cleared by the toolbar's "×" button or after a successful
    *  bulk op. */
   const [multiSelectedIds, setMultiSelectedIds] = useState<string[]>([]);
-  /** When non-null, the task is rendered in the peek overlay (Shift+
-   *  click) instead of the right side-panel. Mutually exclusive with
-   *  `selectedId` — peek + side-panel never overlap. */
-  const [peekId, setPeekId] = useState<string | null>(null);
-  /** Last-focused card. Drives single-key shortcuts. Refresh on click
-   *  even when we don't open the side panel (e.g. Shift+click peek). */
+  /** Last-focused card. Drives single-key shortcuts, and is set on every
+   *  click — including the shift-click that opens a workpane tab instead
+   *  of the detail overlay. */
   const [focusedId, setFocusedId] = useState<string | null>(null);
+  /** The card currently being dragged between kanban lanes. Only the Board
+   *  drawing sets it; the list moves a task by picking its status tag. */
+  const [dragId, setDragId] = useState<string | null>(null);
   const [creating, setCreating] = useState(false);
   /** When set, the task with this id is open in the full-screen edit
    *  wizard (the same FullscreenOverlay shell as create). Reached only
@@ -304,7 +369,6 @@ export function TasksBoard({
   /** Template preset for the open create modal — populated when a user
    *  picks a template card from the empty state. Cleared on submit/cancel. */
   const [createInitial, setCreateInitial] = useState<Partial<CreateTaskInput> | null>(null);
-  const [dragId, setDragId] = useState<string | null>(null);
 
   // ─── OO.2 Phase 2 — filter / group / order / display state ──────────
   //
@@ -314,20 +378,34 @@ export function TasksBoard({
   // are not part of a saved view stay in this state only — they
   // survive a tab switch but not a process restart, matching Plane.
   const [filters, setFilters] = useState<TaskViewFilters>({});
+
+  /**
+   * What the filter bar calls when *you* change a filter — as opposed to the
+   * rail change mirrored down by the effect below.
+   *
+   * The rail and the bar are two views of one filter, and the sync between
+   * them ran one way only: the rail wrote the shared store, the board copied
+   * it into local state, and nothing ever went back. So clicking "Active" in
+   * the rail and then "Clear all" in the bar left the board unfiltered while
+   * the rail carried on highlighting Active — the row asserting a scope the
+   * screen behind it was no longer in. Removing a single chip desynced the
+   * same way. Pushing the three dimensions the rail owns back into the store
+   * makes the rail re-derive its own highlight from what is actually applied.
+   */
+  const handleFilters = useCallback((next: TaskViewFilters) => {
+    setFilters(next);
+    setTasksSharedSidebar({
+      status: next.status,
+      assignee: next.assignee,
+      overdue: next.overdue,
+    });
+  }, []);
   const [groupBy, setGroupBy] = useState<TaskViewGroupBy>("status");
   const [orderBy, setOrderBy] = useState<TaskViewOrderBy>("updated");
   const [orderDir, setOrderDir] = useState<TaskViewOrderDir>("desc");
   const [displayProps, setDisplayProps] = useState<TaskViewDisplayProp[]>(
     DEFAULT_DISPLAY_PROPS,
   );
-  const [savedViews, setSavedViews] = useState<TaskView[]>([]);
-  const [activeViewId, setActiveViewId] = useState<string | null>(() => {
-    try {
-      return localStorage.getItem("aura.tasksBoard.activeView");
-    } catch {
-      return null;
-    }
-  });
   const [shortcutsOpen, setShortcutsOpen] = useState(false);
 
   // OO.4 — Sidebar cycle/module selection. `null` means "no filter";
@@ -337,11 +415,6 @@ export function TasksBoard({
   // the user can drill from "this module" → "this cycle within it".
   const [selectedCycleId, setSelectedCycleId] = useState<string | null>(null);
   const [selectedModuleId, setSelectedModuleId] = useState<string | null>(null);
-  /** Bumped to force `CycleSidebarPanel` / `ModuleSidebarPanel` to
-   *  re-fetch after assign/unassign operations elsewhere (detail
-   *  panel pickers) so member counts stay accurate. */
-  const [sidebarRefreshKey, setSidebarRefreshKey] = useState(0);
-
   // OO.6 — pull bucket selection from the app-level <TasksSidebar>
   // rail (mounted in the Layout's sidebar slot when this board is the
   // active workpane). The sidebar writes into `tasksFilterStore`;
@@ -353,20 +426,32 @@ export function TasksBoard({
       ...prev,
       status: sharedSidebar.sidebar.status,
       assignee: sharedSidebar.sidebar.assignee,
+      overdue: sharedSidebar.sidebar.overdue,
     }));
-  }, [sharedSidebar.sidebar.status, sharedSidebar.sidebar.assignee]);
+  }, [
+    sharedSidebar.sidebar.status,
+    sharedSidebar.sidebar.assignee,
+    sharedSidebar.sidebar.overdue,
+  ]);
   useEffect(() => {
     setSelectedCycleId(sharedSidebar.cycleId);
   }, [sharedSidebar.cycleId]);
   useEffect(() => {
     setSelectedModuleId(sharedSidebar.moduleId);
   }, [sharedSidebar.moduleId]);
-  // When the board unmounts (user switches off the Tasks tab) clear
-  // the shared store so reopening lands on a clean rail rather than
-  // restoring an old bucket pick the user no longer expects.
-  useEffect(() => {
-    return () => clearTasksSharedFilters();
-  }, []);
+  // The cards behind the rail's goal / crew pick, when one is made. `null` is
+  // "no loop narrowing", which is not the same as an empty set: a goal whose
+  // work was authored straight into the graph has no cards behind it, and
+  // showing none of them is the honest answer to picking it.
+  const railIds = useMemo(
+    () => railBoardTaskIds(sharedSidebar),
+    [sharedSidebar],
+  );
+  // Clearing the shared store used to happen here, on unmount. That was right
+  // when leaving the board meant leaving Tasks; it is wrong now that the board
+  // is one of four lenses inside one place, because switching to Plan would
+  // silently drop the sprint you were reading. The place owns it — see
+  // tasks/TasksPlace.
 
   // OO.6 — bridge the app-level sidebar's "+ New task" button to the
   // board's create modal. The sidebar fires this CustomEvent so we
@@ -401,40 +486,54 @@ export function TasksBoard({
     }
   }, [view]);
 
-  useEffect(() => {
-    try {
-      if (activeViewId === null)
-        localStorage.removeItem("aura.tasksBoard.activeView");
-      else localStorage.setItem("aura.tasksBoard.activeView", activeViewId);
-    } catch {
-      /* quota — ignore */
-    }
-  }, [activeViewId]);
-
   const refresh = useCallback(async () => {
-    if (!repoRoot) return;
-    const key = `tasks:${repoRoot}`;
+    if (roots.length === 0) return;
+    const key = `tasks:${rootsKey}`;
     // Cold load (nothing cached) → show the skeleton. Warm revalidate
     // keeps the seeded cards on screen while the refetch runs.
     if (!peekCache<TasksBundle>(key)) setLoading(true);
     setError(null);
     try {
-      const [rows, team, sprintRows, views, stateRows, labelRows, cycleRows, moduleRows] = await Promise.all([
-        api.tasksList(repoRoot),
-        api.teamLoad(repoRoot).catch(() => null),
-        api.sprintsList(repoRoot).catch(() => [] as Sprint[]),
-        api.taskViewsList(repoRoot).catch(() => [] as TaskView[]),
-        api.taskStatesList(repoRoot).catch(() => [] as TaskState[]),
-        api.taskLabelsList(repoRoot).catch(() => [] as TaskLabel[]),
-        api.tasksCyclesList(repoRoot).catch(() => [] as Cycle[]),
-        api.tasksModulesList(repoRoot).catch(() => [] as Module[]),
-      ]);
-      const memberRows = team?.members ?? [];
+      // People, states and labels merge across the scope: a task assigned to
+      // someone who only appears on another project's team would otherwise
+      // render as an unresolved handle, and its label as a grey chip. Sprints
+      // and workstreams do NOT merge — they are per-project catalogs where two
+      // projects can each have a "Sprint 3", and a merged list would offer you
+      // a sprint that can't hold the task you'd drag into it. The rail says as
+      // much where it lists them.
+      const [rows, teams, sprintRows, stateSets, labelSets, cycleRows, moduleRows] =
+        await Promise.all([
+          loadTasksForRoots(roots),
+          Promise.all(roots.map((r) => fetchTeam(r).catch(() => null))),
+          multiRoot
+            ? Promise.resolve([] as Sprint[])
+            : api.sprintsList(primaryRoot).catch(() => [] as Sprint[]),
+          Promise.all(
+            roots.map((r) => fetchTaskStates(r).catch(() => [] as TaskState[])),
+          ),
+          Promise.all(
+            roots.map((r) => fetchTaskLabels(r).catch(() => [] as TaskLabel[])),
+          ),
+          multiRoot
+            ? Promise.resolve([] as Cycle[])
+            : fetchCycles(primaryRoot).catch(() => [] as Cycle[]),
+          multiRoot
+            ? Promise.resolve([] as Module[])
+            : fetchModules(primaryRoot).catch(() => [] as Module[]),
+        ]);
+      const memberRows = dedupeBy(
+        teams.flatMap((t) => t?.members ?? []),
+        (m) => m.handle,
+      );
+      const stateRows = dedupeBy(stateSets.flat(), (x) => x.id);
+      const labelRows = dedupeBy(labelSets.flat(), (x) => x.id);
+      const nextRoots = new Map<string, string>();
+      for (const r of rows) nextRoots.set(r.id, r.__root);
+      taskRootRef.current = nextRoots;
       writeCache<TasksBundle>(key, {
         tasks: rows,
         members: memberRows,
         sprints: sprintRows,
-        savedViews: views,
         taskStates: stateRows,
         taskLabels: labelRows,
         cycles: cycleRows,
@@ -443,57 +542,37 @@ export function TasksBoard({
       setTasks(rows);
       setMembers(memberRows);
       setSprints(sprintRows);
-      setSavedViews(views);
       setTaskStates(stateRows);
       setTaskLabels(labelRows);
-      setCycles(cycleRows);
-      setModules(moduleRows);
     } catch (e) {
       setError(String(e));
     } finally {
       setLoading(false);
     }
-  }, [repoRoot]);
+    // `rootsKey` stands in for `roots`: a fresh array identity every render
+    // would rebuild this callback — and restart the poll below — constantly.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [rootsKey, multiRoot, primaryRoot]);
 
   useEffect(() => {
-    if (!open || !repoRoot) return;
+    if (!open || roots.length === 0) return;
     // Warm open: paint the last load instantly from cache, then
     // revalidate in the background so the board never flashes empty
     // (or shows a skeleton) when reopened within a session.
-    const cached = peekCache<TasksBundle>(`tasks:${repoRoot}`);
+    const cached = peekCache<TasksBundle>(`tasks:${rootsKey}`);
     if (cached) {
+      const warm = new Map<string, string>();
+      for (const t of cached.tasks) if (t.__root) warm.set(t.id, t.__root);
+      taskRootRef.current = warm;
       setTasks(cached.tasks);
       setMembers(cached.members);
       setSprints(cached.sprints);
-      setSavedViews(cached.savedViews);
       setTaskStates(cached.taskStates);
       setTaskLabels(cached.taskLabels);
-      setCycles(cached.cycles);
-      setModules(cached.modules);
     }
     refresh();
-  }, [open, refresh, repoRoot]);
-
-  // OO.4 — re-fetch the cycle/module catalogs whenever a sidebar
-  // panel mutates them (create/delete) or the detail panel changes
-  // a task's cycle_id/module_id. We don't refresh the whole board —
-  // tasks have already been updated in-place — just the catalog
-  // snapshots that drive the detail-panel pickers.
-  useEffect(() => {
-    if (!open || sidebarRefreshKey === 0) return;
-    (async () => {
-      try {
-        const [cycleRows, moduleRows] = await Promise.all([
-          api.tasksCyclesList(repoRoot).catch(() => [] as Cycle[]),
-          api.tasksModulesList(repoRoot).catch(() => [] as Module[]),
-        ]);
-        setCycles(cycleRows);
-        setModules(moduleRows);
-      } catch {
-        /* sidebar surfaces show their own error state */
-      }
-    })();
-  }, [open, repoRoot, sidebarRefreshKey]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open, refresh, rootsKey]);
 
   // #218 — live-sync. Poll the chat rail for task mutations teammates
   // published and refetch when something landed. Invisible plumbing: no
@@ -502,15 +581,21 @@ export function TasksBoard({
   // if a refetch outlasts the interval; failures (offline / no cloud)
   // fall through to the next tick.
   useEffect(() => {
-    if (!open || !repoRoot) return;
+    if (!open || roots.length === 0) return;
     let cancelled = false;
     let inFlight = false;
     const poll = async () => {
       if (cancelled || inFlight) return;
       inFlight = true;
       try {
-        const res = await api.tasksSyncPoll(repoRoot);
-        if (!cancelled && res.changed) await refresh();
+        // Every project in scope, not just the open one — under All projects
+        // a teammate's push to any of them changes what's on screen.
+        const res = await Promise.all(
+          roots.map((r) =>
+            api.tasksSyncPoll(r).catch(() => ({ changed: false })),
+          ),
+        );
+        if (!cancelled && res.some((r) => r.changed)) await refresh();
       } catch {
         /* offline or no cloud configured — next tick retries */
       } finally {
@@ -526,7 +611,8 @@ export function TasksBoard({
       window.clearInterval(id);
       window.removeEventListener("focus", onFocus);
     };
-  }, [open, repoRoot, refresh]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open, rootsKey, refresh]);
 
   // Esc closes; only when no inner modal is open. Skipped in embedded
   // mode — the workpane chrome owns close semantics there.
@@ -554,59 +640,10 @@ export function TasksBoard({
     return () => window.removeEventListener("keydown", onKey);
   }, [open, embedded, creating, selectedId, editingId, onClose]);
 
-  const peeked = useMemo(
-    () => (peekId ? tasks.find((t) => t.id === peekId) ?? null : null),
-    [peekId, tasks],
-  );
   const editingTask = useMemo(
     () => (editingId ? tasks.find((t) => t.id === editingId) ?? null : null),
     [editingId, tasks],
   );
-
-  // Apply the active view definition once the saved-views list has
-  // loaded OR whenever the user clicks a different pill. We DON'T
-  // overwrite filters on every render — only when activeViewId
-  // actually changes — so the user can tweak filters off a baseline
-  // without losing them on rerender.
-  useEffect(() => {
-    if (activeViewId === null) return;
-    const v = savedViews.find((x) => x.id === activeViewId);
-    if (!v) return;
-    setFilters(v.filters ?? {});
-    setGroupBy(v.group_by);
-    setOrderBy(v.order_by);
-    setOrderDir(v.order_dir);
-    setDisplayProps(
-      v.display_props && v.display_props.length > 0
-        ? v.display_props
-        : DEFAULT_DISPLAY_PROPS,
-    );
-    if (v.layout === "board" || v.layout === "list" || v.layout === "sprint") {
-      setView(v.layout);
-    }
-  }, [activeViewId, savedViews]);
-
-  /** Active view as it lives in the saved list — null when the user
-   *  is on "All issues" or a view was deleted out from under them. */
-  const activeView = useMemo(
-    () => savedViews.find((v) => v.id === activeViewId) ?? null,
-    [savedViews, activeViewId],
-  );
-
-  /** Dirty bit — true when the active view's persisted shape differs
-   *  from the live filter / group / order / displayProps state. */
-  const activeViewDirty = useMemo(() => {
-    if (!activeView) return false;
-    return (
-      JSON.stringify(activeView.filters ?? {}) !== JSON.stringify(filters) ||
-      activeView.group_by !== groupBy ||
-      activeView.order_by !== orderBy ||
-      activeView.order_dir !== orderDir ||
-      activeView.layout !== view ||
-      JSON.stringify(activeView.display_props ?? []) !==
-        JSON.stringify(displayProps)
-    );
-  }, [activeView, filters, groupBy, orderBy, orderDir, view, displayProps]);
 
   /** Deduped labels across all tasks — drives the label filter
    *  popover. Capped at 200 to keep popover render snappy on big
@@ -635,6 +672,14 @@ export function TasksBoard({
       if (selectedModuleId) {
         scope = scope.filter((t) => t.module_id === selectedModuleId);
       }
+      // The rail's goal / crew pick, said in cards. Crew work is a PROJECTION
+      // of this board — every node carries the id of the card it came from — so
+      // picking a goal in the rail narrows the board to the cards that goal is
+      // made of, exactly the way picking a sprint does. Without this the rail
+      // lit a row and this drawing carried on showing everything.
+      if (railIds) {
+        scope = scope.filter((t) => railIds.has(t.id));
+      }
       return applyOrder(scope, orderBy, orderDir);
     },
     [
@@ -645,68 +690,9 @@ export function TasksBoard({
       currentHandle,
       selectedCycleId,
       selectedModuleId,
+      railIds,
     ],
   );
-
-  // ── Views CRUD ─────────────────────────────────────────────────────
-
-  async function createView(name: string) {
-    const id = uniqueSlug(slugifyViewName(name), savedViews);
-    try {
-      const next = await api.taskViewsUpsert(repoRoot, {
-        id,
-        name,
-        layout: view,
-        filters,
-        group_by: groupBy,
-        order_by: orderBy,
-        order_dir: orderDir,
-        display_props: displayProps,
-      });
-      setSavedViews((prev) => [...prev, next]);
-      setActiveViewId(next.id);
-    } catch (e) {
-      setError(String(e));
-    }
-  }
-
-  async function saveActiveView() {
-    if (!activeView) return;
-    try {
-      const next = await api.taskViewsUpsert(repoRoot, {
-        id: activeView.id,
-        name: activeView.name,
-        layout: view,
-        filters,
-        group_by: groupBy,
-        order_by: orderBy,
-        order_dir: orderDir,
-        display_props: displayProps,
-      });
-      setSavedViews((prev) => prev.map((v) => (v.id === next.id ? next : v)));
-    } catch (e) {
-      setError(String(e));
-    }
-  }
-
-  async function renameView(id: string, name: string) {
-    try {
-      const next = await api.taskViewsRename(repoRoot, id, name);
-      setSavedViews((prev) => prev.map((v) => (v.id === id ? next : v)));
-    } catch (e) {
-      setError(String(e));
-    }
-  }
-
-  async function deleteView(id: string) {
-    try {
-      await api.taskViewsDelete(repoRoot, id);
-      setSavedViews((prev) => prev.filter((v) => v.id !== id));
-      if (activeViewId === id) setActiveViewId(null);
-    } catch (e) {
-      setError(String(e));
-    }
-  }
 
   // ── Shortcut handler ──────────────────────────────────────────────
   //
@@ -723,8 +709,9 @@ export function TasksBoard({
         return;
       }
       if (action === "close") {
-        if (peekId) setPeekId(null);
-        else if (detailId) setDetailId(null);
+        // Innermost thing first: the overlay, then the wizard, then the
+        // side panel, then the focus ring.
+        if (detailId) setDetailId(null);
         else if (editingId) setEditingId(null);
         else if (selectedId) setSelectedId(null);
         else if (focusedId) setFocusedId(null);
@@ -738,15 +725,20 @@ export function TasksBoard({
         return;
       }
       if (action === "delete") {
-        // Confirm via window.confirm — the destructive flow inside the
-        // detail panel already has a richer confirm; for a hot-key we
-        // mirror Plane's terser confirm-then-delete pattern.
+        // The hot-key asks the same question the detail panel asks, in the
+        // same sheet. Kept out of the handler's own control flow so the
+        // keydown stays synchronous.
         const t = tasks.find((x) => x.id === focusedId);
         if (!t) return;
-        const ok = window.confirm(
-          `Delete "${t.title || "(untitled)"}"? This cannot be undone.`,
-        );
-        if (ok) void deleteTask(focusedId);
+        void (async () => {
+          const ok = await askConfirm({
+            title: `Delete "${t.title || "(untitled)"}"?`,
+            body: "This can't be undone.",
+            confirmLabel: "Delete",
+            tone: "danger",
+          });
+          if (ok) void deleteTask(focusedId);
+        })();
         return;
       }
       if (action === "copy_id") {
@@ -760,7 +752,7 @@ export function TasksBoard({
     },
     // `deleteTask` is referenced by closure but stable across renders
     // — listing the deps it really depends on.
-    [focusedId, peekId, selectedId, editingId, detailId, tasks],
+    [focusedId, selectedId, editingId, detailId, tasks],
   );
 
   const focusedSeq =
@@ -789,7 +781,6 @@ export function TasksBoard({
   // replay a stale edit.
   useEffect(() => {
     const promote = (id: string) => {
-      setPeekId(null);
       setSelectedId(null);
       setDetailId(null);
       setEditingId(id);
@@ -807,38 +798,52 @@ export function TasksBoard({
   }, [editor, repoRoot]);
 
   const handleSelect = useCallback(
-    (id: string, opts?: { peek?: boolean; multi?: boolean }) => {
+    (id: string, opts?: { newTab?: boolean; multi?: boolean }) => {
       // OO.5 — Cmd/Ctrl+click toggles the card into the bulk
       // selection set. The detail panel does NOT open in that mode so
       // the user can build the selection up without flickering the
       // right rail.
       if (opts?.multi) {
-        setMultiSelectedIds((prev) =>
-          prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id],
-        );
+        setMultiSelectedIds((prev) => {
+          if (prev.includes(id)) return prev.filter((x) => x !== id);
+          // A bulk edit is one call against one project's task file, so a
+          // selection that spans two projects is one this board can't carry
+          // out. Rather than let it build up and fail at the toolbar, adding
+          // a task from a different project starts a new selection there.
+          const root = rootOf(id);
+          const kept = prev.filter((x) => rootOf(x) === root);
+          return [...kept, id];
+        });
         setFocusedId(id);
         return;
       }
       setFocusedId(id);
-      if (opts?.peek) {
+      if (opts?.newTab) {
         // Shift-click promotes to a persistent workpane tab so the
         // user can keep multiple task details open while working.
-        setPeekId(null);
         setSelectedId(null);
         setEditingId(null);
-        editor.openTaskDetail(id, repoRoot);
+        editor.openTaskDetail(id, rootOf(id));
       } else {
-        // Default click opens the read-mode detail pane (markdown doc +
-        // metadata, no wizard tabs) — the user reads first and only sees
-        // the stepped editor after pressing Edit. The peek slide-over
-        // (TaskPeekOverlay) is still reachable via the keyboard shortcuts.
-        setPeekId(null);
+        // Default click opens the task in the overlay every other detail in
+        // this app opens in — the same FullscreenOverlay chrome as create and
+        // edit, so reading a task, editing it and making one are one surface
+        // in three states rather than three different-shaped surfaces.
+        //
+        // It briefly opened a side slide-over instead. A panel that takes the
+        // right third and pushes the board under it is neither of the two
+        // things a slide-over is for: it is not small enough to leave the
+        // board usable, and not whole enough to hold a task's description, its
+        // sub-tasks and its activity without scrolling all three in a column
+        // narrower than the card you clicked.
+        //
+        // Shift-click still promotes to a persistent workpane tab.
         setSelectedId(null);
         setEditingId(null);
         setDetailId(id);
       }
     },
-    [editor, repoRoot],
+    [editor, rootOf],
   );
 
   // OO.5 — drop ids from the multi-selection set whenever the
@@ -856,25 +861,44 @@ export function TasksBoard({
     async (parentId: string, title: string) => {
       const t = title.trim();
       if (!t) return;
-      const next = await api.tasksCreate(repoRoot, {
+      // A child belongs to its parent's project, not to whichever one is open.
+      const root = rootOf(parentId);
+      const next = await api.tasksCreate(root, {
         title: t,
         parent_id: parentId,
       });
-      setTasks((prev) => [...prev, next]);
+      taskRootRef.current.set(next.id, root);
+      setTasks((prev) => [...prev, { ...next, __root: root }]);
     },
-    [repoRoot],
+    [rootOf],
   );
 
   async function patchTask(input: UpdateTaskInput) {
     try {
-      const next = await api.tasksUpdate(repoRoot, input);
-      setTasks((prev) => prev.map((t) => (t.id === next.id ? next : t)));
-      // OO.4 — When the detail panel changes cycle or module
-      // membership the sidebar panels need to re-fetch so the
-      // member-count chips stay accurate. Bumping the refresh key
-      // is cheaper than re-mounting the whole board.
-      if ("cycle_id" in input || "module_id" in input) {
-        setSidebarRefreshKey((k) => k + 1);
+      const root = rootOf(input.id);
+      const next = await api.tasksUpdate(root, input);
+      setTasks((prev) =>
+        prev.map((t) => (t.id === next.id ? { ...next, __root: root } : t)),
+      );
+      // A cycle/module membership change used to bump a board-local refresh
+      // key here so the member-count chips stayed accurate. Both catalogs now
+      // live in the surfaces that show them, and `setTasks` above lands a new
+      // array — which fires the `aura:tasks:mutated` broadcast those surfaces
+      // already listen on. Two mechanisms for one refresh; this is the one
+      // that reaches every reader.
+      //
+      // For labels: writing a label name the catalog hasn't got
+      // mints it server-side (update_task auto-imports), so without this the
+      // picker keeps showing the catalog as it was — a task wearing a label
+      // the list right underneath still says doesn't exist, and no way to
+      // toggle it back off.
+      if ("labels" in input || "label_ids" in input) {
+        api
+          .taskLabelsList(root)
+          .then(setTaskLabels)
+          .catch(() => {
+            /* the chip already renders from the task's own names */
+          });
       }
     } catch (e) {
       setError(String(e));
@@ -883,8 +907,12 @@ export function TasksBoard({
 
   async function createTask(input: CreateTaskInput) {
     try {
-      const next = await api.tasksCreate(repoRoot, input);
-      setTasks((prev) => [...prev, next]);
+      // New work is filed in the open project — under All projects there is no
+      // other answer, and it is the one whose sprints and workstreams the
+      // create wizard was offering.
+      const next = await api.tasksCreate(primaryRoot, input);
+      taskRootRef.current.set(next.id, primaryRoot);
+      setTasks((prev) => [...prev, { ...next, __root: primaryRoot }]);
       setCreating(false);
       setSelectedId(next.id);
       trackFeature("task_create");
@@ -901,8 +929,9 @@ export function TasksBoard({
     const t = title.trim();
     if (!t) return;
     try {
-      const next = await api.tasksCreate(repoRoot, { title: t, status });
-      setTasks((prev) => [...prev, next]);
+      const next = await api.tasksCreate(primaryRoot, { title: t, status });
+      taskRootRef.current.set(next.id, primaryRoot);
+      setTasks((prev) => [...prev, { ...next, __root: primaryRoot }]);
     } catch (e) {
       setError(String(e));
     }
@@ -910,7 +939,7 @@ export function TasksBoard({
 
   async function deleteTask(id: string) {
     try {
-      await api.tasksDelete(repoRoot, id);
+      await api.tasksDelete(rootOf(id), id);
       setTasks((prev) => prev.filter((t) => t.id !== id));
       if (selectedId === id) setSelectedId(null);
     } catch (e) {
@@ -918,29 +947,42 @@ export function TasksBoard({
     }
   }
 
-  async function handleDrop(targetStatus: TaskStatus) {
-    if (!dragId) return;
-    const id = dragId;
-    setDragId(null);
+  /** Move one task to another status. This is what dragging a card between
+   *  kanban lanes did; it is now the row's own status tag, so the verb outlived
+   *  the drawing. Same optimistic-then-revert shape the drag had — the row
+   *  moves the moment you pick, and snaps back if the write fails, so the list
+   *  never shows a change that didn't persist. */
+  async function setStatus(id: string, targetStatus: TaskStatus) {
     const t = tasks.find((x) => x.id === id);
     if (!t || t.status === targetStatus) return;
     const prevStatus = t.status;
-    // Optimistically move the card so the drag feels instant…
     setTasks((prev) =>
       prev.map((x) => (x.id === id ? { ...x, status: targetStatus } : x)),
     );
     try {
-      const next = await api.tasksUpdate(repoRoot, { id, status: targetStatus });
-      setTasks((prev) => prev.map((x) => (x.id === next.id ? next : x)));
+      const root = rootOf(id);
+      const next = await api.tasksUpdate(root, { id, status: targetStatus });
+      setTasks((prev) =>
+        prev.map((x) => (x.id === next.id ? { ...next, __root: root } : x)),
+      );
     } catch (e) {
-      // …but if the save fails, snap the card back to where it started so
-      // the board never shows a move that didn't actually persist. (Inlined
-      // rather than via patchTask so we know the move failed and can revert.)
+      // Inlined rather than routed via patchTask so we know the move failed
+      // and can put the row back where it was.
       setTasks((prev) =>
         prev.map((x) => (x.id === id ? { ...x, status: prevStatus } : x)),
       );
       setError(String(e));
     }
+  }
+
+  /** A card dropped into a lane. The same move as picking a row's status tag in
+   *  the list, so it routes through the same writer rather than keeping a
+   *  second copy of the optimistic-then-revert dance. */
+  async function handleDrop(targetStatus: TaskStatus) {
+    if (!dragId) return;
+    const id = dragId;
+    setDragId(null);
+    await setStatus(id, targetStatus);
   }
 
   if (!open) return null;
@@ -951,86 +993,116 @@ export function TasksBoard({
 
   return (
     <div className={rootClass}>
-      {/* Page-head — mirrors docs/plane-app-examples.html `.page-head`:
-       *    h2 title (20px / 600) + `.sub` 12px tertiary  ─ left
-       *    viewbar (icon buttons) + filter icon + Display + + Add  ─ right
-       *  No close X (workpane tab strip owns close), no sticky pill chrome
-       *  — Plane's viewbar is a raw inline-flex strip in the header row. */}
-      <div className="px-4 sm:px-6 pt-4 pb-3 border-b-[0.5px] border-line-soft flex items-start justify-between gap-3 flex-shrink-0 flex-wrap">
-        <div className="min-w-0">
-          <h2 className="text-[20px] font-semibold tracking-[-0.01em] text-text-1 leading-tight">
-            Work items
-          </h2>
-          <div className="text-[12px] text-text-5 mt-0.5 truncate">
-            {tasks.length} item{tasks.length === 1 ? "" : "s"}
-            {groupBy !== "none" && ` · grouped by ${groupBy}`}
-            <span className="px-1.5 text-text-5/60">·</span>
-            <span className="font-mono">{shortRepo(repoRoot)}</span>
-          </div>
-        </div>
-        <div className="flex items-center gap-1.5 flex-shrink-0">
-          {/* View switcher stays (List / Board / Sprint); the pop-out and
-              keyboard-shortcut icons were removed to keep this header simple —
-              shortcuts are still on "?". */}
-          <TasksToolbarPill>
-            {VIEW_MODES.map((m) => (
-              <TasksToolbarButton
-                key={m.id}
-                onClick={() => setView(m.id)}
-                active={view === m.id}
-                title={`${m.label} view`}
-                ariaLabel={`${m.label} view`}
+      {/* One bar, and no title: the rail row you clicked is lit and says Tasks,
+          the workpane tab says Tasks, and the popout window's own title bar
+          says Tasks. This used to print it a fourth time at 20px — the largest
+          type in the app outside a dialog, spent on the one thing you already
+          knew — over a second line that named the repo the rail was already
+          showing and announced a grouping you could read off the headings.
+
+          What the bar does carry is the strip: which drawing of the work you
+          are on. Three cells, not the five this once had — Plan was the list
+          grouped by goal, which Display now does, and Sprint was a dashboard
+          about a sprint rather than a way of looking at the work. What's left
+          are three genuinely different pictures, and beside them the one fact
+          none of the rest of the screen states: how much of the work is on
+          screen. */}
+      <SurfaceHeader
+        tabs={
+          <>
+            <WorkLensTabs lens={activeLens} onLens={chooseLens} />
+            {/* How much of the work is on screen — the one thing the old page
+                head said that nothing else on screen says.
+
+                Don't assert a count we haven't got yet: on a cold open this
+                read "0 items" over a body that was still loading, the only
+                number on the page and wrong for as long as the fetch took. And
+                when something narrows the board, count what's on it — this read
+                "141 tasks" over five cards. The chips above say which filters
+                are on, but picking a sprint or a workstream in the rail scopes
+                the board with no chip at all, so this is the only place that
+                narrowing can show. */}
+            {/* Yields the row before the lens strip does. Flex shares a
+                shortfall in proportion to size, so the strip — ten times this
+                span's width — was giving up ten times as much: drag the place
+                rail wide and the tabs collapsed to one cell while this held on
+                and printed "1…", a truncated 1149 that reads as the number 1.
+                Where you can go outranks how much is there, and a count that
+                can't be read in full is better not drawn. */}
+            <span className="min-w-0 shrink-[100] truncate text-xs text-text-5">
+              {loading && tasks.length === 0
+                ? "Counting…"
+                : visibleTasks.length !== tasks.length
+                  ? `${visibleTasks.length} of ${tasks.length} tasks`
+                  : `${tasks.length} task${tasks.length === 1 ? "" : "s"}`}
+            </span>
+          </>
+        }
+        actions={
+          <>
+            <TasksControls
+              filters={filters}
+              onFilters={handleFilters}
+              groupBy={groupBy}
+              onGroupBy={setGroupBy}
+              orderBy={orderBy}
+              onOrderBy={setOrderBy}
+              orderDir={orderDir}
+              onOrderDir={setOrderDir}
+              displayProps={displayProps}
+              onDisplayProps={setDisplayProps}
+              members={members}
+              allLabels={allLabels}
+            />
+            {/* Spin this board off into its own window. The workpane has always
+                passed this and the board accepted it and drew nothing, so a
+                tasks tab could never be detached — even though the window it
+                would open already knows how to render one, and the task detail
+                inside this very board offers exactly this button. */}
+            {onPopOut ? (
+              <Button
+                variant="subtle"
+                size="icon-sm"
+                onClick={onPopOut}
+                title="Detach to its own window"
+                aria-label="Detach to its own window"
               >
-                <m.Icon strokeWidth={1.5} aria-hidden />
-              </TasksToolbarButton>
-            ))}
-          </TasksToolbarPill>
-          <Button
-            variant="accentSoft"
-            size="sm"
-            onClick={() => setCreating(true)}
-            title="New work item (n)"
-          >
-            <Plus className="w-3 h-3" strokeWidth={2} aria-hidden />
-            Add work item
-          </Button>
-        </div>
-      </div>
+                <SquareArrowOutUpRight size={13} strokeWidth={1.75} aria-hidden />
+              </Button>
+            ) : null}
+            <Button
+              variant="accentSoft"
+              size="sm"
+              onClick={() => setCreating(true)}
+              title="New task (n)"
+            >
+              <Plus className="w-3 h-3" strokeWidth={2} aria-hidden />
+              New task
+            </Button>
+          </>
+        }
+      />
 
       {/* Error / loading */}
       {error && (
-        <div className="px-4 py-2 text-[11.5px] text-red bg-red/10 border-b border-line-soft">
+        <div className="px-4 py-2 text-sm text-red bg-red/10 border-b border-line-soft">
           {error}
         </div>
       )}
 
-      {/* Saved Views pill row */}
-      <TasksViewsBar
-        views={savedViews}
-        activeId={activeViewId}
-        onSelect={(id) => setActiveViewId(id)}
-        onCreate={createView}
-        onRename={renameView}
-        onDelete={deleteView}
-        dirty={activeViewDirty}
-        onSaveActive={saveActiveView}
-      />
+      {/* No saved-views bar. A second row of pills under the lens strip — "All
+          tasks", whatever you'd named, "+ New view" — was a switcher over a
+          switcher: two rows deep before the work, each answering a different
+          question, neither of them the one you came to the page with. What a
+          saved view held is still all here and still one click away: the rail
+          narrows by goal, sprint, module and person, Filters narrows by
+          anything else, and both survive a reload. */}
 
-      {/* Filter bar (state/priority/assignee/agent/labels + group/order/display) */}
-      <TasksFilterBar
+      {/* Why you aren't seeing everything — absent when you are. */}
+      <TasksAppliedFilters
         filters={filters}
-        onFilters={setFilters}
-        groupBy={groupBy}
-        onGroupBy={setGroupBy}
-        orderBy={orderBy}
-        onOrderBy={setOrderBy}
-        orderDir={orderDir}
-        onOrderDir={setOrderDir}
-        displayProps={displayProps}
-        onDisplayProps={setDisplayProps}
+        onFilters={handleFilters}
         members={members}
-        allLabels={allLabels}
-        compact={false}
       />
 
       {/* Body */}
@@ -1043,8 +1115,7 @@ export function TasksBoard({
          *  `selectedCycleId` / `selectedModuleId` via the effect
          *  near the top of this component. */}
         <div className="flex-1 min-h-0 overflow-hidden">
-          {!loading &&
-          tasks.length === 0 && (view === "board" || view === "list") ? (
+          {!loading && tasks.length === 0 ? (
             <TasksEmptyHero
               onBlank={() => {
                 setCreateInitial(null);
@@ -1055,53 +1126,62 @@ export function TasksBoard({
                 setCreating(true);
               }}
             />
-          ) : view === "board" ? (
-            <BoardView
+          ) : !loading && visibleTasks.length === 0 ? (
+            /* There IS work here — the current filters are hiding all of it.
+               Deliberately NOT the "add your first item" state: showing that
+               to someone who has thirty items and one stray filter makes them
+               think they lost their work. */
+            <div className="flex h-full w-full items-center justify-center">
+              <BoardFilteredEmpty
+                noun="tasks"
+                onClear={() => {
+                  setFilters({});
+                  setSelectedCycleId(null);
+                  setSelectedModuleId(null);
+                  // Every narrowing, including the ones the rail owns —
+                  // clearing "the filters" while a goal stayed lit would leave
+                  // the same empty board under a button that said it fixed it.
+                  clearTasksSharedFilters();
+                }}
+              />
+            </div>
+          ) : drawing === "board" ? (
+            <TasksBoardView
               tasks={visibleTasks}
               members={members}
               taskStates={taskStates}
               taskLabels={taskLabels}
               loading={loading}
+              groupBy={groupBy}
               displayProps={displayProps}
-              focusedId={focusedId}
+              focusedId={editingId ?? focusedId}
               multiSelectedIds={multiSelectedIds}
               onSelect={(id, e) =>
                 handleSelect(id, {
-                  peek: e?.shiftKey ?? false,
-                  // Cmd on macOS / Ctrl elsewhere toggles bulk selection.
-                  multi: (e?.metaKey ?? false) || (e?.ctrlKey ?? false),
+                  newTab: e?.shiftKey,
+                  multi: e?.metaKey || e?.ctrlKey,
                 })
               }
               onDragStart={(id) => setDragId(id)}
               onDropOn={handleDrop}
               onQuickCreate={quickCreate}
             />
-          ) : view === "sprint" ? (
-            <SprintView
-              repoRoot={repoRoot}
-              tasks={tasks}
-              sprints={sprints}
-              members={members}
-              loading={loading}
-              onSelect={(id) => handleSelect(id)}
-              onSprintsChanged={(next) => setSprints(next)}
-              onTaskPatched={(t) =>
-                setTasks((prev) => prev.map((x) => (x.id === t.id ? t : x)))
-              }
-              onCreate={(sprintId) => {
-                setCreateInitial({ cycle_id: sprintId });
-                setCreating(true);
-              }}
-            />
           ) : (
-            <ListView
+            <TasksListView
               tasks={visibleTasks}
               loading={loading}
               members={members}
               taskStates={taskStates}
               taskLabels={taskLabels}
+              groupBy={groupBy}
+              displayProps={displayProps}
+              // Which goal each row belongs to, resolved by the rail off the
+              // loop graph. This is the Plan view, folded into the list: the
+              // plan's whole content was "these tasks, under that goal".
+              goalOfTask={sharedSidebar.goalOfTask}
               selectedId={editingId ?? focusedId}
               onSelect={(id) => handleSelect(id)}
+              onStatus={setStatus}
               onAddInStatus={(status) => {
                 setCreateInitial({ status });
                 setCreating(true);
@@ -1109,14 +1189,12 @@ export function TasksBoard({
             />
           )}
         </div>
-        {/* Default click now opens the Plane-style peek slide-over
-            (TaskPeekOverlay), so the legacy 400px right rail is gone
-            from the board surface. The Plane mockup uses peek + side
-            properties grid together — see TaskPeekOverlay. */}
         {/* OO.5 — bulk action bar. Anchored to the board container so
             it floats above whichever view is active. */}
         <BulkActionToolbar
-          repoRoot={repoRoot}
+          repoRoot={
+            multiSelectedIds.length > 0 ? rootOf(multiSelectedIds[0]!) : primaryRoot
+          }
           selectedIds={multiSelectedIds}
           taskStates={taskStates}
           taskLabels={taskLabels}
@@ -1126,47 +1204,21 @@ export function TasksBoard({
             // Re-fetch the task list so state/label/assignee/archive/delete
             // mutations made by the bulk endpoints are reflected without
             // forcing the user to switch views.
-            const next = await api.tasksList(repoRoot);
-            setTasks(next);
+            await refresh();
           }}
         />
-        {peeked && (
-          <TaskPeekOverlay
-            task={peeked}
-            allTasks={tasks}
-            members={members}
-            taskStates={taskStates}
-            taskLabels={taskLabels}
-            cycles={cycles}
-            modules={modules}
-            repoRoot={repoRoot}
-            currentHandle={currentHandle}
-            onClose={() => setPeekId(null)}
-            onExpand={() => {
-              // Mockup `expandToPage()` — close the peek and promote to
-              // the full detail page (our workpane tab equivalent of the
-              // mockup's `#item/<id>` route).
-              setPeekId(null);
-              setSelectedId(null);
-              editor.openTaskDetail(peeked.id, repoRoot);
-            }}
-            onNavigate={(id) => setPeekId(id)}
-            onPatch={patchTask}
-            onDelete={() => {
-              void deleteTask(peeked.id);
-              setPeekId(null);
-            }}
-            onCreateChild={createChildTask}
-          />
-        )}
       </div>
 
-      {/* Shortcuts modal (`?` to open) */}
-      <ShortcutsModal
+      {/* `?` opens the app's one cheat-sheet, the same one ⌘/ opens. The
+          board used to pop a sheet of its own here, listing ten card keys
+          that the ⌘/ sheet had never heard of — so the app had two answers
+          to "what can I press", and the one bound to "Show all shortcuts"
+          was missing a third of them. The card keys are a scoped group in
+          lib/shortcuts.ts now. */}
+      <ShortcutsDialog
         open={shortcutsOpen}
         onClose={() => setShortcutsOpen(false)}
       />
-
 
       {creating && (
         <CreateTaskWizard
@@ -1197,7 +1249,7 @@ export function TasksBoard({
           members={members}
           tasks={tasks}
           sprints={sprints}
-          repoRoot={repoRoot}
+          repoRoot={rootOf(editingTask.id)}
           currentHandle={currentHandle}
           onCancel={() => setEditingId(null)}
           onSubmit={createTask}
@@ -1216,10 +1268,10 @@ export function TasksBoard({
       {detailId && (
         <TaskDetailPane
           taskId={detailId}
-          repoRoot={repoRoot}
+          repoRoot={rootOf(detailId)}
           onClose={() => setDetailId(null)}
           onDetach={() =>
-            openPopout({ kind: "task", root: repoRoot, taskId: detailId })
+            openPopout({ kind: "task", root: rootOf(detailId), taskId: detailId })
           }
         />
       )}
@@ -1234,6 +1286,19 @@ export function TasksBoard({
 // task" CTA plus a row of template cards that pre-fill priority/labels/
 // agent assignee so the second task takes ten seconds.
 
+/**
+ * The board's own empty state.
+ *
+ * This used to be a full marketing page: a hero, eight bordered template
+ * cards, and three "feature bullet" panels explaining epics, agents and
+ * sprints. All of it landed on someone who had asked for their work and been
+ * shown none — the moment they are least interested in a tour.
+ *
+ * It's now the shared empty state plus one quiet line of templates: still the
+ * fastest way to a well-formed first item, with none of the furniture. The
+ * templates are plain text buttons, not cards, so the eye goes to the one
+ * primary action first and finds them only if it wants a shortcut.
+ */
 function TasksEmptyHero({
   onBlank,
   onPickTemplate,
@@ -1242,77 +1307,33 @@ function TasksEmptyHero({
   onPickTemplate: (tpl: TaskTemplate) => void;
 }) {
   return (
-    <div className="h-full w-full overflow-y-auto flex items-start justify-center">
-      <div className="w-full max-w-3xl p-10">
-        <div className="flex flex-col items-center text-center">
-          <div className="mb-3 text-text-4" aria-hidden>
-            <Inbox className="w-10 h-10" strokeWidth={1.25} />
-          </div>
-          <div className="text-text-1 text-[18px] font-medium">
-            No tasks yet
-          </div>
-          <div className="mt-1.5 text-text-4 text-[12.5px] max-w-md leading-snug">
-            Track features, bugs, epics, AI work, and goal-linked work in
-            one place. You and your AI agents share the same board.
-          </div>
-          <Button
-            variant="accentSoft"
-            size="default"
-            onClick={onBlank}
-            className="mt-5"
-          >
-            + Create blank task
-          </Button>
-        </div>
-
-        <div className="mt-10">
-          <div className="text-[10.5px] uppercase tracking-wider text-text-5 mb-2 pl-1">
-            Or start from a template
-          </div>
-          <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-2">
-            {TEMPLATES.map((t) => (
-              <button
-                key={t.id}
-                type="button"
-                onClick={() => onPickTemplate(t)}
-                className="group text-left rounded-md border border-line-soft bg-bg-2 hover:border-line hover:bg-bg-chrome p-3 transition-colors"
-              >
-                <div className="mb-1.5">{t.icon}</div>
-                <div className="text-[12px] text-text-1 font-medium">
-                  {t.label}
-                </div>
-                <div className="mt-0.5 text-[10.5px] text-text-4 leading-snug">
-                  {t.hint}
-                </div>
-              </button>
-            ))}
-          </div>
-        </div>
-
-        <div className="mt-8 grid grid-cols-1 sm:grid-cols-3 gap-2 text-[10.5px] text-text-4">
-          <FeatureBullet
-            title="Epics + goals"
-            body="Group related tasks under an epic, and link them to a goal so your roadmap stays on track."
-          />
-          <FeatureBullet
-            title="Humans + agents"
-            body="Assign a teammate, an AI (Claude / Gemini / Codex), or both — and turn any finished task into a portable proof an agent can verify."
-          />
-          <FeatureBullet
-            title="Estimates + sprints"
-            body="Add hours/points, pin to a sprint, set due dates. The roadmap view rolls everything up."
-          />
-        </div>
+    <div className="flex h-full w-full items-center justify-center overflow-y-auto">
+      <div className="w-full">
+        <BoardEmpty
+          icon={Inbox}
+          title="No tasks yet"
+          body="This is the shared board. Everything you and your agents are working on lives here, in one place."
+          action={{ label: "New task", onClick: onBlank, icon: Plus }}
+          footnote={
+            <span className="flex flex-wrap items-center justify-center gap-x-1 gap-y-1">
+              <span className="text-text-5">Or start from</span>
+              {TEMPLATES.map((t, i) => (
+                <span key={t.id} className="inline-flex items-center gap-1">
+                  {i > 0 && <span className="text-text-5/50">·</span>}
+                  <button
+                    type="button"
+                    onClick={() => onPickTemplate(t)}
+                    title={t.hint}
+                    className="rounded-[3px] px-0.5 text-text-3 underline-offset-2 transition-colors hover:text-accent hover:underline"
+                  >
+                    {t.label}
+                  </button>
+                </span>
+              ))}
+            </span>
+          }
+        />
       </div>
-    </div>
-  );
-}
-
-function FeatureBullet({ title, body }: { title: string; body: string }) {
-  return (
-    <div className="rounded-md border border-line-soft bg-bg-1 px-3 py-2.5">
-      <div className="text-text-2 text-[11px] font-medium mb-0.5">{title}</div>
-      <div className="leading-snug">{body}</div>
     </div>
   );
 }
@@ -1320,1758 +1341,11 @@ function FeatureBullet({ title, body }: { title: string; body: string }) {
 
 // ─── Board ─────────────────────────────────────────────────────────────
 
-function BoardView({
-  tasks,
-  members,
-  taskStates,
-  taskLabels,
-  loading,
-  displayProps,
-  focusedId,
-  multiSelectedIds,
-  onSelect,
-  onDragStart,
-  onDropOn,
-  onQuickCreate,
-}: {
-  tasks: Task[];
-  members: TeamMember[];
-  /** OO.3 — state catalog so card chips render the canonical state
-   *  name + color instead of the legacy `status` enum. */
-  taskStates: TaskState[];
-  /** OO.3 — label catalog so card chips render label colors instead
-   *  of the legacy slug-only string array. */
-  taskLabels: TaskLabel[];
-  loading: boolean;
-  displayProps: TaskViewDisplayProp[];
-  focusedId: string | null;
-  /** OO.5 — ids in the bulk-selection set. Drives the per-card
-   *  selected ring so the user can see what the BulkActionToolbar
-   *  will target. */
-  multiSelectedIds: string[];
-  onSelect: (
-    id: string,
-    e?: { shiftKey: boolean; metaKey?: boolean; ctrlKey?: boolean },
-  ) => void;
-  onDragStart: (id: string) => void;
-  onDropOn: (status: TaskStatus) => void;
-  onQuickCreate: (title: string, status: TaskStatus) => Promise<void> | void;
-}) {
-  const selectedSet = new Set(multiSelectedIds);
-  // Direct sub-task count per task id — drives the light branch chip on
-  // cards that parent other tasks. A child points back via `parent_id`
-  // (or the legacy `epic_id`). Computed once over the visible set.
-  const childCounts = new Map<string, number>();
-  for (const t of tasks) {
-    const parent = t.parent_id ?? t.epic_id;
-    if (parent) childCounts.set(parent, (childCounts.get(parent) ?? 0) + 1);
-  }
-  return (
-    <div className="h-full w-full overflow-x-auto overflow-y-hidden">
-      <div className="h-full min-w-full flex gap-2 p-3">
-        {COLUMNS.map((col, colIndex) => {
-          const colTasks = tasks.filter((t) => t.status === col.id);
-          return (
-            <div
-              key={col.id}
-              className="w-[280px] flex-shrink-0 flex flex-col rounded-[8px] bg-bg-2/50 border-[0.5px] border-line-soft"
-              onDragOver={(e) => {
-                e.preventDefault();
-                e.dataTransfer.dropEffect = "move";
-              }}
-              onDrop={(e) => {
-                e.preventDefault();
-                onDropOn(col.id);
-              }}
-            >
-              <div className="px-3 py-2.5 flex items-center gap-2 border-b-[0.5px] border-line-soft">
-                <span className="inline-flex items-center gap-1.5 font-medium text-[13px] text-text-1">
-                  <StateRing statusId={col.id} />
-                  {col.label}
-                </span>
-                <span className="ml-auto text-[11px] text-text-3 tabular-nums">
-                  {colTasks.length}
-                </span>
-              </div>
-              <div className="flex-1 overflow-y-auto p-2 space-y-2">
-                {loading && colTasks.length === 0 && (
-                  <BoardColumnSkeleton count={colIndex === 0 ? 3 : 2} />
-                )}
-                {colTasks.map((t) => (
-                  <TaskCard
-                    key={t.id}
-                    task={t}
-                    members={members}
-                    taskStates={taskStates}
-                    taskLabels={taskLabels}
-                    displayProps={displayProps}
-                    childCount={childCounts.get(t.id) ?? 0}
-                    focused={t.id === focusedId}
-                    selected={selectedSet.has(t.id)}
-                    onClick={(e) =>
-                      onSelect(t.id, {
-                        shiftKey: e.shiftKey,
-                        metaKey: e.metaKey,
-                        ctrlKey: e.ctrlKey,
-                      })
-                    }
-                    onDragStart={() => onDragStart(t.id)}
-                  />
-                ))}
-              </div>
-              <ColumnQuickAdd
-                status={col.id}
-                onCreate={(title) => onQuickCreate(title, col.id)}
-              />
-            </div>
-          );
-        })}
-      </div>
-    </div>
-  );
-}
-
-/**
- * Subtle `+ New issue` footer baked into every kanban column. Click
- * expands to an inline input; Enter commits with the column's status
- * baked in; Esc cancels.
- *
- * Tab moves to the next column's input — implemented by setting a
- * stable `data-quick-add-status` so we can `querySelector` the next
- * focusable input without lifting state out. Wraps from the last
- * column back to the first.
- */
-function ColumnQuickAdd({
-  status,
-  onCreate,
-}: {
-  status: TaskStatus;
-  onCreate: (title: string) => Promise<void> | void;
-}) {
-  const [open, setOpen] = useState(false);
-  const [title, setTitle] = useState("");
-  const [busy, setBusy] = useState(false);
-
-  async function commit() {
-    const t = title.trim();
-    if (!t) return;
-    setBusy(true);
-    try {
-      await onCreate(t);
-      setTitle("");
-      // Keep the input open so the user can keep adding cards in
-      // rapid succession. Mirrors Plane's UX.
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  function focusSibling(dir: 1 | -1) {
-    const ids: TaskStatus[] = ["backlog", "in_progress", "in_review", "done"];
-    const idx = ids.indexOf(status);
-    const nextIdx = (idx + dir + ids.length) % ids.length;
-    const next = ids[nextIdx];
-    const el = document.querySelector<HTMLInputElement>(
-      `input[data-quick-add-status="${next}"]`,
-    );
-    if (el) {
-      // The sibling input might be collapsed; click to expand first.
-      const wrapper = el.closest("[data-quick-add-root]");
-      const btn = wrapper?.querySelector<HTMLButtonElement>(
-        "button[data-quick-add-trigger]",
-      );
-      btn?.click();
-      // Defer focus so the input has time to mount/expand.
-      setTimeout(() => {
-        const fresh = document.querySelector<HTMLInputElement>(
-          `input[data-quick-add-status="${next}"]`,
-        );
-        fresh?.focus();
-      }, 0);
-    }
-  }
-
-  return (
-    <div className="border-t border-line-soft p-1.5" data-quick-add-root>
-      {!open ? (
-        <button
-          type="button"
-          data-quick-add-trigger
-          onClick={() => setOpen(true)}
-          className="w-full text-left text-[11px] text-text-5 hover:text-text-2 hover:bg-bg-content px-2 py-1 rounded transition-colors flex items-center gap-1"
-        >
-          <Plus className="w-3 h-3" strokeWidth={1.5} aria-hidden />
-          New issue
-        </button>
-      ) : (
-        <div className="flex gap-1">
-          <Input
-            autoFocus
-            type="text"
-            value={title}
-            data-quick-add-status={status}
-            disabled={busy}
-            onChange={(e) => setTitle(e.target.value)}
-            onKeyDown={(e) => {
-              if (e.key === "Enter") {
-                e.preventDefault();
-                void commit();
-              } else if (e.key === "Escape") {
-                e.preventDefault();
-                setOpen(false);
-                setTitle("");
-              } else if (e.key === "Tab") {
-                e.preventDefault();
-                focusSibling(e.shiftKey ? -1 : 1);
-              }
-            }}
-            onBlur={() => {
-              if (!title.trim()) setOpen(false);
-            }}
-            placeholder="Title — Enter to add"
-            className="flex-1 min-w-0"
-          />
-        </div>
-      )}
-    </div>
-  );
-}
-
-function TaskCard({
-  task,
-  members,
-  taskStates,
-  taskLabels,
-  displayProps,
-  childCount = 0,
-  focused = false,
-  selected = false,
-  onClick,
-  onDragStart,
-}: {
-  task: Task;
-  members: TeamMember[];
-  /** Direct sub-task count — renders a light branch chip in the card
-   *  footer when > 0. Defaults to 0 (chip hidden) for callers that
-   *  don't yet compute it. */
-  childCount?: number;
-  /** OO.3 — optional state catalog so the card can render a Plane-
-   *  style state pill alongside the priority dot. Undefined in
-   *  callers that don't yet plumb it (sprint columns); the pill
-   *  silently drops out in that case. */
-  taskStates?: TaskState[];
-  /** OO.3 — optional label catalog so chips render with the catalog
-   *  color instead of the legacy grey-on-grey slug bubble. */
-  taskLabels?: TaskLabel[];
-  /** Display-prop set from the active view. When undefined, fall back
-   *  to the default set so callers that don't yet plumb the prop
-   *  (sprint columns, epics view) keep working. */
-  displayProps?: TaskViewDisplayProp[];
-  focused?: boolean;
-  /** OO.5 — card is in the bulk-action selection set. Draws an
-   *  accent border + ring so the user can scan the picked rows. */
-  selected?: boolean;
-  onClick: (e: {
-    shiftKey: boolean;
-    metaKey?: boolean;
-    ctrlKey?: boolean;
-  }) => void;
-  onDragStart: () => void;
-}) {
-  // `props` set — falls back to the default when the caller passes
-  // nothing. Using a Set is O(1) per check inside the JSX below.
-  const props = useMemo(
-    () => new Set<TaskViewDisplayProp>(displayProps ?? DEFAULT_DISPLAY_PROPS),
-    [displayProps],
-  );
-  const showId = props.has("id");
-  const showAssignee = props.has("assignee");
-  const showAgent = props.has("agent");
-  const showDue = props.has("due");
-  const showLabels = props.has("labels");
-  const showEstimate = props.has("estimate");
-  const showPr = props.has("pr");
-
-  // Resolved custom state (Plane-style pill) — falls back to the
-  // status ring when the catalog isn't plumbed or the task has no
-  // custom state.
-  const state =
-    taskStates && task.state_id
-      ? (taskStates.find((s) => s.id === task.state_id) ?? null)
-      : null;
-
-  // Footer meta items, gated by their displayProps, rendered through a
-  // single quiet chip so every item shares one size/colour/icon scale.
-  const overdue = showDue && task.due_date != null && isOverdue(task.due_date);
-  const metaItems: ReactNode[] = [];
-  if (showDue && task.due_date) {
-    metaItems.push(
-      <CardMeta
-        key="due"
-        icon={Clock}
-        muted={overdue ? "alert" : undefined}
-        title={`Due ${task.due_date}`}
-      >
-        {formatDueDate(task.due_date)}
-      </CardMeta>,
-    );
-  }
-  if (showEstimate && task.estimate != null) {
-    metaItems.push(
-      <CardMeta key="est" title="Estimate">
-        {task.estimate} pts
-      </CardMeta>,
-    );
-  }
-  if (showAgent && task.agent_assignee) {
-    metaItems.push(
-      <CardMeta key="agent" icon={Bot} title={`Agent: ${task.agent_assignee}`}>
-        {task.agent_assignee}
-      </CardMeta>,
-    );
-  }
-  if (showPr && task.linked_pr) {
-    metaItems.push(
-      <CardMeta key="pr" mono title={task.linked_pr.url}>
-        #{task.linked_pr.number}
-      </CardMeta>,
-    );
-  }
-  if (childCount > 0) {
-    metaItems.push(
-      <CardMeta
-        key="children"
-        icon={GitBranch}
-        title={`${childCount} sub-task${childCount === 1 ? "" : "s"}`}
-      >
-        {childCount}
-      </CardMeta>,
-    );
-  }
-  if (task.bead_id) {
-    metaItems.push(
-      <CardMeta key="bead" mono title={`Linked A2A bead ${task.bead_id}`}>
-        bead
-      </CardMeta>,
-    );
-  }
-
-  // Assignee slot — sits on the right of the footer via `ml-auto`. Pre-
-  // computed so an empty footer (no meta, no assignee) drops out cleanly.
-  let assigneeSlot: ReactNode = null;
-  if (showAssignee && task.assignee_ids.length > 0) {
-    assigneeSlot = (
-      <span className="ml-auto flex-shrink-0" title={task.assignee_ids.join(", ")}>
-        <AssigneeStack
-          handles={task.assignee_ids}
-          members={members}
-          dense
-          maxAvatars={3}
-        />
-      </span>
-    );
-  } else if (showAssignee && task.assignee) {
-    assigneeSlot = (
-      <span
-        className="ml-auto text-[10.5px] text-text-3 tabular-nums"
-        title={`Assigned to ${task.assignee}`}
-      >
-        @{task.assignee}
-      </span>
-    );
-  }
-
-  const hasFooter = metaItems.length > 0 || assigneeSlot != null;
-
-  return (
-    <div
-      role="button"
-      tabIndex={0}
-      data-task-id={task.id}
-      // macOS WKWebView suppresses the synthetic `click` on `draggable=true`
-      // elements (it begins drag-tracking on mousedown and never dispatches the
-      // click), which left task cards intermittently un-openable. Open on
-      // mousedown (left button only); a real drag still fires onDragStart. The
-      // selection modifiers are read off the same event, present on mousedown.
-      onMouseDown={(e) => {
-        if (e.button !== 0) return;
-        onClick({
-          shiftKey: e.shiftKey,
-          metaKey: e.metaKey,
-          ctrlKey: e.ctrlKey,
-        });
-      }}
-      draggable
-      onDragStart={(e) => {
-        e.dataTransfer.effectAllowed = "move";
-        e.dataTransfer.setData("text/plain", task.id);
-        onDragStart();
-      }}
-      className={`flex flex-col gap-1.5 rounded-[6px] bg-bg-content border px-2.5 py-2 text-left cursor-pointer transition-all ${
-        selected
-          ? "border-accent ring-2 ring-accent/60 bg-accent/[0.04]"
-          : focused
-          ? "border-accent ring-1 ring-accent/40"
-          : "border-line-soft hover:border-line"
-      }`}
-      style={{ boxShadow: "var(--shadow-raised-100)" }}
-      onMouseEnter={(e) => {
-        (e.currentTarget as HTMLDivElement).style.boxShadow =
-          "var(--shadow-raised-200)";
-      }}
-      onMouseLeave={(e) => {
-        (e.currentTarget as HTMLDivElement).style.boxShadow =
-          "var(--shadow-raised-100)";
-      }}
-    >
-      {/* Header — priority signal · id (quiet) · state (right) */}
-      <div className="flex items-center gap-1.5">
-        <PrioritySignal priority={task.priority} />
-        {showId && <TaskIdChip sequenceId={task.sequence_id} />}
-        <span className="ml-auto flex items-center" title={state?.name}>
-          {state ? <StatePill state={state} dense /> : <StateRing statusId={task.status} />}
-        </span>
-      </div>
-
-      {/* Title — 13px, two-line clamp */}
-      <div className="text-[13px] text-text-1 leading-snug line-clamp-2">
-        <MentionedText text={task.title || "(untitled)"} members={members} />
-      </div>
-
-      {/* Labels — one unified quiet chip style, capped + overflow */}
-      {showLabels && task.labels.length > 0 && (
-        <div className="flex flex-wrap items-center gap-1">
-          {task.labels.slice(0, 3).map((l) => {
-            const catalogEntry = taskLabels?.find(
-              (cl) => cl.name === l || cl.id === l,
-            );
-            const color = catalogEntry?.color;
-            const name = catalogEntry?.name ?? l;
-            return (
-              <span
-                key={l}
-                className="inline-flex items-center gap-1 text-[10.5px] text-text-3 px-[6px] py-px rounded-[4px] bg-bg-1"
-                title={name}
-              >
-                <span
-                  className="w-1.5 h-1.5 rounded-full flex-shrink-0"
-                  style={{ background: color ?? "var(--color-text-4)" }}
-                  aria-hidden
-                />
-                <span className="truncate max-w-[104px]">{name}</span>
-              </span>
-            );
-          })}
-          {task.labels.length > 3 && (
-            <span
-              className="text-[10.5px] text-text-4 tabular-nums px-[2px]"
-              title={task.labels.slice(3).join(", ")}
-            >
-              +{task.labels.length - 3}
-            </span>
-          )}
-        </div>
-      )}
-
-      {/* Footer — one muted meta cluster + avatars (right) */}
-      {hasFooter && (
-        <div className="flex items-center gap-x-2.5 gap-y-1 flex-wrap text-text-3">
-          {metaItems}
-          {assigneeSlot}
-        </div>
-      )}
-    </div>
-  );
-}
-
-// ─── Card meta chip ────────────────────────────────────────────────────
-//
-// One quiet style shared by every footer item (due / estimate / agent /
-// PR / sub-tasks / bead) so the card reads as a single muted row rather
-// than a grab-bag of competing chrome. No backgrounds, no per-item
-// colour: same 10.5px text, same w-3 icon, tabular-nums throughout. The
-// only colour the footer ever carries is an overdue due-date (rose).
-function CardMeta({
-  icon: Icon,
-  children,
-  title,
-  mono = false,
-  muted,
-}: {
-  icon?: typeof Clock;
-  children: ReactNode;
-  title?: string;
-  mono?: boolean;
-  /** Semantic, not chromatic: "alert" is the one meta that is asking for the
-   *  reader (an overdue date). Everything else stays on the neutral ramp. */
-  muted?: "alert";
-}) {
-  return (
-    <span
-      className={`inline-flex items-center gap-1 text-[10.5px] tabular-nums whitespace-nowrap ${
-        muted === "alert" ? "text-red" : "text-text-3"
-      } ${mono ? "font-mono" : ""}`}
-      title={title}
-    >
-      {Icon && <Icon className="w-3 h-3 flex-shrink-0" strokeWidth={1.5} aria-hidden />}
-      {children}
-    </span>
-  );
-}
-
-// ─── Task identifier chip ──────────────────────────────────────────────
-//
-// Plane.so-style monospace handle ("AURA-42") rendered top-left on each
-// card and reused in the detail panel. Click-to-copy with a transient
-// "copied" tooltip — stopPropagation so the click doesn't also open the
-// detail drawer (and the inner span is keyboard-reachable). Falls back
-// silently when sequence_id is 0 (legacy rows that haven't been healed
-// yet — see `backfill_sequence_ids` on the Rust side).
-export function TaskIdChip({
-  sequenceId,
-  className,
-}: {
-  sequenceId: number;
-  className?: string;
-}) {
-  const [copied, setCopied] = useState(false);
-  if (!sequenceId || sequenceId <= 0) return null;
-  const label = `AURA-${sequenceId}`;
-  const copy = (e: { stopPropagation: () => void }) => {
-    e.stopPropagation();
-    try {
-      void navigator.clipboard.writeText(label);
-      setCopied(true);
-      window.setTimeout(() => setCopied(false), 1200);
-    } catch {
-      // clipboard rejected (rare in Tauri webview) — leave UI quiet.
-    }
-  };
-  return (
-    <button
-      type="button"
-      onClick={copy}
-      title={copied ? "Copied" : `Copy ${label}`}
-      aria-label={copied ? "Copied" : `Copy ${label}`}
-      className={
-        className ??
-        "font-mono text-[10px] tracking-tight text-text-5 hover:text-text-2 hover:bg-bg-2 px-1 py-0 rounded leading-4 transition-colors"
-      }
-    >
-      {copied ? "copied" : label}
-    </button>
-  );
-}
-
 // ─── List ──────────────────────────────────────────────────────────────
-
-function ListView({
-  tasks,
-  loading,
-  members,
-  taskStates,
-  taskLabels,
-  selectedId,
-  onSelect,
-  onAddInStatus,
-}: {
-  tasks: Task[];
-  loading: boolean;
-  members: TeamMember[];
-  taskStates: TaskState[];
-  taskLabels: TaskLabel[];
-  selectedId: string | null;
-  onSelect: (id: string) => void;
-  onAddInStatus: (status: TaskStatus) => void;
-}) {
-  // Plane-style list: tasks grouped by status into collapsible sections
-  // (mirrors the PR Inbox triage pattern in InboxPane.tsx — chevron
-  // toggle + sticky group headers + dense row with id/title/labels/
-  // assignees/due/updated). Order matches COLUMNS so the visual flow
-  // reads top-to-bottom Backlog → Done.
-  const [collapsed, setCollapsed] = useState<Set<TaskStatus>>(new Set());
-
-  const grouped = useMemo(() => {
-    const out: Record<TaskStatus, Task[]> = {
-      backlog: [],
-      in_progress: [],
-      in_review: [],
-      done: [],
-    };
-    for (const t of tasks) {
-      const bucket = (out[t.status] ?? out.backlog)!;
-      bucket.push(t);
-    }
-    return out;
-  }, [tasks]);
-
-  function toggle(id: TaskStatus) {
-    setCollapsed((prev) => {
-      const next = new Set(prev);
-      if (next.has(id)) next.delete(id);
-      else next.add(id);
-      return next;
-    });
-  }
-
-  return (
-    <div className="h-full w-full overflow-y-auto bg-bg-content px-4 sm:px-6">
-      {loading && tasks.length === 0 && (
-        <div className="flex items-center gap-2 py-6 text-[12px] text-text-4">
-          <AsciiSpinner />
-          Loading…
-        </div>
-      )}
-      {!loading && tasks.length === 0 && (
-        <div className="py-6 text-[12px] text-text-5 italic">
-          No tasks yet. Click <span className="text-text-3">+ Add work item</span> to
-          create the first one.
-        </div>
-      )}
-      {tasks.length > 0 &&
-        COLUMNS.map((col) => {
-          const rows = grouped[col.id] ?? [];
-          // Hide empty groups for "in_review" + "done" to keep the
-          // surface focused on active work. Backlog + In Progress stay
-          // even when empty so the user always sees the canonical
-          // pipeline top-of-view.
-          if (rows.length === 0 && (col.id === "in_review" || col.id === "done")) {
-            return null;
-          }
-          const expanded = !collapsed.has(col.id);
-          return (
-            <ListSection
-              key={col.id}
-              statusId={col.id}
-              label={col.label}
-              count={rows.length}
-              expanded={expanded}
-              onToggle={() => toggle(col.id)}
-              rows={rows}
-              members={members}
-              taskStates={taskStates}
-              taskLabels={taskLabels}
-              selectedId={selectedId}
-              onSelect={onSelect}
-              onAdd={() => onAddInStatus(col.id)}
-            />
-          );
-        })}
-    </div>
-  );
-}
-
-// Plane `.group-head` + `.issue-list` per docs/plane-app-examples.html.
-// Row: chev + state ring + title + count + spacer + "+ Add" ghost button.
-// List body: continuous 0.5px hairline rows. Footer: "+ Add work item"
-// inline pill (only rendered when expanded).
-function ListSection({
-  statusId,
-  label,
-  count,
-  expanded,
-  onToggle,
-  rows,
-  members,
-  taskStates,
-  taskLabels,
-  selectedId,
-  onSelect,
-  onAdd,
-}: {
-  statusId: TaskStatus;
-  label: string;
-  count: number;
-  expanded: boolean;
-  onToggle: () => void;
-  rows: Task[];
-  members: TeamMember[];
-  taskStates: TaskState[];
-  taskLabels: TaskLabel[];
-  selectedId: string | null;
-  onSelect: (id: string) => void;
-  onAdd: () => void;
-}) {
-  return (
-    <div className="pb-1">
-      <div className="sticky top-0 z-10 flex items-center gap-2.5 px-1 pt-[10px] pb-2 bg-bg-content/95 backdrop-blur">
-        <button
-          type="button"
-          onClick={onToggle}
-          className="flex items-center gap-2.5 flex-1 min-w-0 hover:opacity-80 transition-opacity"
-          title={expanded ? "Collapse" : "Expand"}
-        >
-          <svg
-            width="11"
-            height="11"
-            viewBox="0 0 10 10"
-            className={`text-text-5 transition-transform flex-shrink-0 ${
-              expanded ? "" : "-rotate-90"
-            }`}
-            aria-hidden
-          >
-            <path d="M2 4l3 3 3-3" stroke="currentColor" strokeWidth="1.4" fill="none" />
-          </svg>
-          <StateRing statusId={statusId} />
-          <span className="text-[13px] text-text-1 font-medium">{label}</span>
-          <span className="text-[12px] text-text-5 tabular-nums">{count}</span>
-        </button>
-        <button
-          type="button"
-          onClick={onAdd}
-          title={`Add work item to ${label}`}
-          className="inline-flex items-center justify-center w-5 h-5 rounded-[4px] text-text-5 hover:text-text-1 hover:bg-bg-2 transition-colors"
-        >
-          <Plus className="w-3.5 h-3.5" strokeWidth={1.5} aria-hidden />
-        </button>
-      </div>
-      {expanded && rows.length > 0 && (
-        <div>
-          {rows.map((t) => (
-            <ListRow
-              key={t.id}
-              task={t}
-              selected={t.id === selectedId}
-              members={members}
-              taskStates={taskStates}
-              taskLabels={taskLabels}
-              onSelect={() => onSelect(t.id)}
-            />
-          ))}
-        </div>
-      )}
-      {expanded && (
-        <button
-          type="button"
-          onClick={onAdd}
-          className="w-full text-left flex items-center gap-2 px-1 py-2 text-[12px] text-text-5 hover:text-text-2 border-t-[0.5px] border-line-soft transition-colors"
-        >
-          <Plus className="w-3 h-3" strokeWidth={1.5} aria-hidden />
-          <span>Add work item</span>
-        </button>
-      )}
-    </div>
-  );
-}
-
-// Plane `.signal` — 3-bar priority icon. Bars are 2.5px wide, heights
-// 4/8/12px, gap 1.5px, aligned flex-end in a 14px box.
-//
-// The number of LIT bars already spells out the level, so the old five-colour
-// ladder (red/orange/yellow/blue/grey) was saying the same thing twice in
-// paint. Bars now read on the neutral ramp and only Urgent — the one priority
-// that is asking for the reader right now — keeps a filled red chip.
-function PrioritySignal({ priority }: { priority: TaskPriority }) {
-  const bars = (color: string, urgent = false) => (
-    <>
-      <i
-        className="block w-[2.5px] h-[4px] rounded-[1px]"
-        style={{ background: color, opacity: urgent || priority !== "none" ? 1 : 0.25 }}
-      />
-      <i
-        className="block w-[2.5px] h-[8px] rounded-[1px]"
-        style={{
-          background: color,
-          opacity:
-            urgent || priority === "high" || priority === "medium" ? 1 : 0.25,
-        }}
-      />
-      <i
-        className="block w-[2.5px] h-[12px] rounded-[1px]"
-        style={{ background: color, opacity: urgent || priority === "high" ? 1 : 0.25 }}
-      />
-    </>
-  );
-
-  if (priority === "urgent") {
-    return (
-      <span
-        className="inline-flex items-end gap-[1.5px] h-4 px-1 py-px rounded-[4px] flex-shrink-0 bg-red"
-        title="Priority: Urgent"
-        aria-label="Urgent priority"
-      >
-        {bars("var(--color-bg-0)", true)}
-      </span>
-    );
-  }
-  return (
-    <span
-      className="inline-flex items-end gap-[1.5px] h-[14px] flex-shrink-0"
-      title={`Priority: ${priority}`}
-      aria-label={`${priority} priority`}
-    >
-      {bars("var(--color-text-3)")}
-    </span>
-  );
-}
-
-// Plane `.state-pill .ring-i` — 12px circle whose STROKE STYLE is keyed to
-// status: dashed for backlog/cancelled, part-filled conic for in progress and
-// in review, solid disc for done. The shape is the signal, so only the one
-// genuinely live state ("in progress") carries colour; the rest sit on the
-// neutral ramp instead of each owning a hue. That colour is amber — work in
-// flight — matching CrewCanvas's STATUS_DOT.working and the Automations run
-// dot. Not the accent: on a board, the accent belongs to the card you have
-// selected, and a ring that borrowed it made every running task look picked.
-function StateRing({ statusId }: { statusId: TaskStatus }) {
-  const cls = (() => {
-    switch (statusId) {
-      case "backlog":
-        return "border-dashed border-[1.5px] border-text-4";
-      case "in_progress":
-        return "border-[1.5px] border-amber bg-[conic-gradient(var(--color-amber)_50%,transparent_50%)]";
-      case "in_review":
-        return "border-[1.5px] border-text-3 bg-[conic-gradient(var(--color-text-3)_75%,transparent_75%)]";
-      case "done":
-        return "border-[1.5px] border-text-3 bg-text-3";
-      default:
-        return "border-[1.5px] border-text-4";
-    }
-  })();
-  return (
-    <span
-      className={`w-[12px] h-[12px] rounded-full box-border flex-shrink-0 ${cls}`}
-      aria-hidden
-    />
-  );
-}
 
 // Plane-style row. Single-line: priority dot · #id · state pill · title
 // · label chips · assignees · due · updated. Mirrors the InboxPane Row
 // shape so visual rhythm is consistent between Tasks list + PR Inbox.
-function ListRow({
-  task,
-  selected,
-  members,
-  taskStates,
-  taskLabels,
-  onSelect,
-}: {
-  task: Task;
-  selected: boolean;
-  members: TeamMember[];
-  taskStates: TaskState[];
-  taskLabels: TaskLabel[];
-  onSelect: () => void;
-}) {
-  const state =
-    taskStates && task.state_id
-      ? (taskStates.find((s) => s.id === task.state_id) ?? null)
-      : null;
-
-  // Labels — keep the chip count modest in dense rows. Slice early so
-  // wide rows never explode horizontally past the assignees + due.
-  const labelChips = task.labels.slice(0, 3).map((l) => {
-    const catalog = taskLabels.find((cl) => cl.name === l || cl.id === l);
-    return { key: l, name: catalog?.name ?? l, color: catalog?.color };
-  });
-
-  return (
-    <button
-      type="button"
-      onClick={onSelect}
-      data-task-id={task.id}
-      className={`w-full text-left flex items-center gap-3 px-1 py-[9px] border-t-[0.5px] border-line-soft text-[13px] hover:bg-bg-2 transition-colors ${
-        selected ? "bg-bg-2" : ""
-      }`}
-    >
-      <PrioritySignal priority={task.priority} />
-      <StateRing statusId={task.status} />
-      <span
-        className="text-[11px] text-text-5 font-mono flex-shrink-0 w-20 tabular-nums"
-        style={{ letterSpacing: "0.02em" }}
-        title={state ? `State: ${state.name}` : undefined}
-      >
-        AURA-{task.sequence_id}
-      </span>
-      <span className="flex-1 min-w-0 text-text-1 truncate">
-        <MentionedText text={task.title || "(untitled)"} members={members} />
-      </span>
-      <span className="flex items-center gap-1.5 flex-shrink-0">
-        {labelChips.length > 0 &&
-          labelChips.map((l) => (
-            <span
-              key={l.key}
-              className="inline-flex items-center gap-1 text-[10px] px-[7px] py-px rounded-full bg-bg-1 border-[0.5px] border-line-soft whitespace-nowrap"
-              style={{ color: l.color ?? "var(--color-text-3)" }}
-              title={l.name}
-            >
-              <span
-                className="w-1.5 h-1.5 rounded-full"
-                style={{ background: l.color ?? "currentColor" }}
-                aria-hidden
-              />
-              <span className="truncate max-w-[80px]">{l.name}</span>
-            </span>
-          ))}
-        {task.due_date && (
-          <span
-            className={`flex-shrink-0 text-[11px] tabular-nums px-1 ${
-              isOverdue(task.due_date) ? "text-red" : "text-text-3"
-            }`}
-            title={`Due ${task.due_date}`}
-          >
-            {formatDueDate(task.due_date)}
-          </span>
-        )}
-        {task.assignee_ids.length > 0 && (
-          <span className="flex-shrink-0" title={task.assignee_ids.join(", ")}>
-            <AssigneeStack
-              handles={task.assignee_ids}
-              members={members}
-              dense
-              maxAvatars={3}
-            />
-          </span>
-        )}
-      </span>
-    </button>
-  );
-}
-
-// ─── Sprint view ───────────────────────────────────────────────────────
-//
-// Slices tasks down to the currently-active sprint and renders three
-// columns (Todo / Doing / Done) plus a count-based burndown. Sprints
-// are the unified Cycle store (`.aura/tasks/task_cycles.json`), surfaced
-// here through the legacy `Sprint`-shaped shim; membership rides
-// `Task.cycle_id`. If none exists, the user can spin up a default
-// 2-week sprint with one click.
-//
-// Burndown uses estimate points when every task in the sprint has an
-// `estimate`; otherwise it falls back to task count so a fresh repo
-// still shows a real chart instead of an empty box.
-
-function SprintView({
-  repoRoot,
-  tasks,
-  sprints,
-  members,
-  loading,
-  onSelect,
-  onSprintsChanged,
-  onTaskPatched,
-  onCreate,
-}: {
-  repoRoot: string;
-  tasks: Task[];
-  sprints: Sprint[];
-  members: TeamMember[];
-  loading: boolean;
-  onSelect: (id: string) => void;
-  onSprintsChanged: (next: Sprint[]) => void;
-  onTaskPatched: (t: Task) => void;
-  onCreate: (sprintId: string) => void;
-}) {
-  const [selectedId, setSelectedId] = useState<string | null>(null);
-  const [busy, setBusy] = useState(false);
-  const [err, setErr] = useState<string | null>(null);
-  /** When true, the full-screen CreateSprintWizard is open. */
-  const [creatingSprint, setCreatingSprint] = useState(false);
-  /** When true, the full-screen CloseSprintPanel (complete-sprint) is open. */
-  const [closingSprint, setClosingSprint] = useState(false);
-
-  // Pick the active sprint by default, or the one the user clicked.
-  // Falls back to the most recently-updated sprint if no active flag.
-  const effective = useMemo(() => {
-    if (selectedId) {
-      const found = sprints.find((s) => s.id === selectedId);
-      if (found) return found;
-    }
-    return sprints.find((s) => s.active) ?? sprints[0] ?? null;
-  }, [sprints, selectedId]);
-
-  const sprintTasks = useMemo(() => {
-    if (!effective) return [] as Task[];
-    // Membership rides the unified Cycle pointer post-BEAD-I. `effective`
-    // is the legacy-shaped projection of a cycle, so `effective.id` is
-    // the cycle id stored on `Task.cycle_id`.
-    return tasks.filter((t) => t.cycle_id === effective.id && !t.is_epic);
-  }, [tasks, effective]);
-
-  // Backlog candidates the planner can pull into a sprint — unbound,
-  // non-epic tasks. Hoisted so both the empty-state and the active-sprint
-  // render can hand it to the create wizard's Scope step.
-  const backlogCandidates = useMemo(
-    () => tasks.filter((t) => !t.is_epic && (t.cycle_id == null || t.cycle_id === "")),
-    [tasks],
-  );
-
-  // Burndown — if every task has an estimate, sum estimates; else count.
-  const usePoints =
-    sprintTasks.length > 0 && sprintTasks.every((t) => typeof t.estimate === "number" && t.estimate! > 0);
-  const totalWork = usePoints
-    ? sprintTasks.reduce((n, t) => n + (t.estimate ?? 0), 0)
-    : sprintTasks.length;
-  const doneWork = usePoints
-    ? sprintTasks
-        .filter((t) => t.status === "done")
-        .reduce((n, t) => n + (t.estimate ?? 0), 0)
-    : sprintTasks.filter((t) => t.status === "done").length;
-  const remainingWork = totalWork - doneWork;
-
-  const burndown = useMemo(() => {
-    if (!effective || sprintTasks.length === 0) return [] as { date: string; remaining: number }[];
-    return buildBurndownSeries(effective, sprintTasks, usePoints);
-  }, [effective, sprintTasks, usePoints]);
-
-  // Per-assignee capacity rollup. Tasks with multiple assignees are
-  // attributed to each of them (full count, not split) — matches how
-  // teams reason about "what's on my plate" rather than fractional load.
-  // Unassigned tasks roll into a synthetic "unassigned" bucket so they
-  // stay visible (a sprint with 8 unassigned tasks is a planning smell).
-  const capacity = useMemo(() => {
-    if (!effective || sprintTasks.length === 0) return [];
-    const buckets = new Map<
-      string,
-      { handle: string; total: number; done: number }
-    >();
-    for (const t of sprintTasks) {
-      const ids = t.assignee_ids && t.assignee_ids.length > 0
-        ? t.assignee_ids
-        : t.assignee
-        ? [t.assignee]
-        : ["unassigned"];
-      const weight = usePoints ? t.estimate ?? 0 : 1;
-      const isDone = t.status === "done";
-      for (const handle of ids) {
-        const cur = buckets.get(handle) ?? { handle, total: 0, done: 0 };
-        cur.total += weight;
-        if (isDone) cur.done += weight;
-        buckets.set(handle, cur);
-      }
-    }
-    return Array.from(buckets.values()).sort((a, b) => b.total - a.total);
-  }, [sprintTasks, usePoints, effective]);
-
-  // Scope creep — tasks created after the sprint started. Heuristic but
-  // catches the common "we kept dragging stuff in mid-sprint" pattern.
-  const scopeCreep = useMemo(() => {
-    if (!effective) return [] as Task[];
-    const startUnix = Date.parse(`${effective.start}T00:00:00Z`);
-    if (Number.isNaN(startUnix)) return [];
-    return sprintTasks.filter((t) => {
-      const created = Date.parse(t.created_at);
-      return Number.isFinite(created) && created > startUnix;
-    });
-  }, [effective, sprintTasks]);
-
-  // At-risk — unfinished tasks that have had no movement in N days.
-  // Reuses the AuraWatch nudge vocabulary (a quiet amber dot), not a new
-  // alarm. We don't have per-status-change timestamps, so `updated_at` is
-  // the staleness proxy the design doc (§4) explicitly allows. Done tasks
-  // are never at-risk; a sprint that hasn't started yet (day index < 1)
-  // suppresses the signal so a freshly-planned board isn't all amber.
-  const atRiskIds = useMemo(() => {
-    const out = new Set<string>();
-    if (!effective || sprintDayIndex(effective) < 1) return out;
-    const now = Date.now();
-    for (const t of sprintTasks) {
-      if (t.status === "done") continue;
-      const moved = Date.parse(t.updated_at);
-      if (!Number.isFinite(moved)) continue;
-      if (now - moved > STALE_TASK_MS) out.add(t.id);
-    }
-    return out;
-  }, [effective, sprintTasks]);
-
-  // Past sprints with their final delivered work — used to render a
-  // "velocity" trend sparkline. A sprint that was deliberately closed has
-  // its throughput frozen on the cycle (`s.velocity`, phase 4); prefer
-  // that stable figure so moving done tasks afterwards can't drift the
-  // trend. Sprints that ended without a formal Close fall back to deriving
-  // delivered work from their still-attached done tasks. Quietly drops the
-  // currently-selected sprint so the trend reads "sprints before this one".
-  const velocity = useMemo(() => {
-    if (!effective) return [] as { id: string; name: string; delivered: number; usePoints: boolean }[];
-    return sprints
-      .filter(
-        (s) =>
-          s.id !== effective.id &&
-          (s.velocity != null || s.end < ymd(new Date())),
-      )
-      .map((s) => {
-        if (s.velocity != null) {
-          // Frozen at Close — we can't know after the fact whether it was
-          // points or counts, but the number is the source of truth.
-          return { id: s.id, name: s.name, delivered: s.velocity, usePoints: false };
-        }
-        const ts = tasks.filter((t) => t.cycle_id === s.id && !t.is_epic);
-        const useP =
-          ts.length > 0 && ts.every((t) => typeof t.estimate === "number" && t.estimate! > 0);
-        const delivered = useP
-          ? ts.filter((t) => t.status === "done").reduce((n, t) => n + (t.estimate ?? 0), 0)
-          : ts.filter((t) => t.status === "done").length;
-        return { id: s.id, name: s.name, delivered, usePoints: useP };
-      })
-      .sort((a, b) => a.id.localeCompare(b.id))
-      .slice(-6);
-  }, [sprints, tasks, effective]);
-
-  // Real sprint-create — wired to the wizard's onSubmit. Persists via
-  // `api.sprintsCreate` ({ id, name, start, end, goal, active }); when the
-  // new sprint is flagged active we clear the flag on every other sprint
-  // locally so the switcher reflects the single-active invariant the
-  // backend enforces. `scopeTaskIds` are the backlog tasks the planner
-  // chose to pull in — each is assigned to the new cycle (mirroring both
-  // sides) and patched into local state optimistically.
-  async function submitSprint(input: SprintInput, scopeTaskIds: string[]) {
-    setBusy(true);
-    setErr(null);
-    try {
-      const next = await api.sprintsCreate(repoRoot, input);
-      for (const taskId of scopeTaskIds) {
-        try {
-          await api.tasksCycleAssign(repoRoot, next.id, taskId);
-          const t = tasks.find((x) => x.id === taskId);
-          if (t) onTaskPatched({ ...t, cycle_id: next.id });
-        } catch (e) {
-          setErr(String(e));
-        }
-      }
-      const others = sprints.filter((s) => s.id !== next.id);
-      onSprintsChanged([
-        ...(next.active ? others.map((s) => ({ ...s, active: false })) : others),
-        next,
-      ]);
-      setSelectedId(next.id);
-      setCreatingSprint(false);
-    } catch (e) {
-      setErr(String(e));
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  async function setActive(id: string) {
-    const target = sprints.find((s) => s.id === id);
-    if (!target) return;
-    setBusy(true);
-    setErr(null);
-    try {
-      const updated = await api.sprintsUpdate(repoRoot, {
-        id: target.id,
-        name: target.name,
-        start: target.start,
-        end: target.end,
-        goal: target.goal,
-        active: true,
-      });
-      const next = sprints.map((s) =>
-        s.id === updated.id ? updated : { ...s, active: false },
-      );
-      onSprintsChanged(next);
-    } catch (e) {
-      setErr(String(e));
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  async function detachTask(taskId: string) {
-    if (!effective) return;
-    const current = tasks.find((t) => t.id === taskId);
-    try {
-      // Use the dedicated unassign so the cycle's `task_ids` mirror stays
-      // in sync (a bare `tasksUpdate` clears the pointer but defers the
-      // catalog mirror). Patch local state optimistically.
-      await api.tasksCycleUnassign(repoRoot, effective.id, taskId);
-      if (current) onTaskPatched({ ...current, cycle_id: null });
-    } catch (e) {
-      setErr(String(e));
-    }
-  }
-
-  // Close the sprint (doc 23 §3d). Moves every unfinished item to the
-  // chosen destination (a planned sprint, or back to the backlog when
-  // `target === CARRY_TO_BACKLOG`), freezes the delivered figure as the
-  // cycle's `velocity`, and flips status to completed. Done items keep
-  // their `cycle_id`, so the historical sprint still reads its delivered
-  // scope. The velocity we record is `doneWork` — already points-or-count
-  // depending on whether the sprint was estimated.
-  async function closeSprint(target: string) {
-    if (!effective) return;
-    setBusy(true);
-    setErr(null);
-    try {
-      const carried = sprintTasks.filter((t) => t.status !== "done");
-      for (const t of carried) {
-        if (target === CARRY_TO_BACKLOG) {
-          await api.tasksCycleUnassign(repoRoot, effective.id, t.id);
-          onTaskPatched({ ...t, cycle_id: null });
-        } else {
-          await api.tasksCycleAssign(repoRoot, target, t.id);
-          onTaskPatched({ ...t, cycle_id: target });
-        }
-      }
-      await api.tasksCycleClose(repoRoot, effective.id, doneWork);
-      // Reflect the close locally: this sprint is no longer active and now
-      // carries its frozen velocity; the others are untouched.
-      onSprintsChanged(
-        sprints.map((s) =>
-          s.id === effective.id
-            ? { ...s, active: false, velocity: doneWork }
-            : s,
-        ),
-      );
-      setClosingSprint(false);
-    } catch (e) {
-      setErr(String(e));
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  if (loading && sprints.length === 0) {
-    return (
-      <div className="flex items-center gap-2 p-6 text-[12px] text-text-4">
-        <AsciiSpinner />
-        Loading sprints…
-      </div>
-    );
-  }
-
-  if (sprints.length === 0) {
-    return (
-      <div className="h-full w-full overflow-y-auto flex items-start justify-center">
-        <div className="w-full max-w-xl p-10 text-center">
-          <div className="mb-3 flex justify-center text-text-4" aria-hidden>
-            <Timer className="w-10 h-10" strokeWidth={1.25} />
-          </div>
-          <div className="text-text-1 text-[18px] font-medium">No sprints yet</div>
-          <div className="mt-1.5 text-text-4 text-[12.5px] max-w-md mx-auto leading-snug">
-            Sprints are 1–2 week iterations stored at{" "}
-            <code className="font-mono text-[11.5px] text-text-3">
-              .aura/tasks/task_cycles.json
-            </code>
-            . Spin up a default fortnight to start.
-          </div>
-          <Button
-            variant="accentSoft"
-            size="default"
-            onClick={() => setCreatingSprint(true)}
-            disabled={busy}
-            className="mt-5"
-          >
-            Start a 2-week sprint
-          </Button>
-          {err && <div className="mt-3 text-[11.5px] text-red">{err}</div>}
-        </div>
-        {creatingSprint && (
-          <CreateSprintWizard
-            onCancel={() => setCreatingSprint(false)}
-            onSubmit={submitSprint}
-            backlog={backlogCandidates}
-          />
-        )}
-      </div>
-    );
-  }
-
-  if (!effective) return null;
-
-  const candidates = backlogCandidates;
-
-  const todoTasks = sprintTasks.filter((t) => t.status === "backlog");
-  const doingTasks = sprintTasks.filter(
-    (t) => t.status === "in_progress" || t.status === "in_review",
-  );
-  const doneTasks = sprintTasks.filter((t) => t.status === "done");
-
-  return (
-    <div className="h-full w-full overflow-y-auto">
-      <div className="px-4 py-3 border-b border-line-soft flex items-center flex-wrap gap-2">
-        <Select
-          value={effective.id}
-          onChange={(v) => setSelectedId(v)}
-          options={sprints.map((s) => ({
-            value: s.id,
-            label: `${s.name}${s.active ? "  ★" : ""}`,
-          }))}
-          aria-label="Select sprint"
-        />
-        <span className="text-[11px] text-text-4 font-mono">
-          {effective.start} → {effective.end}
-        </span>
-        <span className="text-[11px] text-text-5">
-          day {sprintDayIndex(effective)} / {sprintLengthDays(effective)}
-        </span>
-        {sprintTasks.length > 0 && (
-          <span
-            className="text-[11px] text-text-4 tabular-nums px-1.5 py-0.5 rounded bg-bg-2 border border-line-soft"
-            title="Scope delivered so far"
-          >
-            {doneWork} / {totalWork} {usePoints ? "pts" : "tasks"} done
-          </span>
-        )}
-        {!effective.active && effective.velocity == null && (
-          <Button
-            type="button"
-            variant="subtle"
-            size="xs"
-            disabled={busy}
-            onClick={() => setActive(effective.id)}
-          >
-            Make active
-          </Button>
-        )}
-        {effective.velocity != null ? (
-          <StatusChip tone="green" dense icon={<Check className="w-2.5 h-2.5" />}>
-            Completed · {effective.velocity} velocity
-          </StatusChip>
-        ) : (
-          <Button
-            type="button"
-            variant="subtle"
-            size="xs"
-            disabled={busy}
-            onClick={() => setClosingSprint(true)}
-          >
-            Complete sprint
-          </Button>
-        )}
-        <div className="flex-1" />
-        <Button
-          variant="subtle"
-          size="xs"
-          onClick={() => setCreatingSprint(true)}
-        >
-          + New sprint
-        </Button>
-        <Button
-          variant="accentSoft"
-          size="xs"
-          onClick={() => onCreate(effective.id)}
-        >
-          + Task in sprint
-        </Button>
-      </div>
-
-      {effective.goal && (
-        <div className="px-4 py-2 text-[12px] text-text-3 border-b border-line-soft bg-bg-1 flex items-center gap-1.5">
-          <Target className="w-3.5 h-3.5" strokeWidth={1.5} aria-hidden />
-          <span>{effective.goal}</span>
-        </div>
-      )}
-
-      {err && (
-        <div className="px-4 py-2 text-[11.5px] text-red bg-red/10 border-b border-line-soft">
-          {err}
-        </div>
-      )}
-
-      {/* Burndown — compact SVG sparkline, ideal vs actual */}
-      <div className="px-4 py-3 border-b border-line-soft">
-        <div className="flex items-baseline gap-3 mb-2">
-          <span className="text-[11px] uppercase tracking-wider text-text-5">
-            Burndown
-          </span>
-          <span className="text-[11px] text-text-3 tabular-nums">
-            {remainingWork} / {totalWork} {usePoints ? "pts" : "tasks"} remaining
-          </span>
-          {scopeCreep.length > 0 && (
-            <StatusChip
-              tone="amber"
-              dense
-              icon={<AlertTriangle className="w-2.5 h-2.5" />}
-              title={
-                scopeCreep
-                  .slice(0, 8)
-                  .map((t) => `· ${t.title}`)
-                  .join("\n") +
-                (scopeCreep.length > 8 ? `\n+ ${scopeCreep.length - 8} more` : "")
-              }
-            >
-              +{scopeCreep.length} added mid-sprint
-            </StatusChip>
-          )}
-          <div className="flex-1" />
-          {velocity.length > 0 && (
-            <VelocitySparkline data={velocity} />
-          )}
-        </div>
-        {sprintTasks.length === 0 ? (
-          <div className="text-[11.5px] text-text-5 italic">
-            No tasks pinned to this sprint yet.
-          </div>
-        ) : (
-          <Burndown series={burndown} total={totalWork} usePoints={usePoints} />
-        )}
-      </div>
-
-      {/* Capacity — per-assignee load. Renders only when the sprint has
-         tasks so an empty new sprint doesn't show a blank box. */}
-      {capacity.length > 0 && (
-        <div className="px-4 py-3 border-b border-line-soft">
-          <div className="flex items-baseline gap-3 mb-2">
-            <span className="text-[11px] uppercase tracking-wider text-text-5">
-              Capacity
-            </span>
-            <span className="text-[10.5px] text-text-5">
-              {capacity.length} assignee{capacity.length === 1 ? "" : "s"}
-            </span>
-          </div>
-          <CapacityBars
-            rows={capacity}
-            members={members}
-            usePoints={usePoints}
-          />
-        </div>
-      )}
-
-      {/* Three lightweight columns. Reuses TaskCard so cards look the
-         same as the Board view. */}
-      <div className="p-4 grid grid-cols-1 md:grid-cols-3 gap-3">
-        <SprintColumn
-          label="Todo"
-          tasks={todoTasks}
-          members={members}
-          atRisk={atRiskIds}
-          onSelect={onSelect}
-          onDetach={detachTask}
-        />
-        <SprintColumn
-          label="In flight"
-          tasks={doingTasks}
-          members={members}
-          atRisk={atRiskIds}
-          onSelect={onSelect}
-          onDetach={detachTask}
-        />
-        <SprintColumn
-          label="Done"
-          tasks={doneTasks}
-          members={members}
-          atRisk={atRiskIds}
-          onSelect={onSelect}
-          onDetach={detachTask}
-        />
-      </div>
-
-      {/* Drawer of un-pinned tasks the user can pull in. */}
-      {candidates.length > 0 && (
-        <div className="px-4 pb-6">
-          <div className="text-[11px] uppercase tracking-wider text-text-5 mb-2">
-            Pull into sprint
-          </div>
-          <div className="flex flex-wrap gap-1.5">
-            {candidates.slice(0, 30).map((t) => (
-              <button
-                key={t.id}
-                type="button"
-                onClick={async () => {
-                  try {
-                    // Dedicated assign keeps `cycle.task_ids` in sync;
-                    // patch local state optimistically on the cycle pointer.
-                    await api.tasksCycleAssign(repoRoot, effective.id, t.id);
-                    onTaskPatched({ ...t, cycle_id: effective.id });
-                  } catch (e) {
-                    setErr(String(e));
-                  }
-                }}
-                title={t.title}
-                className="text-[10.5px] px-2 py-0.5 rounded-full bg-bg-2 border border-line-soft text-text-3 hover:text-text-1 hover:bg-bg-chrome max-w-[240px] truncate"
-              >
-                + {t.title || "(untitled)"}
-              </button>
-            ))}
-            {candidates.length > 30 && (
-              <span className="text-[10.5px] text-text-5 self-center">
-                + {candidates.length - 30} more in backlog…
-              </span>
-            )}
-          </div>
-        </div>
-      )}
-
-      {creatingSprint && (
-        <CreateSprintWizard
-          onCancel={() => setCreatingSprint(false)}
-          onSubmit={submitSprint}
-          backlog={backlogCandidates}
-        />
-      )}
-
-      {closingSprint && (
-        <CloseSprintPanel
-          sprint={effective}
-          doneCount={doneTasks.length}
-          donePoints={doneWork}
-          totalCount={sprintTasks.length}
-          totalPoints={totalWork}
-          usePoints={usePoints}
-          carriedCount={sprintTasks.length - doneTasks.length}
-          carryTargets={sprints.filter(
-            (s) => s.id !== effective.id && s.velocity == null,
-          )}
-          onCancel={() => setClosingSprint(false)}
-          onConfirm={closeSprint}
-        />
-      )}
-    </div>
-  );
-}
-
-function CapacityBars({
-  rows,
-  members,
-  usePoints,
-}: {
-  rows: { handle: string; total: number; done: number }[];
-  members: TeamMember[];
-  usePoints: boolean;
-}) {
-  // Peak across all rows so every bar is normalised to the same scale —
-  // makes "Alice has 8x what Bob has" visually obvious.
-  const peak = Math.max(1, ...rows.map((r) => r.total));
-  const byHandle = useMemo(
-    () => new Map(members.map((m) => [m.handle, m])),
-    [members],
-  );
-  return (
-    <div className="space-y-1.5">
-      {rows.map((r) => {
-        const member = byHandle.get(r.handle);
-        const label =
-          r.handle === "unassigned"
-            ? "Unassigned"
-            : member?.name || `@${r.handle}`;
-        const donePct = r.total === 0 ? 0 : (r.done / r.total) * 100;
-        const widthPct = (r.total / peak) * 100;
-        return (
-          <div key={r.handle} className="flex items-center gap-2 text-[11px]">
-            <span
-              className={`w-24 truncate ${
-                r.handle === "unassigned" ? "text-text-5 italic" : "text-text-2"
-              }`}
-              title={label}
-            >
-              {label}
-            </span>
-            <div className="flex-1 h-2 bg-bg-2 rounded overflow-hidden relative">
-              <div
-                className="h-2 bg-accent/40"
-                style={{ width: `${widthPct}%` }}
-              />
-              {/* Scope vs delivered reads as two intensities of ONE hue —
-                  a second colour here only made the bar harder to parse. */}
-              <div
-                className="absolute inset-y-0 left-0 h-2 bg-accent"
-                style={{ width: `${(widthPct * donePct) / 100}%` }}
-              />
-            </div>
-            <span className="w-20 text-right text-text-4 tabular-nums">
-              {r.done}/{r.total} {usePoints ? "pts" : ""}
-            </span>
-          </div>
-        );
-      })}
-    </div>
-  );
-}
-
-function VelocitySparkline({
-  data,
-}: {
-  data: { id: string; name: string; delivered: number; usePoints: boolean }[];
-}) {
-  const peak = Math.max(1, ...data.map((d) => d.delivered));
-  return (
-    <div
-      className="flex items-end gap-0.5 h-6"
-      title={
-        "Velocity (last sprints): " +
-        data.map((d) => `${d.name}=${d.delivered}`).join(" · ")
-      }
-    >
-      {data.map((d) => (
-        <div
-          key={d.id}
-          className="w-1.5 bg-accent/60 rounded-t"
-          style={{ height: `${(d.delivered / peak) * 100}%` }}
-        />
-      ))}
-      <span className="ml-1 text-[10px] text-text-5 self-center">
-        velocity
-      </span>
-    </div>
-  );
-}
-
-function SprintColumn({
-  label,
-  tasks,
-  members,
-  atRisk,
-  onSelect,
-  onDetach,
-}: {
-  label: string;
-  tasks: Task[];
-  members: TeamMember[];
-  /** Task ids flagged stale by the at-risk heuristic — rendered with a
-   *  quiet amber dot. Empty set ⇒ no dots (e.g. the Done column). */
-  atRisk: Set<string>;
-  onSelect: (id: string) => void;
-  onDetach: (id: string) => void;
-}) {
-  const riskCount = tasks.reduce((n, t) => n + (atRisk.has(t.id) ? 1 : 0), 0);
-  return (
-    <div className="rounded-md bg-bg-2 border border-line-soft min-h-[200px] flex flex-col">
-      <div className="px-3 py-2 border-b border-line-soft flex items-center gap-2">
-        <span className="text-[11.5px] font-medium text-text-2">{label}</span>
-        <span className="text-[10.5px] text-text-5 font-mono">{tasks.length}</span>
-        {riskCount > 0 && (
-          <span
-            className="ml-auto flex items-center gap-1 text-[10px] text-amber"
-            title={`${riskCount} task${riskCount === 1 ? "" : "s"} with no movement in ${STALE_TASK_MS / 86_400_000} days`}
-          >
-            <span className="w-1.5 h-1.5 rounded-full bg-amber" aria-hidden />
-            {riskCount} stalled
-          </span>
-        )}
-      </div>
-      <div className="flex-1 p-2 space-y-2">
-        {tasks.length === 0 && (
-          <div className="text-[11px] text-text-5 px-1 italic">
-            Nothing here yet
-          </div>
-        )}
-        {tasks.map((t) => (
-          <div key={t.id} className="relative group">
-            {atRisk.has(t.id) && (
-              <span
-                className="absolute -top-1 -left-1 z-10 w-2 h-2 rounded-full bg-amber ring-2 ring-bg-2"
-                title="No movement in a while — at risk of slipping the sprint"
-                aria-label="At risk"
-              />
-            )}
-            <TaskCard
-              task={t}
-              members={members}
-              onClick={() => onSelect(t.id)}
-              onDragStart={() => {
-                /* sprint columns don't drive status drag-and-drop */
-              }}
-              displayProps={DEFAULT_DISPLAY_PROPS}
-            />
-            <button
-              type="button"
-              onClick={(e) => {
-                e.stopPropagation();
-                onDetach(t.id);
-              }}
-              title="Remove from sprint"
-              className="absolute top-1.5 right-1.5 opacity-0 group-hover:opacity-100 text-[10px] text-text-5 hover:text-text-1 px-1 rounded bg-bg-2 border border-line-soft"
-            >
-              ×
-            </button>
-          </div>
-        ))}
-      </div>
-    </div>
-  );
-}
-
-function Burndown({
-  series,
-  total,
-  usePoints,
-}: {
-  series: { date: string; remaining: number }[];
-  total: number;
-  usePoints: boolean;
-}) {
-  // Inline SVG sparkline: ideal line (linear total→0) + actual stepped line.
-  const W = 480;
-  const H = 80;
-  const PAD_X = 28;
-  const PAD_Y = 10;
-  const n = series.length;
-  if (n < 2 || total === 0) {
-    return (
-      <div className="text-[11px] text-text-5 italic">
-        Not enough history yet — this chart needs at least two days of work on
-        the sprint.
-      </div>
-    );
-  }
-  const xAt = (i: number) => PAD_X + (i * (W - PAD_X * 2)) / (n - 1);
-  const yAt = (v: number) =>
-    PAD_Y + ((total - v) / total) * (H - PAD_Y * 2);
-
-  const idealPath = `M ${xAt(0)} ${yAt(total)} L ${xAt(n - 1)} ${yAt(0)}`;
-  const actualPath = series
-    .map((s, i) => `${i === 0 ? "M" : "L"} ${xAt(i)} ${yAt(s.remaining)}`)
-    .join(" ");
-
-  return (
-    <svg
-      viewBox={`0 0 ${W} ${H}`}
-      width="100%"
-      height={H}
-      role="img"
-      aria-label="Sprint burndown"
-    >
-      {/* axis */}
-      <line
-        x1={PAD_X}
-        y1={H - PAD_Y}
-        x2={W - PAD_X}
-        y2={H - PAD_Y}
-        stroke="currentColor"
-        strokeOpacity="0.15"
-      />
-      <line
-        x1={PAD_X}
-        y1={PAD_Y}
-        x2={PAD_X}
-        y2={H - PAD_Y}
-        stroke="currentColor"
-        strokeOpacity="0.15"
-      />
-      <text
-        x={4}
-        y={PAD_Y + 4}
-        fontSize="9"
-        fill="currentColor"
-        fillOpacity="0.5"
-      >
-        {total}
-      </text>
-      <text
-        x={4}
-        y={H - PAD_Y + 4}
-        fontSize="9"
-        fill="currentColor"
-        fillOpacity="0.5"
-      >
-        0
-      </text>
-      {/* ideal */}
-      <path d={idealPath} stroke="currentColor" strokeOpacity="0.25" strokeDasharray="3 3" fill="none" />
-      {/* actual */}
-      <path d={actualPath} stroke="rgb(96,165,250)" strokeWidth="1.5" fill="none" />
-      {/* today marker */}
-      {(() => {
-        const today = ymd(new Date());
-        const idx = series.findIndex((s) => s.date === today);
-        if (idx < 0) return null;
-        return (
-          <circle
-            cx={xAt(idx)}
-            cy={yAt(series[idx].remaining)}
-            r="3"
-            fill="rgb(96,165,250)"
-          />
-        );
-      })()}
-      <title>{`Burndown — ${usePoints ? "story points" : "task count"}`}</title>
-    </svg>
-  );
-}
-
-
 // ─── Phase 2 filter / order helpers ────────────────────────────────────
 //
 // All filter dimensions are AND'd across dimensions, OR'd within. A task
@@ -3094,7 +1368,14 @@ function applyFilters(
   const matchUnassigned = assigneeSet?.includes("@unassigned");
   const realAssignees = assigneeSet?.filter((a) => a !== "@unassigned");
   const q = f.q?.trim().toLowerCase() ?? "";
+  // Same day boundary the sidebar counts against, so its "Overdue N" badge and
+  // the list you land on always agree.
+  const today = new Date().toISOString().slice(0, 10);
   return tasks.filter((t) => {
+    if (f.overdue) {
+      if (t.status === "done") return false;
+      if (!t.due_date || t.due_date >= today) return false;
+    }
     if (f.status?.length && !f.status.includes(t.status)) return false;
     if (f.priority?.length && !f.priority.includes(t.priority)) return false;
     if (matchUnassigned) {
@@ -3182,160 +1463,4 @@ function cmpNullable<T extends string | number>(
   if (bMissing) return -1;
   if (typeof a === "number" && typeof b === "number") return a - b;
   return String(a).localeCompare(String(b));
-}
-
-/** Ensure the slug we pass to `task_views_upsert` doesn't collide with
- *  an existing view's id — when it would, append `-2`, `-3`, etc. */
-function uniqueSlug(slug: string, views: TaskView[]): string {
-  if (!views.some((v) => v.id === slug)) return slug;
-  let n = 2;
-  while (views.some((v) => v.id === `${slug}-${n}`)) n++;
-  return `${slug}-${n}`;
-}
-
-// ─── Shortcuts modal ───────────────────────────────────────────────────
-
-function ShortcutsModal({
-  open,
-  onClose,
-}: {
-  open: boolean;
-  onClose: () => void;
-}) {
-  return (
-    <Dialog open={open} onOpenChange={(o) => !o && onClose()}>
-      <DialogContent className="max-w-[440px] bg-bg-chrome border-line-soft text-text-1">
-        <DialogHeader>
-          <DialogTitle className="text-[14px]">Keyboard shortcuts</DialogTitle>
-        </DialogHeader>
-        <div className="text-[12px] text-text-3 mb-2">
-          Available when a task card is focused (click one to focus it).
-        </div>
-        <ul className="space-y-1">
-          {TASK_SHORTCUTS.map((s) => (
-            <li
-              key={s.keys}
-              className="flex items-center justify-between text-[12px]"
-            >
-              <span className="text-text-2">{s.label}</span>
-              <kbd className="font-mono text-[10.5px] bg-bg-2 border border-line-soft px-1.5 py-0.5 rounded text-text-1">
-                {s.keys}
-              </kbd>
-            </li>
-          ))}
-        </ul>
-      </DialogContent>
-    </Dialog>
-  );
-}
-
-// ─── helpers ───────────────────────────────────────────────────────────
-
-function shortRepo(p: string): string {
-  if (!p) return "";
-  const segs = p.split("/").filter(Boolean);
-  return segs.length <= 2 ? p : `…/${segs.slice(-2).join("/")}`;
-}
-
-function isOverdue(due: string): boolean {
-  // Compare YYYY-MM-DD lexically against today's local date — cheaper
-  // than parsing, immune to timezone edge cases at midnight.
-  const today = new Date();
-  const y = today.getFullYear();
-  const m = String(today.getMonth() + 1).padStart(2, "0");
-  const d = String(today.getDate()).padStart(2, "0");
-  return due < `${y}-${m}-${d}`;
-}
-
-function formatDueDate(due: string): string {
-  // YYYY-MM-DD → "May 23" or "today" / "tomorrow" for the next two days.
-  const d = new Date(due + "T00:00:00");
-  if (isNaN(d.getTime())) return due;
-  const today = new Date();
-  today.setHours(0, 0, 0, 0);
-  const diffMs = d.getTime() - today.getTime();
-  const diffDays = Math.round(diffMs / 86_400_000);
-  if (diffDays === 0) return "today";
-  if (diffDays === 1) return "tomorrow";
-  if (diffDays === -1) return "yesterday";
-  return d.toLocaleDateString(undefined, { month: "short", day: "numeric" });
-}
-
-// ─── date math (sprint + gantt) ────────────────────────────────────────
-
-function ymd(d: Date): string {
-  const y = d.getFullYear();
-  const m = String(d.getMonth() + 1).padStart(2, "0");
-  const day = String(d.getDate()).padStart(2, "0");
-  return `${y}-${m}-${day}`;
-}
-
-function addDays(yyyymmdd: string, n: number): string {
-  const d = new Date(yyyymmdd + "T00:00:00");
-  d.setDate(d.getDate() + n);
-  return ymd(d);
-}
-
-function daysBetweenInclusive(a: string, b: string): number {
-  // a and b are YYYY-MM-DD; returns the inclusive day count (a==b → 1).
-  const da = new Date(a + "T00:00:00").getTime();
-  const db = new Date(b + "T00:00:00").getTime();
-  if (isNaN(da) || isNaN(db) || db < da) return 1;
-  return Math.round((db - da) / 86_400_000) + 1;
-}
-
-/** Staleness threshold for the at-risk amber dot: a sprint task with no
- *  `updated_at` movement in this window reads as drifting. Three days is
- *  the AuraWatch nudge cadence — long enough to ignore a quiet weekend,
- *  short enough to flag a stalled card inside a 1–2 week sprint. */
-const STALE_TASK_MS = 3 * 86_400_000;
-
-function sprintLengthDays(s: Sprint): number {
-  return daysBetweenInclusive(s.start, s.end);
-}
-
-function sprintDayIndex(s: Sprint): number {
-  const today = ymd(new Date());
-  if (today < s.start) return 0;
-  if (today > s.end) return sprintLengthDays(s);
-  return daysBetweenInclusive(s.start, today);
-}
-
-/**
- * Build the burndown series day-over-day across the sprint range.
- * Remaining work on day D = total - work done by end of D (work is
- * "done" if status === done AND updated_at <= end-of-D). Falls back to
- * raw counts when `usePoints` is false. Days past today are blank in
- * the chart by sharing the last-known-remaining value (no future
- * extrapolation).
- */
-function buildBurndownSeries(
-  sprint: Sprint,
-  tasks: Task[],
-  usePoints: boolean,
-): { date: string; remaining: number }[] {
-  const totalUnits = usePoints
-    ? tasks.reduce((n, t) => n + (t.estimate ?? 0), 0)
-    : tasks.length;
-  if (totalUnits === 0) return [];
-  const today = ymd(new Date());
-  const series: { date: string; remaining: number }[] = [];
-  const lengthDays = sprintLengthDays(sprint);
-  let lastRemaining = totalUnits;
-  for (let i = 0; i < lengthDays; i++) {
-    const day = addDays(sprint.start, i);
-    if (day > today) {
-      series.push({ date: day, remaining: lastRemaining });
-      continue;
-    }
-    const cutoff = day + "T23:59:59";
-    const doneUnits = tasks.reduce((n, t) => {
-      if (t.status !== "done") return n;
-      if (!t.updated_at || t.updated_at > cutoff) return n;
-      return n + (usePoints ? t.estimate ?? 0 : 1);
-    }, 0);
-    lastRemaining = totalUnits - doneUnits;
-    series.push({ date: day, remaining: lastRemaining });
-  }
-  return series;
 }

@@ -92,11 +92,11 @@ export function WorkingDiffPane({
       <header className="flex items-center gap-2.5 border-b border-line-soft px-4 py-2.5">
         <FileText size={14} className="shrink-0 text-text-3" />
         <div className="min-w-0 flex-1">
-          <div className="truncate text-[12.5px] font-medium text-text-1" title={path}>
+          <div className="truncate text-base font-medium text-text-1" title={path}>
             {name}
           </div>
           {dir && (
-            <div className="truncate text-[10.5px] text-text-4" title={path}>
+            <div className="truncate text-xs text-text-4" title={path}>
               {dir}
             </div>
           )}
@@ -108,7 +108,7 @@ export function WorkingDiffPane({
               type="button"
               onClick={() => setDiffView("split")}
               className={
-                "h-5 px-1.5 text-[10.5px] " +
+                "h-5 px-1.5 text-xs " +
                 (effectiveMode === "split"
                   ? "bg-bg-2 text-text-1"
                   : "text-text-3 hover:text-text-1")
@@ -122,7 +122,7 @@ export function WorkingDiffPane({
               type="button"
               onClick={() => setDiffView("unified")}
               className={
-                "h-5 px-1.5 text-[10.5px] " +
+                "h-5 px-1.5 text-xs " +
                 (effectiveMode === "unified"
                   ? "bg-bg-2 text-text-1"
                   : "text-text-3 hover:text-text-1")
@@ -140,7 +140,7 @@ export function WorkingDiffPane({
             aria-pressed={ignoreWs}
             title={ignoreWs ? "Whitespace-only changes hidden" : "Hide whitespace-only changes"}
             className={
-              "h-5 shrink-0 rounded border px-1.5 text-[10.5px] " +
+              "h-5 shrink-0 rounded border px-1.5 text-xs " +
               (ignoreWs
                 ? "border-[var(--color-accent)] bg-bg-2 text-[var(--color-accent)]"
                 : "border-line-soft text-text-3 hover:text-text-1")
@@ -157,17 +157,17 @@ export function WorkingDiffPane({
 
       <div className="flex-1 min-h-0 overflow-hidden">
         {state === "loading" ? (
-          <div className="flex items-center gap-1.5 px-4 py-4 text-[12px] text-text-4">
-            <AsciiSpinner className="text-[10px]" />
+          <div className="flex items-center gap-1.5 px-4 py-4 text-sm text-text-4">
+            <AsciiSpinner className="text-2xs" />
             <span>Reading this change…</span>
           </div>
         ) : state === "error" ? (
-          <div className="px-4 py-4 text-[12px] text-text-4">
+          <div className="px-4 py-4 text-sm text-text-4">
             Couldn’t read this file’s changes.
           </div>
         ) : !hasDiff ? (
-          <div className="px-4 py-6 text-[12.5px] leading-relaxed text-text-4">
-            No line-by-line changes to show here — this file is new or already
+          <div className="px-4 py-6 text-base leading-relaxed text-text-4">
+            No line-by-line changes to show here. This file is new or already
             staged whole. Open it in the editor to see its contents.
           </div>
         ) : effectiveMode === "split" ? (

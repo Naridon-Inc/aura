@@ -10,7 +10,11 @@ import type { ConflictedNode } from "../../../lib/api";
 import { agoShort, baseName } from "./syncFormat";
 
 type Props = {
-  conflicts: ConflictedNode[];
+  /** `null` while the conflict store hasn't been read. No Conflicts group
+   *  on screen reads as "nobody has touched your work" — the one thing
+   *  this section exists to tell you — so an unread store says so instead
+   *  of quietly disappearing. */
+  conflicts: ConflictedNode[] | null;
   isOpen: boolean;
   onToggle: () => void;
   busyId: string | null;
@@ -29,16 +33,21 @@ export function ConflictsSection({
   return (
     <CategorySection
       title="Conflicts"
-      count={conflicts.length}
+      count={conflicts?.length ?? 0}
       isOpen={isOpen}
       onToggle={onToggle}
+      empty={
+        conflicts === null
+          ? "Couldn’t check whether anyone has changed the same code as you. This list isn’t up to date."
+          : undefined
+      }
     >
-      {conflicts.map((c) => {
+      {(conflicts ?? []).map((c) => {
         const busy = busyId === c.id;
         return (
           <div
             key={c.id}
-            className="group w-full flex items-center gap-2 px-2 py-1.5 rounded-sm hover:bg-bg-2/60 transition-colors min-w-0"
+            className="group w-full flex items-center gap-2 px-2 py-1.5 rounded-sm hover:bg-state-hover transition-colors min-w-0"
           >
             <Tooltip>
               <TooltipTrigger asChild>
@@ -47,20 +56,20 @@ export function ConflictsSection({
                   onClick={() => onOpenFile?.(c.file)}
                   className="flex items-center gap-2 flex-1 min-w-0 text-left"
                 >
-                  <span className="shrink-0 w-4 h-4 rounded-sm flex items-center justify-center text-[10px] font-mono font-semibold bg-bg-1 text-red">
+                  <span className="shrink-0 w-4 h-4 rounded-sm flex items-center justify-center text-2xs font-mono font-semibold bg-bg-1 text-red">
                     !
                   </span>
                   <span className="flex-1 min-w-0 flex items-center gap-1.5">
-                    <span className="text-[12px] text-text-1 truncate">
+                    <span className="text-sm text-text-1 truncate">
                       {c.identifier || baseName(c.file)}
                     </span>
-                    <span className="text-[10.5px] text-text-4 font-mono truncate shrink min-w-0">
+                    <span className="text-xs text-text-4 font-mono truncate shrink min-w-0">
                       {baseName(c.file)}
                     </span>
                   </span>
                 </button>
               </TooltipTrigger>
-              <TooltipContent side="left" className="text-[10.5px]">
+              <TooltipContent side="left" className="text-xs">
                 <div className="font-medium mb-0.5 truncate max-w-[260px]">
                   {c.file}
                 </div>
@@ -108,7 +117,7 @@ function ResolveBtn({
             onClick();
           }}
           disabled={disabled}
-          className="px-1.5 h-5 rounded text-[10px] text-text-3 hover:text-text-1 hover:bg-bg-1 disabled:opacity-50 transition-colors whitespace-nowrap"
+          className="px-1.5 h-5 rounded text-2xs text-text-3 hover:text-text-1 hover:bg-state-hover disabled:opacity-50 transition-colors whitespace-nowrap"
         >
           {label}
         </button>

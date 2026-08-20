@@ -13,6 +13,9 @@
 
 import { useEffect, useState } from "react";
 import { onExternalAnchorClick } from "../../lib/openExternal";
+import { shortDate } from "../../lib/calendarDate";
+import { clockTime } from "../../lib/clockTime";
+import { monogram } from "../../lib/monogram";
 import { invalidatePrDetail } from "../../lib/prDetailCache";
 import { humanizeFindingText } from "../../lib/humanizeFinding";
 import {
@@ -23,6 +26,11 @@ import {
   type PrRelatedIssue,
   type PrReviewer,
 } from "../../lib/api";
+import {
+  REVIEW_CHANNELS,
+  reviewFlash,
+  type ReviewSection,
+} from "../../lib/reviewVerdict";
 import { PrLabelsCard } from "./PrLabelsCard";
 import { usePrThreadActive } from "./PrThreadColumn";
 import { AsciiSpinner } from "../ui/ascii-spinner";
@@ -32,6 +40,8 @@ import {
   type ChipTone,
   PR_STATE_CHIP,
 } from "../ui/statusChip";
+import { relativeAgeAuto } from "../../lib/relativeTime";
+import { sentenceCase } from "../../lib/textCase";
 
 export type ThreadCounts = {
   total: number;
@@ -43,8 +53,6 @@ type Props = {
   checks: ChecksSummary | null;
   stackReadyCount: number;
   onMerge?: () => void;
-  onToggleMergeWhenReady?: () => void;
-  mergeWhenReady?: boolean;
   /** Repo root + PR number forwarded to the labels card so it can
    *  edit labels without re-deriving them from `detail`. */
   repoRoot: string;
@@ -88,8 +96,6 @@ export function PrRightRail({
   checks,
   stackReadyCount,
   onMerge,
-  onToggleMergeWhenReady,
-  mergeWhenReady = false,
   repoRoot,
   prNumber,
   labels,
@@ -100,12 +106,7 @@ export function PrRightRail({
 }: Props) {
   const cards = (
     <div className="space-y-3">
-      <StatusCard
-        state={detail.state}
-        isDraft={detail.is_draft}
-        mergeWhenReady={mergeWhenReady}
-        onToggleMergeWhenReady={onToggleMergeWhenReady}
-      />
+      <StatusCard state={detail.state} isDraft={detail.is_draft} />
       {detail.state === "MERGED" && (
         <MergedCeremonyCard
           mergedBy={detail.merged_by}
@@ -151,17 +152,11 @@ export function PrRightRail({
 
 // ── Cards ───────────────────────────────────────────────────────────
 
-function StatusCard({
-  state,
-  isDraft,
-  mergeWhenReady,
-  onToggleMergeWhenReady,
-}: {
-  state: string;
-  isDraft: boolean;
-  mergeWhenReady: boolean;
-  onToggleMergeWhenReady?: () => void;
-}) {
+// Open/draft/merged/closed, and nothing else. This used to carry a "Merge
+// when ready" switch that read like GitHub's auto-merge; it was a bare
+// useState with no endpoint behind it, so it forgot itself on reload and
+// nothing ever merged when the checks went green.
+function StatusCard({ state, isDraft }: { state: string; isDraft: boolean }) {
   const isMerged = state === "MERGED";
   const isClosed = state === "CLOSED";
   const stateKey: keyof typeof PR_STATE_CHIP = isDraft
@@ -172,19 +167,13 @@ function StatusCard({
         ? "closed"
         : "open";
   const spec = PR_STATE_CHIP[stateKey];
-  const label = isDraft ? "Draft" : capitalize(state.toLowerCase());
+  const label = isDraft ? "Draft" : sentenceCase(state.toLowerCase());
   return (
     <div className="rounded-lg border border-line-soft bg-bg-content overflow-hidden">
       <div className="flex items-center gap-2 px-3.5 h-11">
         <StatusChip tone={spec.tone} dot icon={<PrIcon />}>
           {label}
         </StatusChip>
-        {!isMerged && !isClosed && (
-          <div className="ml-auto flex items-center gap-2">
-            <span className="text-[11.5px] text-text-3">Merge when ready</span>
-            <Toggle on={mergeWhenReady} onChange={() => onToggleMergeWhenReady?.()} />
-          </div>
-        )}
       </div>
     </div>
   );
@@ -204,16 +193,16 @@ function UnresolvedCommentsCard({
       <div className="flex items-start gap-2">
         <span
           aria-hidden
-          className="text-[13px] leading-none font-semibold mt-0.5"
+          className="text-base leading-none font-semibold mt-0.5"
           style={{ color: AMBER }}
         >
           !
         </span>
         <div className="flex-1 min-w-0">
-          <div className="text-[12px] font-semibold text-text-1">
+          <div className="text-sm font-semibold text-text-1">
             Unresolved comments
           </div>
-          <div className="text-[11px] text-text-3 mt-0.5 leading-snug">
+          <div className="text-xs text-text-3 mt-0.5 leading-snug">
             {count} {noun} {count === 1 ? "needs" : "need"} resolving before this
             PR can merge.
           </div>
@@ -254,16 +243,16 @@ function MergedCeremonyCard({
       <div className="flex items-start gap-2">
         <span
           aria-hidden
-          className="text-[13px] leading-none font-semibold mt-0.5"
+          className="text-base leading-none font-semibold mt-0.5"
           style={{ color: "var(--color-violet)" }}
         >
           ✓
         </span>
         <div className="flex-1 min-w-0">
-          <div className="text-[12px] font-semibold text-text-1">
+          <div className="text-sm font-semibold text-text-1">
             Merged
           </div>
-          <div className="text-[11px] text-text-3 mt-0.5 leading-snug">
+          <div className="text-xs text-text-3 mt-0.5 leading-snug">
             {mergedBy
               ? `Merged by ${mergedBy}${when ? ` on ${when}` : ""}.`
               : when
@@ -286,17 +275,7 @@ function MergedCeremonyCard({
 function formatMergeTime(iso: string): string {
   const t = Date.parse(iso);
   if (Number.isNaN(t)) return "";
-  const d = new Date(t);
-  const date = d.toLocaleDateString(undefined, {
-    month: "short",
-    day: "numeric",
-    year: "numeric",
-  });
-  const time = d.toLocaleTimeString(undefined, {
-    hour: "numeric",
-    minute: "2-digit",
-  });
-  return `${date}, ${time}`;
+  return `${shortDate(t)}, ${clockTime(t)}`;
 }
 
 function AssigneesCard({ assignees }: { assignees: string[] }) {
@@ -311,7 +290,7 @@ function AssigneesCard({ assignees }: { assignees: string[] }) {
         <Button
           variant="ghost"
           size="icon-sm"
-          className="w-5 h-5 text-text-4 hover:text-text-1 text-[12px]"
+          className="w-5 h-5 text-text-4 hover:text-text-1 text-sm"
           title="Add assignee"
         >
           +
@@ -320,12 +299,12 @@ function AssigneesCard({ assignees }: { assignees: string[] }) {
     >
       {expanded && (
         assignees.length === 0 ? (
-          <div className="text-[11.5px] text-text-4">
+          <div className="text-sm text-text-4">
             No assignees ·{" "}
             <Button
               variant="link"
               size="xs"
-              className="h-auto px-0 text-[11.5px] text-text-3 hover:text-text-1"
+              className="h-auto px-0 text-sm text-text-3 hover:text-text-1"
             >
               Assign yourself
             </Button>
@@ -346,7 +325,7 @@ function AssigneeRow({ login }: { login: string }) {
   return (
     <div className="flex items-center gap-2.5 py-0.5">
       <ReviewerAvatar name={login} />
-      <span className="flex-1 min-w-0 truncate text-[12px] text-text-2">{login}</span>
+      <span className="flex-1 min-w-0 truncate text-sm text-text-2">{login}</span>
     </div>
   );
 }
@@ -364,7 +343,7 @@ function RelatedTasksCard({ issues }: { issues: PrRelatedIssue[] }) {
         <Button
           variant="ghost"
           size="icon-sm"
-          className="w-5 h-5 text-text-4 hover:text-text-1 text-[12px]"
+          className="w-5 h-5 text-text-4 hover:text-text-1 text-sm"
           title="Link a task"
         >
           +
@@ -373,7 +352,7 @@ function RelatedTasksCard({ issues }: { issues: PrRelatedIssue[] }) {
     >
       {expanded && (
         issues.length === 0 ? (
-          <div className="text-[11.5px] text-text-4">No related tasks</div>
+          <div className="text-sm text-text-4">No related tasks</div>
         ) : (
           <div className="space-y-1.5">
             {issues.map((i) => (
@@ -397,7 +376,7 @@ function RelatedTaskRow({ issue }: { issue: PrRelatedIssue }) {
       className="flex items-center gap-2 py-0.5 group"
     >
       <span
-        className="w-4 h-4 rounded-sm flex items-center justify-center flex-shrink-0 text-[10px] font-bold"
+        className="w-4 h-4 rounded-sm flex items-center justify-center flex-shrink-0 text-2xs font-bold"
         style={{
           background: `color-mix(in srgb, ${
             closed ? "var(--color-violet)" : "var(--color-accent-green)"
@@ -407,10 +386,10 @@ function RelatedTaskRow({ issue }: { issue: PrRelatedIssue }) {
       >
         {closed ? "✓" : "○"}
       </span>
-      <span className="text-[11.5px] font-mono text-text-4 flex-shrink-0">
+      <span className="text-sm font-mono text-text-4 flex-shrink-0">
         #{issue.number}
       </span>
-      <span className="text-[12px] text-text-2 truncate group-hover:text-text-1 transition-colors">
+      <span className="text-sm text-text-2 truncate group-hover:text-text-1 transition-colors">
         {issue.title}
       </span>
     </a>
@@ -429,16 +408,16 @@ function ReadyToMergeCard({
       <div className="flex items-start gap-2">
         <span
           aria-hidden
-          className="text-[14px] mt-0.5"
+          className="text-md mt-0.5"
           style={{ color: "var(--color-accent-green)" }}
         >
           ✓
         </span>
         <div className="flex-1 min-w-0">
-          <div className="text-[12px] font-semibold text-text-1">
+          <div className="text-sm font-semibold text-text-1">
             {count > 1 ? "Ready to merge as stack" : "Ready to merge"}
           </div>
-          <div className="text-[11px] text-text-3 mt-0.5 leading-snug">
+          <div className="text-xs text-text-3 mt-0.5 leading-snug">
             {count > 1
               ? "This PR and all the PRs stacked below it can be merged."
               : "All checks pass and reviewers have approved."}
@@ -466,11 +445,11 @@ function ChecksCard({ checks }: { checks: ChecksSummary | null }) {
         collapsible
         expanded={expanded}
         onToggle={() => setExpanded(!expanded)}
-        right={<span className="text-[11px] text-text-4">—</span>}
+        right={<span className="text-xs text-text-4">·</span>}
       >
         {expanded && (
-          <div className="flex items-center gap-2 text-[11.5px] text-text-4">
-            <span className="w-4 h-4 rounded-full border border-line-soft flex items-center justify-center text-[8px] text-text-4">
+          <div className="flex items-center gap-2 text-sm text-text-4">
+            <span className="w-4 h-4 rounded-full border border-line-soft flex items-center justify-center text-2xs text-text-4">
               ⏿
             </span>
             <span>No automated checks set up</span>
@@ -548,7 +527,7 @@ function CheckRow({
         : AMBER;
   const icon = (
     <span
-      className="w-3.5 h-3.5 rounded-sm text-[10px] flex items-center justify-center font-bold"
+      className="w-3.5 h-3.5 rounded-sm text-2xs flex items-center justify-center font-bold"
       style={{
         background: `color-mix(in srgb, ${glyphColor} 20%, transparent)`,
         color: glyphColor,
@@ -561,9 +540,9 @@ function CheckRow({
     <div className="flex items-start gap-2">
       <GhActionIcon />
       <div className="flex-1 min-w-0">
-        <div className="text-[11.5px] text-text-1 truncate font-mono">{name}</div>
+        <div className="text-sm text-text-1 truncate font-mono">{name}</div>
         {summary && (
-          <div className="text-[10.5px] text-text-4 truncate">{summary}</div>
+          <div className="text-xs text-text-4 truncate">{summary}</div>
         )}
       </div>
       {icon}
@@ -584,7 +563,7 @@ function ReviewersCard({ reviewers }: { reviewers: PrReviewer[] }) {
         <Button
           variant="ghost"
           size="icon-sm"
-          className="w-5 h-5 text-text-4 hover:text-text-1 text-[12px]"
+          className="w-5 h-5 text-text-4 hover:text-text-1 text-sm"
           title="Add reviewer"
         >
           +
@@ -593,7 +572,7 @@ function ReviewersCard({ reviewers }: { reviewers: PrReviewer[] }) {
     >
       {expanded && (
         reviewers.length === 0 ? (
-          <div className="flex items-center gap-2 text-[11.5px] text-text-4">
+          <div className="flex items-center gap-2 text-sm text-text-4">
             <span className="w-4 h-4 rounded-full border border-line-soft" />
             <span>No reviewers requested</span>
           </div>
@@ -621,25 +600,25 @@ function ReviewerRow({ reviewer }: { reviewer: PrReviewer }) {
   const statusIcon =
     reviewer.state === "APPROVED" ? (
       <span
-        className="text-[12px] leading-none"
+        className="text-sm leading-none"
         style={{ color: "var(--color-accent-green)" }}
       >
         ✓
       </span>
     ) : reviewer.state === "CHANGES_REQUESTED" ? (
       <span
-        className="text-[12px] leading-none"
+        className="text-sm leading-none"
         style={{ color: "var(--color-red)" }}
       >
         ✕
       </span>
     ) : reviewer.state === "COMMENTED" ? (
-      <span className="text-text-3 text-[11px] leading-none">💬</span>
+      <span className="text-text-3 text-xs leading-none">💬</span>
     ) : null;
   return (
     <div className="flex items-center gap-2.5 py-0.5">
       <ReviewerAvatar name={reviewer.login} />
-      <span className={`flex-1 min-w-0 truncate text-[12px] ${tone}`}>
+      <span className={`flex-1 min-w-0 truncate text-sm ${tone}`}>
         {reviewer.login}
       </span>
       {statusIcon}
@@ -648,12 +627,13 @@ function ReviewerRow({ reviewer }: { reviewer: PrReviewer }) {
 }
 
 function ReviewerAvatar({ name }: { name: string }) {
-  const initial = (name || "?").charAt(0).toUpperCase();
+  // One monogram for the whole app — see lib/monogram.
+  const initial = monogram(name);
   // Hue-rotated by login so two reviewers don't look identical.
   const hue = hashHue(name);
   return (
     <span
-      className="w-6 h-6 rounded-full flex items-center justify-center text-[10px] font-bold flex-shrink-0 text-white"
+      className="w-6 h-6 rounded-full flex items-center justify-center text-2xs font-bold flex-shrink-0 text-white"
       style={{
         backgroundColor: `hsl(${hue}, 45%, 38%)`,
       }}
@@ -726,16 +706,9 @@ function AuraReviewCard({
       // needing to navigate away and back.
       try {
         const refreshed = await invalidatePrDetail(repoRoot, prNumber);
-        const r = refreshed.aura_review;
-        const violations = r?.invariant_violations?.length ?? 0;
-        const unverified = countUnverified(r?.unverified_nodes ?? null);
-        const parts: string[] = [];
-        if (violations > 0)
-          parts.push(`${violations} broken rule${violations === 1 ? "" : "s"}`);
-        if (unverified > 0) parts.push(`${unverified} unproven`);
-        const summary = parts.length
-          ? `Safety check done · ${parts.join(" · ")}`
-          : "Safety check done · all clear";
+        // Every channel the card counts, and an honest sentence when the
+        // payload didn't come back at all. See `reviewFlash`.
+        const summary = reviewFlash(refreshed.aura_review);
         setSuccessFlash(summary);
         // OS toast so the user sees confirmation even if the PR pane is
         // out of view.
@@ -778,8 +751,8 @@ function AuraReviewCard({
       >
         {expanded && (
           <div className="space-y-2">
-            <div className="text-[11.5px] text-text-4 leading-snug">
-              A second set of eyes on this change — Aura compares it against{" "}
+            <div className="text-sm text-text-4 leading-snug">
+              A second set of eyes on this change. Aura compares it against{" "}
               <span className="font-mono text-text-3">{baseRef || "the base"}</span>{" "}
               for broken rules, what else it touches, and anything left unproven.
             </div>
@@ -792,7 +765,7 @@ function AuraReviewCard({
             >
               {running ? (
                 <>
-                  <AsciiSpinner className="text-[11px]" />
+                  <AsciiSpinner className="text-xs" />
                   <span className="tabular-nums">Running… {runElapsed}s</span>
                 </>
               ) : (
@@ -800,7 +773,7 @@ function AuraReviewCard({
               )}
             </Button>
             {successFlash && (
-              <div className="text-[11px] rounded border border-line-soft bg-bg-1 px-2 py-1.5 flex items-center gap-1.5 text-text-2">
+              <div className="text-xs rounded border border-line-soft bg-bg-1 px-2 py-1.5 flex items-center gap-1.5 text-text-2">
                 <svg
                   width="11"
                   height="11"
@@ -817,12 +790,12 @@ function AuraReviewCard({
             {error && (
               <details
                 open
-                className="text-[10.5px] rounded border border-line-soft bg-bg-1 px-2 py-1.5"
+                className="text-xs rounded border border-line-soft bg-bg-1 px-2 py-1.5"
               >
                 <summary className="text-red font-medium cursor-pointer select-none">
                   Review failed
                 </summary>
-                <pre className="mt-1 whitespace-pre-wrap break-words text-red/90 font-mono text-[10px] leading-snug max-h-32 overflow-y-auto">
+                <pre className="mt-1 whitespace-pre-wrap break-words text-red/90 font-mono text-2xs leading-snug max-h-32 overflow-y-auto">
                   {error.length > 800 ? error.slice(0, 800) + "\n…" : error}
                 </pre>
               </details>
@@ -834,7 +807,6 @@ function AuraReviewCard({
   }
 
   const tone = riskTone(review.risk_score);
-  const unverifiedCount = countUnverified(review.unverified_nodes);
 
   return (
     <Card
@@ -850,7 +822,7 @@ function AuraReviewCard({
         >
           {running ? (
             <>
-              <AsciiSpinner className="text-[10px]" />
+              <AsciiSpinner className="text-2xs" />
               <span className="tabular-nums">{runElapsed}s</span>
             </>
           ) : (
@@ -868,7 +840,7 @@ function AuraReviewCard({
       {expanded && (
         <div className="space-y-2.5">
           {successFlash && (
-            <div className="text-[11px] rounded border border-accent-green/40 bg-accent-green/10 text-accent-green px-2 py-1.5 flex items-center gap-1.5">
+            <div className="text-xs rounded border border-accent-green/40 bg-accent-green/10 text-accent-green px-2 py-1.5 flex items-center gap-1.5">
               <svg width="11" height="11" viewBox="0 0 12 12" fill="none">
                 <path d="M2.5 6.5l2.5 2.5 4.5-5" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" />
               </svg>
@@ -878,12 +850,12 @@ function AuraReviewCard({
           {error && (
             <details
               open
-              className="text-[10.5px] rounded border border-red/40 bg-red/10 px-2 py-1.5"
+              className="text-xs rounded border border-red/40 bg-red/10 px-2 py-1.5"
             >
               <summary className="text-red font-medium cursor-pointer select-none">
                 Safety-check error
               </summary>
-              <pre className="mt-1 whitespace-pre-wrap break-words text-red/90 font-mono text-[10px] leading-snug max-h-32 overflow-y-auto">
+              <pre className="mt-1 whitespace-pre-wrap break-words text-red/90 font-mono text-2xs leading-snug max-h-32 overflow-y-auto">
                 {error.length > 800 ? error.slice(0, 800) + "\n…" : error}
               </pre>
             </details>
@@ -894,52 +866,29 @@ function AuraReviewCard({
               {review.risk_label || riskLabel(review.risk_score)}
             </StatusChip>
             <span
-              className="text-[11px] text-text-4 tabular-nums"
+              className="text-xs text-text-4 tabular-nums"
               title="How risky this change looks, scored 0–100 (higher = riskier)"
             >
               risk {review.risk_score}/100
             </span>
-            <span className="ml-auto text-[10.5px] text-text-4">
+            <span className="ml-auto text-xs text-text-4">
               {review.total_changes} change{review.total_changes === 1 ? "" : "s"}
             </span>
           </div>
 
-          {/* Counters grid */}
-          <div className="grid grid-cols-2 gap-1.5 text-[11px]">
-            <Counter
-              label="Broken rules"
-              count={review.invariant_violations.length}
-              tone="red"
-              active={section === "violations"}
-              onClick={() =>
-                setSection(section === "violations" ? null : "violations")
-              }
-            />
-            <Counter
-              label="Ripple effects"
-              count={review.blast_radius.length}
-              tone="amber"
-              active={section === "blast"}
-              onClick={() => setSection(section === "blast" ? null : "blast")}
-            />
-            <Counter
-              label="Unproven"
-              count={unverifiedCount}
-              tone="violet"
-              active={section === "unverified"}
-              onClick={() =>
-                setSection(section === "unverified" ? null : "unverified")
-              }
-            />
-            <Counter
-              label="Branch clashes"
-              count={review.cross_branch_conflicts.length}
-              tone="sky"
-              active={section === "conflicts"}
-              onClick={() =>
-                setSection(section === "conflicts" ? null : "conflicts")
-              }
-            />
+          {/* Counters grid — one per REVIEW_CHANNELS entry, so the grid and
+              the summary line can never name different sets again. */}
+          <div className="grid grid-cols-2 gap-1.5 text-xs">
+            {REVIEW_CHANNELS.map((ch) => (
+              <Counter
+                key={ch.key}
+                label={ch.label}
+                count={ch.items(review).length}
+                tone={ch.tone}
+                active={section === ch.key}
+                onClick={() => setSection(section === ch.key ? null : ch.key)}
+              />
+            ))}
           </div>
 
           {section && (
@@ -951,18 +900,18 @@ function AuraReviewCard({
           {error && (
             <details
               open
-              className="text-[10.5px] rounded border border-red/40 bg-red/10 px-2 py-1.5"
+              className="text-xs rounded border border-red/40 bg-red/10 px-2 py-1.5"
             >
               <summary className="text-red font-medium cursor-pointer select-none">
                 Re-run failed
               </summary>
-              <pre className="mt-1 whitespace-pre-wrap break-words text-red/90 font-mono text-[10px] leading-snug max-h-32 overflow-y-auto">
+              <pre className="mt-1 whitespace-pre-wrap break-words text-red/90 font-mono text-2xs leading-snug max-h-32 overflow-y-auto">
                 {error.length > 800 ? error.slice(0, 800) + "\n…" : error}
               </pre>
             </details>
           )}
 
-          <div className="text-[10.5px] text-text-4">
+          <div className="text-xs text-text-4">
             Updated {relAge(review.ts)} · base{" "}
             <span className="font-mono text-text-3">{review.base_branch}</span>
           </div>
@@ -1019,25 +968,19 @@ function FindingList({
   section,
 }: {
   review: AuraReviewPayload;
-  section: "violations" | "blast" | "unverified" | "conflicts";
+  section: ReviewSection;
 }) {
-  const items: string[] =
-    section === "violations"
-      ? review.invariant_violations
-      : section === "blast"
-        ? review.blast_radius
-        : section === "conflicts"
-          ? review.cross_branch_conflicts
-          : flattenUnverified(review.unverified_nodes);
+  const channel = REVIEW_CHANNELS.find((c) => c.key === section);
+  const items = channel ? channel.items(review) : [];
   if (items.length === 0) {
     return (
-      <div className="px-2 py-2 text-[11px] text-text-4 italic">Nothing here.</div>
+      <div className="px-2 py-2 text-xs text-text-4 italic">Nothing here.</div>
     );
   }
   // Rule-breaks and clashes arrive as raw engine strings ("Protected Node
   // Deleted: …") — read them as plain prose. Ripple effects and unproven
   // items are bare code identifiers, so they stay in a mono font.
-  const isProse = section === "violations" || section === "conflicts";
+  const isProse = channel?.prose ?? false;
   return (
     <ul className="divide-y divide-line-soft/40">
       {items.map((it, i) => (
@@ -1045,8 +988,8 @@ function FindingList({
           key={i}
           className={
             isProse
-              ? "px-2 py-1.5 text-[11px] text-text-2 break-words leading-snug"
-              : "px-2 py-1.5 text-[11px] text-text-2 font-mono break-words leading-snug"
+              ? "px-2 py-1.5 text-xs text-text-2 break-words leading-snug"
+              : "px-2 py-1.5 text-xs text-text-2 font-mono break-words leading-snug"
           }
         >
           {isProse ? humanizeFindingText(it) : it}
@@ -1068,38 +1011,11 @@ function riskLabel(score: number): string {
   return "Low risk";
 }
 
-function countUnverified(uv: unknown): number {
-  if (Array.isArray(uv)) return uv.length;
-  return 0;
-}
-
-function flattenUnverified(uv: unknown): string[] {
-  if (!Array.isArray(uv)) return [];
-  return uv.map((n) => {
-    if (typeof n === "string") return n;
-    if (n && typeof n === "object") {
-      const obj = n as Record<string, unknown>;
-      const path = typeof obj.path === "string" ? obj.path : null;
-      const node = typeof obj.node === "string" ? obj.node : null;
-      if (path && node) return `${path} :: ${node}`;
-      if (path) return path;
-      if (node) return node;
-      return JSON.stringify(obj);
-    }
-    return String(n);
-  });
-}
-
 function relAge(ts: number): string {
-  if (!ts) return "—";
-  // Backend ts may be unix seconds or millis; normalise.
-  const ms = ts > 1e12 ? ts : ts * 1000;
-  const diff = Math.floor((Date.now() - ms) / 1000);
-  if (diff < 60) return "just now";
-  if (diff < 3600) return `${Math.floor(diff / 60)}m ago`;
-  if (diff < 86400) return `${Math.floor(diff / 3600)}h ago`;
-  if (diff < 2592000) return `${Math.floor(diff / 86400)}d ago`;
-  return `${Math.floor(diff / 2592000)}mo ago`;
+  // One ladder for the whole app — see lib/relativeTime. Backend ts is unix
+  // seconds on some rows and millis on others; that test lives there now,
+  // because writing it twice by hand is how the copies start.
+  return relativeAgeAuto(ts, { empty: "—" });
 }
 
 function SparkleIcon() {
@@ -1154,9 +1070,9 @@ function Card({
             </svg>
           </button>
         )}
-        <span className="text-[12.5px] font-semibold text-text-1">{title}</span>
+        <span className="text-base font-semibold text-text-1">{title}</span>
         {typeof count === "number" && (
-          <span className="text-[11.5px] text-text-4 tabular-nums">{count}</span>
+          <span className="text-sm text-text-4 tabular-nums">{count}</span>
         )}
         <div className="ml-auto">{right}</div>
       </div>
@@ -1164,25 +1080,6 @@ function Card({
         <div className="px-3.5 py-3">{children}</div>
       )}
     </div>
-  );
-}
-
-function Toggle({ on, onChange }: { on: boolean; onChange: () => void }) {
-  return (
-    <button
-      type="button"
-      onClick={onChange}
-      role="switch"
-      aria-checked={on}
-      className="relative w-7 h-4 rounded-full transition-colors"
-      style={{ background: on ? "var(--color-violet)" : "var(--color-bg-3)" }}
-    >
-      <span
-        className={`absolute top-0.5 w-3 h-3 rounded-full bg-white transition-transform ${
-          on ? "translate-x-3.5" : "translate-x-0.5"
-        }`}
-      />
-    </button>
   );
 }
 
@@ -1239,8 +1136,4 @@ function synthRows(c: ChecksSummary): NonNullable<ChecksSummary["rows"]> {
     });
   }
   return rows;
-}
-
-function capitalize(s: string): string {
-  return s.length === 0 ? s : s[0].toUpperCase() + s.slice(1);
 }

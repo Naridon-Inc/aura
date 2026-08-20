@@ -347,17 +347,17 @@ export function OpenAiCompatChatView({ tab }: Props) {
           <AgentIcon agentId="openai-compat" size={20} />
         </div>
         <div className="flex flex-col leading-tight min-w-0">
-          <span className="text-text-1 text-[12.5px] font-semibold truncate">
+          <span className="text-text-1 text-base font-semibold truncate">
             {displayLabel}
           </span>
-          <span className="text-text-5 text-[10px] font-mono truncate">
+          <span className="text-text-5 text-2xs font-mono truncate">
             {subtitle}
           </span>
         </div>
         <div className="ml-auto flex items-center gap-1.5">
           {profile?.api_key ? null : profile ? (
             <span
-              className="text-[10px] uppercase tracking-wide font-mono px-1.5 py-0.5 rounded"
+              className="text-2xs font-mono px-1.5 py-0.5 rounded"
               style={{
                 // "No key set" is a caveat you may need to act on, not a
                 // feature — the amber slot, same as every other warning chip.
@@ -365,7 +365,7 @@ export function OpenAiCompatChatView({ tab }: Props) {
                 background: "color-mix(in srgb, var(--color-amber) 10%, transparent)",
                 border: "1px solid color-mix(in srgb, var(--color-amber) 40%, transparent)",
               }}
-              title="No API key set — fine for Ollama, required for hosted endpoints."
+              title="No API key set. Fine for Ollama, required for hosted endpoints."
             >
               no-key
             </span>
@@ -374,7 +374,7 @@ export function OpenAiCompatChatView({ tab }: Props) {
             type="button"
             onClick={clear}
             disabled={messages.length === 0 || streaming}
-            className="px-2 h-6 rounded text-[11px] font-medium border transition-colors disabled:opacity-40"
+            className="px-2 h-6 rounded text-xs font-medium border transition-colors disabled:opacity-40"
             style={{
               background: "color-mix(in srgb, var(--color-bg-1) 70%, transparent)",
               color: "var(--color-text-3)",
@@ -390,7 +390,7 @@ export function OpenAiCompatChatView({ tab }: Props) {
       {profileError && (
         <div
           role="alert"
-          className="px-4 py-2 text-[11.5px] border-b"
+          className="px-4 py-2 text-sm border-b"
           style={{
             color: "var(--color-red)",
             background: "color-mix(in srgb, var(--color-red) 10%, transparent)",
@@ -408,7 +408,7 @@ export function OpenAiCompatChatView({ tab }: Props) {
       >
         <div className="max-w-[860px] mx-auto px-6 py-5 flex flex-col gap-4">
           {messages.length === 0 && (
-            <div className="text-text-5 text-[12.5px] py-8 text-center">
+            <div className="text-text-5 text-base py-8 text-center">
               {profile
                 ? `Send a message to ${profile.model}.`
                 : "Configure a profile in Settings → Local & Custom Models."}
@@ -439,13 +439,13 @@ export function OpenAiCompatChatView({ tab }: Props) {
           }
           disabled={!profile || streaming}
           rows={2}
-          className="flex-1 min-w-0 resize-none rounded bg-bg-0 border border-line-soft text-text-1 text-[13px] px-3 py-2 placeholder:text-text-5 focus:outline-none focus:border-line disabled:opacity-50"
+          className="flex-1 min-w-0 resize-none rounded bg-bg-0 border border-line-soft text-text-1 text-base px-3 py-2 placeholder:text-text-5 focus:outline-none focus:border-line disabled:opacity-50"
         />
         {streaming ? (
           <button
             type="button"
             onClick={stop}
-            className="px-3 h-9 rounded text-[12px] font-medium border transition-colors"
+            className="px-3 h-9 rounded text-sm font-medium border transition-colors"
             style={{
               background: "color-mix(in srgb, var(--color-red) 10%, transparent)",
               color: "var(--color-red)",
@@ -460,7 +460,7 @@ export function OpenAiCompatChatView({ tab }: Props) {
             type="button"
             onClick={() => void send()}
             disabled={!composer.trim() || !profile}
-            className="px-4 h-9 rounded text-[12px] font-medium border transition-colors disabled:opacity-40"
+            className="px-4 h-9 rounded text-sm font-medium border transition-colors disabled:opacity-40"
             style={{
               background: brand.bg,
               color: brand.fg,
@@ -485,11 +485,11 @@ function Bubble({ message }: { message: Message }) {
   const roleLabel = isUser ? "You" : "Assistant";
   return (
     <div className={`flex flex-col ${align} gap-1 w-full`}>
-      <span className="text-[10px] uppercase tracking-wider text-text-5">
+      <span className="section-label">
         {roleLabel}
       </span>
       <div
-        className="max-w-[90%] rounded-lg px-3.5 py-2 text-[13.5px] leading-[1.55] text-text-1"
+        className="max-w-[90%] rounded-lg px-3.5 py-2 text-md leading-[1.55] text-text-1"
         style={{
           background: bg,
           border: `1px solid ${border}`,
@@ -522,7 +522,7 @@ function Bubble({ message }: { message: Message }) {
         )}
         {message.error && (
           <div
-            className="mt-2 text-[11.5px]"
+            className="mt-2 text-sm"
             style={{ color: "var(--color-red)" }}
             role="alert"
           >
@@ -564,7 +564,7 @@ function mdComponents() {
       if (inline) {
         return (
           <code
-            className="bg-bg-3 text-text-1 px-1 py-[1px] rounded text-[12.5px] font-mono"
+            className="bg-bg-3 text-text-1 px-1 py-[1px] rounded text-base font-mono"
             {...rest}
           >
             {children}
@@ -573,7 +573,7 @@ function mdComponents() {
       }
       return (
         <code
-          className={`${className ?? ""} block font-mono text-[12.5px]`}
+          className={`${className ?? ""} block font-mono text-base`}
           {...rest}
         >
           {children}
@@ -586,9 +586,9 @@ function mdComponents() {
         {...p}
       />
     ),
-    h1: (p: any) => <h1 {...p} className="text-[17px] font-semibold mt-3 mb-2" />,
-    h2: (p: any) => <h2 {...p} className="text-[15px] font-semibold mt-3 mb-2" />,
-    h3: (p: any) => <h3 {...p} className="text-[14px] font-semibold mt-3 mb-1" />,
+    h1: (p: any) => <h1 {...p} className="text-lg font-semibold mt-3 mb-2" />,
+    h2: (p: any) => <h2 {...p} className="text-lg font-semibold mt-3 mb-2" />,
+    h3: (p: any) => <h3 {...p} className="text-md font-semibold mt-3 mb-1" />,
     blockquote: (p: any) =>
       calloutFromBlockquote(p.className, p.children) ?? (
         <blockquote

@@ -1,0 +1,33 @@
+{
+  "why": [
+    "One table, read by both halves of the app, so the two spellings of shell",
+    "quoting cannot drift apart in silence.",
+    "",
+    "Rust's `cloudbox::script::quote` is the authority: it wraps every value",
+    "this app sends to a machine. The frontend keeps one small copy",
+    "(`remoteShell.ts::shQuote`) for the handful of lines the connect wizard",
+    "types into a shell that is already open — a token to export, a runner name",
+    "— and a copy that quietly stopped agreeing with the original would be a",
+    "quoting bug found on somebody's box rather than in a test.",
+    "",
+    "So both read this file. Change one implementation and its own test fails",
+    "here; change the rule for real and both have to be updated together."
+  ],
+  "cases": [
+    { "raw": "build-box", "quoted": "'build-box'" },
+    { "raw": "Mo's spare mac", "quoted": "'Mo'\\''s spare mac'" },
+    { "raw": "; rm -rf /", "quoted": "'; rm -rf /'" },
+    { "raw": "$(whoami)", "quoted": "'$(whoami)'" },
+    { "raw": "`id`", "quoted": "'`id`'" },
+    { "raw": "a && b", "quoted": "'a && b'" },
+    { "raw": "x | y", "quoted": "'x | y'" },
+    { "raw": "$HOME", "quoted": "'$HOME'" },
+    { "raw": "box'; rm -rf ~; echo '", "quoted": "'box'\\''; rm -rf ~; echo '\\'''" },
+    { "raw": "it's", "quoted": "'it'\\''s'" },
+    { "raw": "", "quoted": "''" },
+    { "raw": "two\nlines", "quoted": "'two\nlines'" },
+    { "raw": "'", "quoted": "''\\'''" },
+    { "raw": "''", "quoted": "''\\'''\\'''" },
+    { "raw": "/home/ubuntu/naridon", "quoted": "'/home/ubuntu/naridon'" }
+  ]
+}

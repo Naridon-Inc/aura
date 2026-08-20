@@ -224,14 +224,19 @@ export function TeamActivityNow({
   const overflow = lines.length - visibleLines.length;
 
   return (
-    <div className="mx-auto max-w-[760px] px-4 pt-3">
-      <div className="rounded-lg border border-line-soft bg-bg-1 p-2.5">
-        <div className="mb-2.5 flex items-baseline justify-between">
-          <span className="text-[11px] uppercase tracking-wide text-text-4">
+    <div className="mx-auto max-w-[760px] px-4 pt-4">
+      {/* Not a card. This is the page's opening line — who is working right
+          now — and it used to be drawn as a bordered, filled box identical to
+          the four stat boxes below it, which said the two were the same kind
+          of thing. They aren't: this is a sentence, those are figures. A
+          heading and its lines need no walls. */}
+      <div>
+        <div className="mb-2 flex items-baseline justify-between">
+          <span className="section-label">
             Right now
           </span>
           {liveCount > 0 ? (
-            <span className="flex items-center gap-1.5 text-[11px] text-text-4">
+            <span className="flex items-center gap-1.5 text-xs text-text-4">
               <span
                 className="inline-block h-1.5 w-1.5 rounded-full"
                 style={{ background: "var(--color-accent-green)" }}
@@ -242,8 +247,13 @@ export function TeamActivityNow({
         </div>
 
         {lines.length === 0 ? (
-          <div className="py-1.5 text-[12px] text-text-4">
-            All quiet — no active sessions right now.
+          // The card is already headed "Right now" — it used to close with
+          // "…no active sessions right now", so a 40px-tall card said its own
+          // scope twice and spent its one sentence on the half the reader
+          // already had. What's worth saying instead is what it means: nothing
+          // is running, so nothing is changing under you.
+          <div className="py-1.5 text-sm text-text-4">
+            All quiet. Nothing is running, so nothing is changing under you.
           </div>
         ) : (
           <div className="flex flex-col gap-2">
@@ -259,7 +269,7 @@ export function TeamActivityNow({
                 ) : (
                   <span className="relative shrink-0">
                     <span
-                      className="flex h-[22px] w-[22px] items-center justify-center rounded-full text-[10px] font-semibold text-text-2"
+                      className="flex h-[22px] w-[22px] items-center justify-center rounded-full text-2xs font-semibold text-text-2"
                       style={{ background: "var(--color-bg-2)" }}
                       aria-hidden="true"
                     >
@@ -278,15 +288,15 @@ export function TeamActivityNow({
                 )}
 
                 <div className="flex min-w-0 flex-1 items-baseline gap-1.5">
-                  <span className="shrink-0 text-[12.5px] font-medium text-text-1">
+                  <span className="shrink-0 text-base font-medium text-text-1">
                     {l.name}
                   </span>
-                  <span className="min-w-0 flex-1 truncate text-[12px] text-text-3">
+                  <span className="min-w-0 flex-1 truncate text-sm text-text-3">
                     {l.detail}
                   </span>
                 </div>
 
-                <span className="shrink-0 text-[11px] text-text-4">
+                <span className="shrink-0 text-xs text-text-4">
                   {l.live ? (
                     <span className="flex items-center gap-1">
                       <span
@@ -302,7 +312,7 @@ export function TeamActivityNow({
               </div>
             ))}
             {overflow > 0 ? (
-              <span className="text-[11px] text-text-4">+{overflow} more</span>
+              <span className="text-xs text-text-4">+{overflow} more</span>
             ) : null}
           </div>
         )}

@@ -10,8 +10,17 @@ use std::path::PathBuf;
 use aura_attestation::SigningKey;
 use colored::Colorize;
 
+use crate::worktree::paths;
+
+/// Anchored at the repository root, like the event log it signs. It was
+/// cwd-relative, which meant `load_or_create` minted a SECOND seed the first
+/// time you ran from a worktree or a subdirectory — one human, two `key_id`s,
+/// and teammates watching what looked like two actors. (Nothing failed
+/// verification: the key is self-certifying, so both identities were perfectly
+/// valid. They just weren't the same person.) It also scattered private key
+/// material into whatever directory you happened to be standing in.
 fn key_path() -> PathBuf {
-    PathBuf::from(".aura").join("awareness").join("identity.key")
+    PathBuf::from(paths::shared_aura_path("awareness")).join("identity.key")
 }
 
 /// `aura identity` — show the repo-local signing identity used to sign awareness
@@ -69,4 +78,50 @@ pub fn load() -> Option<SigningKey> {
 /// or `None` if no identity is available.
 pub fn key_id() -> Option<String> {
     load().map(|k| k.key_id())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+    // The key path is resolved from the process cwd, so these tests take the
+    // same serial lock as every other cwd-mutating test in the crate.
+    use crate::TEST_CWD_LOCK as SERIAL;
+
+    struct CwdGuard(PathBuf);
+    impl Drop for CwdGuard {
+        fn drop(&mut self) {
+            let _ = std::env::set_current_dir(&self.0);
+        }
+    }
+
+    #[test]
+    fn one_person_in_a_repo_has_one_identity_wherever_they_stand() {
+        let _lk = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+        let guard = CwdGuard(std::env::current_dir().expect("cwd"));
+        let d = tempfile::tempdir().expect("tmp");
+        std::env::set_current_dir(d.path()).expect("cd");
+        let _guard = guard;
+
+        // A checkout is a directory with a `.git` in it — enough for the
+        // repo-root walk, and enough for this test.
+        fs::create_dir_all(d.path().join(".git")).expect("git dir");
+        let deep = d.path().join("crates").join("engine");
+        fs::create_dir_all(&deep).expect("subdir");
+
+        let root_id = key_id().expect("an identity is minted on first use");
+
+        // `load_or_create` does exactly what it says, so a cwd-relative key
+        // path minted a SECOND seed the first time you ran from a worktree or
+        // a subdirectory: one human, two `did:aura:key/...` handles, and
+        // teammates watching what looked like two actors. Nothing failed
+        // verification — the key is self-certifying, so both identities were
+        // perfectly valid. They just weren't the same person.
+        std::env::set_current_dir(&deep).expect("cd deep");
+        assert_eq!(key_id().as_deref(), Some(root_id.as_str()));
+        assert!(
+            !deep.join(".aura").exists(),
+            "private key material must not be scattered into subdirectories"
+        );
+    }
 }

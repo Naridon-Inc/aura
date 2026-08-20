@@ -10,7 +10,7 @@
 
 import { useCallback, type ReactNode } from "react";
 
-import { api } from "../../../lib/api";
+import { fetchTasks } from "../../../lib/tasksCache";
 import { useEditorStore } from "../../../lib/editorStore";
 
 const HANDLE_RE = /\bAURA-(\d+)\b/g;
@@ -24,7 +24,7 @@ export async function openTaskByNumber(
   open: (taskId: string, repoRoot: string) => void,
 ): Promise<void> {
   try {
-    const rows = await api.tasksList(repoRoot);
+    const rows = await fetchTasks(repoRoot);
     const match = rows.find((t) => t.sequence_id === n);
     if (match) {
       open(match.id, repoRoot);
@@ -49,7 +49,7 @@ export function TaskChip({ n, repoRoot }: { n: number; repoRoot: string }) {
       type="button"
       onClick={onClick}
       title={`Open AURA-${n} on the board`}
-      className="inline-flex items-center gap-1 px-1.5 h-[18px] rounded align-middle text-[11px] font-medium font-mono transition-opacity hover:opacity-80 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-accent/50"
+      className="inline-flex items-center gap-1 px-1.5 h-[18px] rounded align-middle text-xs font-medium font-mono transition-opacity hover:opacity-80 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-accent/50"
       style={{
         background: "color-mix(in srgb, var(--color-accent) 14%, transparent)",
         color: "var(--color-accent)",

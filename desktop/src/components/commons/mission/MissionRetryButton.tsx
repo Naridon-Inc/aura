@@ -36,7 +36,7 @@ export function MissionRetryButton({
         e.stopPropagation();
         onRetry(armable);
       }}
-      className={`inline-flex flex-shrink-0 items-center gap-1 rounded-[5px] border border-line-soft px-1.5 py-[3px] text-[10.5px] font-medium text-text-3 transition-colors hover:border-accent/60 hover:bg-accent/[0.06] hover:text-accent ${className}`}
+      className={`inline-flex flex-shrink-0 items-center gap-1 rounded-[5px] border border-line-soft px-1.5 py-[3px] text-xs font-medium text-text-3 transition-colors hover:border-accent/60 hover:bg-accent/[0.06] hover:text-accent ${className}`}
       title={
         armable.length > 1
           ? `Re-queue ${armable.length} failed tasks`

@@ -323,6 +323,31 @@ pub struct ChatTurn {
     pub input_tokens: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub output_tokens: Option<u32>,
+    /// The model id this turn actually ran on — the composer's override, else
+    /// the brain's own default — as `cmd_brain_chat` resolved it for billing.
+    /// Recorded even when nothing could price it, because a card that can name
+    /// the model it has no rate for ("no published rate for gemini-3.1-pro")
+    /// is telling the truth, whereas one that says "unknown model" is hiding
+    /// what it knows. `None` on CLI-wrapper turns and on history that predates
+    /// the field.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    /// USD this turn billed, as computed when it settled.
+    ///
+    /// Recorded rather than re-derived, and deliberately so: the figure the
+    /// ledger charged sums EVERY round of the turn's tool loop, while
+    /// `input_tokens`/`output_tokens` above carry only the final round's
+    /// context reading. Pricing those counts on the way past would produce a
+    /// second, smaller number for the same message — the one disagreement a
+    /// money surface must never have. `None` when the brain wasn't on an API
+    /// key (a subscription isn't billed per token), when no tokens were
+    /// billed, or when no rate matched the model.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cost_usd: Option<f64>,
+    /// True when `cost_usd` came off a model-family rate rather than a
+    /// published one, so every surface showing it can mark it `~`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cost_estimated: Option<bool>,
 }
 
 /// One persisted `tool_use`/`tool_result` pair on a `ChatTurn`. Mirrors
@@ -742,6 +767,18 @@ pub struct ManagerSession {
     pub objective: String,
     pub status: ManagerStatus,
     pub projects: Vec<ProjectRef>,
+    /// The machine this conversation's *hands* are on, when they aren't on
+    /// this laptop. `None` — the overwhelming default — is a chat about the
+    /// code on this disk.
+    ///
+    /// One field, and it is the entire difference between a local chat and a
+    /// cloud one. Everything else — the brain, the stream, the tool cards, the
+    /// composer — is the same code either way, which is the only way the two
+    /// stay the same experience as both keep changing. The model call is
+    /// unaffected: it still happens here, so no API key is ever copied to a
+    /// box somebody else can also log into.
+    #[serde(default)]
+    pub machine_id: Option<String>,
     pub tasks: Vec<ManagerTask>,
     pub ribbon: Vec<RibbonEntry>,
     /// Chat thread between the user and the Manager router. Empty for
@@ -819,6 +856,9 @@ impl ManagerSession {
             objective,
             status: ManagerStatus::AwaitingApproval,
             projects,
+            // A conversation is about the code on this disk unless something
+            // later says otherwise. Opening one on a machine sets it.
+            machine_id: None,
             tasks,
             ribbon: vec![RibbonEntry { at: now, event: RibbonEvent::PlanReady }],
             chat: vec![],
@@ -865,6 +905,9 @@ impl ManagerSession {
             saved_tokens: None,
             input_tokens: None,
             output_tokens: None,
+            model: None,
+            cost_usd: None,
+            cost_estimated: None,
         });
         self.touch();
     }
@@ -888,6 +931,9 @@ impl ManagerSession {
             saved_tokens: None,
             input_tokens: None,
             output_tokens: None,
+            model: None,
+            cost_usd: None,
+            cost_estimated: None,
         });
         self.touch();
     }
@@ -916,6 +962,9 @@ impl ManagerSession {
             saved_tokens: None,
             input_tokens: None,
             output_tokens: None,
+            model: None,
+            cost_usd: None,
+            cost_estimated: None,
         });
         self.touch();
     }
@@ -943,6 +992,9 @@ impl ManagerSession {
             saved_tokens: None,
             input_tokens: None,
             output_tokens: None,
+            model: None,
+            cost_usd: None,
+            cost_estimated: None,
         });
         self.touch();
     }
@@ -967,6 +1019,9 @@ impl ManagerSession {
             saved_tokens: None,
             input_tokens: None,
             output_tokens: None,
+            model: None,
+            cost_usd: None,
+            cost_estimated: None,
         });
         self.touch();
     }
@@ -1034,9 +1089,12 @@ pub fn now_secs() -> u64 {
 /// domain so every path that seeds an objective (new session, agent import,
 /// the first-user-turn backfill) derives the title identically.
 /// Strip the composer's internal steering/pipe directives off the front of a
-/// user turn. The composer prepends a single bracketed line — `[AUTO MODE — …]`,
-/// `[PLAN MODE — …]`, `[ASK MODE — …]`, `[BUILD MODE — …]` or `[↪ PIPED …]` —
-/// so the brain honours a mode or knows the user also drove an agent PTY. That
+/// user turn. The composer prepends a single bracketed line — `[AUTO MODE. …]`,
+/// `[PLAN MODE. …]`, `[ASK MODE. …]` or `[↪ PIPED …]` — so the brain honours a
+/// mode or knows the user also drove an agent PTY. Matching is on the marker
+/// alone, never on what follows it: the frontend stripper once required a dash
+/// there and silently stopped stripping when the directive was written with a
+/// full stop instead. That
 /// wiring must reach the model but is never human-facing, so it must not become
 /// the session title. Only blocks opening with a known marker are stripped, so a
 /// user message that legitimately starts with `[` survives untouched. Repeats so
@@ -1115,6 +1173,20 @@ mod tests {
         assert_eq!(summarize_objective(plain), "[urgent] please refactor the parser");
         // No prefix at all — unchanged.
         assert_eq!(summarize_objective("hello world"), "hello world");
+    }
+
+    /// The directive as `buildSteeringText` actually writes it: marker, full
+    /// stop, sentence. Nothing here may depend on the separator.
+    #[test]
+    fn summarize_objective_strips_the_directive_the_composer_really_sends() {
+        let auto = "[AUTO MODE. Full autopilot. Judge the request and pick the approach \
+                    yourself: answer trivial things directly; for real work, make the \
+                    edits and run the commands end-to-end WITHOUT pausing for plan \
+                    approval.]\n\nhow intelligent are you big buckle?";
+        assert_eq!(
+            summarize_objective(auto),
+            "how intelligent are you big buckle?"
+        );
     }
 
     #[test]
@@ -1214,5 +1286,59 @@ mod tests {
         assert_eq!(plan.id, "old-1");
         assert_eq!(plan.approved_by, None);
         assert_eq!(plan.approved_at, None);
+    }
+
+    #[test]
+    fn a_turn_from_before_the_price_fields_still_loads_unpriced() {
+        // Every chat on disk predates these fields. Loading one must leave the
+        // money absent — NOT zero, which the card would print as "$0" and read
+        // as "this reply was free".
+        let raw = r#"{
+            "role": "manager",
+            "text": "hi",
+            "at": 1234567,
+            "input_tokens": 19742,
+            "output_tokens": 32
+        }"#;
+        let turn: ChatTurn = serde_json::from_str(raw).unwrap();
+        assert_eq!(turn.input_tokens, Some(19_742));
+        assert_eq!(turn.model, None);
+        assert_eq!(turn.cost_usd, None);
+        assert_eq!(turn.cost_estimated, None);
+    }
+
+    #[test]
+    fn a_priced_turn_round_trips_its_bill() {
+        let mut turn = ChatTurn {
+            role: ChatRole::Manager,
+            text: "hi".into(),
+            at: 1234567,
+            answered_question: None,
+            anchor: None,
+            attachments: Vec::new(),
+            brain: Some("gemini_native".into()),
+            tool_calls: Vec::new(),
+            thinking: None,
+            saved_tokens: None,
+            input_tokens: Some(19_742),
+            output_tokens: Some(32),
+            model: Some("gemini-2.5-pro".into()),
+            cost_usd: Some(0.024_997_5),
+            cost_estimated: Some(false),
+        };
+        let back: ChatTurn =
+            serde_json::from_str(&serde_json::to_string(&turn).unwrap()).unwrap();
+        assert_eq!(back.model.as_deref(), Some("gemini-2.5-pro"));
+        assert_eq!(back.cost_usd, Some(0.024_997_5));
+        assert_eq!(back.cost_estimated, Some(false));
+
+        // A model we could name but not price keeps the name and drops the
+        // figure — that is what lets the card say WHICH model it has no rate
+        // for instead of shrugging at the user.
+        turn.cost_usd = None;
+        turn.cost_estimated = None;
+        let json = serde_json::to_string(&turn).unwrap();
+        assert!(!json.contains("cost_usd"), "an absent cost is not serialized as 0");
+        assert!(json.contains("gemini-2.5-pro"));
     }
 }

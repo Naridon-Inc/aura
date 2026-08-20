@@ -236,6 +236,18 @@ pub async fn agent_stream_send(
     for (k, v) in &inv.env {
         cmd.env(k, v);
     }
+    // Pin the session to THIS shell's socket, the way the manager's own
+    // spawn path does. `aura ask-user` otherwise resolves the well-known
+    // path, which on a machine running two shells belongs to whichever
+    // bound it first — the question then reaches the wrong window, or a
+    // socket file whose listener is gone, and `ask-user` exits 3 without
+    // ever having asked anyone.
+    cmd.env(
+        "AURA_SHELL_SOCKET",
+        crate::cmd_permission_socket::socket_path()
+            .to_string_lossy()
+            .as_ref(),
+    );
 
     // Claude-only post-build extensions: permission-prompt MCP bridge
     // and the optional --permission-mode toggle. These live shell-side

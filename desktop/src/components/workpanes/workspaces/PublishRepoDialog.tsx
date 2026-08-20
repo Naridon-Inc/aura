@@ -145,15 +145,15 @@ export function PublishRepoDialog({ dir, onClose, onPublished }: Props) {
       }
     >
       {loading ? (
-        <div className="flex items-center gap-2 py-6 text-[12px]" style={{ color: "var(--color-text-4)" }}>
+        <div className="flex items-center gap-2 py-6 text-sm" style={{ color: "var(--color-text-4)" }}>
           <AsciiSpinner /> Checking this folder and your accounts…
         </div>
       ) : (
         <div className="flex flex-col gap-3.5">
-          <p className="text-[12.5px] leading-relaxed" style={{ color: "var(--color-text-2)" }}>
+          <p className="text-base leading-relaxed" style={{ color: "var(--color-text-2)" }}>
             {state.is_repo
               ? "This folder keeps its own history, but it has nowhere to send it. Aura will create a repository and upload what's here."
-              : "Aura will start keeping this folder's history, create a repository for it, and upload what's here — so your work is backed up and you can run several copies of it side by side."}
+              : "Aura will start keeping this folder's history, create a repository for it, and upload what's here, so your work is backed up and you can run several copies of it side by side."}
           </p>
 
           {/* Host. Both are always listed: one of them being unavailable is
@@ -179,12 +179,12 @@ export function PublishRepoDialog({ dir, onClose, onPublished }: Props) {
                     }}
                   >
                     <span
-                      className="text-[12px] font-medium"
+                      className="text-sm font-medium"
                       style={{ color: active ? "var(--color-accent)" : "var(--color-text-2)" }}
                     >
                       {p.label}
                     </span>
-                    <span className="truncate text-[10.5px]" style={{ color: "var(--color-text-4)" }}>
+                    <span className="truncate text-xs" style={{ color: "var(--color-text-4)" }}>
                       {usable ? (p.account ?? "signed in") : (p.hint ?? "not available")}
                     </span>
                   </button>
@@ -217,14 +217,14 @@ export function PublishRepoDialog({ dir, onClose, onPublished }: Props) {
                   spellCheck={false}
                   autoCapitalize="off"
                   autoCorrect="off"
-                  className="w-full rounded-sm px-2 py-1 font-mono text-[12px] outline-none"
+                  className="w-full rounded-sm px-2 py-1 font-mono text-sm outline-none"
                   style={{
                     background: "var(--color-bg-2)",
                     color: "var(--color-text-1)",
                     border: `1px solid ${check.kind === "taken" ? "var(--color-red)" : "var(--color-line-soft)"}`,
                   }}
                 />
-                <div className="mt-1 flex items-center gap-1.5 text-[11px]">
+                <div className="mt-1 flex items-center gap-1.5 text-xs">
                   <span className="font-mono" style={{ color: "var(--color-text-4)" }}>
                     {owner}/{name.trim() || "…"}
                   </span>
@@ -238,21 +238,21 @@ export function PublishRepoDialog({ dir, onClose, onPublished }: Props) {
                   onCheckedChange={(v) => setIsPrivate(v === true)}
                   aria-label="Keep this repository private"
                 />
-                <span className="text-[12px]" style={{ color: "var(--color-text-2)" }}>
-                  Private — only you and people you invite can see it
+                <span className="text-sm" style={{ color: "var(--color-text-2)" }}>
+                  Private. Only you and people you invite can see it
                 </span>
               </label>
             </>
           )}
 
           {!ready && provider && (
-            <p className="text-[11.5px] leading-relaxed" style={{ color: "var(--color-text-3)" }}>
+            <p className="text-sm leading-relaxed" style={{ color: "var(--color-text-3)" }}>
               {provider.hint ?? `${provider.label} isn't available on this machine yet.`}
             </p>
           )}
 
           {error && (
-            <p className="text-[11.5px] leading-relaxed" style={{ color: "var(--color-red)" }}>
+            <p className="text-sm leading-relaxed" style={{ color: "var(--color-red)" }}>
               {error}
             </p>
           )}
@@ -266,7 +266,7 @@ function Field({ label, children }: { label: string; children: React.ReactNode }
   return (
     <div className="flex flex-col gap-1">
       <span
-        className="text-[10.5px] font-medium uppercase tracking-[0.08em]"
+        className="section-label"
         style={{ color: "var(--color-text-4)" }}
       >
         {label}

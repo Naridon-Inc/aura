@@ -543,7 +543,7 @@ function CodeBlock({ children }: { children: React.ReactNode }) {
         />
       )}
       <pre
-        className="overflow-x-auto p-2.5 font-mono text-[12px] leading-relaxed"
+        className="overflow-x-auto p-2.5 font-mono text-sm leading-relaxed"
         style={{ ...CODE_SURFACE, color: "var(--color-text-1)" }}
       >
         {children}
@@ -626,7 +626,7 @@ export const MarkdownBody = React.memo(function MarkdownBody({
           ),
           h1: ({ children }) => (
             <h1
-              className="text-[15px] font-[650] mt-4 mb-1.5 first:mt-0"
+              className="text-lg font-[650] mt-4 mb-1.5 first:mt-0"
               style={{ color: "var(--color-text-1)", lineHeight: 1.3, letterSpacing: "-0.01em" }}
             >
               {children}
@@ -634,7 +634,7 @@ export const MarkdownBody = React.memo(function MarkdownBody({
           ),
           h2: ({ children }) => (
             <h2
-              className="text-[14px] font-[650] mt-3.5 mb-1 first:mt-0"
+              className="text-md font-[650] mt-3.5 mb-1 first:mt-0"
               style={{ color: "var(--color-text-1)", lineHeight: 1.32, letterSpacing: "-0.006em" }}
             >
               {children}
@@ -642,7 +642,7 @@ export const MarkdownBody = React.memo(function MarkdownBody({
           ),
           h3: ({ children }) => (
             <h3
-              className="text-[13px] font-semibold mt-3 mb-0.5 first:mt-0"
+              className="text-base font-semibold mt-3 mb-0.5 first:mt-0"
               style={{ color: "var(--color-text-1)", lineHeight: 1.35 }}
             >
               {children}
@@ -650,7 +650,7 @@ export const MarkdownBody = React.memo(function MarkdownBody({
           ),
           h4: ({ children }) => (
             <h4
-              className="text-[12px] font-semibold mt-3 mb-1 first:mt-0 uppercase tracking-wide"
+              className="section-label mt-3 mb-1 first:mt-0"
               style={{ color: "var(--color-text-3)", letterSpacing: "0.04em" }}
             >
               {children}
@@ -692,7 +692,7 @@ export const MarkdownBody = React.memo(function MarkdownBody({
             if (isBlock) {
               return (
                 <code
-                  className={`font-mono text-[12px] ${className ?? ""}`}
+                  className={`font-mono text-sm ${className ?? ""}`}
                   style={{ color: "var(--color-text-1)" }}
                   {...rest}
                 >
@@ -728,7 +728,7 @@ export const MarkdownBody = React.memo(function MarkdownBody({
           table: ({ children }) => (
             <div className="my-2 overflow-x-auto">
               <table
-                className="text-[12px] border-collapse"
+                className="text-sm border-collapse"
                 style={{ border: "1px solid var(--color-line)" }}
               >
                 {children}

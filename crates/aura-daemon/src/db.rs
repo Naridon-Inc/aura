@@ -19,16 +19,6 @@ impl DaemonDb {
         task::spawn_blocking(move || {
             let conn = Connection::open(&path).map_err(|e| e.to_string())?;
             
-            // ACP Policies table
-            conn.execute(
-                "CREATE TABLE IF NOT EXISTS acp_policies (
-                    id TEXT PRIMARY KEY,
-                    policy_json TEXT NOT NULL,
-                    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
-                )",
-                [],
-            ).map_err(|e| e.to_string())?;
-            
             // Episodic Memory table
             conn.execute(
                 "CREATE TABLE IF NOT EXISTS episodic_memory (

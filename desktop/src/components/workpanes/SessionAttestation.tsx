@@ -24,7 +24,9 @@ import { useCallback, useEffect, useState } from "react";
 import { onExternalAnchorClick } from "../../lib/openExternal";
 import type { ReactNode } from "react";
 import { api } from "../../lib/api";
+import { intentTypeSentence } from "../../lib/intentTypeLabels";
 import { Button } from "../ui/button";
+import { relativeAgeFromDelta } from "../../lib/relativeTime";
 
 /** Structured shape of `aura attest verify --json` (see
  *  intent_block::verify_block_structured). Every field past the verified
@@ -270,7 +272,7 @@ export function SessionAttestation({
                   type="button"
                   onClick={() => void checkInclusion()}
                   disabled={incl.kind === "checking"}
-                  className="shrink-0 text-[11px] text-text-3 hover:text-text-1"
+                  className="shrink-0 text-xs text-text-3 hover:text-text-1"
                 >
                   {incl.kind === "checking" ? "Checking…" : "Check now"}
                 </Button>
@@ -280,10 +282,10 @@ export function SessionAttestation({
         </section>
 
         {/* Quiet footer — what this whole thing is, in plain words. */}
-        <p className="max-w-[560px] text-[11.5px] leading-relaxed text-text-4">
+        <p className="max-w-[560px] text-sm leading-relaxed text-text-4">
           Every change the AI makes here is sealed the moment it happens, so you always have
           a true record of what happened that can&apos;t be quietly altered later. Aura checks
-          the seal right on your own computer — it works even offline. The public witness is an
+          the seal right on your own computer. It works even offline. The public witness is an
           extra, optional copy kept in an independent logbook.
         </p>
       </div>
@@ -293,24 +295,14 @@ export function SessionAttestation({
 
 /** Canonical intent types → everyday words. Falls back to the raw value
  *  (title-cased) so an unknown tag still reads cleanly. Exported so the
- *  repo-wide ledger labels its rows in the same plain language. */
+ *  repo-wide ledger labels its rows in the same plain language.
+ *
+ *  The map itself now lives in `lib/intentTypeLabels` — three surfaces had
+ *  each grown a private copy, which is how one enum ended up reading three
+ *  different ways. This stays as the name the attestation surfaces already
+ *  import. */
 export function humanizeIntentType(type: string): string {
-  const map: Record<string, string> = {
-    FeatureAdd: "A new feature",
-    BugFix: "A bug fix",
-    Refactor: "Code cleanup",
-    Revert: "An undo of earlier work",
-    Performance: "A speed-up",
-    Docs: "Documentation",
-    Deps: "Dependency updates",
-  };
-  if (map[type]) return map[type];
-  // CamelCase / snake_case → spaced words, first letter up.
-  const spaced = type
-    .replace(/([a-z])([A-Z])/g, "$1 $2")
-    .replace(/[_-]+/g, " ")
-    .trim();
-  return spaced ? spaced.charAt(0).toUpperCase() + spaced.slice(1) : type;
+  return intentTypeSentence(type);
 }
 
 /** The crypto facts, available but never the headline — one click away for
@@ -334,7 +326,7 @@ function TechnicalDetails({
         size="xs"
         type="button"
         onClick={() => setOpen((v) => !v)}
-        className="gap-1.5 px-0 text-[11px] text-text-4 hover:text-text-2"
+        className="gap-1.5 px-0 text-xs text-text-4 hover:text-text-2"
       >
         <Caret open={open} />
         Technical details
@@ -342,16 +334,16 @@ function TechnicalDetails({
       {open ? (
         <div className="mt-2 overflow-hidden rounded-lg border border-line-soft bg-bg-1">
           <MetaRow label="Record ID">
-            <span className="font-mono text-[12px] text-text-2 break-all">{blockId || "—"}</span>
+            <span className="font-mono text-sm text-text-2 break-all">{blockId || "—"}</span>
           </MetaRow>
           <MetaRow label="Method">
             {algo} signature, checked on this computer
           </MetaRow>
           <MetaRow label="Key">
             {keyId ? (
-              <span className="font-mono text-[12px] text-text-2">{keyId}</span>
+              <span className="font-mono text-sm text-text-2">{keyId}</span>
             ) : (
-              <span className="text-text-3">—</span>
+              <span className="text-text-3">·</span>
             )}
           </MetaRow>
           {chain ? (
@@ -413,20 +405,20 @@ function ScopeCheck({
         {caught ? (
           <div className="flex items-start gap-3 px-3.5 py-3">
             <span
-              className="mt-px shrink-0 text-[13px] leading-none"
+              className="mt-px shrink-0 text-base leading-none"
               style={{ color: "var(--color-amber)" }}
               aria-hidden
             >
               ⚠
             </span>
             <div className="min-w-0 flex-1">
-              <div className="text-[13px] font-medium text-text-1">
+              <div className="text-base font-medium text-text-1">
                 A change reached beyond the plan
               </div>
-              <div className="mt-1 text-[12.5px] leading-snug text-text-2">
+              <div className="mt-1 text-base leading-snug text-text-2">
                 Before this change, the AI said it would touch{" "}
                 <FileList files={declared} />. It also changed{" "}
-                <FileList files={undeclared} emphasise /> — {undeclared.length === 1 ? "a file" : "files"} it
+                <FileList files={undeclared} emphasise /> · {undeclared.length === 1 ? "a file" : "files"} it
                 didn&apos;t mention. Aura caught it. The change was kept; now you know it happened.
               </div>
             </div>
@@ -437,10 +429,10 @@ function ScopeCheck({
               <Tick />
             </span>
             <div className="min-w-0 flex-1">
-              <div className="text-[13px] font-medium text-text-1">Stayed in scope</div>
-              <div className="mt-1 text-[12.5px] leading-snug text-text-2">
+              <div className="text-base font-medium text-text-1">Stayed in scope</div>
+              <div className="mt-1 text-base leading-snug text-text-2">
                 The AI changed exactly the {actual.length === 1 ? "file" : "files"} it said it
-                would — <FileList files={actual} />. Nothing extra slipped in.
+                would. <FileList files={actual} />. Nothing extra slipped in.
               </div>
             </div>
           </div>
@@ -461,7 +453,7 @@ function FileList({ files, emphasise }: { files: string[]; emphasise?: boolean }
         <span key={f}>
           {i > 0 ? (i === files.length - 1 ? " and " : ", ") : ""}
           <span
-            className="font-mono text-[11.5px]"
+            className="font-mono text-sm"
             style={emphasise ? { color: "var(--color-amber)" } : { color: "var(--color-text-1)" }}
           >
             {f}
@@ -490,10 +482,10 @@ function VerdictHero({ phase, onReverify }: { phase: SigPhase; onReverify: () =>
       ? "Checking the seal…"
       : "Genuine record";
   const msg = failed
-    ? "Aura couldn't confirm this record is intact — it may have been changed, or the check couldn't run. Don't rely on this history until it verifies."
+    ? "Aura couldn't confirm this record is intact. It may have been changed, or the check couldn't run. Don't rely on this history until it verifies."
     : loading
       ? "Making sure nothing in this record has been altered."
-      : "This is a true record of what the AI changed here, sealed the moment it happened. Aura just re-checked the seal on your own computer — it's intact, so nothing in this history has been altered or faked.";
+      : "This is a true record of what the AI changed here, sealed the moment it happened. Aura just re-checked the seal on your own computer. It's intact, so nothing in this history has been altered or faked.";
   const detail = failed && phase.kind === "failed" ? phase.message : undefined;
 
   return (
@@ -507,7 +499,7 @@ function VerdictHero({ phase, onReverify }: { phase: SigPhase; onReverify: () =>
           {failed ? <UnlockGlyph /> : <LockGlyph />}
         </span>
         <span
-          className="text-[13px] font-semibold text-text-1"
+          className="text-base font-semibold text-text-1"
           style={failed ? { color: "var(--color-red)" } : undefined}
         >
           {label}
@@ -518,15 +510,15 @@ function VerdictHero({ phase, onReverify }: { phase: SigPhase; onReverify: () =>
             size="xs"
             type="button"
             onClick={onReverify}
-            className="ml-auto text-[11px] text-text-3 hover:text-text-1"
+            className="ml-auto text-xs text-text-3 hover:text-text-1"
           >
             Check again
           </Button>
         ) : null}
       </div>
-      <div className="mt-1.5 text-[12.5px] leading-snug text-text-2">{msg}</div>
+      <div className="mt-1.5 text-base leading-snug text-text-2">{msg}</div>
       {detail ? (
-        <div className="mt-1.5 break-words font-mono text-[11px] leading-snug text-text-4">
+        <div className="mt-1.5 break-words font-mono text-xs leading-snug text-text-4">
           {detail}
         </div>
       ) : null}
@@ -550,11 +542,11 @@ function Inclusion({
   if (phase.kind === "verified") {
     return (
       <div className="flex flex-col gap-1">
-        <span className="flex items-center gap-2 text-[12.5px] text-text-1">
+        <span className="flex items-center gap-2 text-base text-text-1">
           <Tick />
-          Confirmed in a public logbook — an independent witness
+          Confirmed in a public logbook. An independent witness
         </span>
-        <span className="font-mono text-[10.5px] text-text-4">
+        <span className="font-mono text-xs text-text-4">
           {phase.logIndex != null ? `#${phase.logIndex} · ` : ""}
           {phase.uuid ? `${phase.uuid.slice(0, 18)}…` : ""}
         </span>
@@ -564,7 +556,7 @@ function Inclusion({
             target="_blank"
             rel="noreferrer"
             onClick={onExternalAnchorClick}
-            className="text-[11px] text-accent hover:underline"
+            className="text-xs text-accent hover:underline"
           >
             View the public record →
           </a>
@@ -574,34 +566,34 @@ function Inclusion({
   }
   if (phase.kind === "error") {
     return (
-      <span className="flex items-start gap-2 text-[12px] text-text-2">
-        <span className="mt-px text-[11px]" style={{ color: "var(--color-amber)" }}>
+      <span className="flex items-start gap-2 text-sm text-text-2">
+        <span className="mt-px text-xs" style={{ color: "var(--color-amber)" }}>
           ⚠
         </span>
         <span className="min-w-0 break-words">
-          Couldn&apos;t check the public copy —{" "}
+          Couldn&apos;t check the public copy. {" "}
           <span className="font-mono text-text-3">{phase.message}</span>
         </span>
       </span>
     );
   }
   if (phase.kind === "checking") {
-    return <span className="text-[12.5px] text-text-3">Checking the public logbook…</span>;
+    return <span className="text-base text-text-3">Checking the public logbook…</span>;
   }
   // idle
   if (hasEntry) {
     return (
-      <span className="flex items-center gap-2 text-[12.5px] text-text-1">
+      <span className="flex items-center gap-2 text-base text-text-1">
         <Tick muted />
         Posted to a public logbook
-        <span className="text-[11px] text-text-4">— check now to confirm it&apos;s there</span>
+        <span className="text-xs text-text-4">. Check now to confirm it&apos;s there</span>
       </span>
     );
   }
   return (
-    <span className="text-[12.5px] text-text-3">
+    <span className="text-base text-text-3">
       {metaKnown
-        ? "Kept only on your computer — no public copy (that's optional)"
+        ? "Kept only on your computer. No public copy (that's optional)"
         : "Public copy status unknown"}
     </span>
   );
@@ -628,17 +620,17 @@ function Tick({ muted }: { muted?: boolean }) {
 
 function SectionLabel({ children }: { children: ReactNode }) {
   return (
-    <h2 className="text-[11px] font-medium uppercase tracking-wider text-text-3">{children}</h2>
+    <h2 className="section-label">{children}</h2>
   );
 }
 
 function MetaRow({ label, children }: { label: string; children: ReactNode }) {
   return (
     <div className="flex items-start gap-3 border-b border-line-soft px-3.5 py-2.5 last:border-b-0">
-      <span className="w-[92px] shrink-0 pt-px text-[11px] uppercase tracking-wide text-text-3">
+      <span className="section-label w-[92px] shrink-0 pt-px">
         {label}
       </span>
-      <span className="min-w-0 flex-1 text-[13px] leading-relaxed text-text-1">{children}</span>
+      <span className="min-w-0 flex-1 text-base leading-relaxed text-text-1">{children}</span>
     </div>
   );
 }
@@ -664,7 +656,7 @@ export function TrustBadge({
       : "var(--color-blue)";
   return (
     <span
-      className="rounded px-1.5 py-0.5 text-[9.5px] uppercase tracking-wide"
+      className="rounded px-1.5 py-0.5 text-2xs"
       style={{
         color,
         border: `1px solid color-mix(in oklab, ${color} 40%, transparent)`,
@@ -735,11 +727,13 @@ export function formatAttestWhen(
   }
   if (Number.isNaN(ms)) return typeof value === "string" ? value : "";
   const diff = Math.floor((Date.now() - ms) / 1000);
-  if (diff < 60) return "<1m";
-  if (diff < 3600) return `${Math.floor(diff / 60)}m`;
-  if (diff < 86400) return `${Math.floor(diff / 3600)}h`;
-  if (diff < 2592000) return `${Math.floor(diff / 86400)}d`;
-  const d = new Date(ms);
-  const pad = (n: number) => String(n).padStart(2, "0");
-  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+  if (diff >= 2592000) {
+    // Past a month an attestation isn't recent, it's filed — and the fact
+    // anyone quotes from it is the date it was signed, not its age.
+    const d = new Date(ms);
+    const pad = (n: number) => String(n).padStart(2, "0");
+    return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+  }
+  // One ladder for the whole app — see lib/relativeTime.
+  return relativeAgeFromDelta(diff, { style: "compact" });
 }

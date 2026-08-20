@@ -19,7 +19,7 @@ export const Label = React.forwardRef<HTMLLabelElement, LabelProps>(
       {...props}
     >
       <span>{children}</span>
-      {optional && <span className="font-normal text-ui-fg-muted">(Optional)</span>}
+      {optional && <span className="font-normal text-text-3">(Optional)</span>}
       {hint != null && (
         <Tooltip content={hint} side="top" className="max-w-[220px]">
           <IconButton

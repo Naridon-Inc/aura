@@ -49,7 +49,7 @@ type Props = {
 };
 
 const BTN =
-  "h-6 w-6 grid place-items-center rounded text-text-4 transition-colors hover:text-text-2 hover:bg-bg-hover disabled:opacity-40 disabled:hover:bg-transparent";
+  "h-6 w-6 grid place-items-center rounded text-text-4 transition-colors hover:text-text-2 hover:bg-state-hover disabled:opacity-40 disabled:hover:bg-transparent";
 
 export function TerminalPanelToolbar({
   activeProfileName,
@@ -77,16 +77,16 @@ export function TerminalPanelToolbar({
 }: Props) {
   return (
     <div className="h-8 px-2 flex items-center gap-1 border-b border-line-soft bg-bg-chrome flex-shrink-0">
-      <span className="text-text-3 text-[11px] font-medium mr-1 flex-shrink-0">Terminal</span>
+      <span className="text-text-3 text-xs font-medium mr-1 flex-shrink-0">Terminal</span>
 
       <TerminalNewMenu
         trigger={
           <button
             type="button"
             title="Choose which shell to open"
-            className="h-6 px-2 flex items-center gap-1 min-w-0 rounded text-text-3 text-[11px] transition-colors hover:text-text-1 hover:bg-bg-hover"
+            className="h-6 px-2 flex items-center gap-1 min-w-0 rounded text-text-3 text-xs transition-colors hover:text-text-1 hover:bg-state-hover"
           >
-            <span className="font-mono text-text-4 text-[10px]">{">_"}</span>
+            <span className="font-mono text-text-4 text-2xs">{">_"}</span>
             <span className="max-w-[120px] truncate">{activeProfileName}</span>
             <ChevronDown className="h-3.5 w-3.5 flex-shrink-0" />
           </button>

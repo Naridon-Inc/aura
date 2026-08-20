@@ -25,6 +25,9 @@ import {
 } from "../lib/commitGraphLayout";
 import { Avatar } from "./team/presentation/Avatar";
 import { AsciiSpinner } from "./ui/ascii-spinner";
+import { Segment } from "./ui/segment";
+import { relativeAgeFromDelta } from "../lib/relativeTime";
+import { shortDateFromSecs } from "../lib/calendarDate";
 
 const ROW_H = 32;
 const LANE_W = 14;
@@ -41,17 +44,17 @@ type Props = {
   repoRoot: string;
   /** How many commits to walk across all branches. */
   limit?: number;
-  /** Render the built-in header. Off when a host (e.g. HistorySidebar)
-   *  already provides its own header with a List/Graph toggle. */
-  showHeader?: boolean;
+  /** Bump to refetch. The graph has no header of its own — it is always
+   *  mounted inside a host that already owns one (HistorySidebar), so the
+   *  host owns the Refresh button too and reaches the fetch through here. */
+  reloadToken?: number;
 };
 
-export function CommitGraph({ repoRoot, limit = 300, showHeader = true }: Props) {
+export function CommitGraph({ repoRoot, limit = 300, reloadToken = 0 }: Props) {
   const [commits, setCommits] = useState<GraphCommit[]>([]);
   const [dirtyCount, setDirtyCount] = useState(0);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const [reloadKey, setReloadKey] = useState(0);
   // "all" = every branch (VS Code's default). "branch" = only the line you're
   // on right now (the ancestors of HEAD) — for non-engineers on a busy team
   // repo who just want "show me my own story, not everyone's branches".
@@ -81,7 +84,7 @@ export function CommitGraph({ repoRoot, limit = 300, showHeader = true }: Props)
     return () => {
       alive = false;
     };
-  }, [repoRoot, limit, reloadKey]);
+  }, [repoRoot, limit, reloadToken]);
 
   // Prepend the synthetic "unsaved changes" node at the tip (parent = the
   // current HEAD commit) so the lane algorithm threads it straight down into
@@ -142,62 +145,19 @@ export function CommitGraph({ repoRoot, limit = 300, showHeader = true }: Props)
 
   return (
     <div className="h-full flex flex-col">
-      {showHeader && (
-        <header className="flex items-center gap-2 h-9 px-3 border-b border-line-soft flex-shrink-0">
-          <span className="text-text-2 text-[12px] font-medium uppercase tracking-wider">
-            Graph
-          </span>
-          <span className="text-text-4 text-[10.5px] truncate">
-            how the project branched &amp; came together
-          </span>
-          <button
-            type="button"
-            onClick={() => setReloadKey((k) => k + 1)}
-            title="Refresh"
-            className="ml-auto shrink-0 w-6 h-6 rounded text-text-4 hover:text-text-1 hover:bg-bg-2 flex items-center justify-center"
-          >
-            <svg width="11" height="11" viewBox="0 0 16 16" fill="none">
-              <path
-                d="M3 8a5 5 0 019-3M13 8a5 5 0 01-9 3"
-                stroke="currentColor"
-                strokeWidth="1.4"
-                fill="none"
-              />
-              <path
-                d="M9 5h3V2M7 11H4v3"
-                stroke="currentColor"
-                strokeWidth="1.3"
-                fill="none"
-              />
-            </svg>
-          </button>
-        </header>
-      )}
-
       {!loading && !error && commits.length > 0 && (
         <div className="flex items-center gap-2 h-7 px-3 border-b border-line-soft/60 flex-shrink-0">
-          <div className="flex items-center gap-0.5 rounded bg-bg-2 p-0.5">
-            {(["all", "branch"] as const).map((s) => (
-              <button
-                key={s}
-                type="button"
-                onClick={() => setScope(s)}
-                className={`text-[10px] px-1.5 h-[18px] rounded ${
-                  scope === s
-                    ? "bg-bg-0 text-text-1 shadow-sm"
-                    : "text-text-4 hover:text-text-2"
-                }`}
-                title={
-                  s === "all"
-                    ? "Show every branch"
-                    : "Show only the line you’re on now"
-                }
-              >
-                {s === "all" ? "All branches" : "This branch"}
-              </button>
-            ))}
-          </div>
-          <span className="text-text-4 text-[10px] tabular-nums ml-auto">
+          <Segment
+            value={scope}
+            onChange={setScope}
+            size="xs"
+            ariaLabel="Which branches to show"
+            options={[
+              { value: "all", label: "All branches", title: "Show every branch" },
+              { value: "branch", label: "This branch", title: "Show only the line you’re on now" },
+            ]}
+          />
+          <span className="text-text-4 text-2xs tabular-nums ml-auto">
             {layout.rows.length} shown
           </span>
         </div>
@@ -205,16 +165,16 @@ export function CommitGraph({ repoRoot, limit = 300, showHeader = true }: Props)
 
       <div ref={parentRef} className="flex-1 min-h-0 overflow-y-auto">
         {loading && commits.length === 0 ? (
-          <div className="flex items-center gap-1.5 px-4 py-3 text-text-4 text-[11px]">
-            <AsciiSpinner className="text-[10px]" />
+          <div className="flex items-center gap-1.5 px-4 py-3 text-text-4 text-xs">
+            <AsciiSpinner className="text-2xs" />
             <span>Reading the project’s story…</span>
           </div>
         ) : error ? (
-          <div className="px-4 py-3 text-text-4 text-[11px]">
+          <div className="px-4 py-3 text-text-4 text-xs">
             Couldn’t read history here.
           </div>
         ) : layout.rows.length === 0 ? (
-          <div className="px-4 py-6 text-text-4 text-[11.5px] leading-relaxed">
+          <div className="px-4 py-6 text-text-4 text-sm leading-relaxed">
             No commits yet. Once you save your first version, the project’s
             story shows up here.
           </div>
@@ -287,10 +247,10 @@ function GraphRow({
     <button
       type="button"
       onClick={open}
-      className="group w-full h-full flex items-stretch text-left hover:bg-bg-2/70 focus:outline-none focus:bg-bg-2/70"
+      className="group w-full h-full flex items-stretch text-left hover:bg-state-hover focus:outline-none focus:bg-state-hover"
       title={
         isWorking
-          ? "Your unsaved changes — edits not saved to history yet"
+          ? "Your unsaved changes. Edits not saved to history yet"
           : `${commit.subject}\n${commit.short} · ${commit.author}`
       }
     >
@@ -356,13 +316,13 @@ function GraphRow({
             <>
               <div className="flex items-center gap-1.5 min-w-0">
                 <span
-                  className="text-[12px] truncate font-medium"
+                  className="text-sm truncate font-medium"
                   style={{ color: "var(--color-amber)" }}
                 >
                   Your unsaved changes
                 </span>
               </div>
-              <div className="text-text-4 text-[10.5px] truncate">
+              <div className="text-text-4 text-xs truncate">
                 {commit.subject} · not saved to history yet
               </div>
             </>
@@ -372,11 +332,11 @@ function GraphRow({
                 {commit.refs.map((r, i) => (
                   <RefBadge key={i} name={r.name} kind={r.kind} laneColor={color} />
                 ))}
-                <span className="text-text-1 text-[12px] truncate">
+                <span className="text-text-1 text-sm truncate">
                   {commit.subject || "(no message)"}
                 </span>
               </div>
-              <div className="text-text-4 text-[10.5px] truncate flex items-center gap-1.5">
+              <div className="text-text-4 text-xs truncate flex items-center gap-1.5">
                 <span className="font-mono text-text-3">{commit.short}</span>
                 <span>·</span>
                 <span className="truncate">{commit.author}</span>
@@ -411,12 +371,12 @@ function RefBadge({
   if (kind === "head") {
     return (
       <span
-        className="flex-shrink-0 inline-flex items-center gap-1 text-[9.5px] font-medium px-1.5 h-[15px] rounded-full"
+        className="flex-shrink-0 inline-flex items-center gap-1 text-2xs font-medium px-1.5 h-[15px] rounded-full"
         style={{
           background: "var(--color-accent)",
           color: "var(--color-accent-foreground)",
         }}
-        title="You are here — the version you’re working from"
+        title="You are here. The version you’re working from"
       >
         <span
           className="inline-block w-1 h-1 rounded-full"
@@ -429,7 +389,7 @@ function RefBadge({
   if (kind === "tag") {
     return (
       <span
-        className="flex-shrink-0 inline-flex items-center rounded-full border border-line-soft px-1.5 h-[15px] text-[9.5px] text-text-3"
+        className="flex-shrink-0 inline-flex items-center rounded-full border border-line-soft px-1.5 h-[15px] text-2xs text-text-3"
         title="A named release point"
       >
         ⌖ {name}
@@ -439,7 +399,7 @@ function RefBadge({
   // local / remote branch tip — outlined in its lane colour, remote dimmer.
   return (
     <span
-      className="flex-shrink-0 inline-flex items-center text-[9.5px] px-1.5 h-[15px] rounded-full border"
+      className="flex-shrink-0 inline-flex items-center text-2xs px-1.5 h-[15px] rounded-full border"
       style={{
         borderColor: lc,
         color: lc,
@@ -452,15 +412,12 @@ function RefBadge({
   );
 }
 
-/** Compact relative time: "2m", "3h", "5d", "2w", else a date. */
+/** "2m ago" / "3h ago" / "5d ago" / "2w ago", else a date. */
 function relTime(secs: number): string {
   if (!secs) return "";
-  const now = Math.floor(Date.now() / 1000);
-  const d = now - secs;
-  if (d < 60) return "just now";
-  if (d < 3600) return `${Math.floor(d / 60)}m ago`;
-  if (d < 86400) return `${Math.floor(d / 3600)}h ago`;
-  if (d < 604800) return `${Math.floor(d / 86400)}d ago`;
-  if (d < 2592000) return `${Math.floor(d / 604800)}w ago`;
-  return new Date(secs * 1000).toLocaleDateString();
+  // Past a month a commit is history, not news — the date is the useful fact.
+  // One ladder for the whole app — see lib/relativeTime.
+  const d = Math.floor(Date.now() / 1000) - secs;
+  if (d >= 2592000) return shortDateFromSecs(secs);
+  return relativeAgeFromDelta(d);
 }

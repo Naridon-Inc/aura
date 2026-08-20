@@ -9,34 +9,18 @@
 // message is audible whether or not the user is looking at Aura. Muting is a
 // user preference persisted in localStorage; `playChime()` no-ops when muted
 // or when the browser hasn't granted an audio context yet.
+//
+// The AudioContext is NOT owned here — it comes from `audioOutput`, which
+// hands the output device back to the OS once the chime has decayed. A chime
+// that leaves a context running holds the Mac's audio route open forever and
+// makes connected AirPods bounce between the Mac and the phone; see the header
+// of `audioOutput.ts`.
+
+import { playOutputSound } from "./audioOutput";
 
 export type ChimeKind = "message" | "mention" | "huddle" | "send";
 
 const MUTE_KEY = "aura.chime.muted";
-
-let ctx: AudioContext | null = null;
-
-/** Lazily create (and resume) a shared AudioContext. Returns null when audio
- *  isn't available — outside a browser, or before the platform grants one. */
-function audio(): AudioContext | null {
-  if (typeof window === "undefined") return null;
-  try {
-    if (!ctx) {
-      const Ctor =
-        window.AudioContext ||
-        (window as unknown as { webkitAudioContext?: typeof AudioContext })
-          .webkitAudioContext;
-      if (!Ctor) return null;
-      ctx = new Ctor();
-    }
-    // A context that started suspended (no user gesture yet) resumes silently
-    // once the platform allows it — best-effort, ignore the rejection.
-    if (ctx.state === "suspended") void ctx.resume();
-    return ctx;
-  } catch {
-    return null;
-  }
-}
 
 export function isChimeMuted(): boolean {
   try {
@@ -82,14 +66,16 @@ const MOTIFS: Record<ChimeKind, Note[]> = {
  *  audio context is available. Never throws. */
 export function playChime(kind: ChimeKind): void {
   if (isChimeMuted()) return;
-  const ac = audio();
-  if (!ac) return;
-  try {
-    const now = ac.currentTime;
+  // playOutputSound swallows a scheduling failure and still arms the release —
+  // a missed chime is never worth surfacing, but a stranded device is.
+  playOutputSound((ac, now) => {
     const master = ac.createGain();
     master.gain.value = 1;
     master.connect(ac.destination);
-    for (const [freq, off, dur, peak] of MOTIFS[kind]) {
+    const notes = MOTIFS[kind];
+    let pending = notes.length;
+    let endsAt = now;
+    for (const [freq, off, dur, peak] of notes) {
       const osc = ac.createOscillator();
       osc.type = "sine";
       osc.frequency.value = freq;
@@ -102,9 +88,23 @@ export function playChime(kind: ChimeKind): void {
       osc.connect(g);
       g.connect(master);
       osc.start(t0);
-      osc.stop(t0 + dur + 0.03);
+      const stopAt = t0 + dur + 0.03;
+      osc.stop(stopAt);
+      // Drop each note out of the graph as it finishes, and the master with
+      // the last one — otherwise a long session accumulates one dead subgraph
+      // per message on a context we deliberately keep alive between chimes.
+      osc.onended = () => {
+        try {
+          osc.disconnect();
+          g.disconnect();
+          pending -= 1;
+          if (pending === 0) master.disconnect();
+        } catch {
+          /* graph already torn down */
+        }
+      };
+      if (stopAt > endsAt) endsAt = stopAt;
     }
-  } catch {
-    /* audio scheduling failed — a missed chime is never worth surfacing */
-  }
+    return endsAt;
+  });
 }

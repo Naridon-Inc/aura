@@ -1,142 +1,132 @@
-// WorkSurface empty state — the calm landing surface shown when no editor
-// tab is open (and the default when a workspace first opens). Modeled on the
-// reference editors' empty pane: a single muted code-bracket glyph centered
-// over a short vertical list of "open something" actions, each with its real
-// keyboard hint. Rendered entirely on Aura's design tokens — no hardcoded
-// colours. Coding agents launch from the preset bar above; this surface
-// covers the everyday "open a terminal / team chat / search" reaches.
+// WorkSurface empty state — the surface you land on when a workspace opens
+// and nothing is in it yet.
+//
+// It used to offer three things: a terminal, the Team place, and file search.
+// Not a coding agent, not a chat, not anything you had already been running —
+// and its closing line read "Pick a coding agent from the bar above", pointing
+// at a row that deliberately draws no launcher, because (its own comment says)
+// "the surface underneath it IS the launcher". It wasn't.
+//
+// It hosts the real launcher now — the same body the "+" and an empty split
+// pane use — in its `compact` variant: the list and its search, without the
+// three "needs a choice first" menus. Someone who has just opened a workspace
+// came to start a Claude, not to choose an inference endpoint.
+//
+// One card, one mark, one line of links. The identity is the product's own
+// logo rather than a glyph invented for this screen, and this is the one
+// place it gets to play the brand kit's build-in — everywhere else the mark
+// is furniture in a 13px slot, where motion would only be noise.
 
 import type { ReactNode } from "react";
+
+import { useEditorStore, type WorkPaneRef } from "../../lib/editorStore";
+import { AuraMark } from "../AuraMark";
+import { Launcher } from "../launcher/Launcher";
+import { Kbd } from "../ui/kbd";
 
 type Props = {
   repoRoot: string;
   projectName: string;
-  onOpenTerminal: () => void;
   onOpenChat: () => void;
   onSearch: () => void;
 };
 
-type EmptyAction = {
-  key: string;
-  label: string;
-  icon: ReactNode;
-  onClick: () => void;
-  /** Real Aura keybinding, shown as kbd chips. Omitted when the action has
-   *  no global shortcut — we never show a hint that doesn't fire. */
-  keys?: string[];
-};
+/** Stable identity so the launcher's row list isn't rebuilt every render. */
+const EMPTY: WorkPaneRef[] = [];
 
 export function WorkSurfaceEmpty({
+  repoRoot,
   projectName,
-  onOpenTerminal,
   onOpenChat,
   onSearch,
 }: Props) {
-  const actions: EmptyAction[] = [
-    {
-      key: "terminal",
-      label: "Open Terminal",
-      icon: <TerminalIcon />,
-      onClick: onOpenTerminal,
-    },
-    {
-      key: "chat",
-      label: "Open Team Chat",
-      icon: <ChatIcon />,
-      onClick: onOpenChat,
-    },
-    {
-      key: "search",
-      label: "Search Files",
-      icon: <SearchIcon />,
-      onClick: onSearch,
-      keys: ["⌘", "⇧", "F"],
-    },
-  ];
+  const store = useEditorStore();
 
   return (
-    <div className="h-full w-full flex flex-col items-center justify-center bg-bg-content px-8">
-      <BracketGlyph />
-      <div className="mt-10 w-full max-w-[360px] flex flex-col">
-        {actions.map((a) => (
-          <button
-            key={a.key}
-            type="button"
-            onClick={a.onClick}
-            className="group flex items-center gap-3 h-10 px-3 rounded-md text-text-3 hover:text-text-1 hover:bg-bg-2 transition-colors"
-          >
-            <span className="text-text-4 group-hover:text-text-2 transition-colors">
-              {a.icon}
-            </span>
-            <span className="flex-1 text-left text-[13px]">{a.label}</span>
-            {a.keys && (
-              <span className="flex items-center gap-1">
-                {a.keys.map((k, i) => (
-                  <kbd
-                    key={i}
-                    className="min-w-[18px] h-[18px] px-1 inline-flex items-center justify-center rounded border border-line-soft bg-bg-1 text-[10.5px] text-text-4 font-sans"
-                  >
-                    {k}
-                  </kbd>
-                ))}
-              </span>
-            )}
-          </button>
-        ))}
-      </div>
-      <div className="mt-8 text-[11.5px] text-text-5">
-        Pick a coding agent from the bar above to start in{" "}
-        <span className="text-text-4">{projectName}</span>.
+    <div className="h-full w-full min-h-0 flex flex-col items-center justify-center bg-bg-content px-6 py-6">
+      <div className="w-full max-w-[440px] min-h-0 flex flex-col">
+        <div className="flex-shrink-0 flex justify-center mb-4 text-accent">
+          <AuraMark size={64} animated />
+        </div>
+
+        {/* The launcher inside a real container. Loose in the middle of the
+            surface its own header and footer hairlines read as two stray
+            lines floating on nothing — a card is what makes them edges. */}
+        <div className="min-h-0 flex flex-col rounded-lg border border-line-soft bg-bg-2 overflow-hidden max-h-[46vh]">
+          <Launcher
+            className="w-full min-h-0"
+            currentRepoRoot={repoRoot}
+            variant="compact"
+            // The surface holds nothing, so nothing is filtered out — including
+            // tabs and live agents living elsewhere, which a pick moves here.
+            present={EMPTY}
+            // Whatever is started has already put itself in the layout; this
+            // drops it into the slot the reader is looking at rather than
+            // leaving them on an empty surface with the work in another pane.
+            place={(ref: WorkPaneRef) => store.replaceSplitPaneAt(0, ref)}
+          />
+        </div>
+
+        {/* No "Earlier sessions" here any more: the launcher's own switch is
+            that, one click nearer and with the sessions themselves under it
+            rather than a page you leave for. What stays are the two things
+            this surface can't start — a conversation with people, and a search
+            across the files. */}
+        <div className="mt-3 flex items-center justify-center gap-0.5 flex-wrap text-xs text-text-5">
+          <FooterLink icon={<ChatIcon />} label="Team chat" onClick={onOpenChat} />
+          <FooterLink
+            icon={<SearchIcon />}
+            label="Search files"
+            onClick={onSearch}
+            keys={["⌘", "⇧", "F"]}
+          />
+        </div>
+
+        <div className="mt-1.5 text-center text-xs text-text-5">
+          Starting in <span className="text-text-4">{projectName}</span>
+        </div>
       </div>
     </div>
   );
 }
 
-// Muted code-bracket mark — the single piece of identity on the surface.
-// Two facing brackets framing a dot, drawn from the line tokens so it sits
-// quietly behind the actions rather than competing with them.
-function BracketGlyph() {
+function FooterLink({
+  icon,
+  label,
+  onClick,
+  keys,
+}: {
+  icon: ReactNode;
+  label: string;
+  onClick: () => void;
+  /** Real Aura keybinding. Omitted when the action has no global shortcut —
+   *  we never print a hint that doesn't fire. */
+  keys?: string[];
+}) {
   return (
-    <svg
-      width="72"
-      height="48"
-      viewBox="0 0 72 48"
-      fill="none"
-      aria-hidden
-      className="text-text-5"
+    <button
+      type="button"
+      onClick={onClick}
+      className="group flex items-center gap-1.5 h-6 px-2 rounded text-text-4 hover:text-text-1 hover:bg-state-hover transition-colors"
     >
-      <path
-        d="M26 8 L14 8 Q9 8 9 13 L9 20 Q9 24 5 24 Q9 24 9 28 L9 35 Q9 40 14 40 L26 40"
-        stroke="currentColor"
-        strokeWidth="2"
-        strokeLinecap="round"
-        strokeLinejoin="round"
-      />
-      <path
-        d="M46 8 L58 8 Q63 8 63 13 L63 20 Q63 24 67 24 Q63 24 63 28 L63 35 Q63 40 58 40 L46 40"
-        stroke="currentColor"
-        strokeWidth="2"
-        strokeLinecap="round"
-        strokeLinejoin="round"
-      />
-      <circle cx="36" cy="24" r="2.4" fill="currentColor" />
-    </svg>
-  );
-}
-
-function TerminalIcon() {
-  return (
-    <svg width="15" height="15" viewBox="0 0 16 16" fill="none" aria-hidden>
-      <rect x="1.5" y="2.5" width="13" height="11" rx="1.5" stroke="currentColor" strokeWidth="1.3" />
-      <path d="M4 6l2.2 2L4 10" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" strokeLinejoin="round" />
-      <path d="M8 10.5h4" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" />
-    </svg>
+      <span className="text-text-5 group-hover:text-text-3 transition-colors">
+        {icon}
+      </span>
+      <span>{label}</span>
+      {keys && (
+        <span className="flex items-center gap-0.5">
+          {keys.map((k, i) => (
+            <Kbd key={i}>{k}</Kbd>
+          ))}
+        </span>
+      )}
+    </button>
   );
 }
 
 function ChatIcon() {
   return (
-    <svg width="15" height="15" viewBox="0 0 16 16" fill="none" aria-hidden>
+    <svg width="12" height="12" viewBox="0 0 16 16" fill="none" aria-hidden>
       <path
         d="M2 4a1 1 0 0 1 1-1h10a1 1 0 0 1 1 1v6a1 1 0 0 1-1 1H6l-3 3v-3H3a1 1 0 0 1-1-1V4z"
         stroke="currentColor"
@@ -149,7 +139,7 @@ function ChatIcon() {
 
 function SearchIcon() {
   return (
-    <svg width="15" height="15" viewBox="0 0 16 16" fill="none" aria-hidden>
+    <svg width="12" height="12" viewBox="0 0 16 16" fill="none" aria-hidden>
       <circle cx="7" cy="7" r="4.5" stroke="currentColor" strokeWidth="1.3" />
       <path d="M10.5 10.5L14 14" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" />
     </svg>

@@ -1,10 +1,16 @@
-// The small "you just updated" card shown at the top of the sidebar after a
-// MINOR update. Quiet by design — a headline + the single top highlight, and an
-// × to wave it away. Dismissing marks the version seen upstream, so it never
-// returns. (Major updates use the WhatsNewModal instead.)
+// The small "you just updated" notice, shown once after every update. Quiet by
+// design — a headline + the single top highlight, and an × to wave it away.
+// Dismissing marks the version seen upstream, so it never returns. Big
+// releases used to interrupt with a full-screen modal instead; this card says
+// the same thing from the corner and waits.
+//
+// It wears the sidebar's announcement shell rather than a look of its own:
+// this is the rail's announcement slot, and a second card style in the same
+// 8px-wide corner would read as two unrelated things shouting at once. The
+// shell also pins it to the FOOT of the rail, which is why the projects no
+// longer shuffle down the page every time we ship a release.
 
-import { Sparkles, X } from "lucide-react";
-
+import { SidebarAnnouncement } from "./SidebarAnnouncement";
 import type { ReleaseNote } from "../lib/releaseNotes";
 
 type Props = {
@@ -16,55 +22,32 @@ type Props = {
 
 export function WhatsNewCard({ note, onDismiss, onCta }: Props) {
   const lead = note.highlights[0] ?? note.title;
+  const cta = note.cta;
   return (
-    <div
-      className="mx-3 mt-3 rounded-lg border p-2.5 text-xs"
-      // `--color-bg-elevated` is defined by no pack, so this card was painted
-      // by its fallbacks — a cold grey box with a blue edge, frozen against
-      // every theme. `--color-bg-3` is the real elevated surface. The accent
-      // stays: a left edge + the spark are the "something new landed" mark,
-      // which is exactly what the accent slot is for.
-      style={{
-        background: "var(--color-bg-3)",
-        borderColor: "var(--color-line)",
-        borderLeft: "3px solid var(--color-accent)",
-      }}
-    >
-      <div className="flex items-start gap-2">
-        <Sparkles
-          className="mt-px h-3.5 w-3.5 shrink-0"
-          style={{ color: "var(--color-accent)" }}
-          aria-hidden="true"
-        />
-        <div className="min-w-0 flex-1">
-          <div className="font-medium text-text-1">
-            Updated to {note.version}
-          </div>
-          <div className="mt-0.5 leading-snug text-text-3">{lead}</div>
-          {note.cta && onCta && (
-            <button
-              type="button"
-              onClick={() => {
-                const { kind } = note.cta!;
-                onDismiss();
-                onCta(kind);
-              }}
-              className="mt-1.5 font-medium underline-offset-2 hover:underline"
-              style={{ color: "var(--color-accent)" }}
-            >
-              {note.cta.label}
-            </button>
-          )}
-        </div>
-        <button
-          type="button"
-          onClick={onDismiss}
-          aria-label="Dismiss"
-          className="-mr-0.5 -mt-0.5 shrink-0 rounded p-0.5 text-text-4 hover:bg-white/5 hover:text-text-1"
-        >
-          <X className="h-3.5 w-3.5" />
-        </button>
-      </div>
-    </div>
+    <SidebarAnnouncement
+      badge="New"
+      title={`Updated to ${note.version}`}
+      body={lead}
+      // A release note's action is the one thing the release asks you to do,
+      // so it gets the button rather than the link it used to get. There is no
+      // second action here on purpose: the alternative to acting is closing the
+      // card, and the × already does that — a "Got it" beside it would be the
+      // same choice offered twice.
+      actions={
+        cta && onCta
+          ? [
+              {
+                label: cta.label,
+                kind: "primary",
+                onClick: () => {
+                  onDismiss();
+                  onCta(cta.kind);
+                },
+              },
+            ]
+          : undefined
+      }
+      onDismiss={onDismiss}
+    />
   );
 }

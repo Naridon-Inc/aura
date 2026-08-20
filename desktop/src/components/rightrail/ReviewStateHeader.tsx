@@ -2,14 +2,19 @@
 // lifecycle strip). Sits at the top of the right review panel and changes its
 // background TINT + label + primary action by the live git/PR state:
 //
-//   conflicts → red "Merge conflicts" · Resolve
-//   merged    → violet "Merged"       · Continue + Archive
-//   ready     → green  "Ready to merge"· Merge
-//   behind    → amber  "Behind by N"  · Pull
-//   ahead     → neutral "N ahead"     · Push
-//   nopublish → neutral "Unpublished" · Publish
-//   uncommit  → amber  "Uncommitted"  · Commit and push
-//   clean     → no tint "Up to date"  · (none)
+//   conflicts → red     "Your changes clash with the team's" · Resolve
+//   merged    → violet  "This work is in"                    · Continue + Archive
+//   ready     → green   "Ready to go in"                     · Merge
+//   behind    → amber   "Missing N updates from the team"    · Pull
+//   ahead     → neutral "N updates the team can't see yet"   · Push
+//   nopublish → neutral "Nobody else can see this yet"       · Publish
+//   uncommit  → amber   "N changed files"                    · Commit and push
+//   clean     → no tint "Up to date"                         · (none)
+//
+// Six of those eight used to be the git word for the condition — "Behind by
+// 586 commits", "Unpublished branch" — on a bar this file's own comment calls
+// the plain-language label. The exact git fact is on the hover now; see
+// `branchStateDetail`.
 //
 // The lifecycle precedence + labels live in the pure `deriveReviewState`;
 // this file only polls the facts, renders the tinted bar, and wires each
@@ -20,16 +25,18 @@
 
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { api, type AheadBehind, type PrSummary } from "../../lib/api";
+import { fetchAheadBehind, fetchDiffStats } from "../../lib/gitStateCache";
 import {
   fetchPrList,
   getPrListCached,
   invalidatePrList,
+  pickBranchPr,
   subscribePrList,
 } from "../../lib/prsCache";
 import { useDocumentVisibility } from "../../lib/useDocumentVisibility";
 import { setWorkspaceArchived } from "../../lib/workspaceCustomization";
 import { openExternal } from "../../lib/openExternal";
-import { sendToAmbientManager } from "../../lib/focusManager";
+import { startAuraJob, useAuraJobs } from "../../lib/auraJob";
 import { resolveConflictsPrompt } from "../../lib/worktreeActions";
 import { AsciiSpinner } from "../ui/ascii-spinner";
 import { CreatePrButton } from "./CreatePrButton";
@@ -39,7 +46,6 @@ import {
   type ReviewAction,
   type ReviewTone,
 } from "./reviewState";
-import type { ActiveAgentSession } from "./createPrRouting";
 
 const POLL_MS = 6000;
 
@@ -47,9 +53,6 @@ type Props = {
   repoRoot: string;
   /** Live merge-conflict count (App already scans sentinel + git markers). */
   conflictsCount: number;
-  /** The running agent session to route "Create PR" into, when one is live
-   *  for this repo. Threaded through to CreatePrButton. */
-  activeAgentSession?: ActiveAgentSession | null;
   /** Switch the right rail to its Changes tab (for "Commit and push" and the
    *  merged "Continue" step). */
   onGoToChanges?: () => void;
@@ -58,18 +61,18 @@ type Props = {
 export function ReviewStateHeader({
   repoRoot,
   conflictsCount,
-  activeAgentSession,
   onGoToChanges,
 }: Props) {
-  const [ab, setAb] = useState<AheadBehind>({
-    ahead: 0,
-    behind: 0,
-    has_upstream: false,
-    branch: null,
-  });
+  // `null` until a read lands. It used to be seeded with `{0, 0, false}`,
+  // which is a valid AheadBehind meaning "published nowhere" — so the bar's
+  // very first frame read "Nobody else can see this yet" and offered Publish,
+  // about a branch nothing had looked at. The `catch` below then kept that
+  // fabrication as the "last-known state" for the whole session.
+  const [ab, setAb] = useState<AheadBehind | null>(null);
   const [changedCount, setChangedCount] = useState(0);
   const [prs, setPrs] = useState<PrSummary[]>(() => getPrListCached(repoRoot) ?? []);
   const [busy, setBusy] = useState(false);
+  const job = useAuraJobs(repoRoot);
   const [tick, setTick] = useState(0);
   const visible = useDocumentVisibility();
 
@@ -82,14 +85,18 @@ export function ReviewStateHeader({
     async function poll() {
       try {
         const [a, d] = await Promise.all([
-          api.gitAheadBehind(repoRoot),
-          api.gitDiffStats(repoRoot).catch(() => null),
+          fetchAheadBehind(repoRoot),
+          fetchDiffStats(repoRoot).catch(() => null),
         ]);
         if (cancelled) return;
         setAb(a);
         if (d) setChangedCount(d.changed_files);
       } catch {
-        /* transient — the bar keeps its last-known state */
+        // Transient — the bar keeps its last-known state, and when there is
+        // no last-known state it keeps `null`, which draws "Couldn't check
+        // where this stands". It must NOT fall back to a zeroed AheadBehind:
+        // that reads as a published-nowhere branch and is what this whole
+        // change is about.
       }
     }
     void poll();
@@ -129,18 +136,19 @@ export function ReviewStateHeader({
     };
   }, []);
 
-  const branch = ab.branch;
-  const pr = useMemo(
-    () => (branch ? (prs.find((p) => p.head_ref === branch) ?? null) : null),
-    [prs, branch],
-  );
+  const branch = ab?.branch ?? null;
+  // `pickBranchPr` prefers the OPEN pull request for this branch — see its doc:
+  // the cache holds `--state all`, so a bare `.find` could land on a superseded
+  // closed PR and tint the whole bar by its state.
+  const pr = useMemo(() => pickBranchPr(prs, branch), [prs, branch]);
 
   const state = useMemo(
     () =>
       deriveReviewState({
-        ahead: ab.ahead,
-        behind: ab.behind,
-        hasUpstream: ab.has_upstream,
+        known: ab !== null,
+        ahead: ab?.ahead ?? 0,
+        behind: ab?.behind ?? 0,
+        hasUpstream: ab?.has_upstream ?? false,
         changedCount,
         conflictsCount,
         pr: pr
@@ -157,14 +165,28 @@ export function ReviewStateHeader({
     window.dispatchEvent(new CustomEvent("aura:git-changed"));
   }, []);
 
+  // A background job keeps the button in its busy state for as long as the work
+  // actually runs — the local `busy` flag only covers the inline git calls.
+  const isActionRunning = useCallback(
+    (action: ReviewAction) => job(action.id)?.status === "running",
+    [job],
+  );
+
   const runAction = useCallback(
     async (action: ReviewAction) => {
       switch (action.id) {
         case "resolve":
-          // Hand the conflict resolution to Aura's chat (it drives the real
-          // conflict tools and walks the user through it inline) instead of
-          // popping a separate ConflictsDialog.
-          void sendToAmbientManager(repoRoot, resolveConflictsPrompt());
+          // Hand the conflict resolution to Aura (it drives the real conflict
+          // tools) instead of popping a separate ConflictsDialog. As a
+          // BACKGROUND job — same id the Checks rail uses, so the two surfaces
+          // show one run — rather than splicing the prompt into whatever
+          // conversation the user is currently having.
+          startAuraJob({
+            repoRoot,
+            id: "resolve",
+            title: "Resolve the conflicts",
+            text: resolveConflictsPrompt(),
+          });
           return;
         case "archive":
           setWorkspaceArchived(repoRoot, true);
@@ -230,15 +252,21 @@ export function ReviewStateHeader({
           type="button"
           onClick={() => void openExternal(pr.url)}
           title={`Open pull request #${pr.number}`}
-          className="shrink-0 inline-flex items-center gap-1 h-[20px] px-1.5 rounded border border-line-soft text-[10.5px] tabular-nums text-text-2 hover:text-text-1 hover:bg-bg-2 transition-colors"
+          className="shrink-0 inline-flex items-center gap-1 h-[20px] px-1.5 rounded border border-line-soft text-xs tabular-nums text-text-2 hover:text-text-1 hover:bg-state-hover transition-colors"
         >
           <span>#{pr.number}</span>
           <ExternalGlyph />
         </button>
       )}
 
-      {/* State dot + plain-language label. */}
-      <span className="flex items-center gap-1.5 min-w-0 flex-1">
+      {/* State dot + plain-language label, with the precise git fact on the
+          hover. The label used to BE the git fact — "Behind by 586 commits"
+          on a bar whose own type calls this "plain-language (non-engineer
+          audience)". See `branchStateLabel`. */}
+      <span
+        className="flex items-center gap-1.5 min-w-0 flex-1"
+        title={state.detail}
+      >
         {color && (
           <span
             className="w-1.5 h-1.5 rounded-full shrink-0"
@@ -247,7 +275,7 @@ export function ReviewStateHeader({
           />
         )}
         <span
-          className="text-[11px] font-medium truncate"
+          className="text-xs font-medium truncate"
           style={color ? { color: `var(${color})` } : undefined}
         >
           {state.label}
@@ -263,17 +291,14 @@ export function ReviewStateHeader({
             state has a blocking git step to finish first (resolve / pull /
             push / commit), so that primary shows alone. */}
         {!pr && (state.id === "clean" || state.id === "unpublished") ? (
-          <CreatePrButton
-            repoRoot={repoRoot}
-            activeAgentSession={activeAgentSession}
-          />
+          <CreatePrButton repoRoot={repoRoot} />
         ) : (
           <>
             {state.secondary && (
               <ActionButton
                 action={state.secondary}
                 tone="neutral"
-                busy={busy}
+                busy={busy || isActionRunning(state.secondary)}
                 onClick={() => void runAction(state.secondary!)}
               />
             )}
@@ -281,7 +306,7 @@ export function ReviewStateHeader({
               <ActionButton
                 action={state.primary}
                 tone={state.tone}
-                busy={busy}
+                busy={busy || isActionRunning(state.primary)}
                 onClick={() => void runAction(state.primary!)}
               />
             )}
@@ -325,11 +350,11 @@ function ActionButton({
       onClick={onClick}
       disabled={busy}
       style={style}
-      className={`h-[22px] px-2 rounded-md border text-[11px] font-medium inline-flex items-center gap-1.5 transition-colors hover:bg-bg-2 disabled:opacity-50 disabled:cursor-default ${
+      className={`h-[22px] px-2 rounded-md border text-xs font-medium inline-flex items-center gap-1.5 transition-colors hover:bg-state-hover disabled:opacity-50 disabled:cursor-default ${
         v ? "" : "border-line text-text-2 hover:text-text-1"
       }`}
     >
-      {busy && <AsciiSpinner className="text-[10px]" />}
+      {busy && <AsciiSpinner className="text-2xs" />}
       <span>{action.label}</span>
     </button>
   );

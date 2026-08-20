@@ -27,6 +27,7 @@ import { onExternalAnchorClick } from "../../lib/openExternal";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import type { IntentChangesetFile } from "../../lib/api";
+import { basename } from "../../lib/paths";
 
 /** Split an intent / commit message into a short headline + the remaining body.
  *  Mirrors git's "subject line, blank line, body" convention and falls back to
@@ -56,12 +57,6 @@ export function splitIntent(text: string): { headline: string; body: string } {
   return { headline: t, body: "" };
 }
 
-// ── file entity index ────────────────────────────────────────────────────────
-
-function basename(p: string): string {
-  const i = p.lastIndexOf("/");
-  return i >= 0 ? p.slice(i + 1) : p;
-}
 function stripExt(b: string): string {
   const i = b.lastIndexOf(".");
   return i > 0 ? b.slice(0, i) : b;
@@ -328,7 +323,7 @@ export function IntentProse({
   );
   return (
     <div
-      className={`text-[13.5px] leading-[1.7] text-text-2 ${className ?? ""}`}
+      className={`text-md leading-[1.7] text-text-2 ${className ?? ""}`}
     >
       <ReactMarkdown
         remarkPlugins={[remarkGfm]}
@@ -369,7 +364,7 @@ export function IntentProse({
             if (isBlock) {
               return (
                 <code
-                  className="block overflow-x-auto rounded-md border border-line-soft bg-bg-1 p-3 font-mono text-[12px] leading-relaxed text-text-1"
+                  className="block overflow-x-auto rounded-md border border-line-soft bg-bg-1 p-3 font-mono text-sm leading-relaxed text-text-1"
                   {...rest}
                 >
                   {children}

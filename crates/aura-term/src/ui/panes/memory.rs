@@ -130,14 +130,16 @@ fn resolve_memory_path() -> Option<PathBuf> {
 }
 
 fn encode_project_dir(path: &Path) -> String {
-    // Claude Code encodes project dirs by replacing `/` with `-` and
-    // stripping the leading slash, so `/Users/ashiq/Dev` → `-Users-ashiq-Dev`.
-    // We mirror that here. Spaces become literal `-` too based on the
-    // example path in CLAUDE.md (`-Users-muhammed-Documents-New-Git`).
+    // Claude Code encodes project dirs by folding every character that isn't
+    // ASCII-alphanumeric to a single `-`, so `/Users/ashiq/Dev` →
+    // `-Users-ashiq-Dev`. The dot is why this is a rule and not a table of two
+    // characters: a worktree path (`…/.claude/worktrees/x`, `~/.aura/…`) that
+    // keeps its dot names a directory Claude never writes, so the pane shows an
+    // empty memory for a repo that has one.
     let s = path.to_string_lossy().into_owned();
     let replaced: String = s
         .chars()
-        .map(|c| if c == '/' || c == ' ' { '-' } else { c })
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
         .collect();
     if replaced.starts_with('-') {
         replaced
@@ -297,6 +299,16 @@ mod tests {
         assert_eq!(
             encode_project_dir(p),
             "-Users-muhammed-Documents-New-Git".to_string()
+        );
+    }
+
+    #[test]
+    fn encodes_a_worktree_checkout_too() {
+        // The dot has to fold as well, or a repo opened as a worktree reads as
+        // having no memory when it has one.
+        assert_eq!(
+            encode_project_dir(Path::new("/Users/me/.aura/worktrees/p-ab12/zagreb")),
+            "-Users-me--aura-worktrees-p-ab12-zagreb".to_string()
         );
     }
 }

@@ -12,8 +12,10 @@
 // a concern. For now: independent + slow + best-effort.
 
 import { useEffect, useState } from "react";
-import { api, type ImpactAlert } from "../lib/api";
+import { type ImpactAlert } from "../lib/api";
 import { useDocumentVisibility } from "../lib/useDocumentVisibility";
+import { relativeAgeFromSecs } from "../lib/relativeTime";
+import { fetchImpacts } from "../lib/ambientCache";
 
 type Props = {
   repoRoot: string;
@@ -40,7 +42,7 @@ export function AuraImpactsBanner({
     let cancelled = false;
     async function tick() {
       try {
-        const list = await api.auraReadImpacts(repoRoot);
+        const list = await fetchImpacts(repoRoot);
         if (!cancelled) setAlerts(list);
       } catch {
         /* ignore — banner is best-effort */
@@ -69,7 +71,7 @@ export function AuraImpactsBanner({
 
   return (
     <div
-      className="flex items-center gap-2 h-7 px-3 text-[11.5px] border-b"
+      className="flex items-center gap-2 h-7 px-3 text-sm border-b"
       style={{ background: tone.bg, borderColor: tone.border, color: tone.text }}
       role="status"
     >
@@ -81,13 +83,13 @@ export function AuraImpactsBanner({
         {top.function || "(unknown)"}
       </span>
       <span className="text-text-3 truncate flex-1">
-        — {top.message || "impact alert"}
+        · {top.message || "impact alert"}
       </span>
       {more > 0 && (
         <button
           type="button"
           onClick={onOpenImpacts}
-          className="text-[10.5px] px-1.5 py-0.5 rounded font-medium"
+          className="text-xs px-1.5 py-0.5 rounded font-medium"
           style={{
             background: "color-mix(in oklab, currentColor 14%, transparent)",
           }}
@@ -96,13 +98,13 @@ export function AuraImpactsBanner({
           +{more} more
         </button>
       )}
-      <span className="text-text-4 tabular-nums text-[10.5px]">
+      <span className="text-text-4 tabular-nums text-xs">
         {relAge(top.timestamp)}
       </span>
       <button
         type="button"
         onClick={onOpenImpacts}
-        className="text-[10.5px] px-2 py-0.5 rounded font-medium hover:opacity-80"
+        className="text-xs px-2 py-0.5 rounded font-medium hover:opacity-80"
         style={{
           background: "color-mix(in oklab, currentColor 14%, transparent)",
         }}
@@ -112,7 +114,7 @@ export function AuraImpactsBanner({
       <button
         type="button"
         onClick={() => onDismiss(top.id)}
-        className="text-[12px] w-5 h-5 rounded hover:bg-bg-2 transition-colors text-text-4 hover:text-text-1"
+        className="text-sm w-5 h-5 rounded hover:bg-state-hover transition-colors text-text-4 hover:text-text-1"
         title="Dismiss this alert for the session"
       >
         ✕
@@ -170,9 +172,6 @@ function severityTone(s: string): {
 }
 
 function relAge(unixSecs: number): string {
-  const ageS = Math.max(0, Math.floor(Date.now() / 1000 - unixSecs));
-  if (ageS < 60) return `${ageS}s`;
-  if (ageS < 3600) return `${Math.floor(ageS / 60)}m`;
-  if (ageS < 86400) return `${Math.floor(ageS / 3600)}h`;
-  return `${Math.floor(ageS / 86400)}d`;
+  // One ladder for the whole app — see lib/relativeTime.
+  return relativeAgeFromSecs(unixSecs, { style: "compact" });
 }

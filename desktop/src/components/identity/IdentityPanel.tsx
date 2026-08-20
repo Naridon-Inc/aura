@@ -65,33 +65,32 @@ export function IdentityPanel({ repoRoots }: IdentityPanelProps) {
   }, [load]);
 
   return (
-    <section className="flex flex-col gap-3">
-      <header className="flex flex-col gap-1">
-        <h3 className="text-[13px] font-medium text-text-1">This is me</h3>
-        <p className="text-[12px] text-text-3 leading-snug">
-          Each project can use a different git email — confirm who you are
-          in each.
-        </p>
-      </header>
-
+    // No heading of its own. This panel has exactly one caller — the
+    // Identity settings pane — which already prints "Identity" from the rail
+    // row you clicked, so the old <h3>This is me</h3> was the same
+    // destination named twice, forty pixels apart. Its one sentence moved up
+    // to the pane's intro, where the rest of the app puts that sentence.
+    <section>
       {rows === null ? (
-        <div className="flex flex-col gap-2">
+        <div className="divide-y divide-line-soft">
           {Array.from({ length: Math.max(1, Math.min(repoRoots.length, 3)) }).map(
             (_, i) => (
-              <Skeleton key={i} className="h-[68px] w-full rounded-[5px]" />
+              <div key={i} className="py-7">
+                <Skeleton className="h-[42px] w-full" />
+              </div>
             ),
           )}
         </div>
       ) : error ? (
-        <p className="text-[12px] text-text-3" role="alert">
+        <p className="py-7 text-[13px] text-text-3" role="alert">
           {error}
         </p>
       ) : rows.length === 0 ? (
-        <p className="text-[12px] text-text-3">
-          No git projects open — open one to confirm your identity.
+        <p className="py-7 text-[13px] text-text-3">
+          No git projects open. Open one to confirm your identity.
         </p>
       ) : (
-        <div className="flex flex-col gap-2">
+        <div className="divide-y divide-line-soft">
           {rows.map((status) => (
             <IdentityRepoRow
               key={status.repo_root}

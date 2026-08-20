@@ -14,6 +14,8 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { SLASH_COMMANDS } from "../lib/slashCommands";
 import type { AppActionId } from "../lib/keymap";
 import { api } from "../lib/api";
+import { fetchIntentRows } from "../lib/intentCache";
+import { relativeAge } from "../lib/relativeTime";
 import { useDebouncedValue } from "../lib/useDebouncedValue";
 import { useExtCommands } from "../lib/vscodeExt/extCommandStore";
 import { groupHits } from "./palette/paletteGroups";
@@ -103,20 +105,10 @@ type PaletteIntentRow = {
   fileCount: number;
 };
 
-// Compact "2h ago" / "3d ago" stamp for reason rows. Frontend-only, so
-// Date.now() is fine here (this is app code, not a workflow script).
+// Compact "2h ago" / "3d ago" stamp for reason rows.
 function relativeTime(ts: number): string {
-  const secs = Math.max(0, Math.floor((Date.now() - ts) / 1000));
-  if (secs < 60) return "just now";
-  const mins = Math.floor(secs / 60);
-  if (mins < 60) return `${mins}m ago`;
-  const hrs = Math.floor(mins / 60);
-  if (hrs < 24) return `${hrs}h ago`;
-  const days = Math.floor(hrs / 24);
-  if (days < 30) return `${days}d ago`;
-  const months = Math.floor(days / 30);
-  if (months < 12) return `${months}mo ago`;
-  return `${Math.floor(months / 12)}y ago`;
+  // One ladder for the whole app — see lib/relativeTime.
+  return relativeAge(ts);
 }
 
 // Trim the agent id to a readable label for the reason row hint.
@@ -127,9 +119,11 @@ function shortAgent(id: string): string {
 }
 
 const APP_ACTIONS: PaletteEntry[] = [
+  { kind: "action", id: "open_aura", label: "Open Aura: your command centre", hint: "⌘⌥A" },
   { kind: "action", id: "toggle_sidebar", label: "Toggle Sidebar", hint: "⌘B" },
   { kind: "action", id: "toggle_terminal", label: "Toggle Terminal", hint: "⌘J" },
-  { kind: "action", id: "toggle_review", label: "Toggle Review Panel", hint: "⌘R" },
+  { kind: "action", id: "run_project", label: "Run this project", hint: "⌘R" },
+  { kind: "action", id: "toggle_review", label: "Toggle Review Panel", hint: "⌘⌥R" },
   { kind: "action", id: "save", label: "Save File", hint: "⌘S" },
   { kind: "action", id: "close_tab", label: "Close Tab", hint: "⌘W" },
   { kind: "action", id: "settings", label: "Open Settings", hint: "⌘," },
@@ -141,7 +135,7 @@ const APP_ACTIONS: PaletteEntry[] = [
   { kind: "action", id: "workspaces", label: "Workspaces: See every parallel copy…", hint: "⌘⇧W" },
   { kind: "action", id: "tasks_board", label: "Open Tasks Board", hint: "⌘T" },
   { kind: "action", id: "orchestrate", label: "Orchestrate Multi-Step Session…" },
-  { kind: "action", id: "notes", label: "Open Team Notes", hint: "⌘⇧N" },
+  { kind: "action", id: "notes", label: "Open Team Notes" },
   { kind: "action", id: "open_prs", label: "Open Pull Requests" },
   { kind: "action", id: "aura_ask", label: "Ask Aura about your project…" },
   { kind: "action", id: "aura_status", label: "Aura: Project Status" },
@@ -296,8 +290,7 @@ export function CommandPalette({
       return;
     }
     let cancelled = false;
-    api
-      .auraIntentRecent(repoRoot, 400)
+    fetchIntentRows(repoRoot, 400)
       .then((rows) => {
         if (cancelled) return;
         setIntentRows(
@@ -712,7 +705,7 @@ export function CommandPalette({
             // One chip, one look. Five scopes wearing violet / blue / green /
             // amber taught the user nothing the WORD in the chip doesn't
             // already say, and two of those hues were off-token hex fallbacks.
-            <span className="ml-3 rounded bg-bg-2 px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wider text-text-3">
+            <span className="meta-tag ml-3">
               {scope === "aura"
                 ? "Aura"
                 : scope === "agent"
@@ -732,19 +725,19 @@ export function CommandPalette({
               setIdx(0);
             }}
             placeholder="Search conversations, actions, files, code…  ·  @ agent  /  command  :  file"
-            className="flex-1 bg-transparent outline-none ml-3 text-text-1 text-[13px] placeholder:text-text-4"
+            className="flex-1 bg-transparent outline-none ml-3 text-text-1 text-base placeholder:text-text-4"
           />
           {(searching || chatSearching) && (
-            <AsciiSpinner className="mr-2 text-[11px]" />
+            <AsciiSpinner className="mr-2 text-xs" />
           )}
-          <span className="text-[10px] text-text-5 tracking-wider">esc</span>
+          <span className="text-2xs text-text-5 tracking-wider">esc</span>
         </div>
 
         <ul className="max-h-[58vh] overflow-y-auto py-1.5">
           {flat.length === 0 ? (
-            <li className="px-4 py-6 text-center text-text-4 text-[12px]">
+            <li className="px-4 py-6 text-center text-text-4 text-sm">
               {searching ? (
-                <AsciiSpinner className="text-[12px]" />
+                <AsciiSpinner className="text-sm" />
               ) : (
                 "No matches"
               )}
@@ -757,10 +750,10 @@ export function CommandPalette({
               return (
                 <li key={section.key}>
                   <div className="flex items-center gap-2 px-3.5 pb-1 pt-2.5">
-                    <span className="text-[10px] font-semibold uppercase tracking-wider text-text-4">
+                    <span className="section-label">
                       {section.label}
                     </span>
-                    <span className="text-[10px] text-text-5/60">
+                    <span className="text-2xs text-text-5/60">
                       {section.items.length}
                     </span>
                   </div>
@@ -784,8 +777,8 @@ export function CommandPalette({
             })
           )}
           {grepTruncated && (
-            <li className="mt-1 border-t border-line-soft px-3.5 py-1.5 text-[10.5px] text-text-5">
-              Showing the first matches — type a bit more to narrow it down.
+            <li className="mt-1 border-t border-line-soft px-3.5 py-1.5 text-xs text-text-5">
+              Showing the first matches. Type a bit more to narrow it down.
             </li>
           )}
         </ul>

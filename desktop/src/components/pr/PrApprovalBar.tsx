@@ -6,13 +6,24 @@
 // All call into Tauri `pr_*` commands which proxy to `gh pr review` /
 // `gh pr merge`. Uses the same auth `gh` already has.
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { api } from "../../lib/api";
 import { invalidatePrList } from "../../lib/prsCache";
 import { invalidatePrDetail } from "../../lib/prDetailCache";
 import { Button } from "../ui/button";
 
 type Mode = "idle" | "approve" | "changes" | "merge";
+
+/** Asks the approval bar to open its merge panel for a given PR. Lets a
+ *  control elsewhere on the page start a merge without owning one. */
+export const PR_MERGE_REQUEST_EVENT = "aura:pr:request-merge";
+
+/** Fire {@link PR_MERGE_REQUEST_EVENT} for one PR. */
+export function requestPrMerge(repoRoot: string, prNumber: number): void {
+  window.dispatchEvent(
+    new CustomEvent(PR_MERGE_REQUEST_EVENT, { detail: { repoRoot, prNumber } }),
+  );
+}
 
 type Props = {
   repoRoot: string;
@@ -89,6 +100,22 @@ export function PrApprovalBar({
   const open = state.toLowerCase() === "open" && !isDraft;
   const approved = reviewDecision === "APPROVED";
 
+  // The right rail's "Merge PR" card asks to merge from the other side of
+  // the page. It routes here rather than calling `api.prMerge` itself, so
+  // there is one merge in the app — one strategy picker, one delete-branch
+  // choice, one failing-checks gate — instead of a second implementation
+  // that can drift from this one.
+  useEffect(() => {
+    function onRequest(e: Event) {
+      const d = (e as CustomEvent<{ repoRoot: string; prNumber: number }>).detail;
+      if (!d || d.repoRoot !== repoRoot || d.prNumber !== prNumber) return;
+      if (!open) return;
+      setMode("merge");
+    }
+    window.addEventListener(PR_MERGE_REQUEST_EVENT, onRequest);
+    return () => window.removeEventListener(PR_MERGE_REQUEST_EVENT, onRequest);
+  }, [repoRoot, prNumber, open]);
+
   if (mode === "idle") {
     return (
       <div className="flex items-center gap-1.5">
@@ -124,7 +151,7 @@ export function PrApprovalBar({
   return (
     <div className="absolute top-11 right-4 z-10 w-[360px] bg-bg-content border border-line rounded shadow-sm p-3">
       <div className="flex items-center mb-2">
-        <span className="text-[12px] font-medium text-text-1">
+        <span className="text-sm font-medium text-text-1">
           {mode === "approve"
             ? "Approve PR"
             : mode === "changes"
@@ -135,7 +162,7 @@ export function PrApprovalBar({
           variant="ghost"
           size="icon-sm"
           onClick={close}
-          className="ml-auto w-5 h-5 text-text-4 hover:text-text-1 text-[14px]"
+          className="ml-auto w-5 h-5 text-text-4 hover:text-text-1 text-md"
         >
           ×
         </Button>
@@ -155,7 +182,7 @@ export function PrApprovalBar({
               </Button>
             ))}
           </div>
-          <label className="flex items-center gap-1.5 text-[11px] text-text-3">
+          <label className="flex items-center gap-1.5 text-xs text-text-3">
             <input
               type="checkbox"
               checked={deleteBranch}
@@ -166,11 +193,11 @@ export function PrApprovalBar({
           </label>
           {failingChecks > 0 && (
             <div className="rounded border border-red/30 bg-red/[0.06] px-2.5 py-2 space-y-1.5">
-              <div className="text-[11.5px] text-red">
+              <div className="text-sm text-red">
                 {failingChecks} check{failingChecks === 1 ? " is" : "s are"} failing
                 on this PR.
               </div>
-              <label className="flex items-center gap-1.5 text-[11px] text-text-2 cursor-pointer">
+              <label className="flex items-center gap-1.5 text-xs text-text-2 cursor-pointer">
                 <input
                   type="checkbox"
                   checked={overrideChecks}
@@ -182,7 +209,7 @@ export function PrApprovalBar({
             </div>
           )}
           {failingChecks === 0 && pendingChecks > 0 && (
-            <div className="text-[11px] text-amber">
+            <div className="text-xs text-amber">
               {pendingChecks} check{pendingChecks === 1 ? " is" : "s are"} still
               running.
             </div>
@@ -198,11 +225,11 @@ export function PrApprovalBar({
               ? "What needs to change? (required)"
               : "Optional approval message"
           }
-          className="w-full text-[12px] bg-bg-1 border border-line-soft rounded px-2 py-1.5 resize-y min-h-[80px] focus:outline-none focus:border-accent-blue"
+          className="w-full text-sm bg-bg-1 border border-line-soft rounded px-2 py-1.5 resize-y min-h-[80px] focus:outline-none focus:border-accent-blue"
         />
       )}
       {error && (
-        <div className="mt-2 text-[11px] text-red font-mono whitespace-pre-wrap">
+        <div className="mt-2 text-xs text-red font-mono whitespace-pre-wrap">
           {error}
         </div>
       )}

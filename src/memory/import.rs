@@ -136,12 +136,19 @@ impl ImportReport {
 }
 
 /// Encode a repo cwd the way Claude Code names its per-project memory dir:
-/// every `/` and space becomes `-`. An absolute path therefore yields a
-/// leading `-` (e.g. `/Users/me/My Repo` → `-Users-me-My-Repo`).
+/// every character that isn't ASCII-alphanumeric becomes a single `-`. An
+/// absolute path therefore yields a leading `-` (e.g. `/Users/me/My Repo` →
+/// `-Users-me-My-Repo`).
+///
+/// The dot matters: this used to fold only `/` and space, so a repo checked
+/// out as a git worktree — `<repo>/.claude/worktrees/<leaf>` or the managed
+/// `~/.aura/worktrees/p-<hash>/<leaf>` — looked for its memory under a
+/// directory name Claude Code never writes, and the import silently found
+/// nothing.
 pub fn encode_project_dir(cwd: &Path) -> String {
     cwd.to_string_lossy()
         .chars()
-        .map(|c| if c == '/' || c == ' ' { '-' } else { c })
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
         .collect()
 }
 
@@ -338,6 +345,20 @@ mod tests {
     fn encode_replaces_slash_and_space_with_dash() {
         let p = Path::new("/Users/me/My Repo");
         assert_eq!(encode_project_dir(p), "-Users-me-My-Repo");
+    }
+
+    #[test]
+    fn encode_folds_the_dot_in_a_worktree_path() {
+        // A worktree checkout is the case the two-character table got wrong,
+        // and it's the one that made `aura memory import` find nothing at all.
+        assert_eq!(
+            encode_project_dir(Path::new("/Users/me/repo/.claude/worktrees/feat")),
+            "-Users-me-repo--claude-worktrees-feat"
+        );
+        assert_eq!(
+            encode_project_dir(Path::new("/Users/me/.aura/worktrees/p-ab12/zagreb")),
+            "-Users-me--aura-worktrees-p-ab12-zagreb"
+        );
     }
 
     #[test]

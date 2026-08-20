@@ -13,7 +13,8 @@
 
 import { useEffect, useState } from "react";
 
-import { api, type TeamMember } from "../../lib/api";
+import { type TeamMember } from "../../lib/api";
+import { fetchTeam } from "../../lib/teamCache";
 import { LoungePanel } from "../team/presentation/LoungePanel";
 import { PluginBrowser } from "../team/presentation/PluginBrowser";
 import { SegmentedControl } from "../ui/segmented";
@@ -42,8 +43,7 @@ export function CommonsSurface({ repoRoot, initialTab = "lounge" }: Props) {
   useEffect(() => {
     let alive = true;
     const load = () =>
-      api
-        .teamLoad(repoRoot)
+      fetchTeam(repoRoot)
         .then((m) => {
           if (alive) setMembers(m.members ?? []);
         })
@@ -62,10 +62,10 @@ export function CommonsSurface({ repoRoot, initialTab = "lounge" }: Props) {
     <div className="flex h-full min-h-0 flex-col bg-bg-0">
       <header className="flex-shrink-0 flex items-center gap-3 px-4 h-12 border-b border-line-soft">
         <div className="min-w-0">
-          <div className="text-[13px] font-semibold text-text-1 leading-tight">
+          <div className="text-base font-semibold text-text-1 leading-tight">
             Commons
           </div>
-          <div className="text-[10.5px] text-text-3 leading-tight">
+          <div className="text-xs text-text-3 leading-tight">
             Who’s here, what shipped, and the apps you can run
           </div>
         </div>

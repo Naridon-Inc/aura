@@ -1,7 +1,7 @@
-// Per-workspace customisation — currently just an emoji glyph that
-// replaces the auto-generated letter on the WorkspaceRail tile. Storage
-// is localStorage-only (one device, one user); we treat this as a UI
-// preference, not a synced setting.
+// Per-workspace customisation — the bits of a workspace that are yours rather
+// than git's: what it's CALLED, its glyph, whether it's pinned, whether it's
+// hidden. Storage is localStorage-only (one device, one user); we treat this as
+// a UI preference, not a synced setting.
 //
 // API mirrors the other zustand-lite stores in `lib/` so consumers can
 // subscribe via useSyncExternalStore.
@@ -10,11 +10,14 @@ import { useSyncExternalStore } from "react";
 
 const KEY = "aura.workspace.customization.v1";
 
-// Per-root UI state. `emoji` is the tile glyph; `pinned` floats a workspace to
-// the top of the roster; `archived` (a timestamp, ms) hides it from the roster
-// without touching the branch or files on disk — Restore clears it. All three
-// are per-device UI preferences, never synced, and any absent key means "off".
+// Per-root UI state. `name` is what YOU call this workspace, overriding the
+// name derived from its branch; `emoji` is the tile glyph; `pinned` floats a
+// workspace to the top of the roster; `archived` (a timestamp, ms) hides it
+// from the roster without touching the branch or files on disk — Restore
+// clears it. All four are per-device UI preferences, never synced, and any
+// absent key means "off".
 type CustomizationEntry = {
+  name?: string;
   emoji?: string;
   pinned?: boolean;
   archived?: number;
@@ -68,6 +71,24 @@ function patchEntry(root: string, patch: Partial<CustomizationEntry>) {
   }
   persist();
   emit();
+}
+
+/** What YOU call this workspace, or undefined when it still goes by the name
+ *  derived from its branch.
+ *
+ *  Keyed by checkout path, not by repository: every checkout — the main one
+ *  and each parallel copy — is its own root elsewhere in the app, so `main`
+ *  and `feat/abc` can carry different names even though they're one repo. A
+ *  branch slug is a filing code, not a name; this is where "the login fix"
+ *  lives. */
+export function getWorkspaceName(root: string): string | undefined {
+  return cache[root]?.name;
+}
+
+/** Rename a workspace. An empty/blank name clears it, which restores the
+ *  branch-derived name rather than leaving the row nameless. */
+export function setWorkspaceName(root: string, name: string | undefined) {
+  patchEntry(root, { name: name && name.trim() ? name.trim() : undefined });
 }
 
 export function getWorkspaceEmoji(root: string): string | undefined {

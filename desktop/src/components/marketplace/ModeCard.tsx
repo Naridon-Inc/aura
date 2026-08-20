@@ -1,15 +1,18 @@
-// One mode card — used by the marketplace dialog AND the Settings →
-// Modes pane. Compact horizontal layout: accent stripe + display name,
-// description, tags, optional permissions badge + install/uninstall
-// action.
+// One mode card — the marketplace dialog's browse grid. Compact horizontal
+// layout: accent stripe + display name, description, tags, optional
+// permissions badge + install/update/uninstall action.
+//
+// It used to serve Settings → Modes as well, which is why it carried an
+// `onSelect` (click the card to make that mode active), an `onEdit` pencil
+// and an `inert` switch. The settings pane is a list you pick one of, so it
+// is hairline rows now and mounts none of that; a card is right here, where
+// you are shopping through them. Those three props went with it.
 //
 // The card is intentionally presentational. It accepts a `state`
 // discriminator that controls which CTA the card draws (Install,
-// Installed, Update available, Disabled). All side-effect handlers
-// come in via props so the same card renders the same way regardless
-// of where it's mounted.
+// Installed, Update available). All side-effect handlers come in via props.
 
-import { Check, Download, Pencil, RefreshCw, Trash2 } from "lucide-react";
+import { Check, Download, RefreshCw, Trash2 } from "lucide-react";
 
 import { Button } from "../ui/button";
 import { ModePermissionsBadge } from "./ModePermissionsBadge";
@@ -22,24 +25,16 @@ type CardState =
 
 type Props = {
   state: CardState;
-  /** Hide actions when the card is rendered inside a sheet that owns
-   *  its own primary button (install sheet). */
-  inert?: boolean;
   onInstall?: () => void;
   onUpdate?: () => void;
   onUninstall?: () => void;
-  onEdit?: () => void;
-  onSelect?: () => void;
 };
 
 export function ModeCard({
   state,
-  inert = false,
   onInstall,
   onUpdate,
   onUninstall,
-  onEdit,
-  onSelect,
 }: Props) {
   const isInstalled = state.kind === "installed";
   const e = state.entry;
@@ -63,10 +58,10 @@ export function ModeCard({
     : { allow: [], deny: [], advanced: [] };
 
   return (
-    <div
-      className="flex items-stretch rounded-md border border-bg-3 bg-bg-1 overflow-hidden cursor-pointer hover:border-bg-4 transition-colors"
-      onClick={onSelect}
-    >
+    // No pointer cursor, no hover border: this is a browse surface, and a
+    // card that looks clickable but only its buttons do anything is a
+    // promise the card can't keep.
+    <div className="flex items-stretch rounded-md border border-bg-3 bg-bg-1 overflow-hidden transition-colors">
       <div
         className="w-1.5 flex-shrink-0"
         style={{ backgroundColor: accent }}
@@ -78,37 +73,37 @@ export function ModeCard({
             <div className="flex items-center gap-2">
               {badgeText && (
                 <span
-                  className="text-[9px] font-bold rounded px-1 py-0.5 text-white"
+                  className="text-2xs font-bold rounded px-1 py-0.5 text-white"
                   style={{ backgroundColor: accent }}
                 >
                   {badgeText}
                 </span>
               )}
-              <span className="font-medium text-[13px] text-text-1 truncate">
+              <span className="font-medium text-base text-text-1 truncate">
                 {displayName}
               </span>
               {isInstalled && state.entry.bundled && (
-                <span className="text-[9.5px] text-text-4 uppercase tracking-wider">
+                <span className="section-label">
                   bundled
                 </span>
               )}
               {isInstalled && state.updateAvailable && (
-                <span className="text-[9.5px] text-amber uppercase tracking-wider">
+                <span className="text-2xs text-amber">
                   update
                 </span>
               )}
             </div>
-            <div className="text-[11px] text-text-3 mt-0.5 line-clamp-2">
+            <div className="text-xs text-text-3 mt-0.5 line-clamp-2">
               {description}
             </div>
             <div className="flex items-center gap-2 mt-1.5 flex-wrap">
               {author && (
-                <span className="text-[10px] text-text-4">by {author}</span>
+                <span className="text-2xs text-text-4">by {author}</span>
               )}
               {tags.slice(0, 4).map((t) => (
                 <span
                   key={t}
-                  className="text-[10px] text-text-3 bg-bg-2 rounded px-1.5 py-0.5"
+                  className="text-2xs text-text-3 bg-bg-2 rounded px-1.5 py-0.5"
                 >
                   {t}
                 </span>
@@ -116,73 +111,56 @@ export function ModeCard({
               <ModePermissionsBadge toolAcl={toolAcl} />
             </div>
           </div>
-          {!inert && (
-            <div className="flex items-center gap-1 flex-shrink-0">
-              {state.kind === "marketplace" && (
-                <Button
-                  size="sm"
-                  variant="default"
-                  onClick={(ev) => {
-                    ev.stopPropagation();
-                    onInstall?.();
-                  }}
-                >
-                  <Download className="h-3.5 w-3.5 mr-1" />
-                  Install
-                </Button>
-              )}
-              {state.kind === "installed" && state.updateAvailable && (
-                <Button
-                  size="sm"
-                  variant="default"
-                  onClick={(ev) => {
-                    ev.stopPropagation();
-                    onUpdate?.();
-                  }}
-                >
-                  <RefreshCw className="h-3.5 w-3.5 mr-1" />
-                  Update
-                </Button>
-              )}
-              {state.kind === "installed" && !state.updateAvailable && (
-                <span
-                  className="inline-flex items-center text-[10.5px] text-text-3"
-                  title="Installed"
-                >
-                  <Check className="h-3.5 w-3.5 mr-0.5" />
-                  Installed
-                </span>
-              )}
-              {state.kind === "installed" && (
-                <>
-                  <Button
-                    size="icon"
-                    variant="ghost"
-                    onClick={(ev) => {
-                      ev.stopPropagation();
-                      onEdit?.();
-                    }}
-                    title="Edit YAML"
-                  >
-                    <Pencil className="h-3.5 w-3.5" />
-                  </Button>
-                  {!state.entry.bundled && (
-                    <Button
-                      size="icon"
-                      variant="ghost"
-                      onClick={(ev) => {
-                        ev.stopPropagation();
-                        onUninstall?.();
-                      }}
-                      title="Uninstall"
-                    >
-                      <Trash2 className="h-3.5 w-3.5" />
-                    </Button>
-                  )}
-                </>
-              )}
-            </div>
-          )}
+          <div className="flex items-center gap-1 flex-shrink-0">
+            {state.kind === "marketplace" && (
+              <Button
+                size="sm"
+                variant="default"
+                onClick={(ev) => {
+                  ev.stopPropagation();
+                  onInstall?.();
+                }}
+              >
+                <Download className="h-3.5 w-3.5 mr-1" />
+                Install
+              </Button>
+            )}
+            {state.kind === "installed" && state.updateAvailable && (
+              <Button
+                size="sm"
+                variant="default"
+                onClick={(ev) => {
+                  ev.stopPropagation();
+                  onUpdate?.();
+                }}
+              >
+                <RefreshCw className="h-3.5 w-3.5 mr-1" />
+                Update
+              </Button>
+            )}
+            {state.kind === "installed" && !state.updateAvailable && (
+              <span
+                className="inline-flex items-center text-xs text-text-3"
+                title="Installed"
+              >
+                <Check className="h-3.5 w-3.5 mr-0.5" />
+                Installed
+              </span>
+            )}
+            {state.kind === "installed" && !state.entry.bundled && (
+              <Button
+                size="icon"
+                variant="ghost"
+                onClick={(ev) => {
+                  ev.stopPropagation();
+                  onUninstall?.();
+                }}
+                title="Uninstall"
+              >
+                <Trash2 className="h-3.5 w-3.5" />
+              </Button>
+            )}
+          </div>
         </div>
       </div>
     </div>

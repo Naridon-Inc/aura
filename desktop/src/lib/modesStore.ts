@@ -37,6 +37,11 @@ type StoreShape = {
 
   updates: ModeUpdateRow[];
   updatesLoadedAt: number | null;
+  /** Why the last update check didn't finish. Kept because the dialog used to
+   *  read an empty `updates` as "All modes are up to date", which is the one
+   *  sentence a failed check must never produce. */
+  updatesError: string | null;
+  updatesLoading: boolean;
 
   /** Active mode the composer chip injects into every turn. `null` =
    *  no mode (default brain behaviour). Persists in localStorage. */
@@ -75,6 +80,8 @@ const state: StoreShape = {
   marketplaceLoading: false,
   updates: [],
   updatesLoadedAt: null,
+  updatesError: null,
+  updatesLoading: false,
   activeSlug: loadActiveSlug(),
 };
 
@@ -141,12 +148,21 @@ export function refreshMarketplace(): Promise<void> {
 }
 
 export async function refreshUpdates(): Promise<void> {
+  state.updatesLoading = true;
+  emit();
   try {
     state.updates = await api.modesCheckUpdates();
     state.updatesLoadedAt = Date.now();
+    state.updatesError = null;
+  } catch (e) {
+    // Offline → keep whatever rows we already had; they're the last thing we
+    // actually knew. But RECORD the failure: an empty `updates` used to read
+    // as "All modes are up to date", so a check that never completed
+    // announced the all-clear. `updatesLoadedAt` deliberately stays put.
+    state.updatesError = String(e);
+  } finally {
+    state.updatesLoading = false;
     emit();
-  } catch {
-    // Offline → leave the previous value alone.
   }
 }
 

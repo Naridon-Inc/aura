@@ -62,27 +62,27 @@ export function PrDiffMeaning({
       {hasBefore ? (
         <div className="flex flex-col gap-1.5 sm:flex-row sm:gap-3">
           <div className="min-w-0 flex-1">
-            <div className="text-[10px] uppercase tracking-wide text-text-4">Used to</div>
-            <div className="mt-0.5 text-[11.5px] leading-snug text-text-3">{before}</div>
+            <div className="section-label">Used to</div>
+            <div className="mt-0.5 text-sm leading-snug text-text-3">{before}</div>
           </div>
           {nowDoes ? (
             <div className="min-w-0 flex-1">
-              <div className="text-[10px] uppercase tracking-wide text-text-4">Now</div>
-              <div className="mt-0.5 text-[11.5px] leading-snug text-text-1">{nowDoes}</div>
+              <div className="section-label">Now</div>
+              <div className="mt-0.5 text-sm leading-snug text-text-1">{nowDoes}</div>
             </div>
           ) : null}
         </div>
       ) : nowDoes ? (
         <div>
-          <div className="text-[10px] uppercase tracking-wide text-text-4">What this adds</div>
-          <div className="mt-0.5 text-[11.5px] leading-snug text-text-1">{nowDoes}</div>
+          <div className="section-label">What this adds</div>
+          <div className="mt-0.5 text-sm leading-snug text-text-1">{nowDoes}</div>
         </div>
       ) : null}
 
       {/* WHY (+ how) — why this exact change was made and how it now works. */}
       {why ? (
-        <p className="mt-2 text-[11.5px] leading-snug text-text-2">
-          <span className="text-text-5">Why &amp; how — </span>
+        <p className="mt-2 text-sm leading-snug text-text-2">
+          <span className="text-text-5">Why &amp; how. </span>
           {why}
         </p>
       ) : null}

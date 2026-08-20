@@ -20,6 +20,8 @@ import {
 } from "./ui/modalSurface";
 import { cn } from "../lib/utils";
 import { api, type TeamMember } from "../lib/api";
+import { fetchTeam, fetchIdentity } from "../lib/teamCache";
+import { focusChatChannel } from "../lib/chatRoute";
 
 type Payload = {
   filePath?: string;
@@ -66,8 +68,8 @@ export function ShareCodeDialog({ repoRoot }: Props) {
   useEffect(() => {
     if (!payload) return;
     Promise.all([
-      api.teamLoad(repoRoot).catch(() => null),
-      api.teamIdentity(repoRoot).catch(() => null),
+      fetchTeam(repoRoot).catch(() => null),
+      fetchIdentity(repoRoot).catch(() => null),
     ]).then(([t, ident]) => {
       setMembers(t?.members ?? []);
       setChannels(t?.channels ?? ["general"]);
@@ -132,12 +134,10 @@ export function ShareCodeDialog({ repoRoot }: Props) {
         channel: target.channel,
         body,
       });
-      // Fire a follow-up event so CommsPanel can flip to the channel.
-      window.dispatchEvent(
-        new CustomEvent("aura:focus-chat-channel", {
-          detail: { channel: target.channel },
-        }),
-      );
+      // Follow the message over: the Team surface selects the channel it
+      // just landed in, so "shared" is something you can see rather than
+      // something you are told.
+      focusChatChannel(target.channel);
       close();
     } catch (e) {
       setError(String(e));
@@ -161,7 +161,7 @@ export function ShareCodeDialog({ repoRoot }: Props) {
         <div className={MODAL_HEADER}>
           <span className={MODAL_TITLE}>Share to chat</span>
           {payload.filePath && (
-            <span className="ml-2 text-[10.5px] text-text-5 font-mono truncate">
+            <span className="ml-2 text-xs text-text-5 font-mono truncate">
               {shortPath(payload.filePath)}
               {payload.lineStart && payload.lineEnd && payload.lineStart !== payload.lineEnd
                 ? `:${payload.lineStart}-${payload.lineEnd}`
@@ -175,7 +175,7 @@ export function ShareCodeDialog({ repoRoot }: Props) {
             type="button"
             onClick={close}
             aria-label="Close"
-            className="text-[14px] text-text-4 hover:text-text-1 px-1.5 py-0.5 rounded hover:bg-bg-2 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+            className="text-md text-text-4 hover:text-text-1 px-1.5 py-0.5 rounded hover:bg-state-hover focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
           >
             ×
           </button>
@@ -184,7 +184,7 @@ export function ShareCodeDialog({ repoRoot }: Props) {
         <div className="px-4 py-3 flex-1 min-h-0 overflow-y-auto space-y-3">
           {/* Snippet preview */}
           <div className="border border-line-soft rounded bg-bg-content overflow-hidden">
-            <div className="px-3 py-1 text-[10px] uppercase tracking-wider text-text-5 border-b border-line-soft flex items-center gap-2">
+            <div className="section-label px-3 py-1 border-b border-line-soft flex items-center gap-2">
               <span>Snippet</span>
               <span className="font-mono text-text-4 normal-case">
                 {payload.language || "text"}
@@ -193,14 +193,14 @@ export function ShareCodeDialog({ repoRoot }: Props) {
                 {payload.code.split("\n").length} lines
               </span>
             </div>
-            <pre className="px-3 py-2 text-[11.5px] text-text-2 font-mono leading-5 max-h-44 overflow-y-auto whitespace-pre">
+            <pre className="px-3 py-2 text-sm text-text-2 font-mono leading-5 max-h-44 overflow-y-auto whitespace-pre">
               {payload.code}
             </pre>
           </div>
 
           {/* Optional comment */}
           <div>
-            <label className="text-[10px] uppercase tracking-wider text-text-5 block mb-1">
+            <label className="section-label block mb-1">
               Add a note (optional)
             </label>
             <textarea
@@ -208,17 +208,17 @@ export function ShareCodeDialog({ repoRoot }: Props) {
               onChange={(e) => setComment(e.target.value)}
               rows={2}
               placeholder="Quick context for the reader…"
-              className="w-full bg-bg-content border border-line-soft rounded px-2 py-1.5 text-[12.5px] text-text-1 leading-5 focus:outline-none focus:border-line resize-y"
+              className="w-full bg-bg-content border border-line-soft rounded px-2 py-1.5 text-base text-text-1 leading-5 focus:outline-none focus:border-line resize-y"
             />
           </div>
 
           {/* Target picker */}
           <div>
-            <label className="text-[10px] uppercase tracking-wider text-text-5 block mb-1">
+            <label className="section-label block mb-1">
               Send to
             </label>
             {targets.length === 0 ? (
-              <div className="text-[11.5px] text-text-5 italic px-1">
+              <div className="text-sm text-text-5 italic px-1">
                 No teammates or channels yet. Open the Chat panel to claim
                 your identity first.
               </div>
@@ -236,10 +236,10 @@ export function ShareCodeDialog({ repoRoot }: Props) {
                           setSelectedKey(key);
                           send();
                         }}
-                        className={`w-full text-left px-2.5 py-1.5 text-[12px] flex items-center gap-2 ${
+                        className={`w-full text-left px-2.5 py-1.5 text-sm flex items-center gap-2 ${
                           active
                             ? "bg-bg-2 text-text-1"
-                            : "text-text-3 hover:bg-bg-2 hover:text-text-1"
+                            : "text-text-3 hover:bg-state-hover hover:text-text-1"
                         }`}
                       >
                         <span className="font-mono text-text-4 w-3 text-center">
@@ -255,7 +255,7 @@ export function ShareCodeDialog({ repoRoot }: Props) {
           </div>
 
           {error && (
-            <div className="text-[11.5px] text-red bg-red/10 border border-red/20 rounded px-2 py-1.5">
+            <div className="text-sm text-red bg-red/10 border border-red/20 rounded px-2 py-1.5">
               {error}
             </div>
           )}

@@ -1,0 +1,23 @@
+# Aura Runner — one command to run the crew loop on this box.
+#
+#   cp aura-runner/runner.env.example aura-runner/runner.env   # then fill it in
+#   docker compose -f aura-runner/docker-compose.yml up -d --build
+#   docker compose -f aura-runner/docker-compose.yml logs -f
+#
+# The named volume persists the clone (and the local, gitignored lease sidecars)
+# across restarts, so a restarted runner resumes cleanly instead of re-cloning.
+
+services:
+  aura-runner:
+    build:
+      # Context is the repo root so the Dockerfile can build the aura CLI.
+      context: ..
+      dockerfile: aura-runner/Dockerfile
+    env_file:
+      - runner.env
+    restart: unless-stopped
+    volumes:
+      - aura-runner-workspace:/workspace
+
+volumes:
+  aura-runner-workspace:

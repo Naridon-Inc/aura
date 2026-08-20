@@ -1,0 +1,20 @@
+[package]
+name        = "aura-egress"
+version     = "0.1.0"
+edition     = "2021"
+license     = "Apache-2.0 OR MIT"
+description = "Two-phase execution: the setup phase installs with the network, the agent phase runs behind a default-deny allowlist."
+repository  = "https://github.com/Naridon-Inc/aura"
+publish     = false
+
+[dependencies]
+# The journal is read by the desktop app off a machine it may never have logged
+# into, so the rows are JSON rather than a format two parsers would have to
+# agree about.
+serde      = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# Deliberately nothing else. The broker runs on every machine the work runs on —
+# a box somebody brought, with whatever `aura` build it already had — so it is
+# std only: no TLS stack to keep current, no async runtime, nothing that has to
+# be the same version on both ends of an ssh connection.

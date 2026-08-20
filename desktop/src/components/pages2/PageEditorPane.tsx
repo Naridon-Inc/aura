@@ -15,6 +15,7 @@ import {
   Users,
 } from "lucide-react";
 import { cn } from "../../lib/utils";
+import { Segment } from "../ui/segment";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -155,9 +156,16 @@ export function PageEditorPane({
 
   return (
     <div className="pages-doc flex min-w-0 flex-1 flex-col">
+      {/* One bar. This used to be two — a title row, then a full-width strip
+          holding three view tabs. The view switch is three cells; it does not
+          need a rule across the window to hold it.
+
+          The bar opens with the title, and the title is the rename field
+          rather than a label. Where the pages are is answered by the index
+          standing to the left of this whole surface, so it isn't asked again
+          here. */}
       <div className="pages-doc-topbar">
-        <div className="flex min-w-0 flex-1 items-center gap-3">
-          <span className="pages-doc-badge">Page</span>
+        <div className="flex min-w-0 flex-1 items-center gap-1.5">
           <textarea
             ref={titleRef}
             value={title}
@@ -170,6 +178,17 @@ export function PageEditorPane({
           />
         </div>
         <div className="flex shrink-0 items-center gap-2">
+          <Segment<PageView>
+            value={view}
+            onChange={onViewChange}
+            options={VIEW_OPTIONS.map((o) => ({
+              value: o.value,
+              label: o.label,
+            }))}
+            size="xs"
+            ariaLabel="Page view"
+          />
+          <span className="h-4 w-px bg-line-soft" aria-hidden />
           <SaveDot state={saveState} />
           <PageKebab
             view={view}
@@ -184,8 +203,6 @@ export function PageEditorPane({
           />
         </div>
       </div>
-
-      <PageViewTabs view={view} onViewChange={onViewChange} />
 
       <div className="pages-doc-body min-h-0 flex-1 overflow-hidden">
         {view === "blocks" && (
@@ -246,31 +263,6 @@ export function PageEditorPane({
   );
 }
 
-function PageViewTabs({
-  view,
-  onViewChange,
-}: {
-  view: PageView;
-  onViewChange: (view: PageView) => void;
-}) {
-  return (
-    <div className="pages-doc-tabs" role="tablist" aria-label="Page view">
-      {VIEW_OPTIONS.map((opt) => (
-        <button
-          key={opt.value}
-          type="button"
-          role="tab"
-          aria-selected={view === opt.value}
-          className={cn("pages-doc-tab", view === opt.value && "is-active")}
-          onClick={() => onViewChange(opt.value)}
-        >
-          {opt.label}
-        </button>
-      ))}
-    </div>
-  );
-}
-
 function PageKebab({
   view,
   locked,
@@ -300,7 +292,7 @@ function PageKebab({
         </button>
       </DropdownMenuTrigger>
       <DropdownMenuContent align="end" className="w-[238px] p-1.5">
-        <DropdownMenuLabel className="px-2 py-1 text-[10px] uppercase tracking-[0.12em] text-text-5">
+        <DropdownMenuLabel className="section-label px-2 py-1">
           View
         </DropdownMenuLabel>
         {VIEW_OPTIONS.map((opt) => (
@@ -314,7 +306,7 @@ function PageKebab({
         ))}
 
         <DropdownMenuSeparator className="my-1" />
-        <DropdownMenuLabel className="px-2 py-1 text-[10px] uppercase tracking-[0.12em] text-text-5">
+        <DropdownMenuLabel className="section-label px-2 py-1">
           Sharing · {visibilityLabel(visibility)}
         </DropdownMenuLabel>
         {VISIBILITY_OPTIONS.map((opt) => (
@@ -365,12 +357,12 @@ function CompactMenuItem({
   return (
     <DropdownMenuItem
       onSelect={onSelect}
-      className={cn("gap-2 rounded-md px-2 py-1.5 text-[12px]", active && "bg-bg-2 text-text-1")}
+      className={cn("gap-2 rounded-md px-2 py-1.5 text-sm", active && "bg-state-selected text-text-1")}
     >
       <span className="grid size-4 place-items-center text-text-4">{icon}</span>
       <span className="min-w-0 flex-1">
         <span className="block truncate font-medium">{label}</span>
-        {detail && <span className="block truncate text-[10.5px] leading-4 text-text-4">{detail}</span>}
+        {detail && <span className="block truncate text-xs leading-4 text-text-4">{detail}</span>}
       </span>
       {active && <Check className="size-3.5 shrink-0 text-accent" strokeWidth={2} />}
     </DropdownMenuItem>

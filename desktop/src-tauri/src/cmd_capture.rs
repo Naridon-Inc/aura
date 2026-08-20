@@ -37,14 +37,26 @@ pub struct CaptureStatus {
 
 /// Resolve the git hooks directory for `root`, honoring linked worktrees.
 ///
-/// A normal checkout has a `.git/` directory → `.git/hooks`. A linked
-/// worktree has a `.git` *file* containing `gitdir: …/.git/worktrees/<name>`;
-/// its hooks live in the shared common dir (`…/.git/hooks`), so we strip the
-/// trailing `worktrees/<name>` to get there. Mirrors `hooksDir()` in the VS
-/// Code extension's `auraClient.ts`. Returns `None` when `root` has no `.git`.
-fn hooks_dir(root: &Path) -> Option<PathBuf> {
+/// Ask git first — `git rev-parse --git-path hooks` is the same resolution the
+/// CLI's `HookInstaller::hooks_dir` installs through, so the probe and the
+/// installer can never disagree about where the hooks live. It also covers the
+/// one case pure path arithmetic can't see: a repo with `core.hooksPath` set
+/// runs hooks from that directory and nowhere else.
+///
+/// The fallback below is the path-only reading, used when git isn't runnable:
+/// a normal checkout has a `.git/` directory → `.git/hooks`. A linked worktree
+/// has a `.git` *file* containing `gitdir: …/.git/worktrees/<name>`; its hooks
+/// live in the shared common dir (`…/.git/hooks`), so we strip the trailing
+/// `worktrees/<name>` to get there. Mirrors `hooksDir()` in the VS Code
+/// extension's `auraClient.ts`. Returns `None` when `root` has no `.git`.
+pub(crate) fn hooks_dir(root: &Path) -> Option<PathBuf> {
     let dotgit = root.join(".git");
+    // `.git` missing entirely = not a git repo; answer that before spawning
+    // anything, so a plain folder stays a cheap `None`.
     let meta = std::fs::metadata(&dotgit).ok()?;
+    if let Some(p) = git_reported_hooks_dir(root) {
+        return Some(p);
+    }
     if meta.is_dir() {
         return Some(dotgit.join("hooks"));
     }
@@ -59,10 +71,42 @@ fn hooks_dir(root: &Path) -> Option<PathBuf> {
     None
 }
 
+/// Ask git where this repo's hooks live. `None` when git can't be run or
+/// doesn't consider `root` a repository, which hands the caller back to the
+/// path-only fallback.
+fn git_reported_hooks_dir(root: &Path) -> Option<PathBuf> {
+    let out = std::process::Command::new("git")
+        .args(["rev-parse", "--git-path", "hooks"])
+        .current_dir(root)
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let reported = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    if reported.is_empty() {
+        return None;
+    }
+    Some(anchor(root, &reported))
+}
+
+/// git answers `--git-path` relative to the working directory for a normal
+/// checkout (`.git/hooks`) and absolutely for a worktree, so relative answers
+/// have to be anchored on `root` — the app's own cwd is somewhere else
+/// entirely. Pure path arithmetic.
+fn anchor(root: &Path, reported: &str) -> PathBuf {
+    let p = PathBuf::from(reported);
+    if p.is_absolute() {
+        p
+    } else {
+        root.join(p)
+    }
+}
+
 /// If `gitdir` ends in `…/worktrees/<name>`, drop those two trailing
 /// components to land on the shared common `.git` dir; otherwise return it
 /// unchanged. Pure path arithmetic — no filesystem access.
-fn strip_worktrees(gitdir: &Path) -> PathBuf {
+pub(crate) fn strip_worktrees(gitdir: &Path) -> PathBuf {
     let comps: Vec<_> = gitdir.components().collect();
     let n = comps.len();
     if n >= 2 && comps[n - 2].as_os_str() == "worktrees" {
@@ -75,7 +119,7 @@ fn strip_worktrees(gitdir: &Path) -> PathBuf {
 /// either the human marker block header or the actual capture invocation, so a
 /// hook that's been hand-edited (marker comment stripped) but still calls the
 /// CLI still reads as enabled. Same two needles the VS Code probe uses.
-fn marker_present(hooks: &Path) -> bool {
+pub(crate) fn marker_present(hooks: &Path) -> bool {
     match std::fs::read_to_string(hooks.join("pre-commit")) {
         Ok(body) => {
             body.contains("AURA SEMANTIC ENGINE") || body.contains("aura capture-context")
@@ -87,19 +131,22 @@ fn marker_present(hooks: &Path) -> bool {
 /// Read-only probe: is passive semantic capture enabled for `repo_root`?
 #[tauri::command]
 pub async fn aura_capture_status(repo_root: String) -> CaptureStatus {
-    let root = PathBuf::from(&repo_root);
-    match hooks_dir(&root) {
-        Some(h) => CaptureStatus {
-            enabled: marker_present(&h),
-            is_git: true,
-            hooks_dir: Some(h.to_string_lossy().into_owned()),
-        },
-        None => CaptureStatus {
-            enabled: false,
-            is_git: false,
-            hooks_dir: None,
-        },
-    }
+    crate::blocking::run(move || {
+        let root = PathBuf::from(&repo_root);
+        match hooks_dir(&root) {
+            Some(h) => CaptureStatus {
+                enabled: marker_present(&h),
+                is_git: true,
+                hooks_dir: Some(h.to_string_lossy().into_owned()),
+            },
+            None => CaptureStatus {
+                enabled: false,
+                is_git: false,
+                hooks_dir: None,
+            },
+        }
+    })
+    .await
 }
 
 #[cfg(test)]
@@ -117,6 +164,23 @@ mod tests {
     fn strip_worktrees_passes_plain_gitdir_through() {
         let p = PathBuf::from("/proj/.git");
         assert_eq!(strip_worktrees(&p), PathBuf::from("/proj/.git"));
+    }
+
+    #[test]
+    fn anchor_pins_a_relative_git_answer_to_the_repo() {
+        // git says `.git/hooks` for a normal checkout — relative to the repo,
+        // NOT to whatever directory the app happens to be running from.
+        let root = PathBuf::from("/proj");
+        assert_eq!(anchor(&root, ".git/hooks"), PathBuf::from("/proj/.git/hooks"));
+    }
+
+    #[test]
+    fn anchor_keeps_an_absolute_git_answer() {
+        let root = PathBuf::from("/proj/feat");
+        assert_eq!(
+            anchor(&root, "/proj/main/.git/hooks"),
+            PathBuf::from("/proj/main/.git/hooks"),
+        );
     }
 
     #[test]

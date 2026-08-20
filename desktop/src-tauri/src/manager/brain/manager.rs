@@ -8,7 +8,7 @@
 use std::sync::{Arc, RwLock};
 
 use super::{
-    Brain, keychain, registry,
+    Brain, registry,
     settings::{self, BrainSettings},
     types::BrainError,
 };
@@ -86,14 +86,16 @@ impl BrainManager {
 }
 
 /// Pick a sensible default when the user hasn't configured anything.
-/// Order: anthropic_native (if a key is in the keychain), else
-/// cli_wrapper (PTY-spawn discovers installed CLIs at run time).
+/// Order (the registry's own availability walk): a native provider whose
+/// key is actually in the keychain, then an installed coding-agent CLI,
+/// then a configured `openai_compat` endpoint.
+///
+/// It delegates rather than deciding here because that walk only ever
+/// returns ids `registry::build` has an arm for. The old code named the
+/// *family* — `cli_wrapper` — instead of a member like
+/// `cli_wrapper:claude_code`, so on a first launch with no API key stored
+/// every single turn died with "unknown provider: cli_wrapper": the app
+/// looked broken when the truth was just that nobody had picked a CLI.
 fn default_provider_id() -> Option<String> {
-    if keychain::has_api_key("anthropic_native") {
-        Some("anthropic_native".into())
-    } else if cfg!(feature = "brain_cli_wrapper") {
-        Some("cli_wrapper".into())
-    } else {
-        None
-    }
+    registry::first_available_fallback_excluding(&[])
 }

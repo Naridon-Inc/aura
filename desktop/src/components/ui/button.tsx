@@ -18,10 +18,15 @@ import { cva, type VariantProps } from "class-variance-authority";
 import { cn } from "../../lib/utils";
 
 const buttonVariants = cva(
-  // One radius (6px) and one type size for every button so the strip
-  // reads as a set. Filled variants layer the metallic skin on top;
-  // low-emphasis variants stay flat so the emphasis hierarchy holds.
-  "inline-flex items-center justify-center gap-1.5 whitespace-nowrap rounded-[6px] text-xs font-medium transition-colors disabled:pointer-events-none disabled:opacity-50 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring [&_svg]:pointer-events-none [&_svg]:size-3.5 [&_svg]:shrink-0",
+  // One radius and one type size for every button so the strip reads as
+  // a set. Filled variants layer the metallic skin on top; low-emphasis
+  // variants stay flat so the emphasis hierarchy holds.
+  //
+  // The radius was an arbitrary `rounded-[6px]` because the scale had no
+  // step that produced 6 — it ran 3/4/5 through the middle. `lg` is 6px
+  // now, so this is the token rather than an escape from it, and buttons
+  // land on the same corner as menus and cards instead of near them.
+  "inline-flex items-center justify-center gap-1.5 whitespace-nowrap rounded-lg text-xs font-medium transition-colors disabled:pointer-events-none disabled:opacity-50 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring [&_svg]:pointer-events-none [&_svg]:size-3.5 [&_svg]:shrink-0",
   {
     variants: {
       variant: {
@@ -32,8 +37,16 @@ const buttonVariants = cva(
           "btn3d btn3d-primary",
         destructive:
           "btn3d btn3d-danger",
+        // Hover is a whisper, not a decision. shadcn's recipe hovers these
+        // to `bg-accent`, which is right in shadcn because `--accent` there
+        // is a neutral wash — but ours is the brand emerald, so every
+        // outline and ghost button in the app flashed solid green under the
+        // pointer. That read as a selection, or worse as the affirmative
+        // answer: a hovered `Deny` looked exactly like `Allow`. They hover
+        // to the state ladder now, the same wash the other ~518 hover
+        // targets in the app already use.
         outline:
-          "border border-border bg-transparent hover:bg-accent hover:text-accent-foreground transition-colors",
+          "border border-border bg-transparent hover:bg-state-hover hover:text-text-1 transition-colors",
         secondary:
           "btn3d btn3d-neutral",
         // Colored-but-calm — wears the same metallic 3D skin as the rest
@@ -52,7 +65,7 @@ const buttonVariants = cva(
         subtle:
           "btn3d btn3d-subtle",
         ghost:
-          "hover:bg-accent hover:text-accent-foreground transition-colors",
+          "hover:bg-state-hover hover:text-text-1 transition-colors",
         link:
           "text-primary underline-offset-4 hover:underline transition-colors",
       },
@@ -62,7 +75,7 @@ const buttonVariants = cva(
         default:  "h-7 px-3",
         xs:       "h-6 px-2",
         sm:       "h-[26px] px-2.5",
-        lg:       "h-8 px-4 text-[12.5px]",
+        lg:       "h-8 px-4 text-base",
         icon:     "h-7 w-7",
         "icon-sm": "h-6 w-6",
       },

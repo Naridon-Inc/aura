@@ -27,6 +27,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { FullscreenOverlay } from "../FullscreenOverlay";
+import { relativeAge } from "../../lib/relativeTime";
 import { Button } from "../ui/button";
 import {
   api,
@@ -242,7 +243,7 @@ export function ChecksPane({ repoRoot, onClose }: ChecksPaneProps) {
     });
   }, []);
 
-  const { passed, needsLook, headline } = useMemo(
+  const { passed, needsLook, skipped, headline } = useMemo(
     () => summarize(runs),
     [runs],
   );
@@ -261,7 +262,7 @@ export function ChecksPane({ repoRoot, onClose }: ChecksPaneProps) {
             size="sm"
             onClick={() => void runChecks("full")}
             disabled={fullBusy}
-            title="Run every check, including the real build — the full pre-ship gate."
+            title="Run every check, including the real build. The full pre-ship gate."
           >
             {fullBusy ? "Building…" : "Run full check"}
           </Button>
@@ -280,6 +281,7 @@ export function ChecksPane({ repoRoot, onClose }: ChecksPaneProps) {
               headline={headline}
               passed={passed}
               needsLook={needsLook}
+              skipped={skipped}
               ranAt={ranAt}
               mode={lastMode}
               checking={quickBusy && !fullBusy}
@@ -333,7 +335,7 @@ export function ChecksPane({ repoRoot, onClose }: ChecksPaneProps) {
                     "color-mix(in srgb, var(--color-amber) 12%, transparent)",
                 }}
               >
-                Couldn't run your checks just now — showing the last result.
+                Couldn't run your checks just now. Showing the last result.
                 Try again.
               </div>
             )}
@@ -354,6 +356,7 @@ function ChecksHeadline({
   headline,
   passed,
   needsLook,
+  skipped,
   ranAt,
   mode,
   checking,
@@ -363,6 +366,7 @@ function ChecksHeadline({
   headline: string;
   passed: number;
   needsLook: number;
+  skipped: number;
   ranAt: number | null;
   mode: RunMode | null;
   checking: boolean;
@@ -390,6 +394,9 @@ function ChecksHeadline({
               </span>
             </>
           )}
+          {/* A skipped check isn't a passed one. Left out of this line, it was
+              invisible everywhere — and "N passed" read as the whole run. */}
+          {skipped > 0 && <span className="text-text-4"> · {skipped} skipped</span>}
           {ranAt && <span className="text-text-4"> · {relativeTime(ranAt)}</span>}
         </p>
       )}
@@ -473,7 +480,7 @@ function CheckRow({
         <span className="flex-1 min-w-0">
           <span className="text-sm text-text-0">{step.name}</span>
           {advisory && (
-            <span className="ml-2 text-[11px] uppercase tracking-wide text-text-4">
+            <span className="section-label ml-2">
               won't block
             </span>
           )}
@@ -493,7 +500,7 @@ function CheckRow({
         <div className="px-3 pb-3 pt-0">
           <p className="text-xs text-text-3 mb-1.5">{step.summary}</p>
           {step.detail && (
-            <pre className="text-[11px] leading-relaxed text-text-4 whitespace-pre-wrap font-mono bg-bg-0 rounded px-2.5 py-2 overflow-x-auto">
+            <pre className="text-xs leading-relaxed text-text-4 whitespace-pre-wrap font-mono bg-bg-0 rounded px-2.5 py-2 overflow-x-auto">
               {step.detail}
             </pre>
           )}
@@ -513,7 +520,7 @@ function EmptyChecks({
   return (
     <div className="mt-8 text-center">
       <p className="text-sm text-text-3">
-        Aura watches your work for ship-readiness — no leaked secrets, no
+        Aura watches your work for ship-readiness. No leaked secrets, no
         half-finished pieces, and the project still builds. The first three
         re-check on their own after every commit; run the full check to include
         the build.
@@ -545,7 +552,7 @@ function CouldNotRun({
         className="text-sm"
         style={{ color: "var(--color-red)" }}
       >
-        Couldn't run your checks — try again.
+        Couldn't run your checks. Try again.
       </p>
       <p className="mt-1.5 text-xs text-text-3">
         Nothing came back from the checks just now. This usually clears up on a
@@ -596,7 +603,7 @@ function CloudAffordance({
       </Button>
       {exportedPath && (
         <p className="mt-2 text-xs" style={{ color: "var(--color-accent-green)" }}>
-          Wrote {exportedPath} — commit and push it to turn on cloud checks.
+          Wrote {exportedPath}. Commit and push it to turn on cloud checks.
         </p>
       )}
     </div>
@@ -605,39 +612,44 @@ function CloudAffordance({
 
 // ── helpers ────────────────────────────────────────────────────────────────
 
-function summarize(runs: CiPipelineRun[]): {
+/** Fold every step of every pipeline run into the three counts the header
+ *  reports. A step is one of four things (`CiStatus`) and all four have to land
+ *  somewhere: counting only pass and fail/timeout left `skip` invisible, so a
+ *  run where two checks passed and six were skipped read "all 2 passed. Ready
+ *  to ship." — a green all-clear over checks that never ran. */
+export function summarize(runs: CiPipelineRun[]): {
   passed: number;
   needsLook: number;
+  skipped: number;
   headline: string;
 } {
   let passed = 0;
   let needsLook = 0;
+  let skipped = 0;
   for (const run of runs) {
     for (const step of run.steps) {
       if (step.status === "pass") passed += 1;
       else if (step.status === "fail" || step.status === "timeout") needsLook += 1;
+      else skipped += 1;
     }
   }
   // Prefer the engine's own headline when there's exactly one pipeline run —
   // it's already plain-language and computed there.
-  const headline =
-    runs.length === 1
-      ? runs[0].headline
-      : needsLook === 0
-        ? `Your checks ran — all ${passed} passed. Ready to ship.`
-        : `Your checks ran — ${passed} passed, ${needsLook} ${
+  const clean =
+    needsLook === 0 && skipped === 0
+      ? `Your checks ran. All ${passed} passed. Ready to ship.`
+      : // Nothing failed, but "ready to ship" is a claim about checks that
+        // didn't happen. Say what did.
+        needsLook === 0
+        ? `Your checks ran. ${passed} passed, ${skipped} skipped. Nothing failed, but not everything ran.`
+        : `Your checks ran. ${passed} passed, ${needsLook} ${
             needsLook === 1 ? "needs" : "need"
-          } a look.`;
-  return { passed, needsLook, headline };
+          } a look${skipped > 0 ? `, ${skipped} skipped` : ""}.`;
+  const headline = runs.length === 1 ? runs[0].headline : clean;
+  return { passed, needsLook, skipped, headline };
 }
 
 function relativeTime(ts: number): string {
-  const secs = Math.round((Date.now() - ts) / 1000);
-  if (secs < 60) return "just now";
-  const mins = Math.round(secs / 60);
-  if (mins < 60) return `${mins}m ago`;
-  const hours = Math.round(mins / 60);
-  if (hours < 24) return `${hours}h ago`;
-  const days = Math.round(hours / 24);
-  return `${days}d ago`;
+  // One ladder for the whole app — see lib/relativeTime.
+  return relativeAge(ts);
 }

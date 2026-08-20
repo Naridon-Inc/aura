@@ -110,7 +110,8 @@ export interface ClipboardKeyIO {
  *  xterm's paste path. We bridge both through navigator.clipboard, which
  *  the webview does grant. Paste is bracketed so multiline content is
  *  inserted rather than submitted by bracketed-paste-aware TUIs (Claude
- *  Code, Codex) — matching the Shift+Enter path above. */
+ *  Code, Codex) — matching the Shift+Enter path above. Images take a
+ *  different route; see [`pasteIntoPty`]. */
 export function handleClipboardKey(e: KeyboardEvent, io: ClipboardKeyIO): boolean {
   if (e.type !== "keydown" || !e.metaKey || e.altKey || e.ctrlKey) return false;
   const key = e.key.toLowerCase();
@@ -123,14 +124,43 @@ export function handleClipboardKey(e: KeyboardEvent, io: ClipboardKeyIO): boolea
     return true;
   }
   if (key === "v") {
-    void navigator.clipboard
-      ?.readText()
-      .then((text) => {
-        if (!text) return;
-        io.writeBytes(Array.from(ENC.encode(`\x1b[200~${text}\x1b[201~`)));
-      })
-      .catch(() => {});
+    void pasteIntoPty(io);
     return true;
   }
   return false;
+}
+
+/** ⌘V into a PTY. Text is bracketed-pasted; an image is handed to the agent
+ *  CLI by forwarding Ctrl+V instead.
+ *
+ *  A PTY carries bytes, so there is no way to push a screenshot down it. Both
+ *  Claude Code and Codex solve that by reading the OS pasteboard themselves
+ *  when they see Ctrl+V (0x16) — which is why, until now, ⌘V looked broken for
+ *  images and people had to know to press Ctrl+V on a Mac. We ask Rust whether
+ *  the clipboard holds an image (the webview can't answer: WKWebView gates
+ *  `navigator.clipboard.read()` behind its own paste gesture) and forward the
+ *  byte when it does, so one shortcut covers both kinds of paste.
+ *
+ *  Text wins a tie, and an unanswerable clipboard falls back to the text path —
+ *  0x16 is `quoted-insert` in readline, so sending it speculatively would eat
+ *  the user's next keystroke. */
+async function pasteIntoPty(io: ClipboardKeyIO): Promise<void> {
+  let text = "";
+  try {
+    text = (await navigator.clipboard?.readText()) ?? "";
+  } catch {
+    /* denied or empty — the image probe below is the remaining chance */
+  }
+  if (text) {
+    io.writeBytes(Array.from(ENC.encode(`\x1b[200~${text}\x1b[201~`)));
+    return;
+  }
+  try {
+    const { invoke } = await import("@tauri-apps/api/core");
+    if (await invoke<boolean>("clipboard_has_image")) {
+      io.writeBytes([0x16]);
+    }
+  } catch {
+    /* not running under Tauri, or the command is unavailable — nothing to paste */
+  }
 }

@@ -299,7 +299,7 @@ pub fn flush_cloud() {
                 continue;
             }
         };
-        let out = std::process::Command::new("aura")
+        let out = std::process::Command::new(crate::agent_event_listener::resolve_aura_bin())
             .args(["skill", "record", "--json", &body])
             .output();
         match out {
@@ -364,7 +364,7 @@ pub fn suggest_provider(taxonomy: &TaskTaxonomy) -> Option<SkillSuggestion> {
         args.push("--layer".into());
         args.push(layer.clone());
     }
-    let out = std::process::Command::new("aura")
+    let out = std::process::Command::new(crate::agent_event_listener::resolve_aura_bin())
         .args(&args)
         .output()
         .ok()?;
@@ -571,7 +571,7 @@ pub async fn pr_review_for_branch(
     worktree_path: &str,
     base_branch: &str,
 ) -> Option<bool> {
-    let mut cmd = tokio::process::Command::new("aura");
+    let mut cmd = tokio::process::Command::new(crate::agent_event_listener::resolve_aura_bin());
     cmd.args(["pr-review", "--base", base_branch, "--json"])
         .current_dir(worktree_path)
         .stdout(std::process::Stdio::piped())

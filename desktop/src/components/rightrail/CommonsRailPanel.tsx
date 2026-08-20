@@ -13,7 +13,8 @@
 
 import { useEffect, useState } from "react";
 
-import { api, type TeamMember } from "../../lib/api";
+import { type TeamMember } from "../../lib/api";
+import { fetchTeam } from "../../lib/teamCache";
 import { LoungePanel } from "../team/presentation/LoungePanel";
 import { PluginBrowser } from "../team/presentation/PluginBrowser";
 import { AppsLauncher } from "../commons/AppsLauncher";
@@ -42,8 +43,7 @@ export function CommonsRailPanel({ repoRoot, onExpand }: Props) {
   useEffect(() => {
     let alive = true;
     const load = () =>
-      api
-        .teamLoad(repoRoot)
+      fetchTeam(repoRoot)
         .then((m) => {
           if (alive) setMembers(m.members ?? []);
         })
@@ -72,7 +72,7 @@ export function CommonsRailPanel({ repoRoot, onExpand }: Props) {
           onClick={onExpand}
           title="Open Commons in full width"
           aria-label="Open Commons in full width"
-          className="ml-auto flex items-center justify-center w-7 h-7 rounded-md text-text-3 hover:text-text-1 hover:bg-bg-3 transition-colors"
+          className="ml-auto flex items-center justify-center w-7 h-7 rounded-md text-text-3 hover:text-text-1 hover:bg-state-hover transition-colors"
         >
           <svg width="13" height="13" viewBox="0 0 24 24" fill="none" aria-hidden>
             <path

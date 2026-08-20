@@ -3,8 +3,13 @@
 //
 // It narrates one commit top-to-bottom as a sequence of beats:
 //
-//   1. Asked   — the closest recorded signal to the original ask
-//   2. Said    — what the AI said it would do (typed intents)
+//   1. Asked   — the closest recorded signal to the original ask. Only ever
+//                something somebody stated: a Claude session's own opening
+//                prompt, or a logged intent. Never a line Aura inferred from
+//                the diff, which would put the change's own description
+//                where its origin belongs.
+//   2. Said    — what the AI logged as it worked (typed intents), plus any
+//                line Aura wrote afterwards, marked as such
 //   3. Did     — what actually changed, as per-symbol cards (the heart)
 //   4. Lines up— does the code match the ask? (verdict as conclusion)
 //   5. Recover — snapshots + per-symbol rewind, if something's wrong
@@ -25,17 +30,37 @@
 
 import { useEffect, useMemo, useState } from "react";
 import { api, type ClaudeSession, type IntentChangesetFile } from "../../lib/api";
-import { useEditorStore } from "../../lib/editorStore";
+import { intentTypeChip } from "../../lib/intentTypeLabels";
 import { StoryMarkdown } from "../story/StoryMarkdown";
 import { AgentBadge } from "../agent/AgentBadge";
 import { Button } from "../ui/button";
-import { isAutoStubText, nearestSessionByTime } from "../../lib/sessionMeta";
+import {
+  isAutoStubText,
+  isNonClaudeAgent,
+  nearestSessionByTime,
+} from "../../lib/sessionMeta";
+import {
+  basisCanBeChecked,
+  intentBasis,
+  mixedBasisNote,
+  uncheckableLabel,
+  uncheckableNote,
+  type IntentBasis,
+} from "../../lib/intentBasis";
+import { goToTrace } from "../trace/traceRoute";
+import { relativeAgeFromSecs } from "../../lib/relativeTime";
+import { percentOf } from "../../lib/percent";
 
 export type StatedIntent = {
   timestamp: number;
   agent_id: string;
   intent: string;
   intent_type?: string | null;
+  /** Where the text came from when nobody called `log-intent`:
+   *  `session_prompt`, `brain_inferred` or `guard_auto_stub`. Absent means
+   *  somebody stated it. This report is a comparison between this text and
+   *  the AST — see lib/intentBasis for why that only counts sometimes. */
+  source?: string | null;
 };
 
 // Structured per-symbol change. Emitted by `intent-vs-actual show` once
@@ -182,8 +207,15 @@ export function mergeIntentReports(reports: IntentReport[]): IntentReport | null
   const totalChanged = modified.length + added.length + deleted.length;
   const score =
     totalChanged > 0 ? Math.min(1, aligned.length / totalChanged) : head.alignment_score ?? 0;
+  // A commit message is a stated reason: the CLI folds it into the text it
+  // scores, so `mismatched` below was already measured against it. Judging
+  // the run on intent rows alone called every message-only run "No clear
+  // match" in red — an accusation of divergence over work the CLI's own
+  // per-commit scoring had found fully covered. Only the run with no reason
+  // anywhere is a real hole.
+  const anyMessage = live.some((r) => r.commit_message?.trim());
   const banner: IntentReport["banner"] =
-    stated.length === 0
+    stated.length === 0 && !anyMessage
       ? "diverged"
       : mismatched.length === 0
         ? "aligned"
@@ -304,10 +336,21 @@ export function deriveAskedSaid(
   sessions: ClaudeSession[],
 ): { asked: AskedNode | null; said: StatedIntent[] } {
   const genuine = [...report.stated]
-    .filter((s) => !isAutoStubText(s.intent))
+    .filter((s) => !isAutoStubText(s.intent) && s.source !== "guard_auto_stub")
     .sort((a, b) => a.timestamp - b.timestamp);
 
-  const sess = nearestSessionByTime(report.commit_time, sessions);
+  // Borrow a Claude transcript only when this commit could have come from one.
+  // `correlateClaudeSession` gates the same borrow row by row and says why:
+  // an agent that keeps its own logs (codex, gemini, …) must never be shown
+  // wearing a nearby Claude session's prompt. Here the evidence is the
+  // report's own rows — if every one of them names such an agent, the closest
+  // Claude prompt is somebody else's work, and it would render under Claude's
+  // badge as the reason for this change.
+  const claudeAuthored =
+    genuine.length === 0 || genuine.some((s) => !isNonClaudeAgent(s.agent_id));
+  const sess = claudeAuthored
+    ? nearestSessionByTime(report.commit_time, sessions)
+    : null;
   const sessionPrompt = sess?.first_prompt?.trim() || "";
   if (sessionPrompt) {
     return {
@@ -320,8 +363,13 @@ export function deriveAskedSaid(
       said: genuine,
     };
   }
-  if (genuine.length > 0) {
-    const first = genuine[0];
+  // An ask is something somebody stated. A `brain_inferred` line was written
+  // by Aura afterwards, from the diff — promoting it here would print it under
+  // the heading "Asked" as the origin of the very change it describes. It
+  // stays in "Said", where it is marked; with nothing else on record the beat
+  // says outright that the change has no stated origin.
+  const first = genuine.find((s) => s.source !== "brain_inferred");
+  if (first) {
     return {
       asked: {
         text: first.intent,
@@ -330,10 +378,10 @@ export function deriveAskedSaid(
         intentType: first.intent_type,
         fromSession: false,
       },
-      said: genuine.slice(1),
+      said: genuine.filter((s) => s !== first),
     };
   }
-  return { asked: null, said: [] };
+  return { asked: null, said: genuine };
 }
 
 export function IntentStory({
@@ -356,21 +404,21 @@ export function IntentStory({
 }) {
   if (loading) {
     return (
-      <div className="flex-1 min-w-0 px-5 py-4 text-text-4 text-[12px]">
+      <div className="flex-1 min-w-0 px-5 py-4 text-text-4 text-sm">
         reading this change…
       </div>
     );
   }
   if (error) {
     return (
-      <div className="flex-1 min-w-0 px-5 py-4 text-red-400 text-[11px] font-mono">
+      <div className="flex-1 min-w-0 px-5 py-4 text-red-400 text-xs font-mono">
         {error}
       </div>
     );
   }
   if (!report) {
     return (
-      <div className="flex-1 min-w-0 px-5 py-4 text-text-4 text-[12px]">
+      <div className="flex-1 min-w-0 px-5 py-4 text-text-4 text-sm">
         Pick a change from the timeline to read its story.
       </div>
     );
@@ -419,16 +467,16 @@ export function StoryHeader({ report }: { report: IntentReport }) {
     <div>
       <div className="flex items-start gap-3">
         <div className="min-w-0 flex-1">
-          <div className="text-[15px] text-text-1 font-medium leading-snug break-words">
+          <div className="text-lg text-text-1 font-medium leading-snug break-words">
             {report.commit_message?.split("\n")[0] || "(no message)"}
           </div>
-          <div className="text-[10.5px] text-text-4 mt-1 font-mono">
+          <div className="text-xs text-text-4 mt-1 font-mono">
             {report.commit_short} · {report.author} ·{" "}
             {formatAbsolute(report.commit_time)}
           </div>
         </div>
         <span
-          className="flex-shrink-0 inline-flex items-center gap-1.5 rounded-full px-2.5 py-1 text-[11px] font-medium border"
+          className="flex-shrink-0 inline-flex items-center gap-1.5 rounded-full px-2.5 py-1 text-xs font-medium border"
           style={{ color: tone.color, borderColor: tone.color, background: tone.bg }}
         >
           <span
@@ -464,10 +512,10 @@ export function Beat({
           className="absolute left-[8.5px] top-5 bottom-[-24px] w-px bg-line-soft"
         />
       )}
-      <span className="absolute left-0 top-0.5 w-[18px] h-[18px] rounded-full bg-bg-2 border border-line-soft flex items-center justify-center text-[9px] font-mono text-text-3">
+      <span className="absolute left-0 top-0.5 w-[18px] h-[18px] rounded-full bg-bg-2 border border-line-soft flex items-center justify-center text-2xs font-mono text-text-3">
         {n}
       </span>
-      <div className="text-[11px] uppercase tracking-wider text-text-4 font-medium">
+      <div className="section-label">
         {label}
         {hint && (
           <span className="ml-2 normal-case tracking-normal text-text-4/70">
@@ -483,8 +531,8 @@ export function Beat({
 export function AskedBeat({ asked }: { asked: AskedNode | null }) {
   if (!asked) {
     return (
-      <div className="text-[12px] text-text-4 italic">
-        No reason was recorded near this commit — the change has no stated
+      <div className="text-sm text-text-4 italic">
+        No reason was recorded near this commit. The change has no stated
         origin to compare against.
       </div>
     );
@@ -495,7 +543,7 @@ export function AskedBeat({ asked }: { asked: AskedNode | null }) {
         <AgentBadge agentId={asked.agentId} />
         {asked.fromSession ? (
           <span
-            className="text-[9.5px] px-1 py-px rounded border border-line-soft bg-bg-2 text-text-3"
+            className="text-2xs px-1 py-px rounded border border-line-soft bg-bg-2 text-text-3"
             title="The user's first message in the correlated Claude Code session"
           >
             prompt
@@ -503,7 +551,7 @@ export function AskedBeat({ asked }: { asked: AskedNode | null }) {
         ) : asked.intentType ? (
           <TypeBadge type={asked.intentType} />
         ) : null}
-        <span className="ml-auto text-[10px] text-text-4 tabular-nums">
+        <span className="ml-auto text-2xs text-text-4 tabular-nums">
           {formatRelative(asked.timestamp)}
         </span>
       </div>
@@ -520,7 +568,19 @@ export function SaidBeat({ said }: { said: StatedIntent[] }) {
           <div className="flex items-center gap-2 mb-0.5">
             <AgentBadge agentId={s.agent_id} />
             {s.intent_type && <TypeBadge type={s.intent_type} />}
-            <span className="ml-auto text-[10px] text-text-4 tabular-nums">
+            {/* The beat is headed "what the AI logged as it worked". A
+                brain_inferred line is not that: the agent logged nothing, and
+                Aura wrote this afterwards by reading the diff. Without the
+                marker it reads as the agent's own words, under its own badge. */}
+            {s.source === "brain_inferred" && (
+              <span
+                className="text-2xs px-1 py-px rounded border border-line-soft bg-bg-2 text-text-4"
+                title="Nobody wrote a reason for this change, so Aura read it afterwards and wrote this line. It describes what happened. It isn't what the agent said it would do."
+              >
+                Aura's summary
+              </span>
+            )}
+            <span className="ml-auto text-2xs text-text-4 tabular-nums">
               {formatRelative(s.timestamp)}
             </span>
           </div>
@@ -549,7 +609,7 @@ function DidBeat({ report }: { report: IntentReport }) {
 
   if (nodes.length === 0) {
     return (
-      <div className="text-[12px] text-text-4">
+      <div className="text-sm text-text-4">
         No code-level changes detected
         {report.changed_files.length > 0 && (
           <> in {report.changed_files.length} changed file
@@ -566,7 +626,7 @@ function DidBeat({ report }: { report: IntentReport }) {
 
   return (
     <div>
-      <div className="text-[10.5px] text-text-4 mb-2 flex items-center gap-2">
+      <div className="text-xs text-text-4 mb-2 flex items-center gap-2">
         <span>
           {nodes.length} piece{nodes.length === 1 ? "" : "s"} ·{" "}
           {report.changed_files.length} file
@@ -587,7 +647,7 @@ function DidBeat({ report }: { report: IntentReport }) {
           size="xs"
           type="button"
           onClick={() => setShowAll((v) => !v)}
-          className="mt-2 px-0 text-[11px] text-text-3 hover:text-text-1"
+          className="mt-2 px-0 text-xs text-text-3 hover:text-text-1"
         >
           {showAll
             ? "Show fewer"
@@ -601,7 +661,6 @@ function DidBeat({ report }: { report: IntentReport }) {
 }
 
 function NodeCard({ node }: { node: NodeRef }) {
-  const editor = useEditorStore();
   const file = node.file ?? undefined;
   const line = node.start_line ?? undefined;
 
@@ -612,7 +671,11 @@ function NodeCard({ node }: { node: NodeRef }) {
     );
   };
   const rewind = () => {
-    editor.openTraceTool("rewind", { identifier: node.identifier, file });
+    goToTrace({
+      kind: "tool",
+      tool: "rewind",
+      arg: { identifier: node.identifier, file },
+    });
   };
 
   return (
@@ -620,7 +683,7 @@ function NodeCard({ node }: { node: NodeRef }) {
       <div className="flex items-center gap-2">
         <KindGlyph kind={node.kind} />
         <span
-          className="font-mono text-[12px] text-text-1 truncate"
+          className="font-mono text-sm text-text-1 truncate"
           title={node.identifier}
         >
           {node.identifier}
@@ -628,7 +691,7 @@ function NodeCard({ node }: { node: NodeRef }) {
         <ChangeBadge change={node.change} />
         {node.covered === false && (
           <span
-            className="text-[9.5px] px-1 py-px rounded border border-amber-500/30 bg-amber-500/10 text-amber-300/90"
+            className="text-2xs px-1 py-px rounded border border-amber-500/30 bg-amber-500/10 text-amber-300/90"
             title="This code changed, but it wasn't part of what you asked for"
           >
             not in your ask
@@ -651,7 +714,7 @@ function NodeCard({ node }: { node: NodeRef }) {
               size="xs"
               type="button"
               onClick={openFile}
-              className="text-[10.5px] text-text-4 hover:text-text-1"
+              className="text-xs text-text-4 hover:text-text-1"
               title={`Open ${file}${line ? `:${line}` : ""}`}
             >
               Open
@@ -662,7 +725,7 @@ function NodeCard({ node }: { node: NodeRef }) {
             size="xs"
             type="button"
             onClick={rewind}
-            className="text-[10.5px] text-text-4 hover:text-text-1"
+            className="text-xs text-text-4 hover:text-text-1"
             title="Put this piece back the way it was"
           >
             Rewind
@@ -670,14 +733,14 @@ function NodeCard({ node }: { node: NodeRef }) {
         </div>
       </div>
       {file && (
-        <div className="mt-1 text-[10px] font-mono text-text-4 truncate" title={file}>
+        <div className="mt-1 text-2xs font-mono text-text-4 truncate" title={file}>
           {file}
           {line ? `:${line}` : ""}
         </div>
       )}
       {node.signature && (
         <div
-          className="mt-1 text-[11px] font-mono text-text-3 truncate"
+          className="mt-1 text-xs font-mono text-text-3 truncate"
           title={node.signature}
         >
           {node.signature}
@@ -695,9 +758,9 @@ function NodeCard({ node }: { node: NodeRef }) {
 export function VerdictBeat({ report }: { report: IntentReport }) {
   const tone = bannerTone(report);
   // Color rides on the glyph + the coverage meter only — never as a card fill.
-  const glyph =
-    report.banner === "aligned" ? "✓" : report.banner === "drift" ? "–" : "✗";
-  const pct = Math.round(Math.max(0, Math.min(1, report.alignment_score)) * 100);
+  const glyph = verdictGlyph(report);
+  const checkable = basisCanBeChecked(reportBasis(report));
+  const pct = percentOf(report.alignment_score);
   const totalChanged =
     report.modified_nodes.length +
     report.added_nodes.length +
@@ -707,26 +770,34 @@ export function VerdictBeat({ report }: { report: IntentReport }) {
   return (
     <div className="rounded-lg border border-line-soft bg-bg-0 shadow-[var(--shadow-card)] p-3">
       <div className="flex items-center gap-2.5">
-        <span aria-hidden className="text-[12px] leading-none" style={{ color: tone.color }}>
+        <span aria-hidden className="text-sm leading-none" style={{ color: tone.color }}>
           {glyph}
         </span>
-        <span className="text-[13px] font-semibold text-text-1">{tone.label}</span>
-        <span className="ml-auto text-[10.5px] text-text-4 tabular-nums">
-          {report.aligned_nodes.length}/{Math.max(totalChanged, 1)} pieces
-          covered · {pct}%
+        <span className="text-base font-semibold text-text-1">{tone.label}</span>
+        <span className="ml-auto text-xs text-text-4 tabular-nums">
+          {checkable
+            ? `${report.aligned_nodes.length}/${Math.max(totalChanged, 1)} pieces covered · ${pct}%`
+            : `${totalChanged} piece${totalChanged === 1 ? "" : "s"} changed`}
         </span>
       </div>
-      <div className="mt-2 h-1.5 rounded-full bg-bg-2 overflow-hidden">
-        <div
-          className="h-full rounded-full"
-          style={{ width: `${pct}%`, background: tone.color }}
-        />
-      </div>
-      <div className="text-[12.5px] text-text-2 mt-2 leading-snug">
+      {/* The meter is a coverage reading. With nothing independent to cover,
+          it would fill itself — so it only appears when it means something. */}
+      {checkable && (
+        <div className="mt-2 h-1.5 rounded-full bg-bg-2 overflow-hidden">
+          <div
+            className="h-full rounded-full"
+            style={{ width: `${pct}%`, background: tone.color }}
+          />
+        </div>
+      )}
+      <div className="text-base text-text-2 mt-2 leading-snug">
         {tone.msg}
       </div>
-      {uncovered.length > 0 && (
-        <div className="mt-2 text-[11.5px] text-text-3">
+      {tone.note && (
+        <div className="mt-1.5 text-sm text-text-4 leading-relaxed">{tone.note}</div>
+      )}
+      {checkable && uncovered.length > 0 && (
+        <div className="mt-2 text-sm text-text-3">
           Not named in the task:{" "}
           <span className="font-mono text-amber-300/90">
             {uncovered.slice(0, 6).join(", ")}
@@ -772,10 +843,10 @@ export function RecoverBeat({
   }, [repoRoot, changed]);
 
   return (
-    <div className="text-[12px] text-text-3 leading-relaxed">
+    <div className="text-sm text-text-3 leading-relaxed">
       <p>
         Every <span className="font-mono text-text-2">Bring back</span> above
-        restores one piece to the way it was — just that piece, nothing else,
+        restores one piece to the way it was, just that piece, nothing else,
         and never a clash. Aura saves a copy of every file before edits, so
         undoing is always safe.
       </p>
@@ -800,7 +871,7 @@ function ChangeBadge({ change }: { change: NodeRef["change"] }) {
   const m = map[change];
   return (
     <span
-      className={`text-[9.5px] px-1 py-px rounded border flex-shrink-0 ${m.cls}`}
+      className={`text-2xs px-1 py-px rounded border flex-shrink-0 ${m.cls}`}
     >
       {m.label}
     </span>
@@ -809,8 +880,8 @@ function ChangeBadge({ change }: { change: NodeRef["change"] }) {
 
 function TypeBadge({ type }: { type: string }) {
   return (
-    <span className="text-[9.5px] px-1 py-px rounded border border-line-soft bg-bg-2 text-text-3">
-      {type}
+    <span className="text-2xs px-1 py-px rounded border border-line-soft bg-bg-2 text-text-3">
+      {intentTypeChip(type)}
     </span>
   );
 }
@@ -827,7 +898,7 @@ function KindGlyph({ kind }: { kind: string }) {
         ? "ƒ"
         : "•";
   return (
-    <span className="w-4 h-4 flex-shrink-0 rounded bg-bg-2 border border-line-soft flex items-center justify-center text-[9px] font-mono text-text-4">
+    <span className="w-4 h-4 flex-shrink-0 rounded bg-bg-2 border border-line-soft flex items-center justify-center text-2xs font-mono text-text-4">
       {label}
     </span>
   );
@@ -857,18 +928,50 @@ export function deriveNodes(report: IntentReport): NodeRef[] {
   ];
 }
 
+/** What this report's score was computed against — see lib/intentBasis.
+ *  Every verdict rendering in this file goes through here, so the chip, the
+ *  glyph and the sentence can't reach different conclusions. */
+export function reportBasis(report: IntentReport): IntentBasis {
+  return intentBasis(report.stated, report.commit_message);
+}
+
+/** The mark drawn beside the verdict. `?` whenever there was nothing for
+ *  the change to disagree with — a tick there would be unearned. */
+export function verdictGlyph(report: IntentReport): string {
+  if (!basisCanBeChecked(reportBasis(report))) return "?";
+  return report.banner === "aligned" ? "✓" : report.banner === "drift" ? "–" : "✗";
+}
+
 export function bannerTone(report: IntentReport): {
   color: string;
   bg: string;
   label: string;
   msg: string;
+  /** Extra line under `msg`, when the verdict stands but rests on something
+   *  the reader should know about. Empty most of the time. */
+  note: string;
 } {
+  // A pass or a fail is only meaningful when the reason was written
+  // independently of the change. When it wasn't, say what's missing rather
+  // than dress the score up as a verdict.
+  const basis = reportBasis(report);
+  if (!basisCanBeChecked(basis)) {
+    return {
+      color: "var(--color-amber)",
+      bg: "color-mix(in oklab, var(--color-amber) 12%, transparent)",
+      label: uncheckableLabel(basis),
+      msg: uncheckableNote(basis),
+      note: "",
+    };
+  }
+
   if (report.banner === "aligned") {
     return {
       color: "var(--color-accent-green)",
       bg: "color-mix(in oklab, var(--color-accent-green) 12%, transparent)",
       label: "Matches task",
       msg: "Every changed piece is covered by the recorded reason.",
+      note: mixedBasisNote(basis),
     };
   }
   if (report.banner === "drift") {
@@ -877,26 +980,21 @@ export function bannerTone(report: IntentReport): {
       bg: "color-mix(in oklab, var(--color-amber) 12%, transparent)",
       label: "Needs review",
       msg: "Some changed pieces weren't named in the reason.",
+      note: mixedBasisNote(basis),
     };
   }
   return {
     color: "var(--color-red)",
     bg: "color-mix(in oklab, var(--color-red) 12%, transparent)",
     label: "No clear match",
-    msg:
-      report.stated.length === 0
-        ? "No reason was recorded near this commit."
-        : "The reason covers few or none of the changed pieces.",
+    msg: "The reason covers few or none of the changed pieces.",
+    note: mixedBasisNote(basis),
   };
 }
 
 export function formatRelative(unix: number): string {
-  const diff = Math.floor(Date.now() / 1000) - unix;
-  if (diff < 60) return "<1m";
-  if (diff < 3600) return `${Math.floor(diff / 60)}m`;
-  if (diff < 86400) return `${Math.floor(diff / 3600)}h`;
-  if (diff < 2592000) return `${Math.floor(diff / 86400)}d`;
-  return `${Math.floor(diff / 2592000)}mo`;
+  // One ladder for the whole app — see lib/relativeTime.
+  return relativeAgeFromSecs(unix, { style: "compact" });
 }
 
 export function formatAbsolute(unix: number): string {

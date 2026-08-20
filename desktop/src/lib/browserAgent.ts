@@ -41,7 +41,7 @@ const SYSTEM_PROMPT = `You are an agent that browses the web inside a desktop ap
 
 Each turn you receive the GOAL, a short HISTORY of what you've already done, and the CURRENT PAGE (title, url, and visible text). Decide the single best next step.
 
-Reply with EXACTLY ONE JSON object and nothing else — no prose, no markdown, no code fences. It must be one of:
+Reply with EXACTLY ONE JSON object and nothing else. No prose, no markdown, no code fences. It must be one of:
 {"thought": "<one short sentence>", "action": "navigate", "url": "https://..."}
 {"thought": "<one short sentence>", "action": "search", "query": "<web search terms>"}
 {"thought": "<one short sentence>", "action": "answer", "answer": "<final answer>"}
@@ -169,7 +169,7 @@ function buildPrompt(
     : "(nothing yet)";
   const pageBlock = page
     ? `title: ${page.title}\nurl: ${page.url}\ntext:\n${page.text.slice(0, PAGE_TEXT_LIMIT)}`
-    : "(blank tab — navigate or search to begin)";
+    : "(blank tab. Navigate or search to begin)";
   const closing = forceAnswer
     ? `\n\nYou are out of browsing steps. Respond with an "answer" action now, grounded in what you have seen.`
     : "";

@@ -30,16 +30,20 @@ export type PaneSection = AdeSection;
  *
  *  Mirrors the section-follow switch that used to live inline in `App.tsx`:
  *    - Plan  — standup / plan / pages / automations
- *    - Team  — tasks / task / screenshare / channels (the board is collaborative)
+ *    - Team  — screenshare / channels / commons / app
  *    - Trace — trace tools (Review / Rewind / Attestations / Doctor / Memory)
- *    - Build — agent / terminal / manager / file / empty */
+ *    - Build — agent / terminal / manager / file / empty / tasks / task */
 export function sectionForRef(ref: WorkPaneRef): PaneSection {
   switch (ref.kind) {
-    // Tasks live in Team now — the board is a collaborative team surface, so
-    // an open board / task pane reads as Team, not Plan.
+    // Tasks is a Build destination — its own row in the rail's Build group,
+    // in the slot Mission Control held before the two merged. A board opened
+    // as a tab is the same board the destination shows, so it lights the same
+    // row; reading as Team here (from back when a board could only be reached
+    // under Team's umbrella) meant one tab strip and the rail disagreed about
+    // where you were.
     case "tasks":
     case "task":
-      return "team";
+      return "build";
     case "standup":
     case "plan":
     case "pages":

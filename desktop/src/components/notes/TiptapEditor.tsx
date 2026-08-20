@@ -79,6 +79,7 @@ import { SectionScrollIndicator } from "./SectionScrollIndicator";
 import { MermaidAwareCodeBlock } from "./MermaidCodeBlock";
 import { CodeHighlight } from "./tiptap/codeHighlight";
 import { blockExtensions } from "./tiptap/extensions";
+import { registerUndoTarget } from "../../lib/undoRouter";
 import { Avatar } from "../team/presentation/Avatar";
 import {
   searchMentions,
@@ -87,6 +88,8 @@ import {
   type MentionSources,
   type MentionItem,
 } from "../pages2/mentionSources";
+import { useDismiss } from "../../lib/useDismiss";
+import { askText } from "../ui/ask";
 
 // Wikilink transform — tiptap-markdown uses markdown-it which doesn't
 // know about `[[Title]]`, so we inflate to standard link syntax with a
@@ -326,10 +329,18 @@ const SLASH_ITEMS: SlashItem[] = [
     label: "Image",
     icon: <ImageIcon className="w-3.5 h-3.5" strokeWidth={1.5} />,
     command: (e) => {
-      const url = window.prompt("Image URL");
-      if (url && url.trim()) {
-        e.chain().focus().setImage({ src: url.trim() }).run();
-      }
+      void (async () => {
+        const url = await askText({
+          title: "Add an image",
+          label: "Image address",
+          placeholder: "https://…",
+          submitLabel: "Insert",
+          required: true,
+        });
+        if (url && url.trim()) {
+          e.chain().focus().setImage({ src: url.trim() }).run();
+        }
+      })();
     },
   },
   {
@@ -431,7 +442,7 @@ function ToolButton({
         "transition-colors",
         active
           ? "bg-bg-2 text-text-1"
-          : "text-text-3 hover:bg-bg-2 hover:text-text-1",
+          : "text-text-3 hover:bg-state-hover hover:text-text-1",
       )}
     >
       {icon}
@@ -625,12 +636,12 @@ export function TiptapEditor({
           "tiptap-pane prose prose-invert max-w-none",
           "min-h-full focus:outline-none",
           dense
-            ? "px-2 py-1.5 text-[12.5px] leading-5 text-text-1"
+            ? "px-2 py-1.5 text-base leading-5 text-text-1"
             : bare
-              ? "px-4 py-3 text-[13px] leading-[1.65] text-text-2"
+              ? "px-4 py-3 text-base leading-[1.65] text-text-2"
               : noPadding
-                ? "text-[16px] leading-[1.7] text-text-2"
-                : "px-8 py-6 text-[16px] leading-[1.7] text-text-2",
+                ? "text-lg leading-[1.7] text-text-2"
+                : "px-8 py-6 text-lg leading-[1.7] text-text-2",
         ),
       },
       handleKeyDown(_view, event) {
@@ -695,6 +706,19 @@ export function TiptapEditor({
     if (!editor) return;
     if (editor.isEditable !== editable) editor.setEditable(editable);
   }, [editor, editable]);
+
+  // Claim ⌘Z while this page has focus. ProseMirror keeps undo as a stack of
+  // transactions (a Y.js undo manager in collab mode), which the OS-level
+  // `undo:` selector cannot reach — so a Page ignored ⌘Z entirely until the
+  // Edit menu started routing through us.
+  useEffect(() => {
+    if (!editor) return;
+    return registerUndoTarget({
+      hasFocus: () => editor.isFocused,
+      undo: () => editor.commands.undo(),
+      redo: () => editor.commands.redo(),
+    });
+  }, [editor]);
 
   // Keep editor content in sync when `value` changes externally
   // (e.g. switching to another note). We compare against the
@@ -1043,34 +1067,25 @@ export function TiptapEditor({
   }, [editor, blockPos, blockNodeAt, closeBlockMenu]);
 
   // Dismiss the block menu on outside click / Escape.
-  useEffect(() => {
-    if (!blockMenuOpen) return;
-    function onDown(e: MouseEvent) {
-      const t = e.target as HTMLElement | null;
-      if (t?.closest("[data-block-menu]") || t?.closest("[data-drag-handle]")) {
-        return;
-      }
-      closeBlockMenu();
-    }
-    function onKey(e: KeyboardEvent) {
-      if (e.key === "Escape") closeBlockMenu();
-    }
-    window.addEventListener("mousedown", onDown);
-    window.addEventListener("keydown", onKey);
-    return () => {
-      window.removeEventListener("mousedown", onDown);
-      window.removeEventListener("keydown", onKey);
-    };
-  }, [blockMenuOpen, closeBlockMenu]);
+  useDismiss(blockMenuOpen, closeBlockMenu, [], {
+    insideSelector: "[data-block-menu],[data-drag-handle]",
+  });
 
   // ── Selection toolbar (bubble menu) ─────────────────────────────────────
   // Toggle the link mark. Reuses the already-configured Link extension
   // (openOnClick:false). Prefills the prompt with the existing href when a
   // link is active so the user edits rather than re-types; empty input unsets.
-  const toggleLink = useCallback(() => {
+  const toggleLink = useCallback(async () => {
     if (!editor) return;
     const prev = (editor.getAttributes("link").href as string | undefined) ?? "";
-    const url = window.prompt("Link URL", prev);
+    const url = await askText({
+      title: prev ? "Edit this link" : "Add a link",
+      label: "Link address",
+      value: prev,
+      placeholder: "https://…",
+      body: prev ? "Clear the box to remove the link." : undefined,
+      submitLabel: prev ? "Update link" : "Add link",
+    });
     if (url === null) return; // cancelled
     if (url.trim() === "") {
       editor.chain().focus().extendMarkRange("link").unsetLink().run();
@@ -1399,11 +1414,11 @@ export function TiptapEditor({
               }}
               onMouseEnter={() => setSlashIndex(i)}
               className={cn(
-                "w-full text-left px-2 py-1.5 text-[12px] rounded",
+                "w-full text-left px-2 py-1.5 text-sm rounded",
                 "flex items-center gap-2",
                 i === slashIndex
                   ? "bg-bg-2 text-text-1"
-                  : "text-text-3 hover:bg-bg-2 hover:text-text-1",
+                  : "text-text-3 hover:bg-state-hover hover:text-text-1",
               )}
             >
               <span className="text-text-5">{item.icon}</span>
@@ -1436,7 +1451,7 @@ export function TiptapEditor({
                 "w-full text-left px-2 py-1.5 rounded flex items-center gap-2",
                 i === mentionIndex
                   ? "bg-bg-2 text-text-1"
-                  : "text-text-2 hover:bg-bg-2 hover:text-text-1",
+                  : "text-text-2 hover:bg-state-hover hover:text-text-1",
               )}
             >
               {item.kind === "person" ? (
@@ -1444,7 +1459,7 @@ export function TiptapEditor({
               ) : (
                 <span
                   className={cn(
-                    "inline-flex items-center justify-center w-[18px] h-[18px] rounded-sm text-[9px] font-medium flex-shrink-0",
+                    "inline-flex items-center justify-center w-[18px] h-[18px] rounded-sm text-2xs font-medium flex-shrink-0",
                     item.kind === "task"
                       ? "bg-bg-2 text-accent aura-ident"
                       : item.kind === "pr"
@@ -1457,16 +1472,16 @@ export function TiptapEditor({
                 </span>
               )}
               <span className="flex flex-col min-w-0 leading-tight">
-                <span className="text-[12px] truncate">
+                <span className="text-sm truncate">
                   {item.kind === "person" ? `@${item.label}` : item.label}
                 </span>
                 {item.sublabel && (
-                  <span className="text-[10.5px] text-text-4 truncate">
+                  <span className="text-xs text-text-4 truncate">
                     {item.sublabel}
                   </span>
                 )}
               </span>
-              <span className="ml-auto text-[9.5px] uppercase tracking-wide text-text-5 flex-shrink-0">
+              <span className="section-label ml-auto flex-shrink-0">
                 {item.kind}
               </span>
             </button>

@@ -13,6 +13,7 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use crate::cloud_session_sync::{cloud_origin, cloud_token, read_credentials};
+use crate::cloud_org::OrgScoped;
 
 const MAX_FILE_BYTES: usize = 512 * 1024;
 
@@ -254,6 +255,7 @@ async fn fetch_remote(origin: &str, token: &str) -> Result<Option<AgentConfigBun
     let response = http_client()?
         .get(&url)
         .bearer_auth(token)
+        .org_scoped()
         .send()
         .await
         .map_err(|e| format!("GET {url}: {e}"))?;
@@ -276,6 +278,7 @@ async fn put_remote(
     let response = http_client()?
         .put(&url)
         .bearer_auth(token)
+        .org_scoped()
         .json(bundle)
         .send()
         .await

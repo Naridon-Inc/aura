@@ -31,9 +31,9 @@ export function TaskGoals({ repoRoot, task }: { repoRoot: string; task: Task }) 
   return (
     <section>
       <div className="mb-2.5 flex items-baseline justify-between gap-3">
-        <h2 className="text-[11px] font-medium uppercase tracking-wider text-text-3">Goals</h2>
+        <h2 className="section-label">Goals</h2>
         {goals.length > 0 ? (
-          <span className="text-[11px] text-text-4">
+          <span className="text-xs text-text-4">
             {goals.filter((g) => g.runs[0]?.verdict === "verified").length}/{goals.length} reached
           </span>
         ) : null}
@@ -55,9 +55,9 @@ export function TaskGoals({ repoRoot, task }: { repoRoot: string; task: Task }) 
           ))}
         </div>
       ) : (
-        <p className="mb-2.5 text-[12.5px] leading-relaxed text-text-4">
+        <p className="mb-2.5 text-base leading-relaxed text-text-4">
           No goals on this task yet. Describe what &quot;done&quot; looks like and Aura
-          checks whether the AI actually built it — from here, or from the run that does
+          checks whether the AI actually built it, from here, or from the run that does
           the work.
         </p>
       )}

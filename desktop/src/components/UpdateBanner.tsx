@@ -26,13 +26,14 @@ import {
 } from "../lib/updater";
 import { toast } from "../lib/toast";
 import { AsciiSpinner } from "./ui/ascii-spinner";
+import { percent } from "../lib/percent";
 
 type Stage = "idle" | "downloading" | "staged";
 
 // The strip's one primary affordance. Same shape whichever stage it's in, so
 // the button doesn't change colour under the user's cursor mid-update.
 const UPDATE_ACTION_BTN =
-  "text-[11px] px-2.5 h-[22px] rounded bg-accent text-bg-0 font-medium " +
+  "text-xs px-2.5 h-[22px] rounded bg-accent text-bg-0 font-medium " +
   "hover:opacity-90 disabled:opacity-50 transition-opacity " +
   "focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring";
 
@@ -125,7 +126,7 @@ export function UpdateBanner() {
     const failed = manual.kind === "error";
     return (
       <div
-        className="flex items-center gap-3 text-[12px] px-3 h-[28px] border-b border-line-soft"
+        className="flex items-center gap-3 text-sm px-3 h-[28px] border-b border-line-soft"
         style={{
           // A failed check is the only one of the three that needs the reader
           // to do something, so it's the only one that gets ink. "Checking" and
@@ -137,7 +138,7 @@ export function UpdateBanner() {
         role={failed ? "alert" : "status"}
       >
         {checking ? (
-          <AsciiSpinner className="text-[12px] leading-none" />
+          <AsciiSpinner className="text-sm leading-none" />
         ) : (
           <span className={failed ? "text-red" : "text-accent-green"}>
             {failed ? "!" : "✓"}
@@ -148,13 +149,13 @@ export function UpdateBanner() {
             ? "Checking for updates…"
             : manual.kind === "uptodate"
               ? `You're on the latest version${manual.version ? ` (${manual.version})` : ""}.`
-              : `Aura couldn't check for updates — ${manual.message}. Check your internet connection and try again from the Aura menu.`}
+              : `Aura couldn't check for updates. ${manual.message}. Check your internet connection and try again from the Aura menu.`}
         </div>
         {!checking && (
           <button
             type="button"
             onClick={() => setManual({ kind: "idle" })}
-            className="text-[11px] text-text-3 hover:text-text-1 transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring rounded"
+            className="text-xs text-text-3 hover:text-text-1 transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring rounded"
             aria-label="Dismiss"
           >
             ×
@@ -166,7 +167,7 @@ export function UpdateBanner() {
 
   const pct =
     progress.total != null && progress.total > 0
-      ? Math.min(100, Math.floor((progress.done / progress.total) * 100))
+      ? percent(progress.done, progress.total)
       : null;
 
   const onDownload = async () => {
@@ -192,7 +193,7 @@ export function UpdateBanner() {
           title: `Install Aura ${e.version} to keep it updated`,
           message:
             "Aura can’t update itself from its current location. Drag Aura " +
-            "into your Applications folder and open it from there — then " +
+            "into your Applications folder and open it from there, then " +
             "updates install on their own.",
           durationMs: null,
           actions: [
@@ -241,7 +242,7 @@ export function UpdateBanner() {
     // be pressed. "Ready to install" is a state, so it reads as the status
     // green; a failed download reads red. Nothing else is tinted.
     <div
-      className="flex items-center gap-3 text-[12px] px-3 h-[28px] border-b border-line-soft"
+      className="flex items-center gap-3 text-sm px-3 h-[28px] border-b border-line-soft"
       style={{
         background:
           stage === "staged"
@@ -251,7 +252,7 @@ export function UpdateBanner() {
       role="status"
     >
       {stage === "downloading" ? (
-        <AsciiSpinner className="text-[12px] leading-none" />
+        <AsciiSpinner className="text-sm leading-none" />
       ) : (
         <span className={stage === "staged" ? "text-accent-green" : "text-text-3"}>
           {stage === "staged" ? "●" : "↑"}
@@ -261,7 +262,7 @@ export function UpdateBanner() {
         <span className="text-text-1 font-medium">Aura {info.version}</span>{" "}
         <span className="text-text-3">{label}</span>
         {error && (
-          <span className="ml-2 text-red text-[11px]">— {error}</span>
+          <span className="ml-2 text-red text-xs">· {error}</span>
         )}
       </div>
       {manualVersion ? (
@@ -290,7 +291,7 @@ export function UpdateBanner() {
         type="button"
         onClick={() => setDismissed(true)}
         disabled={stage === "downloading"}
-        className="text-[11px] text-text-3 hover:text-text-1 transition-colors disabled:opacity-50 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring rounded"
+        className="text-xs text-text-3 hover:text-text-1 transition-colors disabled:opacity-50 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring rounded"
         aria-label="Dismiss until next launch"
       >
         ×

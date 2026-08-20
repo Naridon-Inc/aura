@@ -396,7 +396,7 @@ fn undo_zone_claim(repo_root: &str, payload: &serde_json::Value) -> Result<Strin
     }
     let mut args = vec!["zone".to_string(), "release".to_string()];
     args.extend(zones.iter().cloned());
-    let out = std::process::Command::new("aura")
+    let out = std::process::Command::new(crate::agent_event_listener::resolve_aura_bin())
         .args(&args)
         .current_dir(repo_root)
         .output()

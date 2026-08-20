@@ -140,6 +140,9 @@ fn project_summary(task: &Value) -> Value {
         "priority": task.get("priority").and_then(Value::as_str).unwrap_or("none"),
         "assignees": assignees,
         "agent_assignee": task.get("agent_assignee").and_then(Value::as_str),
+        // Present on the summary so an agent can tell at a glance which rows
+        // are addressed to its own checkout without fetching each task.
+        "worktree": task.get("worktree").and_then(Value::as_str),
         "labels": task.get("labels").cloned().unwrap_or_else(|| json!([])),
         "due_date": task.get("due_date").and_then(Value::as_str),
         "updated_at": task.get("updated_at").and_then(Value::as_str).unwrap_or(""),
@@ -195,6 +198,14 @@ pub struct TaskPatch {
     pub priority: Option<String>,
     pub assignee: Option<Option<String>>,
     pub agent_assignee: Option<Option<String>>,
+    /// Which checkout the work is to happen in.
+    ///
+    /// `agent_assignee` alone says *what kind of* agent should pick this up;
+    /// it cannot say *where*, and a repo routinely runs the same agent in
+    /// several checkouts at once. Together they are the address the user
+    /// asked for: "codex, in auckland". `Some(None)` clears it — the task
+    /// goes back to being anyone's, anywhere.
+    pub worktree: Option<Option<String>>,
 }
 
 /// Apply a patch to the matching task, mirroring the legacy↔canonical pairs
@@ -258,6 +269,9 @@ pub fn update_task(root: &Path, id: &str, patch: TaskPatch) -> Result<Value, Str
             a.map(|h| json!(h)).unwrap_or(Value::Null),
         );
     }
+    if let Some(w) = patch.worktree {
+        obj.insert("worktree".into(), w.map(|h| json!(h)).unwrap_or(Value::Null));
+    }
     obj.insert("updated_at".into(), json!(now_iso()));
 
     let updated = task.clone();
@@ -298,21 +312,106 @@ fn allocate_sequence_id(root: &Path, tasks: &[Value]) -> u64 {
     next
 }
 
+/// Turn whatever someone called a task into the id the board stores.
+///
+/// Agents read `AURA-12` off the board and refer to it that way; the rows point
+/// at each other by `id`. Accepting both means a dependency can be stated in
+/// the same words it was read in.
+///
+/// An unrecognised reference comes back unchanged rather than empty. A stated
+/// dependency the board can't resolve is a thing to show as unresolved — quietly
+/// dropping it would turn "this is blocked" into "this is ready".
+fn resolve_task_ref(existing: &[Value], reference: &str) -> String {
+    let want = reference.trim();
+    if want.is_empty() {
+        return String::new();
+    }
+    let seq = want
+        .strip_prefix("AURA-")
+        .or_else(|| want.strip_prefix("aura-"))
+        .unwrap_or(want)
+        .parse::<u64>()
+        .ok();
+    for row in existing {
+        if row.get("id").and_then(Value::as_str) == Some(want) {
+            return want.to_string();
+        }
+        if let Some(n) = seq {
+            if row.get("sequence_id").and_then(Value::as_u64) == Some(n) {
+                if let Some(id) = row.get("id").and_then(Value::as_str) {
+                    return id.to_string();
+                }
+            }
+        }
+    }
+    want.to_string()
+}
+
+/// What a task is, as the thing filing it describes it.
+///
+/// This grew from a bare title because a bare title is not a task — it is a
+/// label on work nobody can report on. An agent that files "install pi harness"
+/// and walks off leaves a row whose only honest status line is "an agent is
+/// building this now", which says nothing about how far along it is, what it
+/// will have done when it is finished, or whether it is stuck.
+///
+/// So the four things that make a status line specific are fields, not prose
+/// buried in a description: where it starts (`depends_on`), the ordered work
+/// (`steps`), the pieces that are tasks in their own right (`parent`, from the
+/// child's side), and what done means (`objective`).
+///
+/// Every one is optional at the type level and defaulted, because a human
+/// jotting a one-line reminder should not have to fill a form. The insistence
+/// belongs where the work is *automated* — see the MCP tool description, which
+/// tells an agent to fill them.
+#[derive(Debug, Default, Clone)]
+pub struct NewTask<'a> {
+    pub title: &'a str,
+    pub description: Option<&'a str>,
+    pub status: Option<&'a str>,
+    pub priority: Option<&'a str>,
+    pub agent_assignee: Option<&'a str>,
+    pub worktree: Option<&'a str>,
+    /// What "done" means, in one sentence, checkable by someone who wasn't
+    /// here. The end goal — not a restatement of the title.
+    pub objective: Option<&'a str>,
+    /// The ordered plan. Each becomes a checkable line on the row, which is
+    /// what turns a status report into "step 2 of 5: wire the adapter" instead
+    /// of a spinner.
+    pub steps: Vec<String>,
+    /// `AURA-{n}` handles (or raw ids) this cannot start before. The starting
+    /// point, stated as a relationship rather than a paragraph.
+    pub depends_on: Vec<String>,
+    /// The task this is a piece of. Makes it a sub-task rather than another
+    /// loose row on the pile.
+    pub parent: Option<&'a str>,
+    /// The crew this belongs to (its slug, e.g. "perf"). Gives an agent-filed
+    /// row a home: the board and the crew graph group it under this crew rather
+    /// than the loose "Unsorted" pile. `None`/"main" means the default crew and
+    /// is left unset.
+    pub crew: Option<&'a str>,
+}
+
 /// Create a task on the shared board (the same `.aura/tasks/tasks.json` the
-/// desktop app reads). Writes exactly the columns the app needs — `id`,
-/// `sequence_id`, `title`, `description`, `status` + its mirrored `state_id`,
-/// `priority`, optional `agent_assignee`, and timestamps — and leaves every
-/// other field to its serde default so the app's typed read stays valid.
-/// `status` defaults to `todo`, `priority` to `medium`; both are validated so
-/// a typo can't land an unplaceable row on the kanban. Returns the full row.
-pub fn create_task(
-    root: &Path,
-    title: &str,
-    description: Option<&str>,
-    status: Option<&str>,
-    priority: Option<&str>,
-    agent_assignee: Option<&str>,
-) -> Result<Value, String> {
+/// desktop app reads, and the one directory crew, agents and humans all use).
+/// Writes exactly the columns the app needs and leaves every other field to its
+/// serde default so the app's typed read stays valid. `status` defaults to
+/// `todo`, `priority` to `medium`; both are validated so a typo can't land an
+/// unplaceable row on the kanban. Returns the full row.
+pub fn create_task(root: &Path, draft: NewTask<'_>) -> Result<Value, String> {
+    let NewTask {
+        title,
+        description,
+        status,
+        priority,
+        agent_assignee,
+        worktree,
+        objective,
+        steps,
+        depends_on,
+        parent,
+        crew,
+    } = draft;
     let title = title.trim();
     if title.is_empty() {
         return Err("`title` is required.".into());
@@ -359,6 +458,30 @@ pub fn create_task(
         .map(str::trim)
         .filter(|a| !a.is_empty())
         .map(String::from);
+    // Steps arrive as plain sentences and are stored as checkable rows. `done`
+    // starts false for all of them: a plan is not progress, and a task that
+    // reported itself half-finished the moment it was filed would be lying in
+    // the one place the board is supposed to be trustworthy.
+    let steps: Vec<Value> = steps
+        .iter()
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+        .map(|s| json!({ "text": s, "done": false }))
+        .collect();
+    // Dependencies are resolved to real task ids where we can. An agent knows
+    // the `AURA-12` handle it just read off the board; the row wants the id.
+    // A handle that matches nothing is kept verbatim rather than dropped —
+    // silently losing a stated dependency is worse than carrying one the UI
+    // will show as unresolved.
+    let existing = doc
+        .get("tasks")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let depends_on: Vec<String> = depends_on
+        .iter()
+        .map(|d| resolve_task_ref(&existing, d))
+        .collect();
     let row = json!({
         "id": format!("task_{}", uuid::Uuid::new_v4()),
         "sequence_id": seq,
@@ -370,6 +493,25 @@ pub fn create_task(
         "assignee_ids": [],
         "labels": [],
         "agent_assignee": agent,
+        "worktree": worktree
+            .map(str::trim)
+            .filter(|w| !w.is_empty())
+            .map(String::from),
+        "objective": objective
+            .map(str::trim)
+            .filter(|o| !o.is_empty())
+            .map(String::from),
+        "steps": steps,
+        "dependencies": depends_on,
+        "parent_id": parent
+            .map(|p| resolve_task_ref(&existing, p))
+            .filter(|p| !p.is_empty()),
+        // The default "main" crew means "no crew set" — store nothing so the
+        // row reads as loose rather than pinned to a crew that isn't real.
+        "crew_id": crew
+            .map(str::trim)
+            .filter(|c| !c.is_empty() && *c != "main")
+            .map(String::from),
         "created_at": now,
         "updated_at": now,
     });
@@ -751,6 +893,7 @@ mod tests {
             priority: Some("high".into()),
             assignee: Some(Some("alice".into())),
             agent_assignee: Some(Some("claude".into())),
+            worktree: Some(Some("auckland".into())),
         };
         let updated = update_task(&root, "AURA-5", patch).unwrap();
         assert_eq!(updated["status"], "in_progress");
@@ -759,6 +902,8 @@ mod tests {
         assert_eq!(updated["assignee"], "alice");
         assert_eq!(updated["assignee_ids"][0], "alice");
         assert_eq!(updated["agent_assignee"], "claude");
+        // The address is both halves — an agent AND the checkout it works in.
+        assert_eq!(updated["worktree"], "auckland");
         // Persisted: a fresh read sees it.
         let fresh = get_task(&root, "t1").unwrap().unwrap();
         assert_eq!(fresh["status"], "in_progress");

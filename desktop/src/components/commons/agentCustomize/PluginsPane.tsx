@@ -49,7 +49,7 @@ export function PluginsPane({
     <PaneScroll>
       <PaneIntro
         title="Plugins"
-        blurb="Add-ons that extend what Aura can do. Each one is a signed package — you can see who made it and turn it on or off any time."
+        blurb="Add-ons that extend what Aura can do. Each one is a signed package. You can see who made it and turn it on or off any time."
         action={
           <Button
             size="sm"
@@ -64,7 +64,7 @@ export function PluginsPane({
         <PaneSpinner label="Loading plugins…" />
       ) : rows.length === 0 ? (
         <EmptyHint
-          icon={<Blocks size={22} />}
+          icon={Blocks}
           title="No plugins installed"
           body="Browse add-ons to install one. Aura only runs plugins that are signed, so you always know what you're getting."
         />
@@ -80,13 +80,13 @@ export function PluginsPane({
               <Blocks size={15} className="shrink-0 text-text-4" />
               <div className="min-w-0 flex-1">
                 <div className="flex items-center gap-1.5">
-                  <span className="truncate text-[12.5px] font-medium text-text-1">
+                  <span className="truncate text-base font-medium text-text-1">
                     {row.id}
                   </span>
                   <SignatureMark row={row} />
                 </div>
                 {row.description ? (
-                  <div className="truncate text-[11.5px] text-text-4">
+                  <div className="truncate text-sm text-text-4">
                     {row.description}
                   </div>
                 ) : null}
@@ -111,7 +111,7 @@ function SignatureMark({ row }: { row: PluginRow }) {
   if (row.signature === "verified") {
     return (
       <span
-        className="inline-flex items-center gap-0.5 text-[10px]"
+        className="inline-flex items-center gap-0.5 text-2xs"
         style={{ color: "var(--color-accent)" }}
         title={row.signed_by ? `Signed by ${row.signed_by}` : "Signed"}
       >
@@ -122,7 +122,7 @@ function SignatureMark({ row }: { row: PluginRow }) {
   if (row.signature === "unknown_key") {
     return (
       <span
-        className="inline-flex items-center gap-0.5 text-[10px] text-amber"
+        className="inline-flex items-center gap-0.5 text-2xs text-amber"
         title="Signed by a publisher you haven't trusted yet"
       >
         <ShieldAlert size={12} />

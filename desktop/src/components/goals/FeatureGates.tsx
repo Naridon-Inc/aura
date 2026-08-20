@@ -20,7 +20,11 @@ const BAND_COLOR: Record<GateBand, string> = {
 // Five discrete cells filled by the gate's 0–100 health — the segmented bar the
 // competitor surfaces use, sized to read at a glance without a percentage.
 function SegBar({ pct, color }: { pct: number; color: string }) {
-  const filled = Math.max(0, Math.min(5, Math.round(pct / 20)));
+  // Full only at 100, and never empty once there is something — the same
+  // rule the number follows. Rounding filled all five segments at 99%, so a
+  // feature one part short drew a finished bar.
+  const filled =
+    pct >= 100 ? 5 : pct <= 0 ? 0 : Math.min(4, Math.max(1, Math.floor(pct / 20)));
   return (
     <div className="flex items-center gap-[3px]" aria-hidden>
       {Array.from({ length: 5 }).map((_, i) => (
@@ -39,15 +43,15 @@ function GateCard({ gate }: { gate: Gate }) {
   return (
     <div className="min-w-0 rounded-md border border-line-soft bg-bg-0 px-2.5 py-2">
       <div className="flex items-baseline justify-between gap-1">
-        <span className="text-[9.5px] uppercase tracking-wider text-text-4">{gate.label}</span>
-        <span className="text-[12.5px] font-semibold tabular-nums" style={{ color }}>
+        <span className="section-label">{gate.label}</span>
+        <span className="text-base font-semibold tabular-nums" style={{ color }}>
           {gate.value}
         </span>
       </div>
       <div className="mt-1.5">
         <SegBar pct={gate.pct} color={color} />
       </div>
-      <p className="mt-1.5 text-[10.5px] leading-snug text-text-4">{gate.rationale}</p>
+      <p className="mt-1.5 text-xs leading-snug text-text-4">{gate.rationale}</p>
     </div>
   );
 }
@@ -81,7 +85,7 @@ export function FeatureGates({
           className="mt-[5px] h-1.5 w-1.5 shrink-0 rounded-full"
           style={{ background: dot }}
         />
-        <p className="text-[11.5px] leading-snug text-text-2">{signals.headline}</p>
+        <p className="text-sm leading-snug text-text-2">{signals.headline}</p>
       </div>
       <div className="grid grid-cols-3 gap-1.5">
         <GateCard gate={signals.confidence} />

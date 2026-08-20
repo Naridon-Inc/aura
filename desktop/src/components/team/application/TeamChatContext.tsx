@@ -10,9 +10,15 @@ import {
 
 import { useTeamChat, type TeamChatModel } from "./useTeamChat";
 
+/** Which screen the Team surface is showing: a conversation, or the
+ *  catch-up screen seen through one of its four lenses.
+ *
+ *  It used to carry a "tasks" member as well, which mounted the whole Tasks
+ *  page inside Team — the board in the centre, the board's filter rail in
+ *  Team's sidebar. Tasks is its own destination in the nav; Team is the
+ *  team. */
 export type TeamWorkspaceView =
   | "conversation"
-  | "tasks"
   | "unreads"
   | "recap"
   | "threads"

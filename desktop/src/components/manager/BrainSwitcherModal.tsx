@@ -190,16 +190,16 @@ export function BrainSwitcherModal({
               setIdx(0);
             }}
             placeholder="Switch model…"
-            className="flex-1 bg-transparent text-[13px] text-text-1 placeholder:text-text-4 focus:outline-none"
+            className="flex-1 bg-transparent text-base text-text-1 placeholder:text-text-4 focus:outline-none"
           />
-          <span className="text-[10px] tracking-wider text-text-5">esc</span>
+          <span className="text-2xs tracking-wider text-text-5">esc</span>
         </div>
 
         {turnControls}
 
         {loadError && (
           <div
-            className="border-b border-line-soft px-3.5 py-2 text-[11.5px]"
+            className="border-b border-line-soft px-3.5 py-2 text-sm"
             style={{ color: "var(--color-red)", background: "color-mix(in srgb, var(--color-red) 10%, transparent)" }}
           >
             {loadError}
@@ -209,12 +209,12 @@ export function BrainSwitcherModal({
         {/* Rows */}
         <div ref={listRef} className="max-h-[56vh] overflow-y-auto py-1">
           {loading && brains.length === 0 ? (
-            <div className="flex items-center gap-1.5 px-3.5 py-3 text-[12px] text-text-4">
+            <div className="flex items-center gap-1.5 px-3.5 py-3 text-sm text-text-4">
               <AsciiSpinner />
               Loading models…
             </div>
           ) : entries.length === 0 ? (
-            <div className="px-3.5 py-3 text-[12px] text-text-4">No models match.</div>
+            <div className="px-3.5 py-3 text-sm text-text-4">No models match.</div>
           ) : (
             entries.map((entry, i) => {
               if (entry.kind === "auto") {
@@ -286,7 +286,7 @@ function AutoRow({
       }}
       className={
         "flex w-full items-center gap-2.5 px-3 py-1.5 text-left transition-colors " +
-        (active ? "bg-bg-card" : "hover:bg-bg-2")
+        (active ? "bg-bg-card" : "hover:bg-state-hover")
       }
     >
       <svg
@@ -297,11 +297,11 @@ function AutoRow({
       >
         <use href="#i-sparkles" />
       </svg>
-      <span className="flex-1 text-[12.5px] text-text-1">Auto</span>
-      <span className="text-[10.5px] text-text-4">
-        follow active brain{activeChoice ? ` · ${activeChoice.label}` : ""}
+      <span className="flex-1 text-base text-text-1">Follow the active brain</span>
+      <span className="text-xs text-text-4">
+        {activeChoice ? activeChoice.label : "whichever brain is active"}
       </span>
-      {selected && <span className="text-accent text-[12px]">✓</span>}
+      {selected && <span className="text-accent text-sm">✓</span>}
     </button>
   );
 }
@@ -351,15 +351,16 @@ function BrainModelRow({
               aria-hidden
             />
           )}
-          <span className="text-[10.5px] font-semibold uppercase tracking-wide text-text-3">
-            {brain.label}
-          </span>
+          {/* The brain's own name, as it is written — uppercasing it turned
+              "Claude (Anthropic API)" into shouting, and the caps were doing
+              a job the icon and the divider already do. */}
+          <span className="text-xs font-medium text-text-3">{brain.label}</span>
           {brain.active && (
-            <span className="text-[9.5px] text-accent" title="The globally-active brain">
+            <span className="text-2xs text-accent" title="The globally-active brain">
               active
             </span>
           )}
-          {missingKey && <span className="ml-auto text-[9.5px] text-text-4">needs key</span>}
+          {missingKey && <span className="ml-auto text-2xs text-text-4">needs key</span>}
         </div>
       )}
       <div
@@ -371,12 +372,12 @@ function BrainModelRow({
         }}
         title={unusable ? "Add this brain's API key in Settings → Brains to use it" : undefined}
         className={
-          "group/row flex items-center gap-2 pl-8 pr-3 py-1 text-[12px] transition-colors " +
+          "group/row flex items-center gap-2 pl-8 pr-3 py-1 text-sm transition-colors " +
           (unusable
             ? "opacity-50 cursor-not-allowed"
             : active
               ? "bg-bg-card cursor-pointer"
-              : "hover:bg-bg-2 cursor-pointer") +
+              : "hover:bg-state-hover cursor-pointer") +
           (selected ? " text-text-1" : " text-text-2")
         }
       >
@@ -387,7 +388,7 @@ function BrainModelRow({
         <span className="min-w-0 truncate font-medium">{model.label}</span>
         {model.isNew && (
           <span
-            className="text-[8.5px] font-semibold uppercase tracking-wide px-1 py-px rounded"
+            className="text-2xs font-medium px-1 py-px rounded"
             style={{
               color: "var(--color-accent)",
               background: "color-mix(in srgb, var(--color-accent) 16%, transparent)",
@@ -414,7 +415,7 @@ function BrainModelRow({
             <use href={favorited ? "#i-star-fill" : "#i-star"} />
           </svg>
         </button>
-        {selected && <span className="text-accent text-[12px] w-4 text-center">✓</span>}
+        {selected && <span className="text-accent text-sm w-4 text-center">✓</span>}
       </div>
     </>
   );

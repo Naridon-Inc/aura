@@ -6,6 +6,10 @@
 // The brand accents reuse the SAME theme tokens AgentIcon's `brandFor` uses
 // so the logos and the bars agree on color without re-hardcoding hexes.
 
+import { relativeAgeFromSecs } from "../../lib/relativeTime";
+import { monogram } from "../../lib/monogram";
+import { agentName } from "../../lib/agentNames";
+
 /** Canonical provider id for a model or provider string. Returns an
  *  `agentId`-style token AgentIcon already understands (claude/gemini/
  *  codex/cursor/openai-compat) so the same logo logic applies. Unknown
@@ -37,25 +41,16 @@ export function modelLabel(raw: string): string {
 }
 
 /** Friendly display name for a coding-agent / provider id (the value
- *  `providerForModel` returns, or a raw sentinel/intent `agent_id`). Maps the
- *  known vendors to their product name so the by-agent breakdown reads
- *  "Claude / Gemini / Codex / Cursor"; unknown ids are title-cased rather
- *  than invented. */
+ *  `providerForModel` returns, or a raw sentinel/intent `agent_id`), so the
+ *  by-agent breakdown reads "Claude / Gemini / Codex / Cursor".
+ *
+ *  This was a ladder of substring tests, and `s.includes("openai")` sat one
+ *  line above `s === "openai-compat"` — so a local model, the whole point of
+ *  the compat adapter, was labelled "Codex". Matching on the canonical id
+ *  instead of a substring is what makes that unreachable branch reachable.
+ *  See lib/agentNames. */
 export function providerLabel(id: string): string {
-  const s = (id ?? "").toLowerCase().trim();
-  if (!s || s === "unknown") return "Unknown";
-  // Aura's own built-in agent shows up in the intent log as ai@aura.vcs.
-  if (s === "ai" || s.startsWith("ai@") || s.includes("aura")) return "Aura Agent";
-  if (s.includes("claude") || s.includes("anthropic")) return "Claude";
-  if (s.includes("gemini") || s.includes("google")) return "Gemini";
-  if (s.includes("codex") || s.includes("openai") || s.includes("gpt")) return "Codex";
-  if (s.includes("cursor")) return "Cursor";
-  if (s === "openai-compat" || s.startsWith("openai-compat")) return "Local model";
-  // A stray slug ("ada@x.com" / "some-agent") — drop any email host and
-  // title-case the first segment so it still reads as a name.
-  const at = s.indexOf("@");
-  const base = at > 0 ? s.slice(0, at) : s;
-  return base.charAt(0).toUpperCase() + base.slice(1);
+  return agentName(id, { empty: "Unknown", unknown: "Unknown" });
 }
 
 /** Calm brand accent (a single CSS color expression) for a provider id.
@@ -65,70 +60,39 @@ export function providerAccent(providerId: string): string {
   const id = (providerId ?? "").toLowerCase();
   if (id.includes("claude")) return "var(--color-caret-orange)";
   if (id.includes("gemini")) return "var(--color-blue)";
-  if (id.includes("codex") || id.includes("openai")) return "var(--color-green)";
-  if (id.includes("cursor")) return "var(--color-violet)";
+  // Before the codex test, not after it: "openai-compat" contains "openai",
+  // so this branch could never be reached and a local model drew the full
+  // Codex green. A compat endpoint is OpenAI-shaped but is not OpenAI, so it
+  // reads as that green pulled back toward the surface — same family, visibly
+  // quieter. (The comment here used to describe this fix from below the test
+  // that pre-empted it.)
   if (id === "openai-compat" || id.startsWith("openai-compat")) {
-    // No pack defines `--color-teal`, so this bar drew a hard-coded teal that
-    // ignored every theme. A compat endpoint is OpenAI-shaped but is not
-    // OpenAI, so it reads as the codex green pulled back toward the surface —
-    // same family, visibly quieter.
     return "color-mix(in srgb, var(--color-green) 58%, var(--color-text-3))";
   }
+  if (id.includes("codex") || id.includes("openai")) return "var(--color-green)";
+  if (id.includes("cursor")) return "var(--color-violet)";
   if (id.includes("aura")) return "var(--color-accent)";
   return "var(--color-text-3)";
-}
-
-/** Compact token count — 1234 → "1.2k", 2_400_000 → "2.4M". Never rounds
- *  small values into thin air; <1000 shows the exact integer. */
-export function fmtTokens(n: number): string {
-  const v = Number.isFinite(n) ? n : 0;
-  if (v < 1000) return String(Math.round(v));
-  if (v < 1_000_000) return `${(v / 1000).toFixed(v < 10_000 ? 1 : 0)}k`;
-  if (v < 1_000_000_000) return `${(v / 1_000_000).toFixed(v < 10_000_000 ? 1 : 0)}M`;
-  return `${(v / 1_000_000_000).toFixed(1)}B`;
-}
-
-/** USD cost — "$0.0042" under a cent, "$1.20" otherwise, "$3.4k" big. */
-export function fmtCost(n: number): string {
-  const v = Number.isFinite(n) ? n : 0;
-  if (v === 0) return "$0";
-  if (v < 0.01) return `$${v.toFixed(4)}`;
-  if (v < 1000) return `$${v.toFixed(2)}`;
-  return `$${(v / 1000).toFixed(1)}k`;
 }
 
 /** Relative time from an absolute unix-seconds timestamp. Shared with the
  *  solo pane's relTime semantics, but takes an absolute ts + a now clock so
  *  callers can keep one shared clock per render. */
 export function relTimeFromTs(tsSecs: number, nowSecs: number): string {
-  if (!Number.isFinite(tsSecs) || tsSecs <= 0) return "—";
-  const secsAgo = nowSecs - tsSecs;
-  if (secsAgo < 0) return "just now";
-  if (secsAgo < 45) return "just now";
-  const mins = Math.floor(secsAgo / 60);
-  if (mins < 60) return `${mins}m`;
-  const hours = Math.floor(secsAgo / 3600);
-  if (hours < 24) return `${hours}h`;
-  const days = Math.floor(secsAgo / 86400);
-  if (days < 7) return `${days}d`;
-  const weeks = Math.floor(days / 7);
-  if (weeks < 5) return `${weeks}w`;
-  const months = Math.floor(days / 30);
-  if (months < 12) return `${months}mo`;
-  return `${Math.floor(days / 365)}y`;
+  // One ladder for the whole app — see lib/relativeTime.
+  return relativeAgeFromSecs(tsSecs, {
+    now: nowSecs * 1000,
+    style: "compact",
+    empty: "—",
+  });
 }
 
 /** Monogram initials from a display name / handle / email — up to two
  *  letters, uppercased. Used for teammate avatars when there's no photo. */
 export function initialsOf(label: string): string {
-  const s = (label ?? "").trim();
-  if (!s) return "?";
-  const at = s.indexOf("@");
-  const base = at > 0 ? s.slice(0, at) : s;
-  const parts = base.split(/[\s._-]+/).filter(Boolean);
-  if (parts.length === 0) return base.charAt(0).toUpperCase();
-  if (parts.length === 1) return parts[0].slice(0, 2).toUpperCase();
-  return (parts[0].charAt(0) + parts[1].charAt(0)).toUpperCase();
+  // One monogram for the whole app — see lib/monogram. This one took the first two words, so
+  // "Ada Byron Lovelace" read "AB" here and "AL" in the crew roster.
+  return monogram(label);
 }
 
 /** Current month key "YYYY-MM" in local time — what cloud billing defaults

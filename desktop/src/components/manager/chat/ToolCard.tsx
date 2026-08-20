@@ -479,7 +479,7 @@ function AskBlock({ ask }: { ask: AskView }) {
         <div key={qi} className="flex flex-col gap-1">
           {q.question && (
             <div
-              className="text-[12px] leading-snug"
+              className="text-sm leading-snug"
               style={{ color: "var(--color-text-1)" }}
             >
               {q.question}
@@ -497,14 +497,14 @@ function AskBlock({ ask }: { ask: AskView }) {
                 }}
               >
                 <span
-                  className="text-[11.5px] font-medium leading-tight"
+                  className="text-sm font-medium leading-tight"
                   style={{ color: "var(--color-text-1)" }}
                 >
                   {o.label}
                 </span>
                 {o.description && (
                   <span
-                    className="text-[11px] leading-snug line-clamp-2"
+                    className="text-xs leading-snug line-clamp-2"
                     style={{ color: "var(--color-text-3)" }}
                     title={o.description}
                   >
@@ -516,7 +516,7 @@ function AskBlock({ ask }: { ask: AskView }) {
           </div>
           {q.multiSelect && (
             <span
-              className="text-[10.5px]"
+              className="text-xs"
               style={{ color: "var(--color-text-4)" }}
             >
               Pick one or more
@@ -537,7 +537,7 @@ function AskBlock({ ask }: { ask: AskView }) {
 function PlanBlock({ markdown }: { markdown: string }) {
   return (
     <div
-      className="w-full text-[12.5px] leading-snug px-3 py-2"
+      className="w-full text-base leading-snug px-3 py-2"
       style={{
         border: "1px solid var(--color-line-soft)",
         borderRadius: "var(--radius-sm)",
@@ -558,7 +558,7 @@ function FieldsBlock({ fields }: { fields: ToolField[] }) {
   return (
     <div className="flex flex-col gap-0.5">
       {fields.map((f, i) => (
-        <div key={i} className="flex gap-2 text-[11.5px] leading-snug">
+        <div key={i} className="flex gap-2 text-sm leading-snug">
           <span
             className="shrink-0"
             style={{ color: "var(--color-text-4)", minWidth: 72 }}
@@ -676,8 +676,8 @@ function CardBody({ view, clamped }: { view: ToolView; clamped?: boolean }) {
       <div
         className={
           clamped
-            ? "px-3 pb-2 text-[12px] leading-snug break-words line-clamp-2"
-            : "text-[12px] leading-snug whitespace-pre-wrap break-words"
+            ? "px-3 pb-2 text-sm leading-snug break-words line-clamp-2"
+            : "text-sm leading-snug whitespace-pre-wrap break-words"
         }
         style={{ color: "var(--color-text-2)" }}
       >
@@ -718,7 +718,7 @@ export function DiffView({ diff, clamped }: { diff: string; clamped?: boolean })
       }}
     >
       <pre
-        className="text-[11px] leading-[1.55] overflow-x-auto"
+        className="text-xs leading-[1.55] overflow-x-auto"
         style={{ fontFamily: "var(--font-mono)", margin: 0 }}
       >
         {shown.map((line, i) => (
@@ -736,7 +736,7 @@ export function DiffView({ diff, clamped }: { diff: string; clamped?: boolean })
       )}
       {clamped && lines.length > DIFF_MAX_LINES && (
         <div
-          className="px-2 py-1 text-[10.5px]"
+          className="px-2 py-1 text-xs"
           style={{
             fontFamily: "var(--font-mono)",
             color: "var(--color-text-3)",
@@ -818,7 +818,7 @@ export function StepLoader({ steps, max }: { steps: ToolStep[]; max?: number }) 
       ))}
       {hiddenAfter > 0 && (
         <div
-          className="pl-5 text-[11px]"
+          className="pl-5 text-xs"
           style={{
             color: "var(--color-text-3)",
             fontFamily: "var(--font-mono)",
@@ -864,7 +864,7 @@ export function StepRow({ step }: { step: ToolStep }) {
         {isDone ? "✓" : ""}
       </span>
       <span
-        className="text-[12px] leading-snug"
+        className="text-sm leading-snug"
         style={{ color: labelColor }}
       >
         {step.label}
@@ -945,7 +945,7 @@ export function ToolResultBlock({
       )}
       {result.is_error ? (
         <pre
-          className="text-[11px] whitespace-pre-wrap break-words"
+          className="text-xs whitespace-pre-wrap break-words"
           style={{
             fontFamily: "var(--font-mono)",
             color: "var(--color-red)",
@@ -987,7 +987,7 @@ function MonoOutput({
       }}
     >
       <pre
-        className="text-[11px] leading-[1.55] overflow-x-auto"
+        className="text-xs leading-[1.55] overflow-x-auto"
         style={{ fontFamily: "var(--font-mono)", margin: 0, padding: "6px 8px" }}
       >
         {lines.map((line, i) => (

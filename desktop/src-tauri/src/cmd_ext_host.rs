@@ -197,7 +197,7 @@ pub async fn ext_host_start(
         }
     }
 
-    let node = resolve_node()?;
+    let node = crate::blocking::run(resolve_node).await?;
     let script = host_script(&app)?;
     if !script.is_file() {
         return Err(format!(

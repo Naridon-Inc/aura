@@ -61,9 +61,3 @@ export function folderColor(token: string | null | undefined): FolderColor {
 export function folderTint(token: string | null | undefined): string {
   return folderColor(token).tint;
 }
-
-/** A low-alpha wash of the folder color for an expanded/active row background.
- *  Derived from the tint via color-mix so each swatch needs only one value. */
-export function folderSoftBg(token: string | null | undefined): string {
-  return `color-mix(in srgb, ${folderTint(token)} 12%, transparent)`;
-}

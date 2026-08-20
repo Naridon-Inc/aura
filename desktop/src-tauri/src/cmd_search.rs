@@ -75,75 +75,78 @@ pub async fn fs_grep_content(
     query: String,
     opts: Option<GrepOpts>,
 ) -> Result<GrepResult, String> {
-    if query.trim().is_empty() {
-        return Ok(GrepResult { hits: Vec::new(), truncated: false });
-    }
-    let opts = opts.unwrap_or_default();
-    let cwd = PathBuf::from(&repo_root);
-    if !cwd.exists() {
-        return Err(format!("repo_root does not exist: {repo_root}"));
-    }
-
-    let mut cmd = Command::new("git");
-    cmd.current_dir(&cwd).arg("grep").arg("-n").arg("--column").arg("--no-color");
-    if !opts.case_sensitive {
-        cmd.arg("-i");
-    }
-    if opts.whole_word {
-        cmd.arg("-w");
-    }
-    if opts.regex {
-        cmd.arg("-E");
-    } else {
-        cmd.arg("-F");
-    }
-    // Untracked files too — users want to find content in new files
-    // they haven't committed yet.
-    cmd.arg("--untracked");
-    cmd.arg("--");
-    cmd.arg(&query);
-    // Pathspec filters. `:(glob)` is git's portable glob magic.
-    for inc in &opts.include {
-        cmd.arg(format!(":(glob){inc}"));
-    }
-    for exc in &opts.exclude {
-        cmd.arg(format!(":(exclude,glob){exc}"));
-    }
-
-    let out = cmd.output().map_err(|e| format!("git grep failed: {e}"))?;
-    // git grep exits 1 when there are no matches — not an error for us.
-    if !out.status.success() && out.status.code() != Some(1) {
-        let stderr = String::from_utf8_lossy(&out.stderr).to_string();
-        return Err(format!("git grep error: {stderr}"));
-    }
-
-    let mut hits = Vec::new();
-    let mut truncated = false;
-    for line in String::from_utf8_lossy(&out.stdout).lines() {
-        if hits.len() >= GREP_MAX_HITS {
-            truncated = true;
-            break;
+    crate::blocking::run(move || {
+        if query.trim().is_empty() {
+            return Ok(GrepResult { hits: Vec::new(), truncated: false });
         }
-        // Format with --column: path:line:col:text
-        let mut parts = line.splitn(4, ':');
-        let path = parts.next().unwrap_or("").to_string();
-        let line_no: u32 = parts.next().and_then(|s| s.parse().ok()).unwrap_or(0);
-        let col_no: u32 = parts.next().and_then(|s| s.parse().ok()).unwrap_or(0);
-        let preview = parts.next().unwrap_or("").to_string();
-        if path.is_empty() || line_no == 0 {
-            continue;
+        let opts = opts.unwrap_or_default();
+        let cwd = PathBuf::from(&repo_root);
+        if !cwd.exists() {
+            return Err(format!("repo_root does not exist: {repo_root}"));
         }
-        let preview = if preview.len() > PREVIEW_BYTES {
-            // Truncate on a UTF-8 char boundary — slicing raw bytes panics
-            // when byte PREVIEW_BYTES lands inside a multibyte char (e.g. an
-            // em-dash), which crashed the whole search command live.
-            format!("{}…", truncate_on_char_boundary(&preview, PREVIEW_BYTES))
+
+        let mut cmd = Command::new("git");
+        cmd.current_dir(&cwd).arg("grep").arg("-n").arg("--column").arg("--no-color");
+        if !opts.case_sensitive {
+            cmd.arg("-i");
+        }
+        if opts.whole_word {
+            cmd.arg("-w");
+        }
+        if opts.regex {
+            cmd.arg("-E");
         } else {
-            preview
-        };
-        hits.push(GrepHit { path, line: line_no, column: col_no, preview });
-    }
-    Ok(GrepResult { hits, truncated })
+            cmd.arg("-F");
+        }
+        // Untracked files too — users want to find content in new files
+        // they haven't committed yet.
+        cmd.arg("--untracked");
+        cmd.arg("--");
+        cmd.arg(&query);
+        // Pathspec filters. `:(glob)` is git's portable glob magic.
+        for inc in &opts.include {
+            cmd.arg(format!(":(glob){inc}"));
+        }
+        for exc in &opts.exclude {
+            cmd.arg(format!(":(exclude,glob){exc}"));
+        }
+
+        let out = cmd.output().map_err(|e| format!("git grep failed: {e}"))?;
+        // git grep exits 1 when there are no matches — not an error for us.
+        if !out.status.success() && out.status.code() != Some(1) {
+            let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+            return Err(format!("git grep error: {stderr}"));
+        }
+
+        let mut hits = Vec::new();
+        let mut truncated = false;
+        for line in String::from_utf8_lossy(&out.stdout).lines() {
+            if hits.len() >= GREP_MAX_HITS {
+                truncated = true;
+                break;
+            }
+            // Format with --column: path:line:col:text
+            let mut parts = line.splitn(4, ':');
+            let path = parts.next().unwrap_or("").to_string();
+            let line_no: u32 = parts.next().and_then(|s| s.parse().ok()).unwrap_or(0);
+            let col_no: u32 = parts.next().and_then(|s| s.parse().ok()).unwrap_or(0);
+            let preview = parts.next().unwrap_or("").to_string();
+            if path.is_empty() || line_no == 0 {
+                continue;
+            }
+            let preview = if preview.len() > PREVIEW_BYTES {
+                // Truncate on a UTF-8 char boundary — slicing raw bytes panics
+                // when byte PREVIEW_BYTES lands inside a multibyte char (e.g. an
+                // em-dash), which crashed the whole search command live.
+                format!("{}…", truncate_on_char_boundary(&preview, PREVIEW_BYTES))
+            } else {
+                preview
+            };
+            hits.push(GrepHit { path, line: line_no, column: col_no, preview });
+        }
+        Ok(GrepResult { hits, truncated })
+    })
+    .await
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -166,67 +169,70 @@ pub async fn fs_replace_in_files(
     replacement: String,
     opts: Option<GrepOpts>,
 ) -> Result<ReplaceReport, String> {
-    if query.is_empty() {
-        return Err("empty query".to_string());
-    }
-    let opts = opts.unwrap_or_default();
-    let root = PathBuf::from(&repo_root);
-    if !root.exists() {
-        return Err(format!("repo_root does not exist: {repo_root}"));
-    }
-
-    // Build a regex matcher once. Literal search converts the query
-    // via regex::escape so the same engine handles both modes.
-    let pattern = if opts.regex {
-        if opts.whole_word { format!(r"\b(?:{query})\b") } else { query.clone() }
-    } else {
-        let esc = regex::escape(&query);
-        if opts.whole_word { format!(r"\b(?:{esc})\b") } else { esc }
-    };
-    let re = regex::RegexBuilder::new(&pattern)
-        .case_insensitive(!opts.case_sensitive)
-        .build()
-        .map_err(|e| format!("bad pattern: {e}"))?;
-
-    let mut report = ReplaceReport {
-        files_changed: 0,
-        total_replacements: 0,
-        paths: Vec::new(),
-    };
-
-    for rel in paths {
-        let abs = root.join(&rel);
-        if !abs.starts_with(&root) {
-            // path-traversal guard
-            continue;
+    crate::blocking::run(move || {
+        if query.is_empty() {
+            return Err("empty query".to_string());
         }
-        let Ok(content) = std::fs::read_to_string(&abs) else { continue };
-        let mut count = 0usize;
-        let new_content = re.replace_all(&content, |_caps: &regex::Captures| {
-            count += 1;
-            replacement.clone()
-        });
-        if count == 0 {
-            continue;
+        let opts = opts.unwrap_or_default();
+        let root = PathBuf::from(&repo_root);
+        if !root.exists() {
+            return Err(format!("repo_root does not exist: {repo_root}"));
         }
-        // Atomic write: write to a sibling temp, then rename.
-        let dir = abs.parent().unwrap_or(&root);
-        let stem = abs
-            .file_name()
-            .and_then(|n| n.to_str())
-            .unwrap_or(".tmp")
-            .to_string();
-        let tmp = dir.join(format!(".{stem}.aura-replace.tmp"));
-        std::fs::write(&tmp, new_content.as_bytes())
-            .map_err(|e| format!("write {rel}: {e}"))?;
-        std::fs::rename(&tmp, &abs)
-            .map_err(|e| format!("rename {rel}: {e}"))?;
-        report.files_changed += 1;
-        report.total_replacements += count;
-        report.paths.push(rel);
-    }
 
-    Ok(report)
+        // Build a regex matcher once. Literal search converts the query
+        // via regex::escape so the same engine handles both modes.
+        let pattern = if opts.regex {
+            if opts.whole_word { format!(r"\b(?:{query})\b") } else { query.clone() }
+        } else {
+            let esc = regex::escape(&query);
+            if opts.whole_word { format!(r"\b(?:{esc})\b") } else { esc }
+        };
+        let re = regex::RegexBuilder::new(&pattern)
+            .case_insensitive(!opts.case_sensitive)
+            .build()
+            .map_err(|e| format!("bad pattern: {e}"))?;
+
+        let mut report = ReplaceReport {
+            files_changed: 0,
+            total_replacements: 0,
+            paths: Vec::new(),
+        };
+
+        for rel in paths {
+            let abs = root.join(&rel);
+            if !abs.starts_with(&root) {
+                // path-traversal guard
+                continue;
+            }
+            let Ok(content) = std::fs::read_to_string(&abs) else { continue };
+            let mut count = 0usize;
+            let new_content = re.replace_all(&content, |_caps: &regex::Captures| {
+                count += 1;
+                replacement.clone()
+            });
+            if count == 0 {
+                continue;
+            }
+            // Atomic write: write to a sibling temp, then rename.
+            let dir = abs.parent().unwrap_or(&root);
+            let stem = abs
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or(".tmp")
+                .to_string();
+            let tmp = dir.join(format!(".{stem}.aura-replace.tmp"));
+            std::fs::write(&tmp, new_content.as_bytes())
+                .map_err(|e| format!("write {rel}: {e}"))?;
+            std::fs::rename(&tmp, &abs)
+                .map_err(|e| format!("rename {rel}: {e}"))?;
+            report.files_changed += 1;
+            report.total_replacements += count;
+            report.paths.push(rel);
+        }
+
+        Ok(report)
+    })
+    .await
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -249,103 +255,106 @@ pub async fn fs_grep_symbol(
     repo_root: String,
     name: String,
 ) -> Result<Vec<SymbolHit>, String> {
-    if name.trim().is_empty() {
-        return Ok(Vec::new());
-    }
-    let cwd = PathBuf::from(&repo_root);
-    if !cwd.exists() {
-        return Err(format!("repo_root does not exist: {repo_root}"));
-    }
+    crate::blocking::run(move || {
+        if name.trim().is_empty() {
+            return Ok(Vec::new());
+        }
+        let cwd = PathBuf::from(&repo_root);
+        if !cwd.exists() {
+            return Err(format!("repo_root does not exist: {repo_root}"));
+        }
 
-    // Semantic, AST-level lookup first — but only trust it when it actually
-    // found something. An empty-but-successful `aura defs` (name not indexed,
-    // or no AST graph yet) must fall through to grep, not short-circuit to [].
-    if let Some(hits) = try_aura_defs(&cwd, &name) {
-        if !hits.is_empty() {
-            return Ok(hits);
+        // Semantic, AST-level lookup first — but only trust it when it actually
+        // found something. An empty-but-successful `aura defs` (name not indexed,
+        // or no AST graph yet) must fall through to grep, not short-circuit to [].
+        if let Some(hits) = try_aura_defs(&cwd, &name) {
+            if !hits.is_empty() {
+                return Ok(hits);
+            }
         }
-    }
 
-    // Fallback grep: definition keyword followed by an identifier that
-    // CONTAINS the query (case-insensitive), so "agent" finds `AgentIcon`,
-    // `useAgentState`, `agent_id`, etc.
-    //
-    // POSIX ERE only — git grep's `-E` engine does NOT understand Perl
-    // escapes. `\s` silently matches nothing (the old pattern's bug: every
-    // symbol search came back empty), and `\b` is non-portable. So we spell
-    // whitespace as `[[:space:]]` and require a non-word char (or line start)
-    // before the keyword instead of `\b`. That non-word lead-in also covers
-    // `pub fn`, `export function`, `export class`, … for free.
-    let esc = regex_escape(&name);
-    let pattern = format!(
-        "(^|[^A-Za-z0-9_])(fn|function|class|def|const|let|var|type|interface|struct|enum)[[:space:]]+[A-Za-z0-9_$]*{esc}[A-Za-z0-9_$]*",
-    );
-    let out = Command::new("git")
-        .current_dir(&cwd)
-        .args([
-            "grep",
-            "-niE",
-            "--column",
-            "--no-color",
-            "--untracked",
-            &pattern,
-        ])
-        .output()
-        .map_err(|e| format!("git grep failed: {e}"))?;
-    if !out.status.success() && out.status.code() != Some(1) {
-        return Err(String::from_utf8_lossy(&out.stderr).to_string());
-    }
-    let mut hits = Vec::new();
-    let mut seen = std::collections::HashSet::new();
-    for line in String::from_utf8_lossy(&out.stdout).lines() {
-        let mut parts = line.splitn(4, ':');
-        let path = parts.next().unwrap_or("").to_string();
-        let line_no: u32 = parts.next().and_then(|s| s.parse().ok()).unwrap_or(0);
-        let _col: u32 = parts.next().and_then(|s| s.parse().ok()).unwrap_or(0);
-        let preview = parts.next().unwrap_or("").to_string();
-        if path.is_empty() || line_no == 0 {
-            continue;
+        // Fallback grep: definition keyword followed by an identifier that
+        // CONTAINS the query (case-insensitive), so "agent" finds `AgentIcon`,
+        // `useAgentState`, `agent_id`, etc.
+        //
+        // POSIX ERE only — git grep's `-E` engine does NOT understand Perl
+        // escapes. `\s` silently matches nothing (the old pattern's bug: every
+        // symbol search came back empty), and `\b` is non-portable. So we spell
+        // whitespace as `[[:space:]]` and require a non-word char (or line start)
+        // before the keyword instead of `\b`. That non-word lead-in also covers
+        // `pub fn`, `export function`, `export class`, … for free.
+        let esc = regex_escape(&name);
+        let pattern = format!(
+            "(^|[^A-Za-z0-9_])(fn|function|class|def|const|let|var|type|interface|struct|enum)[[:space:]]+[A-Za-z0-9_$]*{esc}[A-Za-z0-9_$]*",
+        );
+        let out = Command::new("git")
+            .current_dir(&cwd)
+            .args([
+                "grep",
+                "-niE",
+                "--column",
+                "--no-color",
+                "--untracked",
+                &pattern,
+            ])
+            .output()
+            .map_err(|e| format!("git grep failed: {e}"))?;
+        if !out.status.success() && out.status.code() != Some(1) {
+            return Err(String::from_utf8_lossy(&out.stderr).to_string());
         }
-        // Skip the noise that `--untracked` would otherwise drag in: Aura's
-        // own gitignored sidecars are not user code.
-        if path.starts_with(".aura/") || path.contains("/.aura/") {
-            continue;
+        let mut hits = Vec::new();
+        let mut seen = std::collections::HashSet::new();
+        for line in String::from_utf8_lossy(&out.stdout).lines() {
+            let mut parts = line.splitn(4, ':');
+            let path = parts.next().unwrap_or("").to_string();
+            let line_no: u32 = parts.next().and_then(|s| s.parse().ok()).unwrap_or(0);
+            let _col: u32 = parts.next().and_then(|s| s.parse().ok()).unwrap_or(0);
+            let preview = parts.next().unwrap_or("").to_string();
+            if path.is_empty() || line_no == 0 {
+                continue;
+            }
+            // Skip the noise that `--untracked` would otherwise drag in: Aura's
+            // own gitignored sidecars are not user code.
+            if path.starts_with(".aura/") || path.contains("/.aura/") {
+                continue;
+            }
+            if !seen.insert((path.clone(), line_no)) {
+                continue;
+            }
+            let kind = infer_kind(&preview);
+            let name = extract_defined_name(&preview).unwrap_or_else(|| name.clone());
+            hits.push(SymbolHit {
+                path,
+                line: line_no,
+                kind,
+                name,
+                preview: preview.trim().to_string(),
+            });
+            // Bound the scan; we sort + truncate to a tighter window below.
+            if hits.len() >= 600 {
+                break;
+            }
         }
-        if !seen.insert((path.clone(), line_no)) {
-            continue;
-        }
-        let kind = infer_kind(&preview);
-        let name = extract_defined_name(&preview).unwrap_or_else(|| name.clone());
-        hits.push(SymbolHit {
-            path,
-            line: line_no,
-            kind,
-            name,
-            preview: preview.trim().to_string(),
+
+        // Relevance order — the palette only shows the top few, so float the
+        // strongest definitions up: exact-name matches first, then by how much
+        // of the identifier the query covers (shorter ⇒ closer), then declared
+        // functions/classes/types ahead of bare variable bindings.
+        let needle = name.to_lowercase();
+        hits.sort_by_key(|h| {
+            let n = h.name.to_lowercase();
+            let exact = if n == needle { 0 } else { 1 };
+            let kind_rank = match h.kind.as_str() {
+                "function" | "class" | "type" => 0,
+                "const" => 1,
+                _ => 2,
+            };
+            (exact, n.len(), kind_rank)
         });
-        // Bound the scan; we sort + truncate to a tighter window below.
-        if hits.len() >= 600 {
-            break;
-        }
-    }
-
-    // Relevance order — the palette only shows the top few, so float the
-    // strongest definitions up: exact-name matches first, then by how much
-    // of the identifier the query covers (shorter ⇒ closer), then declared
-    // functions/classes/types ahead of bare variable bindings.
-    let needle = name.to_lowercase();
-    hits.sort_by_key(|h| {
-        let n = h.name.to_lowercase();
-        let exact = if n == needle { 0 } else { 1 };
-        let kind_rank = match h.kind.as_str() {
-            "function" | "class" | "type" => 0,
-            "const" => 1,
-            _ => 2,
-        };
-        (exact, n.len(), kind_rank)
-    });
-    hits.truncate(200);
-    Ok(hits)
+        hits.truncate(200);
+        Ok(hits)
+    })
+    .await
 }
 
 /// Return the longest prefix of `s` that fits in `max_bytes` AND ends on a
@@ -416,7 +425,7 @@ fn extract_defined_name(preview: &str) -> Option<String> {
 }
 
 fn try_aura_defs(cwd: &Path, name: &str) -> Option<Vec<SymbolHit>> {
-    let out = Command::new("aura")
+    let out = Command::new(crate::agent_event_listener::resolve_aura_bin())
         .current_dir(cwd)
         .args(["defs", "--json", name])
         .output()

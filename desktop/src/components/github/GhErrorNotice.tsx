@@ -32,7 +32,7 @@ export function GhErrorNotice({
   const info = classifyGhError(error);
   const body = (
     <div
-      className={`text-[12px] leading-relaxed ${
+      className={`text-sm leading-relaxed ${
         align === "center" ? "max-w-md text-center" : ""
       }`}
     >
@@ -42,7 +42,7 @@ export function GhErrorNotice({
         <button
           type="button"
           onClick={onRetry}
-          className="mt-2 text-[11px] text-accent hover:underline"
+          className="mt-2 text-xs text-accent hover:underline"
         >
           Try again
         </button>

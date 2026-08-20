@@ -31,8 +31,8 @@ export const MODAL_PANEL =
 export const MODAL_HEADER =
   "flex items-center gap-2 border-b border-line-soft px-4 py-2.5";
 
-/** The title itself — matches `Dialog`'s `txt-compact-small-plus`. */
-export const MODAL_TITLE = "text-[12.5px] font-semibold text-text-1";
+/** The title itself — matches `Dialog`'s 13px/500 title step. */
+export const MODAL_TITLE = "text-base font-semibold text-text-1";
 
 /** Scrollable content region. */
 export const MODAL_BODY = "px-4 py-3";
@@ -43,4 +43,4 @@ export const MODAL_FOOTER =
 
 /** Quiet "esc" hint that sits at the left of a footer (pair with MODAL_FOOTER's
  *  `justify-end` by giving the hint `mr-auto`). */
-export const MODAL_ESC_HINT = "mr-auto text-[11px] text-text-4";
+export const MODAL_ESC_HINT = "mr-auto text-xs text-text-4";

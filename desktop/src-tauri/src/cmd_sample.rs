@@ -203,81 +203,84 @@ fn git_init_commit(dest: &Path) {
 
 #[tauri::command]
 pub async fn seed_sample_project(app: AppHandle) -> Result<SeededSample, String> {
-    let home = home_dir()?;
-    let dest = home.join("AuraProjects").join(SAMPLE_NAME);
-    let dest_str = dest.to_string_lossy().to_string();
+    crate::blocking::run(move || {
+        let home = home_dir()?;
+        let dest = home.join("AuraProjects").join(SAMPLE_NAME);
+        let dest_str = dest.to_string_lossy().to_string();
 
-    let result = SeededSample {
-        root: dest_str.clone(),
-        name: SAMPLE_NAME.to_string(),
-        ambient_session_id: AMBIENT_SESSION_ID.to_string(),
-    };
+        let result = SeededSample {
+            root: dest_str.clone(),
+            name: SAMPLE_NAME.to_string(),
+            ambient_session_id: AMBIENT_SESSION_ID.to_string(),
+        };
 
-    let subs = build_substitutions(&dest_str);
+        let subs = build_substitutions(&dest_str);
 
-    // Top up the bundled chat sessions FIRST — before the project-tree
-    // idempotency guard below. `seed_sessions` never clobbers an existing file,
-    // so it's safe to run on every call; doing it up here means installs whose
-    // recipe-box dir predates session-seeding (or had `~/.aura/manager-sessions`
-    // cleared) still get the sample conversations, instead of the guard skipping
-    // straight past them and leaving the Get Started workspace looking empty.
-    // Best-effort: a missing sessions resource just means no sample chats, never
-    // a failed seed of the project itself.
-    if let Ok(src_sessions) = app
-        .path()
-        .resolve("resources/sample-sessions", BaseDirectory::Resource)
-    {
-        let sessions_dir = home.join(".aura").join("manager-sessions");
-        let _ = seed_sessions(&src_sessions, &sessions_dir, &subs);
-    }
+        // Top up the bundled chat sessions FIRST — before the project-tree
+        // idempotency guard below. `seed_sessions` never clobbers an existing file,
+        // so it's safe to run on every call; doing it up here means installs whose
+        // recipe-box dir predates session-seeding (or had `~/.aura/manager-sessions`
+        // cleared) still get the sample conversations, instead of the guard skipping
+        // straight past them and leaving the Get Started workspace looking empty.
+        // Best-effort: a missing sessions resource just means no sample chats, never
+        // a failed seed of the project itself.
+        if let Ok(src_sessions) = app
+            .path()
+            .resolve("resources/sample-sessions", BaseDirectory::Resource)
+        {
+            let sessions_dir = home.join(".aura").join("manager-sessions");
+            let _ = seed_sessions(&src_sessions, &sessions_dir, &subs);
+        }
 
-    // Idempotent: a populated destination means we already seeded the project
-    // tree — leave it (and its git history) be. The sample chats were handled
-    // just above, independent of this guard.
-    if dest.exists()
-        && fs::read_dir(&dest)
-            .map(|mut d| d.next().is_some())
-            .unwrap_or(false)
-    {
-        return Ok(result);
-    }
+        // Idempotent: a populated destination means we already seeded the project
+        // tree — leave it (and its git history) be. The sample chats were handled
+        // just above, independent of this guard.
+        if dest.exists()
+            && fs::read_dir(&dest)
+                .map(|mut d| d.next().is_some())
+                .unwrap_or(false)
+        {
+            return Ok(result);
+        }
 
-    // Resolve the bundled project tree (source dir in `tauri dev`, inside the
-    // app bundle when packaged).
-    let src_project = app
-        .path()
-        .resolve("resources/sample-project", BaseDirectory::Resource)
-        .map_err(|e| format!("locate sample-project resource: {e}"))?;
-    if !src_project.is_dir() {
-        return Err(format!(
-            "bundled sample project missing at {}",
-            src_project.display()
-        ));
-    }
+        // Resolve the bundled project tree (source dir in `tauri dev`, inside the
+        // app bundle when packaged).
+        let src_project = app
+            .path()
+            .resolve("resources/sample-project", BaseDirectory::Resource)
+            .map_err(|e| format!("locate sample-project resource: {e}"))?;
+        if !src_project.is_dir() {
+            return Err(format!(
+                "bundled sample project missing at {}",
+                src_project.display()
+            ));
+        }
 
-    // 1) Materialize the project tree (dot-aura → .aura, placeholders filled).
-    fs::create_dir_all(&dest).map_err(|e| format!("create {}: {e}", dest.display()))?;
-    copy_tree(&src_project, &dest, &subs)?;
+        // 1) Materialize the project tree (dot-aura → .aura, placeholders filled).
+        fs::create_dir_all(&dest).map_err(|e| format!("create {}: {e}", dest.display()))?;
+        copy_tree(&src_project, &dest, &subs)?;
 
-    // 2) Make it a real git repo.
-    git_init_commit(&dest);
+        // 2) Make it a real git repo.
+        git_init_commit(&dest);
 
-    // 3) Prime a semantic checkpoint so `aura prove` works on the sample the
-    //    moment it opens. The prover reads the latest checkpoint from git notes
-    //    (`refs/notes/aura`), which only exists after a capture. `--force`
-    //    bypasses the strict intent gate (a fresh checkout has no prior
-    //    checkpoint, so every node reads as "new" and un-forced capture would
-    //    halt asking for an intent). The bundled intent blocks already carry
-    //    their actual_impacts, so this capture only checkpoints — it won't
-    //    re-run the scope-divergence catch. Best-effort: a missing/old `aura`
-    //    on PATH just means prove waits for the first real capture the user
-    //    triggers by editing. Resolve the binary through the shared resolver so
-    //    it still lands when the GUI PATH probe misses (honors $AURA_BIN and the
-    //    `~/.cargo/bin/aura` fallback).
-    let _ = Command::new(crate::agent_event_listener::resolve_aura_bin())
-        .args(["capture-context", "--force"])
-        .current_dir(&dest)
-        .output();
+        // 3) Prime a semantic checkpoint so `aura prove` works on the sample the
+        //    moment it opens. The prover reads the latest checkpoint from git notes
+        //    (`refs/notes/aura`), which only exists after a capture. `--force`
+        //    bypasses the strict intent gate (a fresh checkout has no prior
+        //    checkpoint, so every node reads as "new" and un-forced capture would
+        //    halt asking for an intent). The bundled intent blocks already carry
+        //    their actual_impacts, so this capture only checkpoints — it won't
+        //    re-run the scope-divergence catch. Best-effort: a missing/old `aura`
+        //    on PATH just means prove waits for the first real capture the user
+        //    triggers by editing. Resolve the binary through the shared resolver so
+        //    it still lands when the GUI PATH probe misses (honors $AURA_BIN and the
+        //    `~/.cargo/bin/aura` fallback).
+        let _ = Command::new(crate::agent_event_listener::resolve_aura_bin())
+            .args(["capture-context", "--force"])
+            .current_dir(&dest)
+            .output();
 
-    Ok(result)
+        Ok(result)
+    })
+    .await
 }

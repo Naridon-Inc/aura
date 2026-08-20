@@ -78,23 +78,23 @@ export function PrStackView({ repoRoot, prNumber }: Props) {
 
   if (loading) {
     return (
-      <div className="flex items-center gap-1.5 px-3 py-3 text-text-4 text-[12px]">
-        <AsciiSpinner className="text-[10px]" />
+      <div className="flex items-center gap-1.5 px-3 py-3 text-text-4 text-sm">
+        <AsciiSpinner className="text-2xs" />
         <span>Looking for related pull requests…</span>
       </div>
     );
   }
   if (error) {
     return (
-      <div className="px-3 py-3 text-[11px] text-red font-mono whitespace-pre-wrap">
+      <div className="px-3 py-3 text-xs text-red font-mono whitespace-pre-wrap">
         {error}
       </div>
     );
   }
   if (nodes.length <= 1) {
     return (
-      <div className="px-3 py-3 text-text-4 text-[12px] leading-relaxed">
-        This change stands on its own — it isn’t built on top of another open
+      <div className="px-3 py-3 text-text-4 text-sm leading-relaxed">
+        This change stands on its own. It isn’t built on top of another open
         pull request, so there’s no chain to show.
       </div>
     );
@@ -112,7 +112,7 @@ export function PrStackView({ repoRoot, prNumber }: Props) {
   return (
     <div className="px-2 py-2 space-y-1">
       {graphiteStack && (
-        <div className="flex items-center gap-1.5 px-2 pb-1.5 text-[10.5px] uppercase tracking-wider text-text-4">
+        <div className="section-label flex items-center gap-1.5 px-2 pb-1.5">
           <GraphiteMark />
           Stacked with Graphite
         </div>
@@ -129,18 +129,18 @@ export function PrStackView({ repoRoot, prNumber }: Props) {
               className={`w-full flex items-center gap-2 px-2 py-1.5 rounded text-left transition-colors ${
                 active
                   ? "bg-bg-2 border border-line-soft"
-                  : "hover:bg-bg-2/60 border border-transparent"
+                  : "hover:bg-state-hover border border-transparent"
               }`}
             >
-              <span className="text-[11px] text-text-4 tabular-nums w-10 flex-shrink-0">
+              <span className="text-xs text-text-4 tabular-nums w-10 flex-shrink-0">
                 #{n.number}
               </span>
               <div className="flex-1 min-w-0">
                 <div className="flex items-center gap-1.5">
-                  <span className="text-[12px] text-text-1 truncate">{n.title}</span>
+                  <span className="text-sm text-text-1 truncate">{n.title}</span>
                   {n.gt_managed && (
                     <span
-                      className="flex items-center gap-0.5 text-[9px] uppercase tracking-wide text-text-4 border border-line-soft rounded px-1 py-px flex-shrink-0"
+                      className="meta-tag"
                       title="Parent branch tracked by Graphite (gt)"
                     >
                       <GraphiteMark />
@@ -148,7 +148,7 @@ export function PrStackView({ repoRoot, prNumber }: Props) {
                     </span>
                   )}
                 </div>
-                <div className="text-[10.5px] text-text-4 font-mono truncate">
+                <div className="text-xs text-text-4 font-mono truncate">
                   {n.head_ref} → {n.base_ref}
                 </div>
               </div>
@@ -172,7 +172,7 @@ export function PrStackView({ repoRoot, prNumber }: Props) {
               )}
             </button>
             {i + 1 < ordered.length && (
-              <div className="text-text-4 text-[12px] text-center">↓</div>
+              <div className="text-text-4 text-sm text-center">↓</div>
             )}
           </div>
         );

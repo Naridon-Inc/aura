@@ -17,39 +17,40 @@ import {
 } from "../../../lib/api";
 import { Button } from "../../ui/button";
 
+// ── rail actions ─────────────────────────────────────────────────────
+//
+// This used to be a 48px masthead printing the PROJECT's name at 17px/700 —
+// under a nav row already marking Team as the section you're in, and under a
+// window breadcrumb already naming the project. Three copies of one word in
+// a 120px band, and the only band in any rail that had a title at all.
+//
+// What's left is what the chrome can't say: the claim nudge (only when the
+// local git identity genuinely needs claiming) and a quiet glyph that opens
+// Chat Doctor. When neither applies there is no band — a rule across the top
+// with nothing under it is a line that says nothing.
 export function TeamHeader({
   identity,
   manifest,
   onClaim,
   repoRoot,
-  label = "Team",
 }: {
   identity: TeamIdentity | null;
   manifest: TeamManifest | null;
   onClaim: () => void;
   repoRoot: string;
-  label?: string;
 }) {
   const [doctorOpen, setDoctorOpen] = useState(false);
-  // Trace-style rail title — a glyph + "Team" header that matches the other
-  // sections' own chrome (Trace's `.ade-rail-title`, Build's nav band) rather
-  // than the earlier "+ New / 1·5 claimed" band. Channel-create lives in the
-  // Channels group's own add button; the claim nudge only appears when the
-  // local git identity genuinely needs claiming; a quiet trailing glyph opens
-  // Chat Doctor. Same `.ade-rail-title` class → pixel-identical to Trace.
   const needsClaim = Boolean(
     manifest && identity && !identity.claimed && identity.email,
   );
+  if (!needsClaim && !manifest) return null;
   return (
     <>
-      <div className="ade-rail-title flex-shrink-0">
-        <MembersGlyph />
-        <span>{label}</span>
+      <div className="ade-rail-actions">
         {needsClaim && (
           <Button
             variant="accentSoft"
             size="xs"
-            className="ml-auto"
             onClick={onClaim}
             title={`Claim @${identity?.handle ?? ""} as you`}
             aria-label={`Claim @${identity?.handle ?? ""} as you`}
@@ -61,12 +62,10 @@ export function TeamHeader({
           <button
             type="button"
             onClick={() => setDoctorOpen(true)}
-            className={`${needsClaim ? "" : "ml-auto"} flex h-6 w-6 flex-none items-center justify-center rounded-md text-text-3 transition-colors hover:bg-bg-2 hover:text-text-1`}
-            title="Check chat health — connection, sync, and any unsent messages"
+            className="flex h-6 w-6 flex-none items-center justify-center rounded-md text-text-3 transition-colors hover:bg-state-hover hover:text-text-1"
+            title="Check chat health. Connection, sync, and any unsent messages"
             aria-label="Chat diagnostics"
           >
-            {/* inline width/color beat `.ade-rail-title svg` (14px accent) so
-                this stays a neutral secondary action, not a primary accent one */}
             <svg
               viewBox="0 0 16 16"
               fill="none"
@@ -88,40 +87,6 @@ export function TeamHeader({
         <ChatDoctorDialog repoRoot={repoRoot} onClose={() => setDoctorOpen(false)} />
       )}
     </>
-  );
-}
-
-// ── rail-title glyph ─────────────────────────────────────────────────
-// A two-person "team" mark. `.ade-rail-title svg` governs its 14px size +
-// accent tint (same rule Trace's ShieldGlyph rides), so it matches the other
-// section titles exactly.
-
-function MembersGlyph() {
-  return (
-    <svg className="ade-bnav-glyph" viewBox="0 0 16 16" fill="none" aria-hidden>
-      <path
-        d="M6 7.75a2 2 0 1 0 0-4 2 2 0 0 0 0 4Z"
-        stroke="currentColor"
-        strokeWidth="1.3"
-      />
-      <path
-        d="M1.75 12.5c0-1.7 1.9-2.75 4.25-2.75 1.02 0 1.96.2 2.72.55"
-        stroke="currentColor"
-        strokeWidth="1.3"
-        strokeLinecap="round"
-      />
-      <path
-        d="M11 8.25a1.6 1.6 0 1 0 0-3.2 1.6 1.6 0 0 0 0 3.2Z"
-        stroke="currentColor"
-        strokeWidth="1.2"
-      />
-      <path
-        d="M9.9 10.1c2.02-.16 4.35.72 4.35 2.65"
-        stroke="currentColor"
-        strokeWidth="1.2"
-        strokeLinecap="round"
-      />
-    </svg>
   );
 }
 
@@ -187,7 +152,7 @@ function ChatDoctorDialog({
         onClick={(e) => e.stopPropagation()}
       >
         <div className="flex items-center justify-between border-b border-line-soft px-3 py-2">
-          <div className="text-[12px] font-medium text-text-1">Chat doctor</div>
+          <div className="text-sm font-medium text-text-1">Chat doctor</div>
           <Button
             variant="ghost"
             size="icon-sm"
@@ -198,7 +163,7 @@ function ChatDoctorDialog({
             ✕
           </Button>
         </div>
-        <div className="flex-1 overflow-y-auto px-3 py-3 text-[11.5px]">
+        <div className="flex-1 overflow-y-auto px-3 py-3 text-sm">
           {busy && <div className="text-text-3">Probing…</div>}
           {err && (
             <div className="rounded border border-red/30 bg-red/10 px-2 py-1.5 text-red">
@@ -224,9 +189,9 @@ function ChatDoctorDialog({
             />
           )}
         </div>
-        <div className="flex items-center justify-between gap-2 border-t border-line-soft px-3 py-2 text-[11px]">
+        <div className="flex items-center justify-between gap-2 border-t border-line-soft px-3 py-2 text-xs">
           <div className="text-text-4">
-            Share this with a teammate to compare — if these don't match,
+            Share this with a teammate to compare. If these don't match,
             you won't see each other's messages.
           </div>
           <Button
@@ -326,7 +291,7 @@ function ChatDoctorReportBody({
           v={
             report.http_ws_host_match
               ? "yes"
-              : "NO — messages POST to a host the WS never hears"
+              : "NO. Messages POST to a host the WS never hears"
           }
           tone={report.http_ws_host_match ? "ok" : "err"}
         />
@@ -335,7 +300,7 @@ function ChatDoctorReportBody({
           v={
             report.cloud_reachable
               ? `yes (HTTP ${report.cloud_status ?? ""})`
-              : `no${report.cloud_error ? ` — ${report.cloud_error}` : ""}`
+              : `no${report.cloud_error ? `: ${report.cloud_error}` : ""}`
           }
           tone={cloudTone}
         />
@@ -355,7 +320,7 @@ function ChatDoctorReportBody({
           k="cloud msgs (#general)"
           v={
             report.cloud_message_count_general === null
-              ? "(unknown — cloud unreachable)"
+              ? "(unknown. Cloud unreachable)"
               : String(report.cloud_message_count_general)
           }
         />
@@ -453,7 +418,7 @@ function IdentityMismatchBanner({
   };
 
   return (
-    <div className="mb-3 rounded-lg border border-line bg-bg-0 shadow-[var(--shadow-card)] px-3 py-2.5 text-[11.5px] text-text-2">
+    <div className="mb-3 rounded-lg border border-line bg-bg-0 shadow-[var(--shadow-card)] px-3 py-2.5 text-sm text-text-2">
       <div className="font-medium" style={{ color: "var(--color-amber)" }}>
         {overrideActive
           ? `Sending as @${canonicalHandle} for this repo`

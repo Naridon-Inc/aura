@@ -1,10 +1,16 @@
-// Per-workspace tab snapshot.
+// Per-place tab snapshot.
 //
-// One persisted blob per workspace under `aura.workspaceSnapshot.<root>`.
-// Carries the full tab state for that workspace: file paths, agent /
-// terminal / manager tabs, plan + PR tabs, splitLayout, and the active
-// focus markers. Switching workspaces serializes the outgoing state
-// into its slot, then reads the incoming workspace's slot back.
+// One persisted blob per place under `aura.workspaceSnapshot.<placeKey>`.
+// Carries the full tab state for that place: file paths, agent / terminal /
+// manager tabs, plan + PR tabs, splitLayout, and the active focus markers.
+// Switching places serializes the outgoing state into its slot, then reads
+// the incoming place's slot back.
+//
+// A place, not a repo root: the key is whatever `placeKey` (lib/placeRef)
+// hands back, which for a local checkout IS its root — the historic spelling,
+// so every slot written before machines existed still resolves — and for a
+// machine is its own key. The functions below take it as `place` and do
+// nothing to it but prefix it.
 //
 // Honest about what's NOT persisted here:
 //   • File buffer contents (dirty edits). We persist paths and let
@@ -19,6 +25,7 @@
 // Schema is versioned via a `v` field. Mismatch on load = treat as
 // no snapshot (the user's tabs come back empty rather than corrupt).
 
+import { setDurable } from "./localStore";
 import type {
   AgentTab,
   ManagerTab,
@@ -115,19 +122,34 @@ export function emptySnapshot(): WorkspaceSnapshot {
   };
 }
 
-function keyFor(repoRoot: string): string {
-  return `aura.workspaceSnapshot.${repoRoot}`;
+const SNAPSHOT_KEY_PREFIX = "aura.workspaceSnapshot.";
+
+function keyFor(place: string): string {
+  return `${SNAPSHOT_KEY_PREFIX}${place}`;
 }
 
-// Sentinel slot for the "clubbed" pseudo-workspace. Tabs accumulated
-// while the user is viewing the club land here and stay separate from
-// the member workspaces' own slots — leaving the club restores each
-// member exactly as it was before clubbing.
-export const CLUB_SLOT_KEY = "aura.workspaceSnapshot.__club__";
-
-export function loadClubSnapshot(): WorkspaceSnapshot | null {
+/** Every stored snapshot slot on this device — one per place the user has
+ *  opened, plus one per club. Needed because a tab is not filed in one place:
+ *  the same conversation can sit in several workspaces' restored layouts, so
+ *  removing it from the one you're looking at leaves the others to bring it
+ *  back the next time you switch. */
+export function snapshotSlotKeys(): string[] {
+  const out: string[] = [];
   try {
-    const raw = localStorage.getItem(CLUB_SLOT_KEY);
+    for (let i = 0; i < localStorage.length; i++) {
+      const k = localStorage.key(i);
+      if (k && k.startsWith(SNAPSHOT_KEY_PREFIX)) out.push(k);
+    }
+  } catch {
+    /* storage unavailable — nothing to sweep */
+  }
+  return out;
+}
+
+/** Read a slot by its raw key (from `snapshotSlotKeys`). */
+export function loadSnapshotAt(key: string): WorkspaceSnapshot | null {
+  try {
+    const raw = localStorage.getItem(key);
     if (!raw) return null;
     const parsed = JSON.parse(raw) as WorkspaceSnapshot;
     if (parsed?.v !== SCHEMA_VERSION) return null;
@@ -137,20 +159,68 @@ export function loadClubSnapshot(): WorkspaceSnapshot | null {
   }
 }
 
-export function saveClubSnapshot(snap: WorkspaceSnapshot): void {
-  try {
-    localStorage.setItem(CLUB_SLOT_KEY, JSON.stringify(snap));
-  } catch {
-    /* quota — ignore */
-  }
+/** Write a slot back by its raw key. */
+export function saveSnapshotAt(key: string, snap: WorkspaceSnapshot): void {
+  setDurable(key, JSON.stringify(snap));
 }
 
-export function removeClubSnapshot(): void {
+// One slot per club for the "clubbed" pseudo-workspace. Tabs accumulated
+// while the user is viewing a club land here and stay separate from the
+// member places' own slots — leaving the club restores each member exactly
+// as it was before clubbing.
+//
+// Per club, not one slot for all of them: the window holds as many clubs as
+// the work needs (see workspaceClubStore), and a shared slot would hand the
+// backend-and-frontend arrangement the tabs you opened in the library-and-app
+// one. `.` after `__club__` keeps the sentinel and its per-club slots distinct
+// while both stay under `SNAPSHOT_KEY_PREFIX`, so `snapshotSlotKeys` still
+// sweeps them.
+export function clubSlotKey(clubId: string): string {
+  return `${SNAPSHOT_KEY_PREFIX}__club__.${clubId}`;
+}
+
+/** v1's slot: exactly one club, so exactly one slot, with no id in its name.
+ *  Read once, when the v1 club is carried forward. */
+export const LEGACY_CLUB_SLOT_KEY = `${SNAPSHOT_KEY_PREFIX}__club__`;
+
+export function loadClubSnapshot(clubId: string): WorkspaceSnapshot | null {
+  return loadSnapshotAt(clubSlotKey(clubId));
+}
+
+export function saveClubSnapshot(
+  clubId: string,
+  snap: WorkspaceSnapshot,
+): void {
+  // Same contract as a per-place slot: tabs the user actually opened.
+  saveSnapshotAt(clubSlotKey(clubId), snap);
+}
+
+export function removeClubSnapshot(clubId: string): void {
   try {
-    localStorage.removeItem(CLUB_SLOT_KEY);
+    localStorage.removeItem(clubSlotKey(clubId));
   } catch {
     /* ignore */
   }
+}
+
+/** Move the v1 club's tabs onto the id it was migrated to.
+ *
+ *  Only when the target is still empty, so it can run on every load without
+ *  overwriting what the user has done since. Returns whether anything moved.
+ *  The legacy key is dropped once carried — leaving it would re-adopt it onto
+ *  whichever club happened to be migrated next. */
+export function adoptLegacyClubSlot(clubId: string): boolean {
+  const legacy = loadSnapshotAt(LEGACY_CLUB_SLOT_KEY);
+  if (!legacy) return false;
+  if (!loadSnapshotAt(clubSlotKey(clubId))) {
+    saveSnapshotAt(clubSlotKey(clubId), legacy);
+  }
+  try {
+    localStorage.removeItem(LEGACY_CLUB_SLOT_KEY);
+  } catch {
+    /* ignore */
+  }
+  return true;
 }
 
 /** Union N workspace snapshots into one. Used to seed the club slot
@@ -228,30 +298,21 @@ export function unionSnapshots(parts: WorkspaceSnapshot[]): WorkspaceSnapshot {
   return out;
 }
 
-export function loadSnapshot(repoRoot: string): WorkspaceSnapshot | null {
-  try {
-    const raw = localStorage.getItem(keyFor(repoRoot));
-    if (!raw) return null;
-    const parsed = JSON.parse(raw) as WorkspaceSnapshot;
-    if (parsed?.v !== SCHEMA_VERSION) return null;
-    return parsed;
-  } catch {
-    return null;
-  }
+export function loadSnapshot(place: string): WorkspaceSnapshot | null {
+  return loadSnapshotAt(keyFor(place));
 }
 
-export function saveSnapshot(repoRoot: string, snap: WorkspaceSnapshot): void {
-  try {
-    localStorage.setItem(keyFor(repoRoot), JSON.stringify(snap));
-  } catch {
-    // Quota — workspace switch keeps working in-memory; next switch
-    // will retry the write. Acceptable.
-  }
+export function saveSnapshot(place: string, snap: WorkspaceSnapshot): void {
+  // Durable, not best-effort. This blob is the only record that you had
+  // Claude Code open in this worktree; a quota failure here is what made
+  // switching away and back land on the empty surface. `setDurable` evicts
+  // regenerable caches (PR diffs, chat backlog) to make room. ~2.4 KB.
+  saveSnapshotAt(keyFor(place), snap);
 }
 
-export function removeSnapshot(repoRoot: string): void {
+export function removeSnapshot(place: string): void {
   try {
-    localStorage.removeItem(keyFor(repoRoot));
+    localStorage.removeItem(keyFor(place));
   } catch {
     /* ignore */
   }

@@ -63,7 +63,7 @@ export function SymbolContextMenu({ identifier, filePath, kind, children }: Prop
         >
           <span className="flex flex-col gap-0.5">
             <span>Bring this {kindWord(kind)} back</span>
-            <span className="text-text-4 text-[10px] normal-case tracking-normal">
+            <span className="text-text-4 text-2xs normal-case tracking-normal">
               restore just {identifier} to its last safe version
             </span>
           </span>
@@ -74,7 +74,7 @@ export function SymbolContextMenu({ identifier, filePath, kind, children }: Prop
         <ContextMenuItem
           onSelect={() =>
             dispatch("aura:open-log-intent", {
-              defaultText: `Refactored ${identifier} — `,
+              defaultText: `Refactored ${identifier} to `,
             })
           }
         >

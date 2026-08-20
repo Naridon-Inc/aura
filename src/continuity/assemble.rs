@@ -135,7 +135,7 @@ fn recent_intents(since_hours: i64, limit: usize) -> Vec<IntentBrief> {
 /// "functions in play" digest, so they're filtered out. The per-node intent
 /// is truncated because a checkpoint's intent repeats across all its nodes.
 fn touched_nodes(repo: &Repository, checkpoint_limit: usize, node_cap: usize) -> Vec<NodeState> {
-    let checkpoints = CheckpointStore::get_all_checkpoints(repo).unwrap_or_default();
+    let checkpoints = CheckpointStore::latest_checkpoints(repo, checkpoint_limit).unwrap_or_default();
     let mut seen: HashSet<String> = HashSet::new();
     let mut out: Vec<NodeState> = Vec::new();
 
@@ -160,7 +160,7 @@ fn touched_nodes(repo: &Repository, checkpoint_limit: usize, node_cap: usize) ->
                 signature: node.signature.clone(),
                 is_stub: node.is_stub,
                 intent: truncate(&cp.intent, 200),
-                at: cp.timestamp,
+                at: cp.written_at_ms(),
             });
         }
     }

@@ -63,7 +63,7 @@ function Row({
         onPick();
       }}
       className={`mx-1.5 flex items-center gap-2.5 rounded-md px-2.5 py-1.5 cursor-pointer ${
-        active ? "bg-accent/12 text-text-1" : "text-text-2 hover:bg-bg-2/60"
+        active ? "bg-accent/12 text-text-1" : "text-text-2 hover:bg-state-hover"
       }`}
     >
       {children}
@@ -152,9 +152,9 @@ export function PaletteResultRow({
           <Lead active={active}>
             <Zap />
           </Lead>
-          <span className="truncate text-[13px] font-medium">{entry.label}</span>
+          <span className="truncate text-base font-medium">{entry.label}</span>
           {entry.hint && (
-            <span className="ml-auto shrink-0 text-[11px] text-text-4">
+            <span className="ml-auto shrink-0 text-xs text-text-4">
               {looksLikeAccelerator(entry.hint) ? (
                 <Kbd>{entry.hint}</Kbd>
               ) : (
@@ -169,13 +169,13 @@ export function PaletteResultRow({
       return shell(
         <>
           <Lead active={active}>
-            <span className="font-mono text-[14px] leading-none">/</span>
+            <span className="font-mono text-md leading-none">/</span>
           </Lead>
-          <span className="truncate font-mono text-[12.5px] text-text-1">
+          <span className="truncate font-mono text-base text-text-1">
             {entry.label}
           </span>
           {entry.hint && (
-            <span className="ml-auto truncate text-[11.5px] text-text-4" style={{ maxWidth: 320 }}>
+            <span className="ml-auto truncate text-sm text-text-4" style={{ maxWidth: 320 }}>
               {entry.hint}
             </span>
           )}
@@ -188,9 +188,9 @@ export function PaletteResultRow({
           <Lead active={active}>
             <Puzzle />
           </Lead>
-          <span className="truncate text-[13px]">{entry.label}</span>
+          <span className="truncate text-base">{entry.label}</span>
           {entry.hint && (
-            <span className="ml-auto shrink-0 rounded-full bg-bg-2 px-2 py-0.5 text-[10.5px] text-text-3">
+            <span className="ml-auto shrink-0 rounded-full bg-bg-2 px-2 py-0.5 text-xs text-text-3">
               {entry.hint}
             </span>
           )}
@@ -205,9 +205,9 @@ export function PaletteResultRow({
           <Lead active={active}>
             <FileText />
           </Lead>
-          <span className="truncate text-[13px] text-text-1">{base}</span>
+          <span className="truncate text-base text-text-1">{base}</span>
           {dir && (
-            <span className="ml-auto truncate text-[11px] text-text-4" style={{ maxWidth: 320 }}>
+            <span className="ml-auto truncate text-xs text-text-4" style={{ maxWidth: 320 }}>
               {dir}
             </span>
           )}
@@ -222,14 +222,14 @@ export function PaletteResultRow({
           <Lead active={active}>
             <SymbolGlyph kind={entry.symbolKind} />
           </Lead>
-          <span className="truncate font-mono text-[12.5px] text-text-1">
+          <span className="truncate font-mono text-base text-text-1">
             {entry.label}
           </span>
-          <span className="shrink-0 rounded bg-bg-2 px-1.5 py-px text-[10px] uppercase tracking-wide text-text-4">
+          <span className="meta-tag">
             {entry.symbolKind}
           </span>
           {loc && (
-            <span className="ml-auto truncate text-[11px] text-text-4" style={{ maxWidth: 260 }}>
+            <span className="ml-auto truncate text-xs text-text-4" style={{ maxWidth: 260 }}>
               {loc}
             </span>
           )}
@@ -241,8 +241,8 @@ export function PaletteResultRow({
       const where = entry.hint ?? `${entry.path}:${entry.line}`;
       return shell(
         <div className="flex min-w-0 flex-1 flex-col gap-0.5">
-          <span className="truncate text-[10.5px] text-text-4">{where}</span>
-          <span className="truncate font-mono text-[12px] text-text-2">
+          <span className="truncate text-xs text-text-4">{where}</span>
+          <span className="truncate font-mono text-sm text-text-2">
             <Highlighted text={entry.label} query={query} />
           </span>
         </div>,
@@ -255,11 +255,11 @@ export function PaletteResultRow({
           <Lead active={active}>
             <History />
           </Lead>
-          <span className="truncate text-[13px] text-text-1">
+          <span className="truncate text-base text-text-1">
             <Highlighted text={entry.label} query={query} />
           </span>
           {entry.hint && (
-            <span className="ml-auto shrink-0 truncate text-[11px] text-text-4" style={{ maxWidth: 220 }}>
+            <span className="ml-auto shrink-0 truncate text-xs text-text-4" style={{ maxWidth: 220 }}>
               {entry.hint}
             </span>
           )}
@@ -272,11 +272,11 @@ export function PaletteResultRow({
           <Lead active={active}>
             <FolderGit2 />
           </Lead>
-          <span className="truncate text-[13px] text-text-1">
+          <span className="truncate text-base text-text-1">
             <Highlighted text={entry.label} query={query} />
           </span>
           {entry.hint && (
-            <span className="ml-auto shrink-0 text-[11px] text-text-4">
+            <span className="ml-auto shrink-0 text-xs text-text-4">
               {entry.hint}
             </span>
           )}
@@ -289,11 +289,11 @@ export function PaletteResultRow({
           <Lead active={active}>
             <MessageSquareText />
           </Lead>
-          <span className="truncate text-[13px] text-text-1">
+          <span className="truncate text-base text-text-1">
             <Highlighted text={entry.label} query={query} />
           </span>
           {entry.hint && (
-            <span className="ml-auto shrink-0 truncate text-[11px] text-text-4" style={{ maxWidth: 240 }}>
+            <span className="ml-auto shrink-0 truncate text-xs text-text-4" style={{ maxWidth: 240 }}>
               {entry.hint}
             </span>
           )}
@@ -306,9 +306,9 @@ export function PaletteResultRow({
           <span className="grid h-6 w-6 shrink-0 place-items-center">
             <AgentIcon agentId={entry.id} size={16} />
           </span>
-          <span className="truncate text-[13px] text-text-1">{entry.label}</span>
+          <span className="truncate text-base text-text-1">{entry.label}</span>
           {entry.hint && (
-            <span className="ml-auto flex shrink-0 items-center gap-1 text-[11px] text-text-4">
+            <span className="ml-auto flex shrink-0 items-center gap-1 text-xs text-text-4">
               {entry.prompt ? <CornerDownLeft size={11} /> : null}
               <span className="truncate" style={{ maxWidth: 260 }}>
                 {entry.hint}

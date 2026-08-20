@@ -19,6 +19,8 @@
 //! a cost, a reset time or an identity row appears only when its datum is real.
 
 import { Bar, budgetFill, Rule, SectionHead, StatRow } from "./usageAtoms";
+import { formatCost } from "../../../lib/money";
+import { percentOf } from "../../../lib/percent";
 
 /** One rolling subscription window (5-hour / weekly). `pctLeft` is 0–100. */
 export type UsageWindow = {
@@ -66,7 +68,7 @@ export function UsageProviderSection({
                 <div key={w.label} className="flex flex-col gap-1.5">
                   <StatRow
                     label={w.label}
-                    value={`${Math.round(w.pctLeft)}% left`}
+                    value={`${percentOf(w.pctLeft / 100)}% left`}
                     strong
                   />
                   <Bar frac={usedPct / 100} fill={budgetFill(usedPct)} />
@@ -75,11 +77,11 @@ export function UsageProviderSection({
             })}
           </div>
           {resetsAt && (
-            <div className="mt-2.5 text-[13px] text-text-3">Resets {resetsAt}</div>
+            <div className="mt-2.5 text-base text-text-3">Resets {resetsAt}</div>
           )}
           {sessionCost != null && (
             <div className="mt-2.5">
-              <StatRow label="Session" value={`$${sessionCost.toFixed(2)}`} />
+              <StatRow label="Session" value={formatCost(sessionCost)} />
             </div>
           )}
         </>

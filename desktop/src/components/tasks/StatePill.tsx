@@ -22,6 +22,7 @@ import {
 import { createPortal } from "react-dom";
 import { ChevronDown } from "lucide-react";
 import type { TaskState, TaskStateGroup } from "../../lib/api";
+import { useDismiss } from "../../lib/useDismiss";
 
 const GROUP_ORDER: TaskStateGroup[] = [
   "backlog",
@@ -31,11 +32,17 @@ const GROUP_ORDER: TaskStateGroup[] = [
   "cancelled",
 ];
 
+// These are the state catalog's five buckets, not the board's four statuses
+// (lib/taskStatus) — a custom state the user created is filed under one of
+// these. Different type, same house style: sentence case, and the bucket that
+// holds finished work carries the same word as the lane that holds finished
+// work. It said "In Progress" and "Completed" beside a board saying "In
+// progress" and "Done".
 const GROUP_LABEL: Record<TaskStateGroup, string> = {
   backlog: "Backlog",
   unstarted: "Todo",
-  started: "In Progress",
-  completed: "Completed",
+  started: "In progress",
+  completed: "Done",
   cancelled: "Cancelled",
 };
 
@@ -107,13 +114,13 @@ export function StatePill({
 }) {
   if (!state) {
     return (
-      <span className="inline-flex items-center gap-1 text-[10.5px] text-text-5 italic">
+      <span className="inline-flex items-center gap-1 text-xs text-text-5 italic">
         — no state —
       </span>
     );
   }
   const glyphSize = dense ? 9 : 11;
-  const textSize = dense ? "text-[10.5px]" : "text-[11px]";
+  const textSize = dense ? "text-xs" : "text-xs";
   const pad = dense ? "pl-[5px] pr-[7px] py-px" : "pl-[7px] pr-[9px] py-[2px]";
   return (
     <span
@@ -195,20 +202,9 @@ export function StatePillPicker({
     return out;
   }, [grouped]);
 
-  useEffect(() => {
-    if (!open) return;
-    const onDoc = (e: MouseEvent) => {
-      const t = e.target as Node;
-      const insideTrigger = rootRef.current?.contains(t) ?? false;
-      // Popover is portalled to document.body, so a click inside it
-      // would otherwise look "outside" the trigger and dismiss
-      // immediately. Treat the portal node as inside, too.
-      const insidePopover = popoverRef.current?.contains(t) ?? false;
-      if (!insideTrigger && !insidePopover) setOpen(false);
-    };
-    document.addEventListener("mousedown", onDoc);
-    return () => document.removeEventListener("mousedown", onDoc);
-  }, [open]);
+  // The popover is portalled to document.body, so a click inside it would
+  // otherwise look "outside" the trigger and dismiss immediately.
+  useDismiss(open, () => setOpen(false), [rootRef, popoverRef]);
 
   // Position the portalled dropdown against the trigger. `fixed`
   // coordinates escape every scrollable / overflow-hidden ancestor —
@@ -278,8 +274,8 @@ export function StatePillPicker({
   }
 
   const triggerSize = dense
-    ? "h-5 pl-[6px] pr-[6px] text-[10.5px]"
-    : "h-6 pl-[7px] pr-[7px] text-[11.5px]";
+    ? "h-5 pl-[6px] pr-[6px] text-xs"
+    : "h-6 pl-[7px] pr-[7px] text-sm";
 
   return (
     <div ref={rootRef} className="relative inline-block">
@@ -327,17 +323,17 @@ export function StatePillPicker({
               setCursor(0);
             }}
             placeholder="Search states…"
-            className="w-full bg-transparent border-b border-line-soft px-2.5 py-1.5 text-[12px] text-text-1 focus:outline-none placeholder:text-text-5"
+            className="w-full bg-transparent border-b border-line-soft px-2.5 py-1.5 text-sm text-text-1 focus:outline-none placeholder:text-text-5"
           />
           <div className="max-h-[280px] overflow-y-auto py-1">
             {flat.length === 0 && (
-              <div className="px-2.5 py-2 text-[11px] text-text-5">
+              <div className="px-2.5 py-2 text-xs text-text-5">
                 No states match “{query}”.
               </div>
             )}
             {GROUP_ORDER.filter((g) => (grouped[g]?.length ?? 0) > 0).map((g) => (
               <div key={g}>
-                <div className="px-2.5 pt-1.5 pb-0.5 text-[10px] uppercase tracking-wider text-text-5">
+                <div className="section-label px-2.5 pt-1.5 pb-0.5">
                   {GROUP_LABEL[g]}
                 </div>
                 {grouped[g]!.map((s) => {
@@ -350,7 +346,7 @@ export function StatePillPicker({
                       type="button"
                       onMouseEnter={() => setCursor(idx)}
                       onClick={() => commit(s)}
-                      className={`w-full flex items-center gap-2 px-2.5 py-1.5 text-[12px] text-left ${active ? "bg-bg-2" : "hover:bg-bg-2"}`}
+                      className={`w-full flex items-center gap-2 px-2.5 py-1.5 text-sm text-left ${active ? "bg-state-selected" : "hover:bg-state-hover"}`}
                     >
                       <StateGlyph
                         group={s.group as string}
@@ -361,7 +357,7 @@ export function StatePillPicker({
                         {s.name}
                       </span>
                       {isSelected && (
-                        <span className="text-accent text-[11px]" aria-hidden>
+                        <span className="text-accent text-xs" aria-hidden>
                           ✓
                         </span>
                       )}

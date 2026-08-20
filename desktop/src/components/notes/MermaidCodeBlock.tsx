@@ -111,17 +111,17 @@ function CodeBlockView({ node, updateAttributes }: ReactNodeViewProps) {
       <div className="tiptap-codeblock__bar" contentEditable={false}>
         <div className="flex items-center gap-1.5 text-text-4">
           <CodeIcon className="w-3 h-3" strokeWidth={1.5} />
-          <span className="t-2xs t-ui uppercase tracking-wider">mermaid</span>
+          <span className="section-label">mermaid</span>
         </div>
         <div className="flex items-center gap-1">
           <button
             type="button"
             onClick={() => setMode("preview")}
             className={cn(
-              "h-6 px-2 inline-flex items-center gap-1 rounded text-[11px]",
+              "h-6 px-2 inline-flex items-center gap-1 rounded text-xs",
               mode === "preview"
                 ? "bg-bg-1 text-text-1"
-                : "text-text-4 hover:text-text-1 hover:bg-bg-2",
+                : "text-text-4 hover:text-text-1 hover:bg-state-hover",
             )}
             aria-pressed={mode === "preview"}
             title="Preview diagram"
@@ -133,10 +133,10 @@ function CodeBlockView({ node, updateAttributes }: ReactNodeViewProps) {
             type="button"
             onClick={() => setMode("edit")}
             className={cn(
-              "h-6 px-2 inline-flex items-center gap-1 rounded text-[11px]",
+              "h-6 px-2 inline-flex items-center gap-1 rounded text-xs",
               mode === "edit"
                 ? "bg-bg-1 text-text-1"
-                : "text-text-4 hover:text-text-1 hover:bg-bg-2",
+                : "text-text-4 hover:text-text-1 hover:bg-state-hover",
             )}
             aria-pressed={mode === "edit"}
             title="Edit source"
@@ -152,7 +152,7 @@ function CodeBlockView({ node, updateAttributes }: ReactNodeViewProps) {
                 : "mermaid";
               updateAttributes({ language: next || null });
             }}
-            className="h-6 px-2 inline-flex items-center text-[11px] text-text-4 hover:text-text-1 hover:bg-bg-2 rounded"
+            className="h-6 px-2 inline-flex items-center text-xs text-text-4 hover:text-text-1 hover:bg-state-hover rounded"
             title="Convert back to a plain code block"
           >
             Plain
@@ -170,7 +170,7 @@ function CodeBlockView({ node, updateAttributes }: ReactNodeViewProps) {
             <MermaidDiagram code={source} minHeight={120} />
           ) : (
             <div className="t-xs italic px-3 py-6 text-center text-text-3">
-              Empty diagram — switch to Edit and add mermaid source.
+              Empty diagram. Switch to Edit and add mermaid source.
             </div>
           )}
         </div>

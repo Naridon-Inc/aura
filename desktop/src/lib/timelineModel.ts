@@ -16,6 +16,7 @@
 
 import type { IntentRow } from "./api";
 import { isToolMetadataPath } from "./categorizeChange";
+import { relativeAgeFromDelta } from "./relativeTime";
 
 /** A new session starts when an agent's work has a gap larger than this and the
  *  rows carry no durable session id to bind them. 45 min mirrors the "a coffee
@@ -122,21 +123,10 @@ export function momentStamp(tsSecs: number): string {
   return `${WEEKDAYS[d.getDay()]} ${d.getDate()} ${MONTHS[d.getMonth()]} · ${hh}:${mm}`;
 }
 
-/** "just now" / "2h" / "3d" from a positive seconds-ago delta. */
+/** "just now" / "2h ago" / "3d ago" from a positive seconds-ago delta. */
 export function relTimeOf(secsAgo: number): string {
-  if (!Number.isFinite(secsAgo) || secsAgo < 0) return "just now";
-  if (secsAgo < 45) return "just now";
-  const mins = Math.floor(secsAgo / 60);
-  if (mins < 60) return `${mins}m ago`;
-  const hours = Math.floor(secsAgo / 3600);
-  if (hours < 24) return `${hours}h ago`;
-  const days = Math.floor(secsAgo / 86400);
-  if (days < 7) return `${days}d ago`;
-  const weeks = Math.floor(days / 7);
-  if (weeks < 5) return `${weeks}w ago`;
-  const months = Math.floor(days / 30);
-  if (months < 12) return `${months}mo ago`;
-  return `${Math.floor(days / 365)}y ago`;
+  // One ladder for the whole app — see lib/relativeTime.
+  return relativeAgeFromDelta(secsAgo);
 }
 
 /** A short, human chapter title from an intent string (first sentence, capped). */

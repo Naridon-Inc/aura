@@ -121,7 +121,7 @@ export function UnifiedDiff({ diff }: { diff: string }) {
   const hiddenCount = lines.length - shown.length;
 
   return (
-    <div className="overflow-x-auto bg-bg-content font-mono text-[11.5px] leading-[1.55]">
+    <div className="overflow-x-auto bg-bg-content font-mono text-sm leading-[1.55]">
       <table className="w-full border-collapse">
         <tbody>
           {shown.map((ln, i) => {
@@ -130,7 +130,7 @@ export function UnifiedDiff({ diff }: { diff: string }) {
                 <tr key={i} className="bg-bg-2/60">
                   <td
                     colSpan={3}
-                    className="select-none px-3 py-0.5 text-[10.5px] text-text-4"
+                    className="select-none px-3 py-0.5 text-xs text-text-4"
                   >
                     {ln.text}
                   </td>
@@ -140,7 +140,7 @@ export function UnifiedDiff({ diff }: { diff: string }) {
             if (ln.kind === "meta") {
               return (
                 <tr key={i}>
-                  <td colSpan={3} className="px-3 py-0.5 text-[10px] italic text-text-5">
+                  <td colSpan={3} className="px-3 py-0.5 text-2xs italic text-text-5">
                     {ln.text.replace(/^\\\s?/, "")}
                   </td>
                 </tr>
@@ -149,10 +149,10 @@ export function UnifiedDiff({ diff }: { diff: string }) {
             const glyph = ln.kind === "add" ? "+" : ln.kind === "del" ? "−" : " ";
             return (
               <tr key={i} style={rowStyle(ln.kind, wash)}>
-                <td className="w-10 select-none border-r border-line-soft/40 px-1.5 text-right align-top text-[10px] tabular-nums text-text-5">
+                <td className="w-10 select-none border-r border-line-soft/40 px-1.5 text-right align-top text-2xs tabular-nums text-text-5">
                   {ln.oldNo ?? ""}
                 </td>
-                <td className="w-10 select-none border-r border-line-soft/40 px-1.5 text-right align-top text-[10px] tabular-nums text-text-5">
+                <td className="w-10 select-none border-r border-line-soft/40 px-1.5 text-right align-top text-2xs tabular-nums text-text-5">
                   {ln.newNo ?? ""}
                 </td>
                 <td className="whitespace-pre-wrap break-words px-2 align-top text-text-2">
@@ -170,8 +170,8 @@ export function UnifiedDiff({ diff }: { diff: string }) {
         </tbody>
       </table>
       {hiddenCount > 0 ? (
-        <div className="border-t border-line-soft px-3 py-1.5 text-[11px] text-text-4">
-          +{hiddenCount} more line{hiddenCount === 1 ? "" : "s"} — open the file
+        <div className="border-t border-line-soft px-3 py-1.5 text-xs text-text-4">
+          +{hiddenCount} more line{hiddenCount === 1 ? "" : "s"}. Open the file
           to see the rest.
         </div>
       ) : null}

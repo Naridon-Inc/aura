@@ -26,6 +26,7 @@ import {
   onChatReply,
 } from "./notifications";
 import { playChime, isChimeMuted } from "./chime";
+import { routeToChatChannel } from "./chatRoute";
 import { roomTokenParam } from "./roomAuth";
 import {
   AURA_GLOBAL_ROOM_ID,
@@ -52,6 +53,11 @@ export function useChatNotifier(repoRoot: string | null): void {
   const deviceIdRef = useRef<string>("");
   const selfNeedlesRef = useRef<string[]>([]);
   const seenRef = useRef<Set<string>>(new Set());
+  // The reply listener is installed once for the life of the window, so the
+  // `repoRoot` its closure captured is whichever project was open at that
+  // moment. Anything that has to know the project as it is NOW reads this.
+  const repoRootRef = useRef<string | null>(repoRoot);
+  repoRootRef.current = repoRoot;
 
   useEffect(() => {
     if (!repoRoot) return;
@@ -89,6 +95,19 @@ export function useChatNotifier(repoRoot: string | null): void {
       const channel =
         typeof r.extra.channel === "string" ? r.extra.channel : "general";
       if (!root) return;
+      if (!r.text) {
+        // Tapped without typing — they want to read it, not answer it. The
+        // notification named the conversation; the tap should land in it
+        // rather than dropping them wherever they happened to be.
+        //
+        // Only for the open project: the Team place renders the project the
+        // app is in, so routing another project's channel would select that
+        // slug against the wrong team's conversation list — a worse answer
+        // than the plain focus we already did. Landing a foreign message
+        // needs a project switch first, which this hook cannot do.
+        if (root === repoRootRef.current) routeToChatChannel(root, channel);
+        return;
+      }
       void api.chatSend({ repoRoot: root, channel, body: r.text }).catch(() => {
         /* reply send failed — best-effort; user can retry in-app */
       });
@@ -163,6 +182,9 @@ export function useChatNotifier(repoRoot: string | null): void {
           // on both paths.
           sound: isChimeMuted() ? undefined : mention ? "Glass" : "Ping",
           actionTypeId: CHAT_REPLY_ACTION_TYPE,
+          // One stack per conversation. Coming back to twenty messages across
+          // three channels should be three things to deal with, not twenty.
+          threadId: `${repoRoot}:${channel}`,
           extra: { kind: "chat", repoRoot, channel },
         });
       })();

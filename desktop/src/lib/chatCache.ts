@@ -6,11 +6,17 @@
 // Cache shape (per key):
 //   { v: 1, ts: <writeTimeMs>, msgs: Msg[] }
 //
-// We cap each entry at MAX_PER_CONV messages so the ~5MB localStorage
-// origin quota holds many channels comfortably (a 5KB ceiling per
-// channel × 100 channels = 500KB worst case). The hot ring of recent
+// We cap each entry at MAX_PER_CONV messages. That bounds the message
+// COUNT, not the byte size, and the estimate that followed it here — "a 5KB
+// ceiling per channel" — did not survive contact: measured on a real install,
+// 51 chat cache keys held 1,967,735 bytes, one channel alone 761,234. Agent
+// transcripts posted into a channel are long. So the byte ceiling now lives
+// in `setCache`, which refuses an oversized entry outright rather than
+// letting one channel spend the origin's budget. The hot ring of recent
 // messages is what users want on first paint; older history can keep
 // streaming in from the live `chatList` round-trip without blocking.
+
+import { setCache } from "./localStore";
 
 const VERSION = 1;
 const PREFIX = "aura.chat.cache.v1::";
@@ -69,7 +75,7 @@ export function saveCachedMsgs<M extends CachedMsg>(
     // get reconciled by the next chatList merge.
     const tail = msgs.slice(-MAX_PER_CONV);
     const envelope: Envelope = { v: VERSION, ts: Date.now(), msgs: tail };
-    localStorage.setItem(key(repoRoot, convId), JSON.stringify(envelope));
+    setCache(key(repoRoot, convId), JSON.stringify(envelope));
   } catch {
     // QuotaExceeded: best-effort drop. The next save attempt will
     // retry; meanwhile the in-memory list is still authoritative.

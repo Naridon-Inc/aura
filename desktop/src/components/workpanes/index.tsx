@@ -17,8 +17,14 @@ import {
   type CliResult,
 } from "../../lib/api";
 import { useEditorStore } from "../../lib/editorStore";
+import { clockTimeFromSecs } from "../../lib/clockTime";
 import { Button } from "../ui/button";
 import { ResourcePill } from "../TopBar";
+import {
+  fetchConflicts,
+  fetchImpacts,
+  resolveImpact,
+} from "../../lib/ambientCache";
 
 // ── shared scaffold ────────────────────────────────────────────────────
 
@@ -30,7 +36,11 @@ export function PaneShell({
   onRefresh,
   children,
 }: {
-  title: string;
+  /** The pane's name — set it ONLY where this shell is the sole thing naming
+   *  the surface (a sidebar panel). When the shell fills a TAB, leave it out:
+   *  the tab already carries the name, and printing it again 4px below is the
+   *  reader being told twice where they just chose to go. */
+  title?: string;
   loading?: boolean;
   empty?: boolean;
   /** Friendly empty-state copy for this pane; defaults to "nothing to show". */
@@ -38,12 +48,18 @@ export function PaneShell({
   onRefresh?: () => void;
   children: React.ReactNode;
 }) {
+  // No title and nothing to click means no bar — an empty 36px rule across the
+  // top is chrome that draws a line and says nothing.
+  const showHeader = !!title || !!onRefresh;
   return (
     <div className="h-full w-full flex flex-col">
+      {showHeader && (
       <header className="flex items-center h-9 px-4 border-b border-line-soft flex-shrink-0">
-        <span className="text-text-2 text-[12px] font-medium uppercase tracking-wider">
-          {title}
-        </span>
+        {title && (
+          <span className="section-label">
+            {title}
+          </span>
+        )}
         {onRefresh && (
           <Button
             type="button"
@@ -60,6 +76,7 @@ export function PaneShell({
           </Button>
         )}
       </header>
+      )}
       <div className="flex-1 min-h-0 overflow-y-auto">
         {loading ? (
           <Hint>loading…</Hint>
@@ -75,7 +92,7 @@ export function PaneShell({
 
 function Hint({ children }: { children: React.ReactNode }) {
   return (
-    <div className="text-text-4 text-[12px] px-4 py-6">{children}</div>
+    <div className="text-text-4 text-sm px-4 py-6">{children}</div>
   );
 }
 
@@ -122,14 +139,14 @@ function PlanRow({ wave }: { wave: WaveFile }) {
           ? "text-text-3"
           : "text-text-4";
   return (
-    <div className="flex items-center gap-3 px-4 py-2.5 border-b border-line-soft hover:bg-bg-2">
-      <span className={`text-[10px] uppercase tracking-wider ${tone}`}>
+    <div className="flex items-center gap-3 px-4 py-2.5 border-b border-line-soft hover:bg-state-hover">
+      <span className={`text-2xs ${tone}`}>
         {wave.status}
       </span>
-      <span className="text-text-1 text-[13px] font-medium flex-1 truncate">
+      <span className="text-text-1 text-base font-medium flex-1 truncate">
         {wave.name.replace(/\.xml$/, "")}
       </span>
-      <span className="text-text-3 text-[11px] tabular-nums">
+      <span className="text-text-3 text-xs tabular-nums">
         {wave.waves} {wave.waves === 1 ? "wave" : "waves"}
       </span>
     </div>
@@ -140,7 +157,7 @@ function PlanRow({ wave }: { wave: WaveFile }) {
 
 export function ImpactsPane({ repoRoot }: { repoRoot: string }) {
   const { data, loading, refresh } = useFetched<ImpactAlert[]>(
-    () => api.auraReadImpacts(repoRoot),
+    () => fetchImpacts(repoRoot),
     [repoRoot],
   );
   // `aura_read_impacts` returns acknowledged alerts too; every other consumer
@@ -150,7 +167,8 @@ export function ImpactsPane({ repoRoot }: { repoRoot: string }) {
   const live = data?.filter((a) => !a.resolved) ?? [];
   const isEmpty = live.length === 0;
   return (
-    <PaneShell title="Impacts on me" loading={loading} onRefresh={refresh}>
+    // No title: this shell fills a tab, and the tab says "Impacts on me".
+    <PaneShell loading={loading} onRefresh={refresh}>
       {isEmpty ? (
         <ImpactsEmptyState />
       ) : (
@@ -185,14 +203,14 @@ function ImpactsEmptyState() {
           <path d="m9 11.5 2 2 4-4.2" />
         </svg>
       </div>
-      <div className="text-text-1 text-[14px] font-semibold mb-1.5">Nothing's reaching your work</div>
-      <p className="text-text-3 text-[12px] leading-relaxed max-w-[360px]">
+      <div className="text-text-1 text-md font-semibold mb-1.5">Nothing's reaching your work</div>
+      <p className="text-text-3 text-sm leading-relaxed max-w-[360px]">
         When a teammate changes a function on another branch that your code leans
-        on, Aura spots it and lists it here — so a change you didn't make can't
+        on, Aura spots it and lists it here, so a change you didn't make can't
         quietly break you. Right now nothing your work depends on has moved, so
         you're clear.
       </p>
-      <p className="text-text-4 text-[11px] leading-relaxed max-w-[360px] mt-3">
+      <p className="text-text-4 text-xs leading-relaxed max-w-[360px] mt-3">
         You'll also see a count next to <span className="text-text-2">Impacts on me</span> in
         the sidebar the moment something needs your eyes.
       </p>
@@ -231,7 +249,7 @@ function ImpactRow({
     if (!alert.id || busy) return;
     setBusy(true);
     try {
-      await api.auraResolveImpact(repoRoot, alert.id);
+      await resolveImpact(repoRoot, alert.id);
       onResolved();
     } catch {
       // best-effort; refresh would re-show the row if write didn't take.
@@ -249,29 +267,29 @@ function ImpactRow({
   }, [resolvedPath, editor]);
 
   return (
-    <div className="px-4 py-3 border-b border-line-soft hover:bg-bg-2">
+    <div className="px-4 py-3 border-b border-line-soft hover:bg-state-hover">
       <div className="flex items-center gap-2 mb-1">
-        <span className={`text-[10px] uppercase tracking-wider px-1.5 py-0.5 rounded ${sev}`}>
+        <span className={`text-2xs px-1.5 py-0.5 rounded ${sev}`}>
           {alert.severity || "info"}
         </span>
         <button
           type="button"
           onClick={() => setExpanded((v) => !v)}
-          className="text-text-1 text-[12.5px] font-mono truncate hover:text-accent text-left flex-1 min-w-0"
+          className="text-text-1 text-base font-mono truncate hover:text-accent text-left flex-1 min-w-0"
         >
           {alert.function || "(unknown)"}
         </button>
         {alert.branch && (
-          <span className="text-text-4 text-[11px] truncate">@ {alert.branch}</span>
+          <span className="text-text-4 text-xs truncate">@ {alert.branch}</span>
         )}
       </div>
       {alert.message && (
-        <div className="text-text-2 text-[12px] leading-relaxed mb-2">
+        <div className="text-text-2 text-sm leading-relaxed mb-2">
           {alert.message}
         </div>
       )}
       {expanded && (
-        <div className="text-[11px] text-text-3 mb-2 space-y-0.5 font-mono">
+        <div className="text-xs text-text-3 mb-2 space-y-0.5 font-mono">
           {alert.file && <div>file: {alert.file}</div>}
           {alert.timestamp > 0 && (
             <div>at: {new Date(alert.timestamp * 1000).toLocaleString()}</div>
@@ -284,7 +302,7 @@ function ImpactRow({
           type="button"
           onClick={acknowledge}
           disabled={busy || !alert.id}
-          className="text-[11px] px-2 py-1 rounded border border-line-soft text-text-2 hover:text-text-1 hover:bg-bg-2 disabled:opacity-40 disabled:cursor-not-allowed"
+          className="text-xs px-2 py-1 rounded border border-line-soft text-text-2 hover:text-text-1 hover:bg-state-hover disabled:opacity-40 disabled:cursor-not-allowed"
         >
           {busy ? "…" : "Acknowledge"}
         </button>
@@ -292,7 +310,7 @@ function ImpactRow({
           type="button"
           onClick={takeOver}
           disabled={!resolvedPath}
-          className="text-[11px] px-2 py-1 rounded border border-line-soft text-text-2 hover:text-text-1 hover:bg-bg-2 disabled:opacity-40 disabled:cursor-not-allowed"
+          className="text-xs px-2 py-1 rounded border border-line-soft text-text-2 hover:text-text-1 hover:bg-state-hover disabled:opacity-40 disabled:cursor-not-allowed"
         >
           Take over
         </button>
@@ -404,7 +422,7 @@ export function TimelinePane({ repoRoot }: { repoRoot: string }) {
   return (
     <div className="h-full w-full flex flex-col">
       <header className="flex items-center h-9 px-4 border-b border-line-soft flex-shrink-0">
-        <span className="text-text-2 text-[12px] font-medium uppercase tracking-wider">
+        <span className="section-label">
           Timeline
         </span>
         <Button
@@ -425,7 +443,7 @@ export function TimelinePane({ repoRoot }: { repoRoot: string }) {
         {loading && flat.length === 0 ? (
           <Hint>Loading…</Hint>
         ) : flat.length === 0 ? (
-          <Hint>No history here yet — it fills in as you and the AI make changes.</Hint>
+          <Hint>No history here yet. It fills in as you and the AI make changes.</Hint>
         ) : (
           <div
             style={{
@@ -451,19 +469,19 @@ export function TimelinePane({ repoRoot }: { repoRoot: string }) {
                   }}
                 >
                   {isSentinel ? (
-                    <div className="px-4 py-2 text-text-4 text-[11px]">
+                    <div className="px-4 py-2 text-text-4 text-xs">
                       {loading ? "loading…" : "·"}
                     </div>
                   ) : row!.kind === "header" ? (
-                    <div className="px-4 pt-3 pb-1 text-text-3 text-[10.5px] uppercase tracking-wider">
+                    <div className="section-label px-4 pt-3 pb-1">
                       {row!.day}
                     </div>
                   ) : (
-                    <div className="flex items-center gap-3 px-4 py-2 hover:bg-bg-2">
-                      <span className="text-text-3 text-[11px] tabular-nums">
+                    <div className="flex items-center gap-3 px-4 py-2 hover:bg-state-hover">
+                      <span className="text-text-3 text-xs tabular-nums">
                         {hhmm(row!.s.mtime)}
                       </span>
-                      <span className="text-text-1 text-[12.5px] font-mono truncate flex-1">
+                      <span className="text-text-1 text-base font-mono truncate flex-1">
                         {row!.s.file}
                       </span>
                     </div>
@@ -478,19 +496,14 @@ export function TimelinePane({ repoRoot }: { repoRoot: string }) {
   );
 }
 
-function hhmm(secs: number): string {
-  const d = new Date(secs * 1000);
-  return `${pad(d.getHours())}:${pad(d.getMinutes())}`;
-}
-function pad(n: number) {
-  return n < 10 ? `0${n}` : String(n);
-}
+// One clock for the whole app — see lib/clockTime.
+const hhmm = (secs: number): string => clockTimeFromSecs(secs);
 
 // ── Conflict ───────────────────────────────────────────────────────────
 
 export function ConflictPane({ repoRoot }: { repoRoot: string }) {
   const { data, loading, refresh } = useFetched<ConflictItem[]>(
-    () => api.auraListConflicts(repoRoot),
+    () => fetchConflicts(repoRoot),
     [repoRoot],
   );
   return (
@@ -510,17 +523,17 @@ function ConflictRow({ item }: { item: ConflictItem }) {
         ? "text-violet"
         : "text-red";
   return (
-    <div className="px-4 py-3 border-b border-line-soft hover:bg-bg-2">
+    <div className="px-4 py-3 border-b border-line-soft hover:bg-state-hover">
       <div className="flex items-center gap-2 mb-1">
-        <span className={`text-[10px] uppercase tracking-wider ${kindColor}`}>
+        <span className={`text-2xs ${kindColor}`}>
           {item.kind}
         </span>
-        <span className="text-text-1 text-[12.5px] font-mono truncate">
+        <span className="text-text-1 text-base font-mono truncate">
           {item.label}
         </span>
       </div>
       {item.detail && (
-        <div className="text-text-3 text-[11.5px] font-mono truncate">
+        <div className="text-text-3 text-sm font-mono truncate">
           {item.detail}
         </div>
       )}
@@ -556,10 +569,10 @@ export function DoctorPane({ repoRoot }: { repoRoot: string }) {
           "how's my project doing" surface. Click it for the per-process CPU /
           memory breakdown of every aura binary + spawned agent CLI. */}
       <div className="flex items-center gap-2 px-4 py-2.5 border-b border-line-soft">
-        <span className="text-[11px] text-text-4">Live processes &amp; memory</span>
+        <span className="text-xs text-text-4">Live processes &amp; memory</span>
         <ResourcePill />
       </div>
-      <pre className="text-[11.5px] font-mono leading-relaxed text-text-2 px-4 py-3 whitespace-pre-wrap">
+      <pre className="text-sm font-mono leading-relaxed text-text-2 px-4 py-3 whitespace-pre-wrap">
         {body}
       </pre>
     </PaneShell>
@@ -586,7 +599,7 @@ export function ProofPane({ repoRoot }: { repoRoot: string }) {
   const body = ((res?.stdout || "") + (res?.stderr || "")).trim();
   return (
     <PaneShell title="Proof" loading={loading} empty={!body} onRefresh={refresh}>
-      <pre className="text-[11.5px] font-mono leading-relaxed text-text-2 px-4 py-3 whitespace-pre-wrap">
+      <pre className="text-sm font-mono leading-relaxed text-text-2 px-4 py-3 whitespace-pre-wrap">
         {body}
       </pre>
     </PaneShell>

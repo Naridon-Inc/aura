@@ -18,8 +18,10 @@
 import { useEffect, useState } from "react";
 import { Dialog } from "../Dialog";
 import { Button } from "../ui/button";
-import { LoadingState } from "../ui/state";
+import { EmptyState, ErrorState, LoadingState } from "../ui/state";
+import { ShieldCheck } from "lucide-react";
 import { api, type IntentRow } from "../../lib/api";
+import { fetchIntentRows } from "../../lib/intentCache";
 import { splitIntent } from "../workpanes/IntentProse";
 import { SessionDetailPane } from "../workpanes/SessionDetailPane";
 import {
@@ -82,12 +84,14 @@ export function AttestationsDialog({ open, repoRoot, onClose, inline }: Attestat
   }, [open, repoRoot]);
 
   // Best-effort run cross-reference — absence just means a ledger row stays
-  // un-clickable and falls back to its block kind for a title.
+  // un-clickable and falls back to its block kind for a title. This used to ask
+  // for the backend's default of 50 rows, which meant older ledger entries were
+  // silently un-clickable; the whole history is shared with every other surface
+  // now, so asking for all of it costs nothing extra.
   useEffect(() => {
     if (!open) return;
     let alive = true;
-    api
-      .auraIntentRecent(repoRoot)
+    fetchIntentRows(repoRoot)
       .then((intents) => {
         if (!alive) return;
         const map: Record<string, IntentRow> = {};
@@ -139,14 +143,24 @@ export function AttestationsDialog({ open, repoRoot, onClose, inline }: Attestat
         }
       >
         {error ? (
-          <div role="alert" className="text-red text-[11.5px] py-2 font-mono break-words">{error}</div>
+          <ErrorState
+            title="Couldn’t read the sealed records"
+            message={error}
+            onRetry={() => void run()}
+            size="sm"
+          />
         ) : loading && rows.length === 0 ? (
           <LoadingState label="Reading sealed records…" className="justify-center py-8" />
         ) : rows.length === 0 ? (
-          <EmptyState />
+          <EmptyState
+            icon={ShieldCheck}
+            title="No sealed records yet"
+            size="sm"
+            body="Each time the AI changes something, Aura seals it. A record of exactly what happened that nobody can quietly alter later. Some are copied to an independent public logbook too. Make a change to start the record."
+          />
         ) : (
           <div className={`flex flex-col gap-3 ${inline ? "" : "max-h-[64vh]"}`}>
-            <div className="flex items-center gap-2 text-[11.5px] text-text-2">
+            <div className="flex items-center gap-2 text-sm text-text-2">
               <LockGlyph className="text-accent-green" />
               <span>
                 <span className="text-text-1 font-medium tabular-nums">{signed}</span> sealed
@@ -212,15 +226,15 @@ function AttestRowItem({
       </span>
       <div className="flex-1 min-w-0">
         <div className="flex items-center gap-1.5 flex-wrap">
-          <span className="text-[12.5px] text-text-1 truncate" title={title}>
+          <span className="text-base text-text-1 truncate" title={title}>
             {title}
           </span>
           {row.intent_type && (
-            <span className="text-[10px] px-1.5 py-0.5 rounded border border-line-soft text-text-3">
+            <span className="text-2xs px-1.5 py-0.5 rounded border border-line-soft text-text-3">
               {humanizeIntentType(row.intent_type)}
             </span>
           )}
-          <span className="ml-auto text-[10.5px] text-text-4 tabular-nums shrink-0">
+          <span className="ml-auto text-xs text-text-4 tabular-nums shrink-0">
             {formatAttestWhen(row.created_at)}
           </span>
           {clickable && (
@@ -230,14 +244,14 @@ function AttestRowItem({
           )}
         </div>
         <div className="flex items-center gap-1.5 mt-1.5">
-          <span className="font-mono text-[10.5px] text-text-4" title={row.id}>
+          <span className="font-mono text-xs text-text-4" title={row.id}>
             {shortBlockId(row.id)}
           </span>
           <span className="text-text-5">·</span>
           <TrustBadge ok={row.signature} label={row.signature ? "Sealed" : "Not sealed"} tone="green" />
           {row.rekor && <TrustBadge ok label="Public copy" tone="blue" />}
           {row.human_id && (
-            <span className="text-[10px] text-text-4 font-mono truncate" title={row.human_id}>
+            <span className="text-2xs text-text-4 font-mono truncate" title={row.human_id}>
               {row.human_id}
             </span>
           )}
@@ -253,7 +267,7 @@ function AttestRowItem({
           type="button"
           onClick={onOpen}
           title="Open the change this record came from"
-          className="group flex w-full items-start gap-2.5 px-2.5 py-2 rounded border border-line-soft bg-bg-1 text-left transition-colors hover:bg-bg-2/60"
+          className="group flex w-full items-start gap-2.5 px-2.5 py-2 rounded border border-line-soft bg-bg-1 text-left transition-colors hover:bg-state-hover"
         >
           {body}
         </button>
@@ -281,7 +295,7 @@ function ViewToggle({
           key={v}
           type="button"
           onClick={() => onChange(v)}
-          className={`rounded px-2 py-0.5 text-[10.5px] capitalize transition-colors ${
+          className={`rounded px-2 py-0.5 text-xs capitalize transition-colors ${
             view === v ? "bg-bg-2 text-text-1" : "text-text-4 hover:text-text-2"
           }`}
         >
@@ -306,12 +320,3 @@ function ChevronRight() {
   );
 }
 
-function EmptyState() {
-  return (
-    <div className="text-text-3 text-[11.5px] py-8 px-6 text-center max-w-md mx-auto leading-relaxed">
-      No sealed records yet. Each time the AI makes a change, Aura seals it — a tamper-proof record
-      of exactly what happened, so nobody can quietly alter the history later. Some are also kept in
-      an independent public logbook. Make a change to start the record.
-    </div>
-  );
-}

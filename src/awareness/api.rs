@@ -50,6 +50,31 @@ pub fn collision_json(c: &conflict::Collision) -> Value {
     })
 }
 
+/// Every event this repository's readers may see: the merged local + remote
+/// plane, scoped to THIS repository.
+///
+/// The logs are append-only and shared, so without this a checkout picks up
+/// rows about paths that live in another project entirely — the single loudest
+/// source of "the radar shows random things". Branch is deliberately NOT
+/// filtered: seeing a teammate working the same file on a different branch is
+/// the whole point of the plane.
+///
+/// It is done HERE, once, rather than at the feed, because the feed is the
+/// quieter half. The scope used to be applied to the displayed rows only, which
+/// left the alert layer reading the unscoped plane: `detect` matches a file by
+/// path suffix, so a peer editing `src/auth.rs` in an unrelated project scored
+/// a *direct* collision against the `src/auth.rs` in this one — the loudest
+/// thing the radar can say, about a file they have never opened. That layer
+/// also gates the pre-commit hook, so the fabricated collision could stop a
+/// commit.
+pub fn plane_for_this_repo() -> Vec<AwarenessEvent> {
+    let repo = live_events::repo_name();
+    broadcast::merged_events()
+        .into_iter()
+        .filter(|e| e.repo == repo)
+        .collect()
+}
+
 /// The radar query: the ambient feed (optionally narrowed to `focus`) plus the
 /// reasoned conflicts against the caller's own current work. `as_actor` lets an
 /// agent declare its own label so its events are excluded from its conflicts.
@@ -57,17 +82,9 @@ pub fn radar(focus: Option<&str>, limit: usize, as_actor: Option<&str>) -> Value
     // Opportunistic (throttled, best-effort) pull so the feed includes
     // teammates' events; then read the merged local + remote view (AURA-15).
     let _ = broadcast::pull_remote(false);
-    let all = broadcast::merged_events();
+    let all = plane_for_this_repo();
 
     let mut rows: Vec<&AwarenessEvent> = relevance::filter(&all, focus);
-
-    // Scope to THIS repository. The event log is append-only and shared, so
-    // without this a checkout picks up rows about paths that live in another
-    // project entirely — the single loudest source of "the radar shows random
-    // things". Branch is deliberately NOT filtered: seeing a teammate working
-    // the same file on a different branch is the whole point of the plane.
-    let repo = live_events::repo_name();
-    rows.retain(|e| e.repo == repo);
 
     // Drop anything past the feed window, and count what was dropped so the
     // surface can say "nothing recent" instead of padding the list with
@@ -107,7 +124,7 @@ pub fn radar(focus: Option<&str>, limit: usize, as_actor: Option<&str>) -> Value
 /// layer (pre-commit hook, desktop conflict card).
 pub fn conflicts(as_actor: Option<&str>, include_possible: bool) -> Value {
     let _ = broadcast::pull_remote(false);
-    let all = broadcast::merged_events();
+    let all = plane_for_this_repo();
     // The callgraph ripple edges are only built when the Possible tier is
     // actually wanted — they cost a full checkpoint-store read (see
     // `conflict::focus_from_repo_opts`).
@@ -127,4 +144,81 @@ pub fn conflicts(as_actor: Option<&str>, include_possible: bool) -> Value {
 pub fn emit(input: emit::EmitInput) -> Value {
     let ev = emit::emit(input);
     json!({ "ok": true, "event": event_json(&ev) })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::awareness::model::AwarenessKind;
+    use crate::awareness::store;
+    use crate::TEST_CWD_LOCK as SERIAL;
+
+    struct CwdGuard(std::path::PathBuf);
+    impl Drop for CwdGuard {
+        fn drop(&mut self) {
+            let _ = std::env::set_current_dir(&self.0);
+        }
+    }
+
+    fn enter_tmp() -> (CwdGuard, tempfile::TempDir) {
+        let g = CwdGuard(std::env::current_dir().expect("cwd"));
+        let d = tempfile::tempdir().expect("tmp");
+        std::env::set_current_dir(d.path()).expect("cd");
+        (g, d)
+    }
+
+    fn ev(id: &str, repo: &str) -> AwarenessEvent {
+        AwarenessEvent {
+            id: id.into(),
+            actor: "ashiq".into(),
+            is_agent: false,
+            kind: AwarenessKind::Editing,
+            repo: repo.into(),
+            branch: "main".into(),
+            file: Some("src/auth.rs".into()),
+            symbol: Some("login".into()),
+            intent: None,
+            impact: None,
+            ts: live_events::now_ms(),
+            key_id: None,
+            sig: None,
+            pubkey: None,
+            worktree: None,
+        }
+    }
+
+    #[test]
+    fn another_projects_work_never_reaches_this_repos_readers() {
+        let _lk = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+        let (_g, _d) = enter_tmp();
+        // No git remote here, so this repo's name is the `local` fallback.
+        assert_eq!(live_events::repo_name(), "local");
+
+        assert!(store::append(&ev("mine", "local")));
+        assert!(store::append(&ev("theirs", "acme/payments")));
+
+        let plane: Vec<String> = plane_for_this_repo().into_iter().map(|e| e.id).collect();
+        assert_eq!(plane, vec!["mine".to_string()]);
+    }
+
+    #[test]
+    fn the_alert_layer_reads_the_same_scoped_plane_the_feed_does() {
+        let _lk = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+        let (_g, _d) = enter_tmp();
+
+        // Both events name `src/auth.rs`, and `detect` matches a file by path
+        // suffix — so before the scope moved off the feed and onto the plane,
+        // a peer editing `src/auth.rs` in an unrelated project scored a DIRECT
+        // collision against the `src/auth.rs` in this one. That is the loudest
+        // thing the radar can say, about a file they have never opened, and it
+        // also gates the pre-commit hook.
+        assert!(store::append(&ev("theirs", "acme/payments")));
+
+        let scoped = plane_for_this_repo();
+        assert!(scoped.is_empty(), "nothing here is ours, so nothing can collide");
+
+        // The unscoped read is what the alert layer used to do; keeping the
+        // contrast in the test names what the fix is actually protecting.
+        assert_eq!(super::broadcast::merged_events().len(), 1);
+    }
 }

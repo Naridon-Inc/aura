@@ -18,38 +18,30 @@ import {
   type TeamMember,
   type UsageReport,
 } from "../../lib/api";
+import { fetchSessions } from "../../lib/sessionsCache";
+import { fetchIntentRows } from "../../lib/intentCache";
+import { isAutomationIdentity } from "../../lib/agentIdentity";
 import { collapseAutoStubSessions } from "../../lib/sessionMeta";
 import { TEAM_ACTIVITY_ENABLED } from "../../lib/featureFlags";
-import { Button } from "../ui/button";
+import { Activity } from "lucide-react";
+import { EmptyState, ErrorState, LoadingState } from "../ui/state";
 import { ContributionsScatter } from "./ContributionsScatter";
 import { TeamActivityNow } from "./TeamActivityNow";
 import { SprintProgress } from "./SprintProgress";
-import { currentMonthKey, fmtCost, fmtTokens, prettyMonth } from "./usageProviders";
+import { currentMonthKey, prettyMonth } from "./usageProviders";
+import { compactNumber } from "../../lib/compactNumber";
+import { formatCost } from "../../lib/money";
+import { relativeAgeFromDelta } from "../../lib/relativeTime";
+import { fetchTeam } from "../../lib/teamCache";
+import { fetchBillingUsage } from "../../lib/billingCache";
 
-/** Relative time from a "seconds ago" delta — "just now", "2h", "3d". */
+/** Relative time from a "seconds ago" delta — "now", "2h", "3d". */
 function relTime(secsAgo: number): string {
-  if (!Number.isFinite(secsAgo) || secsAgo < 0) return "just now";
-  if (secsAgo < 45) return "just now";
-  const mins = Math.floor(secsAgo / 60);
-  if (mins < 60) return `${mins}m`;
-  const hours = Math.floor(secsAgo / 3600);
-  if (hours < 24) return `${hours}h`;
-  const days = Math.floor(secsAgo / 86400);
-  if (days < 7) return `${days}d`;
-  const weeks = Math.floor(days / 7);
-  if (weeks < 5) return `${weeks}w`;
-  const months = Math.floor(days / 30);
-  if (months < 12) return `${months}mo`;
-  return `${Math.floor(days / 365)}y`;
+  // One ladder for the whole app — see lib/relativeTime. This copy skipped the
+  // seconds rung, so 45s through 59s printed "0m".
+  return relativeAgeFromDelta(secsAgo, { style: "compact" });
 }
 
-/** Last path segment of a repo root — the repo's short name. */
-function repoShortName(root: string): string {
-  const trimmed = (root ?? "").replace(/[/\\]+$/, "");
-  if (!trimmed) return "";
-  const parts = trimmed.split(/[/\\]+/);
-  return parts[parts.length - 1] || trimmed;
-}
 
 /** A stable local-day key (YYYY-MM-DD) for bucketing. */
 function dayKey(d: Date): string {
@@ -62,11 +54,24 @@ function dayKey(d: Date): string {
 const DAY_MS = 86_400_000;
 const ACTIVITY_DAYS = 14;
 
+/** Shortest gap between two automatic re-reads. Returning to the window is the
+ *  cue to refresh, and a window can regain focus several times in a few
+ *  seconds; below this the pane just keeps what it already has. */
+const REFRESH_MIN_GAP_MS = 20_000;
+
 type Aggregates = {
   total: number;
   thisWeek: number;
+  /** Runs that landed today — the recency slice to show when the whole
+   *  history already fits inside the week (see the "This week" card). */
+  today: number;
   adds: number;
   dels: number;
+  /** How many sessions actually recorded line counts. Churn is optional on an
+   *  intent row, so `adds`/`dels` are a total over THESE sessions, not over
+   *  `total` — and the card has to say so rather than let a partial sum read
+   *  as the project's whole net change. */
+  churnRows: number;
   signed: number;
   /** Oldest → newest, exactly ACTIVITY_DAYS entries, one per local day. */
   activity: { date: Date; count: number }[];
@@ -105,10 +110,14 @@ function computeAggregates(
 
   const weekCutoff = nowMs - 7 * DAY_MS;
 
+  const todayKey = dayKey(startOfToday);
+
   let adds = 0;
   let dels = 0;
+  let churnRows = 0;
   let signed = 0;
   let thisWeek = 0;
+  let today = 0;
 
   for (const d of display) {
     const row = d.row;
@@ -116,11 +125,17 @@ function computeAggregates(
     if (ms >= weekCutoff) thisWeek += 1;
 
     // Churn is pre-summed across the collapsed run, so totalling over display
-    // rows still accounts for every edit's +/−.
+    // rows still accounts for every edit's +/−. `hasChurn` is tracked
+    // alongside because line counts are OPTIONAL on an intent row: a session
+    // that recorded none contributes 0 here and is indistinguishable, in the
+    // total alone, from one that genuinely changed nothing.
     adds += d.adds;
     dels += d.dels;
+    if (d.hasChurn) churnRows += 1;
 
     if (row.signed_block_id) signed += 1;
+
+    if (dayKey(new Date(ms)) === todayKey) today += 1;
 
     const key = dayKey(new Date(ms));
     if (buckets.has(key)) buckets.set(key, (buckets.get(key) ?? 0) + 1);
@@ -144,54 +159,15 @@ function computeAggregates(
   return {
     total: display.length,
     thisWeek,
+    today,
     adds,
     dels,
+    churnRows,
     signed,
     activity,
     activeDays,
     streak,
   };
-}
-
-function RefreshIcon() {
-  return (
-    <svg
-      width="13"
-      height="13"
-      viewBox="0 0 24 24"
-      fill="none"
-      stroke="currentColor"
-      strokeWidth="2"
-      strokeLinecap="round"
-      strokeLinejoin="round"
-      aria-hidden="true"
-    >
-      <path d="M23 4v6h-6" />
-      <path d="M1 20v-6h6" />
-      <path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10" />
-      <path d="M1 14l4.64 4.36A9 9 0 0 0 20.49 15" />
-    </svg>
-  );
-}
-
-function WrappedIcon() {
-  // A small sparkle — the "year in review" affordance.
-  return (
-    <svg
-      width="12"
-      height="12"
-      viewBox="0 0 24 24"
-      fill="none"
-      stroke="currentColor"
-      strokeWidth="2"
-      strokeLinecap="round"
-      strokeLinejoin="round"
-      aria-hidden="true"
-    >
-      <path d="M12 3l1.9 4.8L18.7 9l-4.8 1.9L12 15.7 10.1 11 5.3 9l4.8-1.9z" />
-      <path d="M19 14l.7 1.8L21.5 16.5 19.7 17.2 19 19l-.7-1.8L16.5 16.5l1.8-.7z" />
-    </svg>
-  );
 }
 
 function LockIcon() {
@@ -232,9 +208,15 @@ function ArrowRightIcon() {
   );
 }
 
-/** One stat card — a big number over a dim uppercase label, with an optional
- *  supporting sub-line (a second honest figure that gives the headline
- *  context, mirroring the reference dashboard's richer cards). */
+/** One figure in the headline row — a big number over a dim label,
+ *  with an optional supporting sub-line (a second honest figure that gives the
+ *  headline context).
+ *
+ *  No box. Four numbers used to sit in four separately-bordered, separately-
+ *  filled rounded cards, which drew four containers around content that has
+ *  nothing inside it to contain — a border is for holding things apart, and
+ *  these are one row of one kind of thing. A hairline between neighbours says
+ *  "these are four readings" at a fraction of the ink. */
 function StatCard({
   label,
   sub,
@@ -245,15 +227,15 @@ function StatCard({
   children: React.ReactNode;
 }) {
   return (
-    <div className="rounded-lg border border-line-soft bg-bg-1 p-3">
-      <div className="text-[22px] font-semibold leading-none text-text-1">
+    <div className="px-3 py-0.5 sm:[&:not(:first-child)]:border-l sm:[&:not(:first-child)]:border-line-soft">
+      <div className="text-xl font-semibold leading-none text-text-1">
         {children}
       </div>
-      <div className="mt-2 text-[11px] uppercase tracking-wide text-text-4">
+      <div className="section-label mt-2">
         {label}
       </div>
       {sub ? (
-        <div className="mt-1 text-[11px] leading-none text-text-3">{sub}</div>
+        <div className="mt-1 text-xs leading-none text-text-3">{sub}</div>
       ) : null}
     </div>
   );
@@ -266,34 +248,58 @@ function CostSummaryLine({
   monthLabel,
   tokens,
   costUsd,
+  runsThisMonth,
   scopeNote,
   onOpen,
 }: {
   monthLabel: string;
   tokens: number;
   costUsd: number;
+  /** Runs Aura recorded in this same month — the check on a zero total. */
+  runsThisMonth: number;
   scopeNote: string;
   onOpen: () => void;
 }) {
+  // A zero here is two very different facts, and the row used to print the
+  // same "0 tokens · $0" for both. On this project it read $0 for July
+  // directly beneath a chart of 178 July runs — the page contradicting itself
+  // in the space of one scroll. Runs cost tokens; a zero next to runs means
+  // nobody wrote the usage down, not that the month was free.
+  //
+  // The card two rows up already handles its own version of this correctly
+  // ("— / no line counts recorded"), so match it: assert a measurement only
+  // when there is one.
+  const measured = tokens > 0 || costUsd > 0;
   return (
     <button
       type="button"
       onClick={onOpen}
       title="Open Cost & usage"
-      className="flex w-full items-center justify-between gap-3 rounded-lg border border-line-soft bg-bg-1 px-3 py-2.5 text-left hover:bg-bg-2"
+      // A row you can click, not a card. It holds one line of text and opens
+      // one destination — transparent at rest, filled on hover, which is how
+      // every other clickable row in the app reads.
+      className="-mx-3 flex w-full items-center justify-between gap-3 rounded px-3 py-2.5 text-left hover:bg-state-hover"
     >
       <span className="flex min-w-0 items-baseline gap-1.5">
-        <span className="text-[11px] uppercase tracking-wide text-text-4">
+        <span className="section-label">
           {monthLabel}
         </span>
-        <span className="truncate text-[12.5px] text-text-2">
-          <span className="font-mono text-text-1">{fmtTokens(tokens)}</span>{" "}
-          tokens
-          <span className="text-text-4"> · </span>
-          <span className="font-mono text-text-1">{fmtCost(costUsd)}</span>
-        </span>
+        {measured ? (
+          <span className="truncate text-base text-text-2">
+            <span className="font-mono text-text-1">{compactNumber(tokens)}</span>{" "}
+            tokens
+            <span className="text-text-4"> · </span>
+            <span className="font-mono text-text-1">{formatCost(costUsd)}</span>
+          </span>
+        ) : (
+          <span className="truncate text-base text-text-4">
+            {runsThisMonth > 0
+              ? `usage wasn't recorded for this month's ${runsThisMonth} run${runsThisMonth === 1 ? "" : "s"}`
+              : "no runs yet this month"}
+          </span>
+        )}
       </span>
-      <span className="flex shrink-0 items-center gap-1.5 text-[11px] text-text-4">
+      <span className="flex shrink-0 items-center gap-1.5 text-xs text-text-4">
         {scopeNote}
         <ArrowRightIcon />
       </span>
@@ -329,6 +335,9 @@ export function OverviewPane({
   const [billing, setBilling] = useState<BillingUsageByMember | null>(null);
   const [monthUsage, setMonthUsage] = useState<UsageReport | null>(null);
   const aliveRef = useRef(true);
+  // When we last ASKED for data, not when it landed — a slow read must not
+  // leave the window open for a second one to start behind it.
+  const askedAtRef = useRef(0);
 
   const load = useCallback(async () => {
     if (!repoRoot) {
@@ -340,14 +349,27 @@ export function OverviewPane({
       setLoading(false);
       return;
     }
+    askedAtRef.current = Date.now();
     setLoading(true);
     setError(null);
     try {
       // Claude sessions are best-effort enrichment for the collapse — their
       // absence just means no folding, never a failed load.
       const [data, sessions] = await Promise.all([
-        api.auraIntentRecent(repoRoot, 200),
-        api.claudeListSessions(repoRoot).catch(() => [] as ClaudeSession[]),
+        // This ceiling used to be 200, which quietly turned every headline on
+        // this pane into "the last 200 log lines" rather than the project's
+        // totals — the "sessions" and "active days" cards could never grow past
+        // it, and "Year in review", one click away on this same header, reads
+        // 5000 and so reported a different history for the same project. Same
+        // number as Wrapped, and both go through the shared read so opening one
+        // from the other costs nothing.
+        //
+        // It is not "one local JSONL read", as this comment used to claim: the
+        // backend unions the log across every branch tip with a `git show` per
+        // ref and then pulls teammates' intents over the network. That is why
+        // it goes through intentCache rather than straight at the api.
+        fetchIntentRows(repoRoot, 5000),
+        fetchSessions(repoRoot).catch(() => [] as ClaudeSession[]),
       ]);
       if (!aliveRef.current) return;
       setRows(Array.isArray(data) ? data : []);
@@ -367,7 +389,7 @@ export function OverviewPane({
     // section. We never surface these as the pane-level error.
     void (async () => {
       try {
-        const team = await api.teamLoad(repoRoot);
+        const team = await fetchTeam(repoRoot);
         if (aliveRef.current) setRoster(team?.members ?? []);
       } catch {
         if (aliveRef.current) setRoster([]);
@@ -376,7 +398,7 @@ export function OverviewPane({
 
     void (async () => {
       try {
-        const usage = await api.cloudBillingUsageByMember();
+        const usage = await fetchBillingUsage();
         if (aliveRef.current) setBilling(usage ?? null);
       } catch {
         // Not signed in / no org plan / network — fall back to solo + hint.
@@ -406,11 +428,33 @@ export function OverviewPane({
     };
   }, [load]);
 
+  // Staying current without asking.
+  //
+  // This pane used to carry a refresh button, and it was the only thing that
+  // re-read the log after mount: leave Overview open, let an agent work for an
+  // hour, come back, and every figure was still the one from when the tab
+  // opened — stale numbers that look exactly like fresh ones. The button is
+  // gone, so the reload has to happen by itself, and returning to the window is
+  // the moment you expect to be looking at now. Throttled, because flicking
+  // between windows would otherwise turn one glance into a run of fetches.
+  useEffect(() => {
+    function refreshOnReturn() {
+      if (document.visibilityState === "hidden") return;
+      if (Date.now() - askedAtRef.current < REFRESH_MIN_GAP_MS) return;
+      void load();
+    }
+    window.addEventListener("focus", refreshOnReturn);
+    document.addEventListener("visibilitychange", refreshOnReturn);
+    return () => {
+      window.removeEventListener("focus", refreshOnReturn);
+      document.removeEventListener("visibilitychange", refreshOnReturn);
+    };
+  }, [load]);
+
   const agg = useMemo(
     () => computeAggregates(rows, claudeSessions, nowMs),
     [rows, claudeSessions, nowMs],
   );
-  const shortName = useMemo(() => repoShortName(repoRoot), [repoRoot]);
 
   // Newest row's age for the recent-activity line.
   const newestRel = useMemo(() => {
@@ -432,13 +476,25 @@ export function OverviewPane({
   // The month figure prefers the cloud org total (authoritative, whole team)
   // and falls back to the LOCAL month usage report. Either way the numbers are
   // real and the scope note says exactly whose they are.
-  const monthLabel = useMemo(() => {
-    const key =
+  const monthKey = useMemo(
+    () =>
       billing?.month && billing.month.trim()
         ? billing.month
-        : currentMonthKey(new Date(nowMs));
-    return prettyMonth(key);
-  }, [billing, nowMs]);
+        : currentMonthKey(new Date(nowMs)),
+    [billing, nowMs],
+  );
+  const monthLabel = useMemo(() => prettyMonth(monthKey), [monthKey]);
+
+  // How many runs Aura recorded in the month the figure above is about. A zero
+  // spend means nothing on its own; a zero spend across 178 recorded runs means
+  // the usage numbers are missing, and the row has to say which it is.
+  const runsThisMonth = useMemo(
+    () =>
+      rows.filter(
+        (r) => currentMonthKey(new Date(r.timestamp * 1000)) === monthKey,
+      ).length,
+    [rows, monthKey],
+  );
 
   const heroMonth = useMemo(() => {
     if (cloudAvailable) {
@@ -466,48 +522,31 @@ export function OverviewPane({
     return null;
   }, [cloudAvailable, billing, monthUsage]);
 
+  // Machines don't make a project collaborative. Aura's own agent and the
+  // checkpointer commit under git identities of their own, so a solo repo where
+  // Aura has worked came back with a roster of three and got told it had a live
+  // team — a "who's on this project" summary about one person and two bots.
+  const peopleCount = useMemo(
+    () => roster.filter((m) => !isAutomationIdentity(m.name, m.email)).length,
+    [roster],
+  );
   // Team / shared signal: a roster beyond me, a cloud org, or any month spend.
   const hasTeamSection =
-    roster.length > 0 || cloudAvailable || heroMonth != null;
+    peopleCount > 0 || cloudAvailable || heroMonth != null;
   // A "team" worth a live summary = more than just me, or a cloud org.
-  const hasLiveTeam = roster.length > 1 || cloudAvailable;
+  const hasLiveTeam = peopleCount > 1 || cloudAvailable;
 
   return (
     <div className="flex h-full min-h-0 flex-col bg-bg-content">
-      {/* ── Header ─────────────────────────────────────────────────── */}
-      <div className="flex shrink-0 items-center justify-between border-b border-line-soft px-4 py-3">
-        <div className="flex flex-col gap-0.5">
-          <span className="text-[15px] font-medium leading-none text-text-1">
-            Overview
-          </span>
-          {shortName ? (
-            <span className="text-[12px] text-text-4">{shortName}</span>
-          ) : null}
-        </div>
-        <div className="flex items-center gap-1.5">
-          <button
-            type="button"
-            onClick={onOpenWrapped}
-            className="flex h-6 items-center gap-1.5 rounded border border-accent/30 bg-accent/10 px-2 text-[11px] text-accent hover:bg-accent/20"
-            title="Your year with Aura — a calm look back at everything you've built"
-          >
-            <WrappedIcon />
-            Year in review
-          </button>
-          <Button
-            type="button"
-            variant="ghost"
-            size="icon-sm"
-            onClick={() => void load()}
-            disabled={loading}
-            className="text-text-3 hover:text-text-1"
-            title="Refresh overview"
-            aria-label="Refresh overview"
-          >
-            <RefreshIcon />
-          </Button>
-        </div>
-      </div>
+      {/* No header. What sat here was a strip of chrome carrying two controls
+          and nothing else: a "Year in review" chip and a refresh icon, above a
+          surface that is already a wall of live figures. Both were doing work
+          that didn't need a bar. Refreshing is not a decision anyone makes —
+          it happens on its own now, whenever you come back to the window (see
+          the focus effect above). And "Year in review" is somewhere to go, not
+          an action on this pane, so it belongs beside "View all sessions" at
+          the foot of the content where the other exits live. Removing the strip
+          gives the numbers back the top of the pane. */}
 
       {/* ── Body ───────────────────────────────────────────────────── */}
       <div className="min-h-0 flex-1 overflow-y-auto">
@@ -524,33 +563,34 @@ export function OverviewPane({
           />
         )}
         {error ? (
-          <div className="px-4 py-4 text-[12px] text-text-3">
-            Couldn&rsquo;t load overview.
-            <span className="mt-1 block font-mono text-[11px] text-text-4">
-              {error}
-            </span>
-          </div>
+          <ErrorState
+            title="Couldn’t load this project’s history"
+            message={error}
+            onRetry={() => void load()}
+            size="sm"
+          />
         ) : loading && rows.length === 0 ? (
-          <div className="px-4 py-4 text-[12px] text-text-4">Loading…</div>
+          <LoadingState label="Reading this project’s history…" />
         ) : agg.total === 0 ? (
           // No local intent activity yet. If there's still a team and/or
           // shared usage to show, render those below a calm inline notice
           // instead of swallowing the whole pane into an empty state.
           hasTeamSection ? (
             <div className="mx-auto flex max-w-[760px] flex-col gap-5 px-4 py-5">
-              <div className="rounded-lg border border-line-soft bg-bg-0 shadow-[var(--shadow-card)] p-4 text-center">
-                <span className="text-[13px] text-text-2">
-                  No local activity yet.
-                </span>
-                <span className="mt-1 block text-[12px] leading-relaxed text-text-4">
-                  As you and your agents work, Aura traces every run here.
-                </span>
-              </div>
+              {/* Your own machine has nothing yet, but your team does — so this
+                  is a note above their work, not a takeover of the pane. */}
+              <EmptyState
+                icon={Activity}
+                title="Nothing from you yet"
+                body="Your teammates’ work is below. Yours appears here the moment you or one of your agents changes something."
+                size="sm"
+              />
               {heroMonth ? (
                 <CostSummaryLine
                   monthLabel={monthLabel}
                   tokens={heroMonth.tokensIn + heroMonth.tokensOut}
                   costUsd={heroMonth.costUsd}
+                  runsThisMonth={runsThisMonth}
                   scopeNote={heroMonth.scopeNote}
                   onOpen={onOpenCostUsage}
                 />
@@ -558,27 +598,39 @@ export function OverviewPane({
               <SprintProgress repoRoot={repoRoot} />
             </div>
           ) : (
-            <div className="flex h-full flex-col items-center justify-center px-8 text-center">
-              <span className="text-[13px] text-text-2">No activity yet.</span>
-              <span className="mt-1.5 max-w-[22rem] text-[12px] leading-relaxed text-text-4">
-                As you and your agents work, Aura traces every run here.
-              </span>
+            <div className="flex h-full items-center justify-center">
+              <EmptyState
+                icon={Activity}
+                title="Nothing has happened here yet"
+                body="This is the record of the work on this project, who changed what, when, and why they said they did. It fills itself in as you and your agents go."
+              />
             </div>
           )
         ) : (
           <div className="mx-auto flex max-w-[760px] flex-col gap-5 px-4 py-5">
-            {/* Stat cards */}
-            <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
+            {/* The headline figures — one row, hairlines between, no boxes.
+                `-mx-3` pulls the first figure's own padding back to the
+                column edge so the numbers line up with everything below. */}
+            <div className="-mx-3 grid grid-cols-2 gap-y-4 sm:grid-cols-4 sm:gap-y-0">
+              {/* The count above is every run on record; the line below counts
+                  only the last fortnight. Unlabelled, the two read as one
+                  scope, and "12 active days" looked like the project's whole
+                  history — while "Year in review", one click up in this same
+                  header, said 30. Name the window and both are true. */}
               <StatCard
                 label="Sessions"
-                sub={`${agg.activeDays} active ${
-                  agg.activeDays === 1 ? "day" : "days"
-                }`}
+                sub={`active ${agg.activeDays} of the last ${ACTIVITY_DAYS} days`}
               >
                 {agg.total}
               </StatCard>
+              {/* Recency. "This week" only says something when there IS work
+                  older than a week to contrast it against — on a young project
+                  every session is this week's, and the card printed the exact
+                  number sitting beside it, twice, teaching nothing. So it
+                  narrows to today when the whole history already fits in the
+                  week. Both readings are true; only one is informative. */}
               <StatCard
-                label="This week"
+                label={agg.thisWeek < agg.total ? "This week" : "Today"}
                 sub={
                   agg.streak > 0
                     ? `${agg.streak}-day streak`
@@ -587,23 +639,41 @@ export function OverviewPane({
                       : undefined
                 }
               >
-                {agg.thisWeek}
+                {agg.thisWeek < agg.total ? agg.thisWeek : agg.today}
               </StatCard>
-              <StatCard
-                label="Net change"
-                sub={
+              {/* Net change, with the honest denominator. Line counts are
+                  optional on an intent row, so this is the total over the
+                  sessions that recorded them — never over all of them. Saying
+                  "+84 / −10" flat, next to a card that carefully reads "178 of
+                  178", invites it to be read as the project's whole net change
+                  when it may be a handful of sessions' worth. When nothing
+                  recorded any, the card says that instead of printing a
+                  "+0 / −0" that asserts nothing changed. */}
+              {agg.churnRows === 0 ? (
+                <StatCard label="Net change" sub="no line counts recorded">
+                  <span className="text-text-4">·</span>
+                </StatCard>
+              ) : (
+                <StatCard
+                  label="Net change"
+                  sub={
+                    agg.churnRows < agg.total ? (
+                      `from ${agg.churnRows} of ${agg.total} sessions`
+                    ) : (
+                      <span className="font-mono">
+                        {agg.adds - agg.dels >= 0 ? "+" : "−"}
+                        {Math.abs(agg.adds - agg.dels)} net
+                      </span>
+                    )
+                  }
+                >
                   <span className="font-mono">
-                    {agg.adds - agg.dels >= 0 ? "+" : "−"}
-                    {Math.abs(agg.adds - agg.dels)} net
+                    <span className="text-accent-green">+{agg.adds}</span>
+                    <span className="text-text-4"> / </span>
+                    <span className="text-text-3">−{agg.dels}</span>
                   </span>
-                }
-              >
-                <span className="font-mono">
-                  <span className="text-accent-green">+{agg.adds}</span>
-                  <span className="text-text-4"> / </span>
-                  <span className="text-text-3">−{agg.dels}</span>
-                </span>
-              </StatCard>
+                </StatCard>
+              )}
               <StatCard label="Genuine records" sub="sealed &amp; tamper-proof">
                 <span className="flex items-center gap-1.5">
                   <span className="text-text-3">
@@ -611,7 +681,7 @@ export function OverviewPane({
                   </span>
                   <span>
                     {agg.signed}{" "}
-                    <span className="text-[14px] font-normal text-text-4">
+                    <span className="text-md font-normal text-text-4">
                       of {agg.total}
                     </span>
                   </span>
@@ -633,20 +703,37 @@ export function OverviewPane({
                 monthLabel={monthLabel}
                 tokens={heroMonth.tokensIn + heroMonth.tokensOut}
                 costUsd={heroMonth.costUsd}
+                runsThisMonth={runsThisMonth}
                 scopeNote={heroMonth.scopeNote}
                 onOpen={onOpenCostUsage}
               />
             ) : null}
 
-            {/* View all sessions affordance */}
-            <button
-              type="button"
-              onClick={onOpenSessions}
-              className="flex items-center gap-1 self-start rounded px-1 py-1 text-[12px] text-text-3 hover:text-text-1"
-            >
-              <span>View all sessions</span>
-              <ArrowRightIcon />
-            </button>
+            {/* Where to go next. Both of these are the same kind of thing — the
+                rest of the record, and the long look back at it — so they read
+                as one row of exits at the foot of the summary rather than one
+                here and one pinned to a strip at the top of the pane. "Year in
+                review" is only offered where there is a history to look back
+                over; on an empty log it opened a year with nothing in it. */}
+            <div className="flex items-center gap-4">
+              <button
+                type="button"
+                onClick={onOpenSessions}
+                className="flex items-center gap-1 rounded px-1 py-1 text-sm text-text-3 hover:text-text-1"
+              >
+                <span>View all sessions</span>
+                <ArrowRightIcon />
+              </button>
+              <button
+                type="button"
+                onClick={onOpenWrapped}
+                className="flex items-center gap-1 rounded px-1 py-1 text-sm text-text-3 hover:text-text-1"
+                title="Your year with Aura. A calm look back at everything you've built"
+              >
+                <span>Year in review</span>
+                <ArrowRightIcon />
+              </button>
+            </div>
 
             {/* Sprint completion + velocity — BEAD-I tie-in. Self-hides
                 when the repo has no sprints. */}

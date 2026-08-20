@@ -23,6 +23,7 @@ import {
 import { Button } from "../ui/button";
 import { Input } from "../ui/input";
 import { Select } from "../ui/select";
+import { compactNumber } from "../../lib/compactNumber";
 
 type Props = {
   open: boolean;
@@ -194,7 +195,7 @@ export function ManagerLauncher({
         throw new Error("No waves parsed from the plan output.");
       }
       const drafts: DraftTask[] = waves.map((w, idx) => ({
-        description: w.action + (w.verify ? `\n— Verify: ${w.verify}` : ""),
+        description: w.action + (w.verify ? `\n. Verify: ${w.verify}` : ""),
         agent_id: "", // Smart pick — registry routes per task
         depends_on: idx === 0 ? "" : String(idx),
         project_root: defaultProjectRoot,
@@ -313,8 +314,8 @@ export function ManagerLauncher({
               type="button"
               onClick={discover}
               disabled={!objective.trim() || discovering || busy}
-              title="Run `aura plan` to decompose this objective into wave/task DAG"
-              className="text-[11px] px-2 h-6 rounded inline-flex items-center gap-1.5 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+              title="Have Aura break this down into steps, and work out which ones can run at the same time"
+              className="text-xs px-2 h-6 rounded inline-flex items-center gap-1.5 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
               style={{
                 background: "color-mix(in srgb, var(--color-accent) 14%, transparent)",
                 color: "var(--color-accent)",
@@ -336,12 +337,12 @@ export function ManagerLauncher({
             rows={2}
             value={objective}
             onChange={(e) => setObjective(e.target.value)}
-            placeholder="What should this Manager session accomplish? Discover hands the objective to Aura's orchestrator — it'll decompose into atomic waves, suggest agents, and chain them with dependencies."
+            placeholder="What should this Manager session accomplish? Discover hands the objective to Aura's orchestrator. It'll decompose into atomic waves, suggest agents, and chain them with dependencies."
           />
         </div>
         {planSummary && (
           <div
-            className="flex items-center gap-2 px-2.5 py-1.5 text-[11px] rounded"
+            className="flex items-center gap-2 px-2.5 py-1.5 text-xs rounded"
             style={{
               background: "color-mix(in srgb, var(--color-accent-green) 9%, transparent)",
               color: "var(--color-accent-green)",
@@ -358,7 +359,7 @@ export function ManagerLauncher({
               Aura decomposed into <b>{planSummary.waveCount} waves</b>.
             </span>
             <span className="ml-auto text-text-3 tabular-nums">
-              ≈ {planSummary.estTokensSaved.toLocaleString()} tokens saved per
+              ≈ {compactNumber(planSummary.estTokensSaved)} tokens saved per
               full re-prompt
             </span>
           </div>

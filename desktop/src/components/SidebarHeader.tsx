@@ -1,21 +1,24 @@
 // Sidebar header — the top zone of the full-height ADE sidebar. One compact
 // icon row that owns the window chrome: a macOS traffic-light drag strip (the
-// lights sit over this corner now that the sidebar runs to y=0), then the
-// account + search cluster hugging the left right beside the traffic lights,
-// with the workspace back/forward arrows + settings + the sidebar collapse
-// toggle hugging the right against the sidebar/work divider. The whole middle
-// is left as empty window-drag region.
+// lights sit over this corner now that the sidebar runs to y=0), then search
+// hugging the left right beside the traffic lights, with the workspace
+// back/forward arrows + settings + the sidebar collapse toggle hugging the
+// right against the sidebar/work divider. The whole middle is left as empty
+// window-drag region.
 //
-// The account avatar was re-homed here from the section list below so the top
-// of the sidebar reads as a single quiet chrome strip. The workspace
-// back/forward arrows are the app-wide project visit-history control (grouped
-// with settings at the right end, beside the gear) — distinct from the
-// Pages-scoped arrows inside the Pages surface. The Agents & extensions entry
-// stays in Settings + the command palette; the account popover carries
-// "Account settings".
+// The account lives at the foot of the rail, not here. It briefly had both: an
+// avatar in this strip that knew your name, and a chip at the bottom that knew
+// your plan — two controls for one account, each telling half the story. The
+// foot chip states both and opens the account menu.
+//
+// The workspace back/forward arrows are the app-wide project visit-history
+// control (grouped with settings at the right end, beside the gear) — distinct
+// from the Pages-scoped arrows inside the Pages surface. The Agents &
+// extensions entry stays in Settings + the command palette; the account
+// popover carries "Account settings".
 
-import { type ReactNode } from "react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
+import { beginWindowDrag } from "../lib/windowDrag";
 import { Tooltip, TooltipTrigger, TooltipContent } from "./ui/tooltip";
 import { ChromeBtn } from "./TopBar";
 import { windowControlsInset } from "./topbar/windowControls";
@@ -28,11 +31,11 @@ import { windowControlsInset } from "./topbar/windowControls";
 const ICON_BTN = "text-text-3 disabled:opacity-30 disabled:pointer-events-none";
 
 type SidebarHeaderProps = {
-  /** True while the window is in macOS fullscreen, where it can neither be
-   *  dragged nor zoomed — the strip drops its drag behaviour so a stray click
-   *  in the empty middle does nothing instead of firing a no-op native call.
-   *  The window-buttons gutter does NOT key off this: see
-   *  `topbar/windowControls`. */
+  /** True while the window is in macOS fullscreen. Two things key off it: the
+   *  strip drops its drag behaviour (a fullscreen window can neither be
+   *  dragged nor zoomed, so a live handler only fires no-op native calls), and
+   *  it closes the window-buttons gutter, because macOS moves the lights into
+   *  the auto-hiding titlebar there and the corner is ours again. */
   fullscreen: boolean;
   /** Workspace visit-history back/forward — the top-level nav control (walks
    *  the projects you've opened), restored to the leftmost of the strip. This
@@ -45,11 +48,8 @@ type SidebarHeaderProps = {
   onToggleSidebar?: () => void;
   onOpenPalette?: () => void;
   /** Opens Settings (where Agents & extensions now live). Rendered as a small
-   *  gear beside the account avatar. */
+   *  gear in the right cluster. */
   onOpenSettings?: () => void;
-  /** Compact account control (the avatar popover) shown at the left of the
-   *  strip, where the workspace nav + extensions entry used to sit. */
-  account?: ReactNode;
   projectLabel: string;
 };
 
@@ -64,7 +64,7 @@ function handleDrag(e: React.MouseEvent) {
     getCurrentWindow().toggleMaximize().catch(() => {});
     return;
   }
-  getCurrentWindow().startDragging().catch(() => {});
+  beginWindowDrag();
 }
 
 export function SidebarHeader({
@@ -76,7 +76,6 @@ export function SidebarHeader({
   onToggleSidebar,
   onOpenPalette,
   onOpenSettings,
-  account,
   projectLabel,
 }: SidebarHeaderProps) {
   return (
@@ -90,15 +89,15 @@ export function SidebarHeader({
       className="flex items-center justify-between gap-3 pr-1.5 flex-shrink-0 select-none"
       style={{
         height: "var(--topbar-h)",
-        paddingLeft: windowControlsInset(true),
+        paddingLeft: windowControlsInset(true, fullscreen),
       }}
     >
-      {/* Left end: the compact profile chip then search, hugging the traffic
-          lights (⌘K). The workspace back/forward arrows moved to the right
-          cluster beside the gear, so profile + search sit tight to the
-          traffic lights with no leading nav in between. */}
+      {/* Left end: search, hugging the traffic lights (⌘K). A profile chip used
+          to sit ahead of it, which made two account controls in one window —
+          this one and the plan chip at the foot of the rail — neither of which
+          told the whole story. The foot chip absorbed it: it names the account,
+          states the plan, and opens the same menu. */}
       <div className="flex items-center gap-0.5 flex-shrink-0">
-        {account}
         <Tooltip>
           <TooltipTrigger asChild>
             <ChromeBtn
@@ -122,27 +121,32 @@ export function SidebarHeader({
           persistent animated label in the window chrome was redundant noise. */}
       {/* Right end (against the sidebar/work divider): workspace back/forward
           (the top-level project visit history) grouped beside settings +
-          collapse. */}
+          collapse.
+
+          These say "Previous project" / "Next project", not "Back" / "Forward".
+          They reload the whole workspace, and the Pages rail has its own
+          back/forward roughly 110px below them that steps one page. Two pairs
+          of arrows in one column both labelled "Back" is a coin toss. */}
       <div className="flex items-center gap-0.5 flex-shrink-0">
         <Tooltip>
           <TooltipTrigger asChild>
-            <ChromeBtn title="Back" tooltip className={ICON_BTN} disabled={!canBack} onClick={onBack}>
+            <ChromeBtn title="Previous project" tooltip className={ICON_BTN} disabled={!canBack} onClick={onBack}>
               <svg width="13" height="13" viewBox="0 0 16 16" fill="none">
                 <path d="M10 3.5L5.5 8l4.5 4.5" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
               </svg>
             </ChromeBtn>
           </TooltipTrigger>
-          <TooltipContent side="bottom">Back</TooltipContent>
+          <TooltipContent side="bottom">Previous project</TooltipContent>
         </Tooltip>
         <Tooltip>
           <TooltipTrigger asChild>
-            <ChromeBtn title="Forward" tooltip className={ICON_BTN} disabled={!canForward} onClick={onForward}>
+            <ChromeBtn title="Next project" tooltip className={ICON_BTN} disabled={!canForward} onClick={onForward}>
               <svg width="13" height="13" viewBox="0 0 16 16" fill="none">
                 <path d="M6 3.5L10.5 8L6 12.5" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
               </svg>
             </ChromeBtn>
           </TooltipTrigger>
-          <TooltipContent side="bottom">Forward</TooltipContent>
+          <TooltipContent side="bottom">Next project</TooltipContent>
         </Tooltip>
         {onOpenSettings && (
           <Tooltip>

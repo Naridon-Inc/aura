@@ -7,6 +7,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { Hash, FileText, AtSign, Clock, X } from "lucide-react";
 import { cn } from "../../lib/utils";
+import { shortDate } from "../../lib/calendarDate";
 import { Avatar } from "../team/presentation/Avatar";
 import { extractHandles } from "../../lib/mentions";
 import {
@@ -16,6 +17,7 @@ import {
   type NoteSummary,
 } from "./pagesApi";
 import type { MentionSources } from "./mentionSources";
+import { sentenceCase } from "../../lib/textCase";
 
 type Heading = { id: string; level: number; text: string };
 
@@ -89,11 +91,7 @@ function fmtDate(iso?: string | null): string {
   if (!iso) return "—";
   const t = Date.parse(iso);
   if (Number.isNaN(t)) return iso;
-  return new Date(t).toLocaleDateString(undefined, {
-    month: "short",
-    day: "numeric",
-    year: "numeric",
-  });
+  return shortDate(t);
 }
 
 export function PageContextRail({
@@ -161,7 +159,7 @@ export function PageContextRail({
       <div className="p-2.5 flex flex-col gap-3">
         {onClose && (
           <div className="flex items-center justify-between -mb-1">
-            <span className="text-[10px] uppercase tracking-wide font-medium text-text-4">
+            <span className="section-label">
               Outline
             </span>
             <button
@@ -169,7 +167,7 @@ export function PageContextRail({
               aria-label="Hide outline"
               title="Hide outline"
               onClick={onClose}
-              className="flex items-center justify-center w-5 h-5 rounded text-text-4 hover:bg-bg-2 hover:text-text-1 transition-colors"
+              className="flex items-center justify-center w-5 h-5 rounded text-text-4 hover:bg-state-hover hover:text-text-1 transition-colors"
             >
               <X className="w-3 h-3" strokeWidth={1.5} />
             </button>
@@ -185,7 +183,7 @@ export function PageContextRail({
                   key={`${h.id}-${i}`}
                   type="button"
                   onClick={() => onJumpToHeading(h.id)}
-                  className="text-left truncate rounded px-1 py-[2px] text-[11px] leading-4 text-text-3 hover:bg-bg-2 hover:text-text-1"
+                  className="text-left truncate rounded px-1 py-[2px] text-xs leading-4 text-text-3 hover:bg-state-hover hover:text-text-1"
                   style={{ paddingLeft: (h.level - 1) * 10 }}
                   title={h.text}
                 >
@@ -206,7 +204,7 @@ export function PageContextRail({
                   key={pageKey(b)}
                   type="button"
                   onClick={() => onOpenSummary(b)}
-                  className="flex items-center gap-1.5 text-left truncate py-0.5 text-[11.5px] text-text-3 hover:text-text-1"
+                  className="flex items-center gap-1.5 text-left truncate py-0.5 text-sm text-text-3 hover:text-text-1"
                 >
                   <FileText
                     className="w-3 h-3 flex-shrink-0 text-text-5"
@@ -235,7 +233,7 @@ export function PageContextRail({
                       new CustomEvent("aura:open-dm", { detail: { handle: h } }),
                     )
                   }
-                  className="flex items-center gap-1.5 text-left py-0.5 text-[11.5px] text-text-3 hover:text-text-1"
+                  className="flex items-center gap-1.5 text-left py-0.5 text-sm text-text-3 hover:text-text-1"
                 >
                   <Avatar name={h} size={16} />
                   <span className="truncate">@{h}</span>
@@ -252,9 +250,9 @@ export function PageContextRail({
                       }),
                     )
                   }
-                  className="flex items-center gap-1.5 text-left py-0.5 text-[11.5px] text-text-3 hover:text-text-1"
+                  className="flex items-center gap-1.5 text-left py-0.5 text-sm text-text-3 hover:text-text-1"
                 >
-                  <span className="aura-ident text-accent text-[11px] flex-shrink-0">
+                  <span className="aura-ident text-accent text-xs flex-shrink-0">
                     {t.label}
                   </span>
                   {t.sublabel && (
@@ -267,7 +265,7 @@ export function PageContextRail({
                   key={`g-${title}`}
                   type="button"
                   onClick={() => onOpenByTitle(title)}
-                  className="flex items-center gap-1.5 text-left py-0.5 text-[11.5px] text-text-3 hover:text-text-1"
+                  className="flex items-center gap-1.5 text-left py-0.5 text-sm text-text-3 hover:text-text-1"
                 >
                   <FileText
                     className="w-3 h-3 flex-shrink-0 text-text-5"
@@ -281,14 +279,14 @@ export function PageContextRail({
         </Section>
 
         <Section icon={<Clock className="w-3 h-3" />} label="Info">
-          <dl className="flex flex-col gap-1 text-[11.5px]">
+          <dl className="flex flex-col gap-1 text-sm">
             <InfoRow label="Author" value={fm.author || "—"} />
             <InfoRow label="Created" value={fmtDate(fm.created_at)} />
             <InfoRow label="Updated" value={fmtDate(fm.updated_at)} />
             <InfoRow label="Words" value={String(words)} />
             <InfoRow
               label="Visibility"
-              value={fm.visibility ? capitalize(fm.visibility) : "—"}
+              value={fm.visibility ? sentenceCase(fm.visibility) : "—"}
             />
             {fm.locked ? <InfoRow label="Status" value="Locked" /> : null}
           </dl>
@@ -311,7 +309,7 @@ function Section({
     <section>
       <div className="flex items-center gap-1.5 mb-1 text-text-4">
         {icon}
-        <span className="text-[10px] uppercase tracking-wide font-medium">
+        <span className="section-label">
           {label}
         </span>
       </div>
@@ -321,7 +319,7 @@ function Section({
 }
 
 function Empty({ children }: { children: React.ReactNode }) {
-  return <div className="py-0.5 text-[11px] text-text-5">{children}</div>;
+  return <div className="py-0.5 text-xs text-text-5">{children}</div>;
 }
 
 function InfoRow({ label, value }: { label: string; value: string }) {
@@ -333,6 +331,3 @@ function InfoRow({ label, value }: { label: string; value: string }) {
   );
 }
 
-function capitalize(s: string): string {
-  return s.charAt(0).toUpperCase() + s.slice(1);
-}

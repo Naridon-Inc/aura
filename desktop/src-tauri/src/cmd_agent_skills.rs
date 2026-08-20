@@ -243,29 +243,32 @@ fn collect_flat(
 /// the machine-wide home copies and the project-local ones under `repo_root`.
 #[tauri::command]
 pub async fn agent_skills_list(repo_root: String) -> Vec<AgentSkill> {
-    let home = dirs::home_dir();
-    let repo = if repo_root.trim().is_empty() {
-        None
-    } else {
-        Some(PathBuf::from(&repo_root))
-    };
+    crate::blocking::run(move || {
+        let home = dirs::home_dir();
+        let repo = if repo_root.trim().is_empty() {
+            None
+        } else {
+            Some(PathBuf::from(&repo_root))
+        };
 
-    let mut out: Vec<AgentSkill> = Vec::new();
-    for spec in AGENT_DIRS {
-        if let Some(home) = &home {
-            scan_agent_base(spec, &home.join(spec.dir), "user", &mut out);
+        let mut out: Vec<AgentSkill> = Vec::new();
+        for spec in AGENT_DIRS {
+            if let Some(home) = &home {
+                scan_agent_base(spec, &home.join(spec.dir), "user", &mut out);
+            }
+            if let Some(repo) = &repo {
+                scan_agent_base(spec, &repo.join(spec.dir), "project", &mut out);
+            }
         }
-        if let Some(repo) = &repo {
-            scan_agent_base(spec, &repo.join(spec.dir), "project", &mut out);
-        }
-    }
 
-    // Stable, readable order: by agent, then user-scope first, then name.
-    out.sort_by(|a, b| {
-        a.agent
-            .cmp(&b.agent)
-            .then_with(|| a.scope.cmp(&b.scope))
-            .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
-    });
-    out
+        // Stable, readable order: by agent, then user-scope first, then name.
+        out.sort_by(|a, b| {
+            a.agent
+                .cmp(&b.agent)
+                .then_with(|| a.scope.cmp(&b.scope))
+                .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
+        });
+        out
+    })
+    .await
 }

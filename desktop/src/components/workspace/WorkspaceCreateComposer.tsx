@@ -2,9 +2,28 @@
 // card. One centered panel: pick the project, pick what to start FROM (a
 // branch or an open PR), say what you want to work on, choose a model + effort,
 // and Start agent. Starting provisions a real isolated worktree (a fresh copy
-// of the project) and spawns an agent in it (via `launchWorkspace`), seeding
-// your objective as the agent's opening mission — so "describe it and go" lands
-// one working agent on its own branch, to merge back when you're happy.
+// of the project) and opens Aura chat inside it with your objective as the
+// first message — so "describe it and go" lands one working copy on its own
+// branch, to merge back when you're happy.
+//
+// Local work comes in two shapes, and both are real git. "Separate copy" (the
+// default) puts the new branch in its own folder — a git worktree — which is
+// the ONLY way to have two branches of one repository checked out at the same
+// moment: a folder has exactly one HEAD, so main and feat/abc live at once
+// only by living in two places. Turn it off and the new branch is created
+// right here instead, the plain `git checkout -b` most people mean by
+// "branch": no second copy, no disk, but you leave the branch you were on. The
+// switch is the whole difference; everything after it is identical.
+//
+// It used to spawn a raw Claude Code terminal in the worktree and type the
+// objective into it after the TUI painted. Two things were wrong with that.
+// The message went missing whenever the injection lost the race with the
+// CLI's own startup — the user watched the setup steps run, landed in Claude,
+// and their objective simply wasn't there. And it routed people around Aura
+// into a bare agent terminal, when Aura is the surface that can hand the work
+// out to agents, keep the goal attached to it, and prove it afterwards. So the
+// launch now provisions the worktree only (no agents in the manifest) and App
+// opens Aura chat there — see the `aura:workspace-launched` handler.
 //
 // Self-contained surface: it mounts once and stays dormant until a
 // `window` "aura:new-workspace" CustomEvent opens it (optional
@@ -13,13 +32,24 @@
 // keeps the card up for the next one. No title, by doctrine — the card's own
 // affordances carry the meaning.
 //
-// Models + effort are real but pre-session: there's no agent session yet to
+// WHERE it runs is asked here too, and that is new. It used to be inferred
+// from where you already were: this dialog always made the copy on this laptop,
+// and the only route to a cloud workspace was to walk into the machine and
+// create one from over there. So the place was chosen by navigating rather than
+// by picking, which meant most people never knew it was a choice. The Where
+// chip is the same control the launcher carries — one question, asked the same
+// way wherever new work starts — and picking a machine makes the worktree over
+// there (`cloudbox::script::add_worktree`) with the agent running in tmux on
+// its CPU, its disk, its sign-ins.
+//
+// Models + effort are real but pre-session: there's no chat session yet to
 // persist an override against, so the model chip reads the user's actual
 // brains/catalog (`managerListBrains` + `agentModelsList`) and the composer
-// holds the choice; effort holds a `ReasoningEffort`. Both ride into the
-// launch (`launchWorkspace` → `workspace_launch` → the agent's PTY spawn) as
-// real `--model` / reasoning-effort flags on the agent CLI — the controls are
-// wired to real catalogs and a real spawn, never a fake list.
+// holds the choice; effort holds a `ReasoningEffort`. Both ride out on the
+// launch event and are applied to the Aura chat the moment its session exists
+// — the model becomes that chat's own model chip and its first turn runs on
+// it. The controls are wired to real catalogs and a real turn, never a fake
+// list.
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
@@ -27,7 +57,6 @@ import {
   CornerDownLeft,
   FolderGit2,
   GitBranch,
-  Loader2,
   Sparkles,
 } from "lucide-react";
 
@@ -55,14 +84,20 @@ import {
 import { getModelPrefs } from "../../lib/modelStore";
 import { humanizeGitError } from "../git/branches";
 import { cachedRepoAvatar, resolveRepoAvatar } from "../../lib/repoAvatar";
-import { knownCrewProjectRoots, projectNameFromRoot } from "../commons/crew/crewProjects";
+import { knownProjectRoots, projectNameFromRoot } from "../../lib/projectRoots";
+import { newCloudThreadKey } from "../../lib/cloudJobs";
+import { openRemoteWorkspace } from "../../lib/editorStore";
 import { launchWorkspace } from "../../lib/workspaceCreateStore";
 import { trackFeature } from "../../lib/track";
 import { randomPlaceName } from "../../lib/placeNames";
 import { CreateFromPicker, type CreateFromSelection } from "./CreateFromPicker";
+import { useDismiss } from "../../lib/useDismiss";
+import { WherePicker, useWherePlaces } from "../place/WherePicker";
 
-/** Default agent for a fresh workspace — the native Claude agent the `/launch`
- *  verb uses. Real CLI id, not a placeholder. */
+/** The agent a workspace falls back to when something has to name one: the
+ *  cloud launch path (which runs a CLI, not Aura chat) and the model chip's
+ *  starting brain. Real CLI id, not a placeholder. Local launches no longer
+ *  spawn an agent at all — they open Aura chat, which decides. */
 const DEFAULT_AGENT_ID = "claude";
 
 /** Branch names already in use for this repo — every local branch plus each
@@ -85,10 +120,12 @@ function takenBranchNames(branches: GitBranchInfo[]): Set<string> {
 }
 
 /** Effort levels offered in the compact chip, mapped to the cross-agent
- *  `ReasoningEffort` knob. `null` = let the model choose (Auto). */
+ *  `ReasoningEffort` knob. `null` = leave the model at its own depth. Named
+ *  exactly as the chat composer names them — "Fast" is a separate control
+ *  there, so low effort is Low here too. */
 const EFFORT_OPTIONS: { value: ReasoningEffort | null; label: string }[] = [
-  { value: null, label: "Auto" },
-  { value: "low", label: "Fast" },
+  { value: null, label: "Default" },
+  { value: "low", label: "Low" },
   { value: "medium", label: "Medium" },
   { value: "high", label: "High" },
   { value: "max", label: "Max" },
@@ -134,6 +171,25 @@ export function WorkspaceCreateComposer() {
   // always-on CLOUD runner. Sticky across opens so a cloud-first user doesn't
   // re-toggle every time.
   const [target, setTarget] = useState<Target>("local");
+  // Does the new branch get its own folder? On (default) = a separate copy, so
+  // the branch you're on now stays checked out beside it. Off = created right
+  // here, which is cheaper and simpler but means leaving the current branch.
+  // Sticky, because which of the two you want is a habit, not a per-task call.
+  const [separate, setSeparate] = useState(() => {
+    try {
+      return localStorage.getItem("aura.newwork.separate") !== "0";
+    } catch {
+      return true;
+    }
+  });
+  const chooseSeparate = useCallback((v: boolean) => {
+    setSeparate(v);
+    try {
+      localStorage.setItem("aura.newwork.separate", v ? "1" : "0");
+    } catch {
+      /* quota — the choice just won't stick */
+    }
+  }, []);
   // Cloud readiness, resolved lazily while the Cloud target is selected.
   // `connected` = signed in to Aura cloud (gates the setup path); `runnerOnline`
   // = an always-on machine is draining work now (else the task queues). Drives
@@ -177,7 +233,7 @@ export function WorkspaceCreateComposer() {
     setProjectMenuOpen(false);
     // Enumerate projects (recents-ordered); seed the active root so it's
     // present even on a fresh registry.
-    const roots = await knownCrewProjectRoots(preferRoot).catch(
+    const roots = await knownProjectRoots(preferRoot).catch(
       () => [] as ProjectRoot[],
     );
     setProjects(roots);
@@ -261,11 +317,14 @@ export function WorkspaceCreateComposer() {
     return () => window.removeEventListener("aura:cloud-auth-changed", onAuthChanged);
   }, []);
 
-  // Resolve cloud readiness while the Cloud target is active. Sign-in status
-  // gates the setup path; runner liveness (scoped to the selected project)
-  // tells us whether a task drains now or queues until a machine comes online.
+  // Resolve cloud readiness while the card is open. Sign-in status decides
+  // whether the queue is offered AT ALL — it used to only gate the copy on a
+  // switch that was always there, which is how a project with no cloud ended up
+  // with a Cloud control whose entire content was an apology. Runner liveness
+  // (scoped to the selected project) then tells us whether a task drains now or
+  // queues until a machine comes online.
   useEffect(() => {
-    if (!open || target !== "cloud") return;
+    if (!open) return;
     let cancelled = false;
     setCloud((c) => ({ ...c, checking: true }));
     void (async () => {
@@ -280,11 +339,23 @@ export function WorkspaceCreateComposer() {
       }
       let runnerOnline = false;
       if (connected) {
+        // The cloud registry is the authority: it hears every runner's
+        // heartbeat, including boxes that leave no trace on this disk. The
+        // local mission read stays as a fallback for a runner running on this
+        // same Mac, where a live lease is real evidence and the cloud may be
+        // unreachable.
         try {
-          const mission = await missionState(repoRoot ? [repoRoot] : undefined);
-          runnerOnline = mission.host.online;
+          runnerOnline = (await api.cloudRunners()).some((r) => r.online);
         } catch {
-          /* mission read failed — assume no runner, non-blocking */
+          /* signed out or cloud unreachable — fall back to the local read */
+        }
+        if (!runnerOnline) {
+          try {
+            const mission = await missionState(repoRoot ? [repoRoot] : undefined);
+            runnerOnline = mission.host.online;
+          } catch {
+            /* mission read failed — assume no runner, non-blocking */
+          }
         }
       }
       if (cancelled) return;
@@ -293,7 +364,7 @@ export function WorkspaceCreateComposer() {
     return () => {
       cancelled = true;
     };
-  }, [open, target, repoRoot, authTick]);
+  }, [open, repoRoot, authTick]);
 
   // Esc closes the whole card (when no inner popover is intercepting it).
   useEffect(() => {
@@ -317,23 +388,29 @@ export function WorkspaceCreateComposer() {
   }, [open, createFromOpen, projectMenuOpen, close]);
 
   // Click-away on the project menu.
-  useEffect(() => {
-    if (!projectMenuOpen) return;
-    function onDoc(e: MouseEvent) {
-      const t = e.target as Node | null;
-      if (projectMenuRef.current && t && !projectMenuRef.current.contains(t)) {
-        setProjectMenuOpen(false);
-      }
-    }
-    document.addEventListener("mousedown", onDoc);
-    return () => document.removeEventListener("mousedown", onDoc);
-  }, [projectMenuOpen]);
+  useDismiss(projectMenuOpen, () => setProjectMenuOpen(false), projectMenuRef);
 
   const activeProjectName = useMemo(() => {
     if (!repoRoot) return "Choose a project";
     const entry = projects.find((p) => p.root === repoRoot);
     return entry?.label?.trim() || projectNameFromRoot(repoRoot);
   }, [repoRoot, projects]);
+
+  // Where the work runs. This laptop always leads; the project's cloud is on
+  // the list only where the project has one, and every box of yours is on it
+  // whichever project you are in — see `lib/place/where.ts`, which holds both
+  // rules so no surface can decide them a second time.
+  const where = useWherePlaces(repoRoot, activeProjectName);
+  const onABox = where.chosen.machineId !== null;
+
+  // The always-on runner queue is a different offer from a place, and it is
+  // only a real one when the project's cloud is actually set up. Left showing
+  // regardless, it was the dead option the Where row exists to abolish: a Cloud
+  // switch on every project, most of them answering "Cloud isn't set up yet".
+  const canQueue = !onABox && !cloud.checking && cloud.connected;
+  useEffect(() => {
+    if (!canQueue && target === "cloud") setTarget("local");
+  }, [canQueue, target]);
 
   // ── Create ──────────────────────────────────────────────────────────────
   const submit = useCallback(async () => {
@@ -350,26 +427,93 @@ export function WorkspaceCreateComposer() {
 
     setPhase({ kind: "busy" });
 
+    // ── On a box: the copy is made over there and the agent runs over there.
+    // `launchWorkspace` takes the machine and routes to `box_start`, which adds
+    // the worktree beside the project and holds the agent in tmux — so the work
+    // outlives this window, this wifi and this laptop's lid. Nothing is checked
+    // out here and no tab is placed here; the machine's own workspace is where
+    // that session is, and sending work somewhere should take you there. ─────
+    const machineId = where.chosen.machineId;
+    if (machineId) {
+      trackFeature("workspace_place_launch");
+      try {
+        let taken = new Set<string>();
+        try {
+          taken = takenBranchNames(await api.gitBranches(repoRoot));
+        } catch {
+          /* branch read failed — a blind pick, and git still guards over there */
+        }
+        const branch = randomPlaceName(taken);
+        // The agent named in this dialog is the one that starts over there. The
+        // model chip's brain IS an agent id; with nothing pinned it falls to the
+        // same default the rest of this card uses.
+        const agentId = model?.brainId ?? DEFAULT_AGENT_ID;
+        const { errors } = await launchWorkspace({
+          repoRoot,
+          branch,
+          agents: [{ agentId }],
+          prompt: mission,
+          machineId,
+          remoteProjectPath: where.chosen.projectPath,
+        });
+        if (errors.length > 0) {
+          // The worktree exists (a total failure throws), so this is the fleet
+          // with a gap in it — say which, and leave the card up.
+          setPhase({ kind: "error", message: errors.join("; ") });
+          return;
+        }
+        setPhase({ kind: "done" });
+        if (createMore) {
+          setObjective("");
+          requestAnimationFrame(() => textareaRef.current?.focus());
+          return;
+        }
+        openRemoteWorkspace({ machineId, repoRoot });
+        close();
+      } catch (e) {
+        const raw = e instanceof Error ? e.message : String(e);
+        setPhase({ kind: "error", message: humanizeGitError(raw) });
+      }
+      return;
+    }
+
     // ── Cloud: hand the objective to the always-on runner as a submitted a2a
     // task (scoped to this repo's origin). No local worktree — a runner drains
     // it, and results come back via cloud-sync. ────────────────────────────
     if (target === "cloud") {
       trackFeature("workspace_cloud_launch");
       try {
-        const res = await api.loopCloudSend(repoRoot, mission, DEFAULT_AGENT_ID);
+        // Every cloud send opens a conversation, even the ones nobody replies
+        // to. Threading at the first message rather than at the first reply is
+        // what lets the job have a place to be read the moment it exists.
+        const threadKey = newCloudThreadKey();
+        const res = await api.loopCloudSend(
+          repoRoot,
+          mission,
+          DEFAULT_AGENT_ID,
+          undefined,
+          threadKey,
+        );
         window.dispatchEvent(
           new CustomEvent("aura:cloud-task-created", {
             detail: { repoRoot, id: res.id, status: res.status },
           }),
         );
+        setPhase({ kind: "done", cloud: res });
         if (createMore) {
           setObjective("");
-          setPhase({ kind: "done", cloud: res });
           requestAnimationFrame(() => textareaRef.current?.focus());
-        } else {
-          setPhase({ kind: "done", cloud: res });
-          close();
+          // Staying to send another means staying on the card; the thread is
+          // on the rail and one click away when they're done.
+          return;
         }
+        // Local work closes the card because something takes its place: the
+        // copy opens and the agent starts in front of you. Cloud work does the
+        // same, and lands in the same kind of destination — the machine's
+        // workspace, with the conversation you just started as its first tab.
+        // Sending work somewhere should take you there.
+        openRemoteWorkspace({ threadKey, repoRoot });
+        close();
       } catch (e) {
         const raw = e instanceof Error ? e.message : String(e);
         setPhase({ kind: "error", message: humanizeGitError(raw) });
@@ -396,34 +540,113 @@ export function WorkspaceCreateComposer() {
         /* branch read failed — fall back to a blind pick, Rust still guards */
       }
       const branch = randomPlaceName(taken);
-      const { manifest, tabs } = await launchWorkspace({
+
+      // ── In this folder: no second copy. `git checkout -b` is the whole of
+      // it, which is why it needs a clean tree — git refuses to carry your
+      // uncommitted work onto a branch that forks somewhere else, and we'd
+      // rather say that in words than let the command fail underneath. The
+      // separate copy is the answer to a dirty tree, so the message points
+      // there instead of leaving the user stuck.
+      if (!separate) {
+        // `catch(() => ({}))` here answered "the tree is clean" whenever the
+        // status read failed — which walked straight past the guard below and
+        // into the `checkout -b` it exists to keep you out of. A read we
+        // couldn't do is not a clean tree; say so and stop.
+        const dirty = await api.gitStatus(repoRoot).catch(() => null);
+        if (dirty === null) {
+          setPhase({
+            kind: "error",
+            message:
+              "Couldn’t check whether this folder has changes you haven’t " +
+              "committed yet, so it isn’t safe to start the new work here. " +
+              "Try again, or turn on Separate copy to start it beside what’s " +
+              "here instead.",
+          });
+          return;
+        }
+        if (Object.keys(dirty).length > 0) {
+          setPhase({
+            kind: "error",
+            message:
+              "This folder has changes you haven’t committed yet. Commit them " +
+              "first, or turn on Separate copy to start the new work beside " +
+              "them without disturbing what’s here.",
+          });
+          return;
+        }
+        // Fork from what the Create-from chip says, not from wherever HEAD
+        // happens to be: standing on `feat/x` and asking to start from `main`
+        // has to mean main. Going there first makes `checkout -b` fork right.
+        if (startPoint && startPoint !== "HEAD") {
+          await api.gitCheckout(repoRoot, startPoint);
+        }
+        await api.gitCreateBranch(repoRoot, branch);
+        // The branch chip, the roster badges and the Changes rail all read git
+        // on this event — without it they'd keep naming the branch we left.
+        window.dispatchEvent(new Event("aura:git-changed"));
+        window.dispatchEvent(
+          new CustomEvent("aura:workspace-launched", {
+            detail: {
+              repoRoot,
+              // The "worktree" here IS this folder — the handler switches into
+              // it (a re-hydrate, since we never left) and opens Aura chat
+              // rooted on it, which is exactly what the copy path does.
+              worktreePath: repoRoot,
+              createMore,
+              mission,
+              model,
+              effort,
+            },
+          }),
+        );
+        if (createMore) {
+          setObjective("");
+          setPhase({ kind: "done", path: repoRoot });
+          requestAnimationFrame(() => textareaRef.current?.focus());
+        } else {
+          setPhase({ kind: "done", path: repoRoot });
+          close();
+        }
+        return;
+      }
+
+      // No agents in the manifest: the worktree's working surface is Aura
+      // chat, not a coding-agent terminal, and Aura runs in-process rather
+      // than as a PTY. `workspace_launch` provisions the checkout and returns
+      // an empty session list, which is exactly what we want — the agents this
+      // work needs are the ones Aura decides to hand it to.
+      // No machine on this call: the remote branch returned above, so anything
+      // reaching here is being made on this laptop and has a manifest.
+      const { worktreePath: path } = await launchWorkspace({
         repoRoot,
         branch,
         startPoint,
-        agents: [{ agentId: DEFAULT_AGENT_ID }],
-        prompt: mission,
-        // Model id (e.g. "claude-opus-4-8") + effort ride into the launch as
-        // the agent's pre-session intent; `null`/undefined = the agent keeps
-        // its own default.
-        model: model?.modelId ?? undefined,
-        effort: effort ?? undefined,
-        // Single launch switches into the worktree — defer tab placement so App
-        // opens the agent ACTIVELY there (lands the user in the running chat,
-        // not the empty worktree). Create-more launches keep passive placement.
-        deferTabPlacement: !createMore,
+        agents: [],
       });
-      const path = manifest.worktree.path;
       // The roster is built from the app's `recents`; the launch doesn't
       // touch that list, so announce the parent repo root and let App promote
       // it — otherwise the new workspace stays invisible in the sidebar. The
       // worktree path + createMore ride along so App can (a) refresh the
       // parent's cached worktree list — the brand-new checkout has no roster
       // row until then — and (b) on a single launch, switch into the worktree
-      // so the user lands in the agent they just started instead of hunting
+      // so the user lands in the work they just started instead of hunting
       // for it in the parallel-copies fold.
+      //
+      // The objective + model + effort ride along too. They can't be applied
+      // here: the Aura chat they belong to doesn't exist until App has
+      // switched into the worktree (starting the session from this side would
+      // file it under the OUTGOING workspace's snapshot — the same trap that
+      // made launched agent tabs open into a blank screen).
       window.dispatchEvent(
         new CustomEvent("aura:workspace-launched", {
-          detail: { repoRoot, worktreePath: path, createMore, tabs },
+          detail: {
+            repoRoot,
+            worktreePath: path,
+            createMore,
+            mission,
+            model,
+            effort,
+          },
         }),
       );
       if (createMore) {
@@ -450,6 +673,9 @@ export function WorkspaceCreateComposer() {
     close,
     target,
     cloud.connected,
+    separate,
+    where.chosen.machineId,
+    where.chosen.projectPath,
   ]);
 
   function onTextareaKey(e: React.KeyboardEvent<HTMLTextAreaElement>) {
@@ -504,7 +730,7 @@ export function WorkspaceCreateComposer() {
                 }}
               >
                 {projects.length === 0 ? (
-                  <div className="px-3 py-2 text-[11.5px] text-text-4">No projects yet.</div>
+                  <div className="px-3 py-2 text-sm text-text-4">No projects yet.</div>
                 ) : (
                   projects.map((p) => {
                     const name = p.label?.trim() || projectNameFromRoot(p.root);
@@ -518,18 +744,18 @@ export function WorkspaceCreateComposer() {
                           setCreateFrom(null);
                           setProjectMenuOpen(false);
                         }}
-                        className="flex w-full items-center gap-2 px-3 py-1.5 text-left transition-colors hover:bg-bg-2"
+                        className="flex w-full items-center gap-2 px-3 py-1.5 text-left transition-colors hover:bg-state-hover"
                       >
                         <ProjectAvatar url={avatars[p.root]} size={18} />
                         <span
-                          className={`truncate text-[12.5px] ${active ? "text-text-1" : "text-text-2"}`}
+                          className={`truncate text-base ${active ? "text-text-1" : "text-text-2"}`}
                         >
                           {name}
                         </span>
-                        <span className="ml-auto truncate font-mono text-[9.5px] text-text-5">
+                        <span className="ml-auto truncate font-mono text-2xs text-text-5">
                           {projectNameFromRoot(p.root)}
                         </span>
-                        {active && <span className="shrink-0 text-accent text-[12px]">✓</span>}
+                        {active && <span className="shrink-0 text-accent text-sm">✓</span>}
                       </button>
                     );
                   })
@@ -538,7 +764,16 @@ export function WorkspaceCreateComposer() {
             )}
           </div>
 
-          {/* Create-from picker */}
+          {/* Where it runs. Always present, never disabled: this laptop is
+              always on the list, so the row has something true to say even for
+              a project with no cloud and no box of yours. */}
+          <WherePicker places={where} />
+
+          {/* Create-from picker. Only where the base is ours to choose — on a
+              box the copy forks from what that machine has checked out, and a
+              picker that quietly did nothing would be the dialog lying about
+              which commit the work starts from. */}
+          {!onABox && (
           <div className="relative">
             <ChipButton
               onClick={() => repoRoot && setCreateFromOpen((v) => !v)}
@@ -566,18 +801,47 @@ export function WorkspaceCreateComposer() {
               />
             )}
           </div>
+          )}
 
-          {/* Run target — one Cloud switch: off = a local isolated worktree
-              (default), on = the always-on cloud runner. The dot reads
-              readiness while on: green = a runner is draining now, amber =
-              signed in but idle (work queues). */}
-          <label className="ml-auto flex shrink-0 cursor-pointer select-none items-center gap-1.5 text-[11.5px] text-text-3">
+          <div className="ml-auto flex shrink-0 items-center gap-3">
+          {/* Where the new branch lives. Only meaningful locally — a cloud run
+              has no folder of yours to put it in — so it steps aside entirely
+              while Cloud is on rather than sitting there greyed out. */}
+          {target === "local" && !onABox && (
+            <label
+              className="flex shrink-0 cursor-pointer select-none items-center gap-1.5 text-sm text-text-3"
+              title={
+                separate
+                  ? "The new branch gets its own folder, so the branch you're on now stays open beside it"
+                  : "The new branch is created in this folder. Nothing is copied, but you leave the branch you're on"
+              }
+            >
+              <FolderGit2
+                size={13}
+                className={separate ? "text-accent" : "text-text-4"}
+              />
+              <span>Separate copy</span>
+              <Switch
+                checked={separate}
+                onCheckedChange={chooseSeparate}
+                aria-label="Give the new branch its own folder, so both branches stay open at once"
+              />
+            </label>
+          )}
+          {/* Hand it to the queue instead of opening it. A different offer from
+              the Where row — that one says which computer holds the copy, this
+              one says nobody watches it start — and it appears only where the
+              project's cloud is genuinely set up, so it can never be the
+              apology it used to be. The dot reads readiness while on: green = a
+              runner is draining now, amber = signed in but idle (work queues). */}
+          {canQueue && (
+          <label className="flex shrink-0 cursor-pointer select-none items-center gap-1.5 text-sm text-text-3">
             <Cloud
               size={13}
               className={target === "cloud" ? "text-accent" : "text-text-4"}
             />
-            <span>Cloud</span>
-            {target === "cloud" && cloud.connected && (
+            <span>Queue it</span>
+            {target === "cloud" && (
               <span
                 className={`size-1.5 rounded-full ${cloud.runnerOnline ? "bg-emerald-400" : "bg-amber-400"}`}
                 aria-hidden
@@ -586,9 +850,11 @@ export function WorkspaceCreateComposer() {
             <Switch
               checked={target === "cloud"}
               onCheckedChange={(v) => setTarget(v ? "cloud" : "local")}
-              aria-label="Run this work on the cloud runner instead of locally"
+              aria-label="Hand this to the always-on machine instead of starting it in front of you"
             />
           </label>
+          )}
+          </div>
         </div>
 
         {/* Objective — borderless, blends into the card (reference-calm). */}
@@ -601,9 +867,19 @@ export function WorkspaceCreateComposer() {
             disabled={busy}
             rows={3}
             placeholder="What do you want to work on?"
-            className="w-full resize-none overflow-x-hidden overflow-y-auto bg-transparent px-1 py-1 text-[13.5px] leading-relaxed text-text-1 placeholder:text-text-4 focus:outline-none disabled:opacity-60"
+            className="w-full resize-none overflow-x-hidden overflow-y-auto bg-transparent px-1 py-1 text-md leading-relaxed text-text-1 placeholder:text-text-4 focus:outline-none disabled:opacity-60"
           />
         </div>
+
+        {/* Turning the copy off changes what happens to the folder you're
+            standing in, so it says so once, plainly, rather than letting the
+            branch swap under someone who didn't expect it. */}
+        {target === "local" && !separate && (
+          <div className="px-3 pt-1.5 text-sm text-text-4">
+            This folder switches to the new branch. Nothing is copied, but
+            whatever you're on now closes here until you come back to it.
+          </div>
+        )}
 
         {/* Cloud readiness — only while the Cloud target is selected. Tells the
             user whether this runs now, queues, or needs a one-time sign-in
@@ -611,24 +887,24 @@ export function WorkspaceCreateComposer() {
         {target === "cloud" && (
           <div className="px-3 pt-1.5">
             {cloud.checking ? (
-              <div className="flex items-center gap-2 text-[11.5px] text-text-4">
+              <div className="flex items-center gap-2 text-sm text-text-4">
                 <AsciiSpinner /> Checking your cloud…
               </div>
             ) : !cloud.connected ? (
-              <div className="flex items-start gap-2 rounded-md bg-accent-soft px-2.5 py-1.5 text-[11.5px] text-text-2">
+              <div className="flex items-start gap-2 rounded-md bg-accent-soft px-2.5 py-1.5 text-sm text-text-2">
                 <Cloud size={13} className="mt-[1px] shrink-0 text-accent" />
                 <span>
                   Cloud isn't set up yet. Sign in to your always-on machine to run
-                  this in the cloud — it keeps working after you close your laptop.
+                  this in the cloud. It keeps working after you close your laptop.
                 </span>
               </div>
             ) : cloud.runnerOnline ? (
-              <div className="flex items-center gap-1.5 text-[11.5px] text-emerald-400">
+              <div className="flex items-center gap-1.5 text-sm text-emerald-400">
                 <span className="size-1.5 rounded-full bg-emerald-400" aria-hidden />
-                Runner online{cloud.org ? ` · ${cloud.org}` : ""} — starts right away.
+                Runner online{cloud.org ? ` · ${cloud.org}` : ""}. Starts right away.
               </div>
             ) : (
-              <div className="flex items-start gap-2 text-[11.5px] text-amber-400">
+              <div className="flex items-start gap-2 text-sm text-amber-400">
                 <span className="mt-[5px] size-1.5 shrink-0 rounded-full bg-amber-400" aria-hidden />
                 <span>
                   Signed in{cloud.org ? ` as ${cloud.org}` : ""}, but no always-on
@@ -642,17 +918,31 @@ export function WorkspaceCreateComposer() {
         {/* Error / done line */}
         {phase.kind === "error" && (
           <div
-            className="mx-3 mt-1 rounded-md px-2.5 py-1.5 text-[11.5px]"
+            className="mx-3 mt-1 rounded-md px-2.5 py-1.5 text-sm"
             style={{ color: "var(--color-red)", background: "rgba(239,68,68,0.08)" }}
           >
             {phase.message}
           </div>
         )}
-        {phase.kind === "done" && createMore && (
-          <div className="mx-3 mt-1 text-[11.5px] text-emerald-400">
-            {phase.cloud
-              ? `Sent to cloud — task ${phase.cloud.id.slice(0, 8)} (${phase.cloud.status}). Ready for the next one.`
-              : "Agent started — ready for the next one."}
+        {/* Cloud always reports back, whether or not you're creating more: it is
+            the only sign the work exists, since nothing opens in front of you.
+            The local line stays tied to Create-more, because a local start
+            announces itself by opening the copy. */}
+        {phase.kind === "done" && (phase.cloud || createMore) && (
+          <div className="mx-3 mt-1 text-sm text-emerald-400">
+            {phase.cloud ? (
+              <>
+                Sent to the cloud
+                {cloud.runnerOnline
+                  ? ". A machine is picking it up."
+                  : ". It waits until a machine comes online."}{" "}
+                <span className="text-text-3">
+                  Track it under “In the cloud” on Workspaces.
+                </span>
+              </>
+            ) : (
+              "Agent started. Ready for the next one."
+            )}
           </div>
         )}
 
@@ -667,7 +957,7 @@ export function WorkspaceCreateComposer() {
           </div>
 
           <div className="ml-auto flex shrink-0 items-center gap-2">
-            <label className="inline-flex cursor-pointer select-none items-center gap-1.5 text-[11.5px] text-text-3">
+            <label className="inline-flex cursor-pointer select-none items-center gap-1.5 text-sm text-text-3">
               <Switch
                 checked={createMore}
                 onCheckedChange={setCreateMore}
@@ -693,7 +983,12 @@ export function WorkspaceCreateComposer() {
               >
                 {busy ? (
                   <>
-                    <Loader2 className="animate-spin" />
+                    {/* Same spinner the "Checking your cloud…" line above uses,
+                        and the same one every other busy button in the app
+                        uses. This button drew a lucide `Loader2` instead, so
+                        one composer showed you two different loaders during
+                        one create. */}
+                    <AsciiSpinner />
                     {target === "cloud" ? "Sending…" : "Starting…"}
                   </>
                 ) : target === "cloud" ? (
@@ -780,11 +1075,14 @@ function ModelChip({
   }, []);
 
   // Seed the chip from the user's saved default model so the launcher opens on
-  // their actual preference, not always "Auto". One-shot, once the brains
-  // resolve (a `SelectedModel` needs a brain to route through) and only while
-  // the user hasn't picked yet. A `default` of "auto" stays `null` (= the Auto
-  // row, already the shown default); an unresolvable id also stays Auto, so
-  // this only ever adds a concrete default, never regresses one.
+  // their actual preference, not always on the active brain. One-shot, once the
+  // brains resolve (a `SelectedModel` needs a brain to route through) and only
+  // while the user hasn't picked yet. A `default` of "auto" stays `null` (=
+  // follow-the-brain, already the shown default); an unresolvable id stays
+  // there too, so this only ever adds a concrete default, never regresses one.
+  // The brain a turn falls to when no model is pinned — what the chip names.
+  const activeBrain = useMemo(() => brains.find((b) => b.active) ?? null, [brains]);
+
   useEffect(() => {
     if (seededDefaultRef.current) return;
     if (value != null) {
@@ -809,15 +1107,7 @@ function ModelChip({
     if (row) onChange(toSelectedModel(brain, row));
   }, [brains, liveCatalog, value, onChange]);
 
-  useEffect(() => {
-    if (!open) return;
-    function onDoc(e: MouseEvent) {
-      const t = e.target as Node | null;
-      if (rootRef.current && t && !rootRef.current.contains(t)) setOpen(false);
-    }
-    document.addEventListener("mousedown", onDoc);
-    return () => document.removeEventListener("mousedown", onDoc);
-  }, [open]);
+  useDismiss(open, () => setOpen(false), rootRef);
 
   function pick(brain: BrainChoice, model: CatalogModel) {
     onChange(toSelectedModel(brain, model));
@@ -829,10 +1119,16 @@ function ModelChip({
       <ChipButton onClick={() => setOpen((v) => !v)} active={!!selected}>
         {selected ? (
           <AgentIcon agentId={selected.brainId} label={selected.label} size={13} />
+        ) : activeBrain ? (
+          <AgentIcon agentId={activeBrain.id} label={activeBrain.label} size={13} />
         ) : (
           <Sparkles size={12} className="text-text-4" />
         )}
-        <span className="max-w-[130px] truncate">{selected ? selected.label : "Auto"}</span>
+        {/* Unpinned says which brain will actually run, not "Auto" — the word
+            was already spoken for by the mode chip beside it. */}
+        <span className="max-w-[130px] truncate">
+          {selected ? selected.label : (activeBrain?.label ?? "Active brain")}
+        </span>
       </ChipButton>
       {open && (
         <div
@@ -845,17 +1141,19 @@ function ModelChip({
               onChange(null);
               setOpen(false);
             }}
-            className={`flex w-full items-center gap-2 px-2.5 py-1.5 text-left text-[12px] transition-colors hover:bg-bg-2 ${
+            className={`flex w-full items-center gap-2 px-2.5 py-1.5 text-left text-sm transition-colors hover:bg-state-hover ${
               selected == null ? "text-text-1" : "text-text-2"
             }`}
           >
-            <span className="font-medium">Auto</span>
-            <span className="text-[10.5px] text-text-4">model's choice</span>
-            {selected == null && <span className="ml-auto text-accent text-[12px]">✓</span>}
+            <span className="font-medium">Follow the active brain</span>
+            <span className="text-xs text-text-4">
+              {activeBrain ? activeBrain.label : "whichever brain is active"}
+            </span>
+            {selected == null && <span className="ml-auto text-accent text-sm">✓</span>}
           </button>
           {brains.map((brain) => (
             <div key={brain.id}>
-              <div className="flex items-center gap-1.5 px-2.5 pb-1 pt-2 text-[10px] font-semibold uppercase tracking-wide text-text-3">
+              <div className="flex items-center gap-1.5 px-2.5 pb-1 pt-2 text-xs font-medium text-text-4">
                 <AgentIcon agentId={brain.id} label={brain.label} size={13} />
                 {brain.label}
               </div>
@@ -872,12 +1170,12 @@ function ModelChip({
                     type="button"
                     disabled={!usable}
                     onClick={() => pick(brain, model)}
-                    className={`flex w-full items-center gap-2 px-2.5 py-1.5 pl-5 text-left text-[12px] transition-colors ${
-                      usable ? "hover:bg-bg-2" : "cursor-not-allowed opacity-50"
+                    className={`flex w-full items-center gap-2 px-2.5 py-1.5 pl-5 text-left text-sm transition-colors ${
+                      usable ? "hover:bg-state-hover" : "cursor-not-allowed opacity-50"
                     } ${isSel ? "text-text-1" : "text-text-2"}`}
                   >
                     <span className="font-medium">{model.label}</span>
-                    {isSel && <span className="ml-auto text-accent text-[12px]">✓</span>}
+                    {isSel && <span className="ml-auto text-accent text-sm">✓</span>}
                   </button>
                 );
               })}
@@ -901,15 +1199,7 @@ function EffortChip({
   const effort = value;
   const rootRef = useRef<HTMLDivElement>(null);
 
-  useEffect(() => {
-    if (!open) return;
-    function onDoc(e: MouseEvent) {
-      const t = e.target as Node | null;
-      if (rootRef.current && t && !rootRef.current.contains(t)) setOpen(false);
-    }
-    document.addEventListener("mousedown", onDoc);
-    return () => document.removeEventListener("mousedown", onDoc);
-  }, [open]);
+  useDismiss(open, () => setOpen(false), rootRef);
 
   // 0 = Auto/unset, 1 = low … 4 = max — drives the gauge fill.
   const level: 0 | 1 | 2 | 3 | 4 =
@@ -937,12 +1227,12 @@ function EffortChip({
                 onChange(opt.value);
                 setOpen(false);
               }}
-              className={`flex w-full items-center gap-2 px-2.5 py-1.5 text-left text-[12px] transition-colors hover:bg-bg-2 ${
+              className={`flex w-full items-center gap-2 px-2.5 py-1.5 text-left text-sm transition-colors hover:bg-state-hover ${
                 effort === opt.value ? "text-text-1" : "text-text-2"
               }`}
             >
               <span className="font-medium">{opt.label}</span>
-              {effort === opt.value && <span className="ml-auto text-accent text-[12px]">✓</span>}
+              {effort === opt.value && <span className="ml-auto text-accent text-sm">✓</span>}
             </button>
           ))}
         </div>

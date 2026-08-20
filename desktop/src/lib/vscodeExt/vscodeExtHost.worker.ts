@@ -221,7 +221,7 @@ async function runCommand(commandId: string, args: unknown[]): Promise<unknown> 
   // button gave no clue why).
   if (triggers.has(commandId)) {
     throw new Error(
-      `"${commandId}" didn't run — its extension declares the command but never registered it.`,
+      `"${commandId}" didn't run. Its extension declares the command but never registered it.`,
     );
   }
   // Truly unknown id → no-op (resolve undefined), matching VS Code's tolerance

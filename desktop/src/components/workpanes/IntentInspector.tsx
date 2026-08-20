@@ -13,6 +13,7 @@
 
 import { useCallback, useEffect, useState } from "react";
 import { api, type ClaudeSession } from "../../lib/api";
+import { fetchSessions } from "../../lib/sessionsCache";
 import { IntentStory, useIntentReport, formatRelative } from "./IntentStory";
 import { Button } from "../ui/button";
 
@@ -46,8 +47,7 @@ export function IntentInspector({ repoRoot, onClose }: Props) {
 
   useEffect(() => {
     let alive = true;
-    api
-      .claudeListSessions(repoRoot)
+    fetchSessions(repoRoot)
       .then((s) => {
         if (alive) setSessions(Array.isArray(s) ? s : []);
       })
@@ -93,11 +93,11 @@ export function IntentInspector({ repoRoot, onClose }: Props) {
   return (
     <div className="h-full w-full flex flex-col bg-bg-content">
       <header className="h-9 flex items-center px-4 border-b border-line-soft flex-shrink-0 gap-3">
-        <span className="text-text-2 text-[12px] font-medium uppercase tracking-wider">
+        <span className="section-label">
           Change story
         </span>
-        <span className="text-text-4 text-[11px]">
-          the story of a change — asked, said, did
+        <span className="text-text-4 text-xs">
+          the story of a change. Asked, said, did
         </span>
         <Button
           variant="ghost"
@@ -171,18 +171,18 @@ function Timeline({
 }) {
   return (
     <div className="w-[280px] border-r border-line-soft flex flex-col flex-shrink-0">
-      <div className="h-7 flex items-center px-3 text-[10.5px] uppercase tracking-wider text-text-4 border-b border-line-soft flex-shrink-0">
+      <div className="section-label h-7 flex items-center px-3 border-b border-line-soft flex-shrink-0">
         Timeline
       </div>
       <div className="flex-1 min-h-0 overflow-y-auto">
         {loading ? (
-          <div className="text-text-4 text-[12px] px-4 py-4">loading…</div>
+          <div className="text-text-4 text-sm px-4 py-4">loading…</div>
         ) : error ? (
-          <div className="text-red-400 text-[11px] font-mono px-4 py-4">
+          <div className="text-red-400 text-xs font-mono px-4 py-4">
             {error}
           </div>
         ) : commits.length === 0 ? (
-          <div className="text-text-4 text-[12px] px-4 py-4">No commits yet.</div>
+          <div className="text-text-4 text-sm px-4 py-4">No commits yet.</div>
         ) : (
           commits.map((c) => {
             const active = selectedSha === c.commit_sha;
@@ -191,8 +191,8 @@ function Timeline({
                 key={c.commit_sha}
                 type="button"
                 onClick={() => onSelect(c.commit_sha)}
-                className={`relative w-full text-left pl-6 pr-3 py-2 hover:bg-bg-2 transition-colors border-t border-line-soft/40 ${
-                  active ? "bg-bg-2" : ""
+                className={`relative w-full text-left pl-6 pr-3 py-2 hover:bg-state-hover transition-colors border-t border-line-soft/40 ${
+                  active ? "bg-state-selected" : ""
                 }`}
               >
                 <span
@@ -202,22 +202,22 @@ function Timeline({
                   }`}
                 />
                 <div className="flex items-baseline gap-2">
-                  <span className="text-[11px] font-mono text-text-3 flex-shrink-0">
+                  <span className="text-xs font-mono text-text-3 flex-shrink-0">
                     {c.commit_short}
                   </span>
-                  <span className="text-[10px] text-text-4 tabular-nums ml-auto flex-shrink-0">
+                  <span className="text-2xs text-text-4 tabular-nums ml-auto flex-shrink-0">
                     {formatRelative(c.commit_time)}
                   </span>
                 </div>
                 <div
-                  className="text-[12px] text-text-1 mt-0.5 truncate"
+                  className="text-sm text-text-1 mt-0.5 truncate"
                   title={c.commit_message}
                 >
                   {c.commit_message || (
                     <span className="text-text-4">(no message)</span>
                   )}
                 </div>
-                <div className="text-[10.5px] text-text-4 mt-0.5 flex items-center gap-1.5">
+                <div className="text-xs text-text-4 mt-0.5 flex items-center gap-1.5">
                   <span className="truncate">{c.author}</span>
                   {c.stated_count === 0 && (
                     <>

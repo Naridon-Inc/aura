@@ -13,6 +13,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { api, type MemoryView } from "../../lib/api";
 import { Select } from "../ui/select";
+import { useDismiss } from "../../lib/useDismiss";
 
 const SECTIONS = [
   "architecture",
@@ -31,8 +32,51 @@ type Props = {
   headless?: boolean;
 };
 
+/** What the pill is entitled to claim.
+ *
+ *  This chip exists to be *proof* that memory is loaded — that's the whole
+ *  argument in the header comment above. It read its count as
+ *  `view?.sections… ?? 0`, so before the first read returned — and permanently
+ *  after one threw, since the catch below is silent — it rendered "○ Memory ·
+ *  0" and said "No memory entries yet". A pill whose job is to prove something
+ *  was reporting the opposite from never having looked. `null` is the third
+ *  state and it now has one. */
+export function memoryPill(
+  view: MemoryView | null,
+  checked: boolean,
+): { glyph: string; count: number | null; title: string } {
+  if (!checked)
+    return {
+      glyph: "·",
+      count: null,
+      title: "Checking what Aura remembers about this project…",
+    };
+  if (!view)
+    return {
+      glyph: "·",
+      count: null,
+      title:
+        "Aura couldn't read what it remembers about this project just now. Click to try again.",
+    };
+  const count = view.sections.reduce((acc, s) => acc + s.entries.length, 0);
+  return count > 0
+    ? {
+        glyph: "✓",
+        count,
+        title: `${count} memory entries loaded. Click to view or add`,
+      }
+    : {
+        glyph: "○",
+        count: 0,
+        title: "No memory entries yet. Click to add one",
+      };
+}
+
 export function MemoryBadge({ repoRoot, headless = false }: Props) {
   const [view, setView] = useState<MemoryView | null>(null);
+  /** Whether a read has completed at all — without it, "not yet" and "none"
+   *  are the same value. */
+  const [checked, setChecked] = useState(false);
   const [open, setOpen] = useState(false);
   const [addOpen, setAddOpen] = useState(false);
   const [section, setSection] = useState<string>("decisions");
@@ -44,13 +88,20 @@ export function MemoryBadge({ repoRoot, headless = false }: Props) {
   const reload = useCallback(async () => {
     if (!repoRoot) {
       setView(null);
+      setChecked(false);
       return;
     }
     try {
       const v = await api.auraMemoryView(repoRoot);
       setView(v);
     } catch {
-      // best-effort — missing file returns empty view from backend
+      // A missing memory file returns an empty view rather than throwing, so
+      // reaching here means the read itself failed. Leave `view` null and let
+      // `checked` mark that we looked — the pill says "couldn't read" instead
+      // of standing in for "nothing remembered".
+      setView(null);
+    } finally {
+      setChecked(true);
     }
   }, [repoRoot]);
 
@@ -69,37 +120,22 @@ export function MemoryBadge({ repoRoot, headless = false }: Props) {
     return () => window.removeEventListener("aura:manager:open-memory", onOpen);
   }, [reload]);
 
-  useEffect(() => {
-    if (!open) return;
-    function onDoc(e: MouseEvent) {
-      const t = e.target as Node | null;
-      if (ref.current && t && !ref.current.contains(t)) {
-        setOpen(false);
-        setAddOpen(false);
-      }
-    }
-    function onKey(e: KeyboardEvent) {
-      if (e.key === "Escape") {
-        setOpen(false);
-        setAddOpen(false);
-      }
-    }
-    document.addEventListener("mousedown", onDoc);
-    document.addEventListener("keydown", onKey);
-    return () => {
-      document.removeEventListener("mousedown", onDoc);
-      document.removeEventListener("keydown", onKey);
-    };
-  }, [open]);
+  useDismiss(
+    open,
+    () => {
+      setOpen(false);
+      setAddOpen(false);
+    },
+    ref,
+  );
 
   if (!repoRoot) return null;
 
-  const total =
-    view?.sections.reduce((acc, s) => acc + s.entries.length, 0) ?? 0;
-  const loaded = total > 0;
-  const tone = loaded
-    ? { color: "var(--color-text-1)" }
-    : { color: "var(--color-text-3)" };
+  const pill = memoryPill(view, checked);
+  const tone =
+    pill.count === null || pill.count === 0
+      ? { color: "var(--color-text-3)" }
+      : { color: "var(--color-text-1)" };
 
   async function save() {
     if (!repoRoot || !draft.trim() || !section) return;
@@ -126,40 +162,36 @@ export function MemoryBadge({ repoRoot, headless = false }: Props) {
         <button
           type="button"
           onClick={() => setOpen((v) => !v)}
-          title={
-            loaded
-              ? `${total} memory entries loaded — click to view or add`
-              : "No memory entries yet — click to add one"
-          }
+          title={pill.title}
           className="chip"
           style={tone}
         >
           <span aria-hidden style={{ fontSize: 10 }}>
-            {loaded ? "✓" : "○"}
+            {pill.glyph}
           </span>
           <span>Memory</span>
           <span className="text-text-3">·</span>
-          <span className="tabular-nums">{total}</span>
+          <span className="tabular-nums">{pill.count ?? "—"}</span>
         </button>
       )}
       {open && (
         <div
-          className="absolute right-0 top-7 z-30 min-w-[260px] rounded-md py-1 shadow-lg text-[12px]"
+          className="absolute right-0 top-7 z-30 min-w-[260px] rounded-md py-1 shadow-lg text-sm"
           style={{
             background: "var(--color-bg-3)",
             border: "1px solid var(--color-line-soft)",
           }}
         >
-          <div className="px-2.5 py-1.5 border-b border-line-soft text-[10px] uppercase tracking-wider text-text-3">
+          <div className="section-label px-2.5 py-1.5 border-b border-line-soft">
             Memory bank
           </div>
           {view && view.identity && (
-            <div className="px-2.5 py-1 text-text-2 text-[11px]">
+            <div className="px-2.5 py-1 text-text-2 text-xs">
               {view.identity}
             </div>
           )}
           {view && view.stack.length > 0 && (
-            <div className="px-2.5 pb-1 text-text-3 text-[10.5px] truncate">
+            <div className="px-2.5 pb-1 text-text-3 text-xs truncate">
               {view.stack.join(" · ")}
             </div>
           )}
@@ -202,10 +234,10 @@ export function MemoryBadge({ repoRoot, headless = false }: Props) {
                   onChange={(e) => setDraft(e.target.value)}
                   placeholder="Add a fact, decision, or gotcha…"
                   rows={3}
-                  className="bg-bg-1 border border-line-soft rounded px-1.5 py-1 text-[11.5px] resize-none"
+                  className="bg-bg-1 border border-line-soft rounded px-1.5 py-1 text-sm resize-none"
                 />
                 {err && (
-                  <div className="text-[10.5px] text-red" role="alert">
+                  <div className="text-xs text-red" role="alert">
                     {err}
                   </div>
                 )}
@@ -217,7 +249,7 @@ export function MemoryBadge({ repoRoot, headless = false }: Props) {
                       setDraft("");
                       setErr(null);
                     }}
-                    className="px-2 py-0.5 text-[11px] text-text-3 hover:text-text-1"
+                    className="px-2 py-0.5 text-xs text-text-3 hover:text-text-1"
                   >
                     Cancel
                   </button>
@@ -225,7 +257,7 @@ export function MemoryBadge({ repoRoot, headless = false }: Props) {
                     type="button"
                     disabled={saving || !draft.trim()}
                     onClick={() => void save()}
-                    className="px-2 py-0.5 text-[11px] rounded bg-accent text-bg-0 disabled:opacity-40"
+                    className="px-2 py-0.5 text-xs rounded bg-accent text-bg-0 disabled:opacity-40"
                   >
                     {saving ? "Saving…" : "Save"}
                   </button>
@@ -235,7 +267,7 @@ export function MemoryBadge({ repoRoot, headless = false }: Props) {
               <button
                 type="button"
                 onClick={() => setAddOpen(true)}
-                className="w-full text-left px-1.5 py-1 text-text-2 hover:bg-bg-2 rounded text-[11.5px]"
+                className="w-full text-left px-1.5 py-1 text-text-2 hover:bg-state-hover rounded text-sm"
               >
                 + Add to memory…
               </button>

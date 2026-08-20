@@ -63,75 +63,91 @@ pub struct SentinelAgent {
     pub last_heartbeat: i64,
     #[serde(default)]
     pub claims: Vec<SentinelClaim>,
+    /// Which checkout the agent is running in, and on what branch. The CLI has
+    /// always written these (`Sentinel::here` / `here_branch`); nothing read
+    /// them until the Aura brain needed to answer "what's running where?" —
+    /// claims all live in the shared `.aura`, so without the branch a fleet of
+    /// worktree agents is indistinguishable. Optional because a claim file
+    /// written before the CLI recorded them has neither.
+    #[serde(default)]
+    pub worktree: Option<String>,
+    #[serde(default)]
+    pub branch: Option<String>,
 }
 
 #[tauri::command]
 pub async fn sentinel_inbox(repo_root: String) -> Result<Vec<SentinelMessage>, String> {
-    let dir = PathBuf::from(&repo_root)
-        .join(".aura")
-        .join("sentinel")
-        .join("messages");
-    if !dir.is_dir() {
-        return Ok(vec![]);
-    }
-    let mut out = Vec::new();
-    let entries = fs::read_dir(&dir).map_err(|e| e.to_string())?;
-    for entry in entries.filter_map(|r| r.ok()) {
-        let path = entry.path();
-        if path.extension().and_then(|s| s.to_str()) != Some("json") {
-            continue;
+    crate::blocking::run(move || {
+        let dir = PathBuf::from(&repo_root)
+            .join(".aura")
+            .join("sentinel")
+            .join("messages");
+        if !dir.is_dir() {
+            return Ok(vec![]);
         }
-        let body = match fs::read_to_string(&path) {
-            Ok(s) => s,
-            Err(_) => continue,
-        };
-        if let Ok(mut msg) = serde_json::from_str::<SentinelMessage>(&body) {
-            // Backfill id from filename if the JSON body forgot to carry
-            // it — older sentinel writers did that.
-            if msg.id.is_empty() {
-                if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
-                    msg.id = stem.to_string();
-                }
+        let mut out = Vec::new();
+        let entries = fs::read_dir(&dir).map_err(|e| e.to_string())?;
+        for entry in entries.filter_map(|r| r.ok()) {
+            let path = entry.path();
+            if path.extension().and_then(|s| s.to_str()) != Some("json") {
+                continue;
             }
-            out.push(msg);
+            let body = match fs::read_to_string(&path) {
+                Ok(s) => s,
+                Err(_) => continue,
+            };
+            if let Ok(mut msg) = serde_json::from_str::<SentinelMessage>(&body) {
+                // Backfill id from filename if the JSON body forgot to carry
+                // it — older sentinel writers did that.
+                if msg.id.is_empty() {
+                    if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
+                        msg.id = stem.to_string();
+                    }
+                }
+                out.push(msg);
+            }
         }
-    }
-    // Newest first — same direction the CommsPanel renders project feed.
-    out.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
-    Ok(out)
+        // Newest first — same direction the CommsPanel renders project feed.
+        out.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
+        Ok(out)
+    })
+    .await
 }
 
 #[tauri::command]
 pub async fn sentinel_agents(repo_root: String) -> Result<Vec<SentinelAgent>, String> {
-    let dir = PathBuf::from(&repo_root)
-        .join(".aura")
-        .join("sentinel")
-        .join("claims");
-    if !dir.is_dir() {
-        return Ok(vec![]);
-    }
-    let mut out = Vec::new();
-    let entries = fs::read_dir(&dir).map_err(|e| e.to_string())?;
-    for entry in entries.filter_map(|r| r.ok()) {
-        let path = entry.path();
-        if path.extension().and_then(|s| s.to_str()) != Some("json") {
-            continue;
+    crate::blocking::run(move || {
+        let dir = PathBuf::from(&repo_root)
+            .join(".aura")
+            .join("sentinel")
+            .join("claims");
+        if !dir.is_dir() {
+            return Ok(vec![]);
         }
-        let body = match fs::read_to_string(&path) {
-            Ok(s) => s,
-            Err(_) => continue,
-        };
-        if let Ok(mut a) = serde_json::from_str::<SentinelAgent>(&body) {
-            if a.session_id.is_empty() {
-                if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
-                    a.session_id = stem.to_string();
-                }
+        let mut out = Vec::new();
+        let entries = fs::read_dir(&dir).map_err(|e| e.to_string())?;
+        for entry in entries.filter_map(|r| r.ok()) {
+            let path = entry.path();
+            if path.extension().and_then(|s| s.to_str()) != Some("json") {
+                continue;
             }
-            out.push(a);
+            let body = match fs::read_to_string(&path) {
+                Ok(s) => s,
+                Err(_) => continue,
+            };
+            if let Ok(mut a) = serde_json::from_str::<SentinelAgent>(&body) {
+                if a.session_id.is_empty() {
+                    if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
+                        a.session_id = stem.to_string();
+                    }
+                }
+                out.push(a);
+            }
         }
-    }
-    out.sort_by(|a, b| b.last_heartbeat.cmp(&a.last_heartbeat));
-    Ok(out)
+        out.sort_by(|a, b| b.last_heartbeat.cmp(&a.last_heartbeat));
+        Ok(out)
+    })
+    .await
 }
 
 #[tauri::command]
@@ -170,22 +186,25 @@ pub async fn sentinel_mark_read(
     message_id: String,
     reader_session: String,
 ) -> Result<(), String> {
-    let dir = PathBuf::from(&repo_root)
-        .join(".aura")
-        .join("sentinel")
-        .join("messages");
-    let path = dir.join(format!("{message_id}.json"));
-    if !path.is_file() {
-        return Err(format!("message not found: {message_id}"));
-    }
-    let body = fs::read_to_string(&path).map_err(|e| e.to_string())?;
-    let mut msg: SentinelMessage = serde_json::from_str(&body).map_err(|e| e.to_string())?;
-    if !msg.read_by.iter().any(|r| r == &reader_session) {
-        msg.read_by.push(reader_session);
-        let out = serde_json::to_string_pretty(&msg).map_err(|e| e.to_string())?;
-        fs::write(&path, out).map_err(|e| e.to_string())?;
-    }
-    Ok(())
+    crate::blocking::run(move || {
+        let dir = PathBuf::from(&repo_root)
+            .join(".aura")
+            .join("sentinel")
+            .join("messages");
+        let path = dir.join(format!("{message_id}.json"));
+        if !path.is_file() {
+            return Err(format!("message not found: {message_id}"));
+        }
+        let body = fs::read_to_string(&path).map_err(|e| e.to_string())?;
+        let mut msg: SentinelMessage = serde_json::from_str(&body).map_err(|e| e.to_string())?;
+        if !msg.read_by.iter().any(|r| r == &reader_session) {
+            msg.read_by.push(reader_session);
+            let out = serde_json::to_string_pretty(&msg).map_err(|e| e.to_string())?;
+            fs::write(&path, out).map_err(|e| e.to_string())?;
+        }
+        Ok(())
+    })
+    .await
 }
 
 fn now_secs() -> i64 {

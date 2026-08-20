@@ -19,6 +19,7 @@ use std::path::{Path, PathBuf};
 use serde_json::{Value, json};
 use tauri::{AppHandle, Manager};
 use tracing::warn;
+use crate::cloud_org::OrgScoped;
 
 /// Fire-and-forget. Resolves repo + creds, then POSTs in a background
 /// task. Caller never blocks on network. `agent_kind` is the session's
@@ -208,8 +209,7 @@ async fn push_repo_registration(repo_root: &str) -> Result<(), String> {
     let creds = read_credentials()?;
     let token = cloud_token(&creds).ok_or("no cloud_api_token — run `aura connect`")?;
     let origin = cloud_origin(&creds);
-    let repo_full_name = resolve_repo_full_name(Path::new(repo_root))
-        .unwrap_or_else(|| local_fallback_full_name(Path::new(repo_root)));
+    let repo_full_name = crate::repo_identity::repo_slug(Path::new(repo_root));
     let body = json!({
         "repo_full_name": repo_full_name,
         "sessions": [],
@@ -219,9 +219,9 @@ async fn push_repo_registration(repo_root: &str) -> Result<(), String> {
         .build()
         .map_err(|e| format!("client build: {e}"))?;
     let url = format!("{origin}/api/v1/sync/sessions");
-    let resp = client
-        .post(&url)
+    let resp = with_org(client.post(&url), Path::new(repo_root))
         .bearer_auth(&token)
+        .org_scoped()
         .json(&body)
         .send()
         .await
@@ -287,6 +287,7 @@ async fn push_message(
     let resp = client
         .post(&url)
         .bearer_auth(&token)
+        .org_scoped()
         .json(&payload)
         .send()
         .await
@@ -355,6 +356,7 @@ async fn backfill_messages(session_id: String, turns: Vec<BackfillTurn>) -> Resu
     let resp = client
         .get(&list_url)
         .bearer_auth(&token)
+        .org_scoped()
         .send()
         .await
         .map_err(|e| format!("GET {list_url}: {e}"))?;
@@ -387,6 +389,7 @@ async fn backfill_messages(session_id: String, turns: Vec<BackfillTurn>) -> Resu
         let resp = client
             .post(&post_url)
             .bearer_auth(&token)
+            .org_scoped()
             .json(&Value::Object(payload))
             .send()
             .await
@@ -409,12 +412,11 @@ async fn push_status(
     let creds = read_credentials()?;
     let token = cloud_token(&creds).ok_or("no cloud_api_token — run `aura connect`")?;
     let origin = cloud_origin(&creds);
-    // GitHub remote when present, otherwise `local/<dirname>` so a
-    // local-only project (no `origin` remote, e.g. fresh scaffold) still
-    // surfaces in the mobile / dashboard Workspaces list. Keeps the
-    // round-trip story working before the user has wired a remote.
-    let repo_full_name = resolve_repo_full_name(Path::new(&repo_root))
-        .unwrap_or_else(|| local_fallback_full_name(Path::new(&repo_root)));
+    // Hosted remote when present, otherwise the project's own stable
+    // `local/<name>-<id>` so a local-only project (no `origin` remote, e.g. a
+    // fresh scaffold) still surfaces in the mobile / dashboard Workspaces list
+    // — and stays distinct from another folder of the same name.
+    let repo_full_name = crate::repo_identity::repo_slug(Path::new(&repo_root));
 
     let ended_at = if ended {
         Value::String(chrono::Utc::now().to_rfc3339())
@@ -442,9 +444,9 @@ async fn push_status(
         .build()
         .map_err(|e| format!("client build: {e}"))?;
     let url = format!("{origin}/api/v1/sync/sessions");
-    let resp = client
-        .post(&url)
+    let resp = with_org(client.post(&url), Path::new(&repo_root))
         .bearer_auth(&token)
+        .org_scoped()
         .json(&body)
         .send()
         .await
@@ -489,8 +491,9 @@ async fn pull_intents_inner(repo_root: &Path, limit: usize) -> Result<Vec<Value>
         None => return Ok(Vec::new()),
     };
     let origin = cloud_origin(&creds);
-    // Only a GitHub-tracked repo has a cloud counterpart to match; a local-only
-    // project has no server rows, so skip rather than pull the whole org.
+    // Only a repo with a hosted remote has a cloud counterpart to match; a
+    // local-only project has no server rows, so skip rather than pull the
+    // whole org.
     let repo_full_name = match resolve_repo_full_name(repo_root) {
         Some(n) => n,
         None => return Ok(Vec::new()),
@@ -504,9 +507,9 @@ async fn pull_intents_inner(repo_root: &Path, limit: usize) -> Result<Vec<Value>
         .timeout(std::time::Duration::from_secs(8))
         .build()
         .map_err(|e| format!("client build: {e}"))?;
-    let resp = client
-        .get(&url)
+    let resp = with_org(client.get(&url), repo_root)
         .bearer_auth(&token)
+        .org_scoped()
         .send()
         .await
         .map_err(|e| format!("GET {url}: {e}"))?;
@@ -552,6 +555,39 @@ pub(crate) fn read_credentials() -> Result<serde_json::Map<String, Value>, Strin
     }
 }
 
+/// Where the credentials file is, creating `~/.aura` if this is the first
+/// thing to write into it.
+pub(crate) fn credentials_path() -> Result<PathBuf, String> {
+    let dir = aura_dir()?;
+    if !dir.exists() {
+        std::fs::create_dir_all(&dir).map_err(|e| format!("create {}: {e}", dir.display()))?;
+    }
+    Ok(dir.join("credentials.json"))
+}
+
+/// Write the credentials file back, `0600`.
+///
+/// Lives beside `read_credentials` rather than in whichever command happened to
+/// need it first: sign-in, sign-out and the org switch all rewrite this one
+/// file, and three copies of "serialise, write, chmod" is three places for the
+/// mode bit to go missing. It holds a bearer token; it is not group-readable.
+pub(crate) fn write_credentials(map: &serde_json::Map<String, Value>) -> Result<(), String> {
+    let path = credentials_path()?;
+    let pretty =
+        serde_json::to_string_pretty(map).map_err(|e| format!("serialize credentials.json: {e}"))?;
+    std::fs::write(&path, pretty).map_err(|e| format!("write {}: {e}", path.display()))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if let Ok(meta) = std::fs::metadata(&path) {
+            let mut perms = meta.permissions();
+            perms.set_mode(0o600);
+            let _ = std::fs::set_permissions(&path, perms);
+        }
+    }
+    Ok(())
+}
+
 pub(crate) fn cloud_token(map: &serde_json::Map<String, Value>) -> Option<String> {
     map.get("cloud_api_token")
         .and_then(|v| v.as_str())
@@ -568,44 +604,52 @@ pub(crate) fn cloud_origin(map: &serde_json::Map<String, Value>) -> String {
         .to_string()
 }
 
-/// Find the `origin` remote URL in `<repo_root>/.git/config` and reduce
-/// it to `owner/repo`. Returns `None` for non-GitHub remotes or repos
-/// that haven't been cloned (no .git/config) — the caller treats those
-/// as "not cloud-trackable" and silently skips.
+/// The canonical name of the repo hosted at `repo_root`, or `None` when the
+/// project has no remote at all — callers treat that as "no cloud counterpart
+/// to match against" and silently skip.
+///
+/// GitHub, GitLab, Bitbucket and self-hosted remotes all resolve here; the
+/// rule itself lives in [`crate::repo_identity`] so the shell, the Tasks panel
+/// and the cloud all name a repo the same way. Kept as a thin alias because a
+/// handful of call sites read better asking for "the repo's full name".
 pub(crate) fn resolve_repo_full_name(repo_root: &Path) -> Option<String> {
-    let cfg = std::fs::read_to_string(repo_root.join(".git").join("config")).ok()?;
-    let mut in_origin = false;
-    for line in cfg.lines() {
-        let line = line.trim();
-        if line.starts_with('[') {
-            in_origin = line == "[remote \"origin\"]";
-            continue;
-        }
-        if !in_origin {
-            continue;
-        }
-        if let Some(url) = line.strip_prefix("url = ").or_else(|| line.strip_prefix("url=")) {
-            return github_full_name(url.trim());
-        }
-    }
-    None
+    crate::repo_identity::remote_slug_for_repo(repo_root)
 }
 
-/// Synthesise a `<scope>/<name>` for a repo without a GitHub remote.
-/// Uses `local/` so it's clearly distinguishable from real GitHub repos
-/// in the dashboard, and the directory basename so two local projects
-/// don't collide. Falls back to "unknown" if the path has no final
-/// component (shouldn't happen — repo_root is always an absolute path).
+/// A stable `local/<name>-<id>` for a repo with no remote. Distinct per
+/// project folder, so two checkouts sharing a basename are two repos rather
+/// than one silently merged row. See [`crate::repo_identity`].
 pub(crate) fn local_fallback_full_name(repo_root: &Path) -> String {
-    let name = repo_root
-        .file_name()
-        .and_then(|s| s.to_str())
-        .filter(|s| !s.is_empty())
-        .unwrap_or("unknown");
-    format!("local/{name}")
+    crate::repo_identity::local_project_slug(repo_root)
 }
 
-fn github_full_name(url: &str) -> Option<String> {
+/// The `X-Aura-Org` value for a project that has been explicitly bound to an
+/// org, so the cloud files its rows where the user chose rather than in
+/// whichever org happens to sort first. `None` for an unbound project — the
+/// server then keeps its previous default-org behaviour.
+pub(crate) fn org_header(repo_root: &Path) -> Option<String> {
+    crate::repo_identity::bound_org(repo_root)
+}
+
+/// Attach the project's org binding to a request, when it has one.
+pub(crate) fn with_org(
+    req: reqwest::RequestBuilder,
+    repo_root: &Path,
+) -> reqwest::RequestBuilder {
+    match org_header(repo_root) {
+        Some(org) => req.header(crate::repo_identity::ORG_HEADER, org),
+        None => req,
+    }
+}
+
+/// `owner/repo` from a remote URL, in every spelling git emits.
+///
+/// Shared rather than copied: [`resolve_repo_full_name`] reads the URL out of a
+/// checkout's `.git/config` on this disk, and
+/// [`crate::manager::brain::place_projects`] gets one back off a box in a
+/// listing — same string, same question, and two parsers would eventually
+/// disagree about which org a project belongs to.
+pub(crate) fn repo_full_name_of_url(url: &str) -> Option<String> {
     // Accept https://github.com/owner/repo(.git), git@github.com:owner/repo(.git),
     // and ssh://git@github.com/owner/repo(.git).
     let stripped = url
@@ -625,13 +669,13 @@ fn github_full_name(url: &str) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::github_full_name;
+    use super::repo_full_name_of_url;
 
     #[test]
     fn parses_common_remote_url_shapes() {
-        assert_eq!(github_full_name("https://github.com/MHASK/aura-sovereign.git").as_deref(), Some("MHASK/aura-sovereign"));
-        assert_eq!(github_full_name("git@github.com:MHASK/aura-sovereign.git").as_deref(), Some("MHASK/aura-sovereign"));
-        assert_eq!(github_full_name("ssh://git@github.com/foo/bar").as_deref(), Some("foo/bar"));
-        assert_eq!(github_full_name("https://gitlab.com/foo/bar"), None);
+        assert_eq!(repo_full_name_of_url("https://github.com/MHASK/aura-sovereign.git").as_deref(), Some("MHASK/aura-sovereign"));
+        assert_eq!(repo_full_name_of_url("git@github.com:MHASK/aura-sovereign.git").as_deref(), Some("MHASK/aura-sovereign"));
+        assert_eq!(repo_full_name_of_url("ssh://git@github.com/foo/bar").as_deref(), Some("foo/bar"));
+        assert_eq!(repo_full_name_of_url("https://gitlab.com/foo/bar"), None);
     }
 }

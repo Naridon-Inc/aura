@@ -10,18 +10,12 @@
 // message that we treat as a silent no-op.
 
 import { useEffect, useRef, useState } from "react";
-import { api } from "../lib/api";
+import { api, type AuraCliCheck } from "../lib/api";
 import { AsciiSpinner } from "./ui/ascii-spinner";
 import { ToastActionButton, ToastCard, ToastStack, type ToastTone } from "./ui/toast";
 
-/** What the version check / install returns. Mirrors the Rust struct. */
-type CliCheck = {
-  installed: string | null;
-  expected: string;
-  path: string | null;
-  status: "ok" | "outdated" | "missing" | "unknown";
-  raw: string | null;
-};
+/** What the version check / install returns. */
+type CliCheck = AuraCliCheck;
 
 /** Toast phases. `null` renders nothing — the common case. */
 type Phase =
@@ -39,8 +33,12 @@ function isNoBundleError(err: unknown): boolean {
 
 /** The silent auto-install refused to touch a root-owned install dir
  *  (e.g. /usr/local/bin) — the backend marks that case so we can offer an
- *  explicit Authorize button instead of failing mutely. */
-function isNeedsAuthError(err: unknown): boolean {
+ *  explicit Authorize button instead of failing mutely.
+ *
+ *  Exported because the "Aura off" strip now offers the same update, and two
+ *  surfaces reading the same sentinel two different ways is how one of them
+ *  ends up reporting a password prompt as a hard failure. */
+export function isNeedsAuthError(err: unknown): boolean {
   return String(err).toLowerCase().includes("needs authorization");
 }
 
@@ -161,6 +159,13 @@ export function CliUpdateToast({
       }
       if (!live() || check.status === "ok" || check.status === "unknown") {
         // "unknown" means a binary exists but didn't parse — don't clobber it.
+        //
+        // "ok" now includes the case where an older `aura` sits ahead on PATH
+        // (`check.shadowing`) and the app is stepping over it. Deliberately
+        // silent: nothing is broken for the app, and replacing that copy means
+        // a macOS admin-password prompt. Asking for one unprompted at launch,
+        // to fix something that isn't stopping anything, is the nag this
+        // toast exists to avoid. The footer chip carries it instead.
         return;
       }
       targetRef.current = check.expected;
@@ -200,7 +205,7 @@ export function CliUpdateToast({
           setPhase({
             kind: "failed",
             message:
-              "Aura CLI update is taking longer than expected — it may still finish in the background.",
+              "Aura CLI update is taking longer than expected. It may still finish in the background.",
           });
           return;
         }
@@ -297,10 +302,10 @@ export function CliUpdateToast({
       {phase.kind === "updating" && (
         <ToastCard
           tone={tone}
-          icon={<AsciiSpinner className="mt-px shrink-0 text-[12px] leading-none" />}
+          icon={<AsciiSpinner className="mt-px shrink-0 text-sm leading-none" />}
           title={`Updating the Aura command line tool to ${phase.to}…`}
           onDismiss={dismiss}
-          dismissTitle="Dismiss — the update keeps running in the background"
+          dismissTitle="Dismiss. The update keeps running in the background"
         />
       )}
       {phase.kind === "done" && (

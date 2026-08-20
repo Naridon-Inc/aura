@@ -25,9 +25,12 @@ import {
   type IntentChangesetFile,
 } from "../../lib/api";
 import { useEditorStore } from "../../lib/editorStore";
+import { resumeCwdOf } from "../../lib/agentSessionScope";
 import { Button } from "../ui/button";
 import { Checkbox } from "../ui/checkbox";
 import { Popover, PopoverTrigger, PopoverContent } from "../ui/popover";
+import { goToTrace } from "../trace/traceRoute";
+import { basename } from "../../lib/paths";
 
 // Resume spawns a *live* billed agent, so the first time round we explain
 // what it does and confirm before launching — "don't just do it". A user who
@@ -60,12 +63,6 @@ function sessionCommit(files: IntentChangesetFile[]): string | null {
   }
   return null;
 }
-
-function basename(p: string): string {
-  const i = p.lastIndexOf("/");
-  return i >= 0 ? p.slice(i + 1) : p;
-}
-
 /** Absolute path for a repo-relative changeset path. The Time machine's
  *  snapshot matcher keys on the absolute file, mirroring the symbol
  *  right-click menu's contract. */
@@ -137,7 +134,7 @@ function ChangeTag({ change }: { change: string }) {
   const label =
     change === "added" ? "added" : change === "deleted" ? "removed" : "changed";
   return (
-    <span className={`ml-auto shrink-0 text-[9.5px] uppercase tracking-wide ${tone}`}>
+    <span className={`ml-auto shrink-0 text-2xs ${tone}`}>
       {label}
     </span>
   );
@@ -156,7 +153,7 @@ function RewindRow({
     <button
       type="button"
       onClick={onClick}
-      className={`flex w-full items-center gap-2 rounded-md py-1.5 pr-2 text-left text-[12px] text-text-2 transition-colors hover:bg-bg-2 hover:text-text-1 ${
+      className={`flex w-full items-center gap-2 rounded-md py-1.5 pr-2 text-left text-sm text-text-2 transition-colors hover:bg-state-hover hover:text-text-1 ${
         indent ? "pl-5" : "pl-2.5"
       }`}
     >
@@ -215,8 +212,7 @@ export function SessionActions({
   // spawn from the session's own cwd — which may be a sibling worktree on a
   // different branch than the workspace the user is currently looking at.
   // That divergence is the load-bearing thing to confirm before launching.
-  const spawnRoot =
-    sess?.cwd && sess.cwd.length > 0 ? sess.cwd : repoRoot;
+  const spawnRoot = sess ? resumeCwdOf(sess, repoRoot) : repoRoot;
   const divergentRoot =
     spawnRoot.replace(/\/$/, "") !== repoRoot.replace(/\/$/, "");
 
@@ -290,10 +286,11 @@ export function SessionActions({
   /** Route to the visual Rewind tool, scoped to one symbol (surgical) or one
    *  whole file. Non-destructive: the tool previews + confirms before it runs. */
   function rewind(identifier: string | null, abs: string) {
-    store.openTraceTool(
-      "rewind",
-      identifier ? { identifier, file: abs } : { file: abs },
-    );
+    goToTrace({
+      kind: "tool",
+      tool: "rewind",
+      arg: identifier ? { identifier, file: abs } : { file: abs },
+    });
     onDismiss();
   }
 
@@ -317,7 +314,7 @@ export function SessionActions({
     <div className="flex items-center gap-2">
       {error ? (
         <span
-          className="max-w-[180px] truncate text-[11px] text-red"
+          className="max-w-[180px] truncate text-xs text-red"
           title={error}
         >
           {error}
@@ -370,19 +367,19 @@ export function SessionActions({
             className="w-[340px] border-line bg-bg-content p-0 text-text-1 shadow-[var(--shadow-modal)]"
           >
             <div className="border-b border-line-soft px-3.5 pb-2.5 pt-3">
-              <div className="text-[12px] font-medium text-text-1">
+              <div className="text-sm font-medium text-text-1">
                 Resume this conversation
               </div>
-              <p className="mt-1 text-[11px] leading-relaxed text-text-4">
+              <p className="mt-1 text-xs leading-relaxed text-text-4">
                 Aura launches a{" "}
                 <span className="text-text-2">live Claude session</span> that
-                picks up this exact conversation where it left off — a real
+                picks up this exact conversation where it left off. A real
                 running agent that uses tokens. It opens as a new terminal tab
                 and you&apos;ll land on it.
               </p>
             </div>
 
-            <div className="px-3.5 py-2.5 text-[11px] leading-relaxed">
+            <div className="px-3.5 py-2.5 text-xs leading-relaxed">
               {/* Which run — so the user confirms it's the one they meant. */}
               <div className="flex items-center gap-1.5 text-text-4">
                 <span className="tabular-nums text-text-3">
@@ -410,15 +407,15 @@ export function SessionActions({
                 </span>
               </div>
               {divergentRoot ? (
-                <p className="mt-1.5 rounded-[var(--radius-sm)] border border-amber-500/30 bg-amber-500/10 px-2 py-1.5 text-[10.5px] leading-relaxed text-amber-300">
+                <p className="mt-1.5 rounded-[var(--radius-sm)] border border-amber-500/30 bg-amber-500/10 px-2 py-1.5 text-xs leading-relaxed text-amber-300">
                   This conversation ran in a different workspace than the one
-                  you&apos;re in now — resuming launches Claude there, not here.
+                  you&apos;re in now. Resuming launches Claude there, not here.
                 </p>
               ) : null}
             </div>
 
             <div className="flex items-center gap-2 border-t border-line-soft px-3.5 py-2.5">
-              <label className="mr-auto flex cursor-pointer select-none items-center gap-1.5 text-[11px] text-text-4">
+              <label className="mr-auto flex cursor-pointer select-none items-center gap-1.5 text-xs text-text-4">
                 <Checkbox
                   checked={dontAskResume}
                   onCheckedChange={(v) => setDontAskResume(v === true)}
@@ -459,11 +456,11 @@ export function SessionActions({
             className="w-[340px] border-line bg-bg-content p-0 text-text-1 shadow-[var(--shadow-modal)]"
           >
             <div className="border-b border-line-soft px-3.5 pb-2.5 pt-3">
-              <div className="text-[12px] font-medium text-text-1">
+              <div className="text-sm font-medium text-text-1">
                 Rewind one piece
               </div>
-              <p className="mt-0.5 text-[11px] leading-relaxed text-text-4">
-                Revert a single function or file to its last safe version —
+              <p className="mt-0.5 text-xs leading-relaxed text-text-4">
+                Revert a single function or file to its last safe version. 
                 everything else this session changed stays exactly as it is.
                 Aura snapshots first, so it&apos;s itself undoable.
               </p>
@@ -476,13 +473,13 @@ export function SessionActions({
                       functions. */}
                   <RewindRow onClick={() => rewind(null, t.abs)}>
                     <span
-                      className="truncate font-mono text-[11px] text-text-3"
+                      className="truncate font-mono text-xs text-text-3"
                       title={t.path}
                     >
                       {t.path}
                     </span>
                     {t.symbols.length === 0 ? (
-                      <span className="ml-auto shrink-0 text-[9.5px] uppercase tracking-wide text-text-5">
+                      <span className="section-label ml-auto shrink-0">
                         whole file
                       </span>
                     ) : null}
@@ -494,7 +491,7 @@ export function SessionActions({
                       onClick={() => rewind(s.identifier, t.abs)}
                     >
                       <RewindGlyph />
-                      <span className="truncate font-mono text-[12px] text-text-1">
+                      <span className="truncate font-mono text-sm text-text-1">
                         {s.identifier}
                       </span>
                       <ChangeTag change={s.change} />
@@ -503,8 +500,8 @@ export function SessionActions({
                 </div>
               ))}
               {fnCount === 0 ? (
-                <p className="px-2.5 py-1 text-[10.5px] leading-relaxed text-text-5">
-                  No resolved function map for this run — rewind by file above,
+                <p className="px-2.5 py-1 text-xs leading-relaxed text-text-5">
+                  No resolved function map for this run. Rewind by file above,
                   then pick the symbol in the next step.
                 </p>
               ) : null}
@@ -515,7 +512,7 @@ export function SessionActions({
               <div className="border-t border-line-soft px-3 py-2.5">
                 {confirmCheckout ? (
                   <div className="flex flex-col gap-2">
-                    <span className="text-[11px] leading-relaxed text-text-3">
+                    <span className="text-xs leading-relaxed text-text-3">
                       Move your whole project back to{" "}
                       <span className="font-mono text-text-2">{shortSha}</span>?
                       This also undoes unrelated work and leaves you off any branch.
@@ -543,10 +540,10 @@ export function SessionActions({
                   <button
                     type="button"
                     onClick={() => setConfirmCheckout(true)}
-                    className="flex w-full items-center gap-1.5 text-left text-[11px] text-text-4 transition-colors hover:text-text-2"
+                    className="flex w-full items-center gap-1.5 text-left text-xs text-text-4 transition-colors hover:text-text-2"
                   >
                     <span>Restore everything to this point</span>
-                    <span className="ml-auto shrink-0 text-[9.5px] uppercase tracking-wide text-amber">
+                    <span className="ml-auto shrink-0 text-2xs text-amber">
                       risky
                     </span>
                   </button>

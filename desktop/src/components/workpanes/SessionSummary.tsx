@@ -16,6 +16,7 @@
 
 import type { ReactNode } from "react";
 import type { IntentRow, IntentChangesetFile } from "../../lib/api";
+import type { IntentProvenance } from "../../lib/sessionMeta";
 import { IntentProse } from "./IntentProse";
 import { SessionGoals } from "../goals/SessionGoals";
 import { LockGlyph, UnlockGlyph, TrustBadge, shortBlockId } from "./SessionAttestation";
@@ -23,7 +24,7 @@ import { Button } from "../ui/button";
 
 function SectionLabel({ children }: { children: ReactNode }) {
   return (
-    <h2 className="text-[11px] font-medium uppercase tracking-wider text-text-3">
+    <h2 className="section-label">
       {children}
     </h2>
   );
@@ -34,10 +35,10 @@ function SectionLabel({ children }: { children: ReactNode }) {
 function MetaRow({ label, children }: { label: string; children: ReactNode }) {
   return (
     <div className="flex items-start gap-3 border-b border-line-soft px-3.5 py-2.5 last:border-b-0">
-      <span className="w-[84px] shrink-0 pt-px text-[11px] uppercase tracking-wide text-text-3">
+      <span className="section-label w-[84px] shrink-0 pt-px">
         {label}
       </span>
-      <span className="min-w-0 flex-1 text-[13px] leading-relaxed text-text-1">
+      <span className="min-w-0 flex-1 text-base leading-relaxed text-text-1">
         {children}
       </span>
     </div>
@@ -100,15 +101,15 @@ function FileRow({
       type="button"
       onClick={() => onOpen(p)}
       title={`Open ${p} in Changes`}
-      className="group flex w-full items-center gap-2.5 border-b border-line-soft px-3.5 py-2.5 text-left transition-colors last:border-b-0 hover:bg-bg-2/60"
+      className="group flex w-full items-center gap-2.5 border-b border-line-soft px-3.5 py-2.5 text-left transition-colors last:border-b-0 hover:bg-state-hover"
     >
       <FileIcon />
-      <span className="min-w-0 flex-1 truncate font-mono text-[12.5px]">
+      <span className="min-w-0 flex-1 truncate font-mono text-base">
         {dir ? <span className="text-text-4">{dir}</span> : null}
         <span className="text-text-1">{name}</span>
       </span>
       {adds || dels ? (
-        <span className="shrink-0 font-mono text-[11px] tabular-nums">
+        <span className="shrink-0 font-mono text-xs tabular-nums">
           {adds ? <span className="text-accent-green">+{adds}</span> : null}
           {adds && dels ? <span className="text-text-4"> </span> : null}
           {dels ? <span className="text-text-3">−{dels}</span> : null}
@@ -124,7 +125,13 @@ function FileRow({
  *  what the AI changed and why and locked that record — so the story below
  *  can't have been quietly edited afterward. Deliberately plain: no
  *  "signature", "ed25519", or "block" here; the full proof lives one tab over. */
-function GenuineRecordSeal({ row }: { row: IntentRow }) {
+function GenuineRecordSeal({
+  row,
+  provenance,
+}: {
+  row: IntentRow;
+  provenance: IntentProvenance;
+}) {
   const signed = !!row.signed_block_id;
   if (!signed) {
     return (
@@ -133,8 +140,8 @@ function GenuineRecordSeal({ row }: { row: IntentRow }) {
           <UnlockGlyph />
         </span>
         <div className="min-w-0 flex-1">
-          <span className="text-[13px] font-medium text-text-2">Not sealed</span>
-          <p className="mt-0.5 text-[12px] leading-relaxed text-text-3">
+          <span className="text-base font-medium text-text-2">Not sealed</span>
+          <p className="mt-0.5 text-sm leading-relaxed text-text-3">
             This change wasn't locked with a tamper-proof seal, so Aura can't
             promise the record below is exactly as it happened.
           </p>
@@ -156,12 +163,19 @@ function GenuineRecordSeal({ row }: { row: IntentRow }) {
       </span>
       <div className="min-w-0 flex-1">
         <div className="flex flex-wrap items-center gap-2">
-          <span className="text-[13px] font-medium text-text-1">Genuine record</span>
+          <span className="text-base font-medium text-text-1">Genuine record</span>
           <TrustBadge ok label="Sealed" tone="green" />
         </div>
-        <p className="mt-0.5 text-[12px] leading-relaxed text-text-3">
-          Aura locked exactly what the AI changed and why. Nothing in this
-          record has been altered since.
+        {/* "locked exactly what the AI changed and why" was true of the change
+            and only sometimes true of the why. The seal is tamper-evidence: it
+            proves nothing here moved after the fact. It cannot make a sentence
+            Aura's own model wrote from the diff into a reason somebody gave,
+            and stating it in one breath is what turned the weakest row in the
+            log into the most reassuring thing on the page. */}
+        <p className="mt-0.5 text-sm leading-relaxed text-text-3">
+          {provenance === "stated"
+            ? "Aura locked exactly what the AI changed and why. Nothing in this record has been altered since."
+            : "Aura locked exactly what the AI changed. Nothing in this record has been altered since, but the “why” below wasn’t stated by whoever made the change."}
         </p>
       </div>
     </div>
@@ -208,10 +222,10 @@ function BlockedReport({
             <ShieldStop />
           </span>
           <div className="min-w-0 flex-1">
-            <span className="text-[13px] font-medium text-red">
-              Blocked — this change never landed
+            <span className="text-base font-medium text-red">
+              Blocked. This change never landed
             </span>
-            <p className="mt-0.5 text-[12px] leading-relaxed text-text-2">
+            <p className="mt-0.5 text-sm leading-relaxed text-text-2">
               Aura stopped the commit before it reached your history. Your code
               was left exactly as it was.
             </p>
@@ -224,7 +238,7 @@ function BlockedReport({
             <div className="mb-2.5">
               <SectionLabel>Why Aura stopped it</SectionLabel>
             </div>
-            <p className="text-[13.5px] leading-relaxed text-text-1">{bodyText}</p>
+            <p className="text-md leading-relaxed text-text-1">{bodyText}</p>
           </section>
         ) : null}
 
@@ -238,7 +252,7 @@ function BlockedReport({
               {whenAbsolute} <span className="text-text-3">({rel})</span>
             </MetaRow>
             <MetaRow label="Outcome">
-              <span className="text-text-2">Commit halted — no code was changed.</span>
+              <span className="text-text-2">Commit halted. No code was changed.</span>
             </MetaRow>
           </div>
         </section>
@@ -254,6 +268,8 @@ export function SessionSummary({
   symbols,
   bodyText,
   bodyLabel,
+  bodyNote,
+  provenance,
   whenAbsolute,
   rel,
   onOpenFile,
@@ -266,8 +282,13 @@ export function SessionSummary({
   symbols: string[];
   /** The intent/prompt body (elaboration after the header headline). */
   bodyText: string;
-  /** "Prompt" when correlated to a real session, else "Reason". */
+  /** Heading over the body — what this text actually is. See
+   *  `provenanceLabel`: "Reason" only when somebody stated one. */
   bodyLabel: string;
+  /** One line under the body naming who wrote it; empty for a stated reason. */
+  bodyNote: string;
+  /** Where the body came from, so the seal doesn't claim more than it holds. */
+  provenance: IntentProvenance;
   whenAbsolute: string;
   rel: string;
   /** Jump to Changes; with a path, open that file directly. */
@@ -291,7 +312,7 @@ export function SessionSummary({
       <div className="mx-auto flex max-w-[720px] flex-col gap-5 px-4 py-4">
         {/* 0 · Trust floor — is this record genuine? Woven in at the top so it
             frames the whole story, not buried in a separate verification tab. */}
-        <GenuineRecordSeal row={row} />
+        <GenuineRecordSeal row={row} provenance={provenance} />
 
         {/* 1 · What happened — plain-language body with live entities. */}
         {bodyText ? (
@@ -305,6 +326,16 @@ export function SessionSummary({
               symbols={symbols}
               onOpenFile={onOpenFile}
             />
+            {/* Who wrote the sentence above. Absent for a stated reason —
+                that's the ordinary case. Present when the words came from
+                somewhere the heading alone doesn't make obvious, which until
+                now was every case: a prompt, a model's read of the diff and a
+                genuine logged reason all appeared here as "Reason". */}
+            {bodyNote ? (
+              <p className="mt-2 text-sm leading-relaxed text-text-4">
+                {bodyNote}
+              </p>
+            ) : null}
           </section>
         ) : null}
 
@@ -321,7 +352,7 @@ export function SessionSummary({
                 size="xs"
                 type="button"
                 onClick={() => onOpenFile()}
-                className="px-0 text-[11px] text-accent"
+                className="px-0 text-xs text-accent"
               >
                 Open in Changes →
               </Button>
@@ -357,9 +388,9 @@ export function SessionSummary({
               {signed ? (
                 <span className="flex flex-wrap items-center gap-x-1.5 gap-y-1">
                   <span className="text-text-2">
-                    Sealed — the full proof is on the Genuine record tab.
+                    Sealed. The full proof is on the Genuine record tab.
                   </span>
-                  <span className="font-mono text-[11px] text-text-4">
+                  <span className="font-mono text-xs text-text-4">
                     {shortBlockId(row.signed_block_id ?? "")}
                   </span>
                 </span>

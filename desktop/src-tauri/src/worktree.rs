@@ -378,7 +378,10 @@ pub async fn worktree_resolve_ref(
     repo_root: String,
     raw: String,
 ) -> Result<ResolvedRef, String> {
-    resolve_start_point(&repo_root, &raw)
+    crate::blocking::run(move || {
+        resolve_start_point(&repo_root, &raw)
+    })
+    .await
 }
 
 #[tauri::command]
@@ -387,8 +390,11 @@ pub async fn worktree_create_managed(
     branch: String,
     start_raw: String,
 ) -> Result<ManagedWorktree, String> {
-    let start = resolve_start_point(&repo_root, &start_raw)?;
-    create_managed_worktree(&repo_root, &branch, &start)
+    crate::blocking::run(move || {
+        let start = resolve_start_point(&repo_root, &start_raw)?;
+        create_managed_worktree(&repo_root, &branch, &start)
+    })
+    .await
 }
 
 #[tauri::command]
@@ -396,7 +402,10 @@ pub async fn worktree_remove_managed(
     repo_root: String,
     worktree_path: String,
 ) -> Result<(), String> {
-    remove_managed_worktree(&repo_root, &worktree_path)
+    crate::blocking::run(move || {
+        remove_managed_worktree(&repo_root, &worktree_path)
+    })
+    .await
 }
 
 #[tauri::command]

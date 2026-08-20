@@ -42,7 +42,7 @@ export function FiltersPanel({
   return (
     <div className="flex flex-col gap-4 px-3 py-3">
       <div>
-        <div className="mb-1.5 text-[10.5px] uppercase tracking-wide text-text-4">
+        <div className="section-label mb-1.5">
           Filters
         </div>
         <div className="flex flex-col">
@@ -124,7 +124,7 @@ export function FiltersPanel({
       </div>
 
       <div>
-        <div className="mb-1.5 text-[10.5px] uppercase tracking-wide text-text-4">
+        <div className="section-label mb-1.5">
           View
         </div>
         <div className="flex flex-col gap-0.5">
@@ -150,7 +150,7 @@ export function FiltersPanel({
           <button
             type="button"
             onClick={onJumpLatest}
-            className="mt-1 flex items-center gap-2 rounded px-1.5 py-1 text-left text-[12px] text-text-2 hover:bg-bg-2 hover:text-text-1"
+            className="mt-1 flex items-center gap-2 rounded px-1.5 py-1 text-left text-sm text-text-2 hover:bg-state-hover hover:text-text-1"
           >
             <span className="flex h-3.5 w-3.5 items-center justify-center text-text-4">
               <DownGlyph />
@@ -185,7 +185,7 @@ function FilterRow({
       onClick={disabled ? undefined : onClick}
       className={
         "flex items-center gap-2 rounded px-1.5 py-1 text-left " +
-        (disabled ? "cursor-default opacity-40 " : "hover:bg-bg-2 ") +
+        (disabled ? "cursor-default opacity-40 " : "hover:bg-state-hover ") +
         (className ?? "")
       }
     >
@@ -195,13 +195,13 @@ function FilterRow({
       </span>
       <span
         className={
-          "min-w-0 flex-1 truncate text-[12.5px] " +
+          "min-w-0 flex-1 truncate text-base " +
           (checked && !disabled ? "text-text-1" : "text-text-3")
         }
       >
         {label}
       </span>
-      <span className="shrink-0 font-mono text-[11px] tabular-nums text-text-4">
+      <span className="shrink-0 font-mono text-xs tabular-nums text-text-4">
         {count}
       </span>
     </button>
@@ -228,7 +228,7 @@ function ToolChildRow({
       onClick={disabled ? undefined : onClick}
       className={
         "flex items-center gap-2 rounded px-1.5 py-1 text-left " +
-        (disabled ? "cursor-default opacity-40" : "hover:bg-bg-2")
+        (disabled ? "cursor-default opacity-40" : "hover:bg-state-hover")
       }
     >
       <Checkbox checked={checked && !disabled} />
@@ -239,13 +239,13 @@ function ToolChildRow({
       />
       <span
         className={
-          "min-w-0 flex-1 truncate text-[12px] " +
+          "min-w-0 flex-1 truncate text-sm " +
           (checked && !disabled ? "text-text-2" : "text-text-3")
         }
       >
         {label}
       </span>
-      <span className="shrink-0 font-mono text-[11px] tabular-nums text-text-4">
+      <span className="shrink-0 font-mono text-xs tabular-nums text-text-4">
         {count}
       </span>
     </button>
@@ -269,7 +269,7 @@ function ToggleRow({
     <button
       type="button"
       onClick={onClick}
-      className="flex items-center gap-2 rounded px-1.5 py-1 text-left hover:bg-bg-2"
+      className="flex items-center gap-2 rounded px-1.5 py-1 text-left hover:bg-state-hover"
     >
       <Checkbox checked={checked} />
       <span className="flex h-3.5 w-3.5 items-center justify-center text-text-4">
@@ -277,14 +277,14 @@ function ToggleRow({
       </span>
       <span
         className={
-          "min-w-0 flex-1 truncate text-[12.5px] " +
+          "min-w-0 flex-1 truncate text-base " +
           (checked ? "text-text-1" : "text-text-3")
         }
       >
         {label}
       </span>
       {typeof count === "number" ? (
-        <span className="shrink-0 font-mono text-[11px] tabular-nums text-text-4">
+        <span className="shrink-0 font-mono text-xs tabular-nums text-text-4">
           {count}
         </span>
       ) : null}

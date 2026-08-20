@@ -49,14 +49,14 @@ export function ChannelCustomTab({
         <span className="text-text-4 flex-shrink-0">
           <Globe size={12} />
         </span>
-        <span className="text-[12px] text-text-1 font-medium flex-shrink-0">
+        <span className="text-sm text-text-1 font-medium flex-shrink-0">
           {tab.label}
         </span>
-        <span className="text-[11px] text-text-4 truncate min-w-0 flex-1">
+        <span className="text-xs text-text-4 truncate min-w-0 flex-1">
           {tab.url}
         </span>
         {removeErr && (
-          <span className="text-[10.5px] text-red truncate max-w-[200px]">
+          <span className="text-xs text-red truncate max-w-[200px]">
             {removeErr}
           </span>
         )}
@@ -65,7 +65,7 @@ export function ChannelCustomTab({
           size="xs"
           disabled={!safeUrl}
           onClick={() => safeUrl && void openUrl(safeUrl)}
-          className="gap-1 text-[11px] text-text-3 hover:text-text-1 flex-shrink-0"
+          className="gap-1 text-xs text-text-3 hover:text-text-1 flex-shrink-0"
           title="Open in your default browser"
         >
           <ExternalLink size={11} />
@@ -88,7 +88,7 @@ export function ChannelCustomTab({
                     }
                   })();
                 }}
-                className="text-[11px] text-red"
+                className="text-xs text-red"
               >
                 Remove for everyone
               </Button>
@@ -96,7 +96,7 @@ export function ChannelCustomTab({
                 variant="ghost"
                 size="xs"
                 onClick={() => setConfirming(false)}
-                className="text-[11px] text-text-3 hover:text-text-1"
+                className="text-xs text-text-3 hover:text-text-1"
               >
                 Keep
               </Button>
@@ -130,14 +130,14 @@ export function ChannelCustomTab({
           className="flex-1 min-h-0 w-full border-0 bg-white"
         />
       ) : (
-        <div className="flex-1 min-h-0 w-full flex items-center justify-center px-6 text-center text-[12px] text-text-4">
+        <div className="flex-1 min-h-0 w-full flex items-center justify-center px-6 text-center text-sm text-text-4">
           This tab points to an address Aura won't embed. Only http and https
           links can be shown here.
         </div>
       )}
 
-      <div className="flex-shrink-0 px-3 py-1 border-t border-line-soft bg-bg-content text-[10px] text-text-5 leading-snug">
-        Blank? The site likely refuses to be embedded — use “Open in
+      <div className="flex-shrink-0 px-3 py-1 border-t border-line-soft bg-bg-content text-2xs text-text-5 leading-snug">
+        Blank? The site likely refuses to be embedded. Use “Open in
         browser” above.
       </div>
     </div>

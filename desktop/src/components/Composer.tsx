@@ -40,6 +40,7 @@ import { api, type ImageAttachment, type SavedPrompt } from "../lib/api";
 import { AgentIcon, brandFor } from "./agent/AgentIcon";
 import { Input } from "./ui/input";
 import { AsciiSpinner } from "./ui/ascii-spinner";
+import { useDismiss } from "../lib/useDismiss";
 
 export type ComposerAttachment = ImageAttachment & {
   /** Stable id for keying the thumbnail strip + remove handler. */
@@ -536,7 +537,7 @@ export function Composer({
             }}
             onKeyDown={onKey}
             onPaste={onPaste}
-            className="w-full min-w-0 bg-transparent resize-none outline-none text-text-1 text-[13.5px] px-1 py-1.5 leading-relaxed placeholder:text-text-4"
+            className="w-full min-w-0 bg-transparent resize-none outline-none text-text-1 text-md px-1 py-1.5 leading-relaxed placeholder:text-text-4"
             style={{
               maxHeight: 240,
               overflowX: "hidden",
@@ -598,7 +599,7 @@ export function Composer({
           </div>
         </div>
 
-        <div className="flex items-center justify-end gap-2 mt-1.5 px-1 text-[10.5px] text-text-5">
+        <div className="flex items-center justify-end gap-2 mt-1.5 px-1 text-xs text-text-5">
           ↵ send {fanOut ? `→ ${Math.max(1, fanOutSet.size)} agents` : ""} · ⇧↵ newline
         </div>
       </div>
@@ -654,13 +655,13 @@ function IntentChip({
             }
           }}
           placeholder="What are you trying to do?"
-          className="flex-1 bg-transparent outline-none text-text-2 text-[11.5px] placeholder:text-text-4"
+          className="flex-1 bg-transparent outline-none text-text-2 text-sm placeholder:text-text-4"
         />
       ) : (
         <button
           type="button"
           onClick={onEdit}
-          className="text-[11.5px] text-text-4 hover:text-text-2 transition-colors"
+          className="text-sm text-text-4 hover:text-text-2 transition-colors"
         >
           What are you trying to do?
         </button>
@@ -729,7 +730,7 @@ function ShortcutPills({
             ? `Fan-out to ${fanOutSet.size} agent${fanOutSet.size === 1 ? "" : "s"}`
             : agent?.description
         }
-        className="inline-flex items-center gap-1.5 px-2 h-6 rounded-md text-[11px] transition-colors hover:opacity-90"
+        className="inline-flex items-center gap-1.5 px-2 h-6 rounded-md text-xs transition-colors hover:opacity-90"
         style={{
           background: modelStyle?.background ?? "var(--color-pill-bg)",
           color: modelStyle?.color ?? "var(--color-text-2)",
@@ -744,7 +745,7 @@ function ShortcutPills({
           </>
         ) : agent ? (
           <>
-            <AgentIcon agentId={agent.id} label={agent.label} active size={14} />
+            <AgentIcon agentId={agent.id} label={agent.label} size={14} />
             <span>{agent.label}</span>
             <span style={{ opacity: 0.55 }}>▾</span>
           </>
@@ -823,7 +824,7 @@ function PillButton({
       title={title}
       onClick={onClick}
       disabled={disabled}
-      className={`inline-flex items-center gap-1.5 h-6 px-2 rounded-md text-[11px] text-text-3 hover:text-text-1 transition-colors disabled:opacity-50 disabled:cursor-not-allowed ${className ?? ""}`}
+      className={`inline-flex items-center gap-1.5 h-6 px-2 rounded-md text-xs text-text-3 hover:text-text-1 transition-colors disabled:opacity-50 disabled:cursor-not-allowed ${className ?? ""}`}
       style={{
         background: "var(--color-pill-bg)",
         border: "1px solid var(--color-composer-border)",
@@ -858,7 +859,7 @@ function SavePromptPopover({
       aria-label="Save prompt"
     >
       <div className="flex items-center justify-between">
-        <div className="text-[11px] uppercase tracking-wider text-text-4">
+        <div className="section-label">
           Save prompt
           {pinnedAgent ? (
             <span className="ml-2 text-text-5 normal-case">pinned to {pinnedAgent}</span>
@@ -867,7 +868,7 @@ function SavePromptPopover({
         <button
           type="button"
           onClick={onCancel}
-          className="text-text-5 hover:text-text-2 text-[11px]"
+          className="text-text-5 hover:text-text-2 text-xs"
           title="Cancel (esc)"
         >
           ✕
@@ -882,7 +883,7 @@ function SavePromptPopover({
           if (e.key === "Enter" && name.trim()) onSave();
         }}
         placeholder="name (used as /p:name)"
-        className="text-[12px]"
+        className="text-sm"
       />
       <Input
         value={description}
@@ -892,13 +893,13 @@ function SavePromptPopover({
           if (e.key === "Enter" && name.trim()) onSave();
         }}
         placeholder="optional one-line description"
-        className="text-[11.5px]"
+        className="text-sm"
       />
       <div className="flex justify-end gap-2 mt-1">
         <button
           type="button"
           onClick={onCancel}
-          className="px-2 py-1 rounded-md text-[11px] text-text-3 hover:text-text-1"
+          className="px-2 py-1 rounded-md text-xs text-text-3 hover:text-text-1"
         >
           Cancel
         </button>
@@ -906,7 +907,7 @@ function SavePromptPopover({
           type="button"
           onClick={onSave}
           disabled={!name.trim()}
-          className="px-2 py-1 rounded-md text-[11px] bg-text-1 text-bg-deep disabled:bg-bg-hover disabled:text-text-4"
+          className="px-2 py-1 rounded-md text-xs bg-text-1 text-bg-deep disabled:bg-bg-hover disabled:text-text-4"
         >
           Save
         </button>
@@ -928,7 +929,7 @@ function SlashPalette({
 }) {
   return (
     <div className="absolute left-0 right-0 bottom-full mb-2 bg-bg-2 border border-line rounded-lg shadow-lg overflow-hidden">
-      <div className="px-3 py-1.5 text-[10.5px] uppercase tracking-wider text-text-4 border-b border-line-soft">
+      <div className="section-label px-3 py-1.5 border-b border-line-soft">
         Slash commands
       </div>
       <ul className="max-h-72 overflow-y-auto py-1">
@@ -940,17 +941,17 @@ function SlashPalette({
               onPick(i);
             }}
             onMouseEnter={() => onHover(i)}
-            className={`flex items-center gap-3 px-3 py-1.5 cursor-pointer text-[12.5px] ${
+            className={`flex items-center gap-3 px-3 py-1.5 cursor-pointer text-base ${
               i === activeIdx
                 ? "bg-bg-card text-text-1"
-                : "text-text-2 hover:bg-bg-hover"
+                : "text-text-2 hover:bg-state-hover"
             }`}
           >
             <span className="font-mono text-text-1" style={{ minWidth: 88 }}>
               {c.name}
             </span>
             <span className="text-text-3 truncate">{c.description}</span>
-            <span className="ml-auto text-[10px] text-text-5 uppercase">
+            <span className="section-label ml-auto">
               {c.kind}
             </span>
           </li>
@@ -979,22 +980,9 @@ function AgentPicker({
   onPick: (id: string) => void;
   onDismiss: () => void;
 }) {
-  // Click-outside dismiss without a listener library — one capture-phase
-  // mousedown on window is enough for this pop.
-  useEffect(() => {
-    function handler() {
-      onDismiss();
-    }
-    // Defer registration so the click that opened us doesn't immediately
-    // dismiss it.
-    const t = setTimeout(() => {
-      window.addEventListener("mousedown", handler);
-    }, 0);
-    return () => {
-      clearTimeout(t);
-      window.removeEventListener("mousedown", handler);
-    };
-  }, [onDismiss]);
+  // Any mousedown dismisses, including one landing inside: every row in here
+  // picks and closes anyway. Deferred so the click that opened it doesn't.
+  useDismiss(true, onDismiss, [], { defer: true });
 
   return (
     <div
@@ -1005,14 +993,14 @@ function AgentPicker({
       <button
         type="button"
         onClick={onToggleFanOut}
-        className="w-full flex items-center gap-2 px-3 py-2 text-[11px] uppercase tracking-wider border-b border-line-soft bg-bg-1 hover:bg-bg-hover text-text-3"
+        className="section-label w-full flex items-center gap-2 px-3 py-2 border-b border-line-soft bg-bg-1 hover:bg-state-hover"
       >
         <span
           className={`w-3 h-3 rounded-sm border ${
             fanOut ? "bg-accent border-accent" : "border-line"
           } flex-shrink-0`}
         />
-        <span>Fan out — same prompt to many</span>
+        <span>Fan out. Same prompt to many</span>
       </button>
       {agents.map((a) => {
         const checked = fanOutSet.has(a.id);
@@ -1038,11 +1026,11 @@ function AgentPicker({
             }}
             disabled={!a.available}
             style={rowStyle}
-            className={`w-full flex items-center gap-2.5 px-3 py-2 text-left text-[12px] ${
+            className={`w-full flex items-center gap-2.5 px-3 py-2 text-left text-sm ${
               isActive && !fanOut
                 ? "text-text-1"
                 : a.available
-                  ? "text-text-2 hover:bg-bg-hover"
+                  ? "text-text-2 hover:bg-state-hover"
                   : "text-text-5 cursor-not-allowed"
             }`}
           >
@@ -1056,12 +1044,7 @@ function AgentPicker({
                 }
               />
             )}
-            <AgentIcon
-              agentId={a.id}
-              label={a.label}
-              size={18}
-              active={isActive && !fanOut}
-            />
+            <AgentIcon agentId={a.id} label={a.label} size={18} />
             <span className="flex flex-col">
               <span
                 className={a.available ? "text-text-1" : "text-text-4"}
@@ -1069,7 +1052,7 @@ function AgentPicker({
               >
                 {a.label}
               </span>
-              <span className="text-text-4 text-[10.5px]">{a.description}</span>
+              <span className="text-text-4 text-xs">{a.description}</span>
             </span>
           </button>
         );
@@ -1120,7 +1103,7 @@ function AttachmentThumb({
         type="button"
         onClick={onRemove}
         title="Remove"
-        className="absolute top-0.5 right-0.5 w-4 h-4 rounded-full bg-bg-deep/80 text-text-1 text-[10px] leading-none flex items-center justify-center opacity-0 group-hover:opacity-100 focus-visible:opacity-100 transition-opacity focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-accent/50"
+        className="absolute top-0.5 right-0.5 w-4 h-4 rounded-full bg-bg-deep/80 text-text-1 text-2xs leading-none flex items-center justify-center opacity-0 group-hover:opacity-100 focus-visible:opacity-100 transition-opacity focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-accent/50"
       >
         ×
       </button>
@@ -1187,7 +1170,7 @@ function McpMentionPalette({
 }) {
   return (
     <div className="absolute left-0 right-0 bottom-full mb-2 bg-bg-2 border border-line rounded-lg shadow-lg overflow-hidden">
-      <div className="px-3 py-1.5 text-[10.5px] uppercase tracking-wider text-text-4 border-b border-line-soft">
+      <div className="section-label px-3 py-1.5 border-b border-line-soft">
         MCP tools
       </div>
       <ul className="max-h-72 overflow-y-auto py-1">
@@ -1199,17 +1182,17 @@ function McpMentionPalette({
               onPick(i);
             }}
             onMouseEnter={() => onHover(i)}
-            className={`flex items-center gap-3 px-3 py-1.5 cursor-pointer text-[12.5px] ${
+            className={`flex items-center gap-3 px-3 py-1.5 cursor-pointer text-base ${
               i === activeIdx
                 ? "bg-bg-card text-text-1"
-                : "text-text-2 hover:bg-bg-hover"
+                : "text-text-2 hover:bg-state-hover"
             }`}
           >
             <span className="font-mono text-text-1 truncate" style={{ minWidth: 180 }}>
               @{c.label}
             </span>
             <span className="text-text-3 truncate">{c.description}</span>
-            <span className="ml-auto text-[10px] text-text-5 uppercase">
+            <span className="section-label ml-auto">
               mcp
             </span>
           </li>

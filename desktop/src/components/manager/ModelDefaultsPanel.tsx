@@ -1,14 +1,15 @@
-// ModelDefaultsPanel — "Default model + Auto-routing" config, extracted from the
-// composer's old standalone DefaultModelPicker chip (#17). The composer used to
-// carry TWO look-alike "Auto" chips: the per-turn BrainPicker and this. They read
-// as duplicates, so this now lives *inside* the BrainPicker's model switcher (as
-// its footer) instead of as a second chip. Per-turn choices sit on top; these
-// global defaults collapse below.
+// ModelDefaultsPanel — the standing model config, extracted from the composer's
+// old standalone DefaultModelPicker chip (#17). The composer used to carry TWO
+// look-alike chips, both labelled "Auto": the per-turn BrainPicker and this.
+// They read as duplicates, so this now lives *inside* the BrainPicker's model
+// switcher (as its footer) instead of as a second chip, and no two controls in
+// this family share a name any more. Per-turn choices sit on top; these global
+// defaults collapse below.
 //
 // A settings-grade axis, distinct from the per-turn override beside it:
-//   - Default model — what NEW agent sessions start on.
-//   - Auto routing  — which concrete model "Auto" resolves to per task class
-//     (simple edit / chat / plan).
+//   - New sessions start on — the model a fresh agent session opens with.
+//   - When Aura picks per task — the concrete model each task class resolves
+//     to (simple edit / chat / plan) when that default is "Pick per task".
 // Reads/writes the same `useModelPrefs` store, so a change here is reflected
 // instantly everywhere the pref is consumed.
 
@@ -35,8 +36,8 @@ export function ModelDefaultsPanel({ defaultOpen = false }: { defaultOpen?: bool
   // Trim the vendor prefix so the summary stays compact ("Opus 4.7", not the
   // full "Claude Opus 4.7").
   const defaultLabel = isAuto
-    ? "Auto route"
-    : (activeOpt?.label ?? "Auto route").replace(/^Claude\s+/, "");
+    ? "Per task"
+    : (activeOpt?.label ?? "Per task").replace(/^Claude\s+/, "");
 
   return (
     <div
@@ -54,7 +55,7 @@ export function ModelDefaultsPanel({ defaultOpen = false }: { defaultOpen?: bool
       <button
         type="button"
         onClick={() => setOpen((v) => !v)}
-        className="w-full flex items-center gap-2 px-3 py-2 text-left text-[11.5px] text-text-3 hover:bg-bg-2 transition-colors"
+        className="w-full flex items-center gap-2 px-3 py-2 text-left text-sm text-text-3 hover:bg-state-hover transition-colors"
         aria-expanded={open}
       >
         <svg width="13" height="13" viewBox="0 0 16 16" fill="none" aria-hidden className="shrink-0">
@@ -67,7 +68,7 @@ export function ModelDefaultsPanel({ defaultOpen = false }: { defaultOpen?: bool
         </svg>
         <span className="font-medium text-text-2">Defaults &amp; routing</span>
         <span className="ml-auto flex items-center gap-1.5 text-text-4">
-          <span className="text-[11px]">{defaultLabel}</span>
+          <span className="text-xs">{defaultLabel}</span>
           {/* Explicit size + viewBox, NOT the `.ico-12` class: that class is
               scoped `.aura-chat .ico-12`, and this panel renders inside the
               switcher's portal (outside `.aura-chat`), so the class never
@@ -88,8 +89,8 @@ export function ModelDefaultsPanel({ defaultOpen = false }: { defaultOpen?: bool
 
       {open && (
         <div className="pb-1">
-          <div className="px-3 pt-1 pb-1 text-[10px] uppercase tracking-wider text-text-4">
-            Default model
+          <div className="px-3 pt-1 pb-1 text-xs font-medium text-text-4">
+            New sessions start on
           </div>
           <div className="px-1">
             {MODEL_OPTIONS.map((opt) => (
@@ -97,22 +98,22 @@ export function ModelDefaultsPanel({ defaultOpen = false }: { defaultOpen?: bool
                 key={opt.id}
                 type="button"
                 onClick={() => setDefaultModel(opt.id)}
-                className={`w-full flex items-start gap-2 px-2 py-1.5 rounded text-left text-[12px] hover:bg-bg-2 transition-colors ${
+                className={`w-full flex items-start gap-2 px-2 py-1.5 rounded text-left text-sm hover:bg-state-hover transition-colors ${
                   opt.id === prefs.default ? "text-text-1" : "text-text-2"
                 }`}
               >
                 <span className="flex flex-col">
                   <span className="font-medium">{opt.label}</span>
-                  <span className="text-[10.5px] text-text-4">{opt.hint}</span>
+                  <span className="text-xs text-text-4">{opt.hint}</span>
                 </span>
                 {opt.id === prefs.default && (
-                  <span className="ml-auto text-[12px] text-accent">✓</span>
+                  <span className="ml-auto text-sm text-accent">✓</span>
                 )}
               </button>
             ))}
           </div>
-          <div className="px-3 pt-2 pb-1 text-[10px] uppercase tracking-wider text-text-4">
-            Auto routing
+          <div className="px-3 pt-2 pb-1 text-xs font-medium text-text-4">
+            When Aura picks per task
           </div>
           {TASK_CLASSES.map((cls) => (
             <ClassRow
@@ -144,15 +145,15 @@ function ClassRow({
   current: ModelId;
 }) {
   return (
-    <div className="flex items-center gap-2 px-3 py-1.5 text-[11.5px]">
+    <div className="flex items-center gap-2 px-3 py-1.5 text-sm">
       <span className="flex flex-col flex-1 min-w-0">
         <span className="text-text-2 truncate">{label}</span>
-        <span className="text-[10px] text-text-4 truncate">{hint}</span>
+        <span className="text-2xs text-text-4 truncate">{hint}</span>
       </span>
       <select
         value={current}
         onChange={(e) => setClassModel(cls, e.target.value as ModelId)}
-        className="text-[11px] bg-bg-2 text-text-2 border border-line-soft rounded h-6 px-1.5 focus:outline-none focus-visible:ring-1 focus-visible:ring-accent/50"
+        className="text-xs bg-bg-2 text-text-2 border border-line-soft rounded h-6 px-1.5 focus:outline-none focus-visible:ring-1 focus-visible:ring-accent/50"
       >
         {MODEL_OPTIONS.filter((m) => m.id !== "auto").map((opt) => (
           <option key={opt.id} value={opt.id}>

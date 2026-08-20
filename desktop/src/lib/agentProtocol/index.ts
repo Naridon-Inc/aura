@@ -9,19 +9,28 @@
 //!
 //!     raw bytes ──(adapter, by ingress)──▶ NormalizedEvent[] ──(reduce)──▶ timeline ──▶ cards
 //!
-//! Today only `stream-json` (Claude Code) is wired end-to-end; the others are
-//! declared in the manifest and resolve to `null` here until their adapter
-//! lands, so callers fall back to the raw terminal view instead of crashing.
+//! Claude Code (`stream-json`) and Codex (its rollout JSONL) are wired
+//! end-to-end; the rest are declared in the manifest and resolve to `null`
+//! here until their adapter lands, so callers fall back to the raw terminal
+//! view instead of crashing.
 
 import type { StreamEvent } from "../api";
 import type { NormalizedEvent } from "./events";
 import { manifestFor, type AgentIngress } from "./manifest";
 import { normalizeClaude } from "./adapters/claude";
+import { normalizeCodex } from "./adapters/codex";
+import { normalizeKimi } from "./adapters/kimi";
+import { normalizeOpencode } from "./adapters/opencode";
+import { normalizePi } from "./adapters/pi";
 
 export * from "./events";
 export * from "./manifest";
 export { reduceEvents, type ReducedTimeline } from "./reduce";
 export { normalizeClaude } from "./adapters/claude";
+export { normalizeCodex } from "./adapters/codex";
+export { normalizeKimi } from "./adapters/kimi";
+export { normalizeOpencode } from "./adapters/opencode";
+export { normalizePi } from "./adapters/pi";
 
 /** A normalizer turns one engine-family's raw output into the shared model.
  *  `raw` is `unknown` at this seam; each adapter narrows it to the concrete
@@ -35,16 +44,37 @@ const NORMALIZERS: Partial<Record<AgentIngress, Normalizer>> = {
   "stream-json": (raw, sessionId) =>
     normalizeClaude(raw as StreamEvent[], sessionId),
   // "acp":         pending — Gemini / Cursor / Goose adapter wave.
-  // "json-events": pending — Codex / OpenCode adapter wave.
+  // "json-events": per-agent below — Codex, OpenCode and Pi share the ingress
+  //                but not the schema, so none of them can claim the family.
   // "pty":         intentionally none — raw terminal only.
   // "chat":        pending — OpenAI-compatible endpoints.
 };
+
+/** Agent id → normalizer, checked BEFORE the ingress table.
+ *
+ *  An ingress describes the SHAPE of the transport ("a stream of JSON
+ *  events"), not the vocabulary inside it. Codex, OpenCode and Pi all declare
+ *  `json-events` and agree on nothing else, so binding Codex's adapter to the
+ *  ingress would quietly hand OpenCode a parser that understands none of its
+ *  records — and the failure would look like an empty chat, not an error.
+ *  Engines whose schema is their own live here; families that genuinely share
+ *  a wire (ACP) stay in the table above. */
+const BY_AGENT: Record<string, Normalizer> = {
+  codex: normalizeCodex,
+  kimi: normalizeKimi,
+  opencode: normalizeOpencode,
+  pi: normalizePi,
+};
+
+function normalizerFor(agentId: string): Normalizer | undefined {
+  return BY_AGENT[agentId] ?? NORMALIZERS[manifestFor(agentId).ingress];
+}
 
 /** True when this agent has a wired normalizer AND its manifest claims
  *  structured chat — i.e. the rich card view is meaningful for it right now. */
 export function canNormalize(agentId: string): boolean {
   const m = manifestFor(agentId);
-  return NORMALIZERS[m.ingress] != null && m.interactions.toolCalls;
+  return normalizerFor(agentId) != null && m.interactions.toolCalls;
 }
 
 /** Normalize an agent's full raw event list into the shared model. Returns
@@ -56,7 +86,6 @@ export function normalizeStream(
   raw: unknown,
   sessionId: string,
 ): NormalizedEvent[] | null {
-  const m = manifestFor(agentId);
-  const fn = NORMALIZERS[m.ingress];
+  const fn = normalizerFor(agentId);
   return fn ? fn(raw, sessionId) : null;
 }

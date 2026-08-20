@@ -82,20 +82,35 @@ export type MetaVerifyCommit = {
   binding_ok: boolean;
 };
 
-/** The verify roll-up — coverage and what (if anything) needs a look. */
+/** The verify roll-up — coverage and what (if anything) needs a look.
+ *
+ *  `proofs` and `proven` are different numbers. A proof snapshot records a
+ *  verdict, so a commit can carry a proof saying its goals were never wired
+ *  up; counting that as proven is how the panel came to print "Verified on
+ *  this clone" over evidence that said the opposite. The three optional
+ *  fields are absent when an older `aura` on PATH wrote the report — see
+ *  `gradesVerdicts` in `metaVerifyBanner.ts`. Their absence means "this
+ *  engine can't tell us", never zero. */
 export type MetaVerifyReport = {
   /** Commit range checked, or null for the default scope. */
   range: string | null;
-  /** Commits examined. */
+  /** Commits examined — capped at 200, see `truncated`. */
   commits: number;
   /** Commits that carry a recorded "why". */
   intent_covered: number;
-  /** Commits whose stated goals were proven. */
+  /** Commits carrying a proof snapshot at all, whatever it says. */
+  proofs?: number;
+  /** Commits whose proof binds to them and reads "verified". */
   proven: number;
+  /** Commits whose proof binds and reads "partial". */
+  partial?: number;
   /** Plain-language things that need a look (empty when all is well). */
   issues: string[];
   /** True when nothing needs attention. */
   ok: boolean;
+  /** True when the walk stopped at the cap with history still to go, so
+   *  `commits` is the most recent slice and not the whole clone. */
+  truncated?: boolean;
   /** Per-commit coverage detail. */
   per_commit: MetaVerifyCommit[];
 };

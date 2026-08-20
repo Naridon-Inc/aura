@@ -25,6 +25,7 @@ import {
 } from "./api";
 import { notify } from "./notifications";
 import { playCompletionChime } from "./completionChime";
+import { basename } from "./paths";
 
 // Tools that need a human in the loop — claude can't fulfill them on
 // its own and stalls waiting for our answer. We fire OS notifications
@@ -214,7 +215,7 @@ function applyEvent(entry: Entry, ev: StreamEvent) {
   if (ev.kind === "result" && wasRunning) {
     playCompletionChime();
     notify({
-      title: `Aura — ${entry.agentId ?? "agent"} finished`,
+      title: `Aura · ${entry.agentId ?? "agent"} finished`,
       body: "The turn is done.",
       dedupeKey: `turn-end:${channelOf(entry)}`,
     }).catch(() => {});
@@ -229,7 +230,7 @@ function applyEvent(entry: Entry, ev: StreamEvent) {
       const label =
         ev.name === "ExitPlanMode" ? "shared a plan" : "has a question";
       notify({
-        title: `Aura — ${entry.agentId ?? "agent"} ${label}`,
+        title: `Aura · ${entry.agentId ?? "agent"} ${label}`,
         body: "Open the chat to respond.",
         dedupeKey: `interactive:${ev.id}`,
       }).catch(() => {});
@@ -341,19 +342,13 @@ async function fireWatchdog(entry: Entry, toolUseId: string) {
   pushEvent(channel, {
     kind: "aura_warning",
     message: pending.filePath
-      ? `No intent logged for the edit to \`${basename(pending.filePath)}\` — call \`aura_log_intent\` to keep the audit trail.`
-      : `No intent logged for the last tool use — call \`aura_log_intent\` to keep the audit trail.`,
+      ? `No intent logged for the edit to \`${basename(pending.filePath)}\`. Call \`aura_log_intent\` to keep the audit trail.`
+      : `No intent logged for the last tool use. Call \`aura_log_intent\` to keep the audit trail.`,
     file_path: pending.filePath,
     tool_use_id: toolUseId,
     turn_id: pending.turnId,
   });
 }
-
-function basename(p: string): string {
-  const idx = Math.max(p.lastIndexOf("/"), p.lastIndexOf("\\"));
-  return idx >= 0 ? p.slice(idx + 1) : p;
-}
-
 function cancelAllWatchdogs(entry: Entry) {
   for (const t of entry.pendingTools.values()) {
     window.clearTimeout(t.timeoutId);

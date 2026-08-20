@@ -39,6 +39,7 @@ use super::{
     Brain,
     types::{BrainCapabilities, BrainError, ChatChunk, ChatRequest, cacheable_prefix, cap_keys},
 };
+use crate::cloud_org::OrgScoped;
 
 pub const PROVIDER_ID: &str = "aura_pro";
 
@@ -185,8 +186,8 @@ impl Brain for AuraProBrain {
             .with(
                 cap_keys::SUPPORTED_MODELS,
                 json!([
-                    "claude-sonnet-4-5-20250929",
-                    "claude-opus-4-7",
+                    "claude-opus-5",
+                    "claude-sonnet-5",
                     "claude-haiku-4-5-20251001",
                 ]),
             )
@@ -243,6 +244,7 @@ impl Brain for AuraProBrain {
         let mut req_builder = client
             .post(&url)
             .bearer_auth(&aura_token)
+            .org_scoped()
             // The proxy forwards to Anthropic — sending the anthropic
             // version header here keeps the contract explicit so a
             // future direct-mode debug build can hit Anthropic without
@@ -390,6 +392,7 @@ impl Brain for AuraProBrain {
                                 tool_use_id: id,
                                 name,
                                 input,
+                                signature: None,
                             };
                         }
                     }

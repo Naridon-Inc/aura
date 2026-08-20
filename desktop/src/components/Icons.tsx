@@ -32,6 +32,33 @@ export const Terminal = (p: IconProps) => (
   </I>
 );
 
+// Stacked pages — a sheet with a second one behind it. The one Pages mark, in
+// this set's 16-grid/1.2px stroke system; AdeSidebar draws the same concept in
+// its own 24-grid/2px one.
+export const Pages = (p: IconProps) => (
+  <I {...p}>
+    <path
+      d="M5.5 2.5h4l3 3v6.5a1 1 0 0 1-1 1H5.5a1 1 0 0 1-1-1v-8.5a1 1 0 0 1 1-1z"
+      stroke="currentColor"
+      strokeWidth="1.2"
+      strokeLinejoin="round"
+    />
+    <path
+      d="M9.5 2.5v3h3"
+      stroke="currentColor"
+      strokeWidth="1.2"
+      strokeLinejoin="round"
+    />
+    <path
+      d="M3.5 4.5v8.5a1 1 0 0 0 1 1H11"
+      stroke="currentColor"
+      strokeWidth="1.2"
+      strokeLinejoin="round"
+      opacity="0.55"
+    />
+  </I>
+);
+
 export const Plan = (p: IconProps) => (
   <I {...p}>
     <rect x="2.5" y="2.5" width="11" height="11" rx="1.5" stroke="currentColor" />

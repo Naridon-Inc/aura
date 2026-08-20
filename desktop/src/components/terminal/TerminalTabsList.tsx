@@ -10,7 +10,7 @@
 // the project. Deliberately dense: this is a daily-driver surface.
 
 import { useState } from "react";
-import { Plus, Trash2 } from "lucide-react";
+import { Plus, Terminal as TerminalIcon, Trash2 } from "lucide-react";
 import type {
   TerminalGroup,
   TerminalTab,
@@ -24,6 +24,8 @@ import {
 import { panelGroupViews } from "./grouping";
 import { SplitIcon, TerminalGlyph } from "./icons";
 import { TerminalNewMenu } from "./TerminalNewMenu";
+import { RunRow } from "./RunRow";
+import { EmptyState } from "../ui/state";
 import type { TerminalProfile } from "../../lib/api";
 
 const DRAG_MIME = "application/x-aura-term";
@@ -47,6 +49,13 @@ type Props = {
   onNewWindow?: () => void;
   onSelectDefaultProfile: (profileId: string) => void;
   onConfigureSettings: () => void;
+  /** Run — the reserved row above the terminals you opened yourself. It is a
+   *  terminal like any other underneath, so `runTermId` is just the one the
+   *  project's Run is currently living in (null when it isn't running). */
+  runTermId: string | null;
+  onRun: () => void;
+  onFocusRun: () => void;
+  onStopRun: () => void;
 };
 
 /** Box-drawing connector for a pane at `index` within a split of `count`
@@ -74,9 +83,19 @@ export function TerminalTabsList({
   onNewWindow,
   onSelectDefaultProfile,
   onConfigureSettings,
+  runTermId,
+  onRun,
+  onFocusRun,
+  onStopRun,
 }: Props) {
   const customMap = useTabCustomizationMap(repoRoot);
-  const views = panelGroupViews(groups, terminals);
+  // Run has its own pinned row, so its terminal must not also show up as an
+  // ordinary one — the same thing listed twice reads as two things. Only a
+  // solo Run is folded away: split it and the group is no longer just Run,
+  // so it goes back to being a group like any other.
+  const views = panelGroupViews(groups, terminals).filter(
+    (v) => !(v.panes.length === 1 && v.panes[0].termId === runTermId),
+  );
   const [dropGroupId, setDropGroupId] = useState<string | null>(null);
   const [dropToNew, setDropToNew] = useState(false);
 
@@ -88,7 +107,7 @@ export function TerminalTabsList({
   return (
     <div className="h-full w-[168px] flex-shrink-0 flex flex-col border-l border-line-soft bg-bg-chrome">
       <div className="h-6 px-2 flex items-center justify-between border-b border-line-soft">
-        <span className="text-text-5 text-[10px] font-medium uppercase tracking-wide">
+        <span className="section-label">
           Terminals
         </span>
         <TerminalNewMenu
@@ -96,7 +115,7 @@ export function TerminalTabsList({
             <button
               type="button"
               title="New Terminal"
-              className="h-4 w-4 grid place-items-center rounded text-text-4 transition-colors hover:text-text-2 hover:bg-bg-hover"
+              className="h-4 w-4 grid place-items-center rounded text-text-4 transition-colors hover:text-text-2 hover:bg-state-hover"
             >
               <Plus className="h-3 w-3" />
             </button>
@@ -113,6 +132,14 @@ export function TerminalTabsList({
           align="end"
         />
       </div>
+      <RunRow
+        repoRoot={repoRoot}
+        active={runTermId !== null && runTermId === activeTermId}
+        open={runTermId !== null}
+        onRun={onRun}
+        onFocus={onFocusRun}
+        onStop={onStopRun}
+      />
       <div
         className={[
           "flex-1 min-h-0 overflow-y-auto py-0.5",
@@ -192,8 +219,18 @@ export function TerminalTabsList({
             })}
           </div>
         ))}
-        {views.length === 0 && (
-          <div className="px-3 py-2 text-text-5 text-[11px]">No terminals.</div>
+        {views.length === 0 && runTermId === null && (
+          <EmptyState
+            icon={TerminalIcon}
+            title="No terminals open"
+            body="A terminal is a direct line to your machine. The same one your agents use. Open one to run something yourself."
+            action={{
+              label: "New terminal",
+              onClick: () => onNewTerminal(),
+              icon: Plus,
+            }}
+            size="sm"
+          />
         )}
       </div>
     </div>
@@ -261,14 +298,14 @@ function TermRow({
         "group relative flex items-center gap-1.5 h-[22px] min-w-0 pl-2 pr-1 cursor-pointer select-none transition-colors",
         active
           ? "bg-accent/10 text-text-1 hover:bg-accent/15"
-          : "text-text-3 hover:bg-bg-hover hover:text-text-2",
+          : "text-text-3 hover:bg-state-hover hover:text-text-2",
       ].join(" ")}
     >
       {active && (
         <span className="absolute left-0 top-0 bottom-0 w-0.5 bg-accent" />
       )}
       {connector && (
-        <span className="font-mono text-[11px] leading-none text-text-5 flex-shrink-0 select-none">
+        <span className="font-mono text-xs leading-none text-text-5 flex-shrink-0 select-none">
           {connector}
         </span>
       )}
@@ -285,10 +322,10 @@ function TermRow({
             if (e.key === "Enter") commit();
             if (e.key === "Escape") setEditing(false);
           }}
-          className="min-w-0 flex-1 bg-bg-content border border-accent rounded px-1 text-[11px] text-text-1 outline-none"
+          className="min-w-0 flex-1 bg-bg-content border border-accent rounded px-1 text-xs text-text-1 outline-none"
         />
       ) : (
-        <span className="min-w-0 flex-1 truncate text-[11px]">{name}</span>
+        <span className="min-w-0 flex-1 truncate text-xs">{name}</span>
       )}
       <div className="flex items-center gap-0.5 flex-shrink-0 opacity-0 transition-opacity group-hover:opacity-100">
         <button
@@ -298,7 +335,7 @@ function TermRow({
             e.stopPropagation();
             onSplit();
           }}
-          className="h-4 w-4 grid place-items-center rounded text-text-4 transition-colors hover:text-text-2 hover:bg-bg-hover"
+          className="h-4 w-4 grid place-items-center rounded text-text-4 transition-colors hover:text-text-2 hover:bg-state-hover"
         >
           <SplitIcon className="h-3 w-3" />
         </button>
@@ -309,7 +346,7 @@ function TermRow({
             e.stopPropagation();
             onKill();
           }}
-          className="h-4 w-4 grid place-items-center rounded text-text-4 transition-colors hover:text-red hover:bg-bg-hover"
+          className="h-4 w-4 grid place-items-center rounded text-text-4 transition-colors hover:text-red hover:bg-state-hover"
         >
           <Trash2 className="h-3 w-3" />
         </button>

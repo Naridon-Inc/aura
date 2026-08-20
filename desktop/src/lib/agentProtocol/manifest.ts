@@ -135,10 +135,57 @@ export const AGENT_MANIFESTS: Record<string, AgentManifest> = {
     id: "opencode",
     label: "OpenCode",
     ingress: "json-events",
+    // Measured against a real `opencode run --format json`, which is the wire
+    // the adapter parses: it emits text, reasoning, tool parts and a todowrite
+    // checklist, and nothing else. Permissions and questions DO exist in
+    // OpenCode — as `permission.v2.asked` / `question.v2.asked` on the server
+    // bus that `opencode serve` publishes — but that is a different transport
+    // we don't consume, so claiming them here would offer the user an
+    // allow/deny affordance with nothing on the other end of it.
     interactions: {
-      ...FULL_INTERACTIONS,
+      reasoning: true,
+      toolCalls: true,
+      todo: true,
+      questions: false,
       questionSets: false,
-      permission: true,
+      plan: false,
+      permission: false,
+    },
+  },
+  pi: {
+    id: "pi",
+    label: "Pi",
+    ingress: "json-events",
+    // Read off pi 0.83.0's own `AgentSessionEvent` union, which is what
+    // `--mode json` forwards verbatim. Pi is the first engine after Claude
+    // Code with a REAL token stream: `message_update` carries the provider's
+    // `text_delta` / `thinking_delta` as they arrive, so both reasoning and
+    // text type themselves into the transcript rather than landing whole.
+    //
+    // Tool calls are `tool_execution_start/update/end`, keyed by a real
+    // `toolCallId`, with `isError` set by the tool throwing — which for pi's
+    // bash means a non-zero exit, so a failed command cannot arrive looking
+    // like a success.
+    //
+    // The rest are off because pi does not have them, not because the
+    // adapter skipped them. There is no todo tool — the seven built-ins are
+    // read, bash, edit, write, grep, find and ls — so a checklist would have
+    // no source. And pi has no tool-approval gate at ALL headless: its
+    // `RpcCommand` union under `--mode rpc` is prompt / steer / abort /
+    // set_model / compact / bash and so on, with no approval round-trip
+    // anywhere in it, and `--approve` is about trusting project-local config
+    // files, not tool calls. Pi's answer to "what may this agent do" is
+    // `--tools` at spawn time, which is a different and earlier decision.
+    // Claiming a permission affordance here would draw an allow/deny prompt
+    // with nothing on the other end of it.
+    interactions: {
+      reasoning: true,
+      toolCalls: true,
+      todo: false,
+      questions: false,
+      questionSets: false,
+      plan: false,
+      permission: false,
     },
   },
 };

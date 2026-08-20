@@ -64,6 +64,9 @@ pub struct RunOpts {
     pub goal: Option<String>,
     /// Drain only this crew's nodes — run one crew while another works.
     pub crew: Option<String>,
+    /// Which machine this process is — `local` or `cloud`. Nodes placed on the
+    /// other machine stay in the graph untouched; see `scoped_ready`.
+    pub place: String,
 }
 
 impl RunOpts {
@@ -76,17 +79,32 @@ impl RunOpts {
     }
 }
 
-/// The ready set narrowed to a run's scope. Readiness (dependency
-/// satisfaction) is always computed over the WHOLE graph — a node's deps may
-/// live in another goal/crew — then filtered down to the scope so a scoped run
-/// only ever claims nodes it owns.
-fn scoped_ready(graph: &LoopGraph, scope: &RunScope) -> Vec<LoopTask> {
+/// The ready set narrowed to a run's scope AND to what this machine may run.
+///
+/// Readiness (dependency satisfaction) is always computed over the WHOLE graph
+/// — a node's deps may live in another goal/crew, or on the other machine — then
+/// filtered down. A cloud-placed node blocking a local one still counts as a
+/// dependency here; it just isn't ours to claim.
+fn scoped_ready(graph: &LoopGraph, scope: &RunScope, place: &str) -> Vec<LoopTask> {
     let ready = aura_loop::ready_set(&graph.list());
-    if scope.is_unscoped() {
-        ready
-    } else {
-        scope.filter(&ready)
-    }
+    let scoped = if scope.is_unscoped() { ready } else { scope.filter(&ready) };
+    scoped
+        .into_iter()
+        .filter(|t| aura_loop::runs_here(t, place))
+        .collect()
+}
+
+/// Ready nodes this machine is deliberately leaving alone. The count is worth
+/// printing: a laptop that drains four of six nodes and says nothing looks like
+/// it silently dropped two. Naming them as waiting-for-the-box is the
+/// difference between a split run and a broken one.
+fn deferred_elsewhere(graph: &LoopGraph, scope: &RunScope, place: &str) -> Vec<LoopTask> {
+    let ready = aura_loop::ready_set(&graph.list());
+    let scoped = if scope.is_unscoped() { ready } else { scope.filter(&ready) };
+    scoped
+        .into_iter()
+        .filter(|t| !aura_loop::runs_here(t, place))
+        .collect()
 }
 
 enum Outcome {
@@ -103,7 +121,7 @@ pub fn run(repo_root: &Path, opts: &RunOpts) -> Result<(), Box<dyn std::error::E
     if opts.dry_run {
         // Preview the SAME slice a live run would drain — honor --crew/--goal
         // instead of printing the whole board (which misled scoped previews).
-        let ready = scoped_ready(&graph, &opts.scope());
+        let ready = scoped_ready(&graph, &opts.scope(), &opts.place);
         if opts.json {
             let plan: Vec<serde_json::Value> = ready
                 .iter()
@@ -117,18 +135,35 @@ pub fn run(repo_root: &Path, opts: &RunOpts) -> Result<(), Box<dyn std::error::E
                 })
                 .collect();
             println!("{}", serde_json::to_string(&plan)?);
-        } else if ready.is_empty() {
-            println!("{}", "Ready set is empty — nothing to dispatch.".dimmed());
         } else {
-            println!("{} ({}) — dispatch plan", "DRY RUN".magenta().bold(), ready.len());
-            for t in &ready {
-                println!(
-                    "\n{} {} → {}",
-                    t.short_id().yellow().bold(),
-                    t.title.bold(),
-                    agent_for(t, opts).cyan(),
-                );
-                println!("{}", indent(&build_prompt(t)));
+            if ready.is_empty() {
+                println!("{}", "Ready set is empty — nothing to dispatch.".dimmed());
+            } else {
+                println!("{} ({}) — dispatch plan", "DRY RUN".magenta().bold(), ready.len());
+                for t in &ready {
+                    println!(
+                        "\n{} {} → {}",
+                        t.short_id().yellow().bold(),
+                        t.title.bold(),
+                        agent_for(t, opts).cyan(),
+                    );
+                    println!("{}", indent(&build_prompt(t)));
+                }
+            }
+            // A preview that shows three of five ready nodes and says nothing
+            // about the other two is the exact confusion placement exists to
+            // remove. Name them here for the same reason the live summary does.
+            let waiting = deferred_elsewhere(&graph, &opts.scope(), &opts.place);
+            if !waiting.is_empty() {
+                let whose = if opts.place == aura_loop::PLACE_LOCAL {
+                    "a machine in the cloud"
+                } else {
+                    "a machine someone is sitting at"
+                };
+                println!("\n{} {} node(s) for {}:", "⇢".cyan().bold(), waiting.len(), whose);
+                for t in &waiting {
+                    println!("  {} {}", t.short_id().yellow(), t.title.dimmed());
+                }
             }
         }
         return Ok(());
@@ -159,14 +194,16 @@ pub fn run(repo_root: &Path, opts: &RunOpts) -> Result<(), Box<dyn std::error::E
     );
 
     loop {
-        // 1. Recover any node whose runner died (expired lease).
-        let reclaimed = graph.reclaim_stale();
+        // 1. Recover any node whose runner died (expired lease). Scoped to this
+        // run — another crew's node is another runner's business, and its lease
+        // says nothing about whether that runner is still alive.
+        let reclaimed = graph.reclaim_stale_in(&scope);
         if !reclaimed.is_empty() && !opts.json {
             eprintln!("{} reclaimed {} stale node(s)", "↻".yellow(), reclaimed.len());
         }
 
         // 2. Take the highest-priority ready node within this run's scope.
-        let Some(task) = scoped_ready(&graph, &scope).into_iter().next() else {
+        let Some(task) = scoped_ready(&graph, &scope, &opts.place).into_iter().next() else {
             if opts.watch {
                 if !opts.json {
                     eprintln!("{}", "ready set empty — watching (Ctrl-C to stop)…".dimmed());
@@ -243,9 +280,47 @@ pub fn run(repo_root: &Path, opts: &RunOpts) -> Result<(), Box<dyn std::error::E
     if opts.json {
         println!("{}", serde_json::to_string(&log)?);
     } else {
-        eprintln!("{} {} node(s) processed", "■".green().bold(), done);
+        print_run_summary(&graph, &scope, opts, done);
     }
     Ok(())
+}
+
+/// Close out a run: how many nodes it processed, and — the part that matters
+/// for a split crew — what it deliberately did not touch.
+///
+/// A laptop that drains four of six ready nodes and prints "4 processed" looks
+/// like it dropped two. Naming the other two as the box's work is what makes a
+/// split run legible instead of lossy.
+fn print_run_summary(graph: &LoopGraph, scope: &RunScope, opts: &RunOpts, done: usize) {
+    eprintln!("{} {} node(s) processed", "■".green().bold(), done);
+    let waiting = deferred_elsewhere(graph, scope, &opts.place);
+    if waiting.is_empty() {
+        return;
+    }
+    let (whose, next) = if opts.place == aura_loop::PLACE_LOCAL {
+        (
+            "a machine in the cloud",
+            "`aura crew cloud-sync` hands them to your connected boxes",
+        )
+    } else {
+        (
+            "a machine someone is sitting at",
+            "they run on the next local `aura crew run`",
+        )
+    };
+    eprintln!(
+        "{} {} ready node(s) left for {} — {}",
+        "⇢".cyan().bold(),
+        waiting.len(),
+        whose,
+        next.dimmed()
+    );
+    for t in waiting.iter().take(5) {
+        eprintln!("  {} {}", t.short_id().yellow(), t.title.dimmed());
+    }
+    if waiting.len() > 5 {
+        eprintln!("  {}", format!("… and {} more", waiting.len() - 5).dimmed());
+    }
 }
 
 /// Stamp the end time and append the run to `.aura/crew/runs.jsonl`. A run that
@@ -312,11 +387,21 @@ fn run_parallel(
     // this (deps install, build prime) before its agent dispatches, so the
     // acceptance gate tests buildable state instead of a bare checkout. Absent
     // or empty → no-op, i.e. today's bare behaviour.
-    let setup_cmd = crate::worktree_scripts::load(repo_root).setup;
-    if let Some(cmd) = setup_cmd.as_deref() {
-        if !opts.json {
-            eprintln!("{} warm-up per worktree: {}", "·".dimmed(), cmd.dimmed());
-        }
+    let declared = crate::worktree_scripts::spec(repo_root);
+    let warms = !declared.is_empty();
+    if warms && !opts.json {
+        eprintln!(
+            "{} warm-up per worktree: {}",
+            "·".dimmed(),
+            format!(
+                "spec v{} — {} toolchain(s), {} package(s), {} service(s)",
+                declared.version,
+                declared.toolchain.tools.len(),
+                declared.packages.len(),
+                declared.services.len()
+            )
+            .dimmed()
+        );
     }
 
     let (tx, rx) = mpsc::channel::<WorkerResult>();
@@ -338,14 +423,14 @@ fn run_parallel(
         let hit_max = opts.max > 0 && (done + in_flight) >= opts.max;
         if !hit_max {
             while in_flight < opts.jobs && !(opts.max > 0 && (done + in_flight) >= opts.max) {
-                let reclaimed = graph.reclaim_stale();
+                let reclaimed = graph.reclaim_stale_in(scope);
                 if !reclaimed.is_empty() && !opts.json {
                     eprintln!("{} reclaimed {} stale node(s)", "↻".yellow(), reclaimed.len());
                 }
 
                 // A node still claimed/working (one we just dispatched) is no
                 // longer ready, so this never re-hands the same node out.
-                let Some(task) = scoped_ready(graph, scope).into_iter().next() else {
+                let Some(task) = scoped_ready(graph, scope, &opts.place).into_iter().next() else {
                     break;
                 };
                 let claimed = match graph.claim(&task.id, runner, opts.lease_secs) {
@@ -391,25 +476,36 @@ fn run_parallel(
 
                 let tx = tx.clone();
                 let opts_for_worker = opts.clone();
-                let setup_for_worker = setup_cmd.clone();
+                let root_for_worker = repo_root.to_path_buf();
                 std::thread::spawn(move || {
                     // The worker only ever touches its own worktree dir — never
                     // the repo index — so this is safe to run off the main thread.
-                    // Warm the worktree first (deps/build), so the agent and the
-                    // acceptance gate run against ready state. A failed warm-up is
-                    // non-fatal: the agent still runs and the gate decides honestly.
-                    if let Some(cmd) = setup_for_worker.as_deref() {
-                        let ok = crate::worktree_scripts::run_phase(
+                    // Bring the worktree to the project's declared environment
+                    // first, so the agent and the acceptance gate run against
+                    // ready state rather than a bare checkout. A failed warm-up
+                    // is non-fatal: the agent still runs and the gate decides
+                    // honestly. Same spec, same plan, same order the human's
+                    // `aura work` gets — a crew worktree is not a lesser place.
+                    if warms {
+                        let outcome = crate::worktree_scripts::bring_to_spec(
+                            &root_for_worker,
                             &wt.path,
-                            Some(cmd),
+                            aura_env::Scope::Full,
                             opts_for_worker.json,
                             &[],
+                            false,
                         );
-                        if !ok && !opts_for_worker.json {
+                        let note = match &outcome {
+                            Ok(r) if r.at_spec => None,
+                            Ok(r) => Some(r.summary()),
+                            Err(e) => Some(e.clone()),
+                        };
+                        if let (Some(note), false) = (note, opts_for_worker.json) {
                             eprintln!(
-                                "  {} {} warm-up reported a failure (continuing)",
+                                "  {} {} warm-up: {} (continuing)",
                                 "·".dimmed(),
                                 claimed.short_id().yellow(),
+                                note.dimmed(),
                             );
                         }
                     }
@@ -449,7 +545,7 @@ fn run_parallel(
     if opts.json {
         println!("{}", serde_json::to_string(&log)?);
     } else {
-        eprintln!("{} {} node(s) processed", "■".green().bold(), done);
+        print_run_summary(graph, scope, opts, done);
     }
     Ok(())
 }
@@ -598,6 +694,25 @@ fn resolve_provider(
     ))
 }
 
+/// Name the agent a failure should be pinned on.
+///
+/// When one agent stands in for another (see [`resolve_provider`]), blaming the
+/// *requested* one sends whoever reads the log off to debug a binary that was
+/// never executed. The runner box did exactly that: it logged "'codex' isn't
+/// available here — ran with 'claude' instead" and then, one line later,
+/// "failed agent 'codex' exited 1: Not logged in" — while codex was not
+/// installed and claude was the one that wasn't signed in.
+///
+/// Both names matter, so both are printed: the one that ran, and the one whose
+/// work it took on.
+fn who_ran(requested: &str, ran_as: &str) -> String {
+    if requested == ran_as {
+        format!("agent '{ran_as}'")
+    } else {
+        format!("agent '{ran_as}' (standing in for '{requested}')")
+    }
+}
+
 /// The harness: spawn a coding agent for one node in `work_dir` (the repo
 /// itself in sequential mode, or a throwaway worktree under `--jobs`), capture
 /// its output, run the acceptance gate, and classify the result. On a failed
@@ -624,6 +739,9 @@ fn dispatch(work_dir: &Path, task: &LoopTask, opts: &RunOpts) -> Outcome {
         }
         Err(reason) => return Outcome::Failed { reason },
     };
+    // Who actually runs, which is not always who was asked for. Everything
+    // reported from here down must name this one — see the failure below.
+    let ran_as = provider.id().to_string();
 
     let prompt = build_prompt(task);
     let invocation = match provider.build_invocation(&InvokeRequest {
@@ -748,7 +866,7 @@ fn dispatch(work_dir: &Path, task: &LoopTask, opts: &RunOpts) -> Outcome {
             }
         }
         return Outcome::Failed {
-            reason: format!("agent '{agent_id}' exited {exit}{detail}"),
+            reason: format!("{} exited {exit}{detail}", who_ran(&agent_id, &ran_as)),
         };
     }
 
@@ -1002,7 +1120,7 @@ fn clean_heading(line: &str) -> String {
     // Collapse to a single line, cap length so titles stay tidy.
     let one = cleaned.replace('\n', " ");
     if one.len() > 120 {
-        format!("{}…", &one[..119])
+        format!("{}…", crate::text::clip(&one, 119))
     } else {
         one
     }
@@ -1032,5 +1150,26 @@ mod tests {
     #[test]
     fn empty_plan_yields_no_waves() {
         assert!(parse_waves("just prose\nno headings here").is_empty());
+    }
+
+    /// The runner box printed "'codex' isn't available here — ran with 'claude'
+    /// instead" and then "failed agent 'codex' exited 1: Not logged in". Codex
+    /// was not installed; claude was the one lacking a login. A failure has to
+    /// name the process that produced it.
+    #[test]
+    fn a_stand_in_failure_names_the_agent_that_actually_ran() {
+        let msg = who_ran("codex", "claude");
+        assert!(msg.contains("'claude'"), "the one that ran: {msg}");
+        assert!(msg.contains("'codex'"), "and the one it stood in for: {msg}");
+        assert!(
+            msg.find("'claude'") < msg.find("'codex'"),
+            "the agent that ran is the subject: {msg}"
+        );
+    }
+
+    /// No substitution, no parenthetical — the ordinary case stays short.
+    #[test]
+    fn an_agent_that_ran_as_asked_is_named_once() {
+        assert_eq!(who_ran("claude", "claude"), "agent 'claude'");
     }
 }

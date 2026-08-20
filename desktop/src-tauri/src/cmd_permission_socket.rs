@@ -21,9 +21,12 @@
 //!                                       ▼
 //!                                  aura-shell-mcp
 //!
-//! Path: `~/.aura/run/aura-shell-mcp.sock`. Parent dir is created on
-//! demand; a stale socket is unlinked before bind so a previous crash
-//! doesn't wedge the listener.
+//! Path: `~/.aura/run/aura-shell-mcp.sock`, or `…-<pid>.sock` when
+//! another shell already answers on the well-known one. Parent dir is
+//! created on demand; a socket left by a crash is unlinked before bind
+//! so it doesn't wedge the listener, but one with a live listener behind
+//! it is never taken — see `start()`. Ask `socket_path()` for the path
+//! this process actually holds; never rebuild it from `home_dir()`.
 
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -53,15 +56,40 @@ struct ShimRequest {
     input: Value,
 }
 
-/// Resolve the socket path. macOS+Linux only — Tauri's Windows shim
-/// would use a TCP loopback fallback, but the rest of the build is
+/// The well-known path, tried first. macOS+Linux only — Tauri's Windows
+/// shim would use a TCP loopback fallback, but the rest of the build is
 /// already gated by `cfg(unix)` features in `cmd_agent_stream.rs`.
-pub fn socket_path() -> PathBuf {
+fn default_socket_path() -> PathBuf {
     let mut p = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
     p.push(".aura");
     p.push("run");
     p.push("aura-shell-mcp.sock");
     p
+}
+
+/// Where THIS shell is actually listening. Set once by `start()`; the
+/// default until then, which is what a caller that runs before setup
+/// finishes should hand out anyway.
+static BOUND_PATH: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+
+pub fn socket_path() -> PathBuf {
+    BOUND_PATH.get().cloned().unwrap_or_else(default_socket_path)
+}
+
+/// Is something alive on `path` right now?
+///
+/// The distinction bind(2) cannot make: a socket file left by a crashed
+/// process and a socket file owned by a shell that is running. Both are
+/// `EADDRINUSE` to bind and both look identical on disk. Only a connect
+/// tells them apart — ECONNREFUSED means the file outlived its listener.
+async fn is_live(path: &std::path::Path) -> bool {
+    tokio::time::timeout(
+        std::time::Duration::from_millis(250),
+        UnixStream::connect(path),
+    )
+    .await
+    .map(|r| r.is_ok())
+    .unwrap_or(false)
 }
 
 /// Spawn the listener task. Idempotent — calling twice would race on
@@ -70,12 +98,39 @@ pub fn socket_path() -> PathBuf {
 /// before tokio's reactor is registered as the thread-local.
 pub fn start(app: AppHandle) {
     tauri::async_runtime::spawn(async move {
-        let path = socket_path();
-        if let Some(parent) = path.parent() {
+        let default = default_socket_path();
+        if let Some(parent) = default.parent() {
             let _ = tokio::fs::create_dir_all(parent).await;
         }
-        // Remove stale socket from a previous run; bind(2) refuses to
-        // claim the path otherwise.
+        // Two shells on one machine is a normal state — the installed app
+        // and a `tauri dev` build, or two dev builds — and this used to
+        // unlink the well-known path unconditionally and take it. The
+        // running shell kept its listening file descriptor, so it never
+        // noticed; its sessions did. Every `aura ask-user` they spawned
+        // resolved the same path, reached the file the newcomer had put
+        // there, and the newcomer's registry had no idea who they were.
+        // Worse for the loser of the race: its own socket file was gone,
+        // so its shim connected to nothing and every question that shell
+        // asked died with ECONNREFUSED — silently, because `ask-user`
+        // exits 3 and the agent just carries on without asking.
+        //
+        // So: claim the well-known path only if nobody is answering on
+        // it. If somebody is, take a private path and let the sessions
+        // this shell spawns find it through AURA_SHELL_SOCKET.
+        let path = if is_live(&default).await {
+            let mut p = default.clone();
+            p.set_file_name(format!("aura-shell-mcp-{}.sock", std::process::id()));
+            tracing::info!(
+                "another aura-shell owns {} — listening privately at {}",
+                default.display(),
+                p.display()
+            );
+            p
+        } else {
+            default
+        };
+        // Safe now: either nothing was there, or what was there is a file
+        // whose listener is gone.
         let _ = tokio::fs::remove_file(&path).await;
         let listener = match UnixListener::bind(&path) {
             Ok(l) => l,
@@ -87,6 +142,11 @@ pub fn start(app: AppHandle) {
                 return;
             }
         };
+        // Publish before the accept loop: `socket_path()` is what
+        // `write_mcp_config` stamps into the shim's env and what the
+        // spawn sites export as AURA_SHELL_SOCKET, so it has to be the
+        // path we actually hold by the time any session starts.
+        let _ = BOUND_PATH.set(path.clone());
         tracing::info!("permission socket listening at {}", path.display());
         loop {
             match listener.accept().await {

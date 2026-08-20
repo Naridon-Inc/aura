@@ -9,6 +9,7 @@ import { Dialog } from "../Dialog";
 import { AsciiSpinner } from "../ui/ascii-spinner";
 import { Button } from "../ui/button";
 import { api, type ConflictedNode } from "../../lib/api";
+import { fetchAstConflicts, resolveAstConflict } from "../../lib/ambientCache";
 
 type ConflictsDialogProps = {
   open: boolean;
@@ -33,7 +34,7 @@ export function ConflictsDialog({ open, repoRoot, onClose }: ConflictsDialogProp
     setLoading(true);
     setErr(null);
     try {
-      const list = await api.auraConflictsList(repoRoot);
+      const list = await fetchAstConflicts(repoRoot);
       setRows(list);
     } catch (e) {
       setErr(String(e));
@@ -79,7 +80,7 @@ export function ConflictsDialog({ open, repoRoot, onClose }: ConflictsDialogProp
     setErr(null);
     try {
       const headSha = await api.gitShowHead(repoRoot, ".").catch(() => "");
-      await api.auraConflictsResolve(repoRoot, {
+      await resolveAstConflict(repoRoot, {
         conflict_id: target.id,
         strategy,
         custom_body: strategy === "custom" ? customBody : null,
@@ -104,7 +105,7 @@ export function ConflictsDialog({ open, repoRoot, onClose }: ConflictsDialogProp
       width={780}
       footer={
         <>
-          <label className="flex items-center gap-1.5 text-text-4 text-[11px] mr-auto select-none cursor-pointer">
+          <label className="flex items-center gap-1.5 text-text-4 text-xs mr-auto select-none cursor-pointer">
             <input
               type="checkbox"
               checked={showResolved}
@@ -127,15 +128,15 @@ export function ConflictsDialog({ open, repoRoot, onClose }: ConflictsDialogProp
         </>
       }
     >
-      <div className="space-y-2 text-[11.5px]">
-        {err && <div role="alert" className="text-red text-[11px]">{err}</div>}
+      <div className="space-y-2 text-sm">
+        {err && <div role="alert" className="text-red text-xs">{err}</div>}
         {loading && rows.length === 0 && (
-          <div className="flex items-center gap-1.5 text-text-4 text-[11px]">
-            <AsciiSpinner className="text-[11px] leading-none" /> Looking for clashes…
+          <div className="flex items-center gap-1.5 text-text-4 text-xs">
+            <AsciiSpinner className="text-xs leading-none" /> Looking for clashes…
           </div>
         )}
         {!loading && visibleRows.length === 0 && (
-          <div className="text-text-4 text-[11px]">
+          <div className="text-text-4 text-xs">
             {showResolved ? "Nothing clashes." : "Nothing clashes right now."}
           </div>
         )}
@@ -151,21 +152,21 @@ export function ConflictsDialog({ open, repoRoot, onClose }: ConflictsDialogProp
                   onClick={() => setSelected(isSel ? null : row.id)}
                   className={[
                     "w-full text-left px-2.5 py-1.5 border-b border-line-soft last:border-b-0 transition-colors",
-                    isSel ? "bg-bg-3" : "hover:bg-bg-2",
+                    isSel ? "bg-bg-3" : "hover:bg-state-hover",
                   ].join(" ")}
                 >
                   <div className="flex items-center gap-1.5">
-                    <span className="text-text-1 text-[11.5px] font-medium truncate flex-1">
+                    <span className="text-text-1 text-sm font-medium truncate flex-1">
                       {row.identifier}
                     </span>
                     {resolved && (
-                      <span className="text-accent-green text-[10px] uppercase">
+                      <span className="text-accent-green text-2xs">
                         ✓
                       </span>
                     )}
                   </div>
-                  <div className="text-text-4 text-[10px] truncate">{row.file}</div>
-                  <div className="text-text-4 text-[10px] truncate">
+                  <div className="text-text-4 text-2xs truncate">{row.file}</div>
+                  <div className="text-text-4 text-2xs truncate">
                     {row.ours_agent} vs {row.theirs_agent}
                   </div>
                 </button>
@@ -174,7 +175,7 @@ export function ConflictsDialog({ open, repoRoot, onClose }: ConflictsDialogProp
           </div>
           <div className="overflow-y-auto">
             {!target ? (
-              <div className="text-text-4 text-[11px] p-2">
+              <div className="text-text-4 text-xs p-2">
                 Pick a clash on the left to sort out.
               </div>
             ) : (
@@ -205,18 +206,18 @@ export function ConflictsDialog({ open, repoRoot, onClose }: ConflictsDialogProp
                 </div>
                 {strategy === "custom" && (
                   <div className="space-y-1">
-                    <div className="text-text-4 text-[10.5px] uppercase tracking-wider">
+                    <div className="section-label">
                       Your combined version
                     </div>
                     <textarea
                       value={customBody}
                       onChange={(e) => setCustomBody(e.target.value)}
                       rows={10}
-                      className="w-full bg-bg-1 border border-line rounded px-2 py-1.5 text-text-1 text-[11px] font-mono outline-none focus:border-text-4 resize-y"
+                      className="w-full bg-bg-1 border border-line rounded px-2 py-1.5 text-text-1 text-xs font-mono outline-none focus:border-text-4 resize-y"
                     />
                   </div>
                 )}
-                <div className="text-text-4 text-[10px]">
+                <div className="text-text-4 text-2xs">
                   based on: <span className="font-mono">{target.base_hash || "(none)"}</span>
                   {target.resolved_in_commit && (
                     <>
@@ -261,10 +262,10 @@ function StrategyButton({
       type="button"
       onClick={() => onPick(val)}
       className={[
-        "px-2 py-1 text-[10.5px] rounded border transition-colors",
+        "px-2 py-1 text-xs rounded border transition-colors",
         active
           ? "bg-bg-3 border-line text-text-1"
-          : "bg-bg-1 border-line-soft text-text-3 hover:bg-bg-2",
+          : "bg-bg-1 border-line-soft text-text-3 hover:bg-state-hover",
       ].join(" ")}
     >
       {label}
@@ -275,8 +276,8 @@ function StrategyButton({
 function Side({ label, body }: { label: string; body: string }) {
   return (
     <div className="space-y-1">
-      <div className="text-text-4 text-[10px] uppercase tracking-wider">{label}</div>
-      <pre className="bg-bg-1 border border-line-soft rounded p-1.5 max-h-48 overflow-auto text-[10.5px] font-mono text-text-3 whitespace-pre-wrap break-all">
+      <div className="section-label">{label}</div>
+      <pre className="bg-bg-1 border border-line-soft rounded p-1.5 max-h-48 overflow-auto text-xs font-mono text-text-3 whitespace-pre-wrap break-all">
         {body || "(empty)"}
       </pre>
     </div>

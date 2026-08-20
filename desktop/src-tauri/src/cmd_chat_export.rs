@@ -132,14 +132,17 @@ pub enum ExportMode {
 /// (`chatExportToClaudeCode`) keeps its exact contract + behavior.
 #[tauri::command]
 pub async fn chat_export_to_claude_code(session_id: String) -> Result<ClaudeExport, String> {
-    let export = build_agent_export("claude", &session_id)?;
-    Ok(ClaudeExport {
-        session_id: export.resume_arg.clone().unwrap_or_default(),
-        cwd: export.cwd,
-        jsonl_path: export.transcript_path.unwrap_or_default(),
-        synthesized: export.synthesized,
-        claude_installed: export.installed,
+    crate::blocking::run(move || {
+        let export = build_agent_export("claude", &session_id)?;
+        Ok(ClaudeExport {
+            session_id: export.resume_arg.clone().unwrap_or_default(),
+            cwd: export.cwd,
+            jsonl_path: export.transcript_path.unwrap_or_default(),
+            synthesized: export.synthesized,
+            claude_installed: export.installed,
+        })
     })
+    .await
 }
 
 /// Prepare a continuation target for an Aura chat in ANY registry agent.
@@ -153,7 +156,10 @@ pub async fn chat_export_for_agent(
     agent_id: String,
     session_id: String,
 ) -> Result<AgentExport, String> {
-    build_agent_export(&agent_id, &session_id)
+    crate::blocking::run(move || {
+        build_agent_export(&agent_id, &session_id)
+    })
+    .await
 }
 
 /// Core builder shared by both commands. Loads the chat, resolves the agent in
@@ -856,6 +862,9 @@ mod tests {
             saved_tokens: None,
             input_tokens: None,
             output_tokens: None,
+            model: None,
+            cost_usd: None,
+            cost_estimated: None,
         }
     }
 
@@ -881,6 +890,9 @@ mod tests {
             saved_tokens: None,
             input_tokens: None,
             output_tokens: None,
+            model: None,
+            cost_usd: None,
+            cost_estimated: None,
         }
     }
 

@@ -154,8 +154,8 @@ export function RemoteDialog({ open, onClose }: RemoteDialogProps) {
       <div className="px-5 py-4 flex flex-col gap-4">
         {!status.running ? (
           <div className="flex flex-col gap-3">
-            <p className="text-text-2 text-[12.5px] leading-relaxed">
-              Turn this on and your phone — on the same Wi-Fi — can drive
+            <p className="text-text-2 text-base leading-relaxed">
+              Turn this on and your phone, on the same Wi-Fi, can drive
               whatever's running here. No login: the link carries a short
               PIN so only you can connect.
             </p>
@@ -173,10 +173,10 @@ export function RemoteDialog({ open, onClose }: RemoteDialogProps) {
           <div className="flex flex-col gap-3">
             <div className="flex items-center gap-3">
               <div className="flex-1 min-w-0">
-                <div className="text-text-4 text-[10px] uppercase tracking-wider mb-0.5">
+                <div className="section-label mb-0.5">
                   Open on phone
                 </div>
-                <div className="text-text-1 text-[13px] font-mono break-all">
+                <div className="text-text-1 text-base font-mono break-all">
                   {status.url}
                 </div>
               </div>
@@ -191,7 +191,7 @@ export function RemoteDialog({ open, onClose }: RemoteDialogProps) {
               )}
             </div>
 
-            <div className="flex items-center gap-2 text-[11.5px]">
+            <div className="flex items-center gap-2 text-sm">
               <span className="text-text-4">PIN</span>
               <span className="font-mono text-text-1 tracking-[0.2em]">
                 {status.pin}
@@ -223,35 +223,35 @@ export function RemoteDialog({ open, onClose }: RemoteDialogProps) {
               )}
             </div>
 
-            <div className="text-text-4 text-[10.5px] leading-relaxed">
+            <div className="text-text-4 text-xs leading-relaxed">
               The PIN keeps other devices on your Wi-Fi from connecting by
-              accident. It doesn't scramble the connection, though — only
+              accident. It doesn't scramble the connection, though. Only
               share this link on a network you trust.
             </div>
           </div>
         )}
 
         {error && (
-          <div className="text-[11.5px] text-red">
+          <div className="text-sm text-red">
             {error}
           </div>
         )}
 
         <div className="border-t border-bd-2 pt-4 flex flex-col gap-3">
           <div className="flex items-center gap-2">
-            <span className="text-text-1 text-[12px] font-medium">
+            <span className="text-text-1 text-sm font-medium">
               Internet access
             </span>
-            <span className="text-text-4 text-[10px] uppercase tracking-wider">
+            <span className="section-label">
               via auravcs.com
             </span>
           </div>
 
           {!relay.running ? (
             <div className="flex flex-col gap-3">
-              <p className="text-text-2 text-[12.5px] leading-relaxed">
+              <p className="text-text-2 text-base leading-relaxed">
                 Connect a phone that isn't on your Wi-Fi. Aura gives you a
-                short code — share the link and your phone reaches this
+                short code. Share the link and your phone reaches this
                 computer over the internet.
               </p>
               <Button
@@ -268,13 +268,13 @@ export function RemoteDialog({ open, onClose }: RemoteDialogProps) {
             <div className="flex flex-col gap-3">
               <div className="flex items-center gap-3">
                 <div className="flex-1 min-w-0">
-                  <div className="text-text-4 text-[10px] uppercase tracking-wider mb-0.5">
+                  <div className="section-label mb-0.5">
                     Open on phone
                   </div>
-                  <div className="text-text-1 text-[13px] font-mono break-all">
+                  <div className="text-text-1 text-base font-mono break-all">
                     {relay.public_url}
                   </div>
-                  <div className="text-text-4 text-[10.5px] mt-1">
+                  <div className="text-text-4 text-xs mt-1">
                     Code <span className="font-mono text-text-2 tracking-[0.2em]">{relay.code}</span>
                   </div>
                 </div>
@@ -312,16 +312,16 @@ export function RemoteDialog({ open, onClose }: RemoteDialogProps) {
                 )}
               </div>
 
-              <div className="text-text-4 text-[10.5px] leading-relaxed">
+              <div className="text-text-4 text-xs leading-relaxed">
                 The code changes every time you reconnect. Aura's cloud
                 only passes the connection between your phone and this
-                computer — it doesn't read your code or your agents' work.
+                computer. It doesn't read your code or your agents' work.
               </div>
             </div>
           )}
 
           {relayError && (
-            <div className="text-[11.5px] text-red">
+            <div className="text-sm text-red">
               {relayError}
             </div>
           )}

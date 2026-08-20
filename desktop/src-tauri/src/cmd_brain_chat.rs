@@ -44,9 +44,10 @@ use tokio::task::JoinHandle;
 
 use crate::manager::brain::{
     self,
+    keychain,
     manager::BrainManager,
-    native_tools, registry,
-    types::{BrainError, ChatChunk, ChatMessage, ChatRequest},
+    native_tools, pricing, registry,
+    types::{cap_keys, BrainError, ChatChunk, ChatMessage, ChatRequest},
     Brain,
 };
 use crate::manager::{persist, ChatRole};
@@ -246,9 +247,30 @@ pub async fn brain_chat_turn(
         .map(str::trim)
         .filter(|s| !s.is_empty())
         .map(str::to_string);
-    let active = match explicit_override.as_deref() {
-        Some(provider_id) => mgr.resolve(provider_id).map_err(|e| e.to_string())?,
-        None => mgr.active().map_err(|e| e.to_string())?,
+    // The comment above promises the user's message stays on screen "alongside
+    // the error reply" — but returning the `Err` alone never wrote one. The
+    // transcript kept the question and nothing else, so every surface that
+    // reads the session (the app, the HUD glance, mobile) showed a turn that
+    // had simply been ignored, and only whichever caller happened to hold the
+    // promise saw the reason. Record the failure where the conversation lives,
+    // then still return it so the caller can react.
+    let resolved = match explicit_override.as_deref() {
+        Some(provider_id) => mgr.resolve(provider_id),
+        None => mgr.active(),
+    };
+    let active = match resolved {
+        Ok(brain) => brain,
+        Err(e) => {
+            let said = e.to_string();
+            persist_turn(
+                &app,
+                &session_id,
+                ChatRole::System,
+                format!("Couldn't start this turn: {said}"),
+                None,
+            );
+            return Err(said);
+        }
     };
 
     // Attribute the persisted assistant turn to the brain that actually
@@ -604,7 +626,7 @@ pub(crate) fn record_turn_usage_async(
     let agent_id = agent_id.to_string();
     let model = model.map(|m| m.to_string());
     std::thread::spawn(move || {
-        let mut cmd = std::process::Command::new("aura");
+        let mut cmd = std::process::Command::new(crate::agent_event_listener::resolve_aura_bin());
         cmd.arg("usage-record")
             .arg("--session")
             .arg(&session_id)
@@ -624,6 +646,112 @@ pub(crate) fn record_turn_usage_async(
         // Run to completion on this detached thread so the child is reaped.
         let _ = cmd.status();
     });
+}
+
+/// What a finished turn cost, settled once and spent twice — emitted to the
+/// live meter and persisted onto the turn.
+///
+/// Both surfaces read the same fields of the same struct precisely so they can
+/// never quote different numbers for the same message. The alternative — the
+/// card re-pricing the turn's stored token counts — would silently disagree
+/// with the ledger, which bills every round of the tool loop rather than the
+/// final round the counts describe.
+struct TurnBill {
+    /// The model we priced against. `None` only when neither the composer nor
+    /// the brain would name one; recorded even when nothing could price it, so
+    /// the card can say *which* model it has no rate for.
+    model_id: Option<String>,
+    /// USD this turn billed. `None` when the brain isn't on an API key, no
+    /// tokens were billed, or no rate matched — never a stand-in zero.
+    cost_usd: Option<f64>,
+    /// The figure came off a model-family rate rather than a published one.
+    estimated: bool,
+    /// The live meter's chunk. Present exactly when `cost_usd` is.
+    chunk: Option<ChatChunk>,
+}
+
+/// Price a finished turn and fold it into the key's global spend row.
+///
+/// A dollar figure appears only when all three hold: the brain is running on
+/// an API key (a CLI-subscription or cloud brain isn't metered per token
+/// here), the turn actually billed tokens, and the model is one we can price.
+/// A missing rate yields a bill with no cost rather than a made-up figure; the
+/// token counts still show, and `~/.aura/model_prices.json` fills the gap.
+fn settle_turn_cost(
+    brain: &Arc<dyn Brain>,
+    model: Option<&str>,
+    repo_root: &str,
+    input: u64,
+    output: u64,
+) -> TurnBill {
+    // The composer's override, else whatever the brain would send by default —
+    // pricing the default as "unknown" would blank the meter for every user
+    // who never touched the model picker.
+    let model_id = model
+        .map(str::to_string)
+        .or_else(|| {
+            brain
+                .capabilities()
+                .get(cap_keys::DEFAULT_MODEL)
+                .and_then(|v| v.as_str().map(str::to_string))
+        })
+        .filter(|m| !m.trim().is_empty());
+    let unpriced = TurnBill {
+        model_id: model_id.clone(),
+        cost_usd: None,
+        estimated: false,
+        chunk: None,
+    };
+    if input == 0 && output == 0 {
+        return unpriced;
+    }
+    let provider = brain.provider_id().to_string();
+    let Some(key) = keychain::get_api_key(&provider).ok().flatten() else {
+        return unpriced;
+    };
+    let id = model_id.clone().unwrap_or_default();
+    let Some(price) = pricing::price_for(&id) else {
+        return unpriced;
+    };
+    let cost = price.cost_usd(input, output);
+    let Some(row) = crate::api_spend::record_turn(
+        &provider,
+        &key,
+        &id,
+        repo_root,
+        input,
+        output,
+        cost,
+        price.estimated,
+    ) else {
+        return unpriced;
+    };
+    TurnBill {
+        model_id,
+        cost_usd: Some(cost),
+        estimated: price.estimated,
+        chunk: Some(ChatChunk::Cost {
+            cost_usd: cost,
+            spend_usd: row.cost_usd,
+            spend_since: row.added_at,
+            estimated: row.estimated,
+        }),
+    }
+}
+
+/// One tool call the brain asked for during a round of the tool loop.
+struct RoundToolCall {
+    id: String,
+    name: String,
+    input: Value,
+    /// The provider's continuation token for this call, when it issued one.
+    ///
+    /// Gemini 3 stamps a `thoughtSignature` on every function call and
+    /// refuses the next request if the call comes back without it, so the
+    /// value has to survive from the stream all the way onto the replayed
+    /// assistant turn. Providers that issue no such token leave it `None`
+    /// and their requests are unchanged.
+    signature: Option<String>,
 }
 
 /// Stream one `Brain` through `request`, driving a server-side tool loop.
@@ -732,7 +860,7 @@ async fn stream_one_brain(
 
         // Round-local accumulators.
         let mut round_text = String::new();
-        let mut tool_calls: Vec<(String, String, Value)> = Vec::new();
+        let mut tool_calls: Vec<RoundToolCall> = Vec::new();
         let mut round_max_idx = 0usize;
 
         loop {
@@ -792,6 +920,7 @@ async fn stream_one_brain(
                     tool_use_id,
                     name,
                     input,
+                    signature,
                 } => {
                     round_max_idx = round_max_idx.max(block_idx);
                     produced = true;
@@ -807,6 +936,9 @@ async fn stream_one_brain(
                             tool_use_id: tool_use_id.clone(),
                             name: name.clone(),
                             input: input.clone(),
+                            // The card doesn't render it; the wire format
+                            // omits `None` and drops it for everyone else.
+                            signature: None,
                         });
                         // Record the call for persistence; its result is back-
                         // filled after execution below (or stays None if it's a
@@ -818,7 +950,18 @@ async fn stream_one_brain(
                             result: None,
                         });
                     }
-                    tool_calls.push((tool_use_id, name, input));
+                    tool_calls.push(RoundToolCall {
+                        id: tool_use_id,
+                        name,
+                        input,
+                        signature,
+                    });
+                }
+                ChatChunk::Cost { .. } => {
+                    // Ours to emit at the end of the whole turn, priced across
+                    // every round. A brain has no ledger to price against, so
+                    // one arriving from below is ignored rather than forwarded
+                    // — otherwise a turn would show two different totals.
                 }
                 ChatChunk::End { .. } => break, // round done — handled below
                 ChatChunk::ToolResult { .. } => {
@@ -833,11 +976,12 @@ async fn stream_one_brain(
 
         // Continue only when this round asked for at least one of OUR tools
         // and we have a root to run them against; anything else ends the turn.
-        let runnable: Vec<(String, String, Value)> = if tools_enabled {
+        let runnable: Vec<RoundToolCall> = if tools_enabled {
             tool_calls
                 .into_iter()
-                .filter(|(_, name, _)| {
-                    native_tools::is_board_tool(name) || native_tools::is_interactive_tool(name)
+                .filter(|c| {
+                    native_tools::is_board_tool(&c.name)
+                        || native_tools::is_interactive_tool(&c.name)
                 })
                 .collect()
         } else {
@@ -847,6 +991,18 @@ async fn stream_one_brain(
         if runnable.is_empty() {
             // Terminal: persist the full assistant text + the turn's tool
             // calls and close the turn.
+            //
+            // Settle the bill BEFORE persisting so the turn carries what it
+            // cost from the moment it lands. Reload the session a week later
+            // and the message still answers "what did this cost me" with the
+            // same number the meter showed while it streamed.
+            let bill = settle_turn_cost(
+                &brain,
+                turn_model.as_deref(),
+                repo_root,
+                turn_billed_input,
+                turn_billed_output,
+            );
             if !full_text.is_empty() {
                 persist_turn_with_tools(
                     app,
@@ -857,6 +1013,7 @@ async fn stream_one_brain(
                     std::mem::take(&mut turn_tools),
                     turn_saved_tokens,
                     last_usage,
+                    &bill,
                 );
             } else {
                 full_text.disarm();
@@ -866,6 +1023,9 @@ async fn stream_one_brain(
                     input_tokens,
                     output_tokens,
                 });
+            }
+            if let Some(cost) = bill.chunk {
+                emit(cost);
             }
             record_turn_usage_async(
                 repo_root,
@@ -885,13 +1045,24 @@ async fn stream_one_brain(
         if !round_text.is_empty() {
             assistant_content.push(json!({ "type": "text", "text": round_text }));
         }
-        for (id, name, input) in &runnable {
-            assistant_content.push(json!({
+        for call in &runnable {
+            let mut block = json!({
                 "type": "tool_use",
-                "id": id,
-                "name": name,
-                "input": input,
-            }));
+                "id": call.id,
+                "name": call.name,
+                "input": call.input,
+            });
+            // Replay the provider's continuation token on the block it came
+            // from. Gemini validates that every functionCall it is shown was
+            // one it actually made, and the signature is the proof — without
+            // it the next round is refused outright, so a tool-using Gemini
+            // conversation would answer once and then fail on every follow-up.
+            // Brains that issue no token add no key and their turn is
+            // byte-identical to before.
+            if let Some(sig) = &call.signature {
+                block["signature"] = json!(sig);
+            }
+            assistant_content.push(block);
         }
         request.messages.push(ChatMessage {
             role: "assistant".to_string(),
@@ -901,7 +1072,8 @@ async fn stream_one_brain(
         // Execute each tool, emit a ToolResult so the card completes, and
         // collect the result blocks for the follow-up user message.
         let mut result_blocks: Vec<Value> = Vec::new();
-        for (id, name, input) in &runnable {
+        for call in &runnable {
+            let (id, name, input) = (&call.id, &call.name, &call.input);
             let interactive = native_tools::is_interactive_tool(name);
             let (content, is_error) = if interactive {
                 // ask_user / propose_plan: project the QuestionCard / PlanCard
@@ -912,8 +1084,15 @@ async fn stream_one_brain(
                 // chunk, and nothing to back-fill (the call wasn't persisted).
                 run_interactive_tool(app, sid, name, input).await
             } else {
-                let (content, is_error, saved) = native_tools::execute_board_tool(
+                // The app handle goes through because one family — starting
+                // work on this machine — drives the app's own run dispatcher.
+                // The session id goes through because another — moving work to
+                // a machine that isn't this one — can carry this conversation
+                // with it. Everything else ignores both.
+                let (content, is_error, saved) = native_tools::execute_board_tool_with_app(
+                    Some(app),
                     repo_root,
+                    sid,
                     name,
                     input,
                     native_tools::CHAT_AUTHOR,
@@ -953,7 +1132,15 @@ async fn stream_one_brain(
 
     // Hit the round cap with the model still wanting tools. Persist whatever
     // it produced (text + tool calls) and close gracefully rather than
-    // spinning.
+    // spinning. A capped turn still ran every round it ran, so it is billed
+    // and recorded exactly like one that finished on its own.
+    let bill = settle_turn_cost(
+        &brain,
+        turn_model.as_deref(),
+        repo_root,
+        turn_billed_input,
+        turn_billed_output,
+    );
     if !full_text.is_empty() {
         persist_turn_with_tools(
             app,
@@ -964,6 +1151,7 @@ async fn stream_one_brain(
             std::mem::take(&mut turn_tools),
             turn_saved_tokens,
             last_usage,
+            &bill,
         );
     } else {
         full_text.disarm();
@@ -973,6 +1161,9 @@ async fn stream_one_brain(
             input_tokens,
             output_tokens,
         });
+    }
+    if let Some(cost) = bill.chunk {
+        emit(cost);
     }
     record_turn_usage_async(
         repo_root,
@@ -1153,6 +1344,56 @@ fn last_manager_brain(chat: &[crate::manager::ChatTurn]) -> Option<&str> {
         .and_then(|t| t.brain.as_deref())
 }
 
+/// Put a note into a conversation that neither the user nor the brain wrote —
+/// something the app itself learned and the conversation needs to know.
+///
+/// `marker` is a string that must appear in `text` and identifies the event, so
+/// a watcher that keeps re-observing the same fact (a finished cloud job stays
+/// finished on every poll) says it once. The check reads the live in-memory
+/// session when there is one, which is the same session the write lands in — a
+/// disk-only read would miss a note added minutes ago by this very function and
+/// repeat it. Returns whether a note was actually added.
+///
+/// Its one caller is the cloud hand-back watcher, a single serial loop, so
+/// check-then-write is not racing itself. Two concurrent callers could both
+/// pass the check and double-post; that is a duplicate line, not corruption,
+/// and is not worth holding a lock across a persist for.
+pub(crate) fn push_app_note_once(
+    app: &AppHandle,
+    session_id: &str,
+    marker: &str,
+    text: String,
+) -> bool {
+    use tauri::Manager as _;
+    debug_assert!(text.contains(marker), "the marker must survive into the note");
+    let live = app
+        .try_state::<crate::cmd_manager::ManagerRuntime>()
+        .and_then(|rt| {
+            rt.sessions
+                .lock()
+                .unwrap()
+                .get(session_id)
+                .map(|l| l.state.clone())
+        });
+    let told = match &live {
+        Some(st) => {
+            let guard = st.lock().unwrap();
+            guard.chat.iter().any(|t| t.text.contains(marker))
+        }
+        None => match persist::load(session_id) {
+            Ok(s) => s.chat.iter().any(|t| t.text.contains(marker)),
+            // No session file means no conversation to tell. Saying nothing is
+            // right: a note has to land somewhere a person will read it.
+            Err(_) => return false,
+        },
+    };
+    if told {
+        return false;
+    }
+    persist_turn(app, session_id, ChatRole::System, text, None);
+    true
+}
+
 /// Persist one chat turn to the session on disk and emit a `manager:<sid>`
 /// snapshot — the native-path equivalent of legacy.rs's `append_assistant`
 /// + `persist_now` + `emit_session`.
@@ -1170,13 +1411,31 @@ fn persist_turn(
     text: String,
     brain: Option<String>,
 ) {
-    persist_turn_with_tools(app, session_id, role, text, brain, Vec::new(), 0, None);
+    // A user turn and a fallback notice are not billed, so they settle with an
+    // empty bill rather than a fabricated zero.
+    persist_turn_with_tools(
+        app,
+        session_id,
+        role,
+        text,
+        brain,
+        Vec::new(),
+        0,
+        None,
+        &TurnBill {
+            model_id: None,
+            cost_usd: None,
+            estimated: false,
+            chunk: None,
+        },
+    );
 }
 
 /// Like [`persist_turn`], but also records the tool calls the brain made on
 /// this turn (in emission order, each paired with its result) so the settled
 /// timeline re-renders the tool cards on reload instead of dropping them when
 /// the live stream ends.
+#[allow(clippy::too_many_arguments)]
 fn persist_turn_with_tools(
     app: &AppHandle,
     session_id: &str,
@@ -1189,6 +1448,9 @@ fn persist_turn_with_tools(
     // round's figures). `None` when the brain didn't report usage — the
     // per-message token readout then simply doesn't render for this turn.
     usage: Option<(u32, u32)>,
+    // What the turn billed, already settled against the ledger. Stamped onto
+    // the turn so the message keeps its own price tag across reloads.
+    bill: &TurnBill,
 ) {
     use tauri::Manager as _;
     // `manager_status` returns the in-memory `ManagerRuntime` snapshot when
@@ -1218,6 +1480,13 @@ fn persist_turn_with_tools(
     let session = match &live_state {
         Some(st) => {
             let mut guard = st.lock().unwrap();
+            // A CLI brain fans work out with `aura subagent spawn-bg`, which
+            // writes the dispatched task straight into the session JSON while
+            // we hold this session in memory. Absorb those rows before the
+            // emit below, so the turn that says "I've started two agents"
+            // arrives with the two agents actually on it rather than with a
+            // task list the shell has never heard of them in.
+            crate::manager::persist::absorb_cli_subagents(&mut guard);
             guard.push_chat_with_brain(role, text, brain);
             if let Some(last) = guard.chat.last_mut() {
                 if !tool_calls.is_empty() {
@@ -1229,6 +1498,15 @@ fn persist_turn_with_tools(
                 if let Some((input, output)) = usage {
                     last.input_tokens = Some(input);
                     last.output_tokens = Some(output);
+                }
+                // Only ever stamped when there is something true to stamp: a
+                // model we resolved, a cost we actually charged. Leaving the
+                // fields absent is what lets the card say "no rate for this
+                // model" instead of printing a $0.00 nobody was billed.
+                last.model = bill.model_id.clone();
+                if let Some(cost) = bill.cost_usd {
+                    last.cost_usd = Some(cost);
+                    last.cost_estimated = Some(bill.estimated);
                 }
             }
             // Surface the failure loudly instead of swallowing it with
@@ -1260,6 +1538,15 @@ fn persist_turn_with_tools(
                 if let Some((input, output)) = usage {
                     last.input_tokens = Some(input);
                     last.output_tokens = Some(output);
+                }
+                // Only ever stamped when there is something true to stamp: a
+                // model we resolved, a cost we actually charged. Leaving the
+                // fields absent is what lets the card say "no rate for this
+                // model" instead of printing a $0.00 nobody was billed.
+                last.model = bill.model_id.clone();
+                if let Some(cost) = bill.cost_usd {
+                    last.cost_usd = Some(cost);
+                    last.cost_estimated = Some(bill.estimated);
                 }
             }
             if let Err(e) = persist::save(&session) {

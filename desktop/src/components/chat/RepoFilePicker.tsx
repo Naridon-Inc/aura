@@ -17,6 +17,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { api, type DirEntry, type GitStatusEntry } from "../../lib/api";
+import { loadDirList } from "../../lib/dirListCache";
 import { FileIcon } from "../FileIcon";
 import { Kbd } from "../ui/kbd";
 
@@ -193,7 +194,10 @@ export function RepoFilePicker({
   const loadDirInto = useCallback(
     async (rel: string, depth: number): Promise<TreeNode[]> => {
       try {
-        const entries = await api.listDir(joinAbs(repoRoot, rel));
+        // Shared with the file tree, which walks these same folders — see
+        // dirListCache. Still a real read every time nothing is in flight, so
+        // the picker never offers a file that has since been deleted.
+        const entries = await loadDirList(joinAbs(repoRoot, rel));
         const visible = entries.filter(
           (e: DirEntry) => !(e.is_dir && HIDDEN_DIRS.has(e.name)),
         );
@@ -394,9 +398,9 @@ export function RepoFilePicker({
               setSelIdx(0);
             }}
             placeholder="Find a file…"
-            className="flex-1 bg-transparent outline-none ml-3 text-text-1 text-[12.5px] placeholder:text-text-4"
+            className="flex-1 bg-transparent outline-none ml-3 text-text-1 text-base placeholder:text-text-4"
           />
-          <span className="text-[10px] text-text-5 tracking-wider">esc</span>
+          <span className="text-2xs text-text-5 tracking-wider">esc</span>
         </div>
 
         {/* Tabs */}
@@ -418,10 +422,10 @@ export function RepoFilePicker({
                   setSelIdx(0);
                 }}
                 disabled={searching}
-                className={`px-2 py-0.5 rounded text-[11.5px] transition-colors ${
+                className={`px-2 py-0.5 rounded text-sm transition-colors ${
                   active
                     ? "bg-bg-card text-text-1"
-                    : "text-text-3 hover:text-text-1 hover:bg-bg-hover"
+                    : "text-text-3 hover:text-text-1 hover:bg-state-hover"
                 } ${searching ? "opacity-50 cursor-not-allowed" : ""}`}
               >
                 {TAB_LABELS[t]}
@@ -432,7 +436,7 @@ export function RepoFilePicker({
             );
           })}
           {searching && (
-            <span className="ml-auto text-[10.5px] text-text-4">
+            <span className="ml-auto text-xs text-text-4">
               {navigable.length} match{navigable.length === 1 ? "" : "es"}
             </span>
           )}
@@ -461,7 +465,7 @@ export function RepoFilePicker({
                 searching
                   ? "no matches"
                   : tab === "recent"
-                    ? "no recent files yet — open one in the editor"
+                    ? "no recent files yet. Open one in the editor"
                     : "no modified files"
               }
               onPick={(p) => {
@@ -473,7 +477,7 @@ export function RepoFilePicker({
         </div>
 
         {/* Footer hint */}
-        <div className="flex items-center px-3 py-1.5 border-t border-line-soft text-[10.5px] text-text-5 gap-3 flex-shrink-0">
+        <div className="flex items-center px-3 py-1.5 border-t border-line-soft text-xs text-text-5 gap-3 flex-shrink-0">
           <span>
             <Kbd>↑↓</Kbd> navigate
           </span>
@@ -514,7 +518,7 @@ function FlatList({
 }) {
   if (rows.length === 0) {
     return (
-      <div className="px-3 py-4 text-text-4 text-[12px]">{emptyHint}</div>
+      <div className="px-3 py-4 text-text-4 text-sm">{emptyHint}</div>
     );
   }
   return (
@@ -527,10 +531,10 @@ function FlatList({
             ev.preventDefault();
             onPick(r.path);
           }}
-          className={`flex items-center gap-2 px-3 py-1.5 cursor-pointer text-[12.5px] ${
+          className={`flex items-center gap-2 px-3 py-1.5 cursor-pointer text-base ${
             i === selIdx
               ? "bg-bg-card text-text-1"
-              : "text-text-2 hover:bg-bg-hover"
+              : "text-text-2 hover:bg-state-hover"
           }`}
         >
           <FileIcon name={r.name} size={14} />
@@ -548,7 +552,7 @@ function FlatList({
           )}
           {r.status && (
             <span
-              className="ml-auto text-[10px] font-semibold uppercase tracking-wider"
+              className="section-label ml-auto"
               style={{
                 color:
                   r.status === "A"
@@ -584,7 +588,7 @@ function TreeView({
 }) {
   if (rows.length === 0) {
     return (
-      <div className="px-3 py-4 text-text-4 text-[12px]">empty repo</div>
+      <div className="px-3 py-4 text-text-4 text-sm">empty repo</div>
     );
   }
   const selectedPath = navigable[selIdx];
@@ -607,10 +611,10 @@ function TreeView({
                 onPickFile(n.rel);
               }
             }}
-            className={`flex items-center gap-1.5 px-3 py-1 cursor-pointer text-[12.5px] ${
+            className={`flex items-center gap-1.5 px-3 py-1 cursor-pointer text-base ${
               isSelected
                 ? "bg-bg-card text-text-1"
-                : "text-text-2 hover:bg-bg-hover"
+                : "text-text-2 hover:bg-state-hover"
             }`}
             style={{ paddingLeft: 12 + n.depth * 14 }}
           >

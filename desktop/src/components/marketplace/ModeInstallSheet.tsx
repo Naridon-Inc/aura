@@ -156,7 +156,7 @@ export function ModeInstallSheet({ open, entry, onClose, onInstalled }: Props) {
 
         <div className="space-y-3">
           <div>
-            <label className="text-[11px] text-text-3 mb-1 block">
+            <label className="text-xs text-text-3 mb-1 block">
               YAML URL
             </label>
             <div className="flex gap-2">
@@ -164,7 +164,7 @@ export function ModeInstallSheet({ open, entry, onClose, onInstalled }: Props) {
                 value={url}
                 onChange={(ev) => setUrl(ev.target.value)}
                 placeholder="https://gist.githubusercontent.com/.../code.yaml"
-                className="h-8 text-[12px]"
+                className="h-8 text-sm"
               />
               <Button
                 variant="secondary"
@@ -178,13 +178,13 @@ export function ModeInstallSheet({ open, entry, onClose, onInstalled }: Props) {
           </div>
 
           {preview.kind === "loading" && (
-            <div className="flex items-center gap-2 text-[12px] text-text-3">
+            <div className="flex items-center gap-2 text-sm text-text-3">
               <AsciiSpinner /> Fetching…
             </div>
           )}
 
           {preview.kind === "error" && (
-            <div className="text-[12px] text-red bg-red/10 rounded p-2">
+            <div className="text-sm text-red bg-red/10 rounded p-2">
               {preview.message}
             </div>
           )}
@@ -192,7 +192,7 @@ export function ModeInstallSheet({ open, entry, onClose, onInstalled }: Props) {
           {preview.kind === "ready" && (
             <>
               <div className="rounded border border-bg-3 bg-bg-2 p-2 max-h-48 overflow-auto">
-                <pre className="text-[11px] font-mono text-text-2 whitespace-pre-wrap">
+                <pre className="text-xs font-mono text-text-2 whitespace-pre-wrap">
                   {preview.yaml.split("\n").slice(0, 60).join("\n")}
                 </pre>
               </div>
@@ -201,15 +201,15 @@ export function ModeInstallSheet({ open, entry, onClose, onInstalled }: Props) {
                 <div className="rounded border border-amber/30 bg-amber/[0.08] p-3 space-y-2">
                   <div className="flex items-start gap-2">
                     <AlertTriangle className="h-4 w-4 text-amber flex-shrink-0 mt-0.5" />
-                    <div className="text-[12px] text-amber">
+                    <div className="text-sm text-amber">
                       This mode wants <b>advanced tools</b> that can mutate
                       your system. Review and acknowledge before installing.
                     </div>
                   </div>
-                  <div className="text-[11px] text-amber ml-6 font-mono">
+                  <div className="text-xs text-amber ml-6 font-mono">
                     {preview.wantedReserved.join(", ")}
                   </div>
-                  <label className="flex items-center gap-2 ml-6 text-[12px] text-amber">
+                  <label className="flex items-center gap-2 ml-6 text-sm text-amber">
                     <Checkbox
                       checked={acknowledged}
                       onCheckedChange={(v) => setAcknowledged(v === true)}
@@ -223,7 +223,7 @@ export function ModeInstallSheet({ open, entry, onClose, onInstalled }: Props) {
           )}
 
           {installError && (
-            <div className="text-[12px] text-red">
+            <div className="text-sm text-red">
               Install failed: {installError}
             </div>
           )}
@@ -236,7 +236,7 @@ export function ModeInstallSheet({ open, entry, onClose, onInstalled }: Props) {
           <Button size="xs" onClick={handleInstall} disabled={!canInstall || installing}>
             {installing ? (
               <>
-                <AsciiSpinner className="text-[12px] leading-none mr-1" />
+                <AsciiSpinner className="text-sm leading-none mr-1" />
                 Installing…
               </>
             ) : (

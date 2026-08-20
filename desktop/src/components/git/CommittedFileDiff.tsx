@@ -50,14 +50,14 @@ export function CommittedFileDiff({
       <ChangeNoteCard repoRoot={repoRoot} commit={sha} path={path} />
 
       {state === "loading" ? (
-        <div className="px-3 py-3 text-[12px] text-text-4">Reading the diff…</div>
+        <div className="px-3 py-3 text-sm text-text-4">Reading the diff…</div>
       ) : state === "error" ? (
-        <div className="px-3 py-3 text-[12px] text-text-4">
+        <div className="px-3 py-3 text-sm text-text-4">
           Couldn’t read the diff for this file.
         </div>
       ) : diff.trim().length === 0 ? (
-        <div className="px-3 py-3 text-[12px] text-text-4">
-          No line changes recorded — this may be a rename, a mode change, or a
+        <div className="px-3 py-3 text-sm text-text-4">
+          No line changes recorded. This may be a rename, a mode change, or a
           binary file.
         </div>
       ) : (

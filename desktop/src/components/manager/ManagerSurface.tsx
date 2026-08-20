@@ -11,7 +11,11 @@
 // sits under the i-more button.
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import { useManagerSession } from "../../lib/managerStore";
+import {
+  retryManagerSession,
+  useManagerLoadError,
+  useManagerSession,
+} from "../../lib/managerStore";
 import { useEditorStore } from "../../lib/editorStore";
 import { stripSteeringDirective } from "../../lib/steeringDirective";
 import { AsciiSpinner } from "../ui/ascii-spinner";
@@ -29,17 +33,27 @@ import {
   type RibbonEntry,
   type UsageReport,
 } from "../../lib/api";
+import { fetchSessions } from "../../lib/sessionsCache";
+import { fetchManagerList } from "../../lib/managerCache";
 import { listen } from "@tauri-apps/api/event";
 import { DagView } from "./DagView";
 import { ManagerChatView } from "./ManagerChatView";
 import { LoopPanel } from "./LoopPanel";
 import { MemoryBadge } from "./MemoryBadge";
 import { ChatIconsSprite } from "./ChatIconsSprite";
-import { Badge } from "../ui/badge";
+import { Radio } from "lucide-react";
+import { StatusChip } from "../ui/statusChip";
 import { Button } from "../ui/button";
+import { EmptyState } from "../ui/state";
 import { AgentIcon } from "../agent/AgentIcon";
 import { ResumeElsewhere } from "./chat/ResumeElsewhere";
 import { computeResumePortability } from "./chat/resumePortability";
+import { relativeAgeFromDelta } from "../../lib/relativeTime";
+import { shortDateFromSecs } from "../../lib/calendarDate";
+import { plainLine, plainPreview } from "../../lib/plainPreview";
+import { compactNumber } from "../../lib/compactNumber";
+import { useDismiss } from "../../lib/useDismiss";
+import { formatCost } from "../../lib/money";
 
 const DETAILS_PREF = "aura.manager.details_open";
 const LOOP_PREF = "aura.manager.loop_open";
@@ -71,25 +85,119 @@ export type ManagerPaneActionDetail = {
 // this must never read as a frozen dead-end. So: a live spinner + elapsed
 // counter, and after a long wait an escape hatch (close the tab and reopen)
 // so the user is never trapped staring at "Loading…" with nothing to do.
+//
+// And when the snapshot isn't slow but BROKEN, this says so. The store used to
+// swallow every fetch failure, which made "still loading" the only state a
+// conversation could ever be in — we watched one sit at 420s with the app idle,
+// the backend answering nothing, and no way to find out why. A load that has
+// missed three times running has stopped being slow, so the spinner gives way
+// to the actual reason and a Try again.
 function LoadingSession({ sessionId }: { sessionId: string }) {
   const editor = useEditorStore();
+  const failure = useManagerLoadError(sessionId);
   const [elapsed, setElapsed] = useState(0);
+  const [retrying, setRetrying] = useState(false);
   useEffect(() => {
     const id = setInterval(() => setElapsed((s) => s + 1), 1000);
     return () => clearInterval(id);
   }, []);
+  // Three misses ≈ 6s of the 2s watchdog — past the window where a session
+  // created moments ago is legitimately not on disk yet.
+  const broken = (failure?.failures ?? 0) >= 3;
   const slow = elapsed >= 12;
+
+  const retry = async () => {
+    setRetrying(true);
+    // A fresh attempt starts a fresh clock. Left running, pressing Try again
+    // dropped straight back to "Loading conversation… · 57s" — the elapsed of
+    // the attempt that had already failed, which reads as if the button did
+    // nothing.
+    setElapsed(0);
+    try {
+      await retryManagerSession(sessionId);
+    } finally {
+      setRetrying(false);
+    }
+  };
+
+  // Two different screens, because they are two different facts. A read that
+  // keeps failing might come good — that one gets a retry count and a Try
+  // again. A file that is not on disk will not come good, and saying "Aura
+  // asked 4 times" describes our asking rather than the answer.
+  const gone = failure?.gone ?? false;
+
+  if (gone) {
+    return (
+      <div className="h-full w-full flex items-center justify-center bg-bg-0">
+        <div className="flex max-w-[360px] flex-col items-center gap-3 px-6 text-center">
+          <div className="text-base text-text-1">This conversation is gone</div>
+          <p className="text-sm leading-relaxed text-text-4">
+            It isn’t saved on this device any more, so there’s nothing to
+            reopen. Aura has stopped trying to restore it — it won’t come back
+            the next time you open the app. Your other conversations aren’t
+            affected.
+          </p>
+          <p className="max-h-24 w-full overflow-auto rounded border border-line-soft bg-bg-1 px-2 py-1.5 text-left font-mono text-[11px] leading-snug text-text-4">
+            {failure?.message}
+          </p>
+          <Button size="sm" onClick={() => editor.closeManager(sessionId)}>
+            Close tab
+          </Button>
+        </div>
+      </div>
+    );
+  }
+
+  if (broken) {
+    return (
+      <div className="h-full w-full flex items-center justify-center bg-bg-0">
+        <div className="flex max-w-[360px] flex-col items-center gap-3 px-6 text-center">
+          <div className="text-base text-text-1">This conversation didn’t open</div>
+          {/* No blanket "nothing has been lost" here: the read may be failing
+              for a reason that leaves the file intact, and a reassurance that
+              turns out to be false is worse than none. What IS always true is
+              that this is one conversation, not the app. */}
+          <p className="text-sm leading-relaxed text-text-4">
+            Aura asked {failure?.failures === 1 ? "once" : `${failure?.failures} times`} and
+            got nothing back. Your other conversations aren’t affected.
+          </p>
+          {/* The raw backend message. Not the headline, because it is written
+              for whoever has to fix it, but present — a person who hits this
+              deserves the one line that says whether the file is missing, the
+              disk is unreadable, or the app can no longer parse it. */}
+          {failure?.message && (
+            <p className="max-h-24 w-full overflow-auto rounded border border-line-soft bg-bg-1 px-2 py-1.5 text-left font-mono text-[11px] leading-snug text-text-4">
+              {failure.message}
+            </p>
+          )}
+          <div className="flex items-center gap-2">
+            <Button size="sm" onClick={retry} disabled={retrying}>
+              {retrying ? "Trying…" : "Try again"}
+            </Button>
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => editor.closeManager(sessionId)}
+            >
+              Close tab
+            </Button>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div className="h-full w-full flex items-center justify-center bg-bg-0">
       <div className="flex max-w-[300px] flex-col items-center gap-3 px-6 text-center">
         <AsciiSpinner />
-        <div className="text-[13px] text-text-2">
+        <div className="text-base text-text-2">
           Loading conversation…
           {elapsed >= 3 && <span className="text-text-4"> · {elapsed}s</span>}
         </div>
         {slow && (
           <>
-            <p className="text-[11.5px] leading-relaxed text-text-4">
+            <p className="text-sm leading-relaxed text-text-4">
               A long session can take a moment to open. You can keep waiting, or
               close this tab and reopen it.
             </p>
@@ -260,24 +368,7 @@ export function ManagerSurface({
   }, [showLoop]);
 
   // Click-outside / Esc closes the More menu.
-  useEffect(() => {
-    if (!menuOpen) return;
-    function onDoc(e: MouseEvent) {
-      const t = e.target as Node | null;
-      if (menuRef.current && t && !menuRef.current.contains(t)) {
-        setMenuOpen(false);
-      }
-    }
-    function onKey(e: KeyboardEvent) {
-      if (e.key === "Escape") setMenuOpen(false);
-    }
-    document.addEventListener("mousedown", onDoc);
-    document.addEventListener("keydown", onKey);
-    return () => {
-      document.removeEventListener("mousedown", onDoc);
-      document.removeEventListener("keydown", onKey);
-    };
-  }, [menuOpen]);
+  useDismiss(menuOpen, () => setMenuOpen(false), menuRef);
 
   // Chat-tab right-click actions arrive here as a sessionId-scoped window
   // event (the controls that used to live on the `.p-tabs` header bar). Only
@@ -399,7 +490,7 @@ export function ManagerSurface({
           <button
             type="button"
             className="icon-btn"
-            title={`Take ${soloAgent.label} out — reopens as a standalone ${soloAgent.label} session, and shows up in its CLI resume list`}
+            title={`Take ${soloAgent.label} out. Reopens as a standalone ${soloAgent.label} session, and shows up in its CLI resume list`}
             aria-label={`Take ${soloAgent.label} out`}
             onClick={() => {
               window.dispatchEvent(
@@ -516,7 +607,7 @@ export function ManagerSurface({
         </div>
         {showDetails && (
           <div className="w-[360px] border-l border-line-soft min-h-0 flex flex-col bg-bg-0">
-            <div className="px-3 py-1.5 border-b border-line-soft text-[10px] uppercase tracking-wider text-text-3 flex items-center justify-between">
+            <div className="section-label px-3 py-1.5 border-b border-line-soft flex items-center justify-between">
               <span>Details</span>
               <Button
                 variant="ghost"
@@ -596,14 +687,15 @@ function SessionHistoryButton({
     // different workspace (e.g. New Git while Mixrank is open) must never
     // appear here, let alone be resumable into and touched. Claude sessions
     // below are already repoRoot-scoped.
-    api
-      .managerList(repoRoot)
+    // Through managerCache: the sidebar's recents strip and the resume
+    // picker ask for this same list in the same tick as this surface mounts.
+    // Zero window — it only joins a read already running, never remembers one.
+    fetchManagerList(repoRoot)
       .then(setSessions)
       .catch(() => setSessions([]));
     if (repoRoot) {
       setClaudeSessions(null);
-      api
-        .claudeListSessions(repoRoot)
+      fetchSessions(repoRoot)
         .then(setClaudeSessions)
         .catch(() => setClaudeSessions([]));
     } else {
@@ -620,10 +712,15 @@ function SessionHistoryButton({
     api
       .managerImportAgentSession("claude", repoRoot, sess.session_id)
       .then((newSid) => {
-        const label = (sess.last_prompt || sess.first_prompt || "Claude Code")
+        // Named after what the imported conversation was ABOUT when it has a
+        // prompt to go on. When it doesn't, the fallback is "Aura" — this is
+        // a native Aura session now, and calling it "Claude Code" put an Aura
+        // tab under another agent's name, beside real Claude Code tabs
+        // wearing the same mark.
+        const label = (sess.last_prompt || sess.first_prompt || "")
           .trim()
           .slice(0, 80);
-        editor.openManager(newSid, label || "Claude Code");
+        editor.openManager(newSid, label || "Aura");
         setOpen(false);
       })
       .catch((e) => console.warn("[manager] import claude session failed", e))
@@ -642,22 +739,7 @@ function SessionHistoryButton({
   }, [load]);
 
   // Click-outside / Esc closes the dropdown.
-  useEffect(() => {
-    if (!open) return;
-    function onDoc(e: MouseEvent) {
-      const t = e.target as Node | null;
-      if (ref.current && t && !ref.current.contains(t)) setOpen(false);
-    }
-    function onKey(e: KeyboardEvent) {
-      if (e.key === "Escape") setOpen(false);
-    }
-    document.addEventListener("mousedown", onDoc);
-    document.addEventListener("keydown", onKey);
-    return () => {
-      document.removeEventListener("mousedown", onDoc);
-      document.removeEventListener("keydown", onKey);
-    };
-  }, [open]);
+  useDismiss(open, () => setOpen(false), ref);
 
   const toggle = () => {
     setOpen((v) => {
@@ -680,7 +762,7 @@ function SessionHistoryButton({
         <button
           type="button"
           className="icon-btn"
-          title="Chat history — resume a past conversation"
+          title="Chat history. Resume a past conversation"
           onClick={toggle}
         >
           <svg className="ico"><use href="#i-history" /></svg>
@@ -688,7 +770,7 @@ function SessionHistoryButton({
       )}
       {open && (
         <div className="absolute right-0 top-7 z-30 bg-bg-3 border border-line-soft rounded-lg shadow-xl py-1 text-xs w-[320px] max-h-[420px] overflow-auto">
-          <div className="px-3 py-1.5 text-[10px] uppercase tracking-wider text-text-4">
+          <div className="section-label px-3 py-1.5">
             Resume a conversation
           </div>
           {sessions === null ? (
@@ -708,7 +790,7 @@ function SessionHistoryButton({
                   disabled={isCurrent}
                   onClick={() => pick(s)}
                   className={`w-full text-left px-3 py-2 flex flex-col gap-0.5 transition-colors ${
-                    isCurrent ? "opacity-50 cursor-default" : "hover:bg-bg-2"
+                    isCurrent ? "opacity-50 cursor-default" : "hover:bg-state-hover"
                   }`}
                 >
                   <div className="flex items-center gap-2">
@@ -721,10 +803,10 @@ function SessionHistoryButton({
                       {s.objective?.trim() || "Untitled chat"}
                     </span>
                     {isCurrent && (
-                      <span className="text-[10px] text-accent flex-none">current</span>
+                      <span className="text-2xs text-accent flex-none">current</span>
                     )}
                   </div>
-                  <div className="pl-3.5 flex items-center gap-1.5 text-[10.5px] text-text-4">
+                  <div className="pl-3.5 flex items-center gap-1.5 text-xs text-text-4">
                     <span>{relTime(s.updated_at)}</span>
                     {s.task_count > 0 && (
                       <span>· {s.done_count}/{s.task_count} tasks</span>
@@ -737,7 +819,7 @@ function SessionHistoryButton({
           {claudeSessions && claudeSessions.length > 0 && (
             <>
               <div className="mt-1 border-t border-line-soft" />
-              <div className="px-3 py-1.5 flex items-center gap-1.5 text-[10px] uppercase tracking-wider text-text-4">
+              <div className="section-label px-3 py-1.5 flex items-center gap-1.5">
                 <AgentIcon agentId="claude" size={11} />
                 Resume from Claude Code
               </div>
@@ -755,19 +837,19 @@ function SessionHistoryButton({
                     className={`w-full text-left px-3 py-2 flex flex-col gap-0.5 transition-colors ${
                       importing != null && !busy
                         ? "opacity-50 cursor-default"
-                        : "hover:bg-bg-2"
+                        : "hover:bg-state-hover"
                     }`}
                   >
                     <div className="flex items-center gap-2">
                       <AgentIcon agentId="claude" size={13} />
                       <span className="flex-1 truncate text-text-1">{label}</span>
                       {busy && (
-                        <span className="text-[10px] text-accent flex-none">
+                        <span className="text-2xs text-accent flex-none">
                           importing…
                         </span>
                       )}
                     </div>
-                    <div className="pl-[1.35rem] flex items-center gap-1.5 text-[10.5px] text-text-4">
+                    <div className="pl-[1.35rem] flex items-center gap-1.5 text-xs text-text-4">
                       <span>{relTime(sess.mtime)}</span>
                       {sess.turn_count > 0 && <span>· {sess.turn_count} turns</span>}
                       {sess.cwd_rel && (
@@ -796,12 +878,10 @@ const HISTORY_DOT: Record<ManagerStatus, string> = {
 // Compact relative time for session rows. `secs` is a unix-seconds stamp
 // (created_at / updated_at), matching the backend's serialization.
 function relTime(secs: number): string {
+  // One ladder for the whole app — see lib/relativeTime.
   const delta = Math.max(0, Date.now() / 1000 - secs);
-  if (delta < 60) return "just now";
-  if (delta < 3600) return `${Math.floor(delta / 60)}m ago`;
-  if (delta < 86400) return `${Math.floor(delta / 3600)}h ago`;
-  if (delta < 604800) return `${Math.floor(delta / 86400)}d ago`;
-  return new Date(secs * 1000).toLocaleDateString();
+  if (delta >= 604800) return shortDateFromSecs(secs);
+  return relativeAgeFromDelta(delta);
 }
 
 function MenuItem({
@@ -816,7 +896,7 @@ function MenuItem({
   const cls =
     tone === "danger"
       ? "text-red hover:bg-red/10"
-      : "text-text-1 hover:bg-bg-2";
+      : "text-text-1 hover:bg-state-hover";
   return (
     <button className={`block w-full text-left px-3 py-1.5 ${cls}`} onClick={onClick}>
       {label}
@@ -930,12 +1010,12 @@ function UsageChip({ session }: { session: ManagerSession }) {
   const cacheSavings = agg.totalCacheReadTokens;
   const tooltip = [
     `Today across ${session.projects.length} project${session.projects.length === 1 ? "" : "s"}`,
-    `${formatTokens(agg.totalInputTokens)} in · ${formatTokens(agg.totalOutputTokens)} out`,
-    cacheSavings > 0 ? `${formatTokens(cacheSavings)} cache-read (saved)` : null,
+    `${compactNumber(agg.totalInputTokens)} in · ${compactNumber(agg.totalOutputTokens)} out`,
+    cacheSavings > 0 ? `${compactNumber(cacheSavings)} cache-read (saved)` : null,
     "",
     ...agg.byModel.map(
       (m) =>
-        `${m.model}: ${formatTokens(m.inputTokens + m.outputTokens)} · ${formatCost(m.costUsd)}`,
+        `${m.model}: ${compactNumber(m.inputTokens + m.outputTokens)} · ${formatCost(m.costUsd)}`,
     ),
   ]
     .filter((s) => s !== null)
@@ -944,10 +1024,10 @@ function UsageChip({ session }: { session: ManagerSession }) {
   return (
     <div
       title={tooltip}
-      className="flex items-center gap-1.5 text-[10.5px] px-2 py-0.5 rounded border border-line-soft"
+      className="flex items-center gap-1.5 text-xs px-2 py-0.5 rounded border border-line-soft"
     >
       <span className="font-medium text-text-1 tabular-nums">
-        {formatTokens(total)}
+        {compactNumber(total)}
       </span>
       <span className="text-text-3">·</span>
       <span className="font-medium text-text-2 tabular-nums">
@@ -974,18 +1054,6 @@ function mergeByModel(
     cur.sessions += m.sessions;
   }
   return Array.from(map.values()).sort((x, y) => y.costUsd - x.costUsd);
-}
-
-function formatTokens(n: number): string {
-  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
-  if (n >= 1_000) return `${(n / 1_000).toFixed(1)}k`;
-  return n.toString();
-}
-
-function formatCost(usd: number): string {
-  if (usd >= 1) return `$${usd.toFixed(2)}`;
-  if (usd >= 0.01) return `$${usd.toFixed(3)}`;
-  return `$${usd.toFixed(4)}`;
 }
 
 function TaskCard({
@@ -1042,10 +1110,10 @@ function TaskCard({
       <div className="flex items-center justify-between gap-2">
         <div className="flex items-center gap-1.5 min-w-0">
           <div className={`h-2 w-2 rounded-full flex-none ${TASK_DOT[task.status] ?? "bg-text-4"}`} />
-          <Badge variant="muted">{task.agent_id ?? "auto"}</Badge>
+          <StatusChip dense>{task.agent_id ?? "auto"}</StatusChip>
         </div>
         <button
-          className="flex items-center justify-center w-5 h-5 rounded text-text-3 hover:text-text-1 hover:bg-bg-2 flex-shrink-0"
+          className="flex items-center justify-center w-5 h-5 rounded text-text-3 hover:text-text-1 hover:bg-state-hover flex-shrink-0"
           onClick={(e) => {
             e.stopPropagation();
             setOpen((v) => !v);
@@ -1059,7 +1127,9 @@ function TaskCard({
           </svg>
         </button>
       </div>
-      <div className="text-text-1 t-sm mt-1.5 line-clamp-3">{task.description}</div>
+      <div className="text-text-1 t-sm mt-1.5 line-clamp-3">
+        {plainPreview(task.description)}
+      </div>
       {(task.depends_on.length > 0 ||
         task.worktree_path ||
         task.a2a_task_id ||
@@ -1067,35 +1137,39 @@ function TaskCard({
         liveCount > 0) && (
         <div className="flex flex-wrap items-center gap-1 mt-1.5">
           {task.depends_on.length > 0 && (
-            <Badge variant="muted" title="Upstream task ids">
+            <StatusChip
+              dense
+              title={`Waits for ${task.depends_on.length === 1 ? "task" : "tasks"} ${task.depends_on.join(", ")} to finish first`}
+            >
               ↑ {task.depends_on.join(",")}
-            </Badge>
+            </StatusChip>
           )}
           {task.worktree_path && (
-            <Badge variant="muted" title={`Isolated copy: ${task.worktree_path}`}>
+            <StatusChip dense title={`Isolated copy: ${task.worktree_path}`}>
               ⎇ {task.worktree_path.split("/").slice(-1)[0]}
-            </Badge>
+            </StatusChip>
           )}
           {task.a2a_task_id && (
-            <Badge variant="default" title={`A2A v1.2 task ${task.a2a_task_id}`}>
+            <StatusChip
+              dense
+              title={`Tracked as an agent-to-agent (A2A) task · ${task.a2a_task_id}`}
+            >
               ⇆ a2a:{task.a2a_task_id.split("-")[0]}
-            </Badge>
+            </StatusChip>
           )}
           {(task.pre_dispatch_snapshot_ids?.length ?? 0) > 0 && (
-            <Badge
-              variant="muted"
-              title={`Auto-snapshotted ${task.pre_dispatch_snapshot_ids!.length} file(s) before dispatch — recoverable via 'aura rewind --task ${task.id}'`}
+            <StatusChip dense
+              title={`Auto-snapshotted ${task.pre_dispatch_snapshot_ids!.length} file(s) before dispatch. Recoverable via 'aura rewind --task ${task.id}'`}
             >
               ↺ {task.pre_dispatch_snapshot_ids!.length} snapshot
               {task.pre_dispatch_snapshot_ids!.length === 1 ? "" : "s"}
-            </Badge>
+            </StatusChip>
           )}
           {liveCount > 0 && (
-            <Badge
-              variant="muted"
+            <StatusChip dense
               title={
                 task.status === "running"
-                  ? `Live stream — ${liveCount} lines so far. Click to expand.`
+                  ? `Live stream · ${liveCount} lines so far. Click to expand.`
                   : `Captured ${liveCount} lines while running.`
               }
             >
@@ -1105,15 +1179,15 @@ function TaskCard({
                 } ${pulse ? "animate-pulse" : ""}`}
               />
               ≈{liveCount} lines
-            </Badge>
+            </StatusChip>
           )}
         </div>
       )}
       {task.blocked_reason && (
         <div className="mt-1.5">
-          <Badge variant="warn" title={task.blocked_reason}>
+          <StatusChip dense tone="amber" title={task.blocked_reason}>
             ⚠ {task.blocked_reason}
-          </Badge>
+          </StatusChip>
         </div>
       )}
       {(task.status === "done" ||
@@ -1164,7 +1238,7 @@ function RatingButtons({
       <button
         className={`${baseCls} ${current === 1 ? "text-text-1" : ""}`}
         onClick={(e) => fire(1, e)}
-        title="Mark this task's output as good — feeds the cross-project skill ledger"
+        title="This came out well. Aura remembers which brain did it and reaches for that one on work like this."
         aria-label="Thumbs up"
       >
         <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
@@ -1175,7 +1249,7 @@ function RatingButtons({
       <button
         className={`${baseCls} ${current === -1 ? "text-text-1" : ""}`}
         onClick={(e) => fire(-1, e)}
-        title="Mark this task's output as bad — feeds the cross-project skill ledger"
+        title="This didn't come out well. Aura remembers, and reaches for a different brain on work like this."
         aria-label="Thumbs down"
       >
         <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
@@ -1246,32 +1320,32 @@ function TaskActions({
             agents.map((a) => (
               <button
                 key={a.id}
-                className="block w-full text-left px-2 py-1 hover:bg-bg-2"
+                className="block w-full text-left px-2 py-1 hover:bg-state-hover"
                 onClick={() => fire("reassign", a.id)}
               >
                 {a.label}
               </button>
             ))
           )}
-          <button className="block w-full text-left px-2 py-1 hover:bg-bg-2" onClick={() => setReassignOpen(false)}>
+          <button className="block w-full text-left px-2 py-1 hover:bg-state-hover" onClick={() => setReassignOpen(false)}>
             Back
           </button>
         </>
       ) : (
         <>
-          <button className="block w-full text-left px-2 py-1 hover:bg-bg-2" onClick={() => fire("rerun")}>
+          <button className="block w-full text-left px-2 py-1 hover:bg-state-hover" onClick={() => fire("rerun")}>
             Rerun
           </button>
-          <button className="block w-full text-left px-2 py-1 hover:bg-bg-2" onClick={() => fire("skip")}>
+          <button className="block w-full text-left px-2 py-1 hover:bg-state-hover" onClick={() => fire("skip")}>
             Skip
           </button>
-          <button className="block w-full text-left px-2 py-1 hover:bg-bg-2" onClick={() => setReassignOpen(true)}>
+          <button className="block w-full text-left px-2 py-1 hover:bg-state-hover" onClick={() => setReassignOpen(true)}>
             Reassign…
           </button>
-          <button className="block w-full text-left px-2 py-1 hover:bg-bg-2" onClick={() => fire("take_over")}>
+          <button className="block w-full text-left px-2 py-1 hover:bg-state-hover" onClick={() => fire("take_over")}>
             Take over
           </button>
-          <button className="block w-full text-left px-2 py-1 hover:bg-bg-2" onClick={onClose}>
+          <button className="block w-full text-left px-2 py-1 hover:bg-state-hover" onClick={onClose}>
             Close
           </button>
         </>
@@ -1328,8 +1402,10 @@ function TaskDetailPanel({
     <div className="h-full flex flex-col min-h-0">
       <div className="flex items-center justify-between px-3 py-2 border-b border-line-soft bg-bg-chrome">
         <div className="flex items-center gap-2 min-w-0">
-          <span className="text-[10px] uppercase tracking-wide text-text-3">Task #{task.id}</span>
-          <span className="text-text-1 text-sm truncate">{task.description}</span>
+          <span className="section-label">Task #{task.id}</span>
+          <span className="text-text-1 text-sm truncate">
+            {plainLine(task.description)}
+          </span>
         </div>
         <Button
           variant="ghost"
@@ -1345,7 +1421,7 @@ function TaskDetailPanel({
       </div>
       {(task.status === "manual_pending" || task.status === "failed") && (
         <div className="border-t border-line-soft p-3 flex flex-col gap-2">
-          <div className="text-[10px] uppercase tracking-wide text-text-3">
+          <div className="section-label">
             Mark done manually
           </div>
           <textarea
@@ -1370,7 +1446,14 @@ function TaskDetailPanel({
 
 function RibbonList({ ribbon }: { ribbon: RibbonEntry[] }) {
   if (ribbon.length === 0) {
-    return <div className="text-text-3 text-sm">No events yet.</div>;
+    return (
+      <EmptyState
+        icon={Radio}
+        title="Nothing yet"
+        body="A running commentary of what your agents are doing appears here as it happens."
+        size="sm"
+      />
+    );
   }
   return (
     <ol className="flex flex-col gap-1 text-xs">
@@ -1396,7 +1479,7 @@ function describeEvent(entry: RibbonEntry): string {
     case "task_failed":
       return `Task #${ev.task_id} failed: ${ev.error}`;
     case "zone_collision":
-      return `Zone collision on #${ev.task_id} — claimed by ${ev.claimer}`;
+      return `Zone collision on #${ev.task_id}. Claimed by ${ev.claimer}`;
     case "manual_override":
       return `Override #${ev.task_id}: ${ev.mode}`;
     case "rebase_conflict":

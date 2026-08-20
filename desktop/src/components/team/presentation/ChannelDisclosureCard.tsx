@@ -53,18 +53,18 @@ export function ChannelDisclosureCard({
         <div className="min-w-0 flex-1">
           {!picking ? (
             <>
-              <div className="text-[12.5px] leading-snug text-text-1">
+              <div className="text-base leading-snug text-text-1">
                 You'll post in #aura as <b className="font-semibold">{name}</b>
               </div>
-              <div className="mt-0.5 text-[11.5px] leading-snug text-text-4">
-                #aura is a public space — anyone using Aura, anywhere, can see
+              <div className="mt-0.5 text-sm leading-snug text-text-4">
+                #aura is a public space. Anyone using Aura, anywhere, can see
                 your name and messages here.
               </div>
               <div className="mt-2 flex items-center gap-2">
                 <button
                   type="button"
                   onClick={onKeepRealName}
-                  className="rounded bg-accent px-2.5 py-1 text-[11.5px] font-medium text-bg-1 hover:opacity-90"
+                  className="rounded bg-accent px-2.5 py-1 text-sm font-medium text-bg-1 hover:opacity-90"
                 >
                   Looks good
                 </button>
@@ -72,7 +72,7 @@ export function ChannelDisclosureCard({
                   variant="ghost"
                   size="xs"
                   onClick={() => setPicking(true)}
-                  className="px-1.5 text-[11.5px] text-text-3 hover:text-text-1"
+                  className="px-1.5 text-sm text-text-3 hover:text-text-1"
                 >
                   Use a handle instead
                 </Button>
@@ -80,14 +80,14 @@ export function ChannelDisclosureCard({
             </>
           ) : (
             <>
-              <div className="text-[12.5px] leading-snug text-text-1">
+              <div className="text-base leading-snug text-text-1">
                 Post in #aura as a handle instead
               </div>
-              <div className="mt-0.5 text-[11.5px] leading-snug text-text-4">
-                Just here — your real name still shows in every other channel.
+              <div className="mt-0.5 text-sm leading-snug text-text-4">
+                Just here. Your real name still shows in every other channel.
               </div>
               <div className="mt-2 flex flex-wrap items-center gap-2">
-                <span className="rounded border border-line-soft bg-bg-2 px-2 py-1 font-mono text-[11.5px] text-text-1">
+                <span className="rounded border border-line-soft bg-bg-2 px-2 py-1 font-mono text-sm text-text-1">
                   {handle}
                 </span>
                 <Button
@@ -95,7 +95,7 @@ export function ChannelDisclosureCard({
                   size="xs"
                   onClick={() => setHandle(randomHandle())}
                   title="Suggest another handle"
-                  className="gap-1 px-1.5 text-[11px] text-text-3 hover:text-text-1"
+                  className="gap-1 px-1.5 text-xs text-text-3 hover:text-text-1"
                 >
                   <Shuffle size={11} />
                   Shuffle
@@ -104,7 +104,7 @@ export function ChannelDisclosureCard({
                 <button
                   type="button"
                   onClick={() => onUsePseudonym(handle)}
-                  className="rounded bg-accent px-2.5 py-1 text-[11.5px] font-medium text-bg-1 hover:opacity-90"
+                  className="rounded bg-accent px-2.5 py-1 text-sm font-medium text-bg-1 hover:opacity-90"
                 >
                   Use this handle
                 </button>
@@ -112,7 +112,7 @@ export function ChannelDisclosureCard({
                   variant="ghost"
                   size="xs"
                   onClick={() => setPicking(false)}
-                  className="px-1.5 text-[11.5px] text-text-3 hover:text-text-1"
+                  className="px-1.5 text-sm text-text-3 hover:text-text-1"
                 >
                   Back
                 </Button>

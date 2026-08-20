@@ -9,18 +9,22 @@
 
 import type { CSSProperties } from "react";
 
-import { RepoAvatar } from "../../RepoAvatar";
 import * as Icons from "../../Icons";
+import { CloudGlyph } from "../../ui/cloud-glyph";
+import { labelForAgentId } from "../../../lib/useLiveAgentSessions";
 import type { WorktreeBadge } from "../../../lib/useWorktreeBadges";
-import { compactCount, shortAge, type WorkspaceRowData } from "./model";
+import { shortAge, type WorkspaceRowData } from "./model";
+import { compactNumber } from "../../../lib/compactNumber";
 
 type Props = {
   row: WorkspaceRowData;
-  /** Repository root — what the avatar identifies the project by. */
-  repoRoot: string;
   badge?: WorktreeBadge;
   now: number;
   selected: boolean;
+  /** The branch this copy's ahead/behind counts are measured against. Named on
+   *  the row itself so the list needs no caption explaining what "behind"
+   *  means — see `describeDrift`. */
+  trunk: string;
   onOpen: () => void;
   onMessage: () => void;
 };
@@ -54,71 +58,139 @@ const chip: CSSProperties = {
   whiteSpace: "nowrap",
 };
 
+/** What this copy is carrying, said in the words the rest of the app uses.
+ *
+ *  This read `59 uncommitted · 21 ahead 397 behind`, set in a monospace face.
+ *  Three problems, all of them in one 40-character string:
+ *
+ *  "uncommitted", "ahead" and "behind" are git's words for three ideas the app
+ *  already has plain names for — the board one tab away calls the first lane
+ *  "Unsaved changes", and this product exists so that someone who has never
+ *  run `git status` can read what their agents did.
+ *
+ *  "ahead" and "behind" are also meaningless without saying what of. The page
+ *  answered that with a caption above the list — "measured against main" —
+ *  which is a whole band of chrome spent explaining a word that could simply
+ *  have carried its own reference point. Now it does, and the caption is gone.
+ *
+ *  And the monospace was doing nothing. Its comment claimed the digits lined
+ *  up column-to-column, but these strings are right-aligned and every one of
+ *  them is a different length ("3 unsaved" against "1 unsaved · 143 behind"),
+ *  so nothing has ever lined up. `tabular-nums` gives the only alignment that
+ *  was real, and the row rejoins the typeface the list beside it is set in. */
+function describeDrift(
+  dirty: number,
+  ahead: number,
+  behind: number,
+  trunk: string,
+): { parts: string[]; tip: string } {
+  // An empty trunk means the plane hasn't finished reading; name the idea
+  // rather than printing "ahead of ".
+  const base = trunk || "the main line";
+  const parts: string[] = [];
+  const tip: string[] = [];
+  if (dirty > 0) {
+    parts.push(`${dirty} unsaved`);
+    tip.push(
+      `${dirty} ${dirty === 1 ? "file has" : "files have"} changes that haven't been saved to this copy's history yet.`,
+    );
+  }
+  if (ahead > 0) {
+    parts.push(`${ahead} ahead of ${base}`);
+    tip.push(
+      `${ahead} saved ${ahead === 1 ? "change" : "changes"} here that ${base} doesn't have yet.`,
+    );
+  }
+  if (behind > 0) {
+    parts.push(`${behind} behind`);
+    tip.push(
+      `${behind} ${behind === 1 ? "change" : "changes"} on ${base} that this copy hasn't taken yet.`,
+    );
+  }
+  return { parts, tip: tip.join("\n") };
+}
+
 export function WorkspaceRow({
   row,
-  repoRoot,
   badge,
   now,
   selected,
+  trunk,
   onOpen,
   onMessage,
 }: Props) {
   const { card } = row;
   const live = row.liveAgents.length > 0;
   const collision = row.collisions[0];
+  const drift = describeDrift(card.dirty_files, card.ahead, card.behind, trunk);
 
   return (
     <div
-      className="group flex flex-col gap-0.5 rounded-sm px-2 py-[7px] transition-colors"
-      style={{ background: selected ? "var(--color-bg-2)" : "transparent" }}
-      onMouseEnter={(e) => {
-        if (!selected) e.currentTarget.style.background = "var(--color-bg-hover)";
-      }}
-      onMouseLeave={(e) => {
-        if (!selected) e.currentTarget.style.background = "transparent";
-      }}
+      // The app has one wash for "this is the row you are on" and one for
+      // hover; this row was painting its own pair by hand, in two greys that
+      // belong to neither ladder.
+      className={`group flex flex-col gap-0.5 rounded-sm px-2 py-[7px] transition-colors ${
+        selected ? "bg-state-selected" : "hover:bg-state-hover"
+      }`}
     >
       <div className="flex items-center gap-2.5">
         <button
           type="button"
           onClick={onOpen}
           className="flex min-w-0 flex-1 items-center gap-2.5 text-left"
-          title={card.path}
+          // The row shows the branch read aloud, so the slug itself lives
+          // here with the path — the two things you'd copy, not read.
+          title={card.branch ? `${card.branch}\n${card.path}` : card.path}
         >
+          {/* The one leading mark. This list is a single repository's
+              checkouts, so the project avatar beside it was the same 15px
+              square repeated down forty rows — a column that never varied
+              telling you which project you were already in. */}
           <ForkGlyph live={live} />
 
-          <RepoAvatar
-            repoRoot={repoRoot}
-            size={15}
-            fallback={
-              <span
-                className="grid h-[15px] w-[15px] place-items-center rounded-[3px] text-[9px] font-medium"
-                style={{ background: "var(--color-bg-3)", color: "var(--color-text-3)" }}
-              >
-                {(card.branch ?? card.token).charAt(0).toUpperCase()}
-              </span>
-            }
-          />
-
           <span
-            className="truncate text-[12.5px]"
+            className="truncate text-base"
             style={{ color: selected ? "var(--color-text-1)" : "var(--color-text-2)" }}
           >
             {row.title}
           </span>
 
+          {/* The row is already washed as the selected one; the word is what
+              says *why* it's selected, so it stays — as a word, not as a
+              filled ALL-CAPS pill on top of a fill that already means this. */}
           {card.is_here && (
-            <span
-              className="shrink-0 rounded-[3px] px-1 py-px text-[9.5px] font-medium uppercase tracking-wide"
-              style={{ background: "var(--color-accent-soft)", color: "var(--color-accent)" }}
-            >
-              here
+            <span className="shrink-0 text-xs font-medium text-accent">
+              You&rsquo;re here
             </span>
           )}
           {card.missing && (
             <span style={{ ...chip, color: "var(--color-text-5)" }}>folder gone</span>
           )}
         </button>
+
+        {/* Running somewhere that isn't this disk. Every other mark on this
+            row is read out of the local checkout, so a copy a runner is
+            mid-turn on looks exactly like one nobody has touched: no live
+            dot, no diff, an old timestamp. This is the only thing on the row
+            that can say otherwise, which is why it sits ahead of the agent
+            dot rather than after the counts.
+
+            Still while the job is queued. `submitted` means no machine has
+            claimed it, and a breathing glyph there would say a box is working
+            when none is. */}
+        {badge?.cloud && (
+          <span
+            className="flex shrink-0 items-center"
+            style={{ color: "var(--color-text-4)" }}
+            title={
+              badge.cloud.status === "submitted"
+                ? `Queued for a machine. ${labelForAgentId(badge.cloud.agent)} hasn't started yet`
+                : `Running on your machine in the cloud. ${labelForAgentId(badge.cloud.agent)}`
+            }
+          >
+            <CloudGlyph size={13} pulse={badge.cloud.status !== "submitted"} />
+          </span>
+        )}
 
         {/* Who is standing in it. The dot is the only always-coloured mark on
             the row, because "an agent is running here right now" is the one
@@ -148,15 +220,13 @@ export function WorkspaceRow({
           </button>
         )}
 
-        {/* Drift from trunk and uncommitted work — mono so the digits line up
-            column-to-column down a long list. */}
-        <span className="shrink-0 font-mono tabular-nums" style={chip}>
-          {card.dirty_files > 0 && <span>{card.dirty_files} uncommitted</span>}
-          {card.dirty_files > 0 && (card.ahead > 0 || card.behind > 0) && <span> · </span>}
-          {card.ahead > 0 && <span>{card.ahead} ahead</span>}
-          {card.ahead > 0 && card.behind > 0 && <span> </span>}
-          {card.behind > 0 && <span>{card.behind} behind</span>}
-        </span>
+        {/* What this copy is carrying, against the main line — see
+            `describeDrift` for why it no longer speaks git. */}
+        {drift.parts.length > 0 && (
+          <span className="shrink-0 tabular-nums" style={chip} title={drift.tip}>
+            {drift.parts.join(" · ")}
+          </span>
+        )}
 
         {/* Added / removed.
             Plain text on every row but one: green-and-red down a whole list
@@ -169,12 +239,12 @@ export function WorkspaceRow({
           <span className="flex shrink-0 gap-1 font-mono tabular-nums" style={chip}>
             {badge.added > 0 && (
               <span style={{ color: selected ? "var(--color-accent-green)" : "var(--color-text-3)" }}>
-                +{compactCount(badge.added)}
+                +{compactNumber(badge.added)}
               </span>
             )}
             {badge.removed > 0 && (
               <span style={{ color: selected ? "var(--color-red)" : "var(--color-text-3)" }}>
-                −{compactCount(badge.removed)}
+                −{compactNumber(badge.removed)}
               </span>
             )}
           </span>
@@ -204,7 +274,7 @@ export function WorkspaceRow({
           their change unpickable from the other's. Worth its own line. */}
       {collision && (
         <div
-          className="flex items-center gap-1.5 pl-[26px] text-[10.5px]"
+          className="flex items-center gap-1.5 pl-[26px] text-xs"
           style={{ color: "var(--color-red)" }}
         >
           <Icons.Impacts size={11} />

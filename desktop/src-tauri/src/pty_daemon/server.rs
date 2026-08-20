@@ -260,7 +260,10 @@ async fn handle_request(reg: &Arc<Registry>, req: Request) -> Response {
         Request::Close { session_id } => {
             let mut sessions = reg.sessions.lock().unwrap();
             if let Some(sess) = sessions.remove(&session_id) {
-                let _ = sess.child.lock().unwrap().kill();
+                // Same hangup the in-process path uses. The daemon owns the
+                // child precisely so it can outlive the app, which makes an
+                // orphan here permanent — nothing is left to reap it.
+                crate::pty_reap::hangup_and_reap(&mut **sess.child.lock().unwrap());
                 Response::Ok
             } else {
                 Response::Err { message: format!("unknown session: {session_id}") }

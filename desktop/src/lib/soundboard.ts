@@ -22,6 +22,11 @@
 // receiver side without any custom subscription logic.
 
 import { LocalAudioTrack, type LocalParticipant } from "livekit-client";
+import {
+  acquireOutputContext,
+  releaseOutputContextAfter,
+  releaseOutputContextNow,
+} from "./audioOutput";
 import { api, type SoundboardClip } from "./api";
 
 // Minimal duck type for the LiveKit LocalParticipant — typing exactly
@@ -33,17 +38,23 @@ type SoundboardParticipant = Pick<
   "publishTrack" | "unpublishTrack"
 >;
 
-// AudioContext is heavy; reuse one across plays. Re-create on resume
-// if the OS suspended it (browser autoplay policies).
-let audioCtx: AudioContext | null = null;
+// The context is the app-wide one from `audioOutput` — soundboard used to own
+// a second, permanently-running AudioContext of its own, which meant Aura held
+// the Mac's audio route for the whole session after a single clip. Every
+// acquire below is paired with a `releaseOutputContextAfter` on the clip's
+// end, so the device goes back once the clip has played.
 function ctx(): AudioContext {
-  if (!audioCtx || audioCtx.state === "closed") {
-    audioCtx = new AudioContext();
-  }
-  if (audioCtx.state === "suspended") {
-    void audioCtx.resume().catch(() => {});
-  }
-  return audioCtx;
+  const ac = acquireOutputContext();
+  if (!ac) throw new Error("soundboard: Web Audio is unavailable");
+  return ac;
+}
+
+/** Hold the output device for the length of a clip (plus a little slack for
+ *  the publish round-trip), so an unrelated short sound can't suspend the
+ *  context out from under a clip that is still playing. Deadlines take the
+ *  max in `audioOutput`, so this never shortens someone else's hold. */
+function holdForClip(durationSec: number): void {
+  releaseOutputContextAfter(Math.max(0, durationSec) * 1000 + 500);
 }
 
 // Hold one publication per clip play so an overlapping play (user
@@ -130,8 +141,15 @@ export async function playSoundboardClip(
         /* fine */
       }
       active.delete(play);
+      // Clip is done and unpublished. The hold armed at start already covers
+      // its length; this only guarantees a release is armed at all, for the
+      // case where the clip ran past its own reported duration.
+      releaseOutputContextAfter(0);
       resolve();
     };
+    // The hard cap below stops anything longer than 10s, so the hold never
+    // needs to exceed that either.
+    holdForClip(Math.min(decoded.duration, 10));
     source.start();
     // Hard cap at 10s — soundboard clips should be short; if the clip
     // is longer we still stop publishing so we don't accidentally
@@ -156,6 +174,9 @@ export function stopAllSoundboardClips(): void {
     }
   }
   active.clear();
+  // Nothing left to render — hand the output device back rather than sitting
+  // on it until whatever hold the longest clip armed runs out.
+  releaseOutputContextNow();
 }
 
 // --- Built-in seed clips ---------------------------------------------------
@@ -283,8 +304,10 @@ export async function playSoundboardSeed(
         /* ignore */
       }
       active.delete(play);
+      releaseOutputContextAfter(0);
       resolve();
     };
+    holdForClip(decoded.duration);
     source.start();
   });
 }

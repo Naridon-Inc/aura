@@ -1,14 +1,45 @@
-// The "Board" tab — the same copies laid out as status columns (Conductor's
-// Dashboard, honest to Aura's live signals). Columns only appear when they
-// hold something, so the board never shows an empty lane of placeholders.
+// The "Board" tab — the same parallel copies laid out as status lanes,
+// rendered through the app's shared board design system (`components/board`)
+// so a copy on this board reads as the same kind of object as a task on the
+// Tasks board or a run on Mission Control.
+//
+// Lanes only appear when they hold something (`groupByStatus` filters empties),
+// because unlike a task pipeline there's no meaning in "you have zero copies
+// that need you" — the honest read is just the lanes that exist.
 
+import {
+  BoardCard,
+  BoardCardMetaRow,
+  BoardColumn,
+  BoardFrame,
+  StateGlyph,
+} from "../board";
+import { branchAddsNothing } from "../../lib/workspaceLabel";
 import {
   groupByStatus,
   relTime,
   statusMeta,
+  type CopyStatus,
   type WorkspaceCopy,
 } from "./workspacesModel";
-import { AgentChips, DiffPill, PrPill, ProjectGlyph } from "./WorkspacesBits";
+import {
+  AgentChips,
+  CloudMark,
+  DiffPill,
+  PrPill,
+  ProjectGlyph,
+} from "./WorkspacesBits";
+
+/** Map a copy's status onto the app's one state-glyph vocabulary, so this
+ *  board's lane headers draw the same shapes as every other board: dashed =
+ *  resting, solid ring = live but idle, half-filled = something is running. */
+const STATUS_GLYPH_GROUP: Record<CopyStatus, string> = {
+  attn: "started",
+  working: "started",
+  active: "unstarted",
+  dirty: "unstarted",
+  idle: "backlog",
+};
 
 export function WorkspacesBoardTab({
   copies,
@@ -22,45 +53,35 @@ export function WorkspacesBoardTab({
   const columns = groupByStatus(copies);
   if (!copies.length) {
     return (
-      <div className="flex-1 min-h-0 flex items-center justify-center text-text-4 text-sm">
-        No copies yet — open a project or start a parallel copy.
+      <div className="flex min-h-0 flex-1 items-center justify-center text-sm text-text-4">
+        No copies yet. Open a project or start a parallel copy.
       </div>
     );
   }
   return (
-    <div className="flex-1 min-h-0 overflow-x-auto overflow-y-hidden px-4 py-3">
-      <div className="flex h-full items-start gap-3">
-        {columns.map((col) => {
-          const tint = statusMeta(col.status).tint;
-          return (
-            <section
-              key={col.status}
-              className="flex h-full w-[248px] flex-none flex-col rounded-lg border border-line-soft bg-bg-1"
-            >
-              <header className="flex items-center gap-2 px-3 py-2.5 border-b border-line-soft">
-                <span
-                  className="inline-block h-2 w-2 flex-none rounded-full"
-                  style={{ background: tint }}
-                />
-                <h3 className="text-[12px] font-semibold text-text-1">
-                  {col.label}
-                </h3>
-                <span className="text-[11px] tabular-nums text-text-4">
-                  {col.copies.length}
-                </span>
-                <span className="ml-auto text-[10px] text-text-5" title={col.hint}>
-                  ?
-                </span>
-              </header>
-              <div className="flex flex-1 min-h-0 flex-col gap-1.5 overflow-y-auto p-2">
-                {col.copies.map((c) => (
-                  <CopyCard key={c.path} copy={c} nowMs={nowMs} onOpen={onOpen} />
-                ))}
-              </div>
-            </section>
-          );
-        })}
-      </div>
+    <div className="min-h-0 flex-1">
+      <BoardFrame>
+        {columns.map((col) => (
+          <BoardColumn
+            key={col.status}
+            title={col.label}
+            titleHint={col.hint}
+            count={col.copies.length}
+            collapsible
+            glyph={
+              <StateGlyph
+                group={STATUS_GLYPH_GROUP[col.status]}
+                color={statusMeta(col.status).tint}
+                size={12}
+              />
+            }
+          >
+            {col.copies.map((c) => (
+              <CopyCard key={c.path} copy={c} nowMs={nowMs} onOpen={onOpen} />
+            ))}
+          </BoardColumn>
+        ))}
+      </BoardFrame>
     </div>
   );
 }
@@ -76,12 +97,13 @@ function CopyCard({
 }) {
   const stamp = relTime(c.committedAt, nowMs);
   return (
-    <button
-      type="button"
-      onClick={() => onOpen(c.path)}
-      title={`${c.path} — open`}
-      className="group flex w-full flex-col gap-1.5 rounded-md border border-line-soft bg-bg-content px-2.5 py-2 text-left transition-colors hover:border-line hover:bg-bg-2"
+    <BoardCard
+      onOpen={() => onOpen(c.path)}
+      title={`${c.projectName} · ${c.title}\n${c.path}`}
     >
+      {/* Header — the project's glyph leads, because on an all-projects board
+          "which project is this?" is the first question. The timestamp sits at
+          the right edge, the one place every board puts "when". */}
       <div className="flex items-center gap-1.5">
         <ProjectGlyph
           root={c.root}
@@ -90,23 +112,35 @@ function CopyCard({
           accent={c.projectAccent}
           size={15}
         />
-        <span className="min-w-0 flex-1 truncate text-[12.5px] text-text-1">
+        <span className="min-w-0 flex-1 truncate text-base leading-snug text-text-1">
           {c.title}
         </span>
         {stamp && (
-          <span className="flex-none text-[10px] tabular-nums text-text-5">
+          <span className="flex-none text-2xs tabular-nums text-text-5">
             {stamp}
           </span>
         )}
       </div>
-      <div className="flex items-center gap-1.5 pl-[21px]">
-        <span className="min-w-0 flex-1 truncate text-[10.5px] text-text-4">
-          {c.isMain ? c.projectName : c.branch || c.projectName}
+
+      {/* Footer — the branch, then the live signals, indented to clear the
+          project glyph so the two rows read as one block.
+          The branch only when it says something the title above doesn't: this
+          line printed the card's own name back at it on sixteen of twenty-five
+          cards ("bergen" over `bergen`, "workspaces page" over
+          `feat/workspaces-page`). When it has nothing to add, the slot goes to
+          the question a board spanning every project actually raises — which
+          project is this one? */}
+      <BoardCardMetaRow>
+        <span className="min-w-0 flex-1 truncate pl-[21px] text-xs text-text-4">
+          {c.isMain || branchAddsNothing(c.branch, c.title)
+            ? c.projectName
+            : c.branch}
         </span>
+        <CloudMark cloud={c.cloud} />
         <DiffPill added={c.added} removed={c.removed} />
         <PrPill pr={c.pr} />
         <AgentChips agents={c.agents} />
-      </div>
-    </button>
+      </BoardCardMetaRow>
+    </BoardCard>
   );
 }

@@ -188,73 +188,76 @@ fn symbol_id(key: &str, name: &str, file: Option<&str>) -> String {
 /// the frontend can degrade gracefully to a plain editor.
 #[tauri::command]
 pub async fn read_atlas(repo_root: String) -> Result<AtlasHover, String> {
-    let root = PathBuf::from(&repo_root);
-    let atlas_path = root.join(".aura").join("atlas.json");
+    crate::blocking::run(move || {
+        let root = PathBuf::from(&repo_root);
+        let atlas_path = root.join(".aura").join("atlas.json");
 
-    let raw = match fs::read_to_string(&atlas_path) {
-        Ok(s) => s,
-        // No atlas generated yet — not an error, just nothing to show.
-        Err(_) => return Ok(empty_hover()),
-    };
+        let raw = match fs::read_to_string(&atlas_path) {
+            Ok(s) => s,
+            // No atlas generated yet — not an error, just nothing to show.
+            Err(_) => return Ok(empty_hover()),
+        };
 
-    let atlas: RawAtlas = match serde_json::from_str(&raw) {
-        Ok(a) => a,
-        // A malformed/old-schema atlas shouldn't break the editor.
-        Err(e) => return Err(format!("atlas.json is not valid JSON: {e}")),
-    };
+        let atlas: RawAtlas = match serde_json::from_str(&raw) {
+            Ok(a) => a,
+            // A malformed/old-schema atlas shouldn't break the editor.
+            Err(e) => return Err(format!("atlas.json is not valid JSON: {e}")),
+        };
 
-    // Flatten the three buckets in priority order (features first — those are
-    // the things a person actually does). Dedupe by symbol id, first-wins, so a
-    // feature's meaning beats an atom's if the same id appears twice.
-    let mut entries: Vec<AtlasHoverEntry> = Vec::new();
-    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
-    for raw_entry in atlas
-        .features
-        .iter()
-        .chain(atlas.components.iter())
-        .chain(atlas.atoms.iter())
-    {
-        let id = symbol_id(&raw_entry.key, &raw_entry.name, raw_entry.file.as_deref());
-        if !seen.insert(id) {
-            continue;
+        // Flatten the three buckets in priority order (features first — those are
+        // the things a person actually does). Dedupe by symbol id, first-wins, so a
+        // feature's meaning beats an atom's if the same id appears twice.
+        let mut entries: Vec<AtlasHoverEntry> = Vec::new();
+        let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+        for raw_entry in atlas
+            .features
+            .iter()
+            .chain(atlas.components.iter())
+            .chain(atlas.atoms.iter())
+        {
+            let id = symbol_id(&raw_entry.key, &raw_entry.name, raw_entry.file.as_deref());
+            if !seen.insert(id) {
+                continue;
+            }
+            entries.push(AtlasHoverEntry {
+                key: raw_entry.key.clone(),
+                name: raw_entry.name.clone(),
+                title: raw_entry.title.clone(),
+                role: raw_entry.role.clone(),
+                layer: raw_entry.layer.clone(),
+                summary: raw_entry.summary.clone(),
+                file: raw_entry.file.clone(),
+                line: raw_entry.line,
+                feature: raw_entry.feature.clone(),
+                summary_source: if raw_entry.summary_source.is_empty() {
+                    "structural".to_string()
+                } else {
+                    raw_entry.summary_source.clone()
+                },
+                meaning_change: None,
+            });
         }
-        entries.push(AtlasHoverEntry {
-            key: raw_entry.key.clone(),
-            name: raw_entry.name.clone(),
-            title: raw_entry.title.clone(),
-            role: raw_entry.role.clone(),
-            layer: raw_entry.layer.clone(),
-            summary: raw_entry.summary.clone(),
-            file: raw_entry.file.clone(),
-            line: raw_entry.line,
-            feature: raw_entry.feature.clone(),
-            summary_source: if raw_entry.summary_source.is_empty() {
-                "structural".to_string()
-            } else {
-                raw_entry.summary_source.clone()
-            },
-            meaning_change: None,
-        });
-    }
 
-    // Fold in meaning-change tracking against the durable baseline.
-    let changes = reconcile_meanings(&root, atlas.generated_at, &entries);
-    let mut changed_count = 0usize;
-    for entry in entries.iter_mut() {
-        let id = symbol_id(&entry.key, &entry.name, entry.file.as_deref());
-        if let Some(change) = changes.get(&id) {
-            entry.meaning_change = Some(change.clone());
-            changed_count += 1;
+        // Fold in meaning-change tracking against the durable baseline.
+        let changes = reconcile_meanings(&root, atlas.generated_at, &entries);
+        let mut changed_count = 0usize;
+        for entry in entries.iter_mut() {
+            let id = symbol_id(&entry.key, &entry.name, entry.file.as_deref());
+            if let Some(change) = changes.get(&id) {
+                entry.meaning_change = Some(change.clone());
+                changed_count += 1;
+            }
         }
-    }
 
-    Ok(AtlasHover {
-        available: true,
-        generated_at: Some(atlas.generated_at),
-        repo: Some(atlas.repo.clone()),
-        entries,
-        changed_count,
+        Ok(AtlasHover {
+            available: true,
+            generated_at: Some(atlas.generated_at),
+            repo: Some(atlas.repo.clone()),
+            entries,
+            changed_count,
+        })
     })
+    .await
 }
 
 /// Compare the live atlas's per-symbol meanings against the stored baseline,

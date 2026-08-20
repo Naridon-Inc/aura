@@ -273,7 +273,7 @@ function TourBubble({
           type="button"
           onClick={onSkip}
           aria-label="Skip tour"
-          className="absolute right-3 top-3 grid h-6 w-6 place-items-center rounded-md text-text-4 transition-colors hover:bg-bg-2 hover:text-text-2"
+          className="absolute right-3 top-3 grid h-6 w-6 place-items-center rounded-md text-text-4 transition-colors hover:bg-state-hover hover:text-text-2"
         >
           <X className="h-3.5 w-3.5" aria-hidden="true" />
         </button>
@@ -288,22 +288,19 @@ function TourBubble({
           <Sparkles className="h-[18px] w-[18px]" aria-hidden="true" />
         </span>
 
-        <div
-          className="mt-3 font-mono text-[10.5px] font-semibold uppercase tracking-[0.14em]"
-          style={{ color: "var(--color-accent)" }}
-        >
+        <div className="eyebrow mt-3">
           {step.eyebrow ?? "Get started"}
         </div>
         <h2
           id="tour-title"
-          className="mt-1.5 text-[16px] font-semibold leading-snug text-text-1"
+          className="mt-1.5 text-lg font-semibold leading-snug text-text-1"
           style={{ textWrap: "balance" }}
         >
           {step.title}
         </h2>
       </div>
 
-      <p className="border-t border-line-soft px-5 py-4 text-[13px] leading-relaxed text-text-2">
+      <p className="border-t border-line-soft px-5 py-4 text-base leading-relaxed text-text-2">
         {step.body}
       </p>
 
@@ -329,7 +326,7 @@ function TourBubble({
             <button
               type="button"
               onClick={onSkip}
-              className="text-[12px] text-text-4 transition-colors hover:text-text-2"
+              className="text-sm text-text-4 transition-colors hover:text-text-2"
             >
               Skip
             </button>
@@ -337,7 +334,7 @@ function TourBubble({
             <button
               type="button"
               onClick={onBack}
-              className="text-[12px] text-text-3 transition-colors hover:text-text-1"
+              className="text-sm text-text-3 transition-colors hover:text-text-1"
             >
               Back
             </button>

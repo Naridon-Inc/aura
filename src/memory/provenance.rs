@@ -643,6 +643,7 @@ mod tests {
             intent_type: None,
             signed_block_id: Some("blk_42".into()),
             key_id: Some("key-1".into()),
+            source: None,
         };
         assert_eq!(intent_row_id(&signed).as_deref(), Some("blk_42"));
 
@@ -653,6 +654,7 @@ mod tests {
             intent_type: None,
             signed_block_id: None,
             key_id: None,
+            source: None,
         };
         assert_eq!(intent_row_id(&unsigned).as_deref(), Some("ts:100"));
 
@@ -663,6 +665,7 @@ mod tests {
             intent_type: None,
             signed_block_id: None,
             key_id: None,
+            source: None,
         };
         assert_eq!(intent_row_id(&legacy), None);
     }

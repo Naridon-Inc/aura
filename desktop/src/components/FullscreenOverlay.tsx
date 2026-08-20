@@ -21,6 +21,8 @@
 import { useEffect, type ReactNode } from "react";
 import { createPortal } from "react-dom";
 import { cn } from "../lib/utils";
+import { SurfaceHeader } from "./ui/SurfaceHeader";
+import { Kbd } from "./ui/kbd";
 import {
   dropTrafficLightsForOverlay,
   restoreTrafficLights,
@@ -55,7 +57,7 @@ export function FullscreenOverlay({
   footer,
   children,
   contentClassName,
-  closeHint = "esc",
+  closeHint = "Esc",
   embedded = false,
 }: FullscreenOverlayProps) {
   // Escape closes from anywhere — the overlay owns the whole window while up,
@@ -85,37 +87,28 @@ export function FullscreenOverlay({
   // wrapper differs.
   const panel = (
     <>
-      {/* Top bar — items-stretch so a full-height ProgressTabs sets the bar
-          height while a short pill strip just centers. */}
-      <header className="flex items-stretch min-h-12 border-b border-line bg-bg-content flex-shrink-0">
-        {/* Left cluster: Esc chip owns the top-left corner now that the
-            traffic lights have moved out of the way. No title — the tabs
-            carry the context. */}
-        <div className="flex items-center gap-2 pl-3 pr-3">
+      {/* The same bar every other surface wears — ui/SurfaceHeader. This one
+          used to be drawn here, four pixels taller and with a heavier rule
+          than the pages', which meant the app had one header idea and three
+          drawings of it. The Esc chip is what a modal has that a page doesn't,
+          so it rides in the leading slot; there is still no title, because the
+          tabs carry the context. */}
+      <SurfaceHeader
+        leading={
           <button
             type="button"
             onClick={onClose}
             title="Close (Esc)"
             aria-label="Close (Esc)"
-            className="flex items-center gap-1.5 h-7 pl-1.5 pr-2 rounded-md text-text-2 hover:text-text-1 hover:bg-bg-2 transition-colors"
+            className="flex items-center gap-1.5 h-7 pl-1.5 pr-2 rounded-md text-text-2 hover:text-text-1 hover:bg-state-hover transition-colors"
           >
             <CloseIcon />
-            <kbd className="text-[10px] uppercase tracking-wider text-text-4 bg-bg-2 border border-line-soft px-1.5 py-0.5 rounded leading-none">
-              {closeHint}
-            </kbd>
+            <Kbd>{closeHint}</Kbd>
           </button>
-        </div>
-
-        {tabs ? (
-          <div className="flex min-w-0 flex-1 items-center">{tabs}</div>
-        ) : (
-          <div className="flex-1 min-w-0" />
-        )}
-
-        {actions && (
-          <div className="flex items-center gap-2 px-3">{actions}</div>
-        )}
-      </header>
+        }
+        tabs={tabs}
+        actions={actions}
+      />
 
       {/* Body — full panel width; flex-col so flex-1 children fill height. */}
       <div className={cn("flex-1 min-h-0 flex flex-col", contentClassName)}>

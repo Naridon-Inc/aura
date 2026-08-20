@@ -28,10 +28,10 @@ export function FeatureRollup({ repoRoot, goals }: { repoRoot: string; goals: Go
   return (
     <div className="mb-2.5 rounded-lg border border-line-soft bg-bg-1 px-3.5 py-3">
       <div className="mb-2.5 flex items-baseline gap-2">
-        <h3 className="text-[11px] font-medium uppercase tracking-wider text-text-3">
+        <h3 className="section-label">
           This feature
         </h3>
-        <span className="text-[10.5px] text-text-4">
+        <span className="text-xs text-text-4">
           {agg.goalsReached}/{agg.goalsTotal} goals reached · across every session that worked it
         </span>
       </div>

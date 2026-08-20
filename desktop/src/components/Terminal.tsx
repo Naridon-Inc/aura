@@ -37,6 +37,7 @@ import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { handleClipboardKey, mapKeyEvent } from "../lib/terminalKeymap";
 import { api } from "../lib/api";
 import { registerFilePathLinks } from "../lib/terminalLinks";
+import { openExternal } from "../lib/openExternal";
 import { getSettings } from "../lib/settingsStore";
 import { playTerminalBell } from "../lib/terminalBell";
 import { isNativeTerminalEnabled } from "../lib/nativeTerminalStore";
@@ -308,7 +309,15 @@ export async function pasteIntoTerminal(instanceId: string): Promise<void> {
   const s = sessions.get(instanceId);
   if (!s) return;
   const text = await navigator.clipboard?.readText().catch(() => "");
-  if (text) invoke("pty_write", { id: s.ptyId, data: text }).catch(() => {});
+  // Bytes, not the string — `pty_write` is `data: Vec<u8>`, so a string is
+  // rejected at serde and the paste vanishes with no error anyone sees. Every
+  // other write on this path already encodes; this one was the odd one out.
+  if (text) {
+    const data = Array.from(new TextEncoder().encode(text));
+    invoke("pty_write", { id: s.ptyId, data }).catch((e) =>
+      console.warn("pasteIntoTerminal: pty_write failed", e),
+    );
+  }
 }
 
 /** Find-in-terminal options shared by the find widget. `caseSensitive`,
@@ -470,6 +479,15 @@ function XtermTerminal({
       // hit-testing finds the host via `[data-os-drop]`, then reads this id.
       hostEl.setAttribute("data-pty-id", session.ptyId);
 
+      // A reattach is an "opened" too. Only `createSession()` used to report
+      // the id, so a caller that mounted onto an ALREADY-live session (second
+      // open of the same tab) sat holding a null pty id forever — and every
+      // write it made went nowhere, silently, because `pty_write` was never
+      // called. That is precisely how the connect-machine wizard lost its
+      // setup commands into a void on a re-opened terminal. NativeTerminal
+      // already reports on its reattach path; this brings xterm in line.
+      onOpened?.(session.ptyId, true);
+
       // Fresh observer per mount — old one was disconnected on
       // detach. Keeps xterm fit-to-host as the window resizes while
       // this tab is active.
@@ -501,7 +519,10 @@ function XtermTerminal({
       // ~/.aura/settings.toml). Read once at construction; not reactive.
       const tprefs = getSettings().terminal;
       // VSCode splits its default terminal font size by platform (its editor
-      // default: 12 on macOS, 14 elsewhere) and uses Menlo on mac.
+      // default: 12 on macOS, 14 elsewhere) and uses Menlo on mac. That
+      // default held for everyone until now, because there was nowhere to
+      // change it — Settings → Terminal has a Text size row, and a number
+      // there wins over the platform's.
       const isMac =
         typeof navigator !== "undefined" && /Mac/i.test(navigator.platform);
       const term = new XTerm({
@@ -514,7 +535,7 @@ function XtermTerminal({
           : THEME,
         // Exact VSCode defaults — Menlo on mac, platform monospace elsewhere.
         fontFamily: "Menlo, Monaco, 'Courier New', monospace",
-        fontSize: isMac ? 12 : 14,
+        fontSize: tprefs.font_size ?? (isMac ? 12 : 14),
         fontWeight: "normal",
         fontWeightBold: "bold",
         letterSpacing: 0,
@@ -545,7 +566,10 @@ function XtermTerminal({
       term.loadAddon(fit);
       term.loadAddon(serialize);
       term.loadAddon(search);
-      term.loadAddon(new WebLinksAddon());
+      // Pass an explicit handler: the addon defaults to `window.open`, and a
+      // Tauri webview has no tab to open into, so http(s) links printed by a
+      // command hover like links and do nothing when clicked.
+      term.loadAddon(new WebLinksAddon((_e, uri) => void openExternal(uri)));
       // Unicode 11 width tables — VSCode loads this so wide glyphs/emoji take
       // the right cell count (allowProposedApi is required for it).
       term.loadAddon(new Unicode11Addon());

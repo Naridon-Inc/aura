@@ -19,6 +19,9 @@
  *  never mutated, so the age chip keeps counting and a carried task is obvious.
  *  Pure data + transforms — no React, no I/O. */
 
+import { shortDate } from "../../../lib/calendarDate";
+import { relativeAge } from "../../../lib/relativeTime";
+
 export type ScribbleBlock = {
   /** Stable id for React keys + in-place updates (persisted so edits/toggles
    *  from another device reconcile to the same block). */
@@ -177,21 +180,11 @@ export function serializeScribble(blocks: ScribbleBlock[]): string {
   return ordered.map(serializeBlock).join("\n") + (ordered.length ? "\n" : "");
 }
 
-/** Compact, human age like `just now` / `4m` / `3h` / `2d` / `1w`. */
+/** Compact, human age like `now` / `4m` / `3h` / `2d` / `1w`. */
 export function formatAge(tsMs: number, nowMs: number): string {
-  const s = Math.max(0, Math.floor((nowMs - tsMs) / 1000));
-  if (s < 45) return "just now";
-  const m = Math.floor(s / 60);
-  if (m < 60) return `${m}m`;
-  const h = Math.floor(m / 60);
-  if (h < 24) return `${h}h`;
-  const d = Math.floor(h / 24);
-  if (d < 7) return `${d}d`;
-  const w = Math.floor(d / 7);
-  if (w < 5) return `${w}w`;
-  const mo = Math.floor(d / 30);
-  if (mo < 12) return `${mo}mo`;
-  return `${Math.floor(d / 365)}y`;
+  // One ladder for the whole app — see lib/relativeTime. This copy skipped the
+  // seconds rung, so a block written 50 seconds ago read "0m".
+  return relativeAge(tsMs, { now: nowMs, style: "compact" });
 }
 
 /** Local-calendar day bucket, e.g. "2026-6-24" (month is 0-based, internal). */
@@ -214,15 +207,9 @@ export function dayLabel(dayMs: number, nowMs: number): string {
   const diff = daysBetween(dayMs, nowMs);
   if (diff === 0) return "Today";
   if (diff === 1) return "Yesterday";
-  return new Date(dayMs).toLocaleDateString(undefined, {
-    weekday: "short",
-    month: "short",
-    day: "numeric",
-    year:
-      new Date(dayMs).getFullYear() === new Date(nowMs).getFullYear()
-        ? undefined
-        : "numeric",
-  });
+  // The year-only-when-it-differs rule was worked out here first; it is
+  // the whole app's now — see lib/calendarDate.
+  return shortDate(dayMs, { now: nowMs, weekday: "short" });
 }
 
 /** An open task first added on an earlier day — it "carried" into today. */

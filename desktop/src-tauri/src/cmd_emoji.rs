@@ -12,20 +12,39 @@
 // input, so the user's own OS shortcut (Win+. / the IBus picker) lands in the
 // same field.
 
-/// Open the system emoji picker. macOS fronts the Character Viewer; other
-/// platforms are a graceful no-op (the capture input is already focused).
+/// Open the system emoji picker, attached to the window that asked for it.
+/// macOS fronts the Character Viewer; other platforms are a graceful no-op
+/// (the capture input is already focused).
 #[tauri::command]
-pub fn open_system_emoji_picker() -> Result<(), String> {
+pub fn open_system_emoji_picker(window: tauri::WebviewWindow) -> Result<(), String> {
     #[cfg(target_os = "macos")]
-    unsafe {
-        use cocoa::base::{id, nil};
+    {
+        use cocoa::base::{id, nil, YES};
         use objc::{class, msg_send, sel, sel_impl};
 
-        let app: id = msg_send![class!(NSApplication), sharedApplication];
-        if app == nil {
-            return Err("NSApplication is unavailable".to_string());
+        // The palette follows the KEY window, and this app has more than one:
+        // the menu-bar HUD is its own panel, and a popped-out pane is its own
+        // window. Whichever of them was last key is where the Character Viewer
+        // appeared — over there, inserting into a field that isn't the capture
+        // input, while the roster you clicked sat waiting for a glyph that was
+        // never coming. So make the caller key first, and mean it: a panel that
+        // is still frontmost outranks a window that is merely ordered front.
+        let ns_window = window.ns_window().map_err(|e| e.to_string())? as id;
+        unsafe {
+            let app: id = msg_send![class!(NSApplication), sharedApplication];
+            if app == nil {
+                return Err("NSApplication is unavailable".to_string());
+            }
+            if ns_window != nil {
+                let _: () = msg_send![app, activateIgnoringOtherApps: YES];
+                let _: () = msg_send![ns_window, makeKeyAndOrderFront: nil];
+            }
+            let _: () = msg_send![app, orderFrontCharacterPalette: nil];
         }
-        let _: () = msg_send![app, orderFrontCharacterPalette: nil];
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = &window;
     }
     Ok(())
 }

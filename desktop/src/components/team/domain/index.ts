@@ -60,15 +60,23 @@ export {
   railLabel,
   composerHint,
   hhmm,
-  pad,
   previewBody,
+  isHumanBody,
   railTime,
   formatPinTime,
 } from "./labels";
 
+export type { ConvPresence } from "./presence";
+export { presenceForConversation } from "./presence";
+
+export type { Draft } from "./persistence";
 export {
   loadLastRead,
   persistLastRead,
   loadPinned,
   persistPinned,
+  loadDraft,
+  persistDraft,
+  clearDraft,
+  loadAllDrafts,
 } from "./persistence";

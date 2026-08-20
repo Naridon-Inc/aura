@@ -13,6 +13,7 @@
 
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { onExternalAnchorClick } from "../../lib/openExternal";
+import { taskStatusLabel } from "../../lib/taskStatus";
 import { Pencil, Plus, ArrowUpRight, SquareArrowOutUpRight } from "lucide-react";
 import {
   api,
@@ -24,12 +25,13 @@ import {
   type TeamMember,
   type UpdateTaskInput,
 } from "../../lib/api";
+import { fetchCycles, fetchModules, fetchTaskLabels, fetchTaskStates, fetchTasks } from "../../lib/tasksCache";
 import { useEditorStore } from "../../lib/editorStore";
 import { FullscreenOverlay } from "../FullscreenOverlay";
 import { WizardStepTabs, type WizardStepMeta } from "../ui/wizard";
 import { Button } from "../ui/button";
 import { Input } from "../ui/input";
-import { TaskIdChip } from "../TasksBoard";
+import { TaskIdChip } from "./TaskIdChip";
 import { StartInAgentButton } from "./StartInAgentButton";
 import { StatePill } from "./StatePill";
 import { AssigneeStack } from "../AssigneePicker";
@@ -47,8 +49,13 @@ import {
   CommentsCard,
 } from "./TaskDetailSidePanel";
 import { SubTasksPanel } from "./SubTasksPanel";
+import { TaskPlan } from "./TaskPlan";
 import { TaskGoals } from "../goals/TaskGoals";
 import { TaskCrewActivity } from "./TaskCrewActivity";
+import { relativeAgeFromIso } from "../../lib/relativeTime";
+import { askConfirm } from "../ui/ask";
+import { toast } from "../../lib/toast";
+import { fetchTeam } from "../../lib/teamCache";
 
 /** "Edit this task" channel name. Opening the stepped wizard is owned by
  *  TasksBoard (it holds the `editingId` overlay state); the detail pane
@@ -59,19 +66,8 @@ export const TASK_EDIT_EVENT = "aura:tasks:edit";
 
 // Short "updated 2d ago" relative stamp for the read-mode meta line.
 function relAge(iso: string): string {
-  const t = Date.parse(iso);
-  if (Number.isNaN(t)) return "";
-  const s = Math.max(0, Math.floor((Date.now() - t) / 1000));
-  if (s < 60) return "just now";
-  const m = Math.floor(s / 60);
-  if (m < 60) return `${m}m ago`;
-  const h = Math.floor(m / 60);
-  if (h < 24) return `${h}h ago`;
-  const d = Math.floor(h / 24);
-  if (d < 30) return `${d}d ago`;
-  const mo = Math.floor(d / 30);
-  if (mo < 12) return `${mo}mo ago`;
-  return `${Math.floor(mo / 12)}y ago`;
+  // One ladder for the whole app — see lib/relativeTime.
+  return relativeAgeFromIso(iso);
 }
 
 // Read-mode header tabs — the same Medusa ProgressTabs strip the create/edit
@@ -136,12 +132,12 @@ export function TaskDetailPane({
   const refresh = useCallback(async () => {
     try {
       const [rows, team, states, cyc, mods, labs] = await Promise.all([
-        api.tasksList(repoRoot),
-        api.teamLoad(repoRoot).catch(() => null),
-        api.taskStatesList(repoRoot).catch(() => [] as TaskState[]),
-        api.tasksCyclesList(repoRoot).catch(() => [] as Cycle[]),
-        api.tasksModulesList(repoRoot).catch(() => [] as Module[]),
-        api.taskLabelsList(repoRoot).catch(() => [] as TaskLabel[]),
+        fetchTasks(repoRoot),
+        fetchTeam(repoRoot).catch(() => null),
+        fetchTaskStates(repoRoot).catch(() => [] as TaskState[]),
+        fetchCycles(repoRoot).catch(() => [] as Cycle[]),
+        fetchModules(repoRoot).catch(() => [] as Module[]),
+        fetchTaskLabels(repoRoot).catch(() => [] as TaskLabel[]),
       ]);
       setAllTasks(rows);
       setMembers(team?.members ?? []);
@@ -182,15 +178,50 @@ export function TaskDetailPane({
     [repoRoot],
   );
 
+  // Tick one line of the plan off (or back on) by position. Distinct from
+  // onPatch's whole-list replace: a step toggle addresses a single row so a
+  // concurrent plan edit can't overwrite it (cmd_tasks.rs::tasks_step_set).
+  const onStepSet = useCallback(
+    async (index: number, done: boolean) => {
+      const next = await api.tasksStepSet(repoRoot, taskId, index, done);
+      setTask(next);
+      setAllTasks((prev) => prev.map((t) => (t.id === next.id ? next : t)));
+      window.dispatchEvent(new CustomEvent("aura:tasks:mutated"));
+    },
+    [repoRoot, taskId],
+  );
+
   const onDelete = useCallback(async () => {
     if (!task) return;
-    if (!window.confirm(`Delete "${task.title}"? This cannot be undone.`)) {
+    if (
+      !(await askConfirm({
+        title: `Delete "${task.title}"?`,
+        body: "This can't be undone.",
+        confirmLabel: "Delete",
+        tone: "danger",
+      }))
+    ) {
       return;
     }
-    await api.tasksDelete(repoRoot, task.id);
-    window.dispatchEvent(new CustomEvent("aura:tasks:mutated"));
-    if (onClose) onClose();
-    else editor.closeTaskDetail(task.id);
+    // The confirm dialog just told the user this can't be undone, so the
+    // call that actually does it cannot fail in silence: without this the
+    // pane simply stays open and the Delete button reads as inert. Retry
+    // re-runs the delete only — it does not re-ask, since they already said
+    // yes to this exact task.
+    const attempt = async (): Promise<void> => {
+      try {
+        await api.tasksDelete(repoRoot, task.id);
+      } catch (e) {
+        toast.danger("Couldn't delete the task", String(e), {
+          actions: [{ label: "Try again", onClick: attempt }],
+        });
+        return;
+      }
+      window.dispatchEvent(new CustomEvent("aura:tasks:mutated"));
+      if (onClose) onClose();
+      else editor.closeTaskDetail(task.id);
+    };
+    await attempt();
   }, [task, repoRoot, onClose, editor]);
 
   const close = useCallback(() => {
@@ -223,7 +254,7 @@ export function TaskDetailPane({
   if (loading) {
     return (
       <FullscreenOverlay onClose={close} embedded={embedded}>
-        <div className="flex-1 flex items-center justify-center text-text-5 text-[12px]">
+        <div className="flex-1 flex items-center justify-center text-text-5 text-sm">
           Loading task…
         </div>
       </FullscreenOverlay>
@@ -232,7 +263,7 @@ export function TaskDetailPane({
   if (error || !task) {
     return (
       <FullscreenOverlay onClose={close} embedded={embedded}>
-        <div className="flex-1 flex flex-col items-center justify-center gap-2 text-text-4 text-[13px]">
+        <div className="flex-1 flex flex-col items-center justify-center gap-2 text-text-4 text-base">
           <div>{error ?? "Task not found"}</div>
         </div>
       </FullscreenOverlay>
@@ -291,7 +322,7 @@ export function TaskDetailPane({
             variant="secondary"
             size="xs"
             onClick={startEdit}
-            title="Edit task — opens the stepped editor"
+            title="Edit task. Opens the stepped editor"
           >
             <Pencil strokeWidth={1.75} aria-hidden />
             Edit
@@ -336,17 +367,17 @@ export function TaskDetailPane({
                 and provenance at a glance before the title, so the detail
                 opens as a doc you read (not a form). Inline tweaks still
                 live in the right rail; the full stepped editor is Edit. */}
-            <div className="flex flex-wrap items-center gap-2 text-[11px] text-text-4 mb-3">
+            <div className="flex flex-wrap items-center gap-2 text-xs text-text-4 mb-3">
               <TaskIdChip
                 sequenceId={task.sequence_id}
-                className="font-mono text-[11px] tracking-tight text-text-3 hover:text-text-1 hover:bg-bg-2 px-1.5 py-0.5 rounded transition-colors"
+                className="font-mono text-xs tracking-tight text-text-3 hover:text-text-1 hover:bg-state-hover px-1.5 py-0.5 rounded transition-colors"
               />
               <span className="w-px h-3 bg-line-soft" />
               {currentState ? (
                 <StatePill state={currentState} />
               ) : (
-                <StatusChip tone="neutral" dot>
-                  {task.status.replace(/_/g, " ")}
+                <StatusChip tone={TASK_STATE_CHIP[task.status].tone} dot>
+                  {taskStatusLabel(task.status)}
                 </StatusChip>
               )}
               <StatusChip tone={PRIORITY_CHIP[task.priority].tone} dot>
@@ -380,6 +411,12 @@ export function TaskDetailPane({
                 variant="page"
               />
             </div>
+            {task.steps && task.steps.length > 0 && (
+              <>
+                <div className="h-px bg-line-soft/60 my-7" aria-hidden />
+                <TaskPlan task={task} onStepSet={onStepSet} />
+              </>
+            )}
             <div className="h-px bg-line-soft/60 my-7" aria-hidden />
             <TaskGoals repoRoot={repoRoot} task={task} />
             <div className="h-px bg-line-soft/60 my-7" aria-hidden />
@@ -415,7 +452,7 @@ export function TaskDetailPane({
             section wrapper draws the rules; every child carries its own
             vertical padding via `[&>*]:py-4`. */}
         <aside
-          className="w-[300px] flex-shrink-0 border-l-[0.5px] border-line-soft bg-bg-content overflow-y-auto px-5 text-[12px]"
+          className="w-[300px] flex-shrink-0 border-l-[0.5px] border-line-soft bg-bg-content overflow-y-auto px-5 text-sm"
           aria-label="Task metadata"
         >
           <div className="divide-y divide-line-soft/60 [&>*]:py-4 [&>*:first-child]:pt-5">
@@ -525,7 +562,7 @@ function TitleBlock({
         }
       }}
       rows={1}
-      className="w-full bg-transparent text-text-1 text-[24px] font-semibold leading-[1.25] tracking-[-0.01em] resize-none focus:outline-none focus:bg-bg-2/40 rounded px-2 -mx-2 py-1"
+      className="w-full bg-transparent text-text-1 text-[24px] font-semibold leading-[1.25] tracking-[-0.01em] resize-none focus:outline-none focus:bg-state-hover rounded px-2 -mx-2 py-1"
       placeholder="Untitled task"
     />
   );
@@ -600,7 +637,7 @@ function SubTasksTab({
       // user can retry without retyping. The sibling Sub-tasks panels
       // (SubTasksPanel / TaskDetailSidePanel) show errors the same way;
       // this inner editor was the one create surface that swallowed them.
-      setCreateErr("Couldn't add the sub-task — check your connection and try again.");
+      setCreateErr("Couldn't add the sub-task. Check your connection and try again.");
     } finally {
       setCreating(false);
     }
@@ -611,14 +648,14 @@ function SubTasksTab({
       {/* Master — sidebar list of children. */}
       <aside className="w-[300px] flex-shrink-0 border-r-[0.5px] border-line-soft bg-bg-content flex flex-col">
         <div className="flex items-center h-11 px-4 border-b-[0.5px] border-line-soft flex-shrink-0">
-          <span className="text-[12px] text-text-2 font-medium">Sub-tasks</span>
-          <span className="ml-1.5 text-[11px] text-text-5 tabular-nums">
+          <span className="text-sm text-text-2 font-medium">Sub-tasks</span>
+          <span className="ml-1.5 text-xs text-text-5 tabular-nums">
             {childTasks.length}
           </span>
           <button
             type="button"
             onClick={() => setAdding(true)}
-            className="ml-auto w-6 h-6 grid place-items-center rounded-md text-text-4 hover:text-text-1 hover:bg-bg-2 transition-colors"
+            className="ml-auto w-6 h-6 grid place-items-center rounded-md text-text-4 hover:text-text-1 hover:bg-state-hover transition-colors"
             title="Add a sub-task"
             aria-label="Add a sub-task"
           >
@@ -659,7 +696,7 @@ function SubTasksTab({
               onBlur={() => {
                 if (!draft.trim() && !creating) setAdding(false);
               }}
-              placeholder="Sub-task title — Enter to add"
+              placeholder="Sub-task title. Enter to add"
               disabled={creating}
               className="mt-0.5 w-full"
             />
@@ -667,7 +704,7 @@ function SubTasksTab({
           {createErr && (
             <div
               role="alert"
-              className="mt-0.5 flex items-center gap-1.5 px-0.5 text-[11px] text-red"
+              className="mt-0.5 flex items-center gap-1.5 px-0.5 text-xs text-red"
             >
               <span aria-hidden>⚠</span>
               <span>{createErr}</span>
@@ -690,24 +727,24 @@ function SubTasksTab({
                 <div className="flex items-center gap-2 mb-3">
                   <TaskIdChip
                     sequenceId={selected.sequence_id}
-                    className="font-mono text-[11px] tracking-tight text-text-3 hover:text-text-1 hover:bg-bg-2 px-1.5 py-0.5 rounded transition-colors"
+                    className="font-mono text-xs tracking-tight text-text-3 hover:text-text-1 hover:bg-state-hover px-1.5 py-0.5 rounded transition-colors"
                   />
                   <button
                     type="button"
                     onClick={() => editor.openTaskDetail(selected.id, repoRoot)}
-                    className="ml-auto inline-flex items-center gap-1 text-[11px] text-text-3 hover:text-text-1 px-2 py-1 rounded-md border border-line-soft hover:bg-bg-2 transition-colors"
+                    className="ml-auto inline-flex items-center gap-1 text-xs text-text-3 hover:text-text-1 px-2 py-1 rounded-md border border-line-soft hover:bg-state-hover transition-colors"
                     title="Open this sub-task as its own page"
                   >
                     <ArrowUpRight className="w-3 h-3" strokeWidth={1.75} aria-hidden />
                     Open
                   </button>
                 </div>
-                <div className="flex flex-wrap items-center gap-2 text-[11px] text-text-4 mb-3">
+                <div className="flex flex-wrap items-center gap-2 text-xs text-text-4 mb-3">
                   {selectedState ? (
                     <StatePill state={selectedState} />
                   ) : (
-                    <StatusChip tone="neutral" dot>
-                      {selected.status.replace(/_/g, " ")}
+                    <StatusChip tone={TASK_STATE_CHIP[selected.status].tone} dot>
+                      {taskStatusLabel(selected.status)}
                     </StatusChip>
                   )}
                   <StatusChip tone={PRIORITY_CHIP[selected.priority].tone} dot>
@@ -733,7 +770,7 @@ function SubTasksTab({
 
             {/* Metadata rail — narrow, same flat cards as the parent. */}
             <aside
-              className="w-[300px] flex-shrink-0 border-l-[0.5px] border-line-soft bg-bg-content overflow-y-auto px-5 text-[12px]"
+              className="w-[300px] flex-shrink-0 border-l-[0.5px] border-line-soft bg-bg-content overflow-y-auto px-5 text-sm"
               aria-label="Sub-task metadata"
             >
               <div className="divide-y divide-line-soft/60 [&>*]:py-4 [&>*:first-child]:pt-5">
@@ -774,7 +811,7 @@ function SubTasksTab({
             </aside>
           </>
         ) : (
-          <div className="flex-1 h-full flex items-center justify-center text-text-5 text-[12px]">
+          <div className="flex-1 h-full flex items-center justify-center text-text-5 text-sm">
             Select a sub-task to view its details.
           </div>
         )}
@@ -810,11 +847,11 @@ function SubTaskListRow({
       className={`w-full text-left rounded-md px-2.5 py-2 flex flex-col gap-1.5 transition-colors ${
         selected
           ? "bg-bg-2 ring-1 ring-line-soft"
-          : "hover:bg-bg-2/40"
+          : "hover:bg-state-hover"
       }`}
     >
       <div className="flex items-center gap-2">
-        <span className="font-mono text-[10px] text-text-4 tabular-nums">
+        <span className="font-mono text-2xs text-text-4 tabular-nums">
           {task.sequence_id > 0 ? `AURA-${task.sequence_id}` : "AURA-?"}
         </span>
         <span className="ml-auto">
@@ -822,12 +859,15 @@ function SubTaskListRow({
             <StatePill state={state} dense />
           ) : (
             <StatusChip tone={TASK_STATE_CHIP[task.status].tone} dot dense>
-              {task.status.replace(/_/g, " ")}
+              {/* Was `task.status.replace(/_/g, " ")` — the database column
+                  with its underscores swapped for spaces, printed to whoever
+                  opened the task. See lib/taskStatus. */}
+              {taskStatusLabel(task.status)}
             </StatusChip>
           )}
         </span>
       </div>
-      <span className="text-[12.5px] text-text-1 leading-snug line-clamp-2">
+      <span className="text-base text-text-1 leading-snug line-clamp-2">
         {task.title || "(untitled)"}
       </span>
       <div className="flex items-center gap-2">

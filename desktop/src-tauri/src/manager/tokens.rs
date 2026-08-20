@@ -226,6 +226,9 @@ mod tests {
             saved_tokens: None,
             input_tokens: None,
             output_tokens: None,
+            model: None,
+            cost_usd: None,
+            cost_estimated: None,
         }
     }
 

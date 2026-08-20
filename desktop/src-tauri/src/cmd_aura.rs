@@ -76,8 +76,8 @@ struct LiveExit {
 
 #[derive(Default)]
 pub struct AuraLiveRegistry {
-    by_root: Mutex<HashMap<String, LiveProcess>>,
-    last_exit: Mutex<HashMap<String, LiveExit>>,
+    by_root: Arc<Mutex<HashMap<String, LiveProcess>>>,
+    last_exit: Arc<Mutex<HashMap<String, LiveExit>>>,
 }
 
 impl AuraLiveRegistry {
@@ -87,7 +87,12 @@ impl AuraLiveRegistry {
 
     /// Reap a dead child: snapshot its exit code + stderr tail into
     /// `last_exit` so status polls can explain the death.
-    fn record_exit(&self, repo_root: &str, status: std::process::ExitStatus, proc: &LiveProcess) {
+    fn record_exit(
+        last_exit: &Mutex<HashMap<String, LiveExit>>,
+        repo_root: &str,
+        status: std::process::ExitStatus,
+        proc: &LiveProcess,
+    ) {
         let lines: Vec<String> = proc
             .stderr_tail
             .lock()
@@ -106,21 +111,21 @@ impl AuraLiveRegistry {
                 Some(msg)
             },
         };
-        if let Ok(mut m) = self.last_exit.lock() {
+        if let Ok(mut m) = last_exit.lock() {
             m.insert(repo_root.to_string(), exit);
         }
     }
 
-    fn take_exit(&self, repo_root: &str) -> LiveExit {
-        self.last_exit
+    fn take_exit(last_exit: &Mutex<HashMap<String, LiveExit>>, repo_root: &str) -> LiveExit {
+        last_exit
             .lock()
             .ok()
             .and_then(|m| m.get(repo_root).cloned())
             .unwrap_or_default()
     }
 
-    fn clear_exit(&self, repo_root: &str) {
-        if let Ok(mut m) = self.last_exit.lock() {
+    fn clear_exit(last_exit: &Mutex<HashMap<String, LiveExit>>, repo_root: &str) {
+        if let Ok(mut m) = last_exit.lock() {
             m.remove(repo_root);
         }
     }
@@ -141,42 +146,45 @@ impl Drop for AuraLiveRegistry {
 /// the React side typically asks for 20 to populate the timeline pane.
 #[tauri::command]
 pub async fn aura_recent_blocks(limit: usize) -> Result<Vec<AuraBlock>, String> {
-    let db = home_db_path();
-    if !db.exists() {
-        return Ok(vec![]);
-    }
-    let store = BlockStore::open(&db).map_err(|e| e.to_string())?;
-    let blocks = store
-        .list_blocks(&BlockFilter::default())
-        .map_err(|e| e.to_string())?;
+    crate::blocking::run(move || {
+        let db = home_db_path();
+        if !db.exists() {
+            return Ok(vec![]);
+        }
+        let store = BlockStore::open(&db).map_err(|e| e.to_string())?;
+        let blocks = store
+            .list_blocks(&BlockFilter::default())
+            .map_err(|e| e.to_string())?;
 
-    // Newest first — BlockStore order is insertion; reverse so the
-    // pane shows the most recent activity at the top.
-    let mut out: Vec<AuraBlock> = blocks
-        .into_iter()
-        .rev()
-        .take(limit)
-        .map(|b| {
-            // Block layout varies across kinds; we surface enough to
-            // identify the entry without copying massive payloads.
-            // Use Debug for a stable, terse summary regardless of variant.
-            let summary = format!("{:?}", b);
-            // Truncate so the JSON IPC payload stays small.
-            let summary = if summary.len() > 240 {
-                format!("{}…", &summary[..240])
-            } else {
-                summary
-            };
-            AuraBlock {
-                id: format!("{}", uuid::Uuid::new_v4()),
-                kind: "block".to_string(),
-                timestamp: 0,
-                summary,
-            }
-        })
-        .collect();
-    out.shrink_to_fit();
-    Ok(out)
+        // Newest first — BlockStore order is insertion; reverse so the
+        // pane shows the most recent activity at the top.
+        let mut out: Vec<AuraBlock> = blocks
+            .into_iter()
+            .rev()
+            .take(limit)
+            .map(|b| {
+                // Block layout varies across kinds; we surface enough to
+                // identify the entry without copying massive payloads.
+                // Use Debug for a stable, terse summary regardless of variant.
+                let summary = format!("{:?}", b);
+                // Truncate so the JSON IPC payload stays small.
+                let summary = if summary.len() > 240 {
+                    format!("{}…", crate::text::clip(&summary, 240))
+                } else {
+                    summary
+                };
+                AuraBlock {
+                    id: format!("{}", uuid::Uuid::new_v4()),
+                    kind: "block".to_string(),
+                    timestamp: 0,
+                    summary,
+                }
+            })
+            .collect();
+        out.shrink_to_fit();
+        Ok(out)
+    })
+    .await
 }
 
 /// How long a passthrough CLI call may run before we stop waiting for
@@ -184,11 +192,45 @@ pub async fn aura_recent_blocks(limit: usize) -> Result<Vec<AuraBlock>, String> 
 /// wedged helper doesn't leave the surface that called it spinning.
 const AURA_CLI_TIMEOUT: Duration = Duration::from_secs(30);
 
+/// The Aura verbs worth a product event: the ones that mean somebody used
+/// what makes Aura *Aura*. Everything else the app shells out for — status
+/// probes, version checks, list reads it refreshes on every mount — is
+/// polling, and counting it would bury the signal this is here to carry.
+/// Adding a verb is a one-line change; that is the point of the list.
+const TRACKED_VERBS: &[&str] = &[
+    "prove",
+    "pr-review",
+    "rewind",
+    "log-intent",
+    "sign-intent",
+    "plan",
+    "crew",
+    "handover",
+    "atlas",
+    "bundle",
+    "work",
+    "intent-vs-actual",
+    "attest",
+];
+
+/// Record that an Aura verb ran. The verb alone — never the arguments,
+/// which carry symbol names, goals and paths.
+fn track_aura_verb(verb: Option<&str>) {
+    let Some(verb) = verb.and_then(crate::telemetry_guard::safe_token) else {
+        return;
+    };
+    if !TRACKED_VERBS.contains(&verb.as_str()) {
+        return;
+    }
+    crate::telemetry::track("aura_command", Some(serde_json::json!({ "verb": verb })));
+}
+
 /// Generic CLI passthrough. The frontend invokes Aura subcommands by
 /// name; we run them in the project root and ferry stdout/stderr back.
 /// Times out after 30s so a hung process can't block the IPC channel.
 #[tauri::command]
 pub async fn aura_cli(repo_root: String, args: Vec<String>) -> Result<CliResult, String> {
+    track_aura_verb(args.first().map(String::as_str));
     let cwd = PathBuf::from(&repo_root);
     // tokio's Command rather than std's: waiting on the child parks this
     // task instead of holding one of the runtime's worker threads. The
@@ -196,7 +238,7 @@ pub async fn aura_cli(repo_root: String, args: Vec<String>) -> Result<CliResult,
     // take a worker with it — enough of those and every other command in
     // the app stops being served too. `kill_on_drop` is what makes the
     // timeout below real: on expiry the child is reaped, not orphaned.
-    let run = tokio::process::Command::new("aura")
+    let run = tokio::process::Command::new(crate::agent_event_listener::resolve_aura_bin())
         .args(&args)
         .current_dir(&cwd)
         .kill_on_drop(true)
@@ -227,84 +269,88 @@ pub async fn aura_live_start(
     collab: bool,
     state: tauri::State<'_, AuraLiveRegistry>,
 ) -> Result<AuraLiveProcessStatus, String> {
-    let cwd = PathBuf::from(&repo_root);
-    if !cwd.is_dir() {
-        return Err(format!("repo root does not exist: {}", repo_root));
-    }
-
-    let mut by_root = state
-        .by_root
-        .lock()
-        .map_err(|_| "live registry lock poisoned".to_string())?;
-    if let Some(proc) = by_root.get_mut(&repo_root) {
-        match proc.child.try_wait() {
-            Ok(None) => {
-                return Ok(AuraLiveProcessStatus {
-                    running: true,
-                    pid: Some(proc.child.id()),
-                    started_at: Some(proc.started_at),
-                    exit_code: None,
-                    last_error: None,
-                });
-            }
-            Ok(Some(status)) => {
-                if let Some(dead) = by_root.remove(&repo_root) {
-                    state.record_exit(&repo_root, status, &dead);
-                }
-            }
-            Err(e) => return Err(format!("failed to inspect aura live: {}", e)),
+    let by_root = Arc::clone(&state.by_root);
+    let last_exit = Arc::clone(&state.last_exit);
+    crate::blocking::run(move || {
+        let cwd = PathBuf::from(&repo_root);
+        if !cwd.is_dir() {
+            return Err(format!("repo root does not exist: {}", repo_root));
         }
-    }
 
-    let mut live_args: Vec<&str> = vec!["live", "start"];
-    if collab {
-        live_args.push("--collab");
-    }
-    // stderr is piped (NOT nulled) — when the daemon dies on launch (parser
-    // init, watcher failure, relay auth), its last words are the only clue
-    // the user gets. A reader thread drains the pipe into a small ring.
-    let mut child = Command::new("aura")
-        .args(&live_args)
-        .current_dir(&cwd)
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|e| format!("failed to spawn aura live: {}", e))?;
-    let stderr_tail = Arc::new(Mutex::new(VecDeque::new()));
-    if let Some(stderr) = child.stderr.take() {
-        let tail = Arc::clone(&stderr_tail);
-        std::thread::spawn(move || {
-            let reader = BufReader::new(stderr);
-            for line in reader.lines().map_while(Result::ok) {
-                if let Ok(mut t) = tail.lock() {
-                    if t.len() >= LIVE_STDERR_TAIL_LINES {
-                        t.pop_front();
-                    }
-                    t.push_back(line);
+        let mut by_root = by_root
+            .lock()
+            .map_err(|_| "live registry lock poisoned".to_string())?;
+        if let Some(proc) = by_root.get_mut(&repo_root) {
+            match proc.child.try_wait() {
+                Ok(None) => {
+                    return Ok(AuraLiveProcessStatus {
+                        running: true,
+                        pid: Some(proc.child.id()),
+                        started_at: Some(proc.started_at),
+                        exit_code: None,
+                        last_error: None,
+                    });
                 }
+                Ok(Some(status)) => {
+                    if let Some(dead) = by_root.remove(&repo_root) {
+                        AuraLiveRegistry::record_exit(&last_exit, &repo_root, status, &dead);
+                    }
+                }
+                Err(e) => return Err(format!("failed to inspect aura live: {}", e)),
             }
-        });
-    }
-    let pid = child.id();
-    let started_at = now_unix_secs();
-    // A fresh successful start supersedes any stale death report.
-    state.clear_exit(&repo_root);
-    by_root.insert(
-        repo_root,
-        LiveProcess {
-            child,
-            started_at,
-            stderr_tail,
-        },
-    );
-    Ok(AuraLiveProcessStatus {
-        running: true,
-        pid: Some(pid),
-        started_at: Some(started_at),
-        exit_code: None,
-        last_error: None,
+        }
+
+        let mut live_args: Vec<&str> = vec!["live", "start"];
+        if collab {
+            live_args.push("--collab");
+        }
+        // stderr is piped (NOT nulled) — when the daemon dies on launch (parser
+        // init, watcher failure, relay auth), its last words are the only clue
+        // the user gets. A reader thread drains the pipe into a small ring.
+        let mut child = Command::new(crate::agent_event_listener::resolve_aura_bin())
+            .args(&live_args)
+            .current_dir(&cwd)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .spawn()
+            .map_err(|e| format!("failed to spawn aura live: {}", e))?;
+        let stderr_tail = Arc::new(Mutex::new(VecDeque::new()));
+        if let Some(stderr) = child.stderr.take() {
+            let tail = Arc::clone(&stderr_tail);
+            std::thread::spawn(move || {
+                let reader = BufReader::new(stderr);
+                for line in reader.lines().map_while(Result::ok) {
+                    if let Ok(mut t) = tail.lock() {
+                        if t.len() >= LIVE_STDERR_TAIL_LINES {
+                            t.pop_front();
+                        }
+                        t.push_back(line);
+                    }
+                }
+            });
+        }
+        let pid = child.id();
+        let started_at = now_unix_secs();
+        // A fresh successful start supersedes any stale death report.
+        AuraLiveRegistry::clear_exit(&last_exit, &repo_root);
+        by_root.insert(
+            repo_root,
+            LiveProcess {
+                child,
+                started_at,
+                stderr_tail,
+            },
+        );
+        Ok(AuraLiveProcessStatus {
+            running: true,
+            pid: Some(pid),
+            started_at: Some(started_at),
+            exit_code: None,
+            last_error: None,
+        })
     })
+    .await
 }
 
 #[tauri::command]
@@ -312,32 +358,36 @@ pub async fn aura_live_stop(
     repo_root: String,
     state: tauri::State<'_, AuraLiveRegistry>,
 ) -> Result<AuraLiveProcessStatus, String> {
-    let mut by_root = state
-        .by_root
-        .lock()
-        .map_err(|_| "live registry lock poisoned".to_string())?;
-    if let Some(mut proc) = by_root.remove(&repo_root) {
-        let _ = proc.child.kill();
-        let _ = proc.child.wait();
-    }
-    // Killing the child stops the daemon but leaves the collab marker on
-    // disk; clear it so Live-off cleanly reverts to plain git (the M1
-    // `live_crdt_enabled()` gate would otherwise stay true). Mirrors what
-    // `aura live stop` does via `set_crdt_enabled(false)`.
-    let marker = PathBuf::from(&repo_root)
-        .join(".aura")
-        .join("live")
-        .join("crdt_enabled");
-    let _ = std::fs::remove_file(marker);
-    // Explicit user stop — any prior death report is no longer interesting.
-    state.clear_exit(&repo_root);
-    Ok(AuraLiveProcessStatus {
-        running: false,
-        pid: None,
-        started_at: None,
-        exit_code: None,
-        last_error: None,
+    let by_root = Arc::clone(&state.by_root);
+    let last_exit = Arc::clone(&state.last_exit);
+    crate::blocking::run(move || {
+        let mut by_root = by_root
+            .lock()
+            .map_err(|_| "live registry lock poisoned".to_string())?;
+        if let Some(mut proc) = by_root.remove(&repo_root) {
+            let _ = proc.child.kill();
+            let _ = proc.child.wait();
+        }
+        // Killing the child stops the daemon but leaves the collab marker on
+        // disk; clear it so Live-off cleanly reverts to plain git (the M1
+        // `live_crdt_enabled()` gate would otherwise stay true). Mirrors what
+        // `aura live stop` does via `set_crdt_enabled(false)`.
+        let marker = PathBuf::from(&repo_root)
+            .join(".aura")
+            .join("live")
+            .join("crdt_enabled");
+        let _ = std::fs::remove_file(marker);
+        // Explicit user stop — any prior death report is no longer interesting.
+        AuraLiveRegistry::clear_exit(&last_exit, &repo_root);
+        Ok(AuraLiveProcessStatus {
+            running: false,
+            pid: None,
+            started_at: None,
+            exit_code: None,
+            last_error: None,
+        })
     })
+    .await
 }
 
 #[tauri::command]
@@ -345,39 +395,43 @@ pub async fn aura_live_status(
     repo_root: String,
     state: tauri::State<'_, AuraLiveRegistry>,
 ) -> Result<AuraLiveProcessStatus, String> {
-    let mut by_root = state
-        .by_root
-        .lock()
-        .map_err(|_| "live registry lock poisoned".to_string())?;
-    if let Some(proc) = by_root.get_mut(&repo_root) {
-        match proc.child.try_wait() {
-            Ok(None) => {
-                return Ok(AuraLiveProcessStatus {
-                    running: true,
-                    pid: Some(proc.child.id()),
-                    started_at: Some(proc.started_at),
-                    exit_code: None,
-                    last_error: None,
-                });
-            }
-            Ok(Some(status)) => {
-                if let Some(dead) = by_root.remove(&repo_root) {
-                    state.record_exit(&repo_root, status, &dead);
+    let by_root = Arc::clone(&state.by_root);
+    let last_exit = Arc::clone(&state.last_exit);
+    crate::blocking::run(move || {
+        let mut by_root = by_root
+            .lock()
+            .map_err(|_| "live registry lock poisoned".to_string())?;
+        if let Some(proc) = by_root.get_mut(&repo_root) {
+            match proc.child.try_wait() {
+                Ok(None) => {
+                    return Ok(AuraLiveProcessStatus {
+                        running: true,
+                        pid: Some(proc.child.id()),
+                        started_at: Some(proc.started_at),
+                        exit_code: None,
+                        last_error: None,
+                    });
                 }
+                Ok(Some(status)) => {
+                    if let Some(dead) = by_root.remove(&repo_root) {
+                        AuraLiveRegistry::record_exit(&last_exit, &repo_root, status, &dead);
+                    }
+                }
+                Err(e) => return Err(format!("failed to inspect aura live: {}", e)),
             }
-            Err(e) => return Err(format!("failed to inspect aura live: {}", e)),
         }
-    }
-    // Not running — if the daemon died on its own, carry the reason so the
-    // frontend can explain the toggle flipping off instead of going mute.
-    let exit = state.take_exit(&repo_root);
-    Ok(AuraLiveProcessStatus {
-        running: false,
-        pid: None,
-        started_at: None,
-        exit_code: exit.exit_code,
-        last_error: exit.last_error,
+        // Not running — if the daemon died on its own, carry the reason so the
+        // frontend can explain the toggle flipping off instead of going mute.
+        let exit = AuraLiveRegistry::take_exit(&last_exit, &repo_root);
+        Ok(AuraLiveProcessStatus {
+            running: false,
+            pid: None,
+            started_at: None,
+            exit_code: exit.exit_code,
+            last_error: exit.last_error,
+        })
     })
+    .await
 }
 
 /// Hard wall-clock bound for a single radar shell-out. Must stay BELOW the
@@ -448,64 +502,67 @@ pub async fn aura_radar(
     repo_root: String,
     include_possible: bool,
 ) -> Result<serde_json::Value, String> {
-    let cwd = PathBuf::from(&repo_root);
-    if !cwd.is_dir() {
-        return Err(format!("repo root does not exist: {}", repo_root));
-    }
+    crate::blocking::run(move || {
+        let cwd = PathBuf::from(&repo_root);
+        if !cwd.is_dir() {
+            return Err(format!("repo root does not exist: {}", repo_root));
+        }
 
-    let empty = || {
-        serde_json::json!({
-            "repo": "",
-            "branch": "",
-            "events": [],
-            "conflicts": [],
-            "focus": { "files": [], "symbols": [] },
-        })
-    };
+        let empty = || {
+            serde_json::json!({
+                "repo": "",
+                "branch": "",
+                "events": [],
+                "conflicts": [],
+                "focus": { "files": [], "symbols": [] },
+            })
+        };
 
-    // The feed + default (quiet) conflicts come from one call.
-    let mut show_cmd = Command::new("aura");
-    show_cmd.args(["radar", "show", "--json"]).current_dir(&cwd);
-    let Some(stdout) = run_bounded(&mut show_cmd, RADAR_TIMEOUT) else {
-        return Ok(empty());
-    };
-    let mut view: serde_json::Value = match serde_json::from_slice(&stdout) {
-        Ok(v) => v,
-        Err(_) => return Ok(empty()),
-    };
+        // The feed + default (quiet) conflicts come from one call.
+        let mut show_cmd = Command::new(crate::agent_event_listener::resolve_aura_bin());
+        show_cmd.args(["radar", "show", "--json"]).current_dir(&cwd);
+        let Some(stdout) = run_bounded(&mut show_cmd, RADAR_TIMEOUT) else {
+            return Ok(empty());
+        };
+        let mut view: serde_json::Value = match serde_json::from_slice(&stdout) {
+            Ok(v) => v,
+            Err(_) => return Ok(empty()),
+        };
 
-    // Stamp the caller's own identity into the view so the frontend can
-    // exclude self-authored events from presence pips. Mirrors the CLI's
-    // conflict self-exclusion (`focus_from_repo` uses git user.name).
-    if let Some(obj) = view.as_object_mut() {
-        let me = Command::new("git")
-            .args(["config", "user.name"])
-            .current_dir(&cwd)
-            .output()
-            .ok()
-            .filter(|o| o.status.success())
-            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
-            .filter(|s| !s.is_empty());
-        obj.insert("me".into(), serde_json::json!(me));
-    }
+        // Stamp the caller's own identity into the view so the frontend can
+        // exclude self-authored events from presence pips. Mirrors the CLI's
+        // conflict self-exclusion (`focus_from_repo` uses git user.name).
+        if let Some(obj) = view.as_object_mut() {
+            let me = Command::new("git")
+                .args(["config", "user.name"])
+                .current_dir(&cwd)
+                .output()
+                .ok()
+                .filter(|o| o.status.success())
+                .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+                .filter(|s| !s.is_empty());
+            obj.insert("me".into(), serde_json::json!(me));
+        }
 
-    // When the panel asks for ripples, swap in the fuller conflict list (the
-    // ambient feed deliberately hides the Possible tier).
-    if include_possible {
-        let mut conf_cmd = Command::new("aura");
-        conf_cmd
-            .args(["radar", "conflicts", "--all", "--json"])
-            .current_dir(&cwd);
-        if let Some(out) = run_bounded(&mut conf_cmd, RADAR_TIMEOUT) {
-            if let Ok(parsed) = serde_json::from_slice::<serde_json::Value>(&out) {
-                if let Some(list) = parsed.get("conflicts").cloned() {
-                    view["conflicts"] = list;
+        // When the panel asks for ripples, swap in the fuller conflict list (the
+        // ambient feed deliberately hides the Possible tier).
+        if include_possible {
+            let mut conf_cmd = Command::new(crate::agent_event_listener::resolve_aura_bin());
+            conf_cmd
+                .args(["radar", "conflicts", "--all", "--json"])
+                .current_dir(&cwd);
+            if let Some(out) = run_bounded(&mut conf_cmd, RADAR_TIMEOUT) {
+                if let Ok(parsed) = serde_json::from_slice::<serde_json::Value>(&out) {
+                    if let Some(list) = parsed.get("conflicts").cloned() {
+                        view["conflicts"] = list;
+                    }
                 }
             }
         }
-    }
 
-    Ok(view)
+        Ok(view)
+    })
+    .await
 }
 
 /// Read aura strict-mode posture from `~/.aura/credentials.json`. Returns
@@ -520,30 +577,33 @@ pub struct StrictMode {
 
 #[tauri::command]
 pub async fn aura_strict_mode() -> Result<StrictMode, String> {
-    let creds = match std::env::var_os("HOME") {
-        Some(h) => PathBuf::from(h).join(".aura").join("credentials.json"),
-        None => return Ok(StrictMode { mode: "off".into() }),
-    };
-    if !creds.exists() {
-        return Ok(StrictMode { mode: "off".into() });
-    }
-    let raw = fs::read_to_string(&creds).map_err(|e| format!("read credentials: {}", e))?;
-    let v: serde_json::Value =
-        serde_json::from_str(&raw).map_err(|e| format!("parse credentials: {}", e))?;
-    let on = v
-        .get("strict_gatekeeper_mode")
-        .and_then(|x| x.as_bool())
-        .unwrap_or(false);
-    let locked = v
-        .get("strict_mode_passcode_hash")
-        .map(|x| !x.is_null() && x.as_str().map(|s| !s.is_empty()).unwrap_or(false))
-        .unwrap_or(false);
-    let mode = match (on, locked) {
-        (true, true) => "locked",
-        (true, false) => "on",
-        _ => "off",
-    };
-    Ok(StrictMode { mode: mode.into() })
+    crate::blocking::run(move || {
+        let creds = match std::env::var_os("HOME") {
+            Some(h) => PathBuf::from(h).join(".aura").join("credentials.json"),
+            None => return Ok(StrictMode { mode: "off".into() }),
+        };
+        if !creds.exists() {
+            return Ok(StrictMode { mode: "off".into() });
+        }
+        let raw = fs::read_to_string(&creds).map_err(|e| format!("read credentials: {}", e))?;
+        let v: serde_json::Value =
+            serde_json::from_str(&raw).map_err(|e| format!("parse credentials: {}", e))?;
+        let on = v
+            .get("strict_gatekeeper_mode")
+            .and_then(|x| x.as_bool())
+            .unwrap_or(false);
+        let locked = v
+            .get("strict_mode_passcode_hash")
+            .map(|x| !x.is_null() && x.as_str().map(|s| !s.is_empty()).unwrap_or(false))
+            .unwrap_or(false);
+        let mode = match (on, locked) {
+            (true, true) => "locked",
+            (true, false) => "on",
+            _ => "off",
+        };
+        Ok(StrictMode { mode: mode.into() })
+    })
+    .await
 }
 
 /// Take a durable snapshot of `file_path` so `aura rewind` can recover
@@ -553,33 +613,36 @@ pub async fn aura_strict_mode() -> Result<StrictMode, String> {
 /// only, since a missed snapshot must never stall the live stream.
 #[tauri::command]
 pub async fn aura_snapshot(repo_root: String, file_path: String) -> Result<(), String> {
-    let cwd = PathBuf::from(&repo_root);
-    // Capture the snapshots dir listing before so we can find the new
-    // entry afterwards and record it as the undo target.
-    let snap_dir = cwd.join(".aura").join("snapshots");
-    let before: std::collections::HashSet<PathBuf> = walk_files(&snap_dir);
-    let out = Command::new("aura")
-        .args(["snapshot", "create", &file_path])
-        .current_dir(&cwd)
-        .output()
-        .map_err(|e| format!("failed to spawn aura snapshot: {}", e))?;
-    if !out.status.success() {
-        return Err(String::from_utf8_lossy(&out.stderr).into_owned());
-    }
-    let after: std::collections::HashSet<PathBuf> = walk_files(&snap_dir);
-    let new_files: Vec<PathBuf> = after.difference(&before).cloned().collect();
-    // Most snapshot ops produce a single new blob; record each.
-    for nf in &new_files {
-        let rel = nf.strip_prefix(&cwd).unwrap_or(nf);
-        let _ = crate::op_log::record_op(
-            &repo_root,
-            "snapshot",
-            &format!("Snapshotted {}", file_path),
-            "aura-shell",
-            serde_json::json!({ "snapshot_path": rel.to_string_lossy() }),
-        );
-    }
-    Ok(())
+    crate::blocking::run(move || {
+        let cwd = PathBuf::from(&repo_root);
+        // Capture the snapshots dir listing before so we can find the new
+        // entry afterwards and record it as the undo target.
+        let snap_dir = cwd.join(".aura").join("snapshots");
+        let before: std::collections::HashSet<PathBuf> = walk_files(&snap_dir);
+        let out = Command::new(crate::agent_event_listener::resolve_aura_bin())
+            .args(["snapshot", "create", &file_path])
+            .current_dir(&cwd)
+            .output()
+            .map_err(|e| format!("failed to spawn aura snapshot: {}", e))?;
+        if !out.status.success() {
+            return Err(String::from_utf8_lossy(&out.stderr).into_owned());
+        }
+        let after: std::collections::HashSet<PathBuf> = walk_files(&snap_dir);
+        let new_files: Vec<PathBuf> = after.difference(&before).cloned().collect();
+        // Most snapshot ops produce a single new blob; record each.
+        for nf in &new_files {
+            let rel = nf.strip_prefix(&cwd).unwrap_or(nf);
+            let _ = crate::op_log::record_op(
+                &repo_root,
+                "snapshot",
+                &format!("Snapshotted {}", file_path),
+                "aura-shell",
+                serde_json::json!({ "snapshot_path": rel.to_string_lossy() }),
+            );
+        }
+        Ok(())
+    })
+    .await
 }
 
 fn walk_files(root: &Path) -> std::collections::HashSet<PathBuf> {
@@ -661,6 +724,19 @@ pub struct IntentChangesetFile {
     /// with `commit`; the Claude/back-filled path leaves it None.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub base: Option<String>,
+    /// This file's change is known from the team plane, not from this clone —
+    /// a teammate's intent pulled over the cloud, whose commit may not be
+    /// fetched here (and whose `.aura/` ledger is gitignored on most repos, so
+    /// it can't arrive by git either). We know WHICH file and WHICH symbols
+    /// changed; we do not have the patch.
+    ///
+    /// The flag exists because the alternative is worse than silence. With no
+    /// `commit` and no `base`, the diff view falls through to
+    /// `git diff HEAD -- <path>` — the *viewer's own* uncommitted edits to that
+    /// path — and prints them under the teammate's name. Set here, the view
+    /// shows what actually changed and says the patch isn't in this clone.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub remote_only: bool,
 }
 
 /// Bound changeset claim attached to an intent log entry. `source`
@@ -704,7 +780,7 @@ fn sign_intent_via_cli(
         args.push("--writes".into());
         args.push(w.clone());
     }
-    let out = Command::new("aura")
+    let out = Command::new(crate::agent_event_listener::resolve_aura_bin())
         .args(&args)
         .current_dir(repo_root)
         .output()
@@ -740,77 +816,92 @@ pub async fn aura_log_intent(
     changeset: Option<IntentChangeset>,
     claude_session_id: Option<String>,
 ) -> Result<u64, String> {
-    let trimmed = intent.trim();
-    if trimmed.is_empty() {
-        return Err("intent is empty".into());
-    }
-    let aura_dir = PathBuf::from(&repo_root).join(".aura");
-    fs::create_dir_all(&aura_dir).map_err(|e| format!("create .aura: {}", e))?;
-
-    let ts = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0);
-    let mut entry = serde_json::json!({
-        "agent_id": agent_id.unwrap_or_else(|| "aura-shell".into()),
-        "intent": trimmed,
-        "timestamp": ts,
-    });
-    // Durable session↔intent link: stamp the active Claude session id when the
-    // caller resolved one (the mutation-guard auto-stub does). Empty → skip, so
-    // we never write a junk "" that the frontend would try to exact-match.
-    if let Some(sid) = claude_session_id.as_deref().filter(|s| !s.is_empty()) {
-        entry["claude_session_id"] = serde_json::json!(sid);
-    }
-    let mut declared_writes: Vec<String> = Vec::new();
-    if let Some(mut cs) = changeset {
-        if cs.captured_at.is_none() {
-            cs.captured_at = Some(ts);
+    crate::blocking::run(move || {
+        let trimmed = intent.trim();
+        if trimmed.is_empty() {
+            return Err("intent is empty".into());
         }
-        // Files the agent claims it touched become the declared write-scope for
-        // the signed block. Skip deletes (status "D") — the commit-time
-        // reconciler measures actual writes as added/modified/renamed paths, so
-        // a declared delete would never be "fulfilled" and only adds noise.
-        declared_writes = cs
-            .files
-            .iter()
-            .filter(|f| f.status != "D")
-            .map(|f| f.path.clone())
-            .filter(|p| !p.is_empty())
-            .collect();
-        entry["changeset"] =
-            serde_json::to_value(&cs).map_err(|e| format!("serialize changeset: {}", e))?;
-    }
+        let aura_dir = PathBuf::from(&repo_root).join(".aura");
+        fs::create_dir_all(&aura_dir).map_err(|e| format!("create .aura: {}", e))?;
 
-    // Seal the intent into a signed block via the shared `aura sign-intent`
-    // primitive so a native Aura-chat turn produces the SAME signed attestation
-    // the MCP / Claude-Code capture path does. Stamp the returned ids into this
-    // row so the Trace/Team surfaces show the seal and the commit-time
-    // reconciler has a declared scope to check against. Best-effort — an
-    // unsigned row (no key / no binary) is exactly the pre-existing behaviour.
-    if let Some((block_id, key_id)) = sign_intent_via_cli(&repo_root, trimmed, &declared_writes) {
-        entry["signed_block_id"] = serde_json::json!(block_id);
-        if !key_id.is_empty() {
-            entry["key_id"] = serde_json::json!(key_id);
+        let ts = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        let mut entry = serde_json::json!({
+            "agent_id": agent_id.unwrap_or_else(|| "aura-shell".into()),
+            "intent": trimmed,
+            "timestamp": ts,
+        });
+        // Durable session↔intent link: stamp the active Claude session id when the
+        // caller resolved one (the mutation-guard auto-stub does). Empty → skip, so
+        // we never write a junk "" that the frontend would try to exact-match.
+        if let Some(sid) = claude_session_id.as_deref().filter(|s| !s.is_empty()) {
+            entry["claude_session_id"] = serde_json::json!(sid);
         }
-    }
+        let mut declared_writes: Vec<String> = Vec::new();
+        if let Some(mut cs) = changeset {
+            if cs.captured_at.is_none() {
+                cs.captured_at = Some(ts);
+            }
+            // Files the agent claims it touched become the declared write-scope for
+            // the signed block. Skip deletes (status "D") — the commit-time
+            // reconciler measures actual writes as added/modified/renamed paths, so
+            // a declared delete would never be "fulfilled" and only adds noise.
+            declared_writes = cs
+                .files
+                .iter()
+                .filter(|f| f.status != "D")
+                .map(|f| f.path.clone())
+                .filter(|p| !p.is_empty())
+                .collect();
+            entry["changeset"] =
+                serde_json::to_value(&cs).map_err(|e| format!("serialize changeset: {}", e))?;
+        }
 
-    let log_path = aura_dir.join("intent_log.jsonl");
-    let mut f = fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&log_path)
-        .map_err(|e| format!("open intent_log: {}", e))?;
-    writeln!(f, "{}", entry).map_err(|e| format!("write intent_log: {}", e))?;
-    fs::write(aura_dir.join(".intent_logged"), "1").map_err(|e| format!("write marker: {}", e))?;
-    let _ = crate::op_log::record_op(
-        &repo_root,
-        "log_intent",
-        &format!("Logged intent: {}", &trimmed.chars().take(60).collect::<String>()),
-        "aura-shell",
-        serde_json::json!({ "intent_ts": ts }),
-    );
-    Ok(ts)
+        // Seal the intent into a signed block via the shared `aura sign-intent`
+        // primitive so a native Aura-chat turn produces the SAME signed attestation
+        // the MCP / Claude-Code capture path does. Stamp the returned ids into this
+        // row so the Trace/Team surfaces show the seal and the commit-time
+        // reconciler has a declared scope to check against. Best-effort — an
+        // unsigned row (no key / no binary) is exactly the pre-existing behaviour.
+        if let Some((block_id, key_id)) = sign_intent_via_cli(&repo_root, trimmed, &declared_writes) {
+            entry["signed_block_id"] = serde_json::json!(block_id);
+            if !key_id.is_empty() {
+                entry["key_id"] = serde_json::json!(key_id);
+            }
+        }
+
+        let log_path = aura_dir.join("intent_log.jsonl");
+        let mut f = fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&log_path)
+            .map_err(|e| format!("open intent_log: {}", e))?;
+        writeln!(f, "{}", entry).map_err(|e| format!("write intent_log: {}", e))?;
+        fs::write(aura_dir.join(".intent_logged"), "1").map_err(|e| format!("write marker: {}", e))?;
+        let _ = crate::op_log::record_op(
+            &repo_root,
+            "log_intent",
+            &format!("Logged intent: {}", &trimmed.chars().take(60).collect::<String>()),
+            "aura-shell",
+            serde_json::json!({ "intent_ts": ts }),
+        );
+        // Intent is the thing Aura is *for*, and nothing counted it. Whether
+        // the row was signed says whether the attestation path is actually
+        // working in the field. The intent text itself never leaves the
+        // machine.
+        crate::telemetry::track(
+            "intent_logged",
+            Some(serde_json::json!({
+                "signed": entry.get("signed_block_id").is_some(),
+                "has_changeset": !declared_writes.is_empty(),
+            })),
+        );
+        crate::telemetry::track_activation("intent_logged");
+        Ok(ts)
+    })
+    .await
 }
 
 /// One row from `.aura/intent_log.jsonl` returned to the frontend. Mirrors
@@ -1024,6 +1115,179 @@ fn intent_text_key(r: &IntentRow) -> String {
         .to_lowercase()
 }
 
+/// A cloud row's `file_path`, as this clone would name it.
+///
+/// The path was recorded on the teammate's machine, so an absolute one names
+/// *their* checkout — `/Users/sam/code/aura/aura-shell/src/App.tsx` — and is
+/// meaningless here. The repo-relative tail is the part every clone shares, so
+/// we take the longest suffix that actually resolves under this repo root.
+/// Longest-first matters: `src/App.tsx` may exist by coincidence when the real
+/// file is `aura-shell/src/App.tsx`, and the longer match is the true one.
+///
+/// A path that resolves to nothing comes back unchanged. The file may simply
+/// not be in this clone yet — a branch nobody here has fetched — and naming it
+/// honestly beats silently naming a different file.
+fn remote_repo_path(repo_root: &str, raw: &str) -> String {
+    let cleaned = raw.trim().replace('\\', "/");
+    let cleaned = cleaned.trim_start_matches("./").to_string();
+    // Windows drive letters (`C:/…`) are absolute too.
+    let absolute = cleaned.starts_with('/') || cleaned.as_bytes().get(1) == Some(&b':');
+    if !absolute {
+        return cleaned;
+    }
+    let root = PathBuf::from(repo_root);
+    let segs: Vec<&str> = cleaned.split('/').filter(|s| !s.is_empty()).collect();
+    for start in 0..segs.len() {
+        let candidate = segs[start..].join("/");
+        if root.join(&candidate).exists() {
+            return candidate;
+        }
+    }
+    cleaned
+}
+
+/// The one file a cloud intent object claims, with the symbols it moved.
+///
+/// `live_events` rows are per-file — the server stores the path and an array of
+/// `{name, kind, change_type}` — which is exactly a changeset file minus the
+/// line counts. Returns `None` when the row names no usable source file, so a
+/// bookkeeping path never becomes a changeset entry.
+fn cloud_intent_file(repo_root: &str, it: &serde_json::Value) -> Option<IntentChangesetFile> {
+    let raw = it.get("file_path").and_then(|v| v.as_str())?.trim();
+    if raw.is_empty() {
+        return None;
+    }
+    let path = remote_repo_path(repo_root, raw);
+    if path.is_empty() || is_noise_path(&path) {
+        return None;
+    }
+    let mut symbols: Vec<ChangesetSymbol> = Vec::new();
+    let (mut added, mut deleted, mut other) = (0usize, 0usize, 0usize);
+    for c in it
+        .get("changes")
+        .and_then(|v| v.as_array())
+        .into_iter()
+        .flatten()
+    {
+        let field = |k: &str| {
+            c.get(k)
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .trim()
+                .to_string()
+        };
+        let change = field("change_type");
+        match change.as_str() {
+            "added" => added += 1,
+            "deleted" => deleted += 1,
+            _ => other += 1,
+        }
+        let identifier = field("name");
+        if !identifier.is_empty() {
+            symbols.push(ChangesetSymbol {
+                identifier,
+                kind: field("kind"),
+                change,
+            });
+        }
+    }
+    // Porcelain status for the whole file: only a file whose every recorded
+    // change is an add (or every one a delete) is an add (or delete) — anything
+    // mixed, or unlabelled, is a modification.
+    let status = if other == 0 && deleted == 0 && added > 0 {
+        "A"
+    } else if other == 0 && added == 0 && deleted > 0 {
+        "D"
+    } else {
+        "M"
+    };
+    Some(IntentChangesetFile {
+        path,
+        status: status.to_string(),
+        // The cloud plane records which symbols moved, never line counts.
+        // Leaving these None is what keeps "+0 −0" off the row.
+        additions: None,
+        deletions: None,
+        symbols,
+        commit: None,
+        base: None,
+        remote_only: true,
+    })
+}
+
+/// How far apart two cloud rows may sit and still be one intent. Matches the
+/// back-fill horizon (`WINDOW_CAP`): a run's file saves land within minutes of
+/// each other, and the same prose logged again the next day is a new session.
+const CLOUD_GROUP_WINDOW_SECS: u64 = 1800;
+
+/// Fold the cloud's per-file rows back into one row per intent, carrying the
+/// changeset the plane already knows.
+///
+/// The server stores a *file save*, not a logged intent: one `aura log-intent`
+/// across six files arrives as six objects sharing a rationale. Mapping them
+/// one-to-one and de-duplicating on the prose (which `aura_intent_recent` does)
+/// therefore kept the first file and dropped the other five — and since the
+/// mapper set `changeset: None`, even that one never reached the Changes tab.
+/// A teammate's session showed a summary and a transcript and nothing else, on
+/// every session, forever.
+///
+/// Rows arrive newest-first, so a group's head is its newest member and the
+/// window closes downward from there.
+fn cloud_intents_to_rows(repo_root: &str, items: &[serde_json::Value]) -> Vec<IntentRow> {
+    let mut out: Vec<IntentRow> = Vec::new();
+    // (person, normalized prose) → index of the open group's row in `out`.
+    let mut open: HashMap<(String, String), usize> = HashMap::new();
+
+    for it in items {
+        let Some(mut row) = cloud_intent_to_row(it) else {
+            continue;
+        };
+        let file = cloud_intent_file(repo_root, it);
+        let key = (
+            row.developer_handle.clone().unwrap_or_default(),
+            intent_text_key(&row),
+        );
+
+        if let Some(&idx) = open.get(&key) {
+            let head = &mut out[idx];
+            if head.timestamp.saturating_sub(row.timestamp) <= CLOUD_GROUP_WINDOW_SECS {
+                if let Some(f) = file {
+                    let cs = head.changeset.get_or_insert_with(|| IntentChangeset {
+                        files: Vec::new(),
+                        block_id: None,
+                        source: Some("cloud_activity".to_string()),
+                        captured_at: Some(head.timestamp),
+                    });
+                    // The same file saved twice in one run is one changed file.
+                    match cs.files.iter_mut().find(|e| e.path == f.path) {
+                        Some(existing) => {
+                            for s in f.symbols {
+                                if !existing.symbols.iter().any(|e| e.identifier == s.identifier) {
+                                    existing.symbols.push(s);
+                                }
+                            }
+                        }
+                        None => cs.files.push(f),
+                    }
+                }
+                continue;
+            }
+        }
+
+        if let Some(f) = file {
+            row.changeset = Some(IntentChangeset {
+                files: vec![f],
+                block_id: None,
+                source: Some("cloud_activity".to_string()),
+                captured_at: Some(row.timestamp),
+            });
+        }
+        out.push(row);
+        open.insert(key, out.len() - 1);
+    }
+    out
+}
+
 /// Map one cloud `/api/v2/intents` object to an `IntentRow`. The person is the
 /// authenticated pusher the server stamped (`user` = github login), since cloud
 /// rows carry no local signing `key_id`; the feed leads with that. Returns
@@ -1194,6 +1458,7 @@ fn build_commit_index(repo_root: &str) -> Vec<CommitDiff> {
                     symbols: Vec::new(),
                     commit: None,
                     base: None,
+                    remote_only: false,
                 });
             }
         }
@@ -1366,6 +1631,7 @@ fn backfill_changesets_from_git(repo_root: &str, rows: &mut [IntentRow]) {
                     // diff view shows exactly this commit's change for the file.
                     commit: Some(c.sha.clone()),
                     base: None,
+                    remote_only: false,
                 });
                 if let Some(&(a, d)) = counts.get(&f.path) {
                     e.additions = Some(e.additions.unwrap_or(0) + a);
@@ -1399,6 +1665,27 @@ fn backfill_changesets_from_git(repo_root: &str, rows: &mut [IntentRow]) {
 /// Rows that bound no changeset on disk are back-filled from real git history
 /// so an agent's own committed sessions show their files (see
 /// `backfill_changesets_from_git`).
+/// Hard ceiling on how many intent rows one read may return.
+///
+/// A ceiling has to exist — the log is append-only and a long-lived repo's is
+/// unbounded, and every row returned is serialised across IPC. But it used to
+/// be 500, which is below what the surfaces that want the whole history ask
+/// for: the year-in-review and the overview both request 5000. They were
+/// silently handed the newest 500 and had no way to know, so on any repo past
+/// 500 intents the year picker only offered years that appear in the recent
+/// tail and every "this year" number was really "the part of this year inside
+/// the last 500 entries".
+///
+/// Raising it is close to free: the expensive work — unioning the log across
+/// every branch tip, and the cloud pull — happens before the truncate and does
+/// not depend on this number.
+const INTENT_ROW_CEILING: usize = 5000;
+
+/// How many rows to keep for a caller that asked for `limit`.
+fn intent_row_cap(limit: Option<usize>) -> usize {
+    limit.unwrap_or(50).min(INTENT_ROW_CEILING)
+}
+
 #[tauri::command]
 pub async fn aura_intent_recent(
     repo_root: String,
@@ -1407,7 +1694,9 @@ pub async fn aura_intent_recent(
     // Team-wide: union this branch's working tree with every other branch's
     // committed log, so a teammate working on their own branch is visible here
     // without first merging it.
-    let mut rows = read_intent_rows_all_branches(&repo_root);
+    let read_root = repo_root.clone();
+    let mut rows =
+        crate::blocking::run(move || read_intent_rows_all_branches(&read_root)).await;
 
     // Login-gated team sync: when signed in to Aura, fold in teammates' intents
     // pulled from the cloud activity plane. On real product repos `.aura/` is
@@ -1419,21 +1708,21 @@ pub async fn aura_intent_recent(
     if !cloud.is_empty() {
         let mut seen: std::collections::HashSet<String> =
             rows.iter().map(intent_text_key).collect();
-        for it in &cloud {
-            if let Some(row) = cloud_intent_to_row(it) {
-                if seen.insert(intent_text_key(&row)) {
-                    rows.push(row);
-                }
+        for row in cloud_intents_to_rows(&repo_root, &cloud) {
+            if seen.insert(intent_text_key(&row)) {
+                rows.push(row);
             }
         }
     }
 
-    rows.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
-    let cap = limit.unwrap_or(50).min(500);
-    rows.truncate(cap);
-    backfill_changesets_from_git(&repo_root, &mut rows);
-    resolve_developers(&repo_root, &mut rows);
-    Ok(rows)
+    crate::blocking::run(move || {
+        rows.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
+        rows.truncate(intent_row_cap(limit));
+        backfill_changesets_from_git(&repo_root, &mut rows);
+        resolve_developers(&repo_root, &mut rows);
+        Ok(rows)
+    })
+    .await
 }
 
 /// One teammate identity resolved from the signed key registry: enough to
@@ -1612,31 +1901,34 @@ pub async fn aura_intent_coverage(
     repo_root: String,
     dirty_paths: Vec<String>,
 ) -> Result<IntentCoverage, String> {
-    let mut rows = read_intent_rows(&repo_root)?;
-    rows.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
-    let last_commit_ts = last_commit_unix(&repo_root);
-    let cutoff = last_commit_ts.unwrap_or(0);
-    let fresh: Vec<&IntentRow> = rows.iter().filter(|r| r.timestamp > cutoff).collect();
-    let latest_intent_ts = fresh.first().map(|r| r.timestamp);
+    crate::blocking::run(move || {
+        let mut rows = read_intent_rows(&repo_root)?;
+        rows.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
+        let last_commit_ts = last_commit_unix(&repo_root);
+        let cutoff = last_commit_ts.unwrap_or(0);
+        let fresh: Vec<&IntentRow> = rows.iter().filter(|r| r.timestamp > cutoff).collect();
+        let latest_intent_ts = fresh.first().map(|r| r.timestamp);
 
-    let mut claimed: std::collections::HashSet<String> = std::collections::HashSet::new();
-    for r in &fresh {
-        if let Some(cs) = &r.changeset {
-            for f in &cs.files {
-                claimed.insert(f.path.clone());
+        let mut claimed: std::collections::HashSet<String> = std::collections::HashSet::new();
+        for r in &fresh {
+            if let Some(cs) = &r.changeset {
+                for f in &cs.files {
+                    claimed.insert(f.path.clone());
+                }
             }
         }
-    }
-    let mut covered: Vec<String> = Vec::new();
-    let mut orphans: Vec<String> = Vec::new();
-    for p in dirty_paths {
-        if claimed.contains(&p) {
-            covered.push(p);
-        } else {
-            orphans.push(p);
+        let mut covered: Vec<String> = Vec::new();
+        let mut orphans: Vec<String> = Vec::new();
+        for p in dirty_paths {
+            if claimed.contains(&p) {
+                covered.push(p);
+            } else {
+                orphans.push(p);
+            }
         }
-    }
-    Ok(IntentCoverage { covered, orphans, latest_intent_ts, last_commit_ts })
+        Ok(IntentCoverage { covered, orphans, latest_intent_ts, last_commit_ts })
+    })
+    .await
 }
 
 /// Attribute additional file paths to an existing intent. Targets the
@@ -1651,85 +1943,89 @@ pub async fn aura_intent_attribute(
     file_paths: Vec<String>,
     intent_ts: Option<u64>,
 ) -> Result<u64, String> {
-    if file_paths.is_empty() {
-        return Err("file_paths is empty".into());
-    }
-    let path = PathBuf::from(&repo_root).join(".aura").join("intent_log.jsonl");
-    if !path.exists() {
-        return Err("intent_log.jsonl missing".into());
-    }
-    let raw = fs::read_to_string(&path).map_err(|e| format!("read log: {}", e))?;
-    let mut rows: Vec<serde_json::Value> = raw
-        .lines()
-        .filter(|l| !l.trim().is_empty())
-        .filter_map(|l| serde_json::from_str(l).ok())
-        .collect();
-    if rows.is_empty() {
-        return Err("intent log has no rows".into());
-    }
-    let target_idx = if let Some(ts) = intent_ts {
-        rows.iter()
-            .position(|r| r["timestamp"].as_u64() == Some(ts))
-            .ok_or_else(|| format!("no intent at ts {}", ts))?
-    } else {
-        // Newest by timestamp — fallback to last-line if timestamps are
-        // missing.
-        let mut best: Option<(usize, u64)> = None;
-        for (i, r) in rows.iter().enumerate() {
-            let t = r["timestamp"].as_u64().unwrap_or(0);
-            if best.map(|b| t >= b.1).unwrap_or(true) {
-                best = Some((i, t));
+    crate::blocking::run(move || {
+        if file_paths.is_empty() {
+            return Err("file_paths is empty".into());
+        }
+        let path = PathBuf::from(&repo_root).join(".aura").join("intent_log.jsonl");
+        if !path.exists() {
+            return Err("intent_log.jsonl missing".into());
+        }
+        let raw = fs::read_to_string(&path).map_err(|e| format!("read log: {}", e))?;
+        let mut rows: Vec<serde_json::Value> = raw
+            .lines()
+            .filter(|l| !l.trim().is_empty())
+            .filter_map(|l| serde_json::from_str(l).ok())
+            .collect();
+        if rows.is_empty() {
+            return Err("intent log has no rows".into());
+        }
+        let target_idx = if let Some(ts) = intent_ts {
+            rows.iter()
+                .position(|r| r["timestamp"].as_u64() == Some(ts))
+                .ok_or_else(|| format!("no intent at ts {}", ts))?
+        } else {
+            // Newest by timestamp — fallback to last-line if timestamps are
+            // missing.
+            let mut best: Option<(usize, u64)> = None;
+            for (i, r) in rows.iter().enumerate() {
+                let t = r["timestamp"].as_u64().unwrap_or(0);
+                if best.map(|b| t >= b.1).unwrap_or(true) {
+                    best = Some((i, t));
+                }
+            }
+            best.map(|b| b.0).ok_or_else(|| "no rows".to_string())?
+        };
+        let kept_ts = rows[target_idx]["timestamp"].as_u64().unwrap_or(0);
+
+        // Merge: existing files + new paths, dedupe by path.
+        let cs_val = rows[target_idx]
+            .get("changeset")
+            .cloned()
+            .unwrap_or(serde_json::json!({"files": [], "source": "agent_prompt"}));
+        let mut existing: Vec<IntentChangesetFile> = serde_json::from_value(
+            cs_val.get("files").cloned().unwrap_or(serde_json::json!([])),
+        )
+        .unwrap_or_default();
+        let attributed_paths = file_paths.clone();
+        for p in file_paths {
+            if !existing.iter().any(|f| f.path == p) {
+                existing.push(IntentChangesetFile {
+                    path: p,
+                    status: "M".to_string(),
+                    additions: None,
+                    deletions: None,
+                    symbols: Vec::new(),
+                    commit: None,
+                    base: None,
+                    remote_only: false,
+                });
             }
         }
-        best.map(|b| b.0).ok_or_else(|| "no rows".to_string())?
-    };
-    let kept_ts = rows[target_idx]["timestamp"].as_u64().unwrap_or(0);
 
-    // Merge: existing files + new paths, dedupe by path.
-    let cs_val = rows[target_idx]
-        .get("changeset")
-        .cloned()
-        .unwrap_or(serde_json::json!({"files": [], "source": "agent_prompt"}));
-    let mut existing: Vec<IntentChangesetFile> = serde_json::from_value(
-        cs_val.get("files").cloned().unwrap_or(serde_json::json!([])),
-    )
-    .unwrap_or_default();
-    let attributed_paths = file_paths.clone();
-    for p in file_paths {
-        if !existing.iter().any(|f| f.path == p) {
-            existing.push(IntentChangesetFile {
-                path: p,
-                status: "M".to_string(),
-                additions: None,
-                deletions: None,
-                symbols: Vec::new(),
-                commit: None,
-                base: None,
-            });
+        let mut new_cs = cs_val.clone();
+        new_cs["files"] = serde_json::to_value(&existing).map_err(|e| e.to_string())?;
+        if new_cs.get("source").and_then(|v| v.as_str()).unwrap_or("").is_empty() {
+            new_cs["source"] = serde_json::json!("agent_prompt");
         }
-    }
+        rows[target_idx]["changeset"] = new_cs;
 
-    let mut new_cs = cs_val.clone();
-    new_cs["files"] = serde_json::to_value(&existing).map_err(|e| e.to_string())?;
-    if new_cs.get("source").and_then(|v| v.as_str()).unwrap_or("").is_empty() {
-        new_cs["source"] = serde_json::json!("agent_prompt");
-    }
-    rows[target_idx]["changeset"] = new_cs;
-
-    let mut out = String::new();
-    for r in &rows {
-        out.push_str(&r.to_string());
-        out.push('\n');
-    }
-    fs::write(&path, out).map_err(|e| format!("write log: {}", e))?;
-    let _ = crate::op_log::record_op(
-        &repo_root,
-        "intent_attribute",
-        &format!("Attributed {} path(s) to intent #{}", attributed_paths.len(), kept_ts),
-        "aura-shell",
-        serde_json::json!({ "intent_ts": kept_ts, "file_paths": attributed_paths }),
-    );
-    Ok(kept_ts)
+        let mut out = String::new();
+        for r in &rows {
+            out.push_str(&r.to_string());
+            out.push('\n');
+        }
+        fs::write(&path, out).map_err(|e| format!("write log: {}", e))?;
+        let _ = crate::op_log::record_op(
+            &repo_root,
+            "intent_attribute",
+            &format!("Attributed {} path(s) to intent #{}", attributed_paths.len(), kept_ts),
+            "aura-shell",
+            serde_json::json!({ "intent_ts": kept_ts, "file_paths": attributed_paths }),
+        );
+        Ok(kept_ts)
+    })
+    .await
 }
 
 /// Split an intent into two by partitioning its changeset files. The
@@ -1743,79 +2039,82 @@ pub async fn aura_intent_split(
     move_files: Vec<String>,
     new_intent: String,
 ) -> Result<u64, String> {
-    let path = PathBuf::from(&repo_root).join(".aura").join("intent_log.jsonl");
-    if !path.exists() {
-        return Err("intent_log.jsonl missing".into());
-    }
-    let raw = fs::read_to_string(&path).map_err(|e| format!("read log: {}", e))?;
-    let mut rows: Vec<serde_json::Value> = raw
-        .lines()
-        .filter(|l| !l.trim().is_empty())
-        .filter_map(|l| serde_json::from_str(l).ok())
-        .collect();
+    crate::blocking::run(move || {
+        let path = PathBuf::from(&repo_root).join(".aura").join("intent_log.jsonl");
+        if !path.exists() {
+            return Err("intent_log.jsonl missing".into());
+        }
+        let raw = fs::read_to_string(&path).map_err(|e| format!("read log: {}", e))?;
+        let mut rows: Vec<serde_json::Value> = raw
+            .lines()
+            .filter(|l| !l.trim().is_empty())
+            .filter_map(|l| serde_json::from_str(l).ok())
+            .collect();
 
-    let target_idx = rows
-        .iter()
-        .position(|r| r["timestamp"].as_u64() == Some(intent_ts))
-        .ok_or_else(|| format!("no intent at ts {}", intent_ts))?;
+        let target_idx = rows
+            .iter()
+            .position(|r| r["timestamp"].as_u64() == Some(intent_ts))
+            .ok_or_else(|| format!("no intent at ts {}", intent_ts))?;
 
-    let original = rows[target_idx].clone();
-    let cs = original
-        .get("changeset")
-        .cloned()
-        .unwrap_or(serde_json::json!({"files": []}));
-    let files: Vec<IntentChangesetFile> = serde_json::from_value(
-        cs.get("files").cloned().unwrap_or(serde_json::json!([])),
-    )
-    .map_err(|e| format!("parse files: {}", e))?;
-    let original_files_json = serde_json::to_value(&files).unwrap_or(serde_json::json!([]));
+        let original = rows[target_idx].clone();
+        let cs = original
+            .get("changeset")
+            .cloned()
+            .unwrap_or(serde_json::json!({"files": []}));
+        let files: Vec<IntentChangesetFile> = serde_json::from_value(
+            cs.get("files").cloned().unwrap_or(serde_json::json!([])),
+        )
+        .map_err(|e| format!("parse files: {}", e))?;
+        let original_files_json = serde_json::to_value(&files).unwrap_or(serde_json::json!([]));
 
-    let keep: Vec<IntentChangesetFile> =
-        files.iter().filter(|f| keep_files.contains(&f.path)).cloned().collect();
-    let moved: Vec<IntentChangesetFile> =
-        files.iter().filter(|f| move_files.contains(&f.path)).cloned().collect();
+        let keep: Vec<IntentChangesetFile> =
+            files.iter().filter(|f| keep_files.contains(&f.path)).cloned().collect();
+        let moved: Vec<IntentChangesetFile> =
+            files.iter().filter(|f| move_files.contains(&f.path)).cloned().collect();
 
-    rows[target_idx]["changeset"]["files"] =
-        serde_json::to_value(&keep).map_err(|e| e.to_string())?;
+        rows[target_idx]["changeset"]["files"] =
+            serde_json::to_value(&keep).map_err(|e| e.to_string())?;
 
-    let new_ts = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(intent_ts + 1);
-    let new_ts = if new_ts <= intent_ts { intent_ts + 1 } else { new_ts };
-    let mut new_row = serde_json::json!({
-        "agent_id": original.get("agent_id").cloned().unwrap_or(serde_json::json!("aura-shell")),
-        "intent": new_intent.trim(),
-        "timestamp": new_ts,
-        "changeset": {
-            "files": moved,
-            "source": "split",
-            "captured_at": new_ts,
-        },
-    });
-    if let Some(t) = original.get("intent_type").cloned() {
-        new_row["intent_type"] = t;
-    }
-    rows.push(new_row);
+        let new_ts = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(intent_ts + 1);
+        let new_ts = if new_ts <= intent_ts { intent_ts + 1 } else { new_ts };
+        let mut new_row = serde_json::json!({
+            "agent_id": original.get("agent_id").cloned().unwrap_or(serde_json::json!("aura-shell")),
+            "intent": new_intent.trim(),
+            "timestamp": new_ts,
+            "changeset": {
+                "files": moved,
+                "source": "split",
+                "captured_at": new_ts,
+            },
+        });
+        if let Some(t) = original.get("intent_type").cloned() {
+            new_row["intent_type"] = t;
+        }
+        rows.push(new_row);
 
-    let mut out = String::new();
-    for r in &rows {
-        out.push_str(&r.to_string());
-        out.push('\n');
-    }
-    fs::write(&path, out).map_err(|e| format!("write log: {}", e))?;
-    let _ = crate::op_log::record_op(
-        &repo_root,
-        "intent_split",
-        &format!("Split intent #{} → #{}", intent_ts, new_ts),
-        "aura-shell",
-        serde_json::json!({
-            "kept_ts": intent_ts,
-            "new_ts": new_ts,
-            "original_files": original_files_json,
-        }),
-    );
-    Ok(new_ts)
+        let mut out = String::new();
+        for r in &rows {
+            out.push_str(&r.to_string());
+            out.push('\n');
+        }
+        fs::write(&path, out).map_err(|e| format!("write log: {}", e))?;
+        let _ = crate::op_log::record_op(
+            &repo_root,
+            "intent_split",
+            &format!("Split intent #{} → #{}", intent_ts, new_ts),
+            "aura-shell",
+            serde_json::json!({
+                "kept_ts": intent_ts,
+                "new_ts": new_ts,
+                "original_files": original_files_json,
+            }),
+        );
+        Ok(new_ts)
+    })
+    .await
 }
 
 /// Merge two intents into one. The newer row is kept (timestamp + text),
@@ -1826,103 +2125,106 @@ pub async fn aura_intent_merge(
     intent_ts_a: u64,
     intent_ts_b: u64,
 ) -> Result<u64, String> {
-    let path = PathBuf::from(&repo_root).join(".aura").join("intent_log.jsonl");
-    if !path.exists() {
-        return Err("intent_log.jsonl missing".into());
-    }
-    let raw = fs::read_to_string(&path).map_err(|e| format!("read log: {}", e))?;
-    let rows_in: Vec<serde_json::Value> = raw
-        .lines()
-        .filter(|l| !l.trim().is_empty())
-        .filter_map(|l| serde_json::from_str(l).ok())
-        .collect();
+    crate::blocking::run(move || {
+        let path = PathBuf::from(&repo_root).join(".aura").join("intent_log.jsonl");
+        if !path.exists() {
+            return Err("intent_log.jsonl missing".into());
+        }
+        let raw = fs::read_to_string(&path).map_err(|e| format!("read log: {}", e))?;
+        let rows_in: Vec<serde_json::Value> = raw
+            .lines()
+            .filter(|l| !l.trim().is_empty())
+            .filter_map(|l| serde_json::from_str(l).ok())
+            .collect();
 
-    let mut a = rows_in
-        .iter()
-        .find(|r| r["timestamp"].as_u64() == Some(intent_ts_a))
-        .cloned()
-        .ok_or_else(|| format!("no intent at ts {}", intent_ts_a))?;
-    let b = rows_in
-        .iter()
-        .find(|r| r["timestamp"].as_u64() == Some(intent_ts_b))
-        .cloned()
-        .ok_or_else(|| format!("no intent at ts {}", intent_ts_b))?;
+        let mut a = rows_in
+            .iter()
+            .find(|r| r["timestamp"].as_u64() == Some(intent_ts_a))
+            .cloned()
+            .ok_or_else(|| format!("no intent at ts {}", intent_ts_a))?;
+        let b = rows_in
+            .iter()
+            .find(|r| r["timestamp"].as_u64() == Some(intent_ts_b))
+            .cloned()
+            .ok_or_else(|| format!("no intent at ts {}", intent_ts_b))?;
 
-    let (newer, older) = if a["timestamp"].as_u64().unwrap_or(0)
-        >= b["timestamp"].as_u64().unwrap_or(0)
-    {
-        (a.clone(), b.clone())
-    } else {
-        (b.clone(), a.clone())
-    };
-    let kept_ts = newer["timestamp"].as_u64().unwrap_or(0);
-    let dropped_ts = older["timestamp"].as_u64().unwrap_or(0);
-    // Capture pre-merge state for the op_log so undo can reverse this.
-    let kept_text_pre = newer
-        .get("intent")
-        .and_then(|v| v.as_str())
-        .unwrap_or("")
-        .to_string();
-    let kept_files_pre = newer
-        .get("changeset")
-        .and_then(|c| c.get("files"))
-        .cloned()
-        .unwrap_or(serde_json::json!([]));
-    let dropped_row_for_undo = older.clone();
+        let (newer, older) = if a["timestamp"].as_u64().unwrap_or(0)
+            >= b["timestamp"].as_u64().unwrap_or(0)
+        {
+            (a.clone(), b.clone())
+        } else {
+            (b.clone(), a.clone())
+        };
+        let kept_ts = newer["timestamp"].as_u64().unwrap_or(0);
+        let dropped_ts = older["timestamp"].as_u64().unwrap_or(0);
+        // Capture pre-merge state for the op_log so undo can reverse this.
+        let kept_text_pre = newer
+            .get("intent")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        let kept_files_pre = newer
+            .get("changeset")
+            .and_then(|c| c.get("files"))
+            .cloned()
+            .unwrap_or(serde_json::json!([]));
+        let dropped_row_for_undo = older.clone();
 
-    let mut files: Vec<IntentChangesetFile> = Vec::new();
-    for src in [&newer, &older] {
-        if let Some(cs) = src.get("changeset") {
-            if let Some(arr) = cs.get("files").and_then(|v| v.as_array()) {
-                for f in arr {
-                    if let Ok(parsed) = serde_json::from_value::<IntentChangesetFile>(f.clone()) {
-                        if !files.iter().any(|x| x.path == parsed.path) {
-                            files.push(parsed);
+        let mut files: Vec<IntentChangesetFile> = Vec::new();
+        for src in [&newer, &older] {
+            if let Some(cs) = src.get("changeset") {
+                if let Some(arr) = cs.get("files").and_then(|v| v.as_array()) {
+                    for f in arr {
+                        if let Ok(parsed) = serde_json::from_value::<IntentChangesetFile>(f.clone()) {
+                            if !files.iter().any(|x| x.path == parsed.path) {
+                                files.push(parsed);
+                            }
                         }
                     }
                 }
             }
         }
-    }
-    a = newer;
-    a["intent"] = serde_json::json!(format!(
-        "{}\n{}",
-        a["intent"].as_str().unwrap_or(""),
-        older["intent"].as_str().unwrap_or("")
-    ).trim());
-    a["changeset"] = serde_json::json!({
-        "files": files,
-        "source": "merge",
-        "captured_at": kept_ts,
-    });
+        a = newer;
+        a["intent"] = serde_json::json!(format!(
+            "{}\n{}",
+            a["intent"].as_str().unwrap_or(""),
+            older["intent"].as_str().unwrap_or("")
+        ).trim());
+        a["changeset"] = serde_json::json!({
+            "files": files,
+            "source": "merge",
+            "captured_at": kept_ts,
+        });
 
-    let mut out = String::new();
-    for r in &rows_in {
-        let ts = r["timestamp"].as_u64().unwrap_or(0);
-        if ts == dropped_ts {
-            continue;
+        let mut out = String::new();
+        for r in &rows_in {
+            let ts = r["timestamp"].as_u64().unwrap_or(0);
+            if ts == dropped_ts {
+                continue;
+            }
+            if ts == kept_ts {
+                out.push_str(&a.to_string());
+            } else {
+                out.push_str(&r.to_string());
+            }
+            out.push('\n');
         }
-        if ts == kept_ts {
-            out.push_str(&a.to_string());
-        } else {
-            out.push_str(&r.to_string());
-        }
-        out.push('\n');
-    }
-    fs::write(&path, out).map_err(|e| format!("write log: {}", e))?;
-    let _ = crate::op_log::record_op(
-        &repo_root,
-        "intent_merge",
-        &format!("Merged intent #{} into #{}", dropped_ts, kept_ts),
-        "aura-shell",
-        serde_json::json!({
-            "kept_ts": kept_ts,
-            "dropped_row": dropped_row_for_undo,
-            "kept_text_pre": kept_text_pre,
-            "kept_files_pre": kept_files_pre,
-        }),
-    );
-    Ok(kept_ts)
+        fs::write(&path, out).map_err(|e| format!("write log: {}", e))?;
+        let _ = crate::op_log::record_op(
+            &repo_root,
+            "intent_merge",
+            &format!("Merged intent #{} into #{}", dropped_ts, kept_ts),
+            "aura-shell",
+            serde_json::json!({
+                "kept_ts": kept_ts,
+                "dropped_row": dropped_row_for_undo,
+                "kept_text_pre": kept_text_pre,
+                "kept_files_pre": kept_files_pre,
+            }),
+        );
+        Ok(kept_ts)
+    })
+    .await
 }
 
 fn home_db_path() -> PathBuf {
@@ -2054,4 +2356,228 @@ pub async fn aura_live_peers(repo_root: String) -> Result<AuraLivePeersResult, S
         reason: None,
         peers,
     })
+}
+
+#[cfg(test)]
+mod intent_cap_tests {
+    use super::{intent_row_cap, INTENT_ROW_CEILING};
+
+    #[test]
+    fn a_caller_that_names_no_limit_gets_the_modest_default() {
+        assert_eq!(intent_row_cap(None), 50);
+    }
+
+    #[test]
+    fn a_caller_gets_the_number_of_rows_it_asked_for() {
+        assert_eq!(intent_row_cap(Some(1)), 1);
+        assert_eq!(intent_row_cap(Some(200)), 200);
+        assert_eq!(intent_row_cap(Some(631)), 631);
+    }
+
+    #[test]
+    fn the_surfaces_that_want_the_whole_history_are_not_cut_to_five_hundred() {
+        // The year-in-review and the overview both ask for 5000. Handing them
+        // 500 is what made a repo's older years disappear from the picker
+        // entirely, with nothing on screen to say the answer was partial.
+        assert_eq!(intent_row_cap(Some(5000)), 5000);
+        assert!(intent_row_cap(Some(5000)) > 500);
+    }
+
+    #[test]
+    fn an_unbounded_ask_is_still_bounded() {
+        // The ceiling is the reason this function exists: the log is
+        // append-only and every row crosses IPC.
+        assert_eq!(intent_row_cap(Some(usize::MAX)), INTENT_ROW_CEILING);
+        assert_eq!(intent_row_cap(Some(INTENT_ROW_CEILING + 1)), INTENT_ROW_CEILING);
+    }
+}
+
+#[cfg(test)]
+mod cloud_intent_tests {
+    use super::{cloud_intents_to_rows, remote_repo_path};
+    use serde_json::json;
+
+    /// One `/api/v2/intents` object, shaped the way `intents.rs` serialises a
+    /// `live_events` row: one file, its changed symbols, and the rationale the
+    /// server promotes to the headline.
+    fn cloud(user: &str, at: &str, intent: &str, file: &str, syms: &[(&str, &str)]) -> serde_json::Value {
+        json!({
+            "user": user,
+            "created_at": at,
+            "intent": intent,
+            "file_path": file,
+            "changes": syms
+                .iter()
+                .map(|(name, change)| json!({
+                    "name": name,
+                    "kind": "function",
+                    "change_type": change,
+                }))
+                .collect::<Vec<_>>(),
+        })
+    }
+
+    #[test]
+    fn a_teammates_intent_arrives_with_the_files_it_touched() {
+        // The whole bug in one assertion: this used to come back with
+        // `changeset: None`, so the Changes tab had nothing to show and a
+        // teammate's every session read as summary-and-transcript only.
+        let rows = cloud_intents_to_rows(
+            "/nonexistent",
+            &[cloud(
+                "sam",
+                "2026-08-01T10:00:00Z",
+                "Rate-limit the login endpoint",
+                "api/auth.rs",
+                &[("check_rate", "added")],
+            )],
+        );
+        assert_eq!(rows.len(), 1);
+        let files = &rows[0].changeset.as_ref().expect("changeset").files;
+        assert_eq!(files.len(), 1);
+        assert_eq!(files[0].path, "api/auth.rs");
+        assert_eq!(files[0].status, "A");
+        assert_eq!(files[0].symbols[0].identifier, "check_rate");
+        // Without this the diff view would render the VIEWER's uncommitted
+        // edits to api/auth.rs under Sam's name.
+        assert!(files[0].remote_only);
+    }
+
+    #[test]
+    fn one_intent_across_six_files_is_one_session_with_six_files() {
+        // `live_events` stores a file save, so one `log-intent` over six files
+        // arrives as six objects sharing a rationale. Mapped one-to-one they
+        // were de-duplicated on that prose down to a single row — and five
+        // files vanished with the rows that carried them.
+        let same = "Move retries onto exponential backoff";
+        let rows = cloud_intents_to_rows(
+            "/nonexistent",
+            &[
+                cloud("sam", "2026-08-01T10:04:00Z", same, "net/retry.rs", &[("backoff", "modified")]),
+                cloud("sam", "2026-08-01T10:03:00Z", same, "net/client.rs", &[("send", "modified")]),
+                cloud("sam", "2026-08-01T10:01:00Z", same, "net/mod.rs", &[]),
+            ],
+        );
+        assert_eq!(rows.len(), 1);
+        let files = &rows[0].changeset.as_ref().expect("changeset").files;
+        assert_eq!(files.len(), 3);
+        // Newest-first in, and the group keeps the newest row's timestamp.
+        assert_eq!(rows[0].timestamp % 60, 0);
+    }
+
+    #[test]
+    fn the_same_words_a_day_later_are_a_different_session() {
+        let same = "Fix the flaky login test";
+        let rows = cloud_intents_to_rows(
+            "/nonexistent",
+            &[
+                cloud("sam", "2026-08-02T10:00:00Z", same, "tests/login.rs", &[]),
+                cloud("sam", "2026-08-01T10:00:00Z", same, "tests/login.rs", &[]),
+            ],
+        );
+        assert_eq!(rows.len(), 2);
+    }
+
+    #[test]
+    fn two_people_who_wrote_the_same_words_stay_two_people() {
+        let same = "Bump the client timeout";
+        let rows = cloud_intents_to_rows(
+            "/nonexistent",
+            &[
+                cloud("sam", "2026-08-01T10:02:00Z", same, "net/client.rs", &[]),
+                cloud("ali", "2026-08-01T10:01:00Z", same, "net/server.rs", &[]),
+            ],
+        );
+        assert_eq!(rows.len(), 2);
+    }
+
+    #[test]
+    fn one_file_saved_twice_in_a_run_is_still_one_changed_file() {
+        let same = "Tighten the parser";
+        let rows = cloud_intents_to_rows(
+            "/nonexistent",
+            &[
+                cloud("sam", "2026-08-01T10:02:00Z", same, "src/parse.rs", &[("lex", "modified")]),
+                cloud("sam", "2026-08-01T10:01:00Z", same, "src/parse.rs", &[("emit", "modified")]),
+            ],
+        );
+        let files = &rows[0].changeset.as_ref().expect("changeset").files;
+        assert_eq!(files.len(), 1);
+        // Both saves' symbols survive the merge — the file changed in two ways.
+        let names: Vec<&str> = files[0].symbols.iter().map(|s| s.identifier.as_str()).collect();
+        assert!(names.contains(&"lex") && names.contains(&"emit"));
+    }
+
+    #[test]
+    fn aura_bookkeeping_never_becomes_a_changed_file() {
+        let rows = cloud_intents_to_rows(
+            "/nonexistent",
+            &[cloud(
+                "sam",
+                "2026-08-01T10:00:00Z",
+                "Log the intent",
+                ".aura/intent_log.jsonl",
+                &[],
+            )],
+        );
+        // The "why" is still worth showing; the ledger file is not a change.
+        assert_eq!(rows.len(), 1);
+        assert!(rows[0].changeset.is_none());
+    }
+
+    #[test]
+    fn a_mixed_file_is_a_modification_not_an_add() {
+        let rows = cloud_intents_to_rows(
+            "/nonexistent",
+            &[cloud(
+                "sam",
+                "2026-08-01T10:00:00Z",
+                "Swap the hasher",
+                "src/hash.rs",
+                &[("sha1", "deleted"), ("blake3", "added")],
+            )],
+        );
+        let files = &rows[0].changeset.as_ref().expect("changeset").files;
+        assert_eq!(files[0].status, "M");
+    }
+
+    #[test]
+    fn a_teammates_absolute_path_resolves_to_this_clones_relative_one() {
+        // The path was recorded in THEIR checkout. Only the tail is shared.
+        let root = std::env::temp_dir().join(format!("aura-remote-path-{}", std::process::id()));
+        let nested = root.join("aura-shell/src");
+        std::fs::create_dir_all(&nested).expect("mkdir");
+        std::fs::write(nested.join("App.tsx"), "").expect("write");
+
+        let root_s = root.to_string_lossy().to_string();
+        assert_eq!(
+            remote_repo_path(&root_s, "/Users/sam/code/aura/aura-shell/src/App.tsx"),
+            "aura-shell/src/App.tsx"
+        );
+        // Longest match wins: a bare `src/App.tsx` also exists nowhere here,
+        // but were it to, the longer path is the real one.
+        assert_eq!(
+            remote_repo_path(&root_s, "C:\\work\\aura\\aura-shell\\src\\App.tsx"),
+            "aura-shell/src/App.tsx"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_relative_path_is_left_exactly_as_it_came() {
+        assert_eq!(remote_repo_path("/nonexistent", "src/main.rs"), "src/main.rs");
+        assert_eq!(remote_repo_path("/nonexistent", "./src/main.rs"), "src/main.rs");
+    }
+
+    #[test]
+    fn a_path_this_clone_has_never_seen_is_named_honestly() {
+        // A branch nobody here has fetched. Naming the file we can't find beats
+        // silently naming a different one that happens to share a suffix — and
+        // it comes back absolute, which reads as "this is from their machine"
+        // rather than as a path that should resolve here.
+        assert_eq!(
+            remote_repo_path("/nonexistent", "/Users/sam/code/aura/src/ghost.rs"),
+            "/Users/sam/code/aura/src/ghost.rs"
+        );
+    }
 }

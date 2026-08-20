@@ -452,19 +452,6 @@ fn dispatch(
                 .submit(*session_id, input.as_bytes().to_vec())?;
             Ok(ResponseBody::Ack)
         }
-        RequestBody::AcpMessage { payload } => {
-            let session_id_str = connection_id.to_string();
-            let events = crate::acp_server::DaemonAcpServer::handle_prompt(state, &session_id_str, payload)
-                .map_err(|e| ProtocolError::new(ProtocolErrorKind::Domain, format!("ACP error: {}", e)))?;
-            
-            // We just return the first event payload as the AcpMessage response for simplicity
-            // in this migration. Streaming events require the event loop.
-            if let Some(EventBody::AcpMessage { payload: res_payload }) = events.into_iter().next() {
-                Ok(ResponseBody::AcpMessage { payload: res_payload })
-            } else {
-                Ok(ResponseBody::Ack)
-            }
-        }
         RequestBody::GetFleetData { active_only } => {
             let fleet_service = crate::fleet::FleetService::new(state.store.clone());
             let query = crate::fleet::FleetPanelQuery { active_only: *active_only };
@@ -577,7 +564,6 @@ fn request_label(req: &RequestBody) -> &'static str {
         RequestBody::SendMessage { .. } => "SendMessage",
         RequestBody::Handover { .. } => "Handover",
         RequestBody::Subscribe { .. } => "Subscribe",
-        RequestBody::AcpMessage { .. } => "AcpMessage",
         RequestBody::GetFleetData { .. } => "GetFleetData",
         RequestBody::PublishAgentLifecycle { .. } => "PublishAgentLifecycle",
     }

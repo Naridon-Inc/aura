@@ -79,14 +79,14 @@ export function PublishModeDialog({ open, slug, onClose }: Props) {
         {phase.kind === "idle" || phase.kind === "publishing" ? (
           <>
             <div>
-              <label className="text-[11px] text-text-3 mb-1 block">
+              <label className="text-xs text-text-3 mb-1 block">
                 Gist description (optional)
               </label>
               <Input
                 value={description}
                 onChange={(e) => setDescription(e.target.value)}
                 placeholder="e.g. Architect mode tuned for Rust async work"
-                className="h-8 text-[12px]"
+                className="h-8 text-sm"
               />
             </div>
             <DialogFooter>
@@ -100,7 +100,7 @@ export function PublishModeDialog({ open, slug, onClose }: Props) {
               >
                 {phase.kind === "publishing" ? (
                   <>
-                    <AsciiSpinner className="text-[12px] leading-none mr-1" />
+                    <AsciiSpinner className="text-sm leading-none mr-1" />
                     Publishing…
                   </>
                 ) : (
@@ -111,12 +111,12 @@ export function PublishModeDialog({ open, slug, onClose }: Props) {
           </>
         ) : phase.kind === "done" ? (
           <>
-            <div className="space-y-3 text-[12px]">
+            <div className="space-y-3 text-sm">
               <div className="text-text-1">Published.</div>
               <div>
-                <div className="text-text-3 text-[11px] mb-1">Gist URL</div>
+                <div className="text-text-3 text-xs mb-1">Gist URL</div>
                 <div className="flex items-center gap-2">
-                  <code className="text-[11px] text-text-1 bg-bg-2 rounded p-1 flex-1 truncate">
+                  <code className="text-xs text-text-1 bg-bg-2 rounded p-1 flex-1 truncate">
                     {phase.url}
                   </code>
                   <a
@@ -131,10 +131,10 @@ export function PublishModeDialog({ open, slug, onClose }: Props) {
                 </div>
               </div>
               <div>
-                <div className="text-text-3 text-[11px] mb-1">
+                <div className="text-text-3 text-xs mb-1">
                   Raw URL (use this for "Install from URL")
                 </div>
-                <code className="text-[11px] text-text-1 bg-bg-2 rounded p-1 block truncate">
+                <code className="text-xs text-text-1 bg-bg-2 rounded p-1 block truncate">
                   {phase.rawUrl}
                 </code>
               </div>
@@ -145,7 +145,7 @@ export function PublishModeDialog({ open, slug, onClose }: Props) {
           </>
         ) : (
           <>
-            <div className="text-[12px] text-red bg-red/10 rounded p-2">
+            <div className="text-sm text-red bg-red/10 rounded p-2">
               {phase.message}
             </div>
             <DialogFooter>

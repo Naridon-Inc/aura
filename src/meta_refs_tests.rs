@@ -25,6 +25,7 @@ fn row(ts: u64, agent: &str, intent: &str) -> IntentRow {
         intent_type: Some("BugFix".to_string()),
         signed_block_id: Some(format!("blk_{}", ts)),
         key_id: Some("k1".to_string()),
+        source: None,
     }
 }
 
@@ -103,6 +104,7 @@ fn note_line_omits_absent_optionals() {
         intent_type: None,
         signed_block_id: None,
         key_id: None,
+        source: None,
     };
     let line = render_note_line(&NoteLine::from(&r));
     assert_eq!(line, r#"{"ts":5,"agent_id":"a","intent":"x"}"#);
@@ -620,11 +622,112 @@ fn proof_verify_rejects_a_tampered_binding() {
 
     let v = verify_range(&repo, None).unwrap();
     assert_eq!(v.commits, 1);
-    assert_eq!(v.proven, 1, "a (mis-bound) proof note is still present");
+    assert_eq!(v.proofs, 1, "a (mis-bound) proof note is still present");
+    assert_eq!(
+        v.proven, 0,
+        "a note that binds to another commit is evidence about that commit, not this one"
+    );
     assert!(!v.ok, "tampered binding makes the report not-ok");
     assert_eq!(v.issues.len(), 1);
     assert!(!v.per_commit[0].binding_ok);
     assert!(v.issues[0].contains("binds to"));
+}
+
+/// A proof note whose verdict says the goals were never wired up is not a
+/// proof that they were. `proven` counted any parseable note, so the desktop
+/// panel printed "Verified on this clone — N changes proven" over evidence
+/// that said the opposite, in green, under a shield.
+#[test]
+fn verify_counts_by_verdict_not_by_note_presence() {
+    let tmp = tempfile::tempdir().unwrap();
+    let origin = tmp.path().join("origin.git");
+    let a_dir = tmp.path().join("clone_a");
+    sh_git(tmp.path(), &["init", "--bare", origin.to_str().unwrap()]);
+    sh_git(
+        tmp.path(),
+        &["clone", origin.to_str().unwrap(), a_dir.to_str().unwrap()],
+    );
+    let repo = Repository::open(&a_dir).unwrap();
+
+    let mut oids = Vec::new();
+    for (i, name) in ["a.txt", "b.txt", "c.txt"].iter().enumerate() {
+        oids.push(commit_file(
+            &repo,
+            name,
+            "x",
+            &format!("feat: {name}"),
+            3_200_000 + i as i64,
+            "Dev",
+            "dev@x.com",
+        ));
+    }
+
+    // One note per verdict, each correctly bound to its own commit.
+    for (oid, verdict) in oids.iter().zip(["verified", "partial", "not_wired"]) {
+        let note = super::notes::ProofNote {
+            commit: oid.to_string(),
+            verdict: verdict.to_string(),
+            ok: if verdict == "verified" { 2 } else { 1 },
+            total: 2,
+            goals: vec![],
+            at: 1_700_000_000_000,
+        };
+        let sig = Signature::new("aura", "meta@aura.local", &Time::new(3_200_000, 0)).unwrap();
+        repo.note(
+            &sig,
+            &sig,
+            Some(PROOF_REF),
+            *oid,
+            &render_proof_note(&note),
+            true,
+        )
+        .unwrap();
+    }
+
+    let v = verify_range(&repo, None).unwrap();
+    assert_eq!(v.commits, 3);
+    assert_eq!(v.proofs, 3, "all three carry a proof snapshot");
+    assert_eq!(v.proven, 1, "only the verified one is proven");
+    assert_eq!(v.partial, 1);
+    assert!(v.ok, "an honest not_wired verdict is not a problem to fix");
+    assert!(!v.truncated);
+}
+
+/// A proof note this build can't parse is not the same as no proof note. It
+/// used to fold into the same `None`, so an unreadable file counted as a
+/// commit nobody had tried to prove and the report still came back ok.
+#[test]
+fn an_unreadable_proof_note_is_reported_not_swallowed() {
+    let tmp = tempfile::tempdir().unwrap();
+    let origin = tmp.path().join("origin.git");
+    let a_dir = tmp.path().join("clone_a");
+    sh_git(tmp.path(), &["init", "--bare", origin.to_str().unwrap()]);
+    sh_git(
+        tmp.path(),
+        &["clone", origin.to_str().unwrap(), a_dir.to_str().unwrap()],
+    );
+    let repo = Repository::open(&a_dir).unwrap();
+    let t1: i64 = 3_300_000;
+    let c1 = commit_file(&repo, "f.txt", "f", "feat: future", t1, "Dev", "dev@x.com");
+
+    // What a newer Aura's proof format looks like to this one.
+    let sig = Signature::new("aura", "meta@aura.local", &Time::new(t1, 0)).unwrap();
+    repo.note(
+        &sig,
+        &sig,
+        Some(PROOF_REF),
+        c1,
+        "{\"schema\":2,\"attestation\":{}}",
+        true,
+    )
+    .unwrap();
+
+    let v = verify_range(&repo, None).unwrap();
+    assert_eq!(v.proofs, 0, "we couldn't read it, so it proves nothing");
+    assert_eq!(v.proven, 0);
+    assert!(!v.ok, "an unread file is not an absent one");
+    assert_eq!(v.issues.len(), 1);
+    assert!(v.issues[0].contains("can't read it"));
 }
 
 #[test]

@@ -383,6 +383,9 @@ pub fn apply_compaction(session: &mut ManagerSession, plan: &CompactionPlan) -> 
         saved_tokens: None,
         input_tokens: None,
         output_tokens: None,
+        model: None,
+        cost_usd: None,
+        cost_estimated: None,
     };
     let insert_index = insert_at.min(kept.len());
     kept.insert(insert_index, digest_turn);
@@ -410,6 +413,9 @@ mod tests {
             saved_tokens: None,
             input_tokens: None,
             output_tokens: None,
+            model: None,
+            cost_usd: None,
+            cost_estimated: None,
         }
     }
 

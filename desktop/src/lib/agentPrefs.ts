@@ -1,7 +1,7 @@
 // Shared pin/unpin store for coding-agent presets.
 //
 // Which agents the user has pinned is a preference, not a per-component
-// detail — the quick-launch PresetsBar and the Settings → Agents roster
+// detail — the tab strip's "+" menu and the Settings → Agents roster
 // both read and write it, and popout windows should agree. This lifts what
 // used to live inside PresetsBar into one small external store (localStorage
 // + useSyncExternalStore), keeping the original keys so existing pins carry

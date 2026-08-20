@@ -1,10 +1,16 @@
-// PagesSurface — the Pages workspace shell. Two columns: PageEditorPane
-// (center) + PageContextRail (right). The page LIST lives in the single main
-// Plan-rail sidebar (PagesSidebar) — this surface deliberately has no inner
-// list column, so the app never shows two stacked page sidebars. It owns the
-// active page, the live body buffer, a debounced save, and a periodic sync
-// poll; navigation arrives over the `aura:pages:open` bridge the main sidebar
-// drives. Mounts where the old NotesWorkpane lived.
+// PagesSurface — the Pages workspace shell. The page fills it: PageEditorPane
+// with PageContextRail as an opt-in outline on the right.
+//
+// The page LIST is not in here at all. It was the app sidebar's whole body
+// once (so standing in Pages took your projects off screen), then this
+// surface's own first column (two 248px panels of rows side by side), then a
+// popover in the header. It is now the place's own rail, mounted by the page
+// shell one level up — see components/places/PlacePage. `PagesSidebarMount`
+// is unchanged through all of it and still drives this surface over the
+// `aura:pages:*` bridge; only where it mounts has moved.
+//
+// This surface owns the active page, the live body buffer, a debounced save,
+// and a periodic sync poll. Mounts where the old NotesWorkpane lived.
 //
 // Cross-open contract: the parent supplies `repoRoot`. Page links and mentions
 // open in-place (this component resolves a title → summary itself); person and
@@ -22,7 +28,6 @@ import {
   notesRead,
   notesWrite,
   notesArchive,
-  pagesSyncPoll,
   deviceRoomId,
   deviceIdentity,
   pageKey,
@@ -46,6 +51,7 @@ import {
   hashHandleToColor,
   type PagesProvider,
 } from "../../lib/pages_collab";
+import { usePagesSync, useOnPagesSynced } from "../../lib/usePagesSync";
 
 type Props = {
   repoRoot: string;
@@ -54,7 +60,6 @@ type Props = {
   authorHandle?: string;
 };
 
-const SYNC_INTERVAL_MS = 6000;
 const SAVE_DEBOUNCE_MS = 700;
 
 export function PagesSurface({ repoRoot, authorHandle }: Props) {
@@ -230,9 +235,20 @@ export function PagesSurface({ repoRoot, authorHandle }: Props) {
   // The async read bails if the reader has since opened a different page.
   useEffect(() => {
     const key = lastOpenPageKey(repoRoot);
-    if (!key) return;
-    const parsed = parsePageKey(key);
-    if (!parsed) return;
+    const parsed = key ? parsePageKey(key) : null;
+    if (!key || !parsed) {
+      // Switched to a project with no page open — or one whose stored key no
+      // longer parses. Bailing here left the PREVIOUS project's document in the
+      // editor over the new project's tree, and a keystroke in it would have
+      // saved that page into this repo. Clear instead: no page open is the
+      // honest state, and the tree beside it is where you pick one.
+      setActiveKey(null);
+      setActiveNote(null);
+      setBody("");
+      setTitle("");
+      setSaveState("saved");
+      return;
+    }
     let cancelled = false;
     const cached = cachedNote(repoRoot, parsed.scope, parsed.bucket, parsed.id);
     if (cached) {
@@ -261,23 +277,12 @@ export function PagesSurface({ repoRoot, authorHandle }: Props) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [repoRoot]);
 
-  // Periodic sync poll — pull shared-page mutations + refetch when changed.
-  useEffect(() => {
-    let stopped = false;
-    const tick = async () => {
-      try {
-        const res = await pagesSyncPoll(repoRoot);
-        if (!stopped && res.changed) await refreshList();
-      } catch {
-        /* solo repo / offline — no-op */
-      }
-    };
-    const handle = setInterval(tick, SYNC_INTERVAL_MS);
-    return () => {
-      stopped = true;
-      clearInterval(handle);
-    };
-  }, [repoRoot, refreshList]);
+  // Teammates' page edits. The poll itself is app-wide now (`usePagesSync`
+  // from App), because a page has to reach a machine whether or not this
+  // screen happens to be open — joining here rather than starting a second
+  // interval keeps the two off the same on-disk cursor.
+  usePagesSync(repoRoot);
+  useOnPagesSynced(repoRoot, refreshList);
 
   // ── Open a page ─────────────────────────────────────────────────────────
   const openSummary = useCallback(
@@ -577,7 +582,7 @@ export function PagesSurface({ repoRoot, authorHandle }: Props) {
     };
   }, [summaries, openSummary, flushSave, refreshList, repoRoot]);
 
-  // Mirror state to the Plan-rail PagesSidebar so its list + highlight track us.
+  // Mirror state to the list column so its rows + highlight track us.
   useEffect(() => {
     window.dispatchEvent(
       new CustomEvent("aura:pages:summaries", {
@@ -613,8 +618,8 @@ export function PagesSurface({ repoRoot, authorHandle }: Props) {
 
   return (
     <div className="flex h-full min-h-0 bg-bg-content">
-      {/* Center — editor / empty state. The page LIST lives in the single main
-          Plan-rail sidebar, so this surface has no inner list column. */}
+      {/* Editor / empty state. The page list is the place's rail, mounted by
+          PlacePage — nothing about it is in here. */}
       {activeNote ? (
         <PageEditorPane
           note={activeNote}
@@ -642,19 +647,23 @@ export function PagesSurface({ repoRoot, authorHandle }: Props) {
           editorRef={editorRef}
         />
       ) : (
-        <div className="flex-1 min-w-0 flex flex-col items-center justify-center bg-bg-content text-center px-6">
-          <div className="text-[16px] text-text-2 font-medium">No page open</div>
-          <div className="mt-1 text-[12.5px] text-text-4">
-            Pick one on the left, or start a new page.
+        <div className="flex min-w-0 flex-1 flex-col bg-bg-content">
+          {/* No header strip: with no page open there is no page to name, and
+              the index is already standing to the left. */}
+          <div className="flex flex-1 flex-col items-center justify-center px-6 text-center">
+            <div className="text-lg font-medium text-text-2">No page open</div>
+            <div className="mt-1 text-base text-text-4">
+              Pick one from the list, or start a new one.
+            </div>
+            <Button
+              variant="accentSoft"
+              onClick={() => void createPage()}
+              className="mt-4"
+            >
+              <Plus className="w-3.5 h-3.5" strokeWidth={2} />
+              New page
+            </Button>
           </div>
-          <Button
-            variant="accentSoft"
-            onClick={() => void createPage()}
-            className="mt-4"
-          >
-            <Plus className="w-3.5 h-3.5" strokeWidth={2} />
-            New page
-          </Button>
         </div>
       )}
 

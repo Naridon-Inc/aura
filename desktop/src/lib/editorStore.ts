@@ -14,20 +14,27 @@
 //     PTY cleanly. The bottom-pane Terminal is a separate singleton.
 
 import { useEffect, useState } from "react";
-import { api } from "./api";
+import { api, type FileContent } from "./api";
+import { clearAgentTerminalTitle } from "./agentTerminalTitles";
+import { languageSlugForPath } from "./monacoLanguage";
 import {
   AURA_MANAGER_ENABLED,
   CODE_MAP_ENABLED,
   COMMONS_ENABLED,
   TRACE_V2,
 } from "./featureFlags";
+import { pruneOversizedCaches, setDurable } from "./localStore";
+import { createPlaceRegistry } from "./placeStates";
 import {
   releaseTerminalSession,
   releaseNativeTerminalSession,
 } from "../components/Terminal";
 import {
   loadSnapshot,
+  loadSnapshotAt,
   saveSnapshot,
+  saveSnapshotAt,
+  snapshotSlotKeys,
   loadClubSnapshot,
   saveClubSnapshot,
   unionSnapshots,
@@ -49,6 +56,35 @@ export type OpenFile = {
    *  (e.g. the Git sidebar opens directly into diff). The work-surface
    *  reads this once on mount and lets the user toggle from there. */
   defaultView?: "edit" | "diff";
+  /** Explicit left-hand side for the diff view, overriding the usual
+   *  "compare against git HEAD".
+   *
+   *  A coding agent proposing an edit is proposing it against the file
+   *  as it is on disk RIGHT NOW, not against the last commit. With a
+   *  dirty working tree those differ, and diffing against HEAD would
+   *  fold the person's own unsaved work into the agent's proposal —
+   *  the review would show changes the agent never asked for. Set by
+   *  the IDE control plane (`lib/ideBridge`) and left undefined by
+   *  every human-driven opener, which still wants HEAD. */
+  diffOriginal?: string;
+};
+
+/** Extras an opener can pass to `open()`. Everything here is optional and
+ *  every field is sticky: re-opening an already-open file with new options
+ *  updates the tab in place rather than spawning a second one. */
+export type OpenFileOpts = {
+  defaultView?: "edit" | "diff";
+  diffOriginal?: string;
+  /** Content to open the tab with when there is no such file on disk yet.
+   *
+   *  Without this, opening a path that doesn't exist fails — which is the
+   *  right answer for a click on the file tree, and the wrong one for an
+   *  agent proposing a file it wants to create. Saving the tab is what
+   *  brings the file into existence, so the person reviews the first
+   *  version the same way they review every other change. Left undefined
+   *  by every human-driven opener, which should still fail loudly on a
+   *  path that isn't there. */
+  seedIfMissing?: string;
 };
 
 export type AgentTab = {
@@ -94,6 +130,14 @@ export type AgentTab = {
    *  `agent@repo`, shared by every same-repo tab, so "Start all" reopened
    *  the newest session in all of them instead of each tab's own. */
   resumeSessionId?: string | null;
+  /** The place this agent is running in — a connected machine's id, or
+   *  null/absent for this laptop. Carried on the TAB, not read from the
+   *  window, because the doors that respawn a tab (resume a dead PTY,
+   *  Restart, "Start all") are reopening something that already has a
+   *  place. Asking where the window is standing would answer a different
+   *  question and quietly move a running agent to another computer —
+   *  losing the session it was holding over there. */
+  machineId?: string | null;
 };
 
 export type TerminalTab = {
@@ -186,6 +230,17 @@ export type WorkPaneRef =
    *  Session-only — the layout persister strips this kind on save
    *  (a re-loaded shell has no live SFU track to show). */
   | { kind: "screenshare"; id: string }
+  /** A shared session somebody else is hosting, joined and open as a tab.
+   *  `id` is the external session id, so one tab per session and re-joining
+   *  re-focuses rather than stacking. Body renders LiveSessionPane: the
+   *  access banner, the shared transcript, the composer, the host's ports.
+   *
+   *  Session-only — the persister strips it, same as terminals and
+   *  screenshares. The socket dies with the process, and a restored tab would
+   *  be a room you are no longer standing in. Closing the tab does NOT leave
+   *  the session (the "Leave" button does); the store keeps the transcript, so
+   *  re-opening walks straight back in. */
+  | { kind: "live"; id: string }
   /** Pages (notes/wiki) as a workpane tab — RR.3. id is the repo
    *  root so one tab per repo (re-opening re-focuses). Body renders
    *  NotesWorkpane in `embedded` mode (no modal overlay, no internal
@@ -255,7 +310,28 @@ export type WorkPaneRef =
    *  `id` (lib/browserEngine.ts), rendered by BrowserTab. Session-only — the
    *  native webview doesn't survive a reload, so the persister strips it
    *  (see sanitizeRefForPersist), same as terminals. */
-  | { kind: "browser"; id: string; url?: string };
+  | { kind: "browser"; id: string; url?: string }
+  /** Plan Builder wizard as a workpane tab. Singleton — one per window,
+   *  so the id is a constant. It used to be a whole-area singleton that
+   *  returned above the split branch in WorkSurface, which meant opening
+   *  it swapped the window's tab strip for the legacy one. The wizard's
+   *  per-step buffer lives inside the surface component, so the tab is
+   *  session-only (EPHEMERAL_SURFACE_KINDS): restoring it would restore
+   *  an empty wizard, not the plan being drafted. */
+  | { kind: "planBuilder"; id: string }
+  /** PR triage inbox as a workpane tab. Singleton, same story as
+   *  planBuilder: it re-fetches on mount, so it never persists. */
+  | { kind: "inbox"; id: string }
+  /** One cloud conversation — the work handed to a machine that isn't this
+   *  one, read and answered like any other chat.
+   *
+   *  `id` is the A2A context every job in the thread shares (or, for a job
+   *  minted before threading, that job's own id). `repoRoot` is the checkout
+   *  whose board it came from, carried so the tab can poll and reply after a
+   *  workspace switch; empty when the thread was found by the account-wide
+   *  read, which knows no local copy — the pane then reads without one and
+   *  says plainly that replying needs the project open. */
+  | { kind: "cloudJob"; id: string; repoRoot: string };
 
 // Plan-as-markdown is rendered through the standard `kind: "file"`
 // pane, with the file living at `<repoRoot>/.aura/plans/<planId>.md`.
@@ -995,6 +1071,60 @@ let snapshotsArmed = false;
 /** Arm the per-workspace snapshot writer. Called once, after boot hydration. */
 export function armWorkspaceSnapshots(): void {
   snapshotsArmed = true;
+  // From here on every structural tab change writes a snapshot, so the
+  // origin's storage budget has to be honest BEFORE the first one lands.
+  // Installs that predate the cap are carrying single cache entries north of
+  // a megabyte (measured: one PR detail at 1.6 MB of a 5 MB budget), which is
+  // exactly what made these ~2 KB writes fail and the workspace come back
+  // empty. One pass, at the one moment we know boot is done.
+  pruneOversizedCaches();
+}
+
+// Every place the user has open this session, live. `state` below is a pointer
+// at whichever one is focused right now — the registry is what makes switching
+// to another place a focus rather than a wipe-and-rehydrate. See placeStates.ts
+// for why a snapshot round-trip is not the same state coming back.
+const places = createPlaceRegistry<State>({
+  // A place with an unsaved buffer can't be rebuilt from its snapshot (the
+  // snapshot stores paths; the edit lives only here), so it never gets evicted
+  // to make room.
+  pinned: (s) => s.files.some((f) => f.current !== f.baseline),
+});
+
+// A club view is a union of several places, so it is its own place — parking
+// it under any one member's key would overwrite that member's live state and
+// hand it back on the next switch. One key per club, because the window holds
+// as many as the work needs (see workspaceClubStore) and two clubs sharing a
+// key would hand each other's tabs back. The leading NUL makes it impossible
+// for a repo root — or a remote place key, which begins `machine` or `thread`
+// — to collide with it.
+function clubPlaceKey(clubId: string): string {
+  return `\u0000club\u0000${clubId}`;
+}
+
+// The club being viewed, or null while standing in a single place. Only
+// `enterClub` / `exitClub` / `switchWorkspace` move it.
+let clubbedId: string | null = null;
+
+/** The registry key for whatever is focused right now — normally the active
+ *  place's key, the club's key while clubbed, null before the first switch. */
+function livePlaceKey(): string | null {
+  return clubbedId ? clubPlaceKey(clubbedId) : activeRoot;
+}
+
+/** Install `next` as the live state and keep the focused place's slot pointed
+ *  at it. Every assignment to `state` goes through here, so the registry can
+ *  never hold a stale copy of the place you are standing in. */
+function adoptState(next: State) {
+  state = next;
+  const key = livePlaceKey();
+  if (!key) return;
+  const evicted = places.park(key, next);
+  for (const place of evicted) {
+    // Not silent: an evicted place comes back through its snapshot on the next
+    // switch, which is the old behaviour and worth knowing about.
+    console.info("[places] dropped live state for", place, "— over the cap");
+  }
 }
 
 let state: State = {
@@ -1046,7 +1176,7 @@ function setState(next: State) {
   const prevTabsByRoot = groupAgentTabsByRoot(state.agentTabs);
   const prevManagerTabs = state.managerTabs;
   const prevSplitLayout = state.splitLayout;
-  state = next;
+  adoptState(next);
   // Stage 9I — persist splitLayout to a single global key so a shell
   // restart restores the layout (cross-workspace splits are common, so
   // the key is global rather than per-repo). Empty / terminal refs are
@@ -1111,6 +1241,11 @@ type PersistedAgent = {
    *  persisted so a cold restore resumes THIS tab's conversation rather
    *  than the newest-in-repo. Per-tab — see AgentTab.resumeSessionId. */
   resumeSessionId?: string;
+  /** The machine this agent was running on, or absent for this laptop. A
+   *  restored tab is dormant until the user starts it, and when they do it
+   *  must start where it was — a box's session is still over there, holding
+   *  the work, and reopening it here would silently start a second one. */
+  machineId?: string;
 };
 
 function groupAgentTabsByRoot(tabs: AgentTab[]): Map<string, PersistedAgent[]> {
@@ -1125,6 +1260,7 @@ function groupAgentTabsByRoot(tabs: AgentTab[]): Map<string, PersistedAgent[]> {
       mode: t.mode,
       openaiCompatProfile: t.openaiCompatProfile,
       resumeSessionId: t.resumeSessionId ?? undefined,
+      machineId: t.machineId ?? undefined,
     });
     out.set(t.repoRoot, list);
   }
@@ -1142,7 +1278,8 @@ function shallowEq(a: PersistedAgent[], b: PersistedAgent[] | undefined): boolea
       x.agentId !== y.agentId ||
       x.agentLabel !== y.agentLabel ||
       x.mode !== y.mode ||
-      x.resumeSessionId !== y.resumeSessionId
+      x.resumeSessionId !== y.resumeSessionId ||
+      x.machineId !== y.machineId
     ) {
       return false;
     }
@@ -1166,7 +1303,7 @@ function persistOpenAgents(repoRoot: string, list: PersistedAgent[]) {
     if (list.length === 0) {
       localStorage.removeItem(openAgentsKey(repoRoot));
     } else {
-      localStorage.setItem(openAgentsKey(repoRoot), JSON.stringify(list));
+      setDurable(openAgentsKey(repoRoot), JSON.stringify(list));
     }
   } catch {
     /* quota — ignore */
@@ -1206,7 +1343,7 @@ function persistManagerTabs(list: ManagerTab[]) {
         sessionId: t.sessionId,
         label: t.label,
       }));
-      localStorage.setItem(MANAGER_TABS_KEY, JSON.stringify(payload));
+      setDurable(MANAGER_TABS_KEY, JSON.stringify(payload));
     }
   } catch {
     /* quota — ignore */
@@ -1229,6 +1366,86 @@ export function readPersistedManagers(): PersistedManager[] {
   } catch {
     return [];
   }
+}
+
+/**
+ * Erase every trace of a conversation from this device's restored layouts.
+ *
+ * A chat tab is not filed in one place. It is in the global manager roster, in
+ * the snapshot of every workspace it was ever open in, and in each of those
+ * snapshots' split trees. Closing the tab you are looking at only edits the
+ * workspace you are looking at — which is why a conversation whose file has
+ * been deleted comes back on the next launch, and on the next workspace
+ * switch, and the one after that. It is restored from a slot the close never
+ * touched, fails to load again, and shows the same dead screen.
+ *
+ * Reached for exactly once: when the backend has said the session is not on
+ * disk. Nothing here deletes user data — the data is already gone; this
+ * removes the app's insistence on reopening it.
+ *
+ * Returns how many slots held it, which is the count worth logging.
+ */
+export function forgetManagerSessionEverywhere(sessionId: string): number {
+  const ref: WorkPaneRef = { kind: "manager", id: sessionId };
+  let slots = 0;
+
+  for (const key of snapshotSlotKeys()) {
+    const snap = loadSnapshotAt(key);
+    if (!snap) continue;
+    const managerTabs = (snap.managerTabs ?? []).filter(
+      (t) => t.sessionId !== sessionId,
+    );
+    const wasActive = snap.activeManagerId === sessionId;
+    const layout = snap.splitLayout ? treeRemove(snap.splitLayout, ref) : null;
+    const layoutChanged = layout !== snap.splitLayout;
+    if (
+      managerTabs.length === (snap.managerTabs ?? []).length &&
+      !wasActive &&
+      !layoutChanged
+    ) {
+      continue;
+    }
+    slots += 1;
+    saveSnapshotAt(key, {
+      ...snap,
+      managerTabs,
+      activeManagerId: wasActive ? null : snap.activeManagerId,
+      splitLayout: layout,
+    });
+  }
+
+  // The global roster, which is what a cold boot with no workspace reads.
+  try {
+    const raw = localStorage.getItem(MANAGER_TABS_KEY);
+    if (raw) {
+      const parsed = JSON.parse(raw);
+      if (Array.isArray(parsed)) {
+        const kept = parsed.filter(
+          (e) => !(e && typeof e.sessionId === "string" && e.sessionId === sessionId),
+        );
+        if (kept.length !== parsed.length) {
+          slots += 1;
+          if (kept.length === 0) localStorage.removeItem(MANAGER_TABS_KEY);
+          else setDurable(MANAGER_TABS_KEY, JSON.stringify(kept));
+        }
+      }
+    }
+  } catch {
+    /* unreadable roster — the snapshot sweep above is the load-bearing half */
+  }
+
+  // And the Aura row's pointer, if this was the conversation it pointed at.
+  // Left in place it re-mints the same dead id every time the row is clicked.
+  try {
+    if (localStorage.getItem("aura.orchestrator.session") === sessionId) {
+      localStorage.removeItem("aura.orchestrator.session");
+      slots += 1;
+    }
+  } catch {
+    /* ignore */
+  }
+
+  return slots;
 }
 
 /** Read the persisted stream-tab roster for a workspace. The caller
@@ -1373,6 +1590,8 @@ const EPHEMERAL_SURFACE_KINDS: ReadonlySet<string> = new Set([
   "prove",
   "graph",
   "trace",
+  "planBuilder",
+  "inbox",
 ]);
 
 function sanitizeRefForPersist(ref: WorkPaneRef): WorkPaneRef | null {
@@ -1380,6 +1599,7 @@ function sanitizeRefForPersist(ref: WorkPaneRef): WorkPaneRef | null {
   if (ref.kind === "terminal") return null; // termId is runtime-only
   if (ref.kind === "plan") return null; // plan tabs are session-only
   if (ref.kind === "screenshare") return null; // SFU track is session-only
+  if (ref.kind === "live") return null; // the session socket is session-only
   if (ref.kind === "browser") return null; // native webview is session-only
   // Open-on-demand nav destinations never persist — see EPHEMERAL_SURFACE_KINDS.
   if (EPHEMERAL_SURFACE_KINDS.has(ref.kind)) return null;
@@ -1429,7 +1649,7 @@ function persistSplitLayout(tree: WorkSplitTree | null) {
       root: currentWorkspaceRoot(),
       tree: sanitized,
     };
-    localStorage.setItem(SPLIT_LAYOUT_KEY, JSON.stringify(envelope));
+    setDurable(SPLIT_LAYOUT_KEY, JSON.stringify(envelope));
   } catch {
     /* quota — ignore */
   }
@@ -1515,6 +1735,19 @@ function validateTree(v: unknown): WorkSplitTree | null {
         tabs.push({ kind: "prove", id: r.id });
       else if (r.kind === "graph" && typeof r.id === "string" && CODE_MAP_ENABLED)
         tabs.push({ kind: "graph", id: r.id });
+      // A cloud conversation lives on the board, not on this disk, so it
+      // re-reads itself on mount and is safe to restore — the root may be
+      // absent (an account-wide row), which the pane handles.
+      else if (
+        r.kind === "cloudJob" &&
+        typeof r.id === "string" &&
+        typeof (r as { repoRoot?: unknown }).repoRoot === "string"
+      )
+        tabs.push({
+          kind: "cloudJob",
+          id: r.id,
+          repoRoot: (r as { repoRoot: string }).repoRoot,
+        });
       else if (
         r.kind === "trace" &&
         typeof r.id === "string" &&
@@ -1606,7 +1839,7 @@ export function readPersistedSplitLayout(): WorkSplitTree | null {
 }
 
 export function useEditorStore(): State & {
-  open: (path: string, opts?: { defaultView?: "edit" | "diff" }) => Promise<void>;
+  open: (path: string, opts?: OpenFileOpts) => Promise<void>;
   /** Open `path` as a new pane next to the currently-active pane, split
    *  in `direction`. Used by Files panel Alt+click and the per-row
    *  context-menu "Open in Split" entries. If a split layout already
@@ -1617,21 +1850,35 @@ export function useEditorStore(): State & {
   openFileSplit: (path: string, direction: WorkSplitDirection) => Promise<void>;
   close: (path: string) => void;
   closeAll: () => void;
-  /** Workspace transition: serialize `prev`'s full tab state into its
-   *  per-workspace snapshot, wipe live state, then rehydrate from
-   *  `next`'s snapshot (if any). Replaces the legacy "closeAll +
-   *  reload agents" path that bled non-target-workspace tabs across
-   *  switches. Pass `prev=null` on first boot. */
-  switchWorkspace: (prev: string | null, next: string) => void;
-  /** Club entry: serialize `prev` (the outgoing concrete workspace, if
-   *  any) into its own slot, then hydrate state from the club slot.
-   *  First entry seeds the club slot from a union of the members'
-   *  snapshots. */
-  enterClub: (prev: string | null, members: string[]) => void;
-  /** Club exit: serialize the live tab state back to the club slot
-   *  (so re-entering picks up where the user left off), then hydrate
-   *  state from `next`'s per-workspace snapshot like a normal switch. */
-  exitClub: (next: string) => void;
+  /** Workspace transition. Parks `prev`'s LIVE state (and writes its
+   *  snapshot, which is what a restart reads), then focuses `next`: if
+   *  it's already open this session its state comes back whole —
+   *  buffers, unsaved edits, focus, running agents — with no disk read.
+   *  Only a place seen for the first time is built from its snapshot.
+   *  Returns which of the two happened so the caller knows whether the
+   *  snapshot's file paths still need replaying. Pass `prev=null` on
+   *  first boot. */
+  switchWorkspace: (prev: string | null, next: string) => WorkspaceSwitch;
+  /** Club entry: park + serialize `prev` (the outgoing concrete place, if
+   *  any), then stand in the club named by `clubId` — its own place, with
+   *  its own live state and its own tab slot. First entry seeds that slot
+   *  from a union of the members' snapshots. `members` are place keys, so a
+   *  club spanning this laptop and two machines enters exactly like one over
+   *  two local checkouts. */
+  enterClub: (
+    prev: string | null,
+    clubId: string,
+    members: string[],
+  ) => void;
+  /** Club exit: park the club's live state and serialize it back to its own
+   *  slot (so re-entering picks up where the user left off), then land in
+   *  `next` exactly the way a normal switch does — focus if it's open,
+   *  hydrate if it isn't. */
+  exitClub: (next: string) => WorkspaceSwitch;
+  /** Close a place: drop its live state so the next entry rebuilds from
+   *  its snapshot. The one remaining wipe — switching never wipes. The
+   *  on-disk snapshot is left alone, so reopening restores its tabs. */
+  closeWorkspace: (root: string) => void;
   setActive: (path: string) => void;
   updateBuffer: (path: string, text: string) => void;
   saveActive: () => Promise<void>;
@@ -1664,6 +1911,13 @@ export function useEditorStore(): State & {
    *  lets several same-repo Claude tabs each reopen their OWN conversation
    *  instead of all snapping to the newest session in the repo. */
   bindAgentResumeSession: (sessionId: string, resumeSessionId: string) => void;
+  /** Clear the dormant flag because this tab's PTY answered — it is running.
+   *  `dormant` is a guess written at restore time ("this came off disk, so
+   *  assume the process is gone"); the liveness probe is the fact. When the
+   *  guess is wrong the surface pins itself to a paused pane and offers to
+   *  Start an agent that never stopped, which is what "it hibernated by
+   *  itself" looks like from the user's side. No-op when already live. */
+  markAgentLive: (sessionId: string) => void;
   setActiveAgent: (sessionId: string) => void;
   setAgentView: (sessionId: string, view: "ui" | "terminal") => void;
   /** Flip the per-tab attention flag on (BEL detected, permission
@@ -1768,6 +2022,10 @@ export function useEditorStore(): State & {
   setSplitDirection: (direction: WorkSplitDirection) => void;
   clearSplitLayout: () => void;
   openManager: (sessionId: string, label: string) => void;
+  /** Retitle an open Aura conversation's tab WITHOUT focusing it. `openManager`
+   *  also refreshes the label, but it moves the user, so it can't be used to
+   *  keep a background tab's title honest. */
+  renameManagerTab: (sessionId: string, label: string) => void;
   closeManager: (sessionId: string) => void;
   setActiveManager: (sessionId: string) => void;
   /** Plan tab mutators (Stage 11.4). `openPlan` registers the plan
@@ -1899,6 +2157,12 @@ export function useEditorStore(): State & {
    *  when a new screenshare track shows up. */
   openScreenshare: (huddleKey: string) => void;
   closeScreenshare: (huddleKey: string) => void;
+  /** Open a joined session — somebody else's, hosted on their machine — as a
+   *  workpane tab. `sessionId` is the external id. Idempotent: a second join
+   *  re-focuses the tab that is already there. Closing the tab leaves you in
+   *  the session; the pane's own "Leave" is what drops it. */
+  openLiveSession: (sessionId: string) => void;
+  closeLiveSession: (sessionId: string) => void;
   /** RR.3 — open the Pages (notes/wiki) surface as a workpane tab
    *  keyed by repo root. Replaces the legacy full-screen overlay. */
   openPages: (repoRoot: string) => void;
@@ -1925,6 +2189,7 @@ export function useEditorStore(): State & {
     switchWorkspace,
     enterClub,
     exitClub,
+    closeWorkspace,
     setActive,
     updateBuffer,
     saveActive,
@@ -1937,6 +2202,7 @@ export function useEditorStore(): State & {
     closeAgent,
     stopAndCloseAgent,
     bindAgentResumeSession,
+    markAgentLive,
     setActiveAgent,
     setAgentView,
     markAgentAttention,
@@ -1977,6 +2243,7 @@ export function useEditorStore(): State & {
     setSplitDirection,
     clearSplitLayout,
     openManager,
+    renameManagerTab,
     closeManager,
     setActiveManager,
     openPlan,
@@ -2036,6 +2303,8 @@ export function useEditorStore(): State & {
     closeApp,
     openScreenshare,
     closeScreenshare,
+    openLiveSession,
+    closeLiveSession,
     openPages,
     closePages,
     setActiveDashboard,
@@ -2089,10 +2358,7 @@ async function reloadFromDisk(path: string) {
   setState({ ...state, files: next });
 }
 
-export async function openFileImperative(
-  path: string,
-  opts?: { defaultView?: "edit" | "diff" },
-) {
+export async function openFileImperative(path: string, opts?: OpenFileOpts) {
   return openFile(path, opts);
 }
 
@@ -2103,7 +2369,41 @@ export function getActiveManagerSessionId(): string | null {
   return state.activeManagerId;
 }
 
-async function openFile(path: string, opts?: { defaultView?: "edit" | "diff" }) {
+/** Read a file, or — only when the caller supplied a seed — invent the tab
+ *  for a file that isn't there yet. The seed path never touches disk: the
+ *  file appears when the person saves, not when the agent asks. */
+async function readOrSeed(
+  path: string,
+  seed: string | undefined,
+): Promise<FileContent> {
+  try {
+    return await api.readFile(path);
+  } catch (e) {
+    if (seed === undefined) throw e;
+    return {
+      path,
+      text: seed,
+      size: seed.length,
+      language: languageSlugForPath(path),
+      status: "ok",
+    };
+  }
+}
+
+/** Drop the agent-supplied left-hand side, so the file's diff view goes back
+ *  to comparing against git the way every other tab does. Called once the
+ *  agent's proposal has been accepted or dismissed — leaving it set would
+ *  pin the diff to a moment that has since passed. */
+export function clearAgentDiffBase(path: string): void {
+  const idx = state.files.findIndex((f) => f.path === path);
+  if (idx < 0 || state.files[idx].diffOriginal === undefined) return;
+  const next = state.files.slice();
+  const { diffOriginal: _dropped, ...rest } = next[idx];
+  next[idx] = rest;
+  setState({ ...state, files: next });
+}
+
+async function openFile(path: string, opts?: OpenFileOpts) {
   const existing = state.files.find((f) => f.path === path);
   const fileRef: WorkPaneRef = { kind: "file", path };
 
@@ -2149,11 +2449,18 @@ async function openFile(path: string, opts?: { defaultView?: "edit" | "diff" }) 
   if (existing) {
     const nextLayout = state.splitLayout
       ? syncIntoSplit(state.splitLayout)
-      : state.splitLayout;
-    if (opts?.defaultView && existing.defaultView !== opts.defaultView) {
+      : layoutWithRef(fileRef);
+    const wantsView = !!opts?.defaultView && existing.defaultView !== opts.defaultView;
+    const wantsOriginal =
+      opts?.diffOriginal !== undefined && existing.diffOriginal !== opts.diffOriginal;
+    if (wantsView || wantsOriginal) {
       const idx = state.files.findIndex((f) => f.path === path);
       const next = state.files.slice();
-      next[idx] = { ...next[idx], defaultView: opts.defaultView };
+      next[idx] = {
+        ...next[idx],
+        ...(wantsView ? { defaultView: opts?.defaultView } : {}),
+        ...(wantsOriginal ? { diffOriginal: opts?.diffOriginal } : {}),
+      };
       setState({
         ...state,
         files: next,
@@ -2175,7 +2482,7 @@ async function openFile(path: string, opts?: { defaultView?: "edit" | "diff" }) 
     });
     return;
   }
-  const content = await api.readFile(path);
+  const content = await readOrSeed(path, opts?.seedIfMissing);
   const name = path.split("/").pop() ?? path;
   const file: OpenFile = {
     path,
@@ -2186,10 +2493,11 @@ async function openFile(path: string, opts?: { defaultView?: "edit" | "diff" }) 
     size: content.size,
     status: content.status,
     defaultView: opts?.defaultView,
+    diffOriginal: opts?.diffOriginal,
   };
   const nextLayout = state.splitLayout
     ? syncIntoSplit(state.splitLayout)
-    : state.splitLayout;
+    : layoutWithRef(fileRef);
   setState({
     ...state,
     files: [...state.files, file],
@@ -2329,23 +2637,75 @@ export function activeWorkSurface(
   return sawTasks ? "tasks" : null;
 }
 
-function switchWorkspace(prev: string | null, next: string) {
-  // Capture the surface the user is leaving BEFORE we wipe, so a header
+/** What a workspace switch actually did.
+ *
+ *  "focused"  — `next` was already open this session, so its live state came
+ *               back whole: buffers, unsaved edits, focus, running agents.
+ *               Nothing was read from disk and nothing needs replaying.
+ *  "hydrated" — first time here this session. Built from `next`'s snapshot the
+ *               way every switch used to, and the caller still has to replay
+ *               `pendingFilePaths` because a snapshot stores paths, not text. */
+export type WorkspaceSwitch = "focused" | "hydrated";
+
+/** Rebase a parked place's state onto the sidebar preferences in force NOW.
+ *  `sidebarTab` / `codeSubPill` are global UI preferences that happen to ride
+ *  along in `State` — the old wipe carried them across a switch by hand. A
+ *  focus must do the same, or changing the sidebar in one project and
+ *  switching to another would silently revert it to whatever that project was
+ *  showing when you left it. Returns the parked object itself when nothing
+ *  moved, so the common case stays free. */
+function withGlobalPrefs(parked: State): State {
+  if (
+    parked.sidebarTab === state.sidebarTab &&
+    parked.codeSubPill === state.codeSubPill
+  ) {
+    return parked;
+  }
+  return {
+    ...parked,
+    sidebarTab: state.sidebarTab,
+    codeSubPill: state.codeSubPill,
+  };
+}
+
+function switchWorkspace(prev: string | null, next: string): WorkspaceSwitch {
+  // Capture the surface the user is leaving BEFORE anything moves, so a header
   // project switch made while reading Pages/Tasks lands them on the SAME
-  // surface in the next project (carried forward after the hydrate below).
+  // surface in the next project (carried forward at the end).
   const outgoingSurface = activeWorkSurface(state.splitLayout);
-  // 1) Persist outgoing workspace's tab state, if any.
-  if (prev) {
+  // 1) Park the outgoing place's LIVE state so coming back is a focus, and
+  //    write its snapshot too — the snapshot is what a RESTART reads, and it
+  //    has to stay honest whether or not this session ever returns here.
+  //    `adoptState` keeps the registry current on every ordinary change; this
+  //    covers the few paths that move `state` without it. Guarded on `prev`
+  //    actually being the focused place — while clubbed it isn't, and parking
+  //    the union under a member's key would hand it back as that member.
+  if (prev && livePlaceKey() === prev) {
+    places.park(prev, state);
     saveSnapshot(prev, buildSnapshotFromState(state));
   }
   // Bind the snapshot writer to the incoming workspace immediately, before the
-  // wipe/hydrate below, so any post-switch setState persists into `next`'s slot
+  // focus/hydrate below, so any post-switch setState persists into `next`'s slot
   // (never the outgoing root). In-memory so it's race-free vs App.tsx writing
   // `aura.lastWorkspace`.
+  clubbedId = null;
   activeRoot = next;
 
-  // 2) Wipe everything to defaults. Files come back via openFile, not
-  //    by carrying buffers across (they could be stale; disk is truth).
+  // 2) Already open? Then this is a focus. Hand the live state straight back —
+  //    no wipe, no snapshot read, no rehydrate. This is the whole point: a
+  //    second project used to cost you everything you had open in the first,
+  //    because the only way back was through a summary of it.
+  const live = places.focus(next);
+  if (live) {
+    adoptState(withGlobalPrefs(live));
+    emit();
+    carryWorkSurface(outgoingSurface, next);
+    return "focused";
+  }
+
+  // 3) First time standing here this session. Wipe to defaults, then hydrate
+  //    from the snapshot. Files come back via openFile, not by carrying buffers
+  //    across (they'd belong to another repo; disk is truth for a cold place).
   const wiped: State = {
     files: [],
     agentTabs: [],
@@ -2383,11 +2743,10 @@ function switchWorkspace(prev: string | null, next: string) {
     codeSubPill: state.codeSubPill,
   };
 
-  // 3) Hydrate from incoming workspace's snapshot if we have one.
   const restored = loadSnapshot(next);
   if (restored) {
     const panel = restorePanelGroups(restored);
-    state = {
+    const hydrated: State = {
       ...wiped,
       // filePaths are restored by App.tsx via openFile (it owns the
       // backend read). The snapshot's filePaths get re-applied as soon
@@ -2429,39 +2788,69 @@ function switchWorkspace(prev: string | null, next: string) {
       activeDashboard: restored.activeDashboard,
       activeSessions: TRACE_V2 && restored.activeSessions,
     };
+    // `hydrated.files` is still empty here — App.tsx re-opens them through
+    // openFile once the project finishes loading, and that folds each one
+    // into the layout. Everything else the snapshot restored gets a tree now
+    // rather than falling through to the legacy strip.
+    if (!hydrated.splitLayout) hydrated.splitLayout = seedLayoutForState(hydrated);
+    adoptState(hydrated);
   } else {
-    state = wiped;
+    adoptState(wiped);
   }
   emit();
-
-  // Carry the Pages/Tasks surface across the switch. If the user was reading
-  // one and the incoming workspace didn't already restore to it, open that
-  // surface pointed at the new root and focus it — so "switch project while on
-  // Pages" stays on Pages instead of resetting to Build. Build (null) never
-  // carries, so an ordinary switch restores the target's own tabs untouched.
-  // focusOrAppendRef is hoisted (function declaration), so calling it here —
-  // before its lexical definition — is fine.
-  if (outgoingSurface && activeWorkSurface(state.splitLayout) !== outgoingSurface) {
-    focusOrAppendRef(
-      outgoingSurface === "pages"
-        ? { kind: "pages", id: next }
-        : { kind: "tasks", id: next },
-    );
-  }
+  carryWorkSurface(outgoingSurface, next);
+  return "hydrated";
 }
 
-/** File paths the active workspace's snapshot wants re-opened. App
- *  reads this right after `switchWorkspace` and replays them via
- *  `openFile` (which owns the backend disk read). */
+/** Carry the Pages/Tasks surface across a workspace switch. If the user was
+ *  reading one and the incoming workspace isn't already on it, open that
+ *  surface pointed at the new root and focus it — so "switch project while on
+ *  Pages" stays on Pages instead of resetting to Build. Build (null) never
+ *  carries, so an ordinary switch leaves the target's own tabs untouched.
+ *  Shared by both switch outcomes: a focused place owes the user the same
+ *  carry-over a hydrated one does. `focusOrAppendRef` is hoisted, so calling
+ *  it from above its lexical definition is fine. */
+function carryWorkSurface(
+  outgoingSurface: "pages" | "tasks" | null,
+  next: string,
+) {
+  if (!outgoingSurface) return;
+  if (activeWorkSurface(state.splitLayout) === outgoingSurface) return;
+  focusOrAppendRef(
+    outgoingSurface === "pages"
+      ? { kind: "pages", id: next }
+      : { kind: "tasks", id: next },
+  );
+}
+
+/** Close a place: drop its live state so the next entry rebuilds from its
+ *  on-disk snapshot. This is the ONLY wipe left in the store — switching
+ *  between open places is a focus, and the wipe belongs to the one action
+ *  where the user actually said "I'm done with this". Non-destructive: the
+ *  snapshot stays, so reopening the project restores its tabs as always. */
+function closeWorkspace(root: string): void {
+  places.forget(root);
+}
+
+/** File paths the active workspace's snapshot wants re-opened. App reads this
+ *  right after a `switchWorkspace` that reported `"hydrated"` and replays them
+ *  via `openFile` (which owns the backend disk read). A `"focused"` switch does
+ *  NOT replay: those files are already open with their live buffers, and a
+ *  disk read over an unsaved edit would lose it. */
 export function pendingFilePaths(repoRoot: string): string[] {
   return loadSnapshot(repoRoot)?.filePaths ?? [];
 }
 
-/** File paths to re-open when entering the club. Reads from the club
- *  slot first; if no slot exists yet, falls back to a union of every
- *  member's pending paths so first-time entry isn't empty. */
-export function pendingFilePathsForClub(members: string[]): string[] {
-  const club = loadClubSnapshot();
+/** File paths to re-open when entering a club. Reads from THAT club's own
+ *  slot first; if no slot exists yet, falls back to a union of every member's
+ *  pending paths so first-time entry isn't empty. `members` are place keys —
+ *  a local checkout's root, or a machine's key — so a club spanning both is
+ *  one list, not two code paths. */
+export function pendingFilePathsForClub(
+  clubId: string,
+  members: string[],
+): string[] {
+  const club = loadClubSnapshot(clubId);
   if (club) return club.filePaths;
   const seen = new Set<string>();
   const out: string[] = [];
@@ -2526,7 +2915,7 @@ function markAgentDormant(t: AgentTab): AgentTab {
 
 function hydrateFromSnapshot(snap: WorkspaceSnapshot): State {
   const panel = restorePanelGroups(snap);
-  return {
+  const next: State = {
     ...emptyState(),
     agentTabs: snap.agentTabs.map(markAgentDormant),
     terminalTabs: snap.terminalTabs,
@@ -2571,47 +2960,80 @@ function hydrateFromSnapshot(snap: WorkspaceSnapshot): State {
     activeDashboard: false,
     activeSessions: false,
   };
+  // Tabs with no tree to live in: see seedLayoutForState. Without this a
+  // terminal-only workspace came back on the legacy tab strip.
+  if (!next.splitLayout) next.splitLayout = seedLayoutForState(next);
+  return next;
 }
 
-function enterClub(prev: string | null, members: string[]) {
-  // 1) Persist outgoing concrete workspace's tabs to its own slot.
+function enterClub(prev: string | null, clubId: string, members: string[]) {
+  // 1) Park the outgoing concrete workspace live AND persist its tabs to its
+  //    own slot. Parking is what makes leaving the club a focus rather than a
+  //    reload — the club is a place like any other, and no mode gets to keep
+  //    live state while another loses it.
   //    Skip when `prev` is null (boot-time entry) — the in-memory state
   //    is empty so writing it would clobber any existing snapshot.
   if (prev) {
+    if (livePlaceKey() === prev) places.park(prev, state);
     saveSnapshot(prev, buildSnapshotFromState(state));
   }
+  // From here THIS club is the focused place, so `adoptState` files live state
+  // under its own key instead of overwriting a member's — or another club's.
+  clubbedId = clubId;
 
   // 2) Resolve the club snapshot. First entry has no club slot yet, so
   //    we seed by unioning each member's snapshot — the user enters the
   //    club already seeing every member's tabs, which matches the
   //    "clubbed view = both workspaces visible" expectation.
-  let club = loadClubSnapshot();
+  let club = loadClubSnapshot(clubId);
   if (!club) {
     const parts = members
       .map((m) => loadSnapshot(m))
       .filter((s): s is WorkspaceSnapshot => !!s);
     if (parts.length > 0) {
       club = unionSnapshots(parts);
-      saveClubSnapshot(club);
+      saveClubSnapshot(clubId, club);
     }
   }
-  state = club ? hydrateFromSnapshot(club) : emptyState();
+  // Already in this club once this session? Focus its live state — same rule
+  // as any other place, so re-entering doesn't cost the tabs opened last time.
+  const liveClub = places.focus(clubPlaceKey(clubId));
+  if (liveClub) {
+    adoptState(withGlobalPrefs(liveClub));
+    emit();
+    return;
+  }
+  adoptState(club ? hydrateFromSnapshot(club) : emptyState());
   emit();
 }
 
-function exitClub(next: string) {
-  // 1) Persist the unioned tab state to the club slot so re-entering
-  //    later sees the same surface (including any new tabs the user
-  //    opened while in club mode).
-  saveClubSnapshot(buildSnapshotFromState(state));
+function exitClub(next: string): WorkspaceSwitch {
+  // 1) Park the club's live state under its own key and persist the unioned
+  //    tabs to the club slot, so re-entering picks up where the user left off
+  //    (including any new tabs opened while clubbed).
+  const leaving = clubbedId;
+  if (leaving) {
+    const key = clubPlaceKey(leaving);
+    if (livePlaceKey() === key) places.park(key, state);
+    saveClubSnapshot(leaving, buildSnapshotFromState(state));
+  }
+  clubbedId = null;
+  activeRoot = next;
 
-  // 2) Hydrate from the target workspace's own slot exactly the way a
-  //    plain `switchWorkspace` would. The target snapshot wasn't
-  //    touched while the user was in club mode, so the workspace
-  //    returns to its pre-club state — clean separation.
+  // 2) Land in the target workspace exactly the way a plain `switchWorkspace`
+  //    does: focus it if it's already open this session, otherwise hydrate
+  //    from its own slot. The target's snapshot wasn't touched while the user
+  //    was in club mode, so either path returns it to its pre-club state.
+  const live = places.focus(next);
+  if (live) {
+    adoptState(withGlobalPrefs(live));
+    emit();
+    return "focused";
+  }
   const restored = loadSnapshot(next);
-  state = restored ? hydrateFromSnapshot(restored) : emptyState();
+  adoptState(restored ? hydrateFromSnapshot(restored) : emptyState());
   emit();
+  return "hydrated";
 }
 
 function closeAll() {
@@ -2636,14 +3058,14 @@ function closeAll() {
   // wiped because file refs are workspace-scoped (relative paths). Any
   // file pane in the splitLayout simply fails to resolve and the split
   // hides itself — re-opening the file restores the layout.
-  state = {
+  adoptState({
     ...state,
     files: [],
     activePath: null,
     activeAgentId: null,
     activeTermId: null,
     activeDashboard: false,
-  };
+  });
   emit();
 }
 
@@ -2752,9 +3174,7 @@ function openAgent(
     // its pill is visible (the split path hides the global strip).
     setState({
       ...state,
-      splitLayout: state.splitLayout
-        ? focusRefInLayout(state.splitLayout, { kind: "agent", id: tab.sessionId })
-        : state.splitLayout,
+      splitLayout: layoutWithRef({ kind: "agent", id: tab.sessionId }),
       activeAgentId: tab.sessionId,
       activePath: null,
       activeTermId: null,
@@ -2774,13 +3194,12 @@ function openAgent(
     openaiCompatProfile: tab.openaiCompatProfile,
     dormant: tab.dormant,
     resumeSessionId: tab.resumeSessionId,
+    machineId: tab.machineId,
   };
   setState({
     ...state,
     agentTabs: [...state.agentTabs, next],
-    splitLayout: state.splitLayout
-      ? focusRefInLayout(state.splitLayout, { kind: "agent", id: next.sessionId })
-      : state.splitLayout,
+    splitLayout: layoutWithRef({ kind: "agent", id: next.sessionId }),
     activeAgentId: next.sessionId,
     activePath: null,
     activeTermId: null,
@@ -2836,6 +3255,7 @@ export function appendAgentTabPassive(
         openaiCompatProfile: tab.openaiCompatProfile,
         dormant: tab.dormant,
         resumeSessionId: tab.resumeSessionId,
+        machineId: tab.machineId,
       },
     ],
   });
@@ -2870,6 +3290,11 @@ function replaceAgent(
     // passes the resolved id on `src`; if it didn't, keep whatever the old
     // tab already had so a restart still reopens THIS tab's own session.
     resumeSessionId: src.resumeSessionId ?? state.agentTabs[idx].resumeSessionId,
+    // Same rule for the place, and for a sharper reason: a respawn hands us a
+    // new session id for the SAME agent, and it was started wherever the old
+    // one was. A caller that doesn't say keeps the tab's place rather than
+    // falling back to this laptop.
+    machineId: src.machineId ?? state.agentTabs[idx].machineId,
   };
   const nextTabs = state.agentTabs.slice();
   nextTabs[idx] = replaced;
@@ -2903,6 +3328,12 @@ function stopAndCloseAgent(sessionId: string): void {
 function closeAgent(sessionId: string) {
   const idx = state.agentTabs.findIndex((t) => t.sessionId === sessionId);
   if (idx < 0) return;
+  // The live terminal title belongs to the tab, not to the terminal view — the
+  // view unmounts every time you switch tabs, and forgetting the title there
+  // would snap the pill back to "Claude Code" on the way past. Here is where
+  // the tab actually stops existing, in this window at least: detach() routes
+  // through closeAgent too, and the popout reads the title off its own PTY.
+  clearAgentTerminalTitle(sessionId);
   const next = state.agentTabs.slice();
   next.splice(idx, 1);
   let activeAgentId = state.activeAgentId;
@@ -2947,6 +3378,14 @@ function bindAgentResumeSession(sessionId: string, resumeSessionId: string) {
   setState({ ...state, agentTabs: next });
 }
 
+function markAgentLive(sessionId: string) {
+  const idx = state.agentTabs.findIndex((t) => t.sessionId === sessionId);
+  if (idx < 0 || !state.agentTabs[idx].dormant) return;
+  const next = state.agentTabs.slice();
+  next[idx] = { ...next[idx], dormant: undefined };
+  setState({ ...state, agentTabs: next });
+}
+
 function setActiveAgent(sessionId: string) {
   if (
     // A live split always re-runs so the agent gets folded/focused into
@@ -2969,7 +3408,7 @@ function setActiveAgent(sessionId: string) {
   const agentTabs = state.agentTabs.map((t) =>
     t.sessionId === sessionId && t.attention ? { ...t, attention: false } : t,
   );
-  setState({ ...state, agentTabs, splitLayout: state.splitLayout ? focusRefInLayout(state.splitLayout, { kind: "agent", id: sessionId }) : state.splitLayout, activeAgentId: sessionId, activePath: null, activeTermId: null, activeManagerId: null, activeInspector: false, activeReplay: false, activePlanBuilder: false, activeProve: false, activeGraph: false, activeDashboard: false, activePlanId: null, activePrTabId: null, activeInbox: false, activeSessions: false, traceTool: null });
+  setState({ ...state, agentTabs, splitLayout: layoutWithRef({ kind: "agent", id: sessionId }), activeAgentId: sessionId, activePath: null, activeTermId: null, activeManagerId: null, activeInspector: false, activeReplay: false, activePlanBuilder: false, activeProve: false, activeGraph: false, activeDashboard: false, activePlanId: null, activePrTabId: null, activeInbox: false, activeSessions: false, traceTool: null });
 }
 
 function markAgentAttention(sessionId: string, repoRoot?: string) {
@@ -3044,9 +3483,7 @@ function openTerminal(
   setState({
     ...state,
     terminalTabs: [...state.terminalTabs, next],
-    splitLayout: state.splitLayout
-      ? focusRefInLayout(state.splitLayout, { kind: "terminal", id: termId })
-      : state.splitLayout,
+    splitLayout: layoutWithRef({ kind: "terminal", id: termId }),
     activeTermId: termId,
     activePath: null,
     activeAgentId: null,
@@ -3495,7 +3932,7 @@ function setActiveTerminal(termId: string) {
     !state.activeGraph
   )
     return;
-  setState({ ...state, splitLayout: state.splitLayout ? focusRefInLayout(state.splitLayout, { kind: "terminal", id: termId }) : state.splitLayout, activeTermId: termId, activePath: null, activeAgentId: null, activeManagerId: null, activeInspector: false, activeReplay: false, activePlanBuilder: false, activeProve: false, activeGraph: false, activeDashboard: false, activePlanId: null, activePrTabId: null, activeInbox: false, activeSessions: false, traceTool: null });
+  setState({ ...state, splitLayout: layoutWithRef({ kind: "terminal", id: termId }), activeTermId: termId, activePath: null, activeAgentId: null, activeManagerId: null, activeInspector: false, activeReplay: false, activePlanBuilder: false, activeProve: false, activeGraph: false, activeDashboard: false, activePlanId: null, activePrTabId: null, activeInbox: false, activeSessions: false, traceTool: null });
 }
 
 /** Build a single-direction split tree from a flat panes list. */
@@ -3928,8 +4365,8 @@ function moveTabBetweenPanes(
   });
 }
 
-/** Close a tab inside a specific pane. Empty panes are pruned; a
- *  one-pane survivor collapses the entire split. */
+/** Close a tab inside a specific pane. Empty panes are pruned; the layout
+ *  itself only goes away when the last tab in it does. */
 // ── ⌘⇧T "reopen closed tab" (VS Code parity) ──────────────────────
 //
 // Only kinds whose content survives a close are recorded. A file reopens to
@@ -4018,45 +4455,55 @@ function closeTabInPane(paneId: string, index: number): void {
     ref.kind === "terminal" ? state.terminalTabs.filter((t) => t.termId !== ref.id) : state.terminalTabs;
   const managerTabs =
     ref.kind === "manager" ? state.managerTabs.filter((t) => t.sessionId !== ref.id) : state.managerTabs;
+  // Files were the one roster this reconciliation skipped, and unlike the
+  // other three they have a SECOND way of reaching the screen: the flat
+  // file-tab path renders whatever `activePath` names, layout or no layout.
+  // So closing the only tab pruned the tree to null but left the file both
+  // open and active — and the surface, having no layout left to draw, fell
+  // straight through to that path and drew the file again, with no tab
+  // above it and no way back to the empty state short of switching project.
+  const files = ref.kind === "file" ? state.files.filter((f) => f.path !== ref.path) : state.files;
+  const activePath =
+    ref.kind === "file" && state.activePath === ref.path ? null : state.activePath;
   const next = treeRemove(tree, ref);
   if (!next) {
-    setState({ ...state, closedTabs, agentTabs, terminalTabs, managerTabs, splitLayout: null, ...CLEARED_TRACE_MIRROR });
+    setState({
+      ...state,
+      closedTabs,
+      files,
+      activePath,
+      agentTabs,
+      terminalTabs,
+      managerTabs,
+      splitLayout: null,
+      ...CLEARED_TRACE_MIRROR,
+    });
     return;
   }
   if (next.kind === "leaf") {
     const survivor = next.tabs[next.activeIndex];
-    const flatCapable =
-      !!survivor &&
-      (survivor.kind === "file" ||
-        survivor.kind === "agent" ||
-        survivor.kind === "terminal" ||
-        survivor.kind === "manager" ||
-        survivor.kind === "plan");
-    // Collapse back to the flat strip only when exactly one flat-capable
-    // tab is left. A surviving layout-only tab (Tasks / Pages / Team /
-    // trace / …) has no flat representation, and a multi-tab leaf IS the
-    // unified strip — both stay as the splitLayout so closing one tab
-    // never silently drops the others.
-    if (next.tabs.length === 1 && flatCapable) {
-      setState({
-        ...state,
-        closedTabs,
-        agentTabs,
-        terminalTabs,
-        managerTabs,
-        splitLayout: null,
-        activePath: survivor?.kind === "file" ? survivor.path : null,
-        activeAgentId: survivor?.kind === "agent" ? survivor.id : null,
-        activeTermId: survivor?.kind === "terminal" ? survivor.id : null,
-        activeManagerId: survivor?.kind === "manager" ? survivor.id : null,
-        activePlanId: survivor?.kind === "plan" ? survivor.id : null,
-        ...CLEARED_TRACE_MIRROR,
-      });
-      return;
-    }
+    // The layout STAYS, however few tabs are left in it.
+    //
+    // This branch used to collapse to `splitLayout: null` the moment exactly
+    // one "flat-capable" tab (file / agent / terminal / manager / plan) was
+    // left, handing the survivor to the flat tab strip by setting its
+    // matching `active*` flag. That strip no longer exists — "delete the
+    // second tab strip" removed it, and its invariant is that a tab always
+    // has a tree, because PerPaneTabStrip is the only thing that draws a tab
+    // row and it renders only inside the split path.
+    //
+    // So the collapse stopped handing the tab over and started taking its tab
+    // row away: close two of three tabs and the third was still open, still
+    // drawing its body, with an empty chrome band where its tab had been. A
+    // `plan` survivor lost the body too — the flat plan path went with the
+    // strip, so the surface fell through to WorkSurfaceEmpty. And because
+    // `closeOtherTabsInPane` closes through this same function, "Close other
+    // tabs" on a three-tab strip ended in exactly the same place.
     setState({
       ...state,
       closedTabs,
+      files,
+      activePath,
       agentTabs,
       terminalTabs,
       managerTabs,
@@ -4069,6 +4516,8 @@ function closeTabInPane(paneId: string, index: number): void {
   setState({
     ...state,
     closedTabs,
+    files,
+    activePath,
     agentTabs,
     terminalTabs,
     managerTabs,
@@ -4172,8 +4621,7 @@ function generateEmptyPaneId(): string {
 
 /** Drop a pane (entire leaf, including all its tabs) by DFS leaf
  *  index. Collapses single-child splits and flattens nested splits
- *  sharing direction; when the tree empties, the survivor's `active*`
- *  field is set so WorkSurface unwinds to a normal full-width tab. */
+ *  sharing direction. Only an emptied tree clears the layout. */
 function removeSplitPane(index: number) {
   const tree = state.splitLayout;
   if (!tree) return;
@@ -4186,9 +4634,15 @@ function removeSplitPane(index: number) {
   }
   if (next.kind === "leaf") {
     const survivor = next.tabs[next.activeIndex];
+    // Same collapse, same reason it had to go (see closeTabInPane): one leaf
+    // left is not "no layout", it is a one-pane layout, and it is the leaf
+    // that still holds every tab the surviving pane had open. Nulling it here
+    // wiped a whole tab row, not just one tab. The `active*` mirrors still
+    // follow the survivor's focused tab — the snapshot and the restore seed
+    // read them — but the tree is what renders.
     setState({
       ...state,
-      splitLayout: null,
+      splitLayout: next,
       activePath: survivor?.kind === "file" ? survivor.path : null,
       activeAgentId: survivor?.kind === "agent" ? survivor.id : null,
       activeTermId: survivor?.kind === "terminal" ? survivor.id : null,
@@ -4249,32 +4703,16 @@ function openManager(sessionId: string, label: string) {
   // openTerminal: focus the manager ref INTO the split (adding it if absent)
   // so the chat surfaces in a pane. No split → plain set.
   const mgrRef: WorkPaneRef = { kind: "manager", id: sessionId };
-  const splitLayout = state.splitLayout
-    ? focusRefInLayout(state.splitLayout, mgrRef)
-    : state.splitLayout;
+  const splitLayout = layoutWithRef(mgrRef);
   const existing = state.managerTabs.find((t) => t.sessionId === sessionId);
   if (existing) {
-    if (existing.label !== label) {
-      // Refresh label (objective may have been edited) without losing focus.
-      const idx = state.managerTabs.findIndex((t) => t.sessionId === sessionId);
-      const next = state.managerTabs.slice();
-      next[idx] = { ...existing, label };
-      setState({
-        ...state,
-        managerTabs: next,
-        splitLayout,
-        activeManagerId: sessionId,
-        activePath: null,
-        activeAgentId: null,
-        activeTermId: null,
-        activeInspector: false,
-        activeReplay: false,
-        activePlanBuilder: false,
-        activeProve: false,
-        activeGraph: false, activeInbox: false, activeSessions: false, traceTool: null, activeDashboard: false, activePlanId: null,
-      });
-      return;
-    }
+    // The caller's label seeds a NEW tab; it does not re-title an open one.
+    // This branch used to overwrite the label on every open, to catch an
+    // edited objective — but the tab strip now learns the objective from its
+    // own live session subscription (`renameManagerTab`), and most callers
+    // here pass the category word. So clicking "Aura" in the sidebar took a
+    // conversation called "Fix the login bug" and renamed it "Aura", and the
+    // strip renamed it back a frame later.
     setState({
       ...state,
       splitLayout,
@@ -4307,12 +4745,45 @@ function openManager(sessionId: string, label: string) {
   });
 }
 
+// A conversation is called what it is about. The backend names every manager
+// session from its first user message (`seed_objective_from` →
+// `summarize_objective`) and the Sessions list has always shown that name — but
+// the tab strip kept whatever literal the opener passed, so three open chats
+// all read "Chat", same word, same mark, in the one control you use to move
+// between them.
+//
+// Written into the tab rather than resolved at each render: the strip, the
+// split-pane pill, the pane pickers, the tooltip and the popout window title
+// all read `tab.label`, and this is the one place upstream of all of them. A
+// user's own rename lives in a separate map and still wins.
+function renameManagerTab(sessionId: string, label: string) {
+  const idx = state.managerTabs.findIndex((t) => t.sessionId === sessionId);
+  if (idx < 0) return;
+  const next = state.managerTabs[idx];
+  if (next.label === label) return;
+  const managerTabs = state.managerTabs.slice();
+  managerTabs[idx] = { ...next, label };
+  setState({ ...state, managerTabs });
+}
+
+/** Module-level twin of the store's `renameManagerTab`, for callers that hold a
+ *  session but not the hook-bound store — the tab strip, which learns a
+ *  conversation's title from its own live session subscription. */
+export function renameManagerTabById(sessionId: string, label: string): void {
+  renameManagerTab(sessionId, label);
+}
+
 /** Imperative open of a past Aura conversation — the same path the header
  *  history dropdown uses, exposed for callers that can't reach the hook-bound
  *  `editor.openManager` (e.g. the `/resume` slash card's action router, where
  *  the `editor` binding is out of lexical scope). Mirrors `getActiveWorkspaceRoot`. */
 export function openManagerSession(sessionId: string, label: string): void {
   openManager(sessionId, label);
+  // Every caller of this (unlike the internal `openManager`) is a "take me to
+  // that conversation" click made from somewhere else — a cloud job's row, a
+  // sessions list, a finished-job toast. Some of those live on a full-page
+  // cover, so say so and let App step off it.
+  dispatchDetailTabOpened();
 }
 
 function closeManager(sessionId: string) {
@@ -4370,9 +4841,7 @@ function setActiveManager(sessionId: string) {
     return;
   setState({
     ...state,
-    splitLayout: state.splitLayout
-      ? focusRefInLayout(state.splitLayout, { kind: "manager", id: sessionId })
-      : state.splitLayout,
+    splitLayout: layoutWithRef({ kind: "manager", id: sessionId }),
     activeManagerId: sessionId,
     activePath: null,
     activeAgentId: null,
@@ -4432,30 +4901,14 @@ function openPlan(
   const existing = state.planTabs.find((p) => p.id === plan.id);
   const ref: WorkPaneRef = { kind: "plan", id: plan.id };
   if (existing) {
-    // Already registered — just route focus.
-    if (state.splitLayout) {
-      const owner = treeFindLeafByRef(state.splitLayout, ref);
-      if (owner) {
-        const idx = owner.tabs.findIndex((r) => samePaneRef(r, ref));
-        setState({
-          ...state,
-          splitLayout: treeSetActiveTab(state.splitLayout, owner.paneId, idx),
-          activePlanId: plan.id,
-          activePath: null,
-          activeAgentId: null,
-          activeTermId: null,
-          activeManagerId: null,
-          activeInspector: false,
-          activeReplay: false,
-          activePlanBuilder: false,
-          activeProve: false,
-          activeGraph: false, activeInbox: false, activeSessions: false, traceTool: null, activeDashboard: false,
-        });
-        return;
-      }
-    }
+    // Already registered — just route focus. `layoutWithRef` both finds the
+    // leaf that owns the tab and seeds a layout when there isn't one yet, so
+    // re-focusing a plan can no longer land the window on the legacy strip.
+    // The second, layout-less copy of this setState that used to follow was
+    // that missing half written out longhand, minus the layout.
     setState({
       ...state,
+      splitLayout: layoutWithRef(ref),
       activePlanId: plan.id,
       activePath: null,
       activeAgentId: null,
@@ -4495,19 +4948,11 @@ function openPlan(
     sessionId,
     at: Date.now(),
   };
-  let nextLayout = state.splitLayout;
-  if (nextLayout) {
-    const leaves = treeLeafNodes(nextLayout);
-    const targetPaneId = leaves[0]?.paneId;
-    if (targetPaneId) {
-      nextLayout = treeAddTab(nextLayout, targetPaneId, ref);
-    }
-  }
   setState({
     ...state,
     planTabs: [...state.planTabs, data],
     activePlanId: plan.id,
-    splitLayout: nextLayout,
+    splitLayout: layoutWithRef(ref),
     activePath: null,
     activeAgentId: null,
     activeTermId: null,
@@ -4710,9 +5155,12 @@ function setActiveReplay() {
 // preview live inside the surface component (no per-instance state in
 // the store) — same shape as Inspector / Replay.
 
+const PLAN_BUILDER_REF: WorkPaneRef = { kind: "planBuilder", id: "planBuilder" };
+
 function openPlanBuilder() {
   setState({
     ...state,
+    splitLayout: layoutWithRef(PLAN_BUILDER_REF),
     planBuilderOpen: true,
     activePlanBuilder: true,
     activePath: null,
@@ -4726,61 +5174,18 @@ function openPlanBuilder() {
   });
 }
 
+// Closing is removing the tab from its leaf. The ladder that used to live
+// here — inspector, else replay, else prove, else the last file, else the
+// last agent… — was this function guessing what the leaf already knows: a
+// leaf that loses its active tab focuses its neighbour.
 function closePlanBuilder() {
   if (!state.planBuilderOpen) return;
-  let activePath = state.activePath;
-  let activeAgentId = state.activeAgentId;
-  let activeTermId = state.activeTermId;
-  let activeManagerId = state.activeManagerId;
-  let activeInspector = state.activeInspector;
-  let activeReplay = state.activeReplay;
-  let activeProve = state.activeProve;
-  if (state.activePlanBuilder) {
-    if (state.inspectorOpen) {
-      activeInspector = true;
-    } else if (state.replayOpen) {
-      activeReplay = true;
-    } else if (state.proveOpen) {
-      activeProve = true;
-    } else if (state.files.length > 0) {
-      activePath = state.files[state.files.length - 1].path;
-    } else if (state.agentTabs.length > 0) {
-      activeAgentId = state.agentTabs[state.agentTabs.length - 1].sessionId;
-    } else if (state.terminalTabs.length > 0) {
-      activeTermId = state.terminalTabs[state.terminalTabs.length - 1].termId;
-    } else if (state.managerTabs.length > 0) {
-      activeManagerId = state.managerTabs[state.managerTabs.length - 1].sessionId;
-    }
-  }
-  setState({
-    ...state,
-    planBuilderOpen: false,
-    activePlanBuilder: false,
-    activePath,
-    activeAgentId,
-    activeTermId,
-    activeManagerId,
-    activeInspector,
-    activeReplay,
-    activeProve,
-  });
+  const layout = state.splitLayout ? treeRemove(state.splitLayout, PLAN_BUILDER_REF) : null;
+  setState({ ...state, splitLayout: layout, planBuilderOpen: false, activePlanBuilder: false });
 }
 
 function setActivePlanBuilder() {
-  if (state.activePlanBuilder && state.planBuilderOpen) return;
-  setState({
-    ...state,
-    planBuilderOpen: true,
-    activePlanBuilder: true,
-    activePath: null,
-    activeAgentId: null,
-    activeTermId: null,
-    activeManagerId: null,
-    activeInspector: false,
-    activeReplay: false,
-    activeProve: false,
-    activeGraph: false, activeInbox: false, activeSessions: false, traceTool: null, activeDashboard: false, activePlanId: null,
-  });
+  openPlanBuilder();
 }
 
 // ── Prove (singleton) ──────────────────────────────────────────────
@@ -4899,22 +5304,101 @@ function focusRefInLayout(
   return layout;
 }
 
+/** Every open session/document in a state, as the tab list a single leaf
+ *  would hold. Order is the strip's reading order: agents, terminals, chats,
+ *  plans, then files.
+ *
+ *  Terminals owned by the bottom Terminal panel are left out. Both kinds share
+ *  the one `terminalTabs` roster — it is the PTY list, not a tab list — and a
+ *  terminal is panel-owned iff it appears in some `terminalGroups` layout.
+ *  Without this a panel terminal would seed into the main strip and look like
+ *  it had jumped up out of the panel on its own. */
+function tabRefsForState(s: {
+  agentTabs: AgentTab[];
+  terminalTabs: TerminalTab[];
+  managerTabs: { sessionId: string }[];
+  planTabs: PlanTabData[];
+  files: OpenFile[];
+  terminalGroups: TerminalGroup[];
+}): WorkPaneRef[] {
+  const panelOwned = new Set<string>();
+  for (const g of s.terminalGroups) {
+    for (const ref of treeLeaves(g.layout)) {
+      if (ref.kind === "terminal") panelOwned.add(ref.id);
+    }
+  }
+  const refs: WorkPaneRef[] = [];
+  for (const a of s.agentTabs) refs.push({ kind: "agent", id: a.sessionId });
+  for (const t of s.terminalTabs) {
+    if (!panelOwned.has(t.termId)) refs.push({ kind: "terminal", id: t.termId });
+  }
+  for (const m of s.managerTabs) refs.push({ kind: "manager", id: m.sessionId });
+  for (const p of s.planTabs) refs.push({ kind: "plan", id: p.id });
+  for (const f of s.files) refs.push({ kind: "file", path: f.path });
+  return refs;
+}
+
+/** A one-leaf layout holding a state's open tabs, or null when it has none.
+ *
+ *  Both restore paths need this. A workspace snapshot strips terminals, plans
+ *  and section surfaces from the saved tree (they can't survive a reload), so
+ *  a workspace whose tabs were all terminals came back with `terminalTabs`
+ *  restored and `splitLayout` null — tabs with no tree to live in. */
+function seedLayoutForState(s: {
+  agentTabs: AgentTab[];
+  terminalTabs: TerminalTab[];
+  managerTabs: { sessionId: string }[];
+  planTabs: PlanTabData[];
+  files: OpenFile[];
+  terminalGroups: TerminalGroup[];
+  activePath: string | null;
+  activeAgentId: string | null;
+  activeTermId: string | null;
+  activeManagerId: string | null;
+  activePlanId: string | null;
+}): WorkSplitTree | null {
+  const tabs = tabRefsForState(s);
+  if (tabs.length === 0) return null;
+  // Focus follows the restored active-tab flags, so a switch back lands on
+  // the tab the user left, not on whichever one happens to sort first.
+  const activeRef: WorkPaneRef | null = s.activeAgentId
+    ? { kind: "agent", id: s.activeAgentId }
+    : s.activeTermId
+      ? { kind: "terminal", id: s.activeTermId }
+      : s.activeManagerId
+        ? { kind: "manager", id: s.activeManagerId }
+        : s.activePlanId
+          ? { kind: "plan", id: s.activePlanId }
+          : s.activePath
+            ? { kind: "file", path: s.activePath }
+            : null;
+  const idx = activeRef ? tabs.findIndex((r) => samePaneRef(r, activeRef)) : -1;
+  return {
+    kind: "leaf",
+    paneId: generatePaneId(),
+    tabs,
+    activeIndex: idx >= 0 ? idx : 0,
+  };
+}
+
 function layoutWithRef(ref: WorkPaneRef): WorkSplitTree {
   if (state.splitLayout) {
     return focusRefInLayout(state.splitLayout, ref);
   }
-  const initialTabs: WorkPaneRef[] = [];
-  for (const a of state.agentTabs) {
-    initialTabs.push({ kind: "agent", id: a.sessionId });
-  }
-  for (const t of state.terminalTabs) {
-    initialTabs.push({ kind: "terminal", id: t.termId });
-  }
-  for (const m of state.managerTabs) {
-    initialTabs.push({ kind: "manager", id: m.sessionId });
-  }
-  for (const f of state.files) {
-    initialTabs.push({ kind: "file", path: f.path });
+  const initialTabs = tabRefsForState(state);
+  // Idempotent: the seed above already walks every open agent / terminal /
+  // manager / plan / file, so a ref that names one of them is ALREADY in the
+  // list. Callers now include the activation paths (focus a tab that exists),
+  // not just the creation paths, and pushing unconditionally gave those a
+  // strip with the same tab on it twice.
+  const existing = initialTabs.findIndex((r) => samePaneRef(r, ref));
+  if (existing >= 0) {
+    return {
+      kind: "leaf",
+      paneId: generatePaneId(),
+      tabs: initialTabs,
+      activeIndex: existing,
+    };
   }
   initialTabs.push(ref);
   return {
@@ -4992,12 +5476,47 @@ function openTaskDetail(taskId: string, repoRoot: string) {
   dispatchDetailTabOpened();
 }
 
-// SS.2 — fired whenever the user drills from a list-style sidebar into
-// a single-record detail tab (PR, task, page). App.tsx listens and
-// auto-collapses the surface sidebar on viewports under 1400px so the
-// detail surface gets the breathing room. Wide screens (>=1400px) keep
-// the list-sidebar visible so the user can scan and re-pick without a
-// toggle. Manual ⌘B / sidebar toggle always wins thereafter.
+/** Open a cloud conversation — every job sharing `threadKey`, as a chat.
+ *
+ *  Exported rather than hung off the store hook because the two places that
+ *  reach for it are outside a component's store subscription: the project rail
+ *  (which draws these rows) and the composer (which opens the thread the send
+ *  just started, so pressing Send lands you somewhere, exactly as a local
+ *  launch does). */
+export function openCloudThread(threadKey: string, repoRoot: string): void {
+  const key = threadKey.trim();
+  if (!key) return;
+  focusOrAppendRef({ kind: "cloudJob", id: key, repoRoot });
+  dispatchDetailTabOpened();
+}
+
+/** Enter the machine this work ran on, as a workspace.
+ *
+ *  The difference from `openCloudThread` is the whole point: that opens the
+ *  conversation as a tab in THIS workspace, beside your local files. This
+ *  leaves your workspace and enters the box's — its shell, its project
+ *  directory, whichever agents are installed there — with the conversation as
+ *  one tab inside it. A machine is a place you go, not a document you open.
+ *
+ *  Like the covers themselves, the switch belongs to App: it owns which surface
+ *  the window is showing, so this announces the intent and App acts on it. */
+export function openRemoteWorkspace(entry: {
+  machineId?: string;
+  threadKey?: string;
+  repoRoot?: string;
+}): void {
+  if (typeof window === "undefined") return;
+  window.dispatchEvent(
+    new CustomEvent("aura:open-remote-workspace", { detail: entry }),
+  );
+}
+
+// Fired whenever the user drills from a list into a single-record detail tab
+// (PR, task, cloud conversation). App.tsx listens and steps off whichever
+// full-page view is up — Aura, Workspaces, Mission Control, Trace all render
+// as an opaque cover over the work surface, so a tab opened from one of them
+// is focused, in the strip, and entirely off screen until the cover goes.
+// The store can't clear that state itself: it belongs to App.
 function dispatchDetailTabOpened() {
   if (typeof window === "undefined") return;
   window.dispatchEvent(new CustomEvent("aura:detail-tab-opened"));
@@ -5095,6 +5614,22 @@ function openScreenshare(huddleKey: string) {
 
 function closeScreenshare(huddleKey: string) {
   removeRefFromLayout({ kind: "screenshare", id: huddleKey });
+}
+
+// A joined session as a workpane tab. `sessionId` is the external id, so the
+// tab is idempotent: joining the same session twice re-focuses one tab instead
+// of opening a second view onto the same socket.
+//
+// Closing is NOT leaving. The socket stays up and the store keeps the
+// transcript, so re-opening walks back into a full room — the "Leave" button
+// inside the pane is the only thing that drops the session.
+function openLiveSession(sessionId: string) {
+  if (!sessionId) return;
+  focusOrAppendRef({ kind: "live", id: sessionId });
+}
+
+function closeLiveSession(sessionId: string) {
+  removeRefFromLayout({ kind: "live", id: sessionId });
 }
 
 // RR.3 — Pages as a first-class workpane tab. id is the repo root
@@ -5282,9 +5817,12 @@ function setActivePrDetail() {
 // panes — InboxPane reads `repoRoot` from the WorkSurface prop and
 // re-fetches PRs on open.
 
+const INBOX_REF: WorkPaneRef = { kind: "inbox", id: "inbox" };
+
 function openInbox() {
   setState({
     ...state,
+    splitLayout: layoutWithRef(INBOX_REF),
     inboxOpen: true,
     activeInbox: true,
     activeSessions: false,
@@ -5304,33 +5842,12 @@ function openInbox() {
 
 function closeInbox() {
   if (!state.inboxOpen) return;
-  let activePath = state.activePath;
-  let activeAgentId = state.activeAgentId;
-  let activeTermId = state.activeTermId;
-  let activeManagerId = state.activeManagerId;
-  let activeDashboard = state.activeDashboard;
-  if (state.activeInbox) {
-    if (state.files.length > 0) {
-      activePath = state.files[state.files.length - 1].path;
-    } else if (state.agentTabs.length > 0) {
-      activeAgentId = state.agentTabs[state.agentTabs.length - 1].sessionId;
-    } else if (state.terminalTabs.length > 0) {
-      activeTermId = state.terminalTabs[state.terminalTabs.length - 1].termId;
-    } else if (state.managerTabs.length > 0) {
-      activeManagerId = state.managerTabs[state.managerTabs.length - 1].sessionId;
-    } else {
-      activeDashboard = true;
-    }
-  }
+  const layout = state.splitLayout ? treeRemove(state.splitLayout, INBOX_REF) : null;
   setState({
     ...state,
+    splitLayout: layout,
     inboxOpen: false,
     activeInbox: false, activeSessions: false, traceTool: null,
-    activePath,
-    activeAgentId,
-    activeTermId,
-    activeManagerId,
-    activeDashboard,
   });
 }
 
@@ -5432,24 +5949,7 @@ function closeTraceTool() {
 }
 
 function setActiveInbox() {
-  if (state.activeInbox && state.inboxOpen) return;
-  setState({
-    ...state,
-    inboxOpen: true,
-    activeInbox: true,
-    activeSessions: false,
-    activePath: null,
-    activeAgentId: null,
-    activeTermId: null,
-    activeManagerId: null,
-    activeInspector: false,
-    activeReplay: false,
-    activePlanBuilder: false,
-    activeProve: false,
-    activeGraph: false,
-    activePrTabId: null,
-    activeDashboard: false,
-  });
+  openInbox();
 }
 
 function setAgentView(sessionId: string, view: "ui" | "terminal") {

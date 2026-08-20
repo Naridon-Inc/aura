@@ -24,27 +24,6 @@ export type ThemeVariant =
 const KEY = "aura.theme";
 const VARIANT_KEY = "aura.theme.variant";
 
-// ADE surface redesign master flag. The redesign rides one switch — it
-// forces the `ember` style pack on and swaps the consolidated sidebar in;
-// chrome relocation, NavRail sections, and status avatars all read the
-// same flag so the new shell flips atomically.
-//
-// As of the unified-version release the redesign is the DEFAULT: the flag
-// is ON unless a user has explicitly turned it off (value === "0"). A
-// missing/unknown value resolves ON so fresh installs and existing users
-// who never touched the opt-in both land on the new surface. The one-time
-// migration in settingsStore.loadSettings() flips any persisted "0" left
-// over from the opt-in era to "1" so nobody is stranded on the old shell.
-const ADE_V2_KEY = "aura.ade.v2";
-
-function adeV2On(): boolean {
-  try {
-    return localStorage.getItem(ADE_V2_KEY) !== "0";
-  } catch {
-    return true;
-  }
-}
-
 // Variants that ship dark-only — selecting one forces the resolved
 // scheme back to dark so light/system don't fight the variant palette.
 //
@@ -53,6 +32,10 @@ function adeV2On(): boolean {
 // mode reachable only by first switching to another style pack — a
 // setting the user never asked to lose. It ships a real `.light.theme-amber`
 // palette (accent #9a6100, 5.14:1 on white), so light is a supported ground.
+export function isDarkOnlyVariant(v: ThemeVariant): boolean {
+  return DARK_ONLY_VARIANTS.has(v);
+}
+
 const DARK_ONLY_VARIANTS: ReadonlySet<ThemeVariant> = new Set<ThemeVariant>([
   "modal",
   "ember",
@@ -66,13 +49,13 @@ function notify() {
 }
 
 // External durable stores (settingsStore → ~/.aura/settings.toml) register
-// here to mirror every theme/variant/ade_v2 change to disk. themeStore
+// here to mirror every theme/variant change to disk. themeStore
 // stays the live-application authority (it owns the localStorage boot
 // cache the pre-hydration script reads); the hook just keeps the TOML in
 // lockstep without themeStore needing to import the settings layer.
 const persistHooks = new Set<() => void>();
 
-/** Register a callback fired after every theme/variant/ade_v2 set. Returns
+/** Register a callback fired after every theme/variant set. Returns
  *  an unsubscribe fn. */
 export function onThemePersist(fn: () => void): () => void {
   persistHooks.add(fn);
@@ -111,12 +94,12 @@ function readVariant(): ThemeVariant {
       raw === "emerald"
     )
       return raw;
-    // No explicit choice: the ADE v2 master flag defaults the surface to the
-    // ember pack, so flipping that one key swaps the whole redesign on/off.
-    if (adeV2On()) return "amber";
-    return "default";
+    // No explicit choice: `amber` is the app's ground. It used to fall back
+    // to a "default" pack, which was the pre-redesign palette — there is one
+    // shell now, so there is no second palette to land on.
+    return "amber";
   } catch {
-    return adeV2On() ? "amber" : "default";
+    return "amber";
   }
 }
 
@@ -172,10 +155,9 @@ export function useThemeVariant(): ThemeVariant {
   useEffect(() => {
     const fn = () => setVariant(readVariant());
     subs.add(fn);
-    // Cross-heap mirror (see useThemePreference). The variant also derives from
-    // the ADE v2 master flag, so a change to either key must re-read.
+    // Cross-heap mirror — see useThemePreference.
     const onStorage = (e: StorageEvent) => {
-      if (e.key === VARIANT_KEY || e.key === ADE_V2_KEY) fn();
+      if (e.key === VARIANT_KEY) fn();
     };
     window.addEventListener("storage", onStorage);
     return () => {
@@ -184,40 +166,6 @@ export function useThemeVariant(): ThemeVariant {
     };
   }, []);
   return variant;
-}
-
-// ADE surface redesign master flag. Reactive twin of adeV2On() above so
-// the composition root (App.tsx) can swap the consolidated single-panel
-// sidebar in/out without a reload. Setting it also forces the ember
-// variant on via readVariant(), so flipping this one key reskins +
-// restructures the shell together. (A full reload is still cleanest —
-// the pre-hydration script in index.html only reads the flag at boot —
-// but the hook keeps React in sync if it changes mid-session.)
-export function setAdeV2(on: boolean) {
-  try {
-    localStorage.setItem(ADE_V2_KEY, on ? "1" : "0");
-  } catch {
-    /* private mode — best-effort */
-  }
-  notify();
-  persist();
-}
-
-export function useAdeV2(): boolean {
-  const [on, setOn] = useState<boolean>(() => adeV2On());
-  useEffect(() => {
-    const fn = () => setOn(adeV2On());
-    subs.add(fn);
-    const onStorage = (e: StorageEvent) => {
-      if (e.key === ADE_V2_KEY) fn();
-    };
-    window.addEventListener("storage", onStorage);
-    return () => {
-      subs.delete(fn);
-      window.removeEventListener("storage", onStorage);
-    };
-  }, []);
-  return on;
 }
 
 export function useResolvedTheme(): ResolvedTheme {

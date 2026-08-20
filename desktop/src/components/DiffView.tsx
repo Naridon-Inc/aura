@@ -137,8 +137,8 @@ export function DiffView({
 
   if (original == null) {
     return (
-      <div className="h-full w-full bg-bg-content flex items-center justify-center gap-1.5 text-[12px] text-text-4">
-        <AsciiSpinner className="text-[10px]" />
+      <div className="h-full w-full bg-bg-content flex items-center justify-center gap-1.5 text-sm text-text-4">
+        <AsciiSpinner className="text-2xs" />
         <span>Reading this change…</span>
       </div>
     );
@@ -146,7 +146,7 @@ export function DiffView({
 
   return (
     <div className="h-full w-full overflow-hidden bg-bg-content flex flex-col">
-      <div className="h-8 px-3 flex items-center gap-3 border-b border-line-soft bg-bg-1 text-[11px]">
+      <div className="h-8 px-3 flex items-center gap-3 border-b border-line-soft bg-bg-1 text-xs">
         <span className="text-text-3 font-mono truncate">{path}</span>
         <Churn additions={stats.added} deletions={stats.removed} />
         <button
@@ -154,7 +154,7 @@ export function DiffView({
           onClick={() => setIgnoreWhitespace(!ignoreWs)}
           aria-pressed={ignoreWs}
           title={ignoreWs ? "Showing whitespace changes off" : "Hide whitespace-only changes"}
-          className={`ml-auto h-5 px-1.5 rounded border text-[10.5px] transition-colors ${
+          className={`ml-auto h-5 px-1.5 rounded border text-xs transition-colors ${
             ignoreWs
               ? "border-[var(--color-accent)] text-[var(--color-accent)] bg-bg-2"
               : "border-line-soft text-text-3 hover:text-text-1"

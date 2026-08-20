@@ -1,10 +1,24 @@
-// The single global host for Aura's destructive-op gate. When the
-// coding agent (Claude Code / Gemini) is about to do something risky
-// and Aura's validator is *unsure*, the backend parks the agent and
-// fires `agent-gate-request`. This host catches every such request
-// (bare, global event — one place, not per-pane) and shows the human a
-// calm, plain-language card: exactly what's about to happen and why,
-// with Allow / Deny. The agent stays blocked until we resolve.
+// The single global host for every "your agent has stopped and is waiting
+// on you" card. Two things park an agent, and both dock here:
+//
+//   * Aura's destructive-op gate — our validator is unsure about something
+//     risky, described below;
+//   * a permission prompt — claude itself asking before it uses a tool,
+//     arriving over the MCP bridge (`parked/PermissionCard`). In chat mode
+//     the CLI has no terminal to draw its own prompt in, so if nothing
+//     renders this the agent waits forever with no visible reason.
+//
+// One host and one queue because it is one moment for the person using the
+// app: work stopped, and only they can restart it. Two hosts would race for
+// the same dock and stack cards on top of each other.
+//
+// The rest of this file is the gate itself. When the coding agent (Claude
+// Code / Gemini) is about to do something risky and Aura's validator is
+// *unsure*, the backend parks the agent and fires `agent-gate-request`.
+// This host catches every such request (bare, global event — one place,
+// not per-pane) and shows the human a calm, plain-language card: exactly
+// what's about to happen and why, with Allow / Deny. The agent stays
+// blocked until we resolve.
 //
 // The human must decide before the agent proceeds — but that decision does
 // NOT need to hijack the whole screen. A full-screen dim scrim in the middle
@@ -25,6 +39,10 @@ import { createPortal } from "react-dom";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { Button } from "../ui/button";
 import { api } from "../../lib/api";
+import { usePermissionPrompts } from "../../lib/permissionStore";
+import { ParkedHeader, ParkedShell } from "./parked/dock";
+import { PermissionCard } from "./parked/PermissionCard";
+import { relativeAgeFromDelta } from "../../lib/relativeTime";
 
 // The backend fail-closes a parked gate after this long (see `human_gate` in
 // agent_event_listener.rs — MUST stay in sync). The card's safety-net timer
@@ -190,63 +208,23 @@ function kindLabel(kind: string): string {
   return map[k] ?? k.replace(/_/g, " ");
 }
 
-// Humanize an age in seconds → "Ns" / "Nm" / "Nh" / "Nd". Coarse on
+// Humanize an age in seconds → "42s" / "9m" / "3h" / "5d". Coarse on
 // purpose — staleness is a vibe, not a stopwatch.
 function humanizeAge(secs: number): string {
-  const s = Math.max(0, Math.floor(secs));
-  if (s < 60) return `${s}s`;
-  if (s < 3600) return `${Math.floor(s / 60)}m`;
-  if (s < 86400) return `${Math.floor(s / 3600)}h`;
-  return `${Math.floor(s / 86400)}d`;
-}
-
-// Where to float the card. We anchor it centered just above the composer
-// (`.composer`) so it hovers over the input the parked agent is waiting on.
-// When no composer is on screen (terminal-only view, detached window) we fall
-// back to bottom-center. Re-measured on a light interval so it tracks the
-// composer as it grows/shrinks with multi-line input or window resizes.
-type AnchorPos = { left: number; bottom: number } | null;
-
-function useComposerAnchor(): AnchorPos {
-  const [pos, setPos] = useState<AnchorPos>(null);
-  useEffect(() => {
-    let raf = 0;
-    const measure = () => {
-      const el = document.querySelector<HTMLElement>(".composer");
-      if (!el) {
-        setPos((p) => (p === null ? p : null));
-        return;
-      }
-      const r = el.getBoundingClientRect();
-      // Off-screen / zero-size (hidden pane) → treat as absent.
-      if (r.width === 0 || r.height === 0) {
-        setPos((p) => (p === null ? p : null));
-        return;
-      }
-      const left = Math.round(r.left + r.width / 2);
-      // Sit 10px above the composer's top edge.
-      const bottom = Math.round(Math.max(12, window.innerHeight - r.top + 10));
-      setPos((p) =>
-        p && p.left === left && p.bottom === bottom ? p : { left, bottom },
-      );
-    };
-    // Measure after layout settles, then keep it fresh cheaply.
-    raf = requestAnimationFrame(() => requestAnimationFrame(measure));
-    const iv = window.setInterval(measure, 300);
-    window.addEventListener("resize", measure);
-    return () => {
-      cancelAnimationFrame(raf);
-      window.clearInterval(iv);
-      window.removeEventListener("resize", measure);
-    };
-  }, []);
-  return pos;
+  // One ladder for the whole app — see lib/relativeTime.
+  return relativeAgeFromDelta(secs, { style: "compact" });
 }
 
 export function AgentGateHost() {
   // Oldest-first queue (FIFO). The agent is blocked on the oldest gate,
   // so that's the one we surface; resolving it pops the front.
   const [queue, setQueue] = useState<AgentGateRequest[]>([]);
+
+  // The other reason an agent parks: claude asking permission before it
+  // uses a tool, routed in over the MCP bridge. Different question, same
+  // moment — work has stopped and only a human restarts it — so both go
+  // through this one host rather than two cards racing for the same dock.
+  const prompts = usePermissionPrompts(null);
 
   // Subscribe once to the bare global events. Every gate, every session.
   useEffect(() => {
@@ -281,22 +259,41 @@ export function AgentGateHost() {
     };
   }, []);
 
-  const front = queue[0] ?? null;
+  const gateFront = queue[0] ?? null;
+  const promptFront = prompts[0] ?? null;
+  const waiting = queue.length + prompts.length;
 
   const pop = useCallback((gateId: string) => {
     setQueue((q) => q.filter((g) => g.gateId !== gateId));
   }, []);
 
-  if (!front) return null;
+  // Whichever has been waiting longest is shown first. Both stamp unix
+  // seconds when the agent parked, so they sort against each other — and
+  // answering out of order would leave the older, more-stuck agent behind
+  // a card that has no way to reach it.
+  if (promptFront && (!gateFront || promptFront.ts <= gateFront.createdAt)) {
+    return createPortal(
+      // No onResolved: `decidePrompt` removes the prompt from the store
+      // itself, and the store is what this host reads. One owner.
+      <PermissionCard
+        key={promptFront.prompt_id}
+        prompt={promptFront}
+        pending={waiting - 1}
+      />,
+      document.body,
+    );
+  }
+
+  if (!gateFront) return null;
 
   return createPortal(
     <GateCard
       // key by gateId so each gate gets a fresh card (resets note input,
       // in-flight + error state, and re-focuses Allow).
-      key={front.gateId}
-      request={front}
-      pending={queue.length - 1}
-      onResolved={() => pop(front.gateId)}
+      key={gateFront.gateId}
+      request={gateFront}
+      pending={waiting - 1}
+      onResolved={() => pop(gateFront.gateId)}
     />,
     document.body,
   );
@@ -319,18 +316,8 @@ function GateCard({
   const [note, setNote] = useState("");
   const [showDiff, setShowDiff] = useState(false);
 
-  const cardRef = useRef<HTMLDivElement>(null);
   const allowRef = useRef<HTMLButtonElement>(null);
   const noteRef = useRef<HTMLInputElement>(null);
-
-  // Dock position (above the composer) + a one-shot mount transition so the
-  // card slides up into place instead of snapping in.
-  const anchor = useComposerAnchor();
-  const [shown, setShown] = useState(false);
-  useEffect(() => {
-    const id = requestAnimationFrame(() => setShown(true));
-    return () => cancelAnimationFrame(id);
-  }, []);
 
   // Resolve the gate. allow=true → agent proceeds; allow=false → denied,
   // with an optional human note. Keep the card up (and re-enable) on
@@ -426,177 +413,156 @@ function GateCard({
     [busy, denyMode, resolve, onDenyClick],
   );
 
-  // Anchor above the composer when we found one; otherwise bottom-center.
-  // The slide-in nudge (translateY + opacity) plays once on mount via `shown`.
-  const dockStyle: React.CSSProperties = {
-    left: anchor ? anchor.left : "50%",
-    bottom: anchor ? anchor.bottom : 24,
-    transform: `translateX(-50%) translateY(${shown ? "0px" : "10px"})`,
-    opacity: shown ? 1 : 0,
-  };
-
   return (
-    // Full-screen layer, but pointer-events-none so the live app behind the
-    // card stays clickable — the gate no longer blocks the whole window.
-    <div className="fixed inset-0 z-[200] pointer-events-none" role="presentation">
-      <div
-        ref={cardRef}
-        role="alertdialog"
-        aria-label={request.title}
-        onKeyDown={onKeyDown}
-        style={dockStyle}
-        // Docked above the composer. Flex column with a capped height so the
-        // card never outgrows the viewport: header and footer stay pinned
-        // (Allow/Deny always reachable), only the middle scrolls. `pointer-
-        // events-auto` re-enables interaction on the card itself.
-        className="pointer-events-auto absolute flex max-h-[68vh] w-[min(430px,calc(100vw-2rem))] flex-col rounded-xl bg-bg-1 border border-line shadow-2xl overflow-hidden transition-[opacity,transform] duration-200 ease-out"
-      >
-        {/* Header: severity chip + the "agent is paused" affordance. */}
-        <header className="shrink-0 flex items-center gap-2 px-4 py-2.5 border-b border-line-soft">
+    <ParkedShell label={request.title} onKeyDown={onKeyDown}>
+      <ParkedHeader
+        since={request.createdAt}
+        chip={
           <span
-            className={`inline-flex items-center gap-1.5 rounded-full border px-2 py-0.5 text-[10.5px] font-medium uppercase tracking-wide ${sev.chipBg} ${sev.chipBorder} ${sev.chipText}`}
+            className={`inline-flex shrink-0 items-center gap-1.5 rounded-full border px-2 py-0.5 text-xs font-medium ${sev.chipBg} ${sev.chipBorder} ${sev.chipText}`}
           >
             <span className={`w-1.5 h-1.5 rounded-full ${sev.dot}`} />
             {sev.label}
           </span>
-          <span className="ml-auto flex items-center gap-1.5 text-[10.5px] text-text-4">
-            <span className="w-1.5 h-1.5 rounded-full bg-amber animate-pulse" />
-            Agent paused
-            <Elapsed since={request.createdAt} />
+        }
+      />
+
+      <div className="flex-1 min-h-0 overflow-y-auto px-4 py-3.5 space-y-3">
+        {/* Headline — the short "what". */}
+        <h2 className="text-text-1 text-md font-medium leading-snug">
+          {request.title}
+        </h2>
+
+        {/* Body — the plain-language "what & why". `break-words` so a long
+            unbroken token (a big inline symbol list) wraps instead of
+            forcing horizontal overflow. */}
+        <p className="text-text-2 text-base leading-relaxed whitespace-pre-wrap break-words">
+          {request.reason}
+        </p>
+
+        {/* Impact — what user-facing feature this would break. Only when
+            the validator attached a structured analysis. Informational:
+            no focusable controls, so it never disturbs the focus trap. */}
+        {request.impact && <ImpactPanel impact={request.impact} />}
+
+        {/* Metadata row: which tool, and the target file when present. */}
+        <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs">
+          <span className="text-text-4">
+            Tool{" "}
+            <span className="text-text-2 font-mono">{request.toolName}</span>
           </span>
-        </header>
-
-        <div className="flex-1 min-h-0 overflow-y-auto px-4 py-3.5 space-y-3">
-          {/* Headline — the short "what". */}
-          <h2 className="text-text-1 text-[14px] font-medium leading-snug">
-            {request.title}
-          </h2>
-
-          {/* Body — the plain-language "what & why". `break-words` so a long
-              unbroken token (a big inline symbol list) wraps instead of
-              forcing horizontal overflow. */}
-          <p className="text-text-2 text-[12.5px] leading-relaxed whitespace-pre-wrap break-words">
-            {request.reason}
-          </p>
-
-          {/* Impact — what user-facing feature this would break. Only when
-              the validator attached a structured analysis. Informational:
-              no focusable controls, so it never disturbs the focus trap. */}
-          {request.impact && <ImpactPanel impact={request.impact} />}
-
-          {/* Metadata row: which tool, and the target file when present. */}
-          <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px]">
-            <span className="text-text-4">
-              Tool{" "}
-              <span className="text-text-2 font-mono">{request.toolName}</span>
-            </span>
-            {request.file && (
-              <span className="min-w-0 flex items-center gap-1 text-text-4">
-                File
-                <span
-                  className="text-text-2 font-mono truncate max-w-[280px]"
-                  title={request.file}
-                  dir="rtl"
-                >
-                  {request.file}
-                </span>
-              </span>
-            )}
-          </div>
-
-          {/* Command block — verbatim, mono, so the human sees exactly
-              what would run. */}
-          {request.command && (
-            <div>
-              <div className="text-text-4 text-[10.5px] uppercase tracking-wider mb-1">
-                Command
-              </div>
-              <code className="block bg-bg-2 border border-line-soft rounded px-2.5 py-1.5 text-[11.5px] font-mono text-text-1 whitespace-pre-wrap break-all">
-                {request.command}
-              </code>
-            </div>
-          )}
-
-          {/* Diff — collapsed by default; +/- line tinting, no diff lib. */}
-          {request.diff && (
-            <div>
-              <button
-                type="button"
-                onClick={() => setShowDiff((v) => !v)}
-                className="text-text-3 hover:text-text-1 text-[11px] inline-flex items-center gap-1 transition-colors"
+          {request.file && (
+            <span className="min-w-0 flex items-center gap-1 text-text-4">
+              File
+              <span
+                className="text-text-2 font-mono truncate max-w-[280px]"
+                title={request.file}
+                dir="rtl"
               >
-                <span
-                  className="inline-block transition-transform"
-                  style={{ transform: showDiff ? "rotate(90deg)" : "none" }}
-                >
-                  ▸
-                </span>
-                {showDiff ? "Hide changes" : "Show changes"}
-              </button>
-              {showDiff && <DiffBlock diff={request.diff} />}
-            </div>
-          )}
-
-          {/* Optional deny note — revealed on the first Deny click. */}
-          {denyMode && (
-            <div>
-              <label className="block text-text-4 text-[10.5px] uppercase tracking-wider mb-1">
-                Why? (optional)
-              </label>
-              <input
-                ref={noteRef}
-                value={note}
-                onChange={(e) => setNote(e.target.value)}
-                placeholder="Reason for denying — sent back to the agent"
-                disabled={busy}
-                className="w-full bg-bg-content border border-line rounded px-2.5 py-1.5 text-[12.5px] text-text-1 placeholder:text-text-4 focus:outline-none focus:border-accent disabled:opacity-50"
-              />
-            </div>
-          )}
-
-          {error && (
-            <p className="text-red text-[11.5px] leading-snug" role="alert">
-              {error}
-            </p>
+                {request.file}
+              </span>
+            </span>
           )}
         </div>
 
-        {/* Footer actions. Allow is primary; Deny is secondary (outline,
-            red-tinted in confirm mode so the two-step reads clearly). */}
-        <footer className="shrink-0 flex items-center gap-2 px-4 py-2.5 border-t border-line-soft">
-          {pending > 0 && (
-            <span className="text-text-4 text-[10.5px] tabular-nums mr-auto">
-              {pending} more waiting
-            </span>
-          )}
-          <div className={`flex items-center gap-2 ${pending > 0 ? "" : "ml-auto"}`}>
-            <Button
-              variant="outline"
-              size="sm"
-              onClick={onDenyClick}
-              disabled={busy}
-              className={
-                denyMode
-                  ? "text-red border-red/40 hover:bg-red/10"
-                  : "text-text-2"
-              }
-            >
-              {denyMode ? "Confirm deny" : "Deny"}
-            </Button>
-            <Button
-              ref={allowRef}
-              variant="default"
-              size="sm"
-              onClick={() => void resolve(true)}
-              disabled={busy}
-              className="bg-accent-green text-bg-deep hover:opacity-90"
-            >
-              {busy ? "Resolving…" : "Allow"}
-            </Button>
+        {/* Command block — verbatim, mono, so the human sees exactly
+            what would run. */}
+        {request.command && (
+          <div>
+            <div className="section-label mb-1">
+              Command
+            </div>
+            {/* break-words, not break-all — a command you're being asked to
+              approve must not be sliced through the middle of a flag. */}
+          <code className="block bg-bg-2 border border-line-soft rounded px-2.5 py-1.5 text-sm font-mono text-text-1 whitespace-pre-wrap break-words">
+              {request.command}
+            </code>
           </div>
-        </footer>
+        )}
+
+        {/* Diff — collapsed by default; +/- line tinting, no diff lib. */}
+        {request.diff && (
+          <div>
+            <button
+              type="button"
+              onClick={() => setShowDiff((v) => !v)}
+              className="text-text-3 hover:text-text-1 text-xs inline-flex items-center gap-1 transition-colors"
+            >
+              <span
+                className="inline-block transition-transform"
+                style={{ transform: showDiff ? "rotate(90deg)" : "none" }}
+              >
+                ▸
+              </span>
+              {showDiff ? "Hide changes" : "Show changes"}
+            </button>
+            {showDiff && <DiffBlock diff={request.diff} />}
+          </div>
+        )}
+
+        {/* Optional deny note — revealed on the first Deny click. */}
+        {denyMode && (
+          <div>
+            <label className="section-label block mb-1">
+              Why? (optional)
+            </label>
+            <input
+              ref={noteRef}
+              value={note}
+              onChange={(e) => setNote(e.target.value)}
+              placeholder="Reason for denying. Sent back to the agent"
+              disabled={busy}
+              className="w-full bg-bg-content border border-line rounded px-2.5 py-1.5 text-base text-text-1 placeholder:text-text-4 focus:outline-none focus:border-accent disabled:opacity-50"
+            />
+          </div>
+        )}
+
+        {error && (
+          <p className="text-red text-sm leading-snug" role="alert">
+            {error}
+          </p>
+        )}
       </div>
-    </div>
+
+      {/* Footer actions. Allow is primary; Deny is secondary (outline,
+          red-tinted in confirm mode so the two-step reads clearly). */}
+      <footer className="shrink-0 flex items-center gap-2 px-4 py-2.5 border-t border-line-soft">
+        {pending > 0 && (
+          <span className="text-text-4 text-xs tabular-nums mr-auto">
+            {pending} more waiting
+          </span>
+        )}
+        <div className={`flex items-center gap-2 ${pending > 0 ? "" : "ml-auto"}`}>
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={onDenyClick}
+            disabled={busy}
+            // Red on hover in both modes, not just the confirm step — the
+            // first click is still the one that starts refusing, and this
+            // is the control where a reflex click on the wrong button
+            // costs the most.
+            className={
+              denyMode
+                ? "text-red border-red/40 hover:bg-red/10"
+                : "text-text-2 hover:bg-red/10 hover:text-red hover:border-red/40"
+            }
+          >
+            {denyMode ? "Confirm deny" : "Deny"}
+          </Button>
+          <Button
+            ref={allowRef}
+            variant="default"
+            size="sm"
+            onClick={() => void resolve(true)}
+            disabled={busy}
+            className="bg-accent-green text-bg-deep hover:opacity-90"
+          >
+            {busy ? "Resolving…" : "Allow"}
+          </Button>
+        </div>
+      </footer>
+    </ParkedShell>
   );
 }
 
@@ -605,7 +571,7 @@ function GateCard({
 function DiffBlock({ diff }: { diff: string }) {
   const lines = useMemo(() => diff.replace(/\n$/, "").split("\n"), [diff]);
   return (
-    <pre className="mt-1.5 max-h-[240px] overflow-auto bg-bg-2 border border-line-soft rounded text-[11px] font-mono leading-[1.5]">
+    <pre className="mt-1.5 max-h-[240px] overflow-auto bg-bg-2 border border-line-soft rounded text-xs font-mono leading-[1.5]">
       {lines.map((line, i) => {
         const add = line.startsWith("+") && !line.startsWith("+++");
         const del = line.startsWith("-") && !line.startsWith("---");
@@ -646,7 +612,7 @@ function ImpactPanel({ impact }: { impact: AgentImpact }) {
   // was truncated, or is meaningfully stale (> 1 day).
   const notes: string[] = [];
   if (impact.graphSource === "none") {
-    notes.push("limited view — nothing recent to compare against");
+    notes.push("limited view. Nothing recent to compare against");
   } else if (impact.graphSource !== "checkpoint") {
     notes.push("based on your unsaved changes");
   } else if (impact.graphStalenessSecs != null && impact.graphStalenessSecs > 86400) {
@@ -658,12 +624,12 @@ function ImpactPanel({ impact }: { impact: AgentImpact }) {
     <div className={`rounded-md border px-3 py-2.5 space-y-2 ${tone.bg} ${tone.border}`}>
       {/* Header: "IMPACT" label + severity word + confidence pill. */}
       <div className="flex items-center gap-2">
-        <span className="text-[10.5px] font-semibold uppercase tracking-wider text-text-4">
+        <span className="section-label">
           Impact
         </span>
-        <span className={`text-[11px] font-medium ${tone.text}`}>{tone.word}</span>
+        <span className={`text-xs font-medium ${tone.text}`}>{tone.word}</span>
         <span
-          className={`ml-auto rounded-full border px-1.5 py-0.5 text-[9.5px] font-medium uppercase tracking-wide ${conf.bg} ${conf.border} ${conf.text}`}
+          className={`ml-auto rounded-full border px-1.5 py-0.5 text-2xs font-medium ${conf.bg} ${conf.border} ${conf.text}`}
         >
           {impact.confidence}
         </span>
@@ -671,7 +637,7 @@ function ImpactPanel({ impact }: { impact: AgentImpact }) {
 
       {/* Summary — the headline sentence, prominent, with inline **bold**
           and `code` rendered safely (no markdown lib, no raw HTML). */}
-      <p className="text-text-1 text-[12.5px] leading-snug">
+      <p className="text-text-1 text-base leading-snug">
         {renderInline(impact.summary)}
       </p>
 
@@ -681,27 +647,27 @@ function ImpactPanel({ impact }: { impact: AgentImpact }) {
           {shownFeatures.map((f, i) => (
             <span
               key={`${f.entrySymbol}:${f.file}:${i}`}
-              className="inline-flex items-center gap-1 rounded border border-line bg-bg-2 px-1.5 py-0.5 text-[10.5px]"
-              title={`${f.path && f.path.length > 1 ? f.path.join(" → ") : f.entrySymbol} — ${f.file}`}
+              className="inline-flex items-center gap-1 rounded border border-line bg-bg-2 px-1.5 py-0.5 text-xs"
+              title={`${f.path && f.path.length > 1 ? f.path.join(" → ") : f.entrySymbol} · ${f.file}`}
             >
               <span className="text-text-1 font-medium truncate max-w-[160px]">{f.name}</span>
               <span className="text-text-4">{kindLabel(f.kind)}</span>
               {f.path && f.path.length > 1 && (
-                <span className="font-mono text-[9.5px] text-text-3 truncate max-w-[200px]">
+                <span className="font-mono text-2xs text-text-3 truncate max-w-[200px]">
                   {f.path.join(" → ")}
                 </span>
               )}
             </span>
           ))}
           {moreFeatures > 0 && (
-            <span className="text-text-4 text-[10.5px]">+{moreFeatures} more</span>
+            <span className="text-text-4 text-xs">+{moreFeatures} more</span>
           )}
         </div>
       )}
 
       {/* "Used by" line — the other parts of the code that rely on this. */}
       {callers.length > 0 && (
-        <div className="text-text-3 text-[11px] leading-snug">
+        <div className="text-text-3 text-xs leading-snug">
           Used by:{" "}
           {shownCallers.map((c, i) => (
             <span key={`${c.symbol}:${i}`}>
@@ -719,7 +685,7 @@ function ImpactPanel({ impact }: { impact: AgentImpact }) {
       )}
 
       {/* Footer micro-line — the honesty caveat + provenance notes. */}
-      <p className="text-text-4 text-[10.5px] leading-snug">
+      <p className="text-text-4 text-xs leading-snug">
         {impact.hedge}
         {notes.map((n) => (
           <span key={n}> · {n}</span>
@@ -729,16 +695,6 @@ function ImpactPanel({ impact }: { impact: AgentImpact }) {
   );
 }
 
-// Live "Xs ago" ticker from createdAt (unix secs). Purely informational —
-// the actual ~10min timeout + auto-deny lives server-side.
-function Elapsed({ since }: { since: number }) {
-  const [now, setNow] = useState(() => Math.floor(Date.now() / 1000));
-  useEffect(() => {
-    const id = setInterval(() => setNow(Math.floor(Date.now() / 1000)), 1000);
-    return () => clearInterval(id);
-  }, []);
-  const secs = Math.max(0, now - since);
-  if (secs < 1) return null;
-  const label = secs < 60 ? `${secs}s` : `${Math.floor(secs / 60)}m ${secs % 60}s`;
-  return <span className="tabular-nums">· {label}</span>;
-}
+// The "Xs ago" ticker now lives in `parked/dock` with the rest of the
+// shared chrome — both cards need it and it was only ever written here
+// because this was the only card.

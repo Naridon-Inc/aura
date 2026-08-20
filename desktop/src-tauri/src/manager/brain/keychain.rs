@@ -47,6 +47,10 @@ fn wrap(provider_id: &str, op: &str, message: String) -> BrainError {
 pub fn set_api_key(provider_id: &str, key: &str) -> Result<(), BrainError> {
     crate::secret_store::set(SERVICE, provider_id, key)
         .map_err(|m| wrap(provider_id, "set", m))?;
+    // Open the key's spend row now, so "since the key was added" dates from
+    // when it was actually added rather than from its first billed turn — and
+    // so a key added but not yet used reads "$0.00" instead of being missing.
+    crate::api_spend::note_key_added(provider_id, key);
     cache()
         .lock()
         .unwrap()

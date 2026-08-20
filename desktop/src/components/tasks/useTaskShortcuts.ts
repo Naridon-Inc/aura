@@ -147,17 +147,17 @@ export function useTaskShortcuts({
   }, [taskId, sequenceId, onShortcut, disabled]);
 }
 
-// Static metadata for the Shortcuts modal. Exported so the modal +
-// any external help surface stay in sync with the binding above.
-export const TASK_SHORTCUTS: { keys: string; label: string }[] = [
-  { keys: "Enter", label: "Open task detail" },
-  { keys: "Esc", label: "Close detail / deselect" },
-  { keys: "Shift+click", label: "Peek task in a centered modal" },
-  { keys: "a", label: "Open assignee picker" },
-  { keys: "p", label: "Open priority picker" },
-  { keys: "s", label: "Open status picker" },
-  { keys: "l", label: "Open label picker" },
-  { keys: "c", label: "Copy AURA-{n} to clipboard" },
-  { keys: "d", label: "Delete task" },
-  { keys: "?", label: "Show this shortcuts list" },
-];
+// What these keys DO is described in lib/shortcuts.ts, under "On a task
+// card", along with every other key the app binds.
+//
+// It used to be a `TASK_SHORTCUTS` array right here, on the reasoning that
+// sitting beside the handler keeps the two in step. Exactly one thing read
+// it: a second cheat-sheet the board drew for itself, opened with `?` — a
+// key documented only inside the sheet it opens. So the ⌘/ sheet, whose own
+// entry reads "Show all shortcuts", knew about none of these ten, and the
+// only way to discover them was to already know.
+//
+// Proximity is not what keeps a list honest anyway. tests/shortcuts.test.ts
+// reads this file, pulls out every key it binds, and asserts the group lists
+// exactly those — both directions, so neither a new key nor a deleted one can
+// slip past. Proximity only ever made that drift easy to notice.

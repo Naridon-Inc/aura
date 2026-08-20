@@ -27,7 +27,11 @@
 
 import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
 import { onExternalAnchorClick } from "../../lib/openExternal";
-import { Bot, ChevronDown } from "lucide-react";
+import { shortDate } from "../../lib/calendarDate";
+import { TASK_STATUS_OPTIONS } from "../../lib/taskStatus";
+import { relativeAge } from "../../lib/relativeTime";
+import { Bot, ChevronDown, MessageSquare } from "lucide-react";
+import { BoardEmpty } from "../board";
 import { TaskActionBar } from "./TaskActionBar";
 import { StartInAgentButton } from "./StartInAgentButton";
 import {
@@ -47,7 +51,7 @@ import {
 } from "../../lib/api";
 import { AssigneePicker } from "../AssigneePicker";
 import { TiptapEditor } from "../notes/TiptapEditor";
-import { TaskIdChip } from "../TasksBoard";
+import { TaskIdChip } from "./TaskIdChip";
 import { Button } from "../ui/button";
 import { Input } from "../ui/input";
 import { Select } from "../ui/select";
@@ -62,14 +66,13 @@ import { DatePicker } from "../ui/datePicker";
 import { Popover, PopoverContent, PopoverTrigger } from "../ui/popover";
 import { cn } from "../../lib/utils";
 
-// Mirror the four canonical kanban statuses + their human labels.
-// Kept in-file so the panel doesn't depend on TasksBoard's internals.
-const STATUS_OPTIONS: { id: TaskStatus; label: string }[] = [
-  { id: "backlog", label: "Backlog" },
-  { id: "in_progress", label: "In Progress" },
-  { id: "in_review", label: "In Review" },
-  { id: "done", label: "Done" },
-];
+// One vocabulary for the whole app — see lib/taskStatus.
+//
+// This was kept in-file "so the panel doesn't depend on TasksBoard's
+// internals", which was a good reason back when the labels lived inside
+// TasksBoard.tsx. taskColumns.ts was extracted to end exactly that, and this
+// copy was never told.
+const STATUS_OPTIONS = TASK_STATUS_OPTIONS;
 
 // OO.3 — 5-stop priority dropdown. Listed in render order so the
 // keyboard arrow keys traverse urgent → none.
@@ -204,8 +207,13 @@ export function PlanningCard({
   return (
     <Card title="Planning" variant={variant}>
       <div className="space-y-2.5">
+        {/* Sprint / Workstream — the words the Sprint tab, the create wizard
+            and the left rail all use for these two fields. They read "Cycle"
+            and "Module" here, which named the storage layer rather than the
+            thing, and "module" in particular means something else entirely in
+            an app that reads your source. */}
         {cycles.length > 0 && (
-          <Row label="Cycle" variant={variant}>
+          <Row label="Sprint" variant={variant}>
             <Select
               value={task.cycle_id ?? ""}
               onChange={(v) => onPatch({ id: task.id, cycle_id: v })}
@@ -213,14 +221,14 @@ export function PlanningCard({
                 value: c.id,
                 label: `${c.name}${c.status === "active" ? " · active" : ""}`,
               }))}
-              placeholder="— No cycle —"
+              placeholder="— No sprint —"
               className="flex-1"
-              aria-label="Change cycle"
+              aria-label="Change sprint"
             />
           </Row>
         )}
         {modules.length > 0 && (
-          <Row label="Module" variant={variant}>
+          <Row label="Workstream" variant={variant}>
             <Select
               value={task.module_id ?? ""}
               onChange={(v) => onPatch({ id: task.id, module_id: v })}
@@ -228,9 +236,9 @@ export function PlanningCard({
                 value: m.id,
                 label: `${m.name}${m.status === "in_progress" ? " · in progress" : ""}`,
               }))}
-              placeholder="— No module —"
+              placeholder="— No workstream —"
               className="flex-1"
-              aria-label="Change module"
+              aria-label="Change workstream"
             />
           </Row>
         )}
@@ -279,7 +287,7 @@ function PanelHeader({
       <div className="flex items-center gap-2 px-4 h-12">
         <TaskIdChip
           sequenceId={task.sequence_id}
-          className="font-mono text-[11px] tracking-tight text-text-3 hover:text-text-1 bg-bg-2 hover:bg-bg-3 px-1.5 py-0.5 rounded transition-colors"
+          className="font-mono text-xs tracking-tight text-text-3 hover:text-text-1 bg-bg-2 hover:bg-bg-3 px-1.5 py-0.5 rounded transition-colors"
         />
         <div className="flex-1" />
         <TaskActionBar
@@ -305,7 +313,7 @@ function PanelHeader({
               e.currentTarget.blur();
             }
           }}
-          className="w-full bg-transparent text-text-1 text-[15px] font-semibold leading-[1.3] tracking-tight focus:outline-none focus:bg-bg-2/60 rounded px-1 -mx-1 py-0.5"
+          className="w-full bg-transparent text-text-1 text-lg font-semibold leading-[1.3] tracking-tight focus:outline-none focus:bg-state-hover rounded px-1 -mx-1 py-0.5"
           placeholder="Untitled task"
         />
       </div>
@@ -377,22 +385,27 @@ export function StatusCard({
             onChange={(p) => onPatch({ id: task.id, priority: p })}
           />
         </Row>
-        <div className="grid grid-cols-2 gap-2">
-          <Row label="Start" variant={variant}>
-            <DatePicker
-              value={task.start_date ?? ""}
-              onChange={(v) => onPatch({ id: task.id, start_date: v })}
-              placeholder="—"
-            />
-          </Row>
-          <Row label="Due" variant={variant}>
-            <DatePicker
-              value={task.due_date ?? ""}
-              onChange={(v) => onPatch({ id: task.id, due_date: v })}
-              placeholder="—"
-            />
-          </Row>
-        </div>
+        {/* Full-width rows, like State and Priority above. These two used to
+            share one row as a 2-up grid, which left each cell about sixty
+            pixels wide — narrow enough that the picker collapsed to a bare
+            calendar icon, so the pair read as two anonymous buttons under two
+            labels. At full width the control shows its own empty state
+            (MM/DD/YYYY), which says "no date yet" without anything being
+            added beside it. */}
+        <Row label="Start" variant={variant}>
+          <DatePicker
+            value={task.start_date ?? ""}
+            onChange={(v) => onPatch({ id: task.id, start_date: v })}
+            label="Start date"
+          />
+        </Row>
+        <Row label="Due" variant={variant}>
+          <DatePicker
+            value={task.due_date ?? ""}
+            onChange={(v) => onPatch({ id: task.id, due_date: v })}
+            label="Due date"
+          />
+        </Row>
       </div>
     </Card>
   );
@@ -443,7 +456,7 @@ function PriorityPicker({
               setOpen(false);
             }}
             className={cn(
-              "w-full flex items-center justify-between gap-2 text-left px-2 py-1 text-[11.5px] rounded hover:bg-bg-2",
+              "w-full flex items-center justify-between gap-2 text-left px-2 py-1 text-sm rounded hover:bg-state-hover",
               p.id === value ? "text-text-1" : "text-text-3",
             )}
           >
@@ -451,7 +464,7 @@ function PriorityPicker({
               {p.label}
             </StatusChip>
             {p.id === value && (
-              <span className="text-accent text-[10px] shrink-0" aria-hidden>
+              <span className="text-accent text-2xs shrink-0" aria-hidden>
                 ✓
               </span>
             )}
@@ -492,7 +505,7 @@ export function AssignmentCard({
           {task.agent_assignee ? (
             <div className="flex items-center gap-2">
               <span
-                className="inline-flex items-center px-1.5 h-5 rounded uppercase tracking-wider text-[10px] font-medium"
+                className="inline-flex items-center px-1.5 h-5 rounded text-2xs font-medium"
                 style={{
                   // One agent colour for every agent, not a brand wheel: the
                   // chip already spells the name, and orange is this app's
@@ -517,12 +530,12 @@ export function AssignmentCard({
               </Button>
             </div>
           ) : (
-            <span className="text-[11.5px] text-text-5 italic">None</span>
+            <span className="text-sm text-text-5 italic">None</span>
           )}
         </Row>
         {task.reporter && (
           <Row label="Reporter" variant={variant}>
-            <span className="text-[12px] text-text-2 font-mono">
+            <span className="text-sm text-text-2 font-mono">
               @{task.reporter}
             </span>
           </Row>
@@ -617,9 +630,9 @@ export function DescriptionCard({
           variant="ghost"
           size="xs"
           onClick={() => setEditing(true)}
-          className="px-0 italic font-normal text-[11.5px] text-text-5 hover:text-text-3 hover:bg-transparent"
+          className="px-0 italic font-normal text-sm text-text-5 hover:text-text-3 hover:bg-transparent"
         >
-          No description — click to add one.
+          No description. Click to add one.
         </Button>
       )}
     </Card>
@@ -642,9 +655,10 @@ export function DependenciesCard({
   );
   if (blockedBy.length === 0 && blocks.length === 0) {
     return (
-      <Card title="Dependencies" count={0} variant={variant}>
-        <div className="text-[11.5px] text-text-5 italic">
-          No upstream or downstream tasks.
+      <Card title="Run order" count={0} variant={variant}>
+        <div className="text-sm text-text-5 italic">
+          Nothing has to finish before this one, and nothing is waiting on it.
+          Aura fills this in when it plans a run.
         </div>
       </Card>
     );
@@ -652,15 +666,15 @@ export function DependenciesCard({
   const byId = new Map(allTasks.map((t) => [t.id, t]));
   return (
     <Card
-      title="Dependencies"
+      title="Run order"
       count={blockedBy.length + blocks.length}
       variant={variant}
     >
       <div className="space-y-2.5">
         {blockedBy.length > 0 && (
           <div>
-            <div className="text-[10px] uppercase tracking-wider text-text-5 mb-1">
-              Blocked by
+            <div className="section-label mb-1">
+              Waiting on
             </div>
             <div className="space-y-1">
               {blockedBy.map((id) => {
@@ -668,9 +682,9 @@ export function DependenciesCard({
                 return (
                   <div
                     key={id}
-                    className="flex items-center gap-2 text-[12px] text-text-2"
+                    className="flex items-center gap-2 text-sm text-text-2"
                   >
-                    <span className="w-3 h-3 rounded-sm bg-bg-3 text-text-3 text-[9px] flex items-center justify-center font-bold">
+                    <span className="w-3 h-3 rounded-sm bg-bg-3 text-text-3 text-2xs flex items-center justify-center font-bold">
                       ⇠
                     </span>
                     <span className="truncate" title={upstream?.title ?? id}>
@@ -694,16 +708,16 @@ export function DependenciesCard({
         )}
         {blocks.length > 0 && (
           <div>
-            <div className="text-[10px] uppercase tracking-wider text-text-5 mb-1">
-              Blocks
+            <div className="section-label mb-1">
+              Unblocks
             </div>
             <div className="space-y-1">
               {blocks.map((t) => (
                 <div
                   key={t.id}
-                  className="flex items-center gap-2 text-[12px] text-text-2"
+                  className="flex items-center gap-2 text-sm text-text-2"
                 >
-                  <span className="w-3 h-3 rounded-sm bg-bg-3 text-text-3 text-[9px] flex items-center justify-center font-bold">
+                  <span className="w-3 h-3 rounded-sm bg-bg-3 text-text-3 text-2xs flex items-center justify-center font-bold">
                     ⇢
                   </span>
                   <span className="truncate" title={t.title}>
@@ -754,31 +768,24 @@ export function LabelsCard({
   };
   return (
     <Card title="Labels" count={task.labels.length} variant={variant}>
-      <div className="space-y-2">
-        {task.labels.length > 0 && (
-          <div className="flex flex-wrap gap-1">
-            {task.labels.map((l) => (
-              <span
-                key={l}
-                className="bg-bg-2 text-text-2 text-[10.5px] px-1.5 py-0.5 rounded"
-              >
-                {l}
-              </span>
-            ))}
-          </div>
-        )}
-        <Input
-          type="text"
-          value={draft}
-          onChange={(e) => setDraft(e.target.value)}
-          onBlur={commit}
-          onKeyDown={(e) => {
-            if (e.key === "Enter") e.currentTarget.blur();
-          }}
-          placeholder="bug, frontend, p0"
-          className="w-full"
-        />
-      </div>
+      {/* One field, which both shows the labels and edits them. There used to
+          be a row of grey chips above it printing the exact same words the
+          field already held — the same list twice, the top copy not even
+          clickable. */}
+      <Input
+        type="text"
+        value={draft}
+        onChange={(e) => setDraft(e.target.value)}
+        onBlur={commit}
+        onKeyDown={(e) => {
+          if (e.key === "Enter") e.currentTarget.blur();
+        }}
+        /* Was "bug, frontend, p0" — which read as three real labels sitting
+           under a header saying "Labels 0". A placeholder has to be visibly an
+           instruction, or it is just wrong data. */
+        placeholder="Add labels, separated by commas"
+        className="w-full"
+      />
     </Card>
   );
 }
@@ -866,11 +873,11 @@ export function SubIssuesCard({
   };
 
   return (
-    <Card title="Sub-issues" count={subtree.length} variant={variant}>
+    <Card title="Sub-tasks" count={subtree.length} variant={variant}>
       <div className="space-y-2">
         {subtree.length === 0 && (
-          <div className="text-[11.5px] text-text-5 italic">
-            No sub-issues. Children created here inherit this task as
+          <div className="text-sm text-text-5 italic">
+            No sub-tasks. Children created here inherit this task as
             their parent.
           </div>
         )}
@@ -880,14 +887,14 @@ export function SubIssuesCard({
               ({ task: child, depth }) => (
                 <div
                   key={child.id}
-                  className="group flex items-center gap-2 h-7 rounded-md px-1.5 hover:bg-bg-2/70"
+                  className="group flex items-center gap-2 h-7 rounded-md px-1.5 hover:bg-state-hover"
                   style={{ paddingLeft: `${6 + depth * 14}px` }}
                   title={`AURA-${child.sequence_id} · ${child.title}`}
                 >
-                  <span className="shrink-0 whitespace-nowrap font-mono text-[10px] text-text-5 tabular-nums">
+                  <span className="shrink-0 whitespace-nowrap font-mono text-2xs text-text-5 tabular-nums">
                     {child.sequence_id}
                   </span>
-                  <span className="flex-1 min-w-0 truncate text-[12px] text-text-2 group-hover:text-text-1">
+                  <span className="flex-1 min-w-0 truncate text-sm text-text-2 group-hover:text-text-1">
                     {child.title}
                   </span>
                   <StatusChip
@@ -905,11 +912,11 @@ export function SubIssuesCard({
               <button
                 type="button"
                 onClick={() => setExpanded((v) => !v)}
-                className="mt-1 ml-1.5 text-[11px] text-text-4 hover:text-text-2"
+                className="mt-1 ml-1.5 text-xs text-text-4 hover:text-text-2"
               >
                 {expanded
                   ? "Show less"
-                  : `Show all ${tree.length} sub-issues`}
+                  : `Show all ${tree.length} sub-tasks`}
               </button>
             )}
           </div>
@@ -926,7 +933,7 @@ export function SubIssuesCard({
                   void submitChild();
                 }
               }}
-              placeholder="+ Add sub-issue title"
+              placeholder="+ Add sub-task title"
               disabled={creating}
               className="flex-1"
             />
@@ -942,7 +949,7 @@ export function SubIssuesCard({
           </div>
         )}
         {error && (
-          <div className="text-[10.5px] text-red leading-snug">
+          <div className="text-xs text-red leading-snug">
             {error}
           </div>
         )}
@@ -1077,7 +1084,7 @@ export function RelationsCard({
     >
       <div className="space-y-2">
         {outgoing.length === 0 && !adding && (
-          <div className="text-[11.5px] text-text-5 italic">
+          <div className="text-sm text-text-5 italic">
             No relations. Link this task to others to track
             dependencies, duplicates, or related work.
           </div>
@@ -1087,7 +1094,7 @@ export function RelationsCard({
           if (rows.length === 0) return null;
           return (
             <div key={k.id}>
-              <div className="text-[10px] uppercase tracking-wider text-text-5 mb-1">
+              <div className="section-label mb-1">
                 {k.label}
               </div>
               <div className="space-y-1">
@@ -1096,9 +1103,9 @@ export function RelationsCard({
                   return (
                     <div
                       key={r.id}
-                      className="flex items-center gap-2 text-[12px] text-text-2"
+                      className="flex items-center gap-2 text-sm text-text-2"
                     >
-                      <span className="text-text-5 font-mono text-[10.5px]">
+                      <span className="text-text-5 font-mono text-xs">
                         {target ? `AURA-${target.sequence_id}` : "?"}
                       </span>
                       <span
@@ -1178,7 +1185,7 @@ export function RelationsCard({
           </div>
         )}
         {error && (
-          <div className="text-[10.5px] text-red leading-snug">
+          <div className="text-xs text-red leading-snug">
             {error}
           </div>
         )}
@@ -1258,7 +1265,7 @@ export function ActivityCard({
           events.map((ev) => (
             <div
               key={ev.id}
-              className="flex items-baseline gap-2 text-[11.5px]"
+              className="flex items-baseline gap-2 text-sm"
             >
               <span className="text-text-5 w-20 flex-shrink-0">
                 {formatTimestamp(ev.created_at)}
@@ -1316,7 +1323,7 @@ export function ActivityCard({
             </Button>
             {mintMsg && (
               <span
-                className={`text-[10.5px] leading-snug ${
+                className={`text-xs leading-snug ${
                   mintMsg.startsWith("Proof")
                     ? "text-text-2"
                     : "text-red"
@@ -1340,7 +1347,7 @@ function ActivityRow({
   value: ReactNode;
 }) {
   return (
-    <div className="flex items-baseline gap-3 text-[11.5px]">
+    <div className="flex items-baseline gap-3 text-sm">
       <span className="text-text-5 w-16 flex-shrink-0">{label}</span>
       <span className="text-text-2">{value}</span>
     </div>
@@ -1523,9 +1530,14 @@ export function CommentsCard({
     <Card title="Comments" count={comments.length} variant={variant}>
       <div className="space-y-3">
         {roots.length === 0 && (
-          <div className="text-[11.5px] text-text-5 italic">
-            No comments yet. Start the conversation below.
-          </div>
+          /* No action: the composer is right underneath, so a button here
+             would point at something already on screen. */
+          <BoardEmpty
+            icon={MessageSquare}
+            title="No comments yet"
+            body="Anything you or an agent says about this work goes here, so the reasoning stays with the item."
+            size="sm"
+          />
         )}
         {roots.map((root) => (
           <div key={root.id} className="space-y-1.5">
@@ -1565,7 +1577,7 @@ export function CommentsCard({
         ))}
         <div className="space-y-1.5 pt-2 border-t border-line-soft/60">
           {replyTo && (
-            <div className="flex items-center justify-between text-[10.5px] text-text-5">
+            <div className="flex items-center justify-between text-xs text-text-5">
               <span>
                 Replying to{" "}
                 <span className="font-mono text-text-3">
@@ -1577,7 +1589,7 @@ export function CommentsCard({
                 variant="ghost"
                 size="xs"
                 onClick={() => setReplyTo(null)}
-                className="px-1 text-[10.5px] text-text-4 hover:text-text-1"
+                className="px-1 text-xs text-text-4 hover:text-text-1"
               >
                 Cancel reply
               </Button>
@@ -1591,10 +1603,10 @@ export function CommentsCard({
             }
             disabled={busy}
             rows={2}
-            className="w-full bg-bg-content border border-line-soft rounded px-2 py-1 text-[12px] text-text-1 focus:outline-none focus:border-line disabled:opacity-50 resize-y min-h-[3rem]"
+            className="w-full bg-bg-content border border-line-soft rounded px-2 py-1 text-sm text-text-1 focus:outline-none focus:border-line disabled:opacity-50 resize-y min-h-[3rem]"
           />
           <div className="flex items-center justify-between">
-            <span className="text-[10.5px] text-text-5">
+            <span className="text-xs text-text-5">
               {currentHandle ? `As ${currentHandle}` : "System comment"}
             </span>
             <Button
@@ -1608,7 +1620,7 @@ export function CommentsCard({
             </Button>
           </div>
           {error && (
-            <div className="text-[10.5px] text-red leading-snug">
+            <div className="text-xs text-red leading-snug">
               {error}
             </div>
           )}
@@ -1650,7 +1662,7 @@ function CommentRow({
     currentHandle != null && currentHandle === comment.author_handle;
   return (
     <div className="bg-bg-content rounded border border-line-soft/60 px-2.5 py-2 space-y-1.5">
-      <div className="flex items-baseline gap-2 text-[10.5px]">
+      <div className="flex items-baseline gap-2 text-xs">
         <span className="font-medium text-text-1">{comment.author_handle}</span>
         <span className="text-text-5">
           {formatTimestamp(comment.created_at)}
@@ -1663,7 +1675,7 @@ function CommentRow({
               variant="ghost"
               size="xs"
               onClick={onReply}
-              className="px-1 text-[10.5px] text-text-5 hover:text-text-2"
+              className="px-1 text-xs text-text-5 hover:text-text-2"
             >
               Reply
             </Button>
@@ -1676,7 +1688,7 @@ function CommentRow({
                 size="xs"
                 onClick={onStartEdit}
                 disabled={busy}
-                className="px-1 text-[10.5px] text-text-5 hover:text-text-2"
+                className="px-1 text-xs text-text-5 hover:text-text-2"
               >
                 Edit
               </Button>
@@ -1686,7 +1698,7 @@ function CommentRow({
                 size="xs"
                 onClick={onDelete}
                 disabled={busy}
-                className="px-1 text-[10.5px] text-text-5 hover:text-red"
+                className="px-1 text-xs text-text-5 hover:text-red"
               >
                 Delete
               </Button>
@@ -1700,7 +1712,7 @@ function CommentRow({
             value={editingDraft}
             onChange={(e) => onChangeDraft(e.target.value)}
             rows={2}
-            className="w-full bg-bg-1 border border-line-soft rounded px-2 py-1 text-[12px] text-text-1 focus:outline-none focus:border-line resize-y min-h-[3rem]"
+            className="w-full bg-bg-1 border border-line-soft rounded px-2 py-1 text-sm text-text-1 focus:outline-none focus:border-line resize-y min-h-[3rem]"
           />
           <div className="flex items-center gap-2 justify-end">
             <Button
@@ -1733,9 +1745,9 @@ function CommentRow({
 
 // Two looks share one card recipe. The default `"rail"` is byte-for-byte
 // the original chrome used by the 400px sidebar (TaskDetailSidePanel) and
-// the slide-in peek (TaskPeekOverlay) — flat bordered cards on bg-content.
+// the create/edit wizard — flat bordered cards on bg-content.
 // `"page"` is the calm, flat look the full-page TaskDetailPane opts into:
-// NO box at all — just a quiet uppercase section label over its content,
+// NO box at all — just a quiet section label over its content,
 // the way Linear/Notion lay out an issue. The caller owns separation
 // (hairline dividers + breathing room) so the surface reads as one calm
 // column instead of boxes-stacked-in-boxes. Omitting the prop keeps the
@@ -1768,15 +1780,15 @@ function Card({
     return (
       <section>
         <header className="flex items-center gap-2 mb-2.5">
-          <span className="text-[10.5px] uppercase tracking-[0.09em] text-text-4 font-semibold">
+          <span className="section-label">
             {title}
           </span>
           {typeof count === "number" && (
-            <span className="text-[10.5px] text-text-5 tabular-nums">{count}</span>
+            <span className="text-xs text-text-5 tabular-nums">{count}</span>
           )}
           <div className="ml-auto">{right}</div>
         </header>
-        <div className="text-[12.5px]">{children}</div>
+        <div className="text-base">{children}</div>
       </section>
     );
   }
@@ -1786,9 +1798,9 @@ function Card({
       style={{ boxShadow: RAIL_CARD_SHADOW }}
     >
       <header className="flex items-center gap-2 px-3.5 h-9 border-b border-line-soft/60">
-        <span className="text-[12px] font-medium text-text-1">{title}</span>
+        <span className="text-sm font-medium text-text-1">{title}</span>
         {typeof count === "number" && (
-          <span className="text-[11px] text-text-4 tabular-nums">{count}</span>
+          <span className="text-xs text-text-4 tabular-nums">{count}</span>
         )}
         <div className="ml-auto">{right}</div>
       </header>
@@ -1817,16 +1829,16 @@ function Row({
     <div
       className={
         page
-          ? "grid items-start gap-2.5 py-2 text-[12.5px]"
-          : "grid items-start gap-2.5 py-2 text-[12.5px]"
+          ? "grid items-start gap-2.5 py-2 text-base"
+          : "grid items-start gap-2.5 py-2 text-base"
       }
       style={{ gridTemplateColumns: "80px 1fr" }}
     >
       <span
         className={
           page
-            ? "text-[11px] text-text-4 pt-1 inline-flex items-center gap-1.5"
-            : "text-[11.5px] text-text-4 leading-snug pt-1 inline-flex items-center gap-1.5"
+            ? "text-xs text-text-4 pt-1 inline-flex items-center gap-1.5"
+            : "text-sm text-text-4 leading-snug pt-1 inline-flex items-center gap-1.5"
         }
       >
         {label}
@@ -1846,21 +1858,17 @@ function labelFor<T extends { id: string; label: string }>(
 }
 
 function formatTimestamp(iso: string): string {
+  // One ladder for the whole app — see lib/relativeTime.
+  //
+  // The hand-off past a week is this surface's own call and worth keeping: an
+  // age stops being useful once it is measured in weeks, and the calendar date
+  // is what you want instead. Only the rungs below it were a private copy —
+  // and that copy rounded, so 90 seconds read "2m ago".
   if (!iso) return "";
-  const d = new Date(iso);
-  if (isNaN(d.getTime())) return iso.slice(0, 10);
+  const ms = Date.parse(iso);
+  if (Number.isNaN(ms)) return iso.slice(0, 10);
   const now = Date.now();
-  const diffMs = now - d.getTime();
-  const diffMin = Math.round(diffMs / 60000);
-  if (diffMin < 1) return "just now";
-  if (diffMin < 60) return `${diffMin}m ago`;
-  const diffH = Math.round(diffMin / 60);
-  if (diffH < 24) return `${diffH}h ago`;
-  const diffD = Math.round(diffH / 24);
-  if (diffD < 7) return `${diffD}d ago`;
-  return d.toLocaleDateString(undefined, {
-    month: "short",
-    day: "numeric",
-    year: "numeric",
-  });
+  return now - ms < 7 * 86_400_000
+    ? relativeAge(ms, { now })
+    : shortDate(ms, { now });
 }

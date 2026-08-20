@@ -18,6 +18,7 @@
 // ContributesSummary the Rust side derived from the manifest.
 
 import type { ContributesSummary } from "./vsixTypes";
+import { countOf } from "../plural";
 
 /** How runnable a contribution kind is in Aura today. Drives the accent: only
  *  "active" earns the arctic-blue primary accent; the rest read muted/amber. */
@@ -37,10 +38,6 @@ export type KindLabel = {
   tech?: string;
 };
 
-function plural(n: number, one: string, many: string): string {
-  return `${n} ${n === 1 ? one : many}`;
-}
-
 /** Break a summary into its honest per-kind labels, in priority order (active
  *  kinds first, then coming-soon, then not-yet). Returns every kind the
  *  extension actually contributes — the caller decides how many to show. */
@@ -54,7 +51,7 @@ export function kindLabels(c: ContributesSummary): KindLabel[] {
     out.push({
       key: "themes",
       title: "Themes & colors",
-      detail: `${plural(n, "color theme", "color themes")} you can switch to in Settings → Editor Themes.`,
+      detail: `${countOf(n, "color theme")} you can switch to in Settings → Editor Themes.`,
       band: "active",
       tech: "contributes.themes / iconThemes",
     });
@@ -71,8 +68,8 @@ export function kindLabels(c: ContributesSummary): KindLabel[] {
       title: c.grammars > 0 ? "Syntax highlighting" : "Language files",
       detail:
         c.grammars > 0
-          ? `Full colour highlighting and editor rules for ${plural(n, "language", "languages")}, applied automatically.`
-          : `Editor rules for ${plural(n, "language", "languages")}, applied automatically.`,
+          ? `Full colour highlighting and editor rules for ${countOf(n, "language")}, applied automatically.`
+          : `Editor rules for ${countOf(n, "language")}, applied automatically.`,
       band: "active",
       tech: "contributes.languages / grammars (TextMate engine)",
     });
@@ -81,7 +78,7 @@ export function kindLabels(c: ContributesSummary): KindLabel[] {
     out.push({
       key: "snippets",
       title: "Snippets",
-      detail: `${plural(c.snippets, "snippet pack", "snippet packs")}, available as you type.`,
+      detail: `${countOf(c.snippets, "snippet pack")}, available as you type.`,
       band: "active",
       tech: "contributes.snippets",
     });
@@ -92,7 +89,7 @@ export function kindLabels(c: ContributesSummary): KindLabel[] {
       key: "web",
       title: "Runs its own program",
       detail: c.commands
-        ? `Adds ${plural(c.commands, "command", "commands")} you can run from the Command Palette (⌘K).`
+        ? `Adds ${countOf(c.commands, "command")} you can run from the Command Palette (⌘K).`
         : "Runs as a web extension right here.",
       band: "active",
       tech: "browser entry (web extension host)",
@@ -107,8 +104,8 @@ export function kindLabels(c: ContributesSummary): KindLabel[] {
       key: "language-server",
       title: "Smart code help",
       detail: `Errors as you type, hovers, and smart suggestions${
-        n > 0 ? ` for ${plural(n, "language", "languages")}` : ""
-      } — running now.`,
+        n > 0 ? ` for ${countOf(n, "language")}` : ""
+      }. Running now.`,
       band: "active",
       tech: "language server (LSP) via the Node extension host",
     });
@@ -130,7 +127,7 @@ export function kindLabels(c: ContributesSummary): KindLabel[] {
       key: "program",
       title: "Runs its own program",
       detail: c.commands
-        ? `Runs as a desktop extension and adds ${plural(c.commands, "command", "commands")} you can run from the Command Palette (⌘K).`
+        ? `Runs as a desktop extension and adds ${countOf(c.commands, "command")} you can run from the Command Palette (⌘K).`
         : "Runs as a desktop extension right here.",
       band: "active",
       tech: "main entry (Node extension host)",
@@ -141,7 +138,7 @@ export function kindLabels(c: ContributesSummary): KindLabel[] {
   if (panelCount > 0 || c.viewsContainers || c.webviews) {
     out.push({
       key: "panels",
-      title: "Panels & views — coming soon",
+      title: "Panels & views. Coming soon",
       detail:
         "Adds its own side panels or custom editors. Aura doesn't host these yet, so they won't appear.",
       band: "coming-soon",
@@ -153,8 +150,8 @@ export function kindLabels(c: ContributesSummary): KindLabel[] {
   if ((c.debuggers ?? 0) > 0) {
     out.push({
       key: "debuggers",
-      title: "Debugging — not yet",
-      detail: `Adds ${plural(c.debuggers ?? 0, "debugger", "debuggers")}. Running a debugger needs a host Aura doesn't have yet.`,
+      title: "Debugging, not yet",
+      detail: `Adds ${countOf(c.debuggers ?? 0, "debugger")}. Running a debugger needs a host Aura doesn't have yet.`,
       band: "not-yet",
       tech: "contributes.debuggers (debug adapter)",
     });

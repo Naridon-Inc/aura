@@ -19,7 +19,6 @@ import { api, type AppSettings } from "./api";
 import { emitHudSettings, type HudPresentationMode } from "./hud";
 import {
   onThemePersist,
-  setAdeV2,
   setThemePreference,
   setThemeVariant,
   type ThemePreference,
@@ -28,12 +27,11 @@ import {
 
 // localStorage keys. The theme three are SHARED with themeStore (it reads
 // them at boot and the index.html pre-hydration script reads `aura.theme`
-// / `aura.theme.variant` / `aura.ade.v2`); the rest are the legacy
+// / `aura.theme.variant`); the rest are the legacy
 // SettingsDialog keys we migrate from and keep mirrored as the boot cache.
 const LS = {
   theme: "aura.theme",
   variant: "aura.theme.variant",
-  adeV2: "aura.ade.v2",
   fontSize: "aura.editor.fontSize",
   vim: "aura.editor.vim",
   minimap: "aura.editor.minimap",
@@ -42,6 +40,7 @@ const LS = {
   bell: "aura.terminal.bell",
   cursorBlink: "aura.terminal.cursorBlink",
   scrollback: "aura.terminal.scrollback",
+  terminalFontSize: "aura.terminal.fontSize",
   intentInspector: "aura.flags.intentInspector",
   provenanceReplay: "aura.flags.provenanceReplay",
   managerWorktrees: "aura.flags.managerWorktrees",
@@ -55,13 +54,17 @@ const LS = {
   hudSidebarWidth: "aura.hud.sidebarWidth",
   hudSidebarHeight: "aura.hud.sidebarHeight",
   hudPet: "aura.hud.pet",
+  // Read synchronously by `resolveWorkspaceLanding` on the launch path, which
+  // runs off a window event and cannot await the TOML load, so this one has to
+  // stay mirrored as the boot cache rather than living only in the document.
+  workspaceOpenIn: "aura.workspace.openIn",
 } as const;
 
 // App defaults — mirror the Rust `Default` impls in cmd_settings_prefs.rs.
 export const DEFAULT_SETTINGS: AppSettings = {
-  appearance: { theme: "dark", variant: "default", ade_v2: true, font_size: 13 },
+  appearance: { theme: "dark", variant: "amber", font_size: 13 },
   editor: { vim: false, minimap: true, sticky_scroll: true, indent_guides: true },
-  terminal: { bell: false, cursor_blink: true, scrollback: 5000 },
+  terminal: { bell: false, cursor_blink: true, scrollback: 5000, font_size: null },
   flags: {
     intent_inspector: false,
     provenance_replay: false,
@@ -77,6 +80,10 @@ export const DEFAULT_SETTINGS: AppSettings = {
     sidebar_height: 520,
     pet: true,
   },
+  // A new copy opens into the code and nothing else. The app used to always
+  // start an Aura chat here; that is one good answer out of several, so it
+  // became a choice with the quietest option as its default.
+  workspace: { open_in: "code" },
 };
 
 const HUD_MODES: readonly HudPresentationMode[] = [
@@ -118,15 +125,22 @@ function lsNum(key: string, fallback: number): number {
   const n = Number(raw);
   return Number.isFinite(n) ? n : fallback;
 }
+// A number the user may never have chosen. `null` is a real value here — it
+// means "use the platform default" — so an absent key and a junk key both
+// have to come back as null rather than as some invented number.
+function lsNumOrNull(key: string, fallback: number | null): number | null {
+  const raw = lsGet(key);
+  if (raw == null) return fallback;
+  if (raw === "null" || raw === "") return null;
+  const n = Number(raw);
+  return Number.isFinite(n) ? n : fallback;
+}
 
 // Build an AppSettings purely from the legacy localStorage keys (the boot
 // cache). Used as the synchronous initial in-memory state and as the
 // migration seed when no settings.toml exists yet.
 function readFromLocalStorage(): AppSettings {
   const d = DEFAULT_SETTINGS;
-  // ADE v2 is the default surface — ON unless the user explicitly opted
-  // out ("0"). Matches themeStore.adeV2On + the index.html boot script.
-  const adeV2 = lsGet(LS.adeV2) !== "0";
   const rawTheme = lsGet(LS.theme);
   const theme =
     rawTheme === "light" || rawTheme === "system" || rawTheme === "dark"
@@ -134,23 +148,19 @@ function readFromLocalStorage(): AppSettings {
       : d.appearance.theme;
   const rawVariant = lsGet(LS.variant);
   // Mirror themeStore.readVariant() exactly: an explicit style pick wins,
-  // otherwise the ade_v2 master flag defaults the surface to ember. (Forcing
-  // ember over an explicit pick would silently revert conductor/emerald on the
-  // next TOML load.)
+  // otherwise the ground. (Forcing the ground over an explicit pick would
+  // silently revert modal/emerald on the next TOML load.)
   const variant =
     rawVariant === "modal" ||
     rawVariant === "ember" ||
     rawVariant === "amber" ||
     rawVariant === "emerald"
       ? rawVariant
-      : adeV2
-        ? "ember"
-        : d.appearance.variant;
+      : d.appearance.variant;
   return {
     appearance: {
       theme,
       variant,
-      ade_v2: adeV2,
       font_size: lsNum(LS.fontSize, d.appearance.font_size),
     },
     editor: {
@@ -163,6 +173,7 @@ function readFromLocalStorage(): AppSettings {
       bell: lsBool(LS.bell, d.terminal.bell),
       cursor_blink: lsBool(LS.cursorBlink, d.terminal.cursor_blink),
       scrollback: lsNum(LS.scrollback, d.terminal.scrollback),
+      font_size: lsNumOrNull(LS.terminalFontSize, d.terminal.font_size),
     },
     flags: {
       intent_inspector: lsBool(LS.intentInspector, d.flags.intent_inspector),
@@ -179,6 +190,9 @@ function readFromLocalStorage(): AppSettings {
       sidebar_height: lsNum(LS.hudSidebarHeight, d.hud.sidebar_height),
       pet: lsBool(LS.hudPet, d.hud.pet),
     },
+    workspace: {
+      open_in: lsGet(LS.workspaceOpenIn) || d.workspace.open_in,
+    },
   };
 }
 
@@ -189,7 +203,6 @@ function readFromLocalStorage(): AppSettings {
 function mirrorToLocalStorage(s: AppSettings) {
   lsSet(LS.theme, s.appearance.theme);
   lsSet(LS.variant, s.appearance.variant);
-  lsSet(LS.adeV2, s.appearance.ade_v2 ? "1" : "0");
   lsSet(LS.fontSize, String(s.appearance.font_size));
   lsSet(LS.vim, String(s.editor.vim));
   lsSet(LS.minimap, String(s.editor.minimap));
@@ -198,6 +211,7 @@ function mirrorToLocalStorage(s: AppSettings) {
   lsSet(LS.bell, String(s.terminal.bell));
   lsSet(LS.cursorBlink, String(s.terminal.cursor_blink));
   lsSet(LS.scrollback, String(s.terminal.scrollback));
+  lsSet(LS.terminalFontSize, String(s.terminal.font_size));
   lsSet(LS.intentInspector, String(s.flags.intent_inspector));
   lsSet(LS.provenanceReplay, String(s.flags.provenance_replay));
   lsSet(LS.managerWorktrees, String(s.flags.manager_worktrees));
@@ -209,6 +223,7 @@ function mirrorToLocalStorage(s: AppSettings) {
   lsSet(LS.hudSidebarWidth, String(s.hud.sidebar_width));
   lsSet(LS.hudSidebarHeight, String(s.hud.sidebar_height));
   lsSet(LS.hudPet, String(s.hud.pet));
+  lsSet(LS.workspaceOpenIn, s.workspace.open_in);
 }
 
 // Fill any missing nested field from defaults so an older or hand-trimmed
@@ -221,32 +236,8 @@ function normalize(s: AppSettings): AppSettings {
     terminal: { ...d.terminal, ...(s.terminal ?? {}) },
     flags: { ...d.flags, ...(s.flags ?? {}) },
     hud: { ...d.hud, ...(s.hud ?? {}) },
+    workspace: { ...d.workspace, ...(s.workspace ?? {}) },
   };
-}
-
-// One-time forced enable of the ADE v2 surface. The redesign shipped behind
-// an opt-in localStorage flag; earlier builds persisted `ade_v2 = false` into
-// settings.toml for everyone who never flipped it, so changing the default
-// alone won't move an existing install. This flips any such leftover opt-out
-// to ON exactly once (guarded by the marker key below), then never touches
-// the preference again — a user who later turns it off in Settings stays off
-// across restarts.
-const ADE_V2_DEFAULT_MIGRATION = "aura.ade.v2.defaultOn.v1";
-
-function migrateAdeV2Default(s: AppSettings): AppSettings {
-  try {
-    if (lsGet(ADE_V2_DEFAULT_MIGRATION) === "1") return s;
-    lsSet(ADE_V2_DEFAULT_MIGRATION, "1");
-    if (!s.appearance.ade_v2) {
-      return {
-        ...s,
-        appearance: { ...s.appearance, ade_v2: true, variant: "ember" },
-      };
-    }
-  } catch {
-    /* private mode — best-effort; the boot-cache default still wins */
-  }
-  return s;
 }
 
 let state: AppSettings = readFromLocalStorage();
@@ -295,11 +286,10 @@ if (typeof window !== "undefined") {
 // Push appearance into the live theme so a TOML edited out-of-band (or
 // synced from another device) reskins the running app, not just the next
 // boot. Goes through themeStore so its reactive hooks + the <html> class
-// mirror update. ade_v2 last: its ember-forcing must win over the variant.
+// mirror update.
 function applyThemeFromState() {
   setThemePreference(state.appearance.theme as ThemePreference);
   setThemeVariant(state.appearance.variant as ThemeVariant);
-  setAdeV2(state.appearance.ade_v2);
 }
 
 // Push the HUD prefs to the native side. `hud_set_mode` stores the Rust mode
@@ -316,7 +306,6 @@ function applyHudToWindow(s: AppSettings) {
 // through it for live application. When it fires, pull the freshly-written
 // theme values out of the boot cache and persist the whole document.
 onThemePersist(() => {
-  const adeV2 = lsGet(LS.adeV2) === "1";
   const rawTheme = lsGet(LS.theme);
   const rawVariant = lsGet(LS.variant);
   state = {
@@ -333,10 +322,7 @@ onThemePersist(() => {
         rawVariant === "amber" ||
         rawVariant === "emerald"
           ? rawVariant
-          : adeV2
-            ? "ember"
-            : state.appearance.variant,
-      ade_v2: adeV2,
+          : state.appearance.variant,
     },
   };
   notify();
@@ -360,7 +346,7 @@ export async function loadSettings(): Promise<AppSettings> {
     // Migration / first run: keep whatever the boot cache held, force the
     // ADE v2 default on, and seed the TOML with it so the choice survives
     // the next launch.
-    state = migrateAdeV2Default(readFromLocalStorage());
+    state = readFromLocalStorage();
     mirrorToLocalStorage(state);
     applyThemeFromState();
     applyHudToWindow(state);
@@ -369,12 +355,10 @@ export async function loadSettings(): Promise<AppSettings> {
     return state;
   }
   const adopted = normalize(fromDisk);
-  state = migrateAdeV2Default(adopted);
+  state = adopted;
   mirrorToLocalStorage(state);
   applyThemeFromState();
   applyHudToWindow(state);
-  // Persist the migration flip so the next boot reads ON from disk too.
-  if (state.appearance.ade_v2 !== adopted.appearance.ade_v2) saveSoon();
   notify();
   return state;
 }
@@ -437,6 +421,25 @@ export function setScrollback(n: number) {
   saveSoon();
 }
 
+/** The type size a terminal uses when the user has never set one. VS Code's
+ *  own terminal defaults, which the xterm construction in `Terminal.tsx`
+ *  already matched by hand: 12 on macOS, 14 elsewhere. */
+export function defaultTerminalFontSize(): number {
+  const isMac =
+    typeof navigator !== "undefined" && /Mac/i.test(navigator.platform);
+  return isMac ? 12 : 14;
+}
+
+/** Type size in terminal panes (px). Applies to terminals opened after the
+ *  change — the xterm instance reads it once at construction, same as
+ *  scrollback and cursor blink. */
+export function setTerminalFontSize(n: number) {
+  state = { ...state, terminal: { ...state.terminal, font_size: n } };
+  lsSet(LS.terminalFontSize, String(n));
+  notify();
+  saveSoon();
+}
+
 export function setFlag(key: keyof AppSettings["flags"], val: boolean) {
   state = { ...state, flags: { ...state.flags, [key]: val } };
   lsSet(FLAG_LS[key], String(val));
@@ -479,6 +482,18 @@ export function setHudPref<K extends keyof AppSettings["hud"]>(
   });
 }
 
+/** Choose what a freshly-made copy of a project opens into: `"code"` to open
+ *  nothing, `"chat"` for an Aura chat seeded with the objective, or an agent
+ *  CLI id to land in that CLI's terminal. Stored as a plain string so an agent
+ *  that is later uninstalled degrades on read instead of on write — see
+ *  `resolveWorkspaceLanding`. */
+export function setWorkspaceOpenIn(value: string) {
+  state = { ...state, workspace: { ...state.workspace, open_in: value } };
+  lsSet(LS.workspaceOpenIn, value);
+  notify();
+  saveSoon();
+}
+
 // ── Reactive hooks ────────────────────────────────────────────────────────
 
 function useSettings(): AppSettings {
@@ -510,6 +525,10 @@ export function useFlagPrefs(): AppSettings["flags"] {
 
 export function useHudPrefs(): AppSettings["hud"] {
   return useSettings().hud;
+}
+
+export function useWorkspacePrefs(): AppSettings["workspace"] {
+  return useSettings().workspace;
 }
 
 export function useFontSize(): number {

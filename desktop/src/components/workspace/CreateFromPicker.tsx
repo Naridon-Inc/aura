@@ -19,6 +19,7 @@ import {
   type PrSummary,
 } from "../../lib/api";
 import { fetchPrList, getPrListCached } from "../../lib/prsCache";
+import { useDismiss } from "../../lib/useDismiss";
 
 /** What the picker resolves to — the worktree's start point plus a
  *  human label for the chip and the kind so the chip can show the right
@@ -130,14 +131,7 @@ export function CreateFromPicker({ repoRoot, value, onPick, onClose }: Props) {
 
   // Click-away + Esc close the popover (the parent composer owns its own
   // outer Esc; here we just dismiss this layer).
-  useEffect(() => {
-    function onDoc(e: MouseEvent) {
-      const t = e.target as Node | null;
-      if (rootRef.current && t && !rootRef.current.contains(t)) onClose();
-    }
-    document.addEventListener("mousedown", onDoc);
-    return () => document.removeEventListener("mousedown", onDoc);
-  }, [onClose]);
+  useDismiss(true, onClose, rootRef);
 
   const q = query.trim().toLowerCase();
 
@@ -229,7 +223,7 @@ export function CreateFromPicker({ repoRoot, value, onPick, onClose }: Props) {
           value={query}
           onChange={(e) => setQuery(e.target.value)}
           placeholder="Search branches, pull requests, and issues…"
-          className="flex-1 bg-transparent text-[12.5px] text-text-1 placeholder:text-text-4 focus:outline-none"
+          className="flex-1 bg-transparent text-base text-text-1 placeholder:text-text-4 focus:outline-none"
         />
       </div>
 
@@ -246,22 +240,22 @@ export function CreateFromPicker({ repoRoot, value, onPick, onClose }: Props) {
                   e.preventDefault();
                   pickPr(pr);
                 }}
-                className="flex w-full items-start gap-2.5 px-3 py-1.5 text-left transition-colors hover:bg-bg-2"
+                className="flex w-full items-start gap-2.5 px-3 py-1.5 text-left transition-colors hover:bg-state-hover"
               >
                 <GitPullRequest size={13} className="mt-0.5 shrink-0 text-text-4" />
                 <span className="flex min-w-0 flex-1 flex-col gap-0.5">
                   <span className="flex items-center gap-1.5">
-                    <span className="shrink-0 font-mono text-[11px] text-text-3 tabular-nums">
+                    <span className="shrink-0 font-mono text-xs text-text-3 tabular-nums">
                       #{pr.number}
                     </span>
-                    <span className="truncate text-[12.5px] text-text-1">{pr.title}</span>
+                    <span className="truncate text-base text-text-1">{pr.title}</span>
                     {pr.is_draft && (
-                      <span className="shrink-0 rounded border border-line-soft bg-bg-2 px-1 py-px text-[8.5px] uppercase tracking-wider text-text-4">
+                      <span className="meta-tag">
                         draft
                       </span>
                     )}
                   </span>
-                  <span className="truncate font-mono text-[10px] text-text-4">
+                  <span className="truncate font-mono text-2xs text-text-4">
                     {pr.head_ref}
                   </span>
                 </span>
@@ -278,7 +272,7 @@ export function CreateFromPicker({ repoRoot, value, onPick, onClose }: Props) {
           <>
             <SectionLabel>Work on a GitHub issue</SectionLabel>
             {loadingIssues && filteredIssues.length === 0 ? (
-              <div className="px-3 py-2 text-[11.5px] text-text-4">
+              <div className="px-3 py-2 text-sm text-text-4">
                 Loading issues…
               </div>
             ) : (
@@ -290,20 +284,20 @@ export function CreateFromPicker({ repoRoot, value, onPick, onClose }: Props) {
                     e.preventDefault();
                     pickIssue(issue);
                   }}
-                  className="flex w-full items-start gap-2.5 px-3 py-1.5 text-left transition-colors hover:bg-bg-2"
+                  className="flex w-full items-start gap-2.5 px-3 py-1.5 text-left transition-colors hover:bg-state-hover"
                 >
                   <CircleDot size={13} className="mt-0.5 shrink-0 text-text-4" />
                   <span className="flex min-w-0 flex-1 flex-col gap-0.5">
                     <span className="flex items-center gap-1.5">
-                      <span className="shrink-0 font-mono text-[11px] text-text-3 tabular-nums">
+                      <span className="shrink-0 font-mono text-xs text-text-3 tabular-nums">
                         #{issue.number}
                       </span>
-                      <span className="truncate text-[12.5px] text-text-1">
+                      <span className="truncate text-base text-text-1">
                         {issue.title}
                       </span>
                     </span>
                     {issue.labels.length > 0 && (
-                      <span className="truncate text-[10px] text-text-4">
+                      <span className="truncate text-2xs text-text-4">
                         {issue.labels.join(" · ")}
                       </span>
                     )}
@@ -320,9 +314,9 @@ export function CreateFromPicker({ repoRoot, value, onPick, onClose }: Props) {
         {/* Start new work from… */}
         <SectionLabel>Start new work from…</SectionLabel>
         {loadingBranches && filteredBranches.length === 0 ? (
-          <div className="px-3 py-2 text-[11.5px] text-text-4">Loading branches…</div>
+          <div className="px-3 py-2 text-sm text-text-4">Loading branches…</div>
         ) : filteredBranches.length === 0 ? (
-          <div className="px-3 py-2 text-[11.5px] text-text-4">No branches match.</div>
+          <div className="px-3 py-2 text-sm text-text-4">No branches match.</div>
         ) : (
           filteredBranches.map((b) => (
             <button
@@ -332,12 +326,12 @@ export function CreateFromPicker({ repoRoot, value, onPick, onClose }: Props) {
                 e.preventDefault();
                 pickBranch(b);
               }}
-              className="flex w-full items-center gap-2.5 px-3 py-1.5 text-left transition-colors hover:bg-bg-2"
+              className="flex w-full items-center gap-2.5 px-3 py-1.5 text-left transition-colors hover:bg-state-hover"
             >
               <GitBranch size={13} className="shrink-0 text-text-4" />
-              <span className="truncate font-mono text-[12.5px] text-text-1">{b.name}</span>
+              <span className="truncate font-mono text-base text-text-1">{b.name}</span>
               {isDefaultBranch(b, branches) && (
-                <span className="shrink-0 rounded border border-line-soft bg-bg-2 px-1 py-px text-[8.5px] uppercase tracking-wider text-text-3">
+                <span className="meta-tag">
                   default
                 </span>
               )}
@@ -354,7 +348,7 @@ export function CreateFromPicker({ repoRoot, value, onPick, onClose }: Props) {
 
 function SectionLabel({ children }: { children: React.ReactNode }) {
   return (
-    <div className="px-3 pb-1 pt-2 text-[9.5px] font-semibold uppercase tracking-wider text-text-4">
+    <div className="section-label px-3 pb-1 pt-2">
       {children}
     </div>
   );

@@ -38,6 +38,58 @@ fn watchers() -> &'static Mutex<HashMap<String, oneshot::Sender<()>>> {
     W.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
+/// How far into each session's transcript we have already read, so a watcher
+/// that stops and starts again picks up where the last one left off.
+///
+/// This has to outlive the watcher task, which is the whole point. The task
+/// used to keep its position in a local and open at end-of-file, so every time
+/// the user switched tabs and came back, everything the agent had written while
+/// the tab was unmounted fell into the gap between the old position and the new
+/// end — and nothing ever went back for it. The replay that would have covered
+/// it only runs when the frontend's event cache is empty, which it isn't for
+/// the first five minutes.
+///
+/// Keyed by the tab's session id, which survives a remount, and holding the
+/// file the count was measured against: a resumed session writes a *new* JSONL,
+/// and a byte offset into the old one means nothing there.
+///
+/// Never evicted. One short entry per session opened in this run of the app,
+/// the same lifetime the watcher registry above already assumes.
+fn read_offsets() -> &'static Mutex<HashMap<String, (String, u64)>> {
+    static O: OnceLock<Mutex<HashMap<String, (String, u64)>>> = OnceLock::new();
+    O.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// Record that `session_id`'s transcript has been read up to `offset` bytes of
+/// `file_path`. Both the full replay and the live tail report through here, so
+/// there is one answer to "where did we get to" no matter which of them ran.
+fn note_read_offset(session_id: &str, file_path: &str, offset: u64) {
+    if let Ok(mut map) = read_offsets().lock() {
+        map.insert(session_id.to_string(), (file_path.to_string(), offset));
+    }
+}
+
+/// Where a watcher for `session_id` should start reading `file_path`, given the
+/// file is `file_len` bytes right now.
+///
+/// The mark if there is one for this exact file — that is the fix; a watcher
+/// restarting after a remount has to cover the gap rather than skip it. The end
+/// of the file otherwise, because no mark means nothing has read this
+/// transcript and there is no history to be missing. Clamped either way: a
+/// rotated or truncated file is shorter than a mark taken against the old one,
+/// and seeking past its end would leave the tab silent until it grew back.
+fn resume_offset(session_id: &str, file_path: &str, file_len: u64) -> u64 {
+    read_offsets()
+        .lock()
+        .ok()
+        .and_then(|map| match map.get(session_id) {
+            Some((path, off)) if path == file_path => Some(*off),
+            _ => None,
+        })
+        .map(|off| off.min(file_len))
+        .unwrap_or(file_len)
+}
+
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct ClaudeSession {
     pub session_id: String,
@@ -63,97 +115,103 @@ pub struct ClaudeSession {
     /// the workspace root (e.g. "aura-shell/src-tauri" or "" for the
     /// root itself). Lets the picker show *where* the session ran.
     pub cwd_rel: String,
-    /// Absolute working directory the session was launched from. Claude
-    /// keys `--resume <id>` resolution by cwd, so resuming a session that
-    /// ran in a sibling worktree must spawn the REPL from *here*, not the
-    /// app's current workspace root. Empty when the transcript recorded no
-    /// cwd (caller falls back to the workspace root).
+    /// Absolute directory `claude --resume <session_id>` must be launched
+    /// from for the id to resolve — the one authoritative answer, computed
+    /// in `scan_session` against the transcript's own on-disk project dir.
+    /// Claude keys resume by launch cwd, so a session that ran in a worktree
+    /// resumes from *there*; spawning it from the app's workspace root gives
+    /// a blank REPL and a `/resume` list that doesn't contain it. Empty when
+    /// the transcript recorded no cwd (caller falls back to the workspace
+    /// root).
     pub cwd: String,
 }
 
 #[tauri::command]
 pub async fn claude_list_sessions(repo_root: String) -> Result<Vec<ClaudeSession>, String> {
-    // Claude keys session storage by the *current working directory* it was
-    // launched from, not the workspace root. So a single project ends up
-    // scattered across multiple `~/.claude/projects/<encoded-cwd>/` dirs: one
-    // per subdir the user happened to be in, AND one per sibling git worktree
-    // (an agent driving THIS worktree may have run from the main checkout or
-    // another worktree). We surface the union across every worktree root and
-    // its descendant cwds, so no transcript goes missing just because it was
-    // authored from a sibling checkout.
-    let projects_root = projects_root_dir()
-        .ok_or_else(|| "could not resolve ~/.claude projects dir".to_string())?;
-    if !projects_root.exists() {
-        return Ok(vec![]);
-    }
-    let roots = sibling_worktree_roots(&repo_root);
-    let recovery = recovery_prefix_for(&repo_root);
-    let mut out = Vec::new();
-    for (dir_path, owning_root) in
-        matching_project_dirs(&projects_root, &roots, recovery.as_deref(), &repo_root)
-    {
-        let session_entries = match fs::read_dir(&dir_path) {
-            Ok(it) => it,
-            Err(_) => continue,
-        };
-        for entry in session_entries.flatten() {
-            let path = entry.path();
-            if path.extension().and_then(|s| s.to_str()) != Some("jsonl") {
-                continue;
-            }
-            let session_id = match path.file_stem().and_then(|s| s.to_str()) {
-                Some(s) => s.to_string(),
-                None => continue,
-            };
-            let metadata = match entry.metadata() {
-                Ok(m) => m,
+    crate::blocking::run(move || {
+        // Claude keys session storage by the *current working directory* it was
+        // launched from, not the workspace root. So a single project ends up
+        // scattered across multiple `~/.claude/projects/<encoded-cwd>/` dirs: one
+        // per subdir the user happened to be in, AND one per sibling git worktree
+        // (an agent driving THIS worktree may have run from the main checkout or
+        // another worktree). We surface the union across every worktree root and
+        // its descendant cwds, so no transcript goes missing just because it was
+        // authored from a sibling checkout.
+        let projects_root = projects_root_dir()
+            .ok_or_else(|| "could not resolve ~/.claude projects dir".to_string())?;
+        if !projects_root.exists() {
+            return Ok(vec![]);
+        }
+        let roots = sibling_worktree_roots(&repo_root);
+        let recovery = recovery_prefix_for(&repo_root);
+        let mut out = Vec::new();
+        for (dir_path, owning_root) in
+            matching_project_dirs(&projects_root, &roots, recovery.as_deref(), &repo_root)
+        {
+            let session_entries = match fs::read_dir(&dir_path) {
+                Ok(it) => it,
                 Err(_) => continue,
             };
-            let mtime = metadata
-                .modified()
-                .ok()
-                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-                .map(|d| d.as_secs() as i64)
-                .unwrap_or(0);
-            let scan = scan_session_cached(&path, mtime);
-            // A session whose recorded cwd no longer exists on disk ran in an
-            // archived/pruned worktree. Viewing it still works (the transcript
-            // replays straight off `file_path`), but resuming live must spawn
-            // from a real directory — so we hand the resume the main checkout
-            // instead of the dead worktree path. The label keeps the worktree
-            // branch (the friendliest id we still have) so the row reads
-            // `feat-foo`, not a `.../p-hash/feat-foo` jumble.
-            let orphaned = !scan.cwd.is_empty() && !Path::new(&scan.cwd).is_dir();
-            let (cwd, cwd_rel) = if orphaned {
-                let branch = scan
-                    .cwd
-                    .rsplit('/')
-                    .find(|s| !s.is_empty())
-                    .unwrap_or("")
-                    .to_string();
-                (repo_root.clone(), branch)
-            } else {
-                // Relativize against the worktree the session actually ran in,
-                // so a row reads `aura-shell/src-tauri` rather than a
-                // cross-worktree `.../New Git` fallback.
-                (scan.cwd.clone(), relativize_cwd(&scan.cwd, &owning_root))
-            };
-            out.push(ClaudeSession {
-                session_id,
-                mtime,
-                first_prompt: scan.first_prompt,
-                last_prompt: scan.last_prompt,
-                turn_count: scan.turn_count,
-                step_count: scan.step_count,
-                file_path: path.to_string_lossy().into_owned(),
-                cwd_rel,
-                cwd,
-            });
+            for entry in session_entries.flatten() {
+                let path = entry.path();
+                if path.extension().and_then(|s| s.to_str()) != Some("jsonl") {
+                    continue;
+                }
+                let session_id = match path.file_stem().and_then(|s| s.to_str()) {
+                    Some(s) => s.to_string(),
+                    None => continue,
+                };
+                let metadata = match entry.metadata() {
+                    Ok(m) => m,
+                    Err(_) => continue,
+                };
+                let mtime = metadata
+                    .modified()
+                    .ok()
+                    .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                    .map(|d| d.as_secs() as i64)
+                    .unwrap_or(0);
+                let scan = scan_session_cached(&path, mtime);
+                // A session whose recorded cwd no longer exists on disk ran in an
+                // archived/pruned worktree. Viewing it still works (the transcript
+                // replays straight off `file_path`), but resuming live must spawn
+                // from a real directory — so we hand the resume the main checkout
+                // instead of the dead worktree path. The label keeps the worktree
+                // branch (the friendliest id we still have) so the row reads
+                // `feat-foo`, not a `.../p-hash/feat-foo` jumble.
+                let orphaned = !scan.cwd.is_empty() && !Path::new(&scan.cwd).is_dir();
+                let (cwd, cwd_rel) = if orphaned {
+                    let branch = scan
+                        .cwd
+                        .rsplit('/')
+                        .find(|s| !s.is_empty())
+                        .unwrap_or("")
+                        .to_string();
+                    (repo_root.clone(), branch)
+                } else {
+                    // Relativize against the worktree the session actually ran in,
+                    // so a row reads `aura-shell/src-tauri` rather than a
+                    // cross-worktree `.../New Git` fallback.
+                    (scan.cwd.clone(), relativize_cwd(&scan.cwd, &owning_root))
+                };
+                out.push(ClaudeSession {
+                    session_id,
+                    mtime,
+                    first_prompt: scan.first_prompt,
+                    last_prompt: scan.last_prompt,
+                    turn_count: scan.turn_count,
+                    step_count: scan.step_count,
+                    file_path: path.to_string_lossy().into_owned(),
+                    cwd_rel,
+                    cwd,
+                });
+            }
         }
-    }
-    // Newest first — `/resume` users almost always want the most recent.
-    out.sort_by(|a, b| b.mtime.cmp(&a.mtime));
-    Ok(out)
+        // Newest first — `/resume` users almost always want the most recent.
+        out.sort_by(|a, b| b.mtime.cmp(&a.mtime));
+        Ok(out)
+    })
+    .await
 }
 
 pub(crate) fn projects_root_dir() -> Option<PathBuf> {
@@ -164,14 +222,26 @@ pub(crate) fn projects_root_dir() -> Option<PathBuf> {
     Some(p)
 }
 
-/// Mirror Claude Code's project-dir encoding. Empirically Claude
-/// replaces `/` and ` ` with `-` (extend the table if a workspace ever
-/// turns up missing). e.g. `/Users/muhammed/Documents/New Git`
-/// → `-Users-muhammed-Documents-New-Git`.
+/// Mirror Claude Code's project-dir encoding: every character that is not
+/// ASCII-alphanumeric becomes a single `-`, one for one (NOT run-collapsed,
+/// so `/.aura` becomes `--aura`).
+///
+/// This used to fold only `/` and ` `, and a dot survived verbatim. Every
+/// worktree path has a dot in it — Claude's own `<repo>/.claude/worktrees/…`
+/// and Aura's managed `~/.aura/worktrees/p-<hash>/…` — so a worktree encoded
+/// to a directory name Claude Code never reads or writes. Measured against a
+/// live `~/.claude/projects`: 72 of 72 real dirs match the rule below, and the
+/// only four that didn't were dirs Aura had created itself with the old table
+/// — transcripts written where `claude --resume` will never look.
 pub(crate) fn encode_path(repo_root: &str) -> String {
-    repo_root
+    // A trailing slash is the same directory but a different encoded name, and
+    // roots reach us from both git and the frontend. `/` itself has nothing to
+    // trim.
+    let trimmed = repo_root.trim_end_matches('/');
+    let trimmed = if trimmed.is_empty() { repo_root } else { trimmed };
+    trimmed
         .chars()
-        .map(|c| if c == '/' || c == ' ' { '-' } else { c })
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
         .collect()
 }
 
@@ -519,7 +589,8 @@ fn scan_session_cached(path: &Path, mtime: i64) -> SessionScan {
 
 /// Walk the JSONL once, capturing (1) first user-typed prompt, (2) last
 /// user-typed prompt — usually more identifying since openings are
-/// often "hi" — (3) turn count, (4) cwd of the session.
+/// often "hi" — (3) turn count, (4) the directory `claude --resume` has to
+/// be launched from to find this transcript.
 ///
 /// No artificial line cap — sessions are at most a few MB and this only
 /// runs when the picker dialog opens. A capped scan was cheaper but
@@ -532,6 +603,16 @@ fn scan_session(path: &Path) -> SessionScan {
         step_count: 0,
         cwd: String::new(),
     };
+    // The directory this transcript physically lives in is the ONE thing
+    // `claude --resume <id>` resolves against, so it is what decides the
+    // launch cwd below — not the `cwd` field, which can disagree.
+    let project_dir = path
+        .parent()
+        .and_then(|p| p.file_name())
+        .and_then(|s| s.to_str())
+        .unwrap_or("")
+        .to_string();
+    let mut cwd_matches_dir = false;
     let file = match fs::File::open(path) {
         Ok(f) => f,
         Err(_) => return out,
@@ -546,10 +627,23 @@ fn scan_session(path: &Path) -> SessionScan {
             Ok(v) => v,
             Err(_) => continue,
         };
-        // cwd is set on most event records; first one wins.
-        if out.cwd.is_empty() {
+        // A session that moves — Claude's own EnterWorktree does exactly this —
+        // gets its transcript re-keyed under the new directory, while the `cwd`
+        // stamped on the records it already wrote still names the old one. So
+        // the first recorded cwd is only a starting guess; the answer is the
+        // recorded cwd that actually encodes to the dir the file is sitting in,
+        // because that is the only cwd from which Claude can find it again.
+        if !cwd_matches_dir {
             if let Some(c) = v.get("cwd").and_then(Value::as_str) {
-                out.cwd = c.to_string();
+                if !c.is_empty() {
+                    if out.cwd.is_empty() {
+                        out.cwd = c.to_string();
+                    }
+                    if encode_path(c) == project_dir {
+                        out.cwd = c.to_string();
+                        cwd_matches_dir = true;
+                    }
+                }
             }
         }
         // Two carriers in the on-disk format:
@@ -661,22 +755,53 @@ fn truncate(s: &str, n: usize) -> String {
 /// `limit` truncates from the front so we always keep the most recent
 /// `limit` events — sessions with thousands of turns would otherwise
 /// blow the renderer up. 0 means "unbounded".
+/// `session_id` is optional and only used to record how far this read got, so
+/// the live tail that follows starts exactly where the replay stopped instead
+/// of re-stating the file (which loses anything appended in between) — see
+/// `read_offsets`. Callers that are only previewing a transcript, rather than
+/// about to watch it, leave it out.
 #[tauri::command]
 pub async fn claude_load_session(
     file_path: String,
     limit: usize,
+    session_id: Option<String>,
 ) -> Result<Vec<StreamEvent>, String> {
     let file = fs::File::open(&file_path).map_err(|e| format!("open {file_path}: {e}"))?;
-    let reader = BufReader::new(file);
+    let mut reader = BufReader::new(file);
     let mut events: Vec<StreamEvent> = Vec::new();
     let mut turn_seq: u64 = 0;
     let mut current_turn = String::from("hist-0");
-    for line in reader.lines() {
-        let line = match line {
-            Ok(l) => l,
-            Err(_) => continue,
+    // Counted rather than stat'd. The file is being appended to while we read,
+    // so its length afterwards is not what we consumed — and a byte we credit
+    // ourselves with but never parsed is a line nobody ever sees. Only whole
+    // lines count: a trailing fragment is parsed best-effort (it won't be valid
+    // JSON, so it yields nothing) and left for the tail to read again complete.
+    let mut consumed: u64 = 0;
+    let mut raw: Vec<u8> = Vec::new();
+    loop {
+        raw.clear();
+        let n = match reader.read_until(b'\n', &mut raw) {
+            Ok(0) | Err(_) => break,
+            Ok(n) => n,
         };
-        parse_jsonl_line(&line, "hist", &mut turn_seq, &mut current_turn, &mut events);
+        let whole = raw.last() == Some(&b'\n');
+        if whole {
+            consumed += n as u64;
+        }
+        let line = String::from_utf8_lossy(&raw);
+        parse_jsonl_line(
+            line.trim_end_matches(['\n', '\r']),
+            "hist",
+            &mut turn_seq,
+            &mut current_turn,
+            &mut events,
+        );
+        if !whole {
+            break;
+        }
+    }
+    if let Some(sid) = session_id.as_deref() {
+        note_read_offset(sid, &file_path, consumed);
     }
     if limit > 0 && events.len() > limit {
         let drop = events.len() - limit;
@@ -844,12 +969,13 @@ pub async fn claude_session_watch(
     session_id: String,
     file_path: String,
 ) -> Result<(), String> {
-    // Initial read happened via `claude_load_session`, so jump straight
-    // to the file's current end and only emit appended lines.
-    let mut start_offset = match fs::metadata(&file_path) {
+    let file_len = match fs::metadata(&file_path) {
         Ok(m) => m.len(),
         Err(e) => return Err(format!("stat {file_path}: {e}")),
     };
+    // Resume from wherever this session was last read to — by an earlier
+    // watcher on this same tab, or by the replay that just ran.
+    let mut start_offset = resume_offset(&session_id, &file_path, file_len);
 
     let (cancel_tx, mut cancel_rx) = oneshot::channel::<()>();
     {
@@ -884,8 +1010,12 @@ pub async fn claude_session_watch(
             if len <= start_offset {
                 if len < start_offset {
                     // File rotated/truncated. Reset to its current end —
-                    // we don't try to replay backwards.
+                    // we don't try to replay backwards. The mark moves with it,
+                    // so a watcher started after this one doesn't inherit a
+                    // position measured against the file that used to be here.
                     start_offset = len;
+                    carry.clear();
+                    note_read_offset(&session_id_for_task, &file_path_for_task, len);
                 }
                 continue;
             }
@@ -925,6 +1055,17 @@ pub async fn claude_session_watch(
                     &mut events,
                 );
             }
+
+            // Publish the position a future watcher should resume from, before
+            // emitting: everything up to here is accounted for, and the bytes
+            // held in `carry` are half a line this task has not delivered, so
+            // they are deliberately left outside the mark for the next reader
+            // to pick up whole.
+            note_read_offset(
+                &session_id_for_task,
+                &file_path_for_task,
+                start_offset.saturating_sub(carry.len() as u64),
+            );
 
             for ev in &events {
                 let _ = app.emit(&event_name, ev);
@@ -1006,6 +1147,168 @@ fn is_synthetic_prompt(text: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ── where the transcript is read up to ──────────────────────────────────
+    //
+    // The tab is unmounted while the agent keeps writing. Everything between
+    // where the last watcher stopped and where the next one starts is a hole
+    // the user never sees filled — the replay that would cover it only runs
+    // when the frontend's event cache is empty, and for the first five minutes
+    // it isn't. These pin the two halves of the answer: the mark survives the
+    // watcher, and whoever reads reports honestly how far they got.
+
+    // ── where `claude --resume` has to be launched ──────────────────────────
+    //
+    // Both halves of the worktree-resume bug live here: the encoding has to
+    // name the directory Claude actually uses, and a transcript that moved has
+    // to report the cwd it moved TO.
+
+    #[test]
+    fn encoding_matches_claude_for_both_worktree_layouts() {
+        // Verified against live `~/.claude/projects` dirs. The dotted forms are
+        // the ones the old `/`-and-space-only table got wrong, which is every
+        // worktree there is.
+        assert_eq!(
+            encode_path("/Users/muhammed/Documents/New Git"),
+            "-Users-muhammed-Documents-New-Git"
+        );
+        assert_eq!(
+            encode_path("/Users/muhammed/.aura/worktrees/p-806b69db6ce45eb6/marrakesh"),
+            "-Users-muhammed--aura-worktrees-p-806b69db6ce45eb6-marrakesh"
+        );
+        assert_eq!(
+            encode_path("/Users/muhammed/Documents/Shopify/.claude/worktrees/photo-generator"),
+            "-Users-muhammed-Documents-Shopify--claude-worktrees-photo-generator"
+        );
+        // A branch name with a `+` in it folds too — same rule, no special case.
+        assert_eq!(
+            encode_path("/r/.claude/worktrees/feat+x"),
+            "-r--claude-worktrees-feat-x"
+        );
+    }
+
+    #[test]
+    fn encoding_ignores_a_trailing_slash() {
+        assert_eq!(encode_path("/a/b/"), encode_path("/a/b"));
+        // `/` is a real root, not an empty string.
+        assert_eq!(encode_path("/"), "-");
+    }
+
+    #[test]
+    fn a_session_that_moved_reports_the_cwd_it_moved_to() {
+        // Claude's EnterWorktree re-keys the transcript under the worktree
+        // while the records already written still name the main checkout. The
+        // launch cwd is the one that encodes to the dir the file sits in —
+        // resuming from the main checkout finds nothing.
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join(encode_path("/repo/.claude/worktrees/feat"));
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("s.jsonl");
+        fs::write(
+            &path,
+            "{\"type\":\"user\",\"cwd\":\"/repo\"}\n\
+             {\"type\":\"assistant\",\"cwd\":\"/repo/.claude/worktrees/feat\"}\n\
+             {\"type\":\"assistant\",\"cwd\":\"/repo/.claude/worktrees/feat/sub\"}\n",
+        )
+        .unwrap();
+        assert_eq!(scan_session(&path).cwd, "/repo/.claude/worktrees/feat");
+    }
+
+    #[test]
+    fn a_session_that_never_moved_reports_where_it_started() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join(encode_path("/repo"));
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("s.jsonl");
+        fs::write(&path, "{\"type\":\"user\",\"cwd\":\"/repo\"}\n").unwrap();
+        assert_eq!(scan_session(&path).cwd, "/repo");
+    }
+
+    #[test]
+    fn an_unmatchable_dir_falls_back_to_the_first_recorded_cwd() {
+        // A transcript we can't tie to its dir (hand-moved, or a Claude
+        // encoding we don't know yet) still has to answer with something real
+        // rather than an empty string the caller would read as "no cwd".
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("not-an-encoded-root");
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("s.jsonl");
+        fs::write(&path, "{\"type\":\"user\",\"cwd\":\"/repo/sub\"}\n").unwrap();
+        assert_eq!(scan_session(&path).cwd, "/repo/sub");
+    }
+
+    #[test]
+    fn a_new_session_starts_at_the_end_because_there_is_no_history_to_miss() {
+        assert_eq!(resume_offset("sess-new", "/tmp/never-read.jsonl", 4096), 4096);
+    }
+
+    #[test]
+    fn a_watcher_restarting_on_the_same_tab_covers_the_gap() {
+        note_read_offset("sess-gap", "/tmp/a.jsonl", 1000);
+        // The agent wrote another 500 bytes while the tab was unmounted. The
+        // watcher must open at 1000 — opening at 1500, which is what stat'ing
+        // the file gives you, is the bug.
+        assert_eq!(resume_offset("sess-gap", "/tmp/a.jsonl", 1500), 1000);
+    }
+
+    #[test]
+    fn a_mark_from_a_different_transcript_is_not_used() {
+        // A resumed session writes a fresh JSONL. A byte count taken against
+        // the old one points at an arbitrary place in the new one.
+        note_read_offset("sess-moved", "/tmp/old.jsonl", 900);
+        assert_eq!(resume_offset("sess-moved", "/tmp/new.jsonl", 120), 120);
+    }
+
+    #[test]
+    fn a_mark_past_the_end_of_a_truncated_file_is_clamped() {
+        // Seeking past EOF would leave the tab silent until the file grew back
+        // to where it used to be.
+        note_read_offset("sess-rotated", "/tmp/r.jsonl", 5000);
+        assert_eq!(resume_offset("sess-rotated", "/tmp/r.jsonl", 80), 80);
+    }
+
+    #[test]
+    fn one_tab_s_mark_is_not_another_s() {
+        note_read_offset("sess-a", "/tmp/shared.jsonl", 10);
+        note_read_offset("sess-b", "/tmp/shared.jsonl", 70);
+        assert_eq!(resume_offset("sess-a", "/tmp/shared.jsonl", 100), 10);
+        assert_eq!(resume_offset("sess-b", "/tmp/shared.jsonl", 100), 70);
+    }
+
+    #[tokio::test]
+    async fn a_replay_reports_the_bytes_it_read_not_the_file_s_size() {
+        // The distinction matters because the file is being appended to while
+        // we read it. Crediting ourselves with a byte we never parsed is one
+        // line the user never sees.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("s.jsonl");
+        let whole = "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":\"hi\"}}\n";
+        // A trailing fragment, as if the agent were mid-write.
+        std::fs::write(&path, format!("{whole}{{\"type\":\"assis")).unwrap();
+
+        let p = path.to_string_lossy().to_string();
+        claude_load_session(p.clone(), 0, Some("sess-partial".into()))
+            .await
+            .unwrap();
+
+        // Only the complete line counts. The fragment is left for the tail to
+        // read again once its newline lands.
+        assert_eq!(resume_offset("sess-partial", &p, u64::MAX), whole.len() as u64);
+    }
+
+    #[tokio::test]
+    async fn a_replay_without_a_session_id_moves_nobody_s_mark() {
+        // The resume picker previews transcripts. A preview must not move the
+        // read position of a tab that is live-tailing the same file.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("s.jsonl");
+        std::fs::write(&path, "{\"type\":\"user\",\"message\":{\"content\":\"x\"}}\n").unwrap();
+        let p = path.to_string_lossy().to_string();
+
+        note_read_offset("sess-live", &p, 7);
+        claude_load_session(p.clone(), 0, None).await.unwrap();
+        assert_eq!(resume_offset("sess-live", &p, 999), 7);
+    }
 
     #[test]
     fn synthetic_prompt_filter_catches_internal_plumbing() {

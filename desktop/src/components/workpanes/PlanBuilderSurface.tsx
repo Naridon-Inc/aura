@@ -21,6 +21,8 @@ import { parsePlanXml, type ParsedPlan } from "../../lib/planXml";
 import { AgentIcon } from "../agent/AgentIcon";
 import { Button } from "../ui/button";
 import { AsciiSpinner } from "../ui/ascii-spinner";
+import { useDismiss } from "../../lib/useDismiss";
+import { basename } from "../../lib/paths";
 
 type Props = { repoRoot: string; onClose: () => void };
 
@@ -212,8 +214,8 @@ export function PlanBuilderSurface({ repoRoot, onClose }: Props) {
 function Header({ step, onClose }: { step: StepId; onClose: () => void }) {
   return (
     <div className="flex items-center h-9 px-3 border-b border-line-soft flex-shrink-0">
-      <span className="text-text-1 text-[12px] font-medium">Plan a feature</span>
-      <span className="ml-2 text-text-4 text-[10.5px] tabular-nums">
+      <span className="text-text-1 text-sm font-medium">Plan a feature</span>
+      <span className="ml-2 text-text-4 text-xs tabular-nums">
         Step {step}/5
       </span>
       <Button
@@ -222,7 +224,7 @@ function Header({ step, onClose }: { step: StepId; onClose: () => void }) {
         size="icon-sm"
         onClick={onClose}
         title="Close"
-        className="ml-auto text-text-4 hover:text-text-1 text-[14px]"
+        className="ml-auto text-text-4 hover:text-text-1 text-md"
       >
         ×
       </Button>
@@ -249,19 +251,19 @@ function Stepper({
             <button
               type="button"
               onClick={() => onJump(s.id)}
-              className={`flex items-center gap-1 h-5 px-1.5 rounded text-[10.5px] transition-colors ${
+              className={`flex items-center gap-1 h-5 px-1.5 rounded text-xs transition-colors ${
                 active
                   ? "bg-bg-3 text-text-1 font-medium"
                   : done
-                    ? "text-text-2 hover:text-text-1 hover:bg-bg-2"
-                    : "text-text-4 hover:text-text-2 hover:bg-bg-2"
+                    ? "text-text-2 hover:text-text-1 hover:bg-state-hover"
+                    : "text-text-4 hover:text-text-2 hover:bg-state-hover"
               }`}
             >
               <span className="font-mono w-3 text-center tabular-nums">{s.id}</span>
               <span>{s.label}</span>
             </button>
             {i < STEPS.length - 1 && (
-              <span className="text-text-5 text-[9px]">›</span>
+              <span className="text-text-5 text-2xs">›</span>
             )}
           </div>
         );
@@ -306,7 +308,7 @@ function Footer({
           variant="ghost"
           size="xs"
           onClick={onClose}
-          className="text-[11px] text-text-3 hover:text-text-1"
+          className="text-xs text-text-3 hover:text-text-1"
         >
           Cancel
         </Button>
@@ -318,7 +320,7 @@ function Footer({
             variant="ghost"
             size="xs"
             onClick={onBack}
-            className="px-2.5 text-[11px] text-text-2 hover:text-text-1"
+            className="px-2.5 text-xs text-text-2 hover:text-text-1"
           >
             Back
           </Button>
@@ -327,7 +329,7 @@ function Footer({
           type="button"
           onClick={handleContinue}
           disabled={!canContinue || planning}
-          className="px-3 h-6 rounded text-[11px] font-medium bg-bg-3 hover:bg-bg-2 text-text-1 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+          className="px-3 h-6 rounded text-xs font-medium bg-bg-3 hover:bg-state-hover text-text-1 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
         >
           {continueLabel}
         </button>
@@ -379,7 +381,7 @@ function GoalStep({
 
   return (
     <div className="flex flex-col gap-2">
-      <label className="text-text-2 text-[11.5px]">
+      <label className="text-text-2 text-sm">
         What do you want built?
       </label>
       <textarea
@@ -387,15 +389,15 @@ function GoalStep({
         value={value}
         onChange={(e) => onChange(e.target.value)}
         placeholder="e.g. add OAuth2 sign-in across the API"
-        className="bg-bg-2 border border-line-soft rounded px-2.5 py-1.5 text-text-1 text-[12.5px] resize-none focus:outline-none focus:border-line min-h-[80px] leading-snug"
+        className="bg-bg-2 border border-line-soft rounded px-2.5 py-1.5 text-text-1 text-base resize-none focus:outline-none focus:border-line min-h-[80px] leading-snug"
       />
-      <div className="text-text-4 text-[10.5px]">
-        Aura splits this into atomic waves and tasks. Be concrete — names
+      <div className="text-text-4 text-xs">
+        Aura splits this into atomic waves and tasks. Be concrete. Names
         of features, not full specs.
       </div>
       {recent.length > 0 && (
         <div className="flex flex-col gap-1 mt-2">
-          <div className="text-text-5 text-[10px] uppercase tracking-wider">
+          <div className="section-label">
             Recent intents
           </div>
           {recent.map((r, i) => (
@@ -404,7 +406,7 @@ function GoalStep({
               type="button"
               onClick={() => onChange(r)}
               title={r}
-              className="text-left px-2 py-1 rounded text-text-3 text-[11px] hover:text-text-1 hover:bg-bg-2 truncate"
+              className="text-left px-2 py-1 rounded text-text-3 text-xs hover:text-text-1 hover:bg-state-hover truncate"
             >
               {r}
             </button>
@@ -440,10 +442,10 @@ function ContextStep({
   }, [repoRoot]);
   return (
     <div className="flex flex-col gap-2">
-      <div className="text-text-2 text-[11.5px]">
+      <div className="text-text-2 text-sm">
         Aura is reading your project.
       </div>
-      <div className="flex items-center gap-2 text-[11px] text-text-3 px-2 py-1.5 bg-bg-2 rounded border border-line-soft">
+      <div className="flex items-center gap-2 text-xs text-text-3 px-2 py-1.5 bg-bg-2 rounded border border-line-soft">
         <span className="text-text-5">project</span>
         <span className="text-text-1 font-medium">{projectLabel}</span>
         <span className="ml-auto text-text-4 truncate" title={repoRoot}>
@@ -451,14 +453,14 @@ function ContextStep({
         </span>
       </div>
       {info && (
-        <div className="flex items-center gap-3 text-[10.5px] text-text-4 px-2">
+        <div className="flex items-center gap-3 text-xs text-text-4 px-2">
           <span>branch: <span className="text-text-2">{info.branch}</span></span>
           <span>changed: <span className="text-text-2 tabular-nums">{info.files}</span></span>
         </div>
       )}
-      <div className="text-text-4 text-[10.5px] mt-1 leading-relaxed">
-        The planner walks your repo's semantic engine — file tree, recent
-        commits, intent log, sentinel notes — to ground its plan in what
+      <div className="text-text-4 text-xs mt-1 leading-relaxed">
+        The planner walks your repo's semantic engine (file tree, recent
+        commits, intent log, sentinel notes) to ground its plan in what
         you've actually built.
       </div>
     </div>
@@ -470,13 +472,13 @@ function ContextStep({
 function DecisionsStep() {
   return (
     <div className="flex flex-col gap-2">
-      <div className="text-text-2 text-[11.5px]">Design choices</div>
-      <div className="px-2 py-2 rounded border border-line-soft bg-bg-2 text-[11px] text-text-3 leading-relaxed">
+      <div className="text-text-2 text-sm">Design choices</div>
+      <div className="px-2 py-2 rounded border border-line-soft bg-bg-2 text-xs text-text-3 leading-relaxed">
         Aura uses its own judgement on small design choices for this
         plan. You'll be able to review and edit every wave + task in the
         next step before anything runs.
       </div>
-      <div className="text-text-4 text-[10.5px] mt-1">
+      <div className="text-text-4 text-xs mt-1">
         Coming next: the planner will surface 3 gray-area questions
         (e.g. "session storage: cookie vs JWT?") for you to answer
         before it locks the plan.
@@ -540,8 +542,8 @@ function PlanStep({
     return (
       <div className="flex flex-col gap-2 py-4 items-center text-center">
         <AsciiSpinner className="text-base" />
-        <div className="text-text-2 text-[12px]">Aura is decomposing your goal…</div>
-        <div className="text-text-4 text-[10.5px]">
+        <div className="text-text-2 text-sm">Aura is decomposing your goal…</div>
+        <div className="text-text-4 text-xs">
           Discover · Gray-area picks · Wave synthesis
         </div>
       </div>
@@ -550,13 +552,13 @@ function PlanStep({
   if (error) {
     return (
       <div className="flex flex-col gap-2">
-        <div className="text-rose-300 text-[11px] px-2 py-1.5 rounded bg-rose-500/10 border border-rose-500/30">
+        <div className="text-rose-300 text-xs px-2 py-1.5 rounded bg-rose-500/10 border border-rose-500/30">
           {error}
         </div>
         <button
           type="button"
           onClick={onRetry}
-          className="self-start px-2.5 h-6 rounded text-[11px] bg-bg-3 hover:bg-bg-2 text-text-1 transition-colors"
+          className="self-start px-2.5 h-6 rounded text-xs bg-bg-3 hover:bg-state-hover text-text-1 transition-colors"
         >
           Try again
         </button>
@@ -565,8 +567,8 @@ function PlanStep({
   }
   if (!plan || plan.waves.length === 0) {
     return (
-      <div className="text-text-3 text-[11.5px]">
-        no plan yet — go back and refine the goal
+      <div className="text-text-3 text-sm">
+        no plan yet. Go back and refine the goal
       </div>
     );
   }
@@ -593,13 +595,13 @@ function PlanStep({
   };
   return (
     <div className="flex flex-col gap-2">
-      <div className="text-text-2 text-[11.5px]">
+      <div className="text-text-2 text-sm">
         Edit any wave or task. Pin an agent to lock who picks it up.
       </div>
       {plan.waves.map((wave, wi) => (
         <div key={wave.id} className="flex flex-col gap-1">
           <div className="flex items-center gap-2 px-1 pt-1.5">
-            <span className="text-text-4 text-[9.5px] uppercase tracking-wider tabular-nums w-7">
+            <span className="text-text-4 text-2xs tabular-nums w-7">
               W{wi + 1}
             </span>
             <input
@@ -612,9 +614,9 @@ function PlanStep({
                 };
                 onMutate(next);
               }}
-              className="flex-1 bg-transparent text-text-1 text-[12px] font-medium px-1 py-0.5 rounded hover:bg-bg-2 focus:outline-none focus:bg-bg-2"
+              className="flex-1 bg-transparent text-text-1 text-sm font-medium px-1 py-0.5 rounded hover:bg-state-hover focus:outline-none focus:bg-state-hover"
             />
-            <span className="text-text-4 text-[10px] tabular-nums">
+            <span className="text-text-4 text-2xs tabular-nums">
               {wave.tasks.length}
             </span>
           </div>
@@ -648,11 +650,11 @@ function TaskRow({
         <input
           value={task.name}
           onChange={(e) => onChange({ name: e.target.value })}
-          className="flex-1 bg-transparent text-text-1 text-[11.5px] px-1 py-0.5 rounded focus:outline-none focus:bg-bg-2"
+          className="flex-1 bg-transparent text-text-1 text-sm px-1 py-0.5 rounded focus:outline-none focus:bg-state-hover"
         />
         {task.dependencies.length > 0 && (
           <span
-            className="text-text-4 text-[9.5px] font-mono tabular-nums"
+            className="text-text-4 text-2xs font-mono tabular-nums"
             title={`Depends on: ${task.dependencies.join(", ")}`}
           >
             ⇠ {task.dependencies.length}
@@ -663,7 +665,7 @@ function TaskRow({
           type="button"
           onClick={() => setOpen((v) => !v)}
           title={open ? "Collapse" : "Edit description"}
-          className="w-5 h-5 rounded text-text-4 hover:text-text-1 hover:bg-bg-2 text-[10px] flex items-center justify-center"
+          className="w-5 h-5 rounded text-text-4 hover:text-text-1 hover:bg-state-hover text-2xs flex items-center justify-center"
         >
           {open ? "−" : "+"}
         </button>
@@ -671,7 +673,7 @@ function TaskRow({
           type="button"
           onClick={onRemove}
           title="Remove task"
-          className="w-5 h-5 rounded text-text-4 hover:text-rose-300 hover:bg-bg-2 text-[12px] flex items-center justify-center"
+          className="w-5 h-5 rounded text-text-4 hover:text-rose-300 hover:bg-state-hover text-sm flex items-center justify-center"
         >
           ×
         </button>
@@ -682,7 +684,7 @@ function TaskRow({
             value={task.description}
             onChange={(e) => onChange({ description: e.target.value })}
             placeholder="Description (optional)"
-            className="w-full bg-bg-2 border border-line-soft rounded px-2 py-1 text-[11px] text-text-2 resize-none focus:outline-none focus:border-line min-h-[44px] leading-snug"
+            className="w-full bg-bg-2 border border-line-soft rounded px-2 py-1 text-xs text-text-2 resize-none focus:outline-none focus:border-line min-h-[44px] leading-snug"
           />
         </div>
       )}
@@ -699,14 +701,7 @@ function AgentPicker({
 }) {
   const [open, setOpen] = useState(false);
   const ref = useRef<HTMLDivElement>(null);
-  useEffect(() => {
-    if (!open) return;
-    const onDoc = (e: MouseEvent) => {
-      if (!ref.current?.contains(e.target as Node)) setOpen(false);
-    };
-    document.addEventListener("mousedown", onDoc);
-    return () => document.removeEventListener("mousedown", onDoc);
-  }, [open]);
+  useDismiss(open, () => setOpen(false), ref);
   const label = value ? KNOWN_AGENTS.find((a) => a.id === value)?.label ?? value : "any";
   return (
     <div className="relative" ref={ref}>
@@ -714,9 +709,9 @@ function AgentPicker({
         type="button"
         onClick={() => setOpen((v) => !v)}
         title={value ? `Pinned: ${label}` : "Pick agent"}
-        className="flex items-center gap-1 h-5 px-1.5 rounded text-[10px] text-text-3 hover:text-text-1 hover:bg-bg-2 transition-colors"
+        className="flex items-center gap-1 h-5 px-1.5 rounded text-2xs text-text-3 hover:text-text-1 hover:bg-state-hover transition-colors"
       >
-        {value ? <AgentIcon agentId={value} size={11} /> : <span className="text-text-5">—</span>}
+        {value ? <AgentIcon agentId={value} size={11} /> : <span className="text-text-5">·</span>}
         <span className="hidden sm:inline">{label}</span>
       </button>
       {open && (
@@ -732,10 +727,10 @@ function AgentPicker({
                 onChange(a.id);
                 setOpen(false);
               }}
-              className={`w-full text-left flex items-center gap-2 px-2 py-1 rounded text-[11px] ${
+              className={`w-full text-left flex items-center gap-2 px-2 py-1 rounded text-xs ${
                 value === a.id
                   ? "bg-bg-2 text-text-1"
-                  : "text-text-2 hover:bg-bg-2 hover:text-text-1"
+                  : "text-text-2 hover:bg-state-hover hover:text-text-1"
               }`}
             >
               <AgentIcon agentId={a.id} size={12} />
@@ -749,7 +744,7 @@ function AgentPicker({
                 onChange("");
                 setOpen(false);
               }}
-              className="w-full text-left px-2 py-1 rounded text-[11px] text-text-3 hover:bg-bg-2 hover:text-text-1"
+              className="w-full text-left px-2 py-1 rounded text-xs text-text-3 hover:bg-state-hover hover:text-text-1"
             >
               <span className="pl-[20px]">Clear</span>
             </button>
@@ -784,13 +779,13 @@ function LaunchStep({
   return (
     <div className="flex flex-col gap-2.5">
       <div className="flex flex-col gap-1.5 px-2 py-2 rounded border border-line-soft bg-bg-2">
-        <div className="flex items-center gap-2 text-[11.5px]">
+        <div className="flex items-center gap-2 text-sm">
           <span className="text-text-5">goal</span>
           <span className="text-text-1 truncate" title={goal}>
             {goal}
           </span>
         </div>
-        <div className="flex items-center gap-3 text-[10.5px] text-text-4">
+        <div className="flex items-center gap-3 text-xs text-text-4">
           <span>project: <span className="text-text-2">{projectLabel}</span></span>
           <span>·</span>
           <span><span className="text-text-2 tabular-nums">{waveCount}</span> waves</span>
@@ -804,14 +799,14 @@ function LaunchStep({
           type="button"
           disabled={busy !== "none" || !plan}
           onClick={onSave}
-          className="flex items-center gap-2 px-2.5 py-1.5 rounded border border-line-soft bg-bg-1 hover:bg-bg-2 text-left disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+          className="flex items-center gap-2 px-2.5 py-1.5 rounded border border-line-soft bg-bg-1 hover:bg-state-hover text-left disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
         >
-          <span className="text-text-4 text-[10px] font-mono w-3">▸</span>
+          <span className="text-text-4 text-2xs font-mono w-3">▸</span>
           <div className="flex flex-col flex-1 min-w-0">
-            <span className="text-text-1 text-[11.5px] font-medium">
+            <span className="text-text-1 text-sm font-medium">
               {busy === "save" ? "saving…" : "Save plan"}
             </span>
-            <span className="text-text-4 text-[10.5px]">
+            <span className="text-text-4 text-xs">
               Writes to .aura/plans/ACTIVE_MILESTONE.xml. Run later from
               Plan sidebar.
             </span>
@@ -821,14 +816,14 @@ function LaunchStep({
           type="button"
           disabled={busy !== "none" || !plan}
           onClick={onSend}
-          className="flex items-center gap-2 px-2.5 py-1.5 rounded border border-line bg-bg-3 hover:bg-bg-2 text-left disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+          className="flex items-center gap-2 px-2.5 py-1.5 rounded border border-line bg-bg-3 hover:bg-state-hover text-left disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
         >
-          <span className="text-text-4 text-[10px] font-mono w-3">▸</span>
+          <span className="text-text-4 text-2xs font-mono w-3">▸</span>
           <div className="flex flex-col flex-1 min-w-0">
-            <span className="text-text-1 text-[11.5px] font-medium">
+            <span className="text-text-1 text-sm font-medium">
               {busy === "manager" ? "starting Aura…" : "Send to Aura"}
             </span>
-            <span className="text-text-4 text-[10.5px]">
+            <span className="text-text-4 text-xs">
               Saves the plan and opens a Manager session ready to dispatch
               tasks to the agents you pinned.
             </span>
@@ -837,19 +832,12 @@ function LaunchStep({
       </div>
 
       {error && (
-        <div className="text-rose-300 text-[11px] px-2 py-1.5 rounded bg-rose-500/10 border border-rose-500/30">
+        <div className="text-rose-300 text-xs px-2 py-1.5 rounded bg-rose-500/10 border border-rose-500/30">
           {error}
         </div>
       )}
     </div>
   );
-}
-
-// ── helpers ───────────────────────────────────────────────────────────
-
-function basename(p: string): string {
-  const i = p.lastIndexOf("/");
-  return i >= 0 ? p.slice(i + 1) : p;
 }
 
 function escapeXml(s: string): string {

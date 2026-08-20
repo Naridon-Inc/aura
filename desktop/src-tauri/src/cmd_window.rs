@@ -47,6 +47,44 @@ pub fn window_set_traffic_lights_hidden(
     Ok(())
 }
 
+/// Begin a window drag — but only when AppKit still has the event to drag
+/// from.
+///
+/// `getCurrentWindow().startDragging()` lands in tao's `drag_window`, whose
+/// first act is `msg_send![NSApp().currentEvent, type]`. `currentEvent` is nil
+/// whenever the app is not inside an event, and the hop between a `mousedown`
+/// in the webview and the command arriving on the main thread is enough for
+/// that to be true. Messaging nil panics ("messsaging type to nil"), on the
+/// main thread, inside an objc frame — which does not fail the drag, it takes
+/// the whole app down. We have a crash log of exactly that.
+///
+/// So: ask first. No current event means no drag to start, which is the
+/// correct outcome anyway. Sync command, so the check and the drag happen in
+/// the same main-thread turn and nothing can clear the event in between.
+#[tauri::command]
+pub fn window_start_drag(window: tauri::WebviewWindow) -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    {
+        if !unsafe { has_current_event() } {
+            return Ok(());
+        }
+    }
+    window.start_dragging().map_err(|e| e.to_string())
+}
+
+#[cfg(target_os = "macos")]
+unsafe fn has_current_event() -> bool {
+    use cocoa::appkit::NSApp;
+    use objc::{msg_send, sel, sel_impl};
+
+    let app = NSApp();
+    if app.is_null() {
+        return false;
+    }
+    let event: cocoa::base::id = msg_send![app, currentEvent];
+    !event.is_null()
+}
+
 #[cfg(target_os = "macos")]
 unsafe fn set_traffic_lights_hidden(ns_window: cocoa::base::id, hidden: bool) {
     use cocoa::appkit::{NSWindow, NSWindowButton};

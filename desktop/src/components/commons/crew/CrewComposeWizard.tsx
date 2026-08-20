@@ -19,7 +19,7 @@
 // cramped popovers fighting for the top-right corner.
 
 import { useEffect, useMemo, useState, type KeyboardEvent } from "react";
-import { ArrowRight, Check, GitMerge, Sparkles, Target, Users } from "lucide-react";
+import { ArrowRight, Check, GitMerge, Sparkles, Users } from "lucide-react";
 
 import { api } from "../../../lib/api";
 import type {
@@ -53,18 +53,23 @@ const PRIORITY_OPTS: SelectOption[] = [
   { value: "low", label: "Low", icon: <Dot className="bg-text-4" /> },
 ];
 
+// Steps are named for what you DO in them, not for the mode. The mode is
+// already on screen — the segmented control sets it and its own label says
+// "Plan a goal" / "Add a task" — so a first step called "Goal" or "Task" was
+// that same word again, forty pixels up.
 const GOAL_STEPS: WizardStepMeta[] = [
-  { id: "goal", label: "Goal" },
+  { id: "goal", label: "Describe" },
   { id: "review", label: "Review" },
 ];
 const TASK_STEPS: WizardStepMeta[] = [
-  { id: "task", label: "Task" },
+  { id: "task", label: "Describe" },
   { id: "details", label: "Details" },
 ];
 
 export function CrewComposeWizard({
   repoRoot,
   queue,
+  crew,
   onClose,
   onAdded,
   onPlanned,
@@ -73,6 +78,10 @@ export function CrewComposeWizard({
   repoRoot: string;
   /** Current queue — source for the "waits on" picker (board-task ids). */
   queue: LoopTask[];
+  /** The crew this surface is narrowed to, if any — stamped onto a task added
+   *  here so it lands under that crew rather than the loose pile. `null` (or
+   *  "main") means no crew is selected and the task is filed crew-less. */
+  crew?: string | null;
   onClose: () => void;
   /** A single task was minted + synced into the queue. */
   onAdded: () => void | Promise<void>;
@@ -181,6 +190,10 @@ export function CrewComposeWizard({
         // carries labels through as tags, so the new node lands inside that
         // goal's group on the canvas (and its tail deps wire the order).
         labels: attachGoal ? [`goal:${attachGoal}`] : undefined,
+        // Stamp the crew this surface is narrowed to, so a task added here
+        // lands under that crew instead of the loose pile. "main" / null is
+        // the default crew and is left unset.
+        crew_id: crew && crew !== "main" ? crew : undefined,
       });
       // Project it onto the graph so it shows as a ready node immediately.
       await api.loopSyncBoard(repoRoot);
@@ -274,7 +287,7 @@ export function CrewComposeWizard({
               disabled={busy || !goal.trim()}
               className="gap-1.5"
             >
-              {busy ? <AsciiSpinner className="text-[13px]" /> : <Sparkles size={14} />}
+              {busy ? <AsciiSpinner className="text-base" /> : <Sparkles size={14} />}
               {busy ? "Planning…" : "Plan it"}
             </Button>
           ) : (
@@ -285,7 +298,7 @@ export function CrewComposeWizard({
               disabled={busy || !title.trim()}
               className="gap-1.5"
             >
-              {busy ? <AsciiSpinner className="text-[13px]" /> : null}
+              {busy ? <AsciiSpinner className="text-base" /> : null}
               {busy ? "Adding…" : "Add to queue"}
             </Button>
           )}
@@ -320,20 +333,18 @@ export function CrewComposeWizard({
                   { value: "task", label: "Add a task" },
                 ]}
               />
-              <p className="text-[12px] leading-relaxed text-text-4">
+              <p className="text-sm leading-relaxed text-text-4">
                 {mode === "goal"
-                  ? "Describe an outcome. Your crew breaks it into connected tasks and draws the order — what runs side by side, and what has to wait."
+                  ? "Describe an outcome. Your crew breaks it into connected tasks and draws the order. What runs side by side, and what has to wait."
                   : "Drop one concrete job straight into the queue."}
               </p>
             </div>
           ) : null}
 
           {stepId === "goal" && (
-            <Field
-              label="What do you want built?"
-              htmlFor="crew-goal"
-              description="One outcome in plain language — the crew figures out the steps."
-            >
+            /* No help text under this one: the line above the field already
+               says an outcome in plain language is what goes here. */
+            <Field label="What do you want built?" htmlFor="crew-goal">
               <Textarea
                 id="crew-goal"
                 autoFocus
@@ -347,28 +358,22 @@ export function CrewComposeWizard({
 
           {stepId === "review" && (
             <div className="flex flex-col gap-4">
-              <div className="flex items-start gap-3 rounded-lg border border-line-soft bg-bg-1/40 p-3">
-                <span className="mt-0.5 grid h-8 w-8 shrink-0 place-items-center rounded-lg bg-accent/12 text-accent">
-                  <Target size={16} />
-                </span>
-                <div className="min-w-0">
-                  <div className="text-[10px] font-semibold uppercase tracking-[0.09em] text-text-5">
-                    Goal
-                  </div>
-                  <p className="mt-0.5 whitespace-pre-wrap text-[13.5px] font-medium leading-snug text-text-1">
-                    {goal.trim()}
-                  </p>
-                </div>
+              <div className="min-w-0">
+                <div className="text-xs font-medium text-text-4">Goal</div>
+                <p className="mt-1 whitespace-pre-wrap text-md font-medium leading-snug text-text-1">
+                  {goal.trim()}
+                </p>
               </div>
-              <p className="text-[12.5px] leading-relaxed text-text-3">
-                Aura will read this and break it into 3–8 connected tasks, wiring
-                the “waiting on” links so work that can run side by side does, and
-                work that needs something first waits for it. They land on the
-                board below, ready to <strong className="text-text-2">Run</strong>.
+              {/* What's NEW at this point — the step before already explained
+                  that the crew works out the order, so this doesn't. */}
+              <p className="text-base leading-relaxed text-text-3">
+                Aura reads this and writes the tasks it takes, usually three to
+                eight, in the order they have to happen. They land on the board
+                behind this, ready to <strong className="text-text-2">Run</strong>.
               </p>
-              <p className="text-[11.5px] leading-relaxed text-text-5">
-                This runs the brain set up in Agent setup. If none is configured
-                yet, nothing is written and it’ll say so.
+              <p className="text-sm leading-relaxed text-text-5">
+                This uses the brain you picked in Settings ▸ Brain &amp; models.
+                If you haven’t picked one, nothing is written. It’ll tell you.
               </p>
             </div>
           )}
@@ -416,9 +421,9 @@ export function CrewComposeWizard({
               {/* No "who works it" picker — the crew puts one of its own agents
                   on this task when you Run it. Say so plainly so it doesn't read
                   like a missing setting. */}
-              <p className="flex items-center gap-2 rounded-lg border border-line-soft bg-bg-1/40 px-3 py-2.5 text-[12px] leading-relaxed text-text-4">
+              <p className="flex items-center gap-2 text-sm leading-relaxed text-text-4">
                 <Users size={14} className="shrink-0 text-accent" />
-                Your crew runs an agent on this automatically when you hit Run —
+                Your crew runs an agent on this automatically when you hit Run. 
                 you don't pick who.
               </p>
 
@@ -427,7 +432,7 @@ export function CrewComposeWizard({
                   label="Attach to a flow"
                   htmlFor="crew-attach"
                   optional
-                  hint="Hang this off a goal already on the board so it joins that flow — or start its own."
+                  hint="Hang this off a goal already on the board so it joins that flow, or start its own."
                 >
                   <Select
                     id="crew-attach"
@@ -437,7 +442,7 @@ export function CrewComposeWizard({
                     aria-label="Attach to a flow"
                   />
                   {attachGoal ? (
-                    <p className="mt-1.5 flex items-center gap-1.5 text-[11.5px] text-text-4">
+                    <p className="mt-1.5 flex items-center gap-1.5 text-sm text-text-4">
                       <GitMerge size={12} className="text-accent" />
                       Runs after “{attachGoal}”. Its last steps are checked below.
                     </p>
@@ -460,7 +465,7 @@ export function CrewComposeWizard({
                           key={t.id}
                           type="button"
                           onClick={() => toggleWait(id)}
-                          className="flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-[12.5px] text-text-2 transition-colors hover:bg-bg-2"
+                          className="flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-base text-text-2 transition-colors hover:bg-state-hover"
                         >
                           <span
                             className="grid h-4 w-4 shrink-0 place-items-center rounded border"
@@ -488,7 +493,7 @@ export function CrewComposeWizard({
           )}
 
           {err ? (
-            <p className="rounded-md border border-line-soft bg-bg-1/60 px-3 py-2 text-[12px] leading-relaxed text-red">
+            <p className="rounded-md border border-line-soft bg-bg-1/60 px-3 py-2 text-sm leading-relaxed text-red">
               {err}
             </p>
           ) : null}

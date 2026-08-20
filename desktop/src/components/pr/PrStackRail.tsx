@@ -17,6 +17,7 @@ import { useEditorStore } from "../../lib/editorStore";
 import { StatusChip, type ChipTone } from "../ui/statusChip";
 import { Churn } from "../diff/Churn";
 import { AsciiSpinner } from "../ui/ascii-spinner";
+import { relativeAgeFromIso } from "../../lib/relativeTime";
 
 type Props = {
   repoRoot: string;
@@ -57,8 +58,8 @@ export function PrStackRail({ repoRoot, prNumber, viewer }: Props) {
 
   if (loading) {
     return (
-      <div className="flex items-center gap-1.5 text-text-4 text-[12px] py-3">
-        <AsciiSpinner className="text-[10px]" />
+      <div className="flex items-center gap-1.5 text-text-4 text-sm py-3">
+        <AsciiSpinner className="text-2xs" />
         <span>Looking for related pull requests…</span>
       </div>
     );
@@ -77,7 +78,7 @@ export function PrStackRail({ repoRoot, prNumber, viewer }: Props) {
       <button
         type="button"
         onClick={() => setCollapsed(!collapsed)}
-        className="w-full flex items-center gap-2.5 px-4 h-10 hover:bg-bg-2 transition-colors"
+        className="w-full flex items-center gap-2.5 px-4 h-10 hover:bg-state-hover transition-colors"
       >
         <svg
           width="11"
@@ -93,8 +94,8 @@ export function PrStackRail({ repoRoot, prNumber, viewer }: Props) {
           />
         </svg>
         <StackIcon />
-        <span className="text-[12px] font-semibold text-text-1">Stack</span>
-        <span className="text-[11px] text-text-4 tabular-nums">
+        <span className="text-sm font-semibold text-text-1">Stack</span>
+        <span className="text-xs text-text-4 tabular-nums">
           {Math.max(activeIdx + 1, 1)} of {ordered.length}
         </span>
       </button>
@@ -130,8 +131,8 @@ function TrunkAnchor({ baseRef }: { baseRef?: string | null }) {
       <div className="relative w-7 flex justify-center flex-shrink-0">
         <span className="relative z-10 w-3 h-3 rounded-full bg-line-soft border border-line-strong" />
       </div>
-      <span className="text-[11.5px] font-mono text-text-3">{ref}</span>
-      <span className="text-[11px] text-text-4">(trunk)</span>
+      <span className="text-sm font-mono text-text-3">{ref}</span>
+      <span className="text-xs text-text-4">(trunk)</span>
     </div>
   );
 }
@@ -164,13 +165,13 @@ function Row({
       type="button"
       onClick={onSelect}
       className={`w-full flex items-center gap-3 pl-2 pr-3 py-2 rounded-md text-left transition-colors ${
-        active ? "bg-bg-2" : "hover:bg-bg-2/60"
+        active ? "bg-state-selected" : "hover:bg-state-hover"
       }`}
     >
       {/* avatar dot column */}
       <div className="relative w-7 flex justify-center flex-shrink-0">
         <span
-          className={`relative z-10 w-5 h-5 rounded-full border-2 flex items-center justify-center text-[9px] font-bold uppercase ${
+          className={`relative z-10 w-5 h-5 rounded-full border-2 flex items-center justify-center text-2xs font-bold uppercase ${
             active ? "" : "border-line bg-bg-1 text-text-3"
           }`}
           style={
@@ -193,7 +194,7 @@ function Row({
       <BranchIcon className="text-text-4 flex-shrink-0" />
       {/* title */}
       <span
-        className={`flex-1 min-w-0 truncate text-[12.5px] ${
+        className={`flex-1 min-w-0 truncate text-base ${
           active ? "text-text-1" : "text-text-2"
         }`}
       >
@@ -208,7 +209,7 @@ function Row({
       {/* +/− chip */}
       <Churn additions={additions} deletions={deletions} />
       {/* age */}
-      <span className="text-[11px] tabular-nums text-text-4 w-10 text-right">
+      <span className="text-xs tabular-nums text-text-4 w-10 text-right">
         {formatAge(updated)}
       </span>
     </button>
@@ -311,13 +312,6 @@ function BranchIcon({ className }: { className?: string }) {
 }
 
 function formatAge(iso: string): string {
-  if (!iso) return "—";
-  const t = Date.parse(iso);
-  if (Number.isNaN(t)) return "—";
-  const diff = Math.floor((Date.now() - t) / 1000);
-  if (diff < 60) return "<1m";
-  if (diff < 3600) return `${Math.floor(diff / 60)}m`;
-  if (diff < 86400) return `${Math.floor(diff / 3600)}h`;
-  if (diff < 2592000) return `${Math.floor(diff / 86400)}d`;
-  return `${Math.floor(diff / 2592000)}mo`;
+  // One ladder for the whole app — see lib/relativeTime.
+  return relativeAgeFromIso(iso, { style: "compact", empty: "—" });
 }

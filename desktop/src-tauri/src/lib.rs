@@ -9,12 +9,20 @@
 //! W2: cmd_files — list_dir / read_file / write_file / git_status / git_diff
 
 mod agent_event_listener;
+mod agent_installs;
 mod agent_mutation_guard;
 mod agent_policy;
+mod api_spend;
 mod aurawatch_agentcli;
 mod aurawatch_inference;
+// AWS request signing, shared by the Bedrock brain and the managed-place
+// driver. Not behind either one's feature: two callers in two subsystems is
+// what makes it a crate-level primitive rather than a brain's private helper.
+mod aws_sigv4;
+mod blocking;
 mod cli_bridge;
 mod fs_atomic;
+mod text;
 mod cmd_agent_auth;
 mod cmd_agent_config_sync;
 mod cmd_agent_history;
@@ -40,11 +48,18 @@ mod cmd_commons_app;
 mod cmd_changes;
 mod cmd_cloud_auth;
 mod cmd_cloud_billing;
+mod cmd_cloud_jobs;
+mod cmd_cloud_orgs;
+mod cmd_cloud_runners;
 mod cmd_kg;
 mod cmd_chat_export;
 mod cmd_claude_sessions;
 mod cmd_claude_usage;
+mod cmd_codex_sessions;
 mod cmd_conflicts;
+mod cmd_kimi_sessions;
+mod cmd_opencode_sessions;
+mod cmd_pi_sessions;
 mod cmd_daemon;
 mod cmd_device;
 mod cmd_doctor_cli;
@@ -62,6 +77,7 @@ mod cmd_meta_plane;
 mod cmd_repo_publish;
 mod cmd_worktree_plane;
 mod integrations;
+mod jsonl_tail;
 mod mcp_http_transport;
 mod mcp_oauth;
 mod cmd_memory;
@@ -71,10 +87,13 @@ mod cmd_modes;
 mod cmd_op;
 mod cmd_orchestrator;
 mod cmd_permission;
+/// Aura's answer when a hosted agent asks to write a file or run a tool.
+mod host_policy;
 mod cmd_clips;
 mod cmd_profiles;
 mod clips_watch;
 mod cloud_inbox;
+mod cloud_org;
 mod cloud_session_sync;
 mod cmd_lounge;
 mod cmd_permission_socket;
@@ -84,12 +103,16 @@ mod cmd_plugin_realtime;
 mod cmd_plugin_secrets;
 mod cmd_projects;
 mod cmd_prompts;
+mod cmd_repo_identity;
 mod cmd_repo_settings;
+mod repo_identity;
 mod cmd_prs;
 mod cmd_native_term;
 mod cmd_pty;
+mod cmd_run;
 mod cmd_search;
 mod cmd_sentinel;
+mod cmd_session_live;
 mod cmd_notes;
 mod cmd_note_folders;
 mod cmd_notes_sync;
@@ -112,6 +135,7 @@ mod cmd_team;
 mod cmd_team_notes;
 mod cmd_identity;
 mod cmd_identity_avatar;
+mod cmd_fallback_avatar;
 mod notify;
 mod cmd_dialog;
 mod cmd_team_upload;
@@ -122,6 +146,10 @@ mod cmd_emoji;
 mod cmd_workspace_launch;
 mod cmd_automations;
 mod cmd_mission;
+mod cloudbox;
+mod cmd_machines;
+mod place_make;
+mod place_roster;
 mod cmd_remote;
 mod cmd_remote_connect;
 mod cmd_remote_devices;
@@ -131,16 +159,20 @@ mod cmd_resources;
 mod cmd_zones;
 mod crash;
 mod hud;
+mod ide_bridge;
 mod manager;
 mod menu;
 mod model_discovery;
+mod os_notify;
 mod tray;
 mod op_log;
 mod plugin_exchange;
 mod plugin_host;
 mod telemetry;
+mod telemetry_guard;
 pub mod pty_daemon;
 mod pty_io;
+mod pty_reap;
 mod secret_store;
 pub mod spawn_dir;
 mod worktree;
@@ -175,41 +207,44 @@ struct AuraStatus {
 
 #[tauri::command]
 async fn aura_status() -> AuraStatus {
-    let db_path = default_db_path();
-    let path_str = db_path.to_string_lossy().into_owned();
+    crate::blocking::run(move || {
+        let db_path = default_db_path();
+        let path_str = db_path.to_string_lossy().into_owned();
 
-    if !db_path.exists() {
-        return AuraStatus {
-            db_path: path_str,
-            initialized: false,
-            block_count: None,
-            schema_version: None,
-            channel: "shell-w2",
-        };
-    }
-
-    match BlockStore::open(&db_path) {
-        Ok(store) => {
-            let count = store
-                .list_blocks(&BlockFilter::default())
-                .map(|v| v.len())
-                .unwrap_or(0);
-            AuraStatus {
+        if !db_path.exists() {
+            return AuraStatus {
                 db_path: path_str,
-                initialized: true,
-                block_count: Some(count),
-                schema_version: Some(aura_blockstore::SCHEMA_USER_VERSION as i64),
+                initialized: false,
+                block_count: None,
+                schema_version: None,
                 channel: "shell-w2",
-            }
+            };
         }
-        Err(_) => AuraStatus {
-            db_path: path_str,
-            initialized: false,
-            block_count: None,
-            schema_version: None,
-            channel: "shell-w2",
-        },
-    }
+
+        match BlockStore::open(&db_path) {
+            Ok(store) => {
+                let count = store
+                    .list_blocks(&BlockFilter::default())
+                    .map(|v| v.len())
+                    .unwrap_or(0);
+                AuraStatus {
+                    db_path: path_str,
+                    initialized: true,
+                    block_count: Some(count),
+                    schema_version: Some(aura_blockstore::SCHEMA_USER_VERSION as i64),
+                    channel: "shell-w2",
+                }
+            }
+            Err(_) => AuraStatus {
+                db_path: path_str,
+                initialized: false,
+                block_count: None,
+                schema_version: None,
+                channel: "shell-w2",
+            },
+        }
+    })
+    .await
 }
 
 fn default_db_path() -> PathBuf {
@@ -292,21 +327,26 @@ pub fn run() {
         .manage(cmd_agent_versions::AgentVersionStore::new())
         .manage(cmd_remote::RemoteState::default())
         .manage(cmd_remote_relay::RemoteRelayState::default())
+        .manage(cmd_session_live::SessionLiveState::new())
         .manage(cmd_plugin::build_state(None))
         .manage(cmd_openai_compat::OpenAiCompatRegistry::new())
         .manage(cmd_brain_chat::BrainStreamRegistry::new())
         .manage(cmd_browser::BrowserManager::new())
         .manage(cmd_native_term::NativeTermManager::new())
+        .manage(std::sync::Arc::new(ide_bridge::IdeBridgeState::new()))
         .manage(std::sync::Arc::new(
             crate::manager::dispatcher::DispatcherState::new(),
         ))
         .setup(|app| {
-            // Native menubar — built once at startup and attached to the
-            // app so every window picks it up. `install_handler` emits
-            // `menu:<id>` events the React side listens to.
-            let m = menu::build(app)?;
-            app.set_menu(m)?;
-            menu::install_handler(app.handle());
+            // Native menubar (macOS) + the `menu:<id>` router every platform
+            // needs for the HUD's popup menus. `menu::install` owns that split
+            // — on Linux/Windows an app-wide menu becomes a second bar drawn
+            // INSIDE our window, so only the router goes on there.
+            menu::install(app)?;
+            // Attach Aura's gate to hosted agents before any brain can be
+            // built. An agent whose writes reached disk before this ran
+            // would be the one edit nobody snapshotted, so it goes first.
+            host_policy::install(app.handle());
             // Refresh the fleet agent-CLI config policy in the background so the
             // NEXT agent spawn sees the latest remote rules (this run uses the
             // last cache or the built-in floor). Best-effort: offline / non-200
@@ -314,6 +354,16 @@ pub fn run() {
             // codex `service_tier = "priority"` → `flex`).
             tauri::async_runtime::spawn(async {
                 agent_policy::refresh_remote().await;
+            });
+            // Work out which `aura` on this machine we can actually talk to,
+            // before anything asks. The probe costs two subprocess spawns and
+            // the answer is cached for the process, so paying it on a startup
+            // thread keeps it off whichever passthrough happens to run first.
+            // The log line is the record of which binary a session used —
+            // "it ran the old one in /usr/local/bin" is otherwise invisible.
+            std::thread::spawn(|| {
+                let bin = crate::agent_event_listener::resolve_aura_bin();
+                tracing::info!(bin = %bin, "resolved aura CLI");
             });
             // Menu-bar (tray) presence + the ⌘⇧A floating HUD. The tray
             // keeps Aura resident in the menu bar so the always-on-top HUD
@@ -325,6 +375,12 @@ pub fn run() {
             if let Err(e) = tray::build(app) {
                 tracing::warn!(error = %e, "menu-bar tray init failed");
             }
+            // Notification Center: install the delegate and register the chat
+            // Reply category before anything can post. Doing this at startup is
+            // also what puts Aura in System Settings › Notifications at all —
+            // the old plugin path never registered, so there was no row and no
+            // switch, which is why team messages arrived in silence.
+            os_notify::init(app.handle());
             // Seed the HUD master switch from persisted Settings BEFORE the
             // ⌘⇧A shortcut is live, so a user who turned the HUD off stays off
             // across restarts (the tray + shortcut register unconditionally;
@@ -347,6 +403,24 @@ pub fn run() {
             // talks to. Single listener for the whole shell — every
             // claude process spawned via cmd_agent_stream points at it.
             cmd_permission_socket::start(app.handle().clone());
+            // Advertise Aura as an IDE that coding-agent CLIs can drive, so an
+            // agent in a tab can open files and put a proposed change in front
+            // of you as a real diff instead of pasting it as terminal text.
+            // Best-effort: if the port or the lock file is unavailable the
+            // agent simply runs without tab control, which is where it was
+            // before this existed.
+            {
+                let handle = app.handle().clone();
+                let bridge = app
+                    .state::<std::sync::Arc<ide_bridge::IdeBridgeState>>()
+                    .inner()
+                    .clone();
+                tauri::async_runtime::spawn(async move {
+                    if let Err(e) = ide_bridge::start(handle, bridge).await {
+                        tracing::warn!("ide bridge did not start: {e}");
+                    }
+                });
+            }
             // Stash the app handle on the Manager runtime so sessions
             // re-loaded from disk after a restart can spawn their own
             // tick loops without requiring an active Tauri command.
@@ -359,6 +433,15 @@ pub fn run() {
             // paste into Aura" — the file just appears in the tray
             // ready to drag.
             clips_watch::start(app.handle().clone());
+            // The return leg of a cloud handover. When a chat sends work to a
+            // machine it stamps its own session id on the board row; this
+            // watches those rows and puts a note back in the conversation when
+            // the work settles — the branch and commit it landed on, or the
+            // runner's own reason for stopping. Without it the conversation
+            // that handed the work over is the one place the outcome never
+            // reaches. Silent whenever the board can't be read (signed out,
+            // offline): a watcher that can't ask must not guess.
+            manager::brain::handback::start(app.handle().clone());
             // Boot the loopback HTTP listener for the OSC 777 fallback
             // channel (T2.3). Bind happens in tokio so this returns
             // immediately; the URL appears on the managed state once
@@ -415,6 +498,45 @@ pub fn run() {
                     }
                 });
             }
+            // The idle sweep: stop the machines Aura made that nobody is using.
+            //
+            // A timer rather than an event, because the thing being detected is
+            // the ABSENCE of activity and nothing emits that. Almost every pass
+            // ends in the `0600` machine book with nothing dialled — this
+            // laptop, the boxes you brought and everything opened recently are
+            // ruled out from a file on disk — so the cost of running it every
+            // five minutes on an install with no managed machines is a read of a
+            // small JSON file.
+            //
+            // The warmup is longer than the others' on purpose: a member who
+            // just launched the app is about to open something, and a sweep that
+            // fired first would stop the machine they were reaching for.
+            //
+            // Failures are logged and never shown. The sweep is a bill-saving
+            // background chore, and a toast about a cloud that refused a stop is
+            // a toast about somebody else's afternoon; the Sleep control on the
+            // place itself is where a person asks and gets told.
+            {
+                let app_for_sweep = app.handle().clone();
+                tauri::async_runtime::spawn(async move {
+                    tokio::time::sleep(std::time::Duration::from_secs(120)).await;
+                    loop {
+                        match manager::brain::place_sleep::places_sleep_idle().await {
+                            Ok(slept) if !slept.is_empty() => {
+                                tracing::info!(count = slept.len(), "put idle places to sleep");
+                                // So every open roster, rail and panel redraws
+                                // the place as asleep at the moment it becomes
+                                // asleep, rather than the next time somebody
+                                // tries to reach it and gets nothing.
+                                let _ = app_for_sweep.emit("aura:places:slept", &slept);
+                            }
+                            Ok(_) => { /* nothing idle — the ordinary pass */ }
+                            Err(e) => tracing::warn!(error = %e, "idle sweep skipped"),
+                        }
+                        tokio::time::sleep(manager::brain::place_sleep::SWEEP_EVERY).await;
+                    }
+                });
+            }
             // Anonymous product telemetry: record this launch and forward any
             // crash reports queued from a previous run. Fully consent-gated and
             // key-gated inside telemetry::on_startup — a no-op until the user
@@ -462,6 +584,8 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             aura_status,
+            os_notify::os_notify,
+            os_notify::os_notify_available,
             cmd_automations::automations_list,
             cmd_automations::automation_create,
             cmd_automations::automation_update,
@@ -498,6 +622,8 @@ pub fn run() {
             cmd_files::git_checkout,
             cmd_files::git_create_branch,
             cmd_files::git_remote_origin,
+            cmd_repo_identity::repo_identity_get,
+            cmd_repo_identity::repo_identity_bind,
             cmd_files::git_last_commit_age,
             cmd_files::git_show_head,
             cmd_files::git_blame_lines,
@@ -526,6 +652,7 @@ pub fn run() {
             cmd_files::git_ahead_behind,
             cmd_window::window_set_traffic_light_position,
             cmd_window::window_set_traffic_lights_hidden,
+            cmd_window::window_start_drag,
             cmd_emoji::open_system_emoji_picker,
             cmd_dialog::dialog_pick,
             cmd_commons_app::commons_app_fetch,
@@ -538,6 +665,7 @@ pub fn run() {
             cmd_lane::lane_list,
             cmd_lane::lane_discard,
             cmd_agent_versions::agents_versions_get,
+            agent_installs::agents_installs_get,
             pty_daemon::pty_daemon_ping,
             pty_daemon::pty_daemon_enabled,
             cmd_agents::agent_discover,
@@ -574,6 +702,13 @@ pub fn run() {
             cmd_permission::permission_list_pending,
             cmd_chat_export::chat_export_to_claude_code,
             cmd_chat_export::chat_export_for_agent,
+            cmd_codex_sessions::codex_latest_session,
+            cmd_codex_sessions::codex_rollout_read,
+            cmd_kimi_sessions::kimi_wire_read,
+            cmd_opencode_sessions::opencode_latest_session,
+            cmd_opencode_sessions::opencode_record_read,
+            cmd_pi_sessions::pi_latest_session,
+            cmd_pi_sessions::pi_session_read,
             cmd_claude_sessions::claude_list_sessions,
             cmd_claude_sessions::claude_load_session,
             cmd_claude_sessions::claude_session_watch,
@@ -624,11 +759,14 @@ pub fn run() {
             cmd_changes::aura_changes_resolve,
             cmd_changes::aura_changes_list,
             cmd_change_note::aura_change_note,
+            cmd_change_note::resolve_pr_range,
             cmd_symbol_impact::aura_symbol_impact,
             cmd_kg::aura_kg_build,
             cmd_kg::aura_kg_load,
             cmd_aura_fs::git_diff_stats,
+            cmd_aura_fs::git_diff_stats_batch,
             cmd_aura_fs::git_diff_stats_per_file,
+            cmd_run::run_detect,
             cmd_aura_fs::cli_detect,
             cmd_doctor_cli::aura_cli_version_check,
             cmd_doctor_cli::aura_cli_install_bundled,
@@ -660,6 +798,7 @@ pub fn run() {
             cmd_tasks::tasks_list,
             cmd_tasks::tasks_create,
             cmd_tasks::tasks_update,
+            cmd_tasks::tasks_step_set,
             cmd_tasks::tasks_delete,
             cmd_tasks::tasks_upsert_external,
             cmd_tasks_sync::tasks_sync_poll,
@@ -737,12 +876,15 @@ pub fn run() {
             cmd_page_comments::page_comments_delete,
             cmd_notes_sync::pages_sync_poll,
             cmd_brain::brain_list_descriptors,
+            cmd_brain::brain_session_surface,
+            cmd_brain::brain_set_session_mode,
             cmd_brain::brain_get_settings,
             cmd_brain::brain_set_active,
             cmd_brain::brain_set_auto_route,
             cmd_brain::brain_keychain_set,
             cmd_brain::brain_keychain_delete,
             cmd_brain::brain_keychain_has,
+            api_spend::brain_api_spend,
             cmd_brain::brain_upsert_provider,
             cmd_brain::brain_remove_provider,
             cmd_brain::brain_configure_cloud,
@@ -777,6 +919,8 @@ pub fn run() {
             cmd_native_term::native_term_copy,
             cmd_native_term::native_term_context,
             cmd_native_term::native_term_close,
+            ide_bridge::ide_bridge_status,
+            ide_bridge::ide_bridge_respond,
             cmd_orchestrator::orchestrator_dispatch_wave,
             cmd_orchestrator::orchestrator_lane_status,
             cmd_orchestrator::orchestrator_cancel_lane,
@@ -791,11 +935,17 @@ pub fn run() {
             cmd_team::team_claim,
             cmd_identity::identity_status,
             cmd_identity::identity_status_all,
+            cmd_identity::git_identity_set,
             // Self-picked profile photos (email-keyed, local; falls back to the
             // GitHub avatar then the animal monogram when a person has none).
             cmd_identity_avatar::identity_avatars_get,
             cmd_identity_avatar::identity_avatar_set_from_path,
             cmd_identity_avatar::identity_avatar_clear,
+            // Generated portraits for people with no picture at all — fetched
+            // once, then owned by this machine (see cmd_fallback_avatar.rs for
+            // why they can't simply be linked).
+            cmd_fallback_avatar::fallback_avatar_cached,
+            cmd_fallback_avatar::fallback_avatar_fetch,
             cmd_team::team_set_admin,
             cmd_team::team_transfer_admin,
             cmd_team::identity_override_get,
@@ -847,8 +997,18 @@ pub fn run() {
             cmd_cloud_auth::cloud_auth_poll,
             cmd_cloud_auth::cloud_auth_status,
             cmd_cloud_auth::cloud_auth_logout,
+            cmd_cloud_auth::cloud_org_invite,
+            cmd_cloud_orgs::cloud_orgs,
+            cmd_cloud_orgs::cloud_org_switch,
+            cmd_cloud_orgs::cloud_repos,
             cmd_cloud_auth::cloud_pair_create,
+            cmd_cloud_billing::cloud_billing_status,
             cmd_cloud_billing::cloud_billing_usage_by_member,
+            cmd_cloud_runners::cloud_runners,
+            cmd_cloud_jobs::cloud_job_states,
+            cmd_cloud_jobs::cloud_jobs_for_repo,
+            cmd_cloud_jobs::cloud_jobs_list,
+            cmd_cloud_jobs::cloud_jobs_all,
             cmd_mobile_waitlist::mobile_waitlist_status,
             cmd_mobile_waitlist::mobile_waitlist_join,
             cmd_device::device_identity,
@@ -895,6 +1055,7 @@ pub fn run() {
             cmd_change_summary::explain_change,
             cmd_change_summary::explain_change_diff,
             cmd_change_summary::explain_symbols,
+            cmd_change_summary::prewarm_change_summaries,
             cmd_aurawatch::aurawatch_nudge_accept,
             cmd_aurawatch::aurawatch_nudge_dismiss,
             cmd_manager::manager_start,
@@ -925,6 +1086,53 @@ pub fn run() {
             cmd_loop::loop_cloud_sync,
             cmd_loop::loop_cloud_send,
             cmd_remote_connect::runner_provision,
+            cmd_machines::machines_list,
+            cmd_machines::machine_save,
+            cmd_machines::machine_touch,
+            cmd_machines::machine_set_project,
+            cmd_machines::machine_set_branch,
+            cmd_machines::machine_forget,
+            place_roster::places_list,
+            place_make::place_make_offer,
+            place_make::place_make,
+            cloudbox::box_sessions,
+            cloudbox::box_projects,
+            cloudbox::place_capabilities,
+            cloudbox::box_start,
+            cloudbox::box_stop,
+            cloudbox::box_clone,
+            manager::brain::place_open::place_boot,
+            manager::brain::place_env::place_env_state,
+            manager::brain::place_env::place_env_apply,
+            manager::brain::place_egress::place_agent_phase,
+            manager::brain::place_egress::place_egress_report,
+            manager::brain::place_drift::place_drift,
+            manager::brain::place_account::place_member_account,
+            manager::brain::place_account::member_account_login,
+            manager::brain::place_toolchain::place_toolchain,
+            manager::brain::place_toolbox::place_install_for_me,
+            manager::brain::place_base::place_team_base,
+            manager::brain::place_base::place_team_base_warm,
+            manager::brain::place_git::place_push_credential,
+            manager::brain::place_agent_key::place_agent_key,
+            manager::brain::place_forward::place_forwarding,
+            manager::brain::place_forward::place_forward_set,
+            manager::brain::place_forward::place_forward_release,
+            manager::brain::place_sleep::place_sleeping,
+            manager::brain::place_sleep::place_sleep,
+            manager::brain::place_sleep::places_sleep_idle,
+            manager::brain::place_wake::place_wake,
+            manager::brain::place_wake::place_waking,
+            manager::brain::place_grant::place_grant_offer,
+            manager::brain::place_grant::place_grant_link,
+            manager::brain::place_grant::place_grant_unlink,
+            manager::brain::place_author::place_author,
+            manager::brain::place_author::place_author_adopt,
+            manager::brain::place_forge::place_git_forge,
+            manager::brain::place_secrets::place_secret_list,
+            manager::brain::place_secrets::place_secret_put,
+            manager::brain::place_secrets::place_secret_forget,
+            manager::brain::place_secrets::place_secret_boot,
             cmd_manager::manager_status,
             cmd_manager::manager_memory_health,
             cmd_manager::manager_subagent_monitor,
@@ -988,6 +1196,7 @@ pub fn run() {
             cmd_settings::settings_set_dev_mode,
             cmd_settings::settings_set_local_embeddings,
             cmd_settings::settings_set_worktree_base,
+            cmd_settings::settings_enable_strict_unlocked,
             cmd_settings::settings_disable_strict_unlocked,
             cmd_settings::settings_agents_toml_list,
             cmd_settings::settings_agents_toml_upsert,
@@ -1004,6 +1213,7 @@ pub fn run() {
             cmd_clips::clips_save_file,
             cmd_clips::clips_read_dataurl,
             cmd_clips::clips_copy_image_to_os,
+            cmd_clips::clipboard_has_image,
             cmd_clips::clips_remove,
             cmd_clips::clips_clear,
             cmd_remote::remote_start,
@@ -1013,6 +1223,26 @@ pub fn run() {
             cmd_remote_relay::remote_relay_start,
             cmd_remote_relay::remote_relay_stop,
             cmd_remote_relay::remote_relay_status,
+            cmd_session_live::session::session_live_share,
+            cmd_session_live::session::session_live_share_create,
+            cmd_session_live::session::session_live_share_revoke,
+            cmd_session_live::session::session_live_share_status,
+            cmd_session_live::session::session_live_join_preview,
+            cmd_session_live::session::session_live_unshare,
+            cmd_session_live::session::session_live_preview,
+            cmd_session_live::session::session_live_join,
+            cmd_session_live::session::session_live_set_access,
+            cmd_session_live::session::session_live_leave,
+            cmd_session_live::session::session_live_status,
+            cmd_session_live::frames::session_live_send,
+            cmd_session_live::frames::session_live_say,
+            cmd_session_live::frames::session_live_impact,
+            cmd_session_live::frames::session_live_set_state,
+            cmd_session_live::frames::session_live_typing,
+            cmd_session_live::frames::session_live_cursor,
+            cmd_session_live::tunnel::session_live_tunnel_open,
+            cmd_session_live::tunnel::session_live_tunnel_close,
+            cmd_session_live::tunnel::session_live_tunnels,
             cmd_memory::aura_memory_view,
             cmd_memory::aura_memory_write_entry,
             cmd_memory::aura_memory_import_claude_code,
@@ -1025,6 +1255,7 @@ pub fn run() {
             telemetry::telemetry_consent_get,
             telemetry::telemetry_set_consent,
             telemetry::telemetry_track,
+            telemetry::telemetry_track_once,
             cmd_plugin::plugin_list,
             cmd_plugin::plugin_rescan,
             cmd_plugin::plugin_enable,
@@ -1155,6 +1386,9 @@ pub fn run() {
             // runtime's last cleanup step. We kill on both — kill_all
             // is idempotent.
             if let tauri::RunEvent::ExitRequested { .. } | tauri::RunEvent::Exit = event {
+                // How long this launch lasted. Sent before the teardown below
+                // so a slow kill_all can't eat the quit.
+                telemetry::on_shutdown();
                 if let Some(reg) = app.try_state::<cmd_agent_pty::AgentPtyRegistry>() {
                     reg.kill_all();
                 }
@@ -1165,6 +1399,14 @@ pub fn run() {
                 if let Some(reg) = app.try_state::<cmd_pty::PtyRegistry>() {
                     reg.kill_all();
                 }
+                // Tell anyone sharing a live session that the host is going
+                // away, rather than leaving them on a frozen transcript until
+                // the server times the socket out. Sends queued frames only —
+                // no network round-trip on the quit path.
+                tauri::async_runtime::block_on(cmd_session_live::shutdown_all(app));
+                // Stop advertising as an IDE. A lock file that outlives the
+                // process points the next agent at a dead port.
+                ide_bridge::shutdown(app);
             }
         });
 }

@@ -22,6 +22,7 @@
 // content. The card renderer fetches details on demand.
 
 import { api, type ChatMessage } from "./api";
+import { truncate } from "./truncate";
 
 // ─── Payload schemas ─────────────────────────────────────────────────
 
@@ -155,28 +156,28 @@ function previewLine<K extends RelayKind>(
     case "intent": {
       const p = payload as IntentRelayPayload;
       const subj = (p.subject || "").trim();
-      const short = subj.length > 80 ? subj.slice(0, 77) + "…" : subj;
-      return `[aura-relay] /intent — ${short || "(no subject)"}`;
+      const short = truncate(subj, 80);
+      return `[aura-relay] /intent · ${short || "(no subject)"}`;
     }
     case "snapshot": {
       const p = payload as SnapshotRelayPayload;
-      return `[aura-relay] /snapshot — ${p.path}`;
+      return `[aura-relay] /snapshot · ${p.path}`;
     }
     case "commit": {
       const p = payload as CommitRelayPayload;
       const sha = p.sha.slice(0, 7);
-      return `[aura-relay] commit ${sha} — ${p.subject}`;
+      return `[aura-relay] commit ${sha} · ${p.subject}`;
     }
     case "prove": {
       const p = payload as ProveRelayPayload;
       const mark = p.ok ? "✓" : "✗";
-      return `[aura-relay] /prove ${mark} — ${p.goal}`;
+      return `[aura-relay] /prove ${mark} · ${p.goal}`;
     }
     case "pr_review": {
       const p = payload as PrReviewRelayPayload;
       const mark = p.verdict === "ok" ? "✓" : p.verdict === "warn" ? "⚠" : "✗";
       const head = p.headline || `vs ${p.base}`;
-      return `[aura-relay] /pr-review ${mark} — ${head}`;
+      return `[aura-relay] /pr-review ${mark} · ${head}`;
     }
     case "function_ref": {
       const p = payload as FunctionRefRelayPayload;
@@ -186,8 +187,8 @@ function previewLine<K extends RelayKind>(
     case "pr_opened": {
       const p = payload as PrOpenedRelayPayload;
       const subj = (p.title || "").trim();
-      const short = subj.length > 80 ? subj.slice(0, 77) + "…" : subj;
-      return `[aura-relay] PR #${p.number} opened — ${short || "(untitled)"}`;
+      const short = truncate(subj, 80);
+      return `[aura-relay] PR #${p.number} opened · ${short || "(untitled)"}`;
     }
     case "pr_line": {
       const p = payload as PrLineRelayPayload;
@@ -347,14 +348,22 @@ export function parseAuraRef(url: string): AuraRef | null {
     }
     case "page": {
       // aura://page/<scope>/<bucket>/<id>
-      const segs = rest
-        .split(/[?#]/)[0]
-        .split("/")
-        .filter(Boolean);
-      if (segs.length < 3) return null;
+      //
+      // The bucket is a channel id for channel pages and a handle for member
+      // pages — and EMPTY for team pages, which is most of them. So the link
+      // a team page produces is `aura://page/team//note_x`, with a real empty
+      // segment in the middle. This used to drop empties before counting, see
+      // two segments where three were required, and return null: every mention
+      // DM naming a team page arrived as dead text a teammate could only read
+      // and retype. Keep the empties, and take `scope/id` alone as the same
+      // page for anything hand-written.
+      const segs = rest.split(/[?#]/)[0].split("/");
+      if (segs.length < 2) return null;
       const scope = decodeURIComponent(segs[0]);
-      const bucket = decodeURIComponent(segs[1]);
-      const id = decodeURIComponent(segs.slice(2).join("/"));
+      const bucket = segs.length > 2 ? decodeURIComponent(segs[1]) : "";
+      const id = decodeURIComponent(
+        (segs.length > 2 ? segs.slice(2) : segs.slice(1)).join("/"),
+      );
       if (!scope || !id) return null;
       return { kind: "page", scope, bucket, id };
     }
@@ -377,6 +386,22 @@ export function parseAuraRef(url: string): AuraRef | null {
  *  odd characters survive the round-trip through `parseAuraRef`. */
 export function workspaceRefUrl(externalId: string): string {
   return `aura://workspace/${encodeURIComponent(externalId)}`;
+}
+
+/** Build the shareable `aura://page/<scope>/<bucket>/<id>` link for a page.
+ *
+ *  The one place this string is spelled on the frontend, matching what
+ *  `cmd_notes.rs` puts in a mention DM. Team pages have no bucket and keep the
+ *  empty middle segment — `parseAuraRef` reads it back, and a link that drops
+ *  it would be a different, shorter shape for the same page. */
+export function pageRefUrl(p: {
+  scope: string;
+  bucket: string;
+  id: string;
+}): string {
+  return `aura://page/${encodeURIComponent(p.scope)}/${encodeURIComponent(
+    p.bucket,
+  )}/${encodeURIComponent(p.id)}`;
 }
 
 /** Find the first aura:// URL in a body, if it's solo enough that we

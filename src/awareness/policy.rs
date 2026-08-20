@@ -24,6 +24,8 @@
 use std::fs;
 use std::path::PathBuf;
 
+use crate::worktree::paths;
+
 use serde::{Deserialize, Serialize};
 
 use super::identity;
@@ -100,20 +102,49 @@ struct PrivacyFile {
     share: Option<String>,
 }
 
+/// The dial is the repository's, so it is stored at the repository's `.aura/`.
+/// Being cwd-relative made it a promise the plane didn't keep: `aura radar
+/// privacy off` written at the root was read as the `Symbols` DEFAULT by any
+/// run whose cwd was a worktree or a subdirectory — so a repo its owner had
+/// deliberately taken dark kept broadcasting from every other checkout. A
+/// privacy setting that silently doesn't apply is worse than one that isn't
+/// offered.
 fn policy_path() -> PathBuf {
-    PathBuf::from(".aura").join("privacy.json")
+    PathBuf::from(paths::shared_aura_path("")).join("privacy.json")
+}
+
+/// The dial written at one file, or `None` when there isn't a readable one.
+fn read_dial(path: &std::path::Path) -> Option<SharePolicy> {
+    let body = fs::read_to_string(path).ok()?;
+    serde_json::from_str::<PrivacyFile>(&body)
+        .ok()?
+        .share
+        .as_deref()
+        .and_then(SharePolicy::parse)
 }
 
 /// Load the repo's policy; missing/unparseable file → the `Symbols` default.
-/// cwd-relative like the rest of the awareness store.
+///
+/// Anchoring the dial moved where it is read from, and moving a privacy setting
+/// is only safe in one direction. Someone who ran `aura radar privacy off`
+/// inside a worktree wrote it there, and reading only the repository root would
+/// have silently handed that checkout the sharing default — anchoring would
+/// have *started* a broadcast its owner had switched off. So the pre-anchoring
+/// location is still read, and the MORE RESTRICTIVE of the two wins. This can
+/// only ever tighten what leaves the machine.
 pub fn load() -> SharePolicy {
-    let Ok(body) = fs::read_to_string(policy_path()) else {
-        return SharePolicy::default();
-    };
-    serde_json::from_str::<PrivacyFile>(&body)
-        .ok()
-        .and_then(|f| f.share.as_deref().and_then(SharePolicy::parse))
-        .unwrap_or_default()
+    let anchored = policy_path();
+    let mut dial = read_dial(&anchored).unwrap_or_default();
+
+    let legacy = PathBuf::from(".aura").join("privacy.json");
+    // In the common case — a command run from the repository root — these are
+    // the same file, and there is nothing to reconcile.
+    if fs::canonicalize(&legacy).ok() != fs::canonicalize(&anchored).ok() {
+        if let Some(old) = read_dial(&legacy) {
+            dial = dial.min(old);
+        }
+    }
+    dial
 }
 
 /// Persist the policy (atomic tmp + rename, like the event store).
@@ -233,6 +264,76 @@ mod tests {
             save(p).expect("save");
             assert_eq!(load(), p);
         }
+    }
+
+    #[test]
+    fn a_repo_taken_dark_is_dark_from_every_directory_in_it() {
+        let _lk = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+        let (_g, d) = enter_tmp();
+        // A checkout is a directory with a `.git` in it; that is all the
+        // repo-root walk needs, and all this test needs to fake.
+        fs::create_dir_all(d.path().join(".git")).expect("git dir");
+        let deep = d.path().join("crates").join("engine");
+        fs::create_dir_all(&deep).expect("subdir");
+
+        save(SharePolicy::Off).expect("save");
+
+        // The dial was cwd-relative, so `aura radar privacy off` at the root
+        // was read as the SYMBOLS DEFAULT by any run standing somewhere else —
+        // a repo its owner had deliberately taken dark kept broadcasting from
+        // every worktree and every subdirectory. A privacy setting that
+        // silently doesn't apply is worse than one that was never offered.
+        std::env::set_current_dir(&deep).expect("cd deep");
+        assert_eq!(load(), SharePolicy::Off);
+        assert!(!load().allows_broadcast());
+        assert!(
+            !deep.join(".aura").exists(),
+            "reading the dial must not mint a second one here"
+        );
+    }
+
+    #[test]
+    fn a_dial_set_before_anchoring_is_still_obeyed_where_it_was_written() {
+        let _lk = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+        let (_g, d) = enter_tmp();
+        fs::create_dir_all(d.path().join(".git")).expect("git dir");
+        let worktreeish = d.path().join("crates").join("engine");
+        fs::create_dir_all(worktreeish.join(".aura")).expect("subdir");
+
+        // The root says the default (nothing written). The old cwd-local file
+        // says dark. Anchoring must not hand this directory the default and
+        // start a broadcast its owner switched off.
+        fs::write(
+            worktreeish.join(".aura").join("privacy.json"),
+            r#"{"share":"off"}"#,
+        )
+        .expect("legacy dial");
+
+        std::env::set_current_dir(&worktreeish).expect("cd");
+        assert_eq!(load(), SharePolicy::Off);
+        assert!(!load().allows_broadcast());
+    }
+
+    #[test]
+    fn the_repos_dial_still_tightens_a_looser_legacy_one() {
+        let _lk = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+        let (_g, d) = enter_tmp();
+        fs::create_dir_all(d.path().join(".git")).expect("git dir");
+        let worktreeish = d.path().join("crates").join("engine");
+        fs::create_dir_all(worktreeish.join(".aura")).expect("subdir");
+
+        save(SharePolicy::IntentOnly).expect("root dial");
+        fs::write(
+            worktreeish.join(".aura").join("privacy.json"),
+            r#"{"share":"diffs"}"#,
+        )
+        .expect("legacy dial");
+
+        // Reconciliation is one-way on purpose: the stricter of the two wins,
+        // whichever file it came from.
+        std::env::set_current_dir(&worktreeish).expect("cd");
+        assert_eq!(load(), SharePolicy::IntentOnly);
+        assert!(!load().allows_code_sync());
     }
 
     #[test]

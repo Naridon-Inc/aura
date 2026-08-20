@@ -95,7 +95,7 @@ export function ToastCloseButton({
       onClick={onDismiss}
       aria-label={label}
       title={title ?? label}
-      className="relative grid size-[22px] shrink-0 place-items-center rounded-full border-none bg-transparent p-0 leading-none text-text-4 transition-colors hover:bg-bg-3 hover:text-text-2 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+      className="relative grid size-[22px] shrink-0 place-items-center rounded-full border-none bg-transparent p-0 leading-none text-text-4 transition-colors hover:bg-state-hover hover:text-text-2 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
     >
       {hasRing && (
         <svg
@@ -154,11 +154,11 @@ export function ToastActionButton({
     <button
       type="button"
       className={cn(
-        "inline-flex h-[26px] items-center whitespace-nowrap rounded-[var(--radius-sm)] px-2.5 text-[11.5px] font-medium transition-colors",
+        "inline-flex h-[26px] items-center whitespace-nowrap rounded-[var(--radius-sm)] px-2.5 text-sm font-medium transition-colors",
         "focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-60",
         variant === "primary"
           ? "border border-transparent bg-accent text-bg-0 hover:opacity-90"
-          : "border border-line bg-transparent text-text-2 hover:bg-bg-3 hover:text-text-1",
+          : "border border-line bg-transparent text-text-2 hover:bg-state-hover hover:text-text-1",
         className,
       )}
       {...props}
@@ -231,10 +231,10 @@ export function ToastCard({
 
       <div className="min-w-0 flex-1">
         {title != null && (
-          <div className="text-[13px] font-semibold leading-[1.35] text-text-1">{title}</div>
+          <div className="text-base font-semibold leading-[1.35] text-text-1">{title}</div>
         )}
         {message != null && (
-          <div className={cn("text-[12.5px] leading-[1.45] text-text-3", title != null && "mt-0.5")}>
+          <div className={cn("text-base leading-[1.45] text-text-3", title != null && "mt-0.5")}>
             {message}
           </div>
         )}

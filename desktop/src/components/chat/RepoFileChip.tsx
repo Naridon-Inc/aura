@@ -9,8 +9,9 @@
 // JSON payload and returns `{text, files}` so the renderer can show the
 // chip alongside the original text.
 
-import { useEffect, useRef, useState } from "react";
+import { useRef, useState } from "react";
 import { FileIcon } from "../FileIcon";
+import { useDismiss } from "../../lib/useDismiss";
 
 // --------------------------------------------------------------------- //
 // types                                                                  //
@@ -155,23 +156,7 @@ export function RepoFileChip({
     : path;
 
   // Close the dropdown on outside click / escape.
-  useEffect(() => {
-    if (!menuOpen) return;
-    function onDoc(e: MouseEvent) {
-      if (menuRef.current && !menuRef.current.contains(e.target as Node)) {
-        setMenuOpen(false);
-      }
-    }
-    function onKey(e: KeyboardEvent) {
-      if (e.key === "Escape") setMenuOpen(false);
-    }
-    document.addEventListener("mousedown", onDoc);
-    document.addEventListener("keydown", onKey);
-    return () => {
-      document.removeEventListener("mousedown", onDoc);
-      document.removeEventListener("keydown", onKey);
-    };
-  }, [menuOpen]);
+  useDismiss(menuOpen, () => setMenuOpen(false), menuRef);
 
   const lineLabel =
     lineStart && lineEnd && lineEnd !== lineStart
@@ -182,7 +167,7 @@ export function RepoFileChip({
 
   return (
     <div
-      className="inline-flex items-center gap-2 px-2 py-1.5 rounded border border-line-soft bg-bg-card hover:bg-bg-hover cursor-pointer group"
+      className="inline-flex items-center gap-2 px-2 py-1.5 rounded border border-line-soft bg-bg-card hover:bg-state-hover cursor-pointer group"
       style={{ maxWidth: 320 }}
       onClick={(e) => {
         // Clicks on the menu trigger shouldn't open the file.
@@ -194,14 +179,14 @@ export function RepoFileChip({
       <FileIcon name={name} size={14} />
       <div className="flex flex-col min-w-0 leading-tight">
         <span
-          className="font-mono font-semibold text-[12px] text-text-1 truncate"
+          className="font-mono font-semibold text-sm text-text-1 truncate"
           style={{ maxWidth: 240 }}
         >
           {name}
         </span>
         {parent && (
           <span
-            className="text-[10.5px] text-text-4 truncate"
+            className="text-xs text-text-4 truncate"
             style={{ maxWidth: 240 }}
           >
             {truncateMiddle(parent, 38)}
@@ -210,7 +195,7 @@ export function RepoFileChip({
       </div>
       {lineLabel && (
         <span
-          className="ml-1 px-1.5 py-0.5 rounded text-[10px] font-semibold tracking-wider"
+          className="ml-1 px-1.5 py-0.5 rounded text-2xs font-semibold tracking-wider"
           style={{
             background:
               "color-mix(in oklab, var(--color-blue) 18%, transparent)",
@@ -245,7 +230,7 @@ export function RepoFileChip({
         </button>
         {menuOpen && (
           <ul
-            className="absolute right-0 top-full mt-1 z-10 min-w-[160px] bg-bg-1 border border-line-soft rounded-lg shadow-[var(--shadow-flyout)] p-1 text-[12px]"
+            className="absolute right-0 top-full mt-1 z-10 min-w-[160px] bg-bg-1 border border-line-soft rounded-lg shadow-[var(--shadow-flyout)] p-1 text-sm"
             role="menu"
           >
             <MenuItem
@@ -303,7 +288,7 @@ function MenuItem({
         type="button"
         role="menuitem"
         onClick={onClick}
-        className={`w-full text-left px-3 py-1.5 hover:bg-bg-hover ${
+        className={`w-full text-left px-3 py-1.5 hover:bg-state-hover ${
           danger ? "text-red" : "text-text-2 hover:text-text-1"
         }`}
         style={

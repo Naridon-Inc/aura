@@ -19,6 +19,7 @@ import {
   api,
   type ChatDoctorReport,
   type ChatMessage,
+  type CloudAuthStatus,
   type CommitEntry,
   type DuplicateSuggestion,
   type IntentRow,
@@ -27,6 +28,14 @@ import {
   type TeamManifest,
   type TeamMember,
 } from "../../../lib/api";
+import { identityBannerKind } from "../../chat/identityChoices";
+import { fetchIntentRows } from "../../../lib/intentCache";
+import {
+  CHAT_FOCUS_EVENT,
+  clearPendingChatRoute,
+  focusChatChannel,
+  takePendingChatRoute,
+} from "../../../lib/chatRoute";
 import { useDocumentVisibility } from "../../../lib/useDocumentVisibility";
 import { roomTokenParam, roomAuthHeaders } from "../../../lib/roomAuth";
 import {
@@ -48,6 +57,7 @@ import { useCallSnapshot } from "../../../lib/callStore";
 import { loadCachedAllForRepo, saveCachedMsgs } from "../../../lib/chatCache";
 import { peekCache, writeCache } from "../../../lib/resourceCache";
 import { publishTeamUnread } from "../../../lib/teamUnread";
+import { isAutomationIdentity } from "../../../lib/agentIdentity";
 // Team (chat) domain layer — pure types + helpers + channel identity +
 // local persistence. Lifted out of this monolith into the bounded
 // context's `team/domain/` tree (DDD: domain / application / presentation),
@@ -78,6 +88,7 @@ import {
   addSelfLink,
   removeSelfLink,
   isLinkedSelf,
+  isHumanBody,
   SELF_LINKS_EVENT,
   type ChannelTab,
   type Conversation,
@@ -85,6 +96,7 @@ import {
   type ReadCursorEntry,
   type SelfKeys,
 } from "../domain";
+import { refreshTeam, fetchIdentity, refreshIdentity } from "../../../lib/teamCache";
 
 // Cap the mention-dedup id set. One id lands per message seen, and the set
 // otherwise only resets on a repo switch — so a long-lived session on a
@@ -367,6 +379,19 @@ export function useTeamChat(repoRoot: string, projectName: string) {
   // dedup test sender membership against this set so a message stamped under
   // any of our historical handle variants (override / roster / email-local-
   // part) or a linked account still files as ours. See domain/identity.ts.
+  // Cloud sign-in state, hoisted above selfKeys because a signed-in Aura
+  // account is one of the identity's "me" sources. The refresh effect that
+  // fills these lives with the sign-in banner further down.
+  const [cloudConnected, setCloudConnected] = useState<boolean | null>(null);
+  const [cloudUser, setCloudUser] = useState<string | null>(null);
+  // The whole sign-in status, not just the two fields above: matching the
+  // account to a roster seat needs its `cloud_url` to derive the account's
+  // no-reply address, and that match is one of the few things that counts
+  // as proof a team identity is actually this user's.
+  const [cloudAccount, setCloudAccount] = useState<CloudAuthStatus | null>(
+    null,
+  );
+
   const selfKeys: SelfKeys = useMemo(
     () =>
       buildSelfKeys({
@@ -377,6 +402,7 @@ export function useTeamChat(repoRoot: string, projectName: string) {
         deviceEmail: myDevice?.email,
         auraAlias,
         accountLogin: identity?.account_login,
+        auraAccount: cloudUser,
         alsoHandles: alsoLinks.handles,
         alsoEmails: alsoLinks.emails,
       }),
@@ -388,6 +414,7 @@ export function useTeamChat(repoRoot: string, projectName: string) {
       myDevice?.email,
       auraAlias,
       identity?.account_login,
+      cloudUser,
       alsoLinks,
     ],
   );
@@ -546,8 +573,8 @@ export function useTeamChat(repoRoot: string, projectName: string) {
     let base: TeamManifest;
     try {
       const [id, man] = await Promise.all([
-        api.teamIdentity(repoRoot),
-        api.teamLoad(repoRoot),
+        fetchIdentity(repoRoot),
+        refreshTeam(repoRoot),
       ]);
       applyIdentity(id);
       base = man;
@@ -666,15 +693,22 @@ export function useTeamChat(repoRoot: string, projectName: string) {
   }, []);
 
   // ── cloud sign-in banner (kept) ───────────────────────────────────
-  const [cloudConnected, setCloudConnected] = useState<boolean | null>(null);
   useEffect(() => {
     let cancelled = false;
     const refresh = async () => {
       try {
         const s = await api.cloudAuthStatus();
-        if (!cancelled) setCloudConnected(s.connected);
+        if (!cancelled) {
+          setCloudConnected(s.connected);
+          setCloudUser(s.connected ? s.user ?? null : null);
+          setCloudAccount(s.connected ? s : null);
+        }
       } catch {
-        if (!cancelled) setCloudConnected(false);
+        if (!cancelled) {
+          setCloudConnected(false);
+          setCloudUser(null);
+          setCloudAccount(null);
+        }
       }
     };
     refresh();
@@ -730,19 +764,27 @@ export function useTeamChat(repoRoot: string, projectName: string) {
     promptedReposRef.current.delete(repoRoot);
   }, [repoRoot]);
 
-  /** True when the inline banner should show: local git email isn't on
-   *  the roster AND no per-repo override is currently active. The
-   *  banner stays parked above the rail until the user picks something. */
-  const identityBannerVisible = useMemo(() => {
-    if (!doctorReport) return false;
-    if (doctorReport.roster_email_match === true) return false;
-    if (doctorReport.identity_override_active === true) return false;
-    // Need either an alias candidate OR a claimed roster member to
-    // offer in the picker — otherwise the banner has nothing to do.
-    const hasCanonical = Boolean(doctorReport.canonical_handle);
-    const hasClaimed = (manifest?.members ?? []).some((m) => m.claimed);
-    return hasCanonical || hasClaimed;
-  }, [doctorReport, manifest]);
+  /** What the identity notice should offer, or `null` for "nothing the
+   *  user can legitimately act on".
+   *
+   *  This used to raise the banner whenever ANY roster member was
+   *  `claimed`. The roster is committed into the repo and rebuilt from
+   *  `git log`, so a claimed member is present on every clone — including
+   *  one made by somebody with no connection to that team. That turned
+   *  "somebody, somewhere, claimed a seat" into a prompt telling a
+   *  stranger their identity needed attention, and then offered them
+   *  that person's name. The gate now asks whether THIS machine has
+   *  evidence of an identity of its own to switch to, or no git identity
+   *  at all — the two cases where there is something real to do. */
+  const identityBannerKindValue = useMemo(() => {
+    if (!doctorReport) return null;
+    return identityBannerKind({
+      report: doctorReport,
+      manifest,
+      account: cloudAccount,
+    });
+  }, [doctorReport, manifest, cloudAccount]);
+  const identityBannerVisible = identityBannerKindValue !== null;
 
   // ── built-in / custom channel split ───────────────────────────────
   const builtins = useMemo<Conversation[]>(() => {
@@ -858,6 +900,7 @@ export function useTeamChat(repoRoot: string, projectName: string) {
           // empty. Normalize once here; everything downstream inherits it.
           id: `dm:${norm(selfHandle)}`,
           name: "Me",
+          handle: selfHandle,
           kind: "dm",
           channel: `dm-self-${selfHandle}`,
           hint: "personal notes",
@@ -866,6 +909,12 @@ export function useTeamChat(repoRoot: string, projectName: string) {
       : null;
     const others = members
       .filter((m) => m.handle && m.handle !== selfHandle)
+      // A DM goes to a person. Aura's own agent commits as ai@aura.vcs and the
+      // checkpointer as checkpointer@noreply, so both arrived here off the git
+      // roster and sat in "Direct Messages" as people you could write to —
+      // nothing reads those rooms. Agents have their own surfaces: the #aura
+      // channel, the sentinel inbox, and the chat beside their terminal.
+      .filter((m) => !isAutomationIdentity(m.name, m.email))
       // Drop the user's OWN linked seats — a second GitHub login etc. reads
       // as "me", so it belongs under the self note, not as a separate DM
       // target. The seat still exists in the roster; it's just not a peer.
@@ -882,12 +931,18 @@ export function useTeamChat(repoRoot: string, projectName: string) {
           ),
       )
       .map(
+        // Lead with the person's name and keep the handle as the hint. It used
+        // to be the other way round, so the DM list read as a column of git
+        // logins — `mhdashiquek`, `mo`, `dev` — and you had to know which login
+        // belonged to which colleague to find anyone. The handle still shows,
+        // one line down, which is also what tells two same-named seats apart.
         (m): Conversation => ({
           id: `dm:${norm(m.handle)}`,
-          name: m.handle,
+          name: m.name?.trim() || m.handle,
+          handle: m.handle,
           kind: "dm",
           channel: dmChannel(selfHandle, m.handle),
-          hint: m.name || "",
+          hint: m.name?.trim() ? m.handle : "",
           lastTs: m.last_seen || undefined,
         }),
       );
@@ -908,7 +963,7 @@ export function useTeamChat(repoRoot: string, projectName: string) {
     // never-blank rule the roster helpers follow.
     let failed = false;
     Promise.all([
-      api.auraIntentRecent(repoRoot, 200).catch(() => {
+      fetchIntentRows(repoRoot, 200).catch(() => {
         failed = true;
         return [] as IntentRow[];
       }),
@@ -1631,10 +1686,23 @@ export function useTeamChat(repoRoot: string, projectName: string) {
         : `ch:${ch}`;
       setActiveId(convId);
       setActiveThread(null);
+      // Handled live, so nothing is left parked to re-fire on the next mount.
+      clearPendingChatRoute();
     }
-    window.addEventListener("aura:focus-chat-channel", onFocus);
-    return () => window.removeEventListener("aura:focus-chat-channel", onFocus);
+    window.addEventListener(CHAT_FOCUS_EVENT, onFocus);
+    return () => window.removeEventListener(CHAT_FOCUS_EVENT, onFocus);
   }, [selfHandle]);
+
+  // ── a destination parked before this surface existed ──
+  // A tapped chat notification asks for the Team place and dispatches the
+  // focus event in the same breath. When Team was closed, that event lands a
+  // render before the listener above exists — so the destination waits in
+  // `chatRoute` and is collected here, on the mount it was waiting for.
+  // Declared after the listener so the re-dispatch has something to hear.
+  useEffect(() => {
+    const channel = takePendingChatRoute(repoRoot);
+    if (channel) focusChatChannel(channel);
+  }, [repoRoot]);
 
   // ── open-DM-by-handle (auto-DM deep-links + page/task mentions) ──
   // A clicked @person dispatches `aura:open-dm` with a bare handle; App flips
@@ -1656,15 +1724,34 @@ export function useTeamChat(repoRoot: string, projectName: string) {
     const decorate = (c: Conversation): Conversation => {
       const list = msgs[c.id];
       const last = list?.[list.length - 1];
+      // The rail preview is "what was last said here", so it walks back past
+      // sync envelopes to the last thing a person actually wrote — otherwise
+      // a channel's one-line preview was a fragment of raw JSON. If there is
+      // nothing human in the channel at all it stays undefined and the rail
+      // falls back to the conversation's hint. `lastTs` deliberately still
+      // tracks the raw tail so recency ordering is unchanged.
+      let lastHuman: Msg | undefined;
+      for (let i = (list?.length ?? 0) - 1; i >= 0; i--) {
+        const m = list![i];
+        if (isHumanBody(m.body)) {
+          lastHuman = m;
+          break;
+        }
+      }
       const lr = lastRead[c.id] ?? 0;
-      const fresh = list ? list.filter((m) => m.ts > lr && !m.fromMe) : [];
+      // Sync envelopes don't make a channel unread. They arrive constantly and
+      // the stream doesn't render them, so counting them meant a badge saying
+      // "3" over a channel that opens with nothing new in it.
+      const fresh = list
+        ? list.filter((m) => m.ts > lr && !m.fromMe && isHumanBody(m.body))
+        : [];
       const unread = fresh.length;
       const mentionUnread = selfHandle
         ? fresh.filter((m) => m.mentions?.includes(selfHandle)).length
         : 0;
       return {
         ...c,
-        lastBody: last?.body,
+        lastBody: lastHuman?.body,
         lastTs: last?.ts ?? c.lastTs,
         unread,
         mentionUnread,
@@ -1672,9 +1759,18 @@ export function useTeamChat(repoRoot: string, projectName: string) {
     };
     return [projectConv, ...builtins, ...customs, ...peers]
       .map(decorate)
-      .filter(
-        (c) => !search.trim() || c.name.toLowerCase().includes(search.toLowerCase()),
-      );
+      // Search matches the handle too. A DM row is titled with the person's
+      // name now, so handle-only matching would have hidden colleagues people
+      // still think of by their git login — and name-only would hide them from
+      // anyone who types the login.
+      .filter((c) => {
+        const q = search.trim().toLowerCase();
+        if (!q) return true;
+        return (
+          c.name.toLowerCase().includes(q) ||
+          (c.handle ?? "").toLowerCase().includes(q)
+        );
+      });
   }, [projectConv, builtins, customs, peers, msgs, search, lastRead, selfHandle]);
 
   // Publish the total unread count for the sidebar's Team segment badge.
@@ -1688,7 +1784,7 @@ export function useTeamChat(repoRoot: string, projectName: string) {
       if (!list || list.length === 0) continue;
       const lr = lastRead[c.id] ?? 0;
       for (const m of list) {
-        if (m.ts > lr && !m.fromMe) total += 1;
+        if (m.ts > lr && !m.fromMe && isHumanBody(m.body)) total += 1;
       }
     }
     publishTeamUnread({ total });
@@ -2017,7 +2113,7 @@ export function useTeamChat(repoRoot: string, projectName: string) {
     try {
       const m = await api.teamClaim(repoRoot);
       applyManifest(m);
-      const id = await api.teamIdentity(repoRoot);
+      const id = await refreshIdentity(repoRoot);
       applyIdentity(id);
     } catch (e) {
       console.warn("claim failed", e);
@@ -2084,8 +2180,16 @@ export function useTeamChat(repoRoot: string, projectName: string) {
   const activePinnedSet = active ? pinnedByConv[active.id] : undefined;
   const activeMsgsRaw = active ? msgs[active.id] ?? NO_MSGS : NO_MSGS;
   const activeMsgs = useMemo(() => {
-    if (!activePinnedSet || activePinnedSet.size === 0) return activeMsgsRaw;
-    return activeMsgsRaw.map((m) =>
+    // The sync layers post their envelopes into the same channels people
+    // talk in, so the stream carries both. An envelope has nothing in it to
+    // read — it rendered as a wall of `{"v":1,"op":"upsert",…}` under a
+    // teammate's name — and it should not count as a thread or earn its
+    // author a roster seat either, both of which are derived from here.
+    // `activeMsgsRaw` is still returned below for anything that wants the
+    // unfiltered stream.
+    const human = activeMsgsRaw.filter((m) => isHumanBody(m.body));
+    if (!activePinnedSet || activePinnedSet.size === 0) return human;
+    return human.map((m) =>
       activePinnedSet.has(m.id) ? { ...m, pinned: true } : m,
     );
   }, [activeMsgsRaw, activePinnedSet]);
@@ -2207,6 +2311,7 @@ export function useTeamChat(repoRoot: string, projectName: string) {
       setActiveThread,
       channelTab,
       setChannelTab,
+      cloudAccount,
       cloudConnected,
       setCloudConnected,
       creatingChannel,
@@ -2268,6 +2373,7 @@ export function useTeamChat(repoRoot: string, projectName: string) {
       emittedCursorRef,
       fetchActive,
       firstChatPoll,
+      identityBannerKind: identityBannerKindValue,
       identityBannerVisible,
       lastReadActive,
       loadChatChannel,
@@ -2320,6 +2426,7 @@ export function useTeamChat(repoRoot: string, projectName: string) {
       setActiveThread,
       channelTab,
       setChannelTab,
+      cloudAccount,
       cloudConnected,
       setCloudConnected,
       creatingChannel,
@@ -2381,6 +2488,7 @@ export function useTeamChat(repoRoot: string, projectName: string) {
       emittedCursorRef,
       fetchActive,
       firstChatPoll,
+      identityBannerKindValue,
       identityBannerVisible,
       lastReadActive,
       loadChatChannel,

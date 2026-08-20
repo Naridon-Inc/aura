@@ -36,7 +36,15 @@
 // Cycles (which shouldn't happen, but a hand-edited graph could create one) are
 // broken by treating the back-edge as depth 0 rather than looping forever.
 
-import type { LoopTask, ReadyViewDto } from "../../../lib/api";
+import type { LoopTask, ReadyViewDto, TaskStep } from "../../../lib/api";
+import { currentStepStory } from "../../../lib/taskSteps";
+import { crewOf } from "./crewControl";
+
+/** Board-plan steps keyed by `board_task_id` — the join that lets a working
+ *  node say what it is actually on ("Step 3 of 7 — wire the picker") instead of
+ *  the generic "an agent is building this now". Empty map ⇒ every node falls
+ *  back to the generic sentence, so this stays optional end to end. */
+export type BoardStepsByTaskId = ReadonlyMap<string, TaskStep[]>;
 
 export type CrewNodeStatus =
   | "ready"
@@ -160,9 +168,9 @@ export type CrewObjective = {
  *  Collapsed, a cluster is just its header (and emits NO task nodes); expanded,
  *  its children grid sits inside the box and the box grows to hold them. */
 export type CrewCluster = {
-  /** Stable key: `epic:<parentId>` | `sprint:<slug>` | `unsorted`. */
+  /** Stable key: `epic:<parentId>` | `sprint:<slug>` | `crew:<slug>` | `unsorted`. */
   id: string;
-  kind: "epic" | "sprint" | "unsorted";
+  kind: "epic" | "sprint" | "crew" | "unsorted";
   title: string;
   x: number;
   y: number;
@@ -294,7 +302,7 @@ const WAVE_ORDER: Record<string, number> = {
   h: 7,
 };
 
-type Labeled = { task: LoopTask; status: CrewNodeStatus };
+export type Labeled = { task: LoopTask; status: CrewNodeStatus };
 
 /** One short line of the task's own words — collapsed whitespace, clipped. */
 function snippet(s: string, max = 52): string {
@@ -306,15 +314,26 @@ function snippet(s: string, max = 52): string {
 /** The plain-language STORY a card tells under its title. It EVOLVES with the
  *  task: what an agent is doing now, what it's waiting on (named, not an id),
  *  what it delivered, or — at the head of a flow — what it actually builds. */
-function storyFor(
+export function storyFor(
   l: Labeled,
   byId: Map<string, Labeled>,
   isRoot: boolean,
+  boardSteps?: BoardStepsByTaskId,
 ): string {
   const { task, status } = l;
-  if (status === "working") return "An agent is building this now";
+  if (status === "working") {
+    // Say what's actually happening, from the board row's plan, when this node
+    // is joined to one. Falls back to the generic sentence only when there is
+    // no plan to report — a working node with no board task, or a plan that's
+    // been fully ticked.
+    const steps = task.board_task_id
+      ? boardSteps?.get(task.board_task_id)
+      : undefined;
+    const story = steps ? currentStepStory({ steps }) : null;
+    return story ?? "An agent is building this now";
+  }
   const what = snippet(task.input);
-  if (status === "done") return what ? `Built — ${what}` : "Built and committed";
+  if (status === "done") return what ? `Built · ${what}` : "Built and committed";
   const deps = (task.depends_on ?? [])
     .map((id) => byId.get(id))
     .filter((d): d is Labeled => !!d);
@@ -324,7 +343,7 @@ function storyFor(
     const more = deps.length > 1 ? ` +${deps.length - 1} more` : "";
     if (status === "blocked" || unmet.length > 0)
       return `Waiting on ${ref}${more}`;
-    return `Clear to start — ${ref} landed`;
+    return `Clear to start. ${ref} landed`;
   }
   if (what) return what;
   return isRoot ? "Starts the whole flow" : "Ready to start";
@@ -632,6 +651,9 @@ export function computeCrewGraphLayout(
   /** Which un-ordered work-group sections are open. A collapsed cluster shows
    *  only its header band and emits no task nodes. */
   expanded: ReadonlySet<string> = new Set(),
+  /** Board-plan steps keyed by `board_task_id`, so a working node tells its
+   *  real step. Optional — omit and every node uses the generic sentence. */
+  boardSteps?: BoardStepsByTaskId,
 ): CrewGraphLayout {
   const labeled = flatten(view);
 
@@ -1034,7 +1056,7 @@ export function computeCrewGraphLayout(
         free: false,
         regionId: r.id,
         clusterId: null,
-        story: storyFor(m, byId, off.col === 0),
+        story: storyFor(m, byId, off.col === 0, boardSteps),
         assignee: m.task.assignee?.trim() || null,
         waitingCount: waitingCount.get(m.task.id) ?? 0,
         unblockCount: unblockCount.get(m.task.id) ?? 0,
@@ -1055,7 +1077,7 @@ export function computeCrewGraphLayout(
     const rb = regionKeyOf(e.to);
     if (!ra || !rb || ra === rb) continue;
     if (!regionKeySet.has(ra) || !regionKeySet.has(rb)) continue;
-    const k = `${ra} ${rb}`;
+    const k = `${ra}\u0000${rb}`;
     if (seenRegionEdge.has(k)) continue;
     seenRegionEdge.add(k);
     regionEdges.push({ from: ra, to: rb });
@@ -1109,6 +1131,15 @@ export function computeCrewGraphLayout(
       bucket(`sprint:${sprint.toLowerCase()}`, "sprint", `Sprint ${sprint}`, l);
       continue;
     }
+    // A task that belongs to a named crew groups under that crew rather than
+    // the Unsorted pile — the fix for a crew-filed task landing "loose". The
+    // default "main" crew is not a home (it's just "no crew set"), so those
+    // still fall through to Unsorted.
+    const crew = crewOf(l.task);
+    if (crew !== "main") {
+      bucket(`crew:${crew}`, "crew", `${crew} crew`, l);
+      continue;
+    }
     bucket("unsorted", "unsorted", "Unsorted", l);
   }
 
@@ -1116,7 +1147,8 @@ export function computeCrewGraphLayout(
   const kindRank: Record<CrewCluster["kind"], number> = {
     epic: 0,
     sprint: 1,
-    unsorted: 2,
+    crew: 2,
+    unsorted: 3,
   };
   accums.sort(
     (a, b) =>
@@ -1161,7 +1193,7 @@ export function computeCrewGraphLayout(
           free: true,
           regionId: null,
           clusterId: acc.id,
-          story: storyFor(l, byId, false),
+          story: storyFor(l, byId, false, boardSteps),
           assignee: l.task.assignee?.trim() || null,
           waitingCount: waitingCount.get(l.task.id) ?? 0,
           unblockCount: unblockCount.get(l.task.id) ?? 0,

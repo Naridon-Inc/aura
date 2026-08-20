@@ -30,6 +30,8 @@ import { AgentIcon } from "../agent/AgentIcon";
 import { BrainSwitcherModal } from "./BrainSwitcherModal";
 import { ChipButton } from "../ui/chip";
 import { AsciiSpinner } from "../ui/ascii-spinner";
+import { useDismiss } from "../../lib/useDismiss";
+import { toast } from "../../lib/toast";
 
 type Props = {
   /** Session whose next turn the chosen model runs through. */
@@ -225,46 +227,47 @@ export function BrainPicker({
       onModelChange(brain && model ? toSelectedModel(brain, model) : null);
     } catch (e) {
       // Surface the failure but keep the prior selection — don't lift a
-      // choice the backend rejected.
-      setLoadError(e instanceof Error ? e.message : String(e));
+      // choice the backend rejected. Via a toast, not `loadError`: both of
+      // that state's render sites are inside `{open && …}` and we closed the
+      // picker on the line above, so writing it there showed the user
+      // nothing at all — the picker just shut as if the switch had worked.
+      const detail = e instanceof Error ? e.message : String(e);
+      setLoadError(detail);
+      toast.danger(
+        `Couldn't switch to ${brain?.label ?? "that brain"}`,
+        `${detail}. Still on the previous one.`,
+      );
     }
   }
 
-  // Click-outside / Esc closes; digit 1-9 picks the hotkeyed row. Only for the
-  // inline dropdown — the modal variant is portaled outside rootRef and owns
-  // its own Esc + backdrop-close, so this would mis-fire on it.
+  // Inline dropdown only — the modal variant is portaled outside rootRef and
+  // owns its own Esc + backdrop-close, so this would mis-fire on it.
+  useDismiss(open && variant !== "modal", () => setOpen(false), rootRef);
+
+  // Digit 1-9 picks the hotkeyed row. Inline dropdown only — the modal
+  // variant owns its own keys.
   useEffect(() => {
     if (!open || variant === "modal") return;
-    function onDoc(e: MouseEvent) {
-      const t = e.target as Node | null;
-      if (rootRef.current && t && !rootRef.current.contains(t)) setOpen(false);
-    }
     function onKey(e: globalThis.KeyboardEvent) {
-      if (e.key === "Escape") {
-        setOpen(false);
-        return;
-      }
-      if (e.key >= "1" && e.key <= "9") {
-        const n = Number(e.key);
-        const row = flatRows.find((r) => r.hotkey === n);
-        if (row) {
-          e.preventDefault();
-          void pick(row.brain, row.model);
-        }
+      if (e.key < "1" || e.key > "9") return;
+      const row = flatRows.find((r) => r.hotkey === Number(e.key));
+      if (row) {
+        e.preventDefault();
+        void pick(row.brain, row.model);
       }
     }
-    document.addEventListener("mousedown", onDoc);
     document.addEventListener("keydown", onKey);
-    return () => {
-      document.removeEventListener("mousedown", onDoc);
-      document.removeEventListener("keydown", onKey);
-    };
+    return () => document.removeEventListener("keydown", onKey);
     // `pick` is stable enough for this menu's lifetime; flatRows covers the
     // data the handler reads.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [open, flatRows]);
+  }, [open, variant, flatRows]);
 
-  const chipLabel = value ? value.label : "Auto";
+  // Nothing pinned? Say which brain the turn runs on, not "Auto" — the word
+  // was doing four jobs on this one screen (mode chip, reasoning depth, this
+  // chip, the routing default) and telling you nothing in any of them. The
+  // brain's name is the answer to the question the chip is asked.
+  const chipLabel = value ? value.label : (activeChoice?.label ?? "Default");
 
   return (
     <div className="relative" ref={rootRef} data-tour="brain">
@@ -274,7 +277,7 @@ export function BrainPicker({
         title={
           value
             ? `Next turn: ${value.label}`
-            : `Next turn runs through the active brain${activeChoice ? ` (${activeChoice.label})` : ""} on its default model`
+            : `Next turn runs on ${activeChoice ? activeChoice.label : "the active brain"} and its own model. You haven't pinned one`
         }
         // A picked model lights up with the app accent (chip-on), same as the
         // Effort / Approvals / Mode chips beside it — one selected-state
@@ -287,6 +290,8 @@ export function BrainPicker({
           // selection wears the Claude mark even under "Aura Pro", matching
           // the model ROWS (Conductor brands by who makes the model).
           <AgentIcon agentId={modelBrandId(value.family, value.brainId)} size={14} />
+        ) : activeChoice ? (
+          <AgentIcon agentId={activeChoice.id} size={14} />
         ) : (
           <svg className="ico-12"><use href="#i-sparkles" /></svg>
         )}
@@ -317,30 +322,31 @@ export function BrainPicker({
             border: "1px solid var(--color-line-soft)",
           }}
         >
-          {/* Auto — follow the active brain on its default model. */}
+          {/* Follow the active brain on its default model — the row the chip
+              falls back to when nothing is pinned. */}
           <button
             type="button"
             onClick={() => void pick(null, null)}
-            className={`w-full flex items-center gap-2 px-2.5 py-1.5 text-left text-[12px] hover:bg-bg-2 transition-colors ${
+            className={`w-full flex items-center gap-2 px-2.5 py-1.5 text-left text-sm hover:bg-state-hover transition-colors ${
               value == null ? "text-text-1" : "text-text-2"
             }`}
           >
             <svg className="ico-12 text-text-4"><use href="#i-sparkles" /></svg>
-            <span className="font-medium">Auto</span>
-            <span className="text-[10.5px] text-text-4">
-              follow active brain{activeChoice ? ` · ${activeChoice.label}` : ""}
+            <span className="font-medium">Follow the active brain</span>
+            <span className="text-xs text-text-4">
+              {activeChoice ? activeChoice.label : "whichever brain is active"}
             </span>
-            {value == null && <span className="ml-auto text-accent text-[12px]">✓</span>}
+            {value == null && <span className="ml-auto text-accent text-sm">✓</span>}
           </button>
 
           {loading && brains.length === 0 && (
-            <div className="flex items-center gap-1.5 px-2.5 py-1.5 text-[11px] text-text-4">
+            <div className="flex items-center gap-1.5 px-2.5 py-1.5 text-xs text-text-4">
               <AsciiSpinner />
               Loading models…
             </div>
           )}
           {loadError && (
-            <div className="px-2.5 py-1.5 text-[11px] text-red">{loadError}</div>
+            <div className="px-2.5 py-1.5 text-xs text-red">{loadError}</div>
           )}
 
           {/* Favorites — pinned across agents. Stars persist; a row whose
@@ -425,11 +431,11 @@ export function BrainPicker({
                   new CustomEvent("aura:open-settings", { detail: { pane: "modes" } }),
                 );
               }}
-              className="w-full flex items-center gap-2 px-2.5 py-1.5 text-left text-[12px] text-text-2 hover:bg-bg-2 transition-colors"
+              className="w-full flex items-center gap-2 px-2.5 py-1.5 text-left text-sm text-text-2 hover:bg-state-hover transition-colors"
             >
               <svg className="ico-12 text-text-4"><use href="#i-stack" /></svg>
               <span className="font-medium">Browse Modes…</span>
-              <span className="text-[10.5px] text-text-4">install skill packs</span>
+              <span className="text-xs text-text-4">install skill packs</span>
               <svg className="ico-12 ml-auto text-text-4"><use href="#i-up-right" /></svg>
             </button>
           </div>
@@ -473,19 +479,17 @@ function GroupHeader({
           aria-hidden
         />
       )}
-      <span className="text-[10.5px] font-semibold uppercase tracking-wide text-text-3">
-        {label}
-      </span>
+      <span className="text-xs font-medium text-text-3">{label}</span>
       {active && (
-        <span className="text-[9.5px] text-accent" title="The globally-active brain">
+        <span className="text-2xs text-accent" title="The globally-active brain">
           active
         </span>
       )}
       {missingKey ? (
         <button
           type="button"
-          className="ml-auto text-[9.5px] font-medium text-accent transition-opacity hover:opacity-80"
-          title={`${label} needs an API key to run — add one in Settings → Brains`}
+          className="ml-auto text-2xs font-medium text-accent transition-opacity hover:opacity-80"
+          title={`${label} needs an API key to run. Add one in Settings → Brains`}
           onClick={(e) => {
             e.stopPropagation();
             window.dispatchEvent(
@@ -542,10 +546,10 @@ function ModelRow({
   const brandName = modelBrandName(family, model);
   return (
     <div
-      className={`group/row w-full flex items-center gap-2 px-2.5 py-1.5 text-[12px] transition-colors ${
+      className={`group/row w-full flex items-center gap-2 px-2.5 py-1.5 text-sm transition-colors ${
         unusable
           ? "opacity-50 cursor-not-allowed"
-          : "cursor-pointer hover:bg-bg-2"
+          : "cursor-pointer hover:bg-state-hover"
       } ${selected ? "text-text-1" : "text-text-2"}`}
       title={unusable ? "Add this brain's API key in Settings → Brains to use it" : undefined}
       onClick={unusable ? undefined : onPick}
@@ -555,13 +559,13 @@ function ModelRow({
           "Opus 4.8") — names who makes the model without a bulky row. */}
       <span className="min-w-0 flex flex-col leading-tight">
         {brandName && (
-          <span className="text-[9.5px] text-text-4 truncate">{brandName}</span>
+          <span className="text-2xs text-text-4 truncate">{brandName}</span>
         )}
         <span className="font-medium truncate">{model.label}</span>
       </span>
       {model.isNew && (
         <span
-          className="text-[8.5px] font-semibold uppercase tracking-wide px-1 py-px rounded"
+          className="text-2xs font-medium px-1 py-px rounded"
           style={{
             color: "var(--color-accent)",
             background: "color-mix(in srgb, var(--color-accent) 16%, transparent)",
@@ -584,9 +588,9 @@ function ModelRow({
         <svg className="ico-12"><use href={favorited ? "#i-star-fill" : "#i-star"} /></svg>
       </button>
       {selected ? (
-        <span className="text-accent text-[12px] w-4 text-center">✓</span>
+        <span className="text-accent text-sm w-4 text-center">✓</span>
       ) : (
-        <span className="text-[10px] text-text-4 w-4 text-center tabular-nums">
+        <span className="text-2xs text-text-4 w-4 text-center tabular-nums">
           {hotkey ?? ""}
         </span>
       )}

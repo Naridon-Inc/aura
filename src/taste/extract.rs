@@ -212,14 +212,21 @@ fn formatting_indent(before: &str, after: &str, scope: &Scope) -> Vec<Hit> {
     }
     let added = added_lines(before, after);
 
-    // Collect every distinct non-zero space-indent width from the
-    // added lines. The dominant indent unit is the GCD of these
-    // widths — a 2-space project nesting 4 levels deep produces
-    // widths {2,4,6,8,10}; GCD = 2. A 4-space project produces
-    // {4,8,12,16}; GCD = 4. Naïve "count modulo 4" is wrong because
-    // 8 is divisible by 4 and pulls a 2-space file into the 4-space
-    // bucket.
-    let mut widths: std::collections::BTreeSet<u32> = std::collections::BTreeSet::new();
+    // Collect every non-zero space-indent width from the added lines, and how
+    // many lines use it. The dominant indent unit is the GCD of these widths —
+    // a 2-space project nesting 4 levels deep produces widths {2,4,6,8,10};
+    // GCD = 2. A 4-space project produces {4,8,12,16}; GCD = 4. Naïve "count
+    // modulo 4" is wrong because 8 is divisible by 4 and pulls a 2-space file
+    // into the 4-space bucket.
+    //
+    // The counts are what keep that GCD honest. A line wrapped and aligned to
+    // an open delimiter — rustfmt does this constantly — lands on an arbitrary
+    // width like 13, and a GCD taken over the distinct widths alone lets that
+    // one line outvote three hundred conforming ones: gcd(4, 13) is 1, and a
+    // file indented entirely with four spaces gets reported as 1-space. Weigh
+    // each width by how many lines actually use it and the long tail stops
+    // deciding the answer.
+    let mut widths: std::collections::BTreeMap<u32, u32> = std::collections::BTreeMap::new();
     let mut tabs = 0u32;
     let mut space_lines = 0u32;
     for line in &added {
@@ -235,7 +242,7 @@ fn formatting_indent(before: &str, after: &str, scope: &Scope) -> Vec<Hit> {
             tabs += 1;
         } else {
             space_lines += 1;
-            widths.insert(leading.len() as u32);
+            *widths.entry(leading.len() as u32).or_insert(0) += 1;
         }
     }
     if tabs + space_lines < 4 {
@@ -246,8 +253,22 @@ fn formatting_indent(before: &str, after: &str, scope: &Scope) -> Vec<Hit> {
     } else if widths.is_empty() {
         return vec![];
     } else {
+        // A width earns a vote by being used. Anything rarer than one line in
+        // twenty is alignment, not indentation — unless that leaves nothing,
+        // which is a diff too small to have a tail worth trimming.
+        let floor = std::cmp::max(2, space_lines / 20);
+        let structural: Vec<u32> = widths
+            .iter()
+            .filter(|(_, seen)| **seen >= floor)
+            .map(|(w, _)| *w)
+            .collect();
+        let considered = if structural.is_empty() {
+            widths.keys().copied().collect::<Vec<u32>>()
+        } else {
+            structural
+        };
         let mut g = 0u32;
-        for w in &widths {
+        for w in &considered {
             g = gcd(g, *w);
         }
         match g {
@@ -263,7 +284,7 @@ fn formatting_indent(before: &str, after: &str, scope: &Scope) -> Vec<Hit> {
             "dominant": dominant,
             "tabs": tabs,
             "space_lines": space_lines,
-            "widths": widths.iter().copied().collect::<Vec<u32>>(),
+            "widths": widths.keys().copied().collect::<Vec<u32>>(),
         }),
     }]
 }
@@ -283,4 +304,69 @@ fn added_lines<'a>(before: &str, after: &'a str) -> Vec<&'a str> {
     use std::collections::HashSet;
     let before_set: HashSet<&str> = before.lines().collect();
     after.lines().filter(|l| !before_set.contains(l)).collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn rust_scope() -> Scope {
+        Scope {
+            file_path: "src/lib.rs".into(),
+            language: "rust".into(),
+            layer: String::new(),
+        }
+    }
+
+    fn dominant(after: &str) -> String {
+        let hits = formatting_indent("", after, &rust_scope());
+        hits.first()
+            .and_then(|h| h.detail.get("dominant").and_then(|d| d.as_str()))
+            .unwrap_or("")
+            .to_string()
+    }
+
+    /// The regression. rustfmt wraps a long call and aligns the continuation to
+    /// the open delimiter, which lands on an arbitrary width. Taken as a set of
+    /// distinct widths, `gcd(4, 8, 13)` is 1, so a file indented entirely with
+    /// four spaces was reported as 1-space-indented — and every real four-space
+    /// file on the branch came back as a violation.
+    #[test]
+    fn one_aligned_continuation_does_not_decide_the_indent() {
+        let mut src = String::new();
+        for _ in 0..40 {
+            src.push_str("    let a = 1;\n");
+            src.push_str("        let b = 2;\n");
+        }
+        src.push_str("             aligned_to_the_paren,\n");
+        assert_eq!(dominant(&src), "4");
+    }
+
+    /// The tail is only noise when there is a body to compare it against. A
+    /// handful of added lines has no distribution to speak of, so every width
+    /// still counts.
+    #[test]
+    fn a_small_diff_keeps_every_width() {
+        let src = "  a\n    b\n      c\n        d\n";
+        assert_eq!(dominant(src), "2");
+    }
+
+    /// Two-space projects must not get rounded up. Every 4 is also a 2, so the
+    /// GCD — not a modulo test — is what keeps these apart.
+    #[test]
+    fn a_two_space_project_stays_two_space() {
+        let mut src = String::new();
+        for _ in 0..40 {
+            src.push_str("  a\n");
+            src.push_str("    b\n");
+            src.push_str("      c\n");
+        }
+        assert_eq!(dominant(&src), "2");
+    }
+
+    #[test]
+    fn tabs_win_when_they_lead() {
+        let src = "\ta\n\tb\n\tc\n\td\n    e\n";
+        assert_eq!(dominant(src), "tab");
+    }
 }

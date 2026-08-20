@@ -5,16 +5,19 @@
 
 import { memo, useEffect, useMemo, useRef, useState } from "react";
 import { onExternalAnchorClick } from "../../../lib/openExternal";
+import { clockTime } from "../../../lib/clockTime";
 import {
   Bookmark,
+  Check,
+  Copy,
   MessageSquareReply,
-  MoreHorizontal,
   Pin as PinLucide,
   SmilePlus,
 } from "lucide-react";
 import { type TeamMember } from "../../../lib/api";
 import { ChatMarkdown } from "../../chat/ChatMarkdown";
 import { PICKER_EMOJIS, reactionsStore } from "../../../lib/reactionsStore";
+import { useCopyToClipboard } from "../../../lib/useCopyToClipboard";
 import { AttachmentList, parseAttachments } from "../../chat/FileAttachment";
 import { RepoFileChip, parseRepoFiles } from "../../chat/RepoFileChip";
 import { AuraRefUnfurl, RelayCardView } from "../../chat/AuraRefCard";
@@ -24,7 +27,16 @@ import { hhmm, isSelfSender, norm, type Msg, type ReadCursorEntry, type SelfKeys
 import { MiniAvatar } from "./MiniAvatar";
 import { Avatar } from "./Avatar";
 import { ActivityRow } from "./ActivityRow";
-import { isSystemNotice, pickSoloLink, relativeTime, useUniqueAuthors } from "./messageHelpers";
+import {
+  findMember,
+  isSystemNotice,
+  pickSoloLink,
+  relativeTime,
+  senderLabel,
+  useUniqueAuthors,
+} from "./messageHelpers";
+import { useDismiss } from "../../../lib/useDismiss";
+import { truncate } from "../../../lib/truncate";
 
 // ── message bubble ───────────────────────────────────────────────────
 
@@ -139,7 +151,7 @@ function BubbleImpl({
       <button
         type="button"
         onClick={onReply}
-        className="mt-1 inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full bg-bg-2 border border-line-soft text-text-3 hover:text-text-1 hover:border-line text-[10.5px]"
+        className="mt-1 inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full bg-bg-2 border border-line-soft text-text-3 hover:text-text-1 hover:border-line text-xs"
         title="Open thread"
       >
         <span className="flex -space-x-1">
@@ -190,6 +202,7 @@ function BubbleImpl({
   const hoverActions = (
     <HoverActions
       pinned={!!msg.pinned}
+      copyText={bodyText}
       onTogglePin={onTogglePin}
       onReply={onReply}
       onAddReaction={
@@ -235,8 +248,11 @@ function BubbleImpl({
   const seenByRow =
     fromMe && seenBy && seenBy.length > 0 ? <SeenByRow peers={seenBy} /> : null;
 
-  const displayMember = members.find((member) => member.handle === msg.sender);
-  const displayName = displayMember?.name || msg.sender;
+  // Who wrote this, in words. Shared with the Recap / Threads / Sent lists,
+  // which rendered a sender too and each printed the raw git login because
+  // this resolution only existed in here.
+  const displayMember = findMember(members, msg.sender);
+  const displayName = senderLabel(msg.sender, displayMember, { fromMe, myDisplay });
 
   return (
     <div
@@ -318,7 +334,7 @@ function fmtCursorTime(iso: string): string {
   if (!iso) return "";
   const t = Date.parse(iso);
   if (Number.isNaN(t)) return "";
-  return new Date(t).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
+  return clockTime(t);
 }
 
 // "Seen by …" — compact avatar row under our own most-recently-read
@@ -340,7 +356,7 @@ function SeenByRow({ peers }: { peers: ReadCursorEntry[] }) {
   const lastAt = mostRecent ? fmtCursorTime(mostRecent.last_read_at) : "";
   return (
     <div
-      className="mt-0.5 mr-1 flex items-center justify-end gap-1 text-[10px] text-text-5"
+      className="mt-0.5 mr-1 flex items-center justify-end gap-1 text-2xs text-text-5"
       title={`Seen by ${allNames}${lastAt ? ` · last at ${lastAt}` : ""}`}
     >
       <span className="text-text-4">Seen by</span>
@@ -365,15 +381,22 @@ function SeenByRow({ peers }: { peers: ReadCursorEntry[] }) {
 }
 
 // Hover-only action row: quick reactions + picker + thread reply + save +
-// overflow. This mirrors the reference interaction while preserving Aura's
-// existing reaction, thread, and pin persistence paths.
+// copy. Every control here is gated on having something behind it — the row
+// used to end in an unconditional "More actions" ⋯ with no handler at all,
+// which meant the one control that was always drawn was the only one that
+// never did anything. Copying the message is what people actually reach an
+// overflow menu for, so it's a button rather than a menu holding one item.
 function HoverActions({
   pinned,
+  copyText,
   onTogglePin,
   onReply,
   onAddReaction,
 }: {
   pinned: boolean;
+  /** The message's human text, with attachment / repo-file / relay
+   *  payloads already stripped — what you'd expect on the clipboard. */
+  copyText?: string;
   onTogglePin?: () => void;
   onReply?: () => void;
   /** Called with the picked emoji when present. Omitted when no
@@ -381,7 +404,9 @@ function HoverActions({
   onAddReaction?: (emoji: string) => void;
 }) {
   const [pickerOpen, setPickerOpen] = useState(false);
-  if (!onTogglePin && !onReply && !onAddReaction) return null;
+  const { copy, copied } = useCopyToClipboard();
+  const copyable = (copyText ?? "").trim();
+  if (!onTogglePin && !onReply && !onAddReaction && !copyable) return null;
   return (
     <span className="slack-hover-action-strip relative opacity-0 group-hover:opacity-100 flex items-center">
       {onAddReaction && (
@@ -436,9 +461,16 @@ function HoverActions({
           <MessageSquareReply size={16} />
         </button>
       )}
-      <button type="button" className="slack-hover-action" title="More actions">
-        <MoreHorizontal size={16} />
-      </button>
+      {copyable && (
+        <button
+          type="button"
+          onClick={() => void copy(copyable)}
+          className={`slack-hover-action ${copied ? "is-active" : ""}`}
+          title={copied ? "Copied" : "Copy text"}
+        >
+          {copied ? <Check size={15} /> : <Copy size={15} />}
+        </button>
+      )}
     </span>
   );
 }
@@ -509,7 +541,7 @@ function ReactionStrip({
               sendReactionFrame(msgId, r.emoji, myDeviceId, myDisplay, channel);
             }}
             title={r.names.join(", ")}
-            className={`inline-flex items-center gap-1 px-1.5 py-0.5 rounded-full border text-[11px] leading-none transition-colors ${
+            className={`inline-flex items-center gap-1 px-1.5 py-0.5 rounded-full border text-xs leading-none transition-colors ${
               mine
                 ? "bg-accent/15 border-accent/40 text-text-1"
                 : "bg-bg-2 border-line-soft text-text-2 hover:border-line"
@@ -536,20 +568,7 @@ function EmojiPickerPopover({
 }) {
   const ref = useRef<HTMLDivElement>(null);
   const [custom, setCustom] = useState("");
-  useEffect(() => {
-    function onDown(e: MouseEvent) {
-      if (ref.current && !ref.current.contains(e.target as Node)) onClose();
-    }
-    function onKey(e: KeyboardEvent) {
-      if (e.key === "Escape") onClose();
-    }
-    document.addEventListener("mousedown", onDown);
-    document.addEventListener("keydown", onKey);
-    return () => {
-      document.removeEventListener("mousedown", onDown);
-      document.removeEventListener("keydown", onKey);
-    };
-  }, [onClose]);
+  useDismiss(true, onClose, ref);
   return (
     <div
       ref={ref}
@@ -562,7 +581,7 @@ function EmojiPickerPopover({
             key={e}
             type="button"
             onClick={() => onPick(e)}
-            className="aspect-square flex items-center justify-center rounded text-base hover:bg-bg-2"
+            className="aspect-square flex items-center justify-center rounded text-base hover:bg-state-hover"
             title={`React with ${e}`}
           >
             {e}
@@ -581,14 +600,14 @@ function EmojiPickerPopover({
             }
           }}
           placeholder="custom"
-          className="flex-1 rounded border border-line-soft bg-bg-2 px-1.5 py-0.5 text-[11px] text-text-1 focus:border-line focus:outline-none"
+          className="flex-1 rounded border border-line-soft bg-bg-2 px-1.5 py-0.5 text-xs text-text-1 focus:border-line focus:outline-none"
         />
         <button
           type="button"
           onClick={() => {
             if (custom.trim()) onPick(custom.trim());
           }}
-          className="text-[10px] text-text-3 hover:text-text-1"
+          className="text-2xs text-text-3 hover:text-text-1"
         >
           add
         </button>
@@ -600,7 +619,7 @@ function EmojiPickerPopover({
 // Tiny "📌 Pinned" tag above a pinned bubble.
 function PinnedTag() {
   return (
-    <div className="flex items-center gap-1 px-2 mb-0.5 text-[10px] text-text-4 font-medium">
+    <div className="flex items-center gap-1 px-2 mb-0.5 text-2xs text-text-4 font-medium">
       <PinLucide size={10} />
       <span>Pinned</span>
     </div>
@@ -629,12 +648,23 @@ function DeliveryBadge({
   onResend?: () => void;
 }) {
   if (status === "failed") {
+    // Retry is only offered where the surface can actually re-address the
+    // send — it needs a channel slug, which the sentinel feed has none of.
+    // Without a handler this drew a red "! retry" that took the click and
+    // did nothing, which is worse than saying the send failed.
+    if (!onResend) {
+      return (
+        <span className="text-2xs text-red font-medium" title="Send failed">
+          ! failed
+        </span>
+      );
+    }
     return (
       <button
         type="button"
         onClick={onResend}
-        className="text-[10px] text-red hover:text-red font-medium"
-        title="Send failed — click to retry"
+        className="text-2xs text-red hover:text-red font-medium"
+        title="Send failed. Click to retry"
       >
         ! retry
       </button>
@@ -643,7 +673,7 @@ function DeliveryBadge({
   if (status === "pending") {
     return (
       <span
-        className="text-[10px] text-text-4 inline-flex items-center gap-0.5"
+        className="text-2xs text-text-4 inline-flex items-center gap-0.5"
         title="Sending…"
       >
         <span
@@ -657,7 +687,7 @@ function DeliveryBadge({
   const isRead = read === true || (typeof readAt === "number" && readAt > 0);
   return (
     <span
-      className={`text-[10.5px] tabular-nums leading-none ${
+      className={`text-xs tabular-nums leading-none ${
         isRead ? "text-accent" : "text-text-5"
       }`}
       title={
@@ -896,26 +926,26 @@ function LinkUnfurl({ url }: { url: string }) {
         )}
         <div className="min-w-0 leading-tight flex-1">
           <div className="flex items-center gap-1.5 flex-wrap">
-            <span className="text-text-4 text-[10.5px] truncate">{preview.ref_label}</span>
+            <span className="text-text-4 text-xs truncate">{preview.ref_label}</span>
             {badge && (
               <span
-                className="px-1.5 py-0.5 rounded text-[10px] font-medium uppercase tracking-wide"
+                className="px-1.5 py-0.5 rounded text-2xs font-medium"
                 style={{ background: badge.bg, color: badge.fg }}
               >
                 {badge.label}
               </span>
             )}
           </div>
-          <div className="text-text-1 text-[12px] font-medium truncate mt-0.5" title={preview.title}>
+          <div className="text-text-1 text-sm font-medium truncate mt-0.5" title={preview.title}>
             {preview.title}
           </div>
           {preview.body_excerpt && (
-            <div className="text-text-3 text-[10.5px] mt-0.5 line-clamp-2">
+            <div className="text-text-3 text-xs mt-0.5 line-clamp-2">
               {preview.body_excerpt}
             </div>
           )}
           {preview.author && !preview.body_excerpt && (
-            <div className="text-text-4 text-[10.5px] mt-0.5">
+            <div className="text-text-4 text-xs mt-0.5">
               by {preview.author}
             </div>
           )}
@@ -926,7 +956,7 @@ function LinkUnfurl({ url }: { url: string }) {
 
   // Fallback — generic favicon chip (also shown while a rich preview is
   // still loading, which makes the embed feel instantly populated).
-  const trimmedPath = path.length > 60 ? path.slice(0, 57) + "…" : path;
+  const trimmedPath = truncate(path, 60);
   const favicon = `https://www.google.com/s2/favicons?domain=${encodeURIComponent(host)}&sz=64`;
   return (
     <a
@@ -947,9 +977,9 @@ function LinkUnfurl({ url }: { url: string }) {
         }}
       />
       <div className="min-w-0 leading-tight">
-        <div className="text-text-1 text-[11.5px] font-medium truncate">{host}</div>
+        <div className="text-text-1 text-sm font-medium truncate">{host}</div>
         {trimmedPath && (
-          <div className="text-text-4 text-[10.5px] truncate" title={trimmedPath}>
+          <div className="text-text-4 text-xs truncate" title={trimmedPath}>
             {trimmedPath}
           </div>
         )}

@@ -8,6 +8,7 @@
 // prompt text, code, or anything a person typed.
 
 import { api } from "./api";
+import { isIgnorableThrow } from "./runtimeNoise";
 
 /** Record that a named feature was used (PostHog `feature_used` event). */
 export function trackFeature(
@@ -32,4 +33,74 @@ export function trackFlow(
     .catch(() => {
       /* best-effort */
     });
+}
+
+// ── Activation ────────────────────────────────────────────────────────────
+//
+// The one question every other number depends on: of the people who install
+// Aura, how many reach the point where it does something for them? A funnel
+// only answers that if each step is counted once per install — otherwise a
+// user who opens ten projects looks like ten people who got halfway.
+
+/** The ordered steps from "it launched" to "Aura did the thing it is for". */
+export type ActivationStep =
+  | "consent_answered"
+  | "project_opened"
+  | "agent_started"
+  | "intent_logged";
+
+/** Record an activation step, once per install, forever. */
+export function trackActivation(
+  step: ActivationStep,
+  props?: Record<string, string | number | boolean>,
+): void {
+  void api
+    .telemetryTrackOnce(`activation:${step}`, "flow_step", {
+      flow: "activation",
+      step,
+      ...(props ?? {}),
+    })
+    .catch(() => {
+      /* best-effort */
+    });
+}
+
+// ── Errors ────────────────────────────────────────────────────────────────
+
+/**
+ * Record that something broke, by shape only. `where` names the surface and
+ * `kind` the class of failure (an error's constructor name, a status code) —
+ * never the message, which routinely carries paths, prompts and repo names.
+ * A count of "the PR pane failed to load, TypeError" is enough to find a bug
+ * and carries nothing about the person who hit it.
+ */
+export function trackError(where: string, kind: string): void {
+  void api
+    .telemetryTrack("app_error", { where, kind })
+    .catch(() => {
+      /* best-effort */
+    });
+}
+
+/** Classify a thrown value without touching its message. */
+export function errorKind(err: unknown): string {
+  if (err instanceof Error) return err.name || "Error";
+  if (err === null) return "null";
+  return typeof err;
+}
+
+/**
+ * Report uncaught errors and unhandled promise rejections. Installed once at
+ * boot: until now a crash in the webview left no trace anywhere, so a whole
+ * surface could be broken in the field and look perfectly healthy from here.
+ */
+export function installErrorReporting(): void {
+  window.addEventListener("error", (e) => {
+    if (isIgnorableThrow(e.error ?? e.message)) return;
+    trackError("window", errorKind(e.error));
+  });
+  window.addEventListener("unhandledrejection", (e) => {
+    if (isIgnorableThrow(e.reason)) return;
+    trackError("promise", errorKind(e.reason));
+  });
 }

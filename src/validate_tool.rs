@@ -948,8 +948,19 @@ fn command_terms(cmd: &str) -> Vec<String> {
 // Small helpers
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// Resolve the repo root: prefer the payload `cwd`, walk up for a `.git` /
-/// `.aura` marker, else fall back to the process cwd.
+/// Resolve the repo root: prefer the payload `cwd`, walk up for a marker, else
+/// fall back to the process cwd.
+///
+/// `.git` wins, and a bare `.aura` is only ever a fallback. The two are not
+/// equal evidence: `.git` marks a checkout, while `.aura` is a *cache* that
+/// Aura itself scatters — sub-crates that agents work in accumulate their own
+/// `.aura/{awareness,live,sessions,snapshots,transcripts}` with no intent log,
+/// no board and no `a2a` store. Stopping at the nearest of the two therefore
+/// resolves `aura-cloud/` to itself, the gate reads an intent log that does not
+/// exist there, and a commit whose intent *was* logged — to the real root, over
+/// MCP — is blocked as unexplained. Two crew agents hit exactly that. So keep
+/// walking past an `.aura`, remember it, and only use it if the walk finishes
+/// without ever finding a `.git` (an Aura dir outside any checkout).
 pub(crate) fn resolve_repo_root(cwd: Option<&str>) -> PathBuf {
     let start = cwd
         .map(PathBuf::from)
@@ -957,17 +968,23 @@ pub(crate) fn resolve_repo_root(cwd: Option<&str>) -> PathBuf {
         .or_else(|| std::env::current_dir().ok())
         .unwrap_or_else(|| PathBuf::from("."));
 
+    let mut aura_only: Option<PathBuf> = None;
     let mut cur = start.as_path();
     loop {
-        if cur.join(".git").exists() || cur.join(".aura").exists() {
+        // `.git` is a directory in a normal checkout and a file in a linked
+        // worktree — `exists()` accepts both, and either is a real boundary.
+        if cur.join(".git").exists() {
             return cur.to_path_buf();
+        }
+        if aura_only.is_none() && cur.join(".aura").exists() {
+            aura_only = Some(cur.to_path_buf());
         }
         match cur.parent() {
             Some(p) => cur = p,
             None => break,
         }
     }
-    start
+    aura_only.unwrap_or(start)
 }
 
 fn abs_path(repo_root: &Path, path: &str) -> PathBuf {
@@ -1076,4 +1093,53 @@ fn now_secs() -> u64 {
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0)
+}
+
+#[cfg(test)]
+mod root_tests {
+    use super::resolve_repo_root;
+
+    /// Aura scatters cache directories through a repo — every sub-crate an
+    /// agent has worked in ends up with its own `.aura/`. None of them hold an
+    /// intent log, a board or the `a2a` store, so resolving to one silently
+    /// points the gate at an empty ledger and blocks a commit whose intent was
+    /// logged perfectly well to the real root. `.git` is the boundary.
+    #[test]
+    fn a_nested_aura_cache_does_not_become_the_root() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path().join("repo");
+        let crate_dir = repo.join("aura-cloud");
+        std::fs::create_dir_all(repo.join(".git")).unwrap();
+        std::fs::create_dir_all(crate_dir.join(".aura").join("sessions")).unwrap();
+
+        assert_eq!(resolve_repo_root(Some(crate_dir.to_str().unwrap())), repo);
+    }
+
+    /// A linked worktree carries `.git` as a *file*, not a directory, and it is
+    /// still where the work lives — the walk must stop there rather than escape
+    /// into whatever encloses it.
+    #[test]
+    fn a_worktrees_git_file_is_a_boundary() {
+        let tmp = tempfile::tempdir().unwrap();
+        let outer = tmp.path().join("outer");
+        let wt = outer.join("wt");
+        std::fs::create_dir_all(outer.join(".git")).unwrap();
+        std::fs::create_dir_all(wt.join("src")).unwrap();
+        std::fs::write(wt.join(".git"), "gitdir: /elsewhere\n").unwrap();
+
+        assert_eq!(resolve_repo_root(Some(wt.join("src").to_str().unwrap())), wt);
+    }
+
+    /// With no checkout anywhere above it, an `.aura` directory is the best
+    /// evidence there is — the fallback stays.
+    #[test]
+    fn an_aura_dir_outside_any_checkout_is_still_the_root() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path().join("standalone");
+        let deep = home.join("a").join("b");
+        std::fs::create_dir_all(home.join(".aura")).unwrap();
+        std::fs::create_dir_all(&deep).unwrap();
+
+        assert_eq!(resolve_repo_root(Some(deep.to_str().unwrap())), home);
+    }
 }

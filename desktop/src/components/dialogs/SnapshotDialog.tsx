@@ -67,8 +67,8 @@ export function SnapshotDialog({ open, repoRoot, onClose }: SnapshotDialogProps)
         </>
       }
     >
-      <div className="space-y-2 text-[11.5px]">
-        <div className="text-text-4 text-[10.5px] uppercase tracking-wider">
+      <div className="space-y-2 text-sm">
+        <div className="section-label">
           Description
         </div>
         <Input
@@ -82,12 +82,12 @@ export function SnapshotDialog({ open, repoRoot, onClose }: SnapshotDialogProps)
           }}
           className="w-full"
         />
-        <div className="text-text-5 text-[10.5px]">
-          A point you can always come back to — your current work is kept safe, exactly as it is now.
+        <div className="text-text-5 text-xs">
+          A point you can always come back to. Your current work is kept safe, exactly as it is now.
         </div>
-        {err && <div role="alert" className="text-red text-[11px]">{err}</div>}
+        {err && <div role="alert" className="text-red text-xs">{err}</div>}
         {output && (
-          <pre className="bg-bg-1 border border-line rounded p-2 max-h-40 overflow-auto text-[10.5px] font-mono text-text-3 whitespace-pre-wrap">
+          <pre className="bg-bg-1 border border-line rounded p-2 max-h-40 overflow-auto text-xs font-mono text-text-3 whitespace-pre-wrap">
             {output}
           </pre>
         )}

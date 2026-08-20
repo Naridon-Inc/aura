@@ -20,6 +20,7 @@ use tokio_util::io::ReaderStream;
 
 use crate::cloud_session_sync::{cloud_origin, cloud_token, read_credentials};
 use crate::cmd_device::{effective_identity, room_id_for_repo};
+use crate::cloud_org::OrgScoped;
 
 // Mirror of `cmd_team::room_origin` — kept here as well so the upload
 // path doesn't reach into `cmd_team`'s private API. If you ever change
@@ -225,7 +226,7 @@ async fn upload_part(
     // directly from disk instead of buffering it in the desktop process.
     let mut request = client.post(&url).multipart(form);
     if let Some(token) = cloud_token(&read_credentials().unwrap_or_default()) {
-        request = request.bearer_auth(token);
+        request = request.bearer_auth(token).org_scoped();
     }
     let resp = request
         .send()

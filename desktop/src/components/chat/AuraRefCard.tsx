@@ -34,6 +34,9 @@ import {
   type NoteScope,
   type SnapshotEntry,
 } from "../../lib/api";
+import { fetchTasks } from "../../lib/tasksCache";
+import { fetchIdentity } from "../../lib/teamCache";
+import { fetchIntentRows } from "../../lib/intentCache";
 import { useEditorStore } from "../../lib/editorStore";
 import type {
   AuraRef,
@@ -48,6 +51,8 @@ import type {
   SnapshotRelayPayload,
 } from "../../lib/auraRelay";
 import { parseAuraRef } from "../../lib/auraRelay";
+import { relativeAgeFromDelta } from "../../lib/relativeTime";
+import { shortDateFromSecs } from "../../lib/calendarDate";
 
 // ─── Module-scoped cache (per URL / payload key) ─────────────────────
 
@@ -198,20 +203,20 @@ function CardShell({
           {icon}
         </span>
         <span
-          className="text-[9.5px] uppercase tracking-wider font-medium"
+          className="section-label"
           style={{ color: toneColor }}
         >
           {label}
         </span>
         {meta ? (
-          <span className="text-text-4 text-[10.5px] ml-auto tabular-nums flex-shrink-0">
+          <span className="text-text-4 text-xs ml-auto tabular-nums flex-shrink-0">
             {meta}
           </span>
         ) : null}
       </div>
       <div className="px-2.5 py-1.5">
-        <div className="text-text-1 text-[12px] font-medium break-words">{title}</div>
-        {detail ? <div className="mt-1 text-text-3 text-[11px]">{detail}</div> : null}
+        <div className="text-text-1 text-sm font-medium break-words">{title}</div>
+        {detail ? <div className="mt-1 text-text-3 text-xs">{detail}</div> : null}
         {cta ? <div className="mt-1.5">{cta}</div> : null}
       </div>
     </div>
@@ -234,7 +239,7 @@ function CtaButton({
         e.stopPropagation();
         onClick();
       }}
-      className={`text-[11px] px-2.5 py-1 rounded border ${
+      className={`text-xs px-2.5 py-1 rounded border ${
         tone === "good"
           ? "bg-accent-green/10 border-accent-green/40 text-accent-green hover:bg-accent-green/15"
           : "bg-bg-1 border-line-soft text-text-2 hover:text-text-1 hover:border-line"
@@ -249,13 +254,11 @@ function CtaButton({
 
 function relTime(secs?: number): string {
   if (!secs || !Number.isFinite(secs)) return "";
-  const now = Math.floor(Date.now() / 1000);
-  const d = Math.max(0, now - secs);
-  if (d < 60) return "just now";
-  if (d < 3600) return `${Math.floor(d / 60)}m ago`;
-  if (d < 86400) return `${Math.floor(d / 3600)}h ago`;
-  if (d < 86400 * 7) return `${Math.floor(d / 86400)}d ago`;
-  return new Date(secs * 1000).toLocaleDateString();
+  // Past a week a referenced commit or intent is dated, not recent.
+  // One ladder for the whole app — see lib/relativeTime.
+  const d = Math.max(0, Math.floor(Date.now() / 1000) - secs);
+  if (d >= 86400 * 7) return shortDateFromSecs(secs);
+  return relativeAgeFromDelta(d);
 }
 
 function IntentCard({ payload }: { payload: IntentRelayPayload }) {
@@ -361,7 +364,7 @@ function ProveCard({ payload }: { payload: ProveRelayPayload }) {
         </>
       ) : null}
       {payload.gaps && payload.gaps.length > 0 ? (
-        <div className="mt-1 text-text-4 text-[10.5px]">
+        <div className="mt-1 text-text-4 text-xs">
           Gaps: {payload.gaps.slice(0, 3).join(", ")}
           {payload.gaps.length > 3 ? `, +${payload.gaps.length - 3}` : ""}
         </div>
@@ -452,7 +455,7 @@ function FunctionRefCard({
 function Skeleton({ label }: { label: string }) {
   return (
     <div className="mt-1.5 rounded-md border border-line-soft bg-bg-2 max-w-[420px] px-2.5 py-1.5">
-      <div className="text-[9.5px] uppercase tracking-wider text-text-5">{label}</div>
+      <div className="section-label">{label}</div>
       <div className="mt-1 h-3 w-40 bg-bg-1 rounded animate-pulse" />
       <div className="mt-1 h-3 w-24 bg-bg-1 rounded animate-pulse" />
     </div>
@@ -462,8 +465,8 @@ function Skeleton({ label }: { label: string }) {
 function ErrorPill({ label, error }: { label: string; error: string }) {
   return (
     <div className="mt-1.5 rounded-md border border-line-soft bg-bg-2 max-w-[420px] px-2.5 py-1.5">
-      <div className="text-[9.5px] uppercase tracking-wider text-text-5">{label}</div>
-      <div className="mt-0.5 text-text-3 text-[11px]">Unavailable · {error}</div>
+      <div className="section-label">{label}</div>
+      <div className="mt-0.5 text-text-3 text-xs">Unavailable · {error}</div>
     </div>
   );
 }
@@ -480,7 +483,7 @@ function IntentUnfurl({
   useEffect(() => {
     void ensureFetched<IntentRow | null>(key, async () => {
       // Pull a reasonable window, then find the row matching the ts.
-      const rows = await api.auraIntentRecent(repoRoot, 500);
+      const rows = await fetchIntentRows(repoRoot, 500);
       return rows.find((r) => r.timestamp === refData.ts) ?? null;
     });
   }, [key, repoRoot, refData.ts]);
@@ -652,7 +655,7 @@ function TaskUnfurl({
   const entry = useCacheEntry(key);
   useEffect(() => {
     void ensureFetched<{ title: string; seq: number } | null>(key, async () => {
-      const tasks = await api.tasksList(repoRoot);
+      const tasks = await fetchTasks(repoRoot);
       const t = tasks.find((x) => x.id === refData.id);
       return t ? { title: t.title, seq: t.sequence_id } : null;
     });
@@ -767,7 +770,7 @@ function WorkspaceUnfurl({
       detail={
         <>
           A shared cloud session ·{" "}
-          <span className="font-mono text-[10.5px]">{shortId}</span>
+          <span className="font-mono text-xs">{shortId}</span>
         </>
       }
       cta={<CtaButton label={copied ? "Copied" : "Copy link"} onClick={copy} />}
@@ -808,7 +811,7 @@ function PrOpenedCard({
     // repo area, and picking up one review does not change that. The
     // channel post is what the rest of the team actually reads.
     try {
-      const identity = await api.teamIdentity(repoRoot).catch(() => null);
+      const identity = await fetchIdentity(repoRoot).catch(() => null);
       const who = identity?.handle || identity?.name || "someone";
       const body = `${who} picked up #${payload.number}`;
       await api.chatSend({
@@ -843,7 +846,7 @@ function PrOpenedCard({
       <span className="font-mono text-text-3">{payload.base_branch}</span>
       <span className="text-text-4"> ← </span>
       <span className="font-mono text-text-3">{payload.head_branch}</span>
-      <div className="mt-0.5 text-text-4 text-[10.5px] font-mono">
+      <div className="mt-0.5 text-text-4 text-xs font-mono">
         {payload.repo}
       </div>
     </>
@@ -887,19 +890,19 @@ function PrLineCard({
     ? [...lines.slice(0, PR_LINE_MAX_SNIPPET_LINES), "…"].join("\n")
     : payload.snippet;
   const langChip = payload.language ? (
-    <span className="text-text-4 text-[10.5px] font-mono">
+    <span className="text-text-4 text-xs font-mono">
       {payload.language}
     </span>
   ) : null;
   const detail = (
     <>
-      <div className="flex items-center gap-2 text-[10.5px]">
+      <div className="flex items-center gap-2 text-xs">
         <span className="font-mono text-text-3">{payload.file}</span>
         <span className="text-text-4">:{range}</span>
         {langChip ? <span className="text-text-5">·</span> : null}
         {langChip}
       </div>
-      <pre className="mt-1 max-h-[200px] overflow-auto rounded bg-bg-1 border border-line-soft/60 p-1.5 text-[10.5px] leading-[1.4] font-mono text-text-2 whitespace-pre">
+      <pre className="mt-1 max-h-[200px] overflow-auto rounded bg-bg-1 border border-line-soft/60 p-1.5 text-xs leading-[1.4] font-mono text-text-2 whitespace-pre">
         {shown}
       </pre>
     </>
@@ -911,7 +914,7 @@ function PrLineCard({
       label="pr quote"
       title={`PR #${payload.number}`}
       meta={
-        <span className="font-mono text-text-4 text-[10.5px]">
+        <span className="font-mono text-text-4 text-xs">
           {payload.repo}
         </span>
       }

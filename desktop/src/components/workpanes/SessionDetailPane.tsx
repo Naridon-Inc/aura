@@ -25,7 +25,10 @@ import {
   type IntentChangeset,
   type IntentChangesetFile,
 } from "../../lib/api";
+import { fetchSessions } from "../../lib/sessionsCache";
 import { AgentBadge } from "../agent/AgentBadge";
+import { relativeAgeFromDelta } from "../../lib/relativeTime";
+import { intentTypeChip } from "../../lib/intentTypeLabels";
 import { InlineEntities, splitIntent } from "./IntentProse";
 import { SessionSummary } from "./SessionSummary";
 import { SessionActions } from "./SessionActions";
@@ -45,25 +48,19 @@ import { TRACE_IA_V3 } from "../../lib/featureFlags";
 import { peekCache, writeCache } from "../../lib/resourceCache";
 import {
   correlateClaudeSession,
+  displayedProvenance,
   isAutoStub,
+  provenanceLabel,
+  provenanceNote,
   sessionDisplayTitle,
+  type IntentProvenance,
 } from "../../lib/sessionMeta";
 
-/** Relative time from a "seconds ago" delta — "just now", "2h", "3d". */
+/** Relative time from a "seconds ago" delta — "now", "2h", "3d". */
 function relTime(secsAgo: number): string {
-  if (!Number.isFinite(secsAgo) || secsAgo < 0) return "just now";
-  if (secsAgo < 45) return "just now";
-  const mins = Math.floor(secsAgo / 60);
-  if (mins < 60) return `${mins}m`;
-  const hours = Math.floor(secsAgo / 3600);
-  if (hours < 24) return `${hours}h`;
-  const days = Math.floor(secsAgo / 86400);
-  if (days < 7) return `${days}d`;
-  const weeks = Math.floor(days / 7);
-  if (weeks < 5) return `${weeks}w`;
-  const months = Math.floor(days / 30);
-  if (months < 12) return `${months}mo`;
-  return `${Math.floor(days / 365)}y`;
+  // One ladder for the whole app — see lib/relativeTime. This copy skipped the
+  // seconds rung, so 45s through 59s printed "0m".
+  return relativeAgeFromDelta(secsAgo, { style: "compact" });
 }
 
 /** Sum additions/deletions across a set of changeset files (null → 0). */
@@ -245,8 +242,7 @@ export function SessionDetailPane({
     const key = `sessions:claude:${repoRoot}`;
     const cached = peekCache<ClaudeSession[]>(key);
     if (cached) setSessions(cached);
-    api
-      .claudeListSessions(repoRoot)
+    fetchSessions(repoRoot)
       .then((s) => {
         const list = Array.isArray(s) ? s : [];
         writeCache(key, list);
@@ -365,7 +361,19 @@ export function SessionDetailPane({
   // body carries the elaboration — the same text never prints twice. Both render
   // through the entity-aware renderers (code chips + clickable changed files).
   const { headline, body } = useMemo(() => splitIntent(asked), [asked]);
-  const bodyLabel = isAutoStub(row) && sess?.first_prompt ? "Prompt" : "Reason";
+  // Where the words under that heading came from. The label used to be one of
+  // two things, "Prompt" or "Reason", and three different origins mapped onto
+  // "Reason": a stated intent, your own session prompt, and a line Aura's model
+  // wrote after reading the diff because nobody said why. See lib/sessionMeta —
+  // the last of those is a description of the change standing in for the reason
+  // for it, and it is the one row in the log that can never disagree with the
+  // code, having been written from it.
+  // `asked` above is the row's own intent unless it's an auto-stub, in which
+  // case it's the session's prompt — so provenance is computed from the same
+  // fact, in the same place, rather than re-derived here and left to agree.
+  const provenance: IntentProvenance = displayedProvenance(row, sess?.first_prompt);
+  const bodyLabel = provenanceLabel(provenance);
+  const bodyNote = provenanceNote(provenance);
 
   // The session's own commit sha (first changeset file that carries one) — this
   // is the durable key that lets the Alignment tab pull the asked→said→did→
@@ -480,7 +488,7 @@ export function SessionDetailPane({
             Changes). Clamped to ~2 lines so a long first sentence can't push
             the chips off-screen. */}
         <h1
-          className="text-[17px] font-semibold leading-snug text-text-1"
+          className="text-lg font-semibold leading-snug text-text-1"
           style={{
             display: "-webkit-box",
             WebkitLineClamp: 2,
@@ -498,7 +506,7 @@ export function SessionDetailPane({
         </h1>
 
         {/* Rollup chips */}
-        <div className="mt-2 flex flex-wrap items-center gap-x-2 gap-y-1 text-[11px] text-text-3">
+        <div className="mt-2 flex flex-wrap items-center gap-x-2 gap-y-1 text-xs text-text-3">
           <AgentBadge agentId={row.agent_id} />
           <span className="text-text-4">·</span>
           <span className="text-text-4">{rel}</span>
@@ -515,7 +523,7 @@ export function SessionDetailPane({
                 {fileCount} {fileCount === 1 ? "file" : "files"}
               </span>
               {churn.hasChurn ? (
-                <span className="font-mono text-[10px]">
+                <span className="font-mono text-2xs">
                   <span className="text-accent-green">+{churn.adds}</span>
                   <span className="text-text-4"> / </span>
                   <span className="text-text-3">−{churn.dels}</span>
@@ -526,15 +534,15 @@ export function SessionDetailPane({
           {row.intent_type === "blocked" ? (
             <>
               <span className="text-text-4">·</span>
-              <span className="rounded border border-red px-1.5 py-px text-[10px] font-medium text-red">
+              <span className="rounded border border-red px-1.5 py-px text-2xs font-medium text-red">
                 Blocked
               </span>
             </>
           ) : row.intent_type ? (
             <>
               <span className="text-text-4">·</span>
-              <span className="rounded border border-line-soft px-1.5 py-px text-[10px] text-text-4">
-                {row.intent_type}
+              <span className="rounded border border-line-soft px-1.5 py-px text-2xs text-text-4">
+                {intentTypeChip(row.intent_type)}
               </span>
             </>
           ) : null}
@@ -546,7 +554,7 @@ export function SessionDetailPane({
                 title={row.key_id ? `Signed with key ${row.key_id}` : "Signed"}
               >
                 <LockIcon />
-                <span className="text-[10px]">Signed</span>
+                <span className="text-2xs">Signed</span>
               </span>
             </>
           ) : null}
@@ -565,6 +573,8 @@ export function SessionDetailPane({
             symbols={changedSymbols}
             bodyText={body}
             bodyLabel={bodyLabel}
+            bodyNote={bodyNote}
+            provenance={provenance}
             whenAbsolute={whenAbsolute}
             rel={rel}
             onOpenFile={openFile}
@@ -607,10 +617,10 @@ export function SessionDetailPane({
             <SessionTranscript filePath={sess.file_path} agentId={row.agent_id} />
           ) : (
             <div className="flex h-full flex-col items-center justify-center gap-1.5 px-6 text-center">
-              <span className="text-[13px] text-text-2">
+              <span className="text-base text-text-2">
                 No live conversation recorded
               </span>
-              <span className="max-w-[320px] text-[12px] leading-relaxed text-text-4">
+              <span className="max-w-[320px] text-sm leading-relaxed text-text-4">
                 This entry was reconstructed from a commit, so there's no
                 step-by-step transcript. The Summary and Changes tabs show what
                 it did.
@@ -619,7 +629,7 @@ export function SessionDetailPane({
           )
         ) : files.length === 0 ? (
           <div className="flex h-full flex-col items-center justify-center px-6 text-center">
-            <span className="text-[12px] text-text-3">
+            <span className="text-sm text-text-3">
               No file changes recorded for this run.
             </span>
           </div>

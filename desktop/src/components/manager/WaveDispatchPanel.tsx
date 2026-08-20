@@ -26,7 +26,6 @@ import {
   type BrainDescriptor,
   type LaneOutcome,
   type LaneSpec,
-  type LaneStatus,
   type PendingPlan,
   type TokenLedger,
   type UnifiedChange,
@@ -35,28 +34,15 @@ import {
   type ZoneConflict,
 } from "../../lib/api";
 import { Select } from "../ui/select";
+import { compactNumber } from "../../lib/compactNumber";
+import { WORK_STATE, laneState } from "../../lib/workState";
 
-// `conflict` is a warning, not a destination: two lanes claimed the same zone
-// and someone has to look. That is the amber slot. It used to share the accent
-// with `running`, which made a healthy lane and a collided one identical.
-const STATUS_TONE: Record<LaneStatus, string> = {
-  queued: "var(--color-text-3)",
-  running: "var(--color-accent)",
-  done: "var(--color-accent-green)",
-  conflict: "var(--color-amber)",
-  cancelled: "var(--color-text-3)",
-  failed: "var(--color-red)",
-};
-
-const STATUS_LABEL: Record<LaneStatus, string> = {
-  queued: "QUEUED",
-  running: "RUNNING",
-  done: "DONE",
-  conflict: "CONFLICT",
-  cancelled: "CANCELLED",
-  failed: "FAILED",
-};
-
+// This panel printed the runner's enum in the runner's case — QUEUED, RUNNING,
+// CONFLICT — to someone who asked for a feature, and it reserved amber for a
+// collision while the plan graph beside it used amber for a healthy running
+// lane. The concern behind that choice still holds and is still met: a running
+// lane and a collided one must not look alike. They don't — running is amber
+// and a collision is red, with the failures, because both mean "look here".
 type Props = {
   plan: PendingPlan;
   /** Optional repo root — wired into lane zones so the conflict
@@ -246,8 +232,8 @@ export function WaveDispatchPanel({ plan, repoRoot: _repoRoot, onWaveComplete }:
             }}
             title={
               autoRoute
-                ? "Aura is auto-routing unpinned lanes to the historically best brain per the skill ledger. Click to turn off."
-                : "Auto-routing is off — unpinned lanes use the active brain. Click to let the Aura ledger pick."
+                ? "Aura is picking the brain for each lane you haven't set yourself, going by which one has done this kind of work best before. Click to turn off."
+                : "Off. Every lane you haven't set yourself uses the brain you have selected. Click to let Aura pick instead."
             }
           >
             {autoRoute ? "● AUTO-ROUTE ON" : "○ AUTO-ROUTE OFF"}
@@ -261,7 +247,7 @@ export function WaveDispatchPanel({ plan, repoRoot: _repoRoot, onWaveComplete }:
               style={{
                 opacity: dispatching || plan.todos.length === 0 ? 0.5 : 1,
               }}
-              title="Fan the plan out across parallel specialist brains"
+              title="Start every step of the plan at once, each on its own brain"
             >
               {dispatching ? "DISPATCHING…" : "DISPATCH WAVE"}
             </button>
@@ -348,15 +334,6 @@ export function WaveDispatchPanel({ plan, repoRoot: _repoRoot, onWaveComplete }:
   );
 }
 
-/** Compact ~N/1000 formatter — "1.5k", "370", "0". Estimates only. */
-function fmtTokens(n: number): string {
-  if (n >= 1000) {
-    const k = n / 1000;
-    return `${k >= 10 ? Math.round(k) : k.toFixed(1)}k`;
-  }
-  return String(Math.round(n));
-}
-
 /** The honest Orchestrator token meter. Shows both sides a user cares
  *  about after a "is Conductor costing me more?" worry: what fan-out
  *  compression SAVED the coordinator's context, and the fan-out OVERHEAD
@@ -375,27 +352,27 @@ function WaveTokenMeter({ ledger }: { ledger: TokenLedger }) {
       }}
       title={
         "Heuristic ~3.5-chars/token estimates, not provider-billed counts.\n" +
-        `${done_lanes} lane${done_lanes === 1 ? "" : "s"} produced ~${fmtTokens(transcript_tokens)} tokens of transcript; ` +
-        `the coordinator only reads the ~${fmtTokens(summary_tokens)}-token summaries, ` +
-        `so summarisation kept ~${fmtTokens(saved_tokens)} out of its context.\n` +
-        `Fan-out overhead ~${fmtTokens(overhead_tokens)} is the per-lane coordination prompt a single linear run would not pay.`
+        `${done_lanes} lane${done_lanes === 1 ? "" : "s"} produced ~${compactNumber(transcript_tokens)} tokens of transcript; ` +
+        `the coordinator only reads the ~${compactNumber(summary_tokens)}-token summaries, ` +
+        `so summarisation kept ~${compactNumber(saved_tokens)} out of its context.\n` +
+        `Fan-out overhead ~${compactNumber(overhead_tokens)} is the per-lane coordination prompt a single linear run would not pay.`
       }
     >
       <span className="aura-block-label" style={{ color: "var(--color-text-3)" }}>
         COORDINATOR CONTEXT
       </span>
       <span style={{ color: "var(--color-text-3)" }}>
-        lanes produced ~{fmtTokens(transcript_tokens)}
+        lanes produced ~{compactNumber(transcript_tokens)}
       </span>
       <span style={{ color: "var(--color-text-3)" }}>→</span>
       <span style={{ color: "var(--color-text-2)" }}>
-        you read ~{fmtTokens(summary_tokens)}
+        you read ~{compactNumber(summary_tokens)}
       </span>
       <span style={{ color: "var(--color-accent)", fontWeight: 600 }}>
-        saved ~{fmtTokens(saved_tokens)}
+        saved ~{compactNumber(saved_tokens)}
       </span>
       <span style={{ color: "var(--color-text-3)", marginLeft: "auto" }}>
-        fan-out overhead ~{fmtTokens(overhead_tokens)}
+        fan-out overhead ~{compactNumber(overhead_tokens)}
       </span>
     </div>
   );
@@ -420,7 +397,7 @@ function BrainPicker({
       align="end"
       aria-label={
         autoRoute
-          ? "Leave on auto and the Aura ledger picks the best brain for this lane; or pin one here."
+          ? "Leave this on auto and Aura picks the brain for this lane, going by what has worked before; or choose one yourself here."
           : "Per-lane brain override (defaults to the active brain)"
       }
       options={[
@@ -482,12 +459,12 @@ function LaneRow({
               className="t-xs"
               style={{
                 fontFamily: "var(--font-mono)",
-                color: STATUS_TONE[lane.status],
+                color: WORK_STATE[laneState(lane.status)].color,
                 fontWeight: 600,
                 letterSpacing: "0.04em",
               }}
             >
-              {STATUS_LABEL[lane.status]}
+              {WORK_STATE[laneState(lane.status)].label}
             </span>
             {lane.provider_id && (
               <span
@@ -508,9 +485,9 @@ function LaneRow({
                   fontFamily: "var(--font-mono)",
                   fontSize: "10px",
                 }}
-                title="This lane's brain was chosen by the Aura skill ledger (historically best for this task type)."
+                title="Aura chose this brain because it has done best on this kind of work before."
               >
-                ● auto-routed by Aura ledger
+                ● Aura picked this one
               </span>
             )}
           </div>
@@ -523,9 +500,9 @@ function LaneRow({
           {conflict && (
             <div
               className="t-xs mt-1"
-              // Same amber as STATUS_TONE.conflict — the line that explains
-              // the collision and the dot that flags it stay in step.
-              style={{ color: "var(--color-amber)" }}
+              // Reads from the same entry as the chip above, so the line that
+              // explains the collision and the mark that flags it stay in step.
+              style={{ color: WORK_STATE.conflict.color }}
             >
               zone conflict on <code>{conflict.zone}</code> with sibling lane
             </div>
@@ -569,7 +546,7 @@ function LaneRow({
             onClick={onCancel}
             className="aura-block-link shrink-0 mt-[2px]"
             style={{ color: "var(--color-text-3)" }}
-            title="Cancel this lane (kills the brain session, frees the zone)"
+            title="Stop this lane. Ends its brain's session and releases the files it had claimed"
           >
             CANCEL
           </button>

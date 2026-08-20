@@ -19,9 +19,9 @@
 //
 // Layout (matches the Codex web reference):
 //   • centered "What should we build in <project>?" headline
-//   • big rounded composer with internal toolbar
-//       left:  [+]  [hand] Default permissions ▾
-//       right: <model> ▾   [mic]   [⏎ send-circle]
+//   • big rounded composer whose bar holds the one control that works here:
+//       send. Permissions, model, effort and mode are per-TURN knobs; they
+//       live on the chat composer this converts into on the first send.
 //   • context chips row directly below — project / scope / branch
 //   • one-tap suggestion rows with thin dividers (no pills)
 //   • Resume-recent rows in the same divider-list pattern when present
@@ -29,20 +29,28 @@
 // Strict no-emoji policy: every glyph is an inline SVG.
 
 import { useEffect, useState } from "react";
+import { ambientKey as ambientKeyFor } from "../../lib/ambientSession";
 import { api, type ClaudeSession } from "../../lib/api";
+import { fetchManagerList } from "../../lib/managerCache";
+import { fetchSessions } from "../../lib/sessionsCache";
+import { relativeAgeFromSecs } from "../../lib/relativeTime";
 import {
   FOCUS_MANAGER_EVENT,
   type FocusManagerDetail,
   sendToAmbientManager,
 } from "../../lib/focusManager";
 import { ManagerSurface } from "./ManagerSurface";
+import { truncate } from "../../lib/truncate";
 
 type Props = {
   repoRoot: string;
   projectName: string;
 };
 
-const ambientKey = (repoRoot: string) => `aura.ambient.${repoRoot}`;
+/** This surface is the workspace's own dashboard — the copy of the project on
+ *  this disk — so the pointer it keeps is the local one. A conversation about
+ *  a machine's copy belongs to that machine's workspace and has its own. */
+const ambientKey = (repoRoot: string) => ambientKeyFor(repoRoot, null);
 
 /** Trailing-slash-tolerant root compare — same guard AuraRailPanel applies
  *  before trusting a persisted ambient sid. A pointer written for another
@@ -143,9 +151,15 @@ export function ManagerDashboardSurface({ repoRoot, projectName }: Props) {
 
       // 2) Resume the workspace's most-recent chat instead of the empty splash.
       try {
-        const list = await api.managerList(repoRoot);
+        const list = await fetchManagerList(repoRoot);
         const latest = list
           .filter((m) => !!m.repo_root && sameRoot(m.repo_root, repoRoot))
+          // …and running HERE. A chat whose hands are on a machine is filed
+          // under this project too — its board and transcript are local — but
+          // adopting it into the local workspace's dashboard would put a
+          // conversation about another copy of the code in front of you and
+          // then write it down as this project's local thread.
+          .filter((m) => !m.machine_id)
           .sort((a, b) => b.updated_at - a.updated_at)[0];
         if (latest && alive) {
           setSid(latest.id);
@@ -184,8 +198,7 @@ export function ManagerDashboardSurface({ repoRoot, projectName }: Props) {
   useEffect(() => {
     if (sid || !ready) return;
     let cancelled = false;
-    api
-      .claudeListSessions(repoRoot)
+    fetchSessions(repoRoot)
       .then((list) => {
         if (cancelled) return;
         setSessions(list.slice(0, 4));
@@ -267,7 +280,7 @@ export function ManagerDashboardSurface({ repoRoot, projectName }: Props) {
     <div className="h-full w-full overflow-y-auto bg-bg-content">
       <div className="flex justify-center px-6 pt-16 pb-10">
         <div className="w-full max-w-[600px] flex flex-col items-stretch gap-3">
-          <h1 className="text-[18px] font-medium text-text-1 text-center leading-snug">
+          <h1 className="text-xl font-medium text-text-1 text-center leading-snug">
             What should we build in {projectName}?
           </h1>
 
@@ -281,27 +294,18 @@ export function ManagerDashboardSurface({ repoRoot, projectName }: Props) {
                 rows={1}
                 disabled={busy}
                 autoFocus
-                className="w-full bg-transparent px-3.5 pt-2.5 pb-1 text-[12.5px] text-text-1 placeholder:text-text-4 focus:outline-none resize-none disabled:opacity-50 no-scrollbar leading-relaxed"
+                className="w-full bg-transparent px-3.5 pt-2.5 pb-1 text-base text-text-1 placeholder:text-text-4 focus:outline-none resize-none disabled:opacity-50 no-scrollbar leading-relaxed"
                 style={{ minHeight: 30 }}
               />
+              {/* Only what works. This bar used to draw an attach button, a
+                  permissions chip, a model chip and a mic — four affordances
+                  with carets and hover states and no handlers behind any of
+                  them, on the first screen of an opened workspace. The real
+                  ones live on the chat composer this converts into on the
+                  first send, where a per-turn knob can actually mean
+                  something. */}
               <div className="flex items-center gap-1 px-2 pb-1.5 pt-0.5">
-                <ToolbarIconButton title="Attach">
-                  <PlusGlyph />
-                </ToolbarIconButton>
-                <ToolbarChip>
-                  <HandGlyph />
-                  <span>Default permissions</span>
-                  <CaretGlyph />
-                </ToolbarChip>
                 <span className="flex-1" />
-                <ToolbarChip>
-                  <span className="text-text-2">Aura</span>
-                  <span className="text-text-4">Auto</span>
-                  <CaretGlyph />
-                </ToolbarChip>
-                <ToolbarIconButton title="Voice">
-                  <MicGlyph />
-                </ToolbarIconButton>
                 <button
                   type="button"
                   onClick={() => dispatch(prompt)}
@@ -330,7 +334,7 @@ export function ManagerDashboardSurface({ repoRoot, projectName }: Props) {
             </div>
 
             {error ? (
-              <div className="text-[10.5px] text-caret-orange px-1">
+              <div className="text-xs text-caret-orange px-1">
                 Failed: {error}
               </div>
             ) : null}
@@ -362,7 +366,7 @@ export function ManagerDashboardSurface({ repoRoot, projectName }: Props) {
                     glyph={<ResumeGlyph />}
                     text={preview}
                     meta={`Claude · ${s.turn_count} turn${s.turn_count === 1 ? "" : "s"} · ${formatAge(s.mtime)}`}
-                    title={`Resume Claude session — ${s.turn_count} turn${s.turn_count === 1 ? "" : "s"}`}
+                    title={`Resume Claude session. ${s.turn_count} turn${s.turn_count === 1 ? "" : "s"}`}
                   />
                 );
               })}
@@ -375,42 +379,7 @@ export function ManagerDashboardSurface({ repoRoot, projectName }: Props) {
 }
 
 function shortenBranch(b: string): string {
-  if (!b) return "";
-  if (b.length <= 30) return b;
-  return b.slice(0, 27) + "…";
-}
-
-function ToolbarIconButton({
-  children,
-  title,
-}: {
-  children: React.ReactNode;
-  title?: string;
-}) {
-  return (
-    <button
-      type="button"
-      title={title}
-      tabIndex={-1}
-      className="flex items-center justify-center rounded text-text-3 hover:text-text-1 hover:bg-bg-2 transition-colors"
-      style={{ width: 22, height: 22 }}
-    >
-      {children}
-    </button>
-  );
-}
-
-function ToolbarChip({ children }: { children: React.ReactNode }) {
-  // Inert chip for now — slots in dropdown affordances we'll wire up
-  // when the Manager scope picker (permissions / model) lands.
-  return (
-    <span
-      className="flex items-center gap-1 text-[10.5px] text-text-3 hover:text-text-1 hover:bg-bg-2 rounded px-1.5 transition-colors cursor-default"
-      style={{ height: 22 }}
-    >
-      {children}
-    </span>
-  );
+  return truncate(b, 30);
 }
 
 function ContextChip({
@@ -422,7 +391,7 @@ function ContextChip({
 }) {
   return (
     <span
-      className="flex items-center gap-1 text-[10.5px] text-text-3 hover:text-text-2 hover:bg-bg-2 rounded px-1.5 transition-colors cursor-default"
+      className="flex items-center gap-1 text-xs text-text-3 hover:text-text-2 hover:bg-state-hover rounded px-1.5 transition-colors cursor-default"
       style={{ height: 22 }}
     >
       <span className="text-text-4 flex items-center justify-center" style={{ width: 11, height: 11 }}>
@@ -446,7 +415,7 @@ function DividerList({
   return (
     <div className="flex flex-col">
       {header && (
-        <div className="px-1 pb-1 text-[10px] uppercase tracking-[0.14em] text-text-4">
+        <div className="section-label px-1 pb-1">
           {header}
         </div>
       )}
@@ -478,7 +447,7 @@ function DividerRow({
       onClick={onClick}
       disabled={disabled}
       title={title}
-      className={`group w-full text-left flex items-center gap-2.5 px-2 transition-colors disabled:opacity-50 hover:bg-bg-2/50 ${first ? "" : "border-t border-line-soft"}`}
+      className={`group w-full text-left flex items-center gap-2.5 px-2 transition-colors disabled:opacity-50 hover:bg-state-hover ${first ? "" : "border-t border-line-soft"}`}
       style={{ minHeight: 32, paddingTop: meta ? 6 : 0, paddingBottom: meta ? 6 : 0 }}
     >
       <span
@@ -488,47 +457,16 @@ function DividerRow({
         {glyph}
       </span>
       <span className="flex-1 min-w-0">
-        <span className="text-[12px] text-text-2 group-hover:text-text-1 block truncate">
+        <span className="text-sm text-text-2 group-hover:text-text-1 block truncate">
           {text}
         </span>
         {meta && (
-          <span className="text-[10px] text-text-4 block truncate mt-0.5">
+          <span className="text-2xs text-text-4 block truncate mt-0.5">
             {meta}
           </span>
         )}
       </span>
     </button>
-  );
-}
-
-function PlusGlyph() {
-  return (
-    <svg width="14" height="14" viewBox="0 0 16 16" fill="none">
-      <path d="M8 3v10M3 8h10" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" />
-    </svg>
-  );
-}
-
-function HandGlyph() {
-  return (
-    <svg width="13" height="13" viewBox="0 0 16 16" fill="none">
-      <path
-        d="M5 7V3.5a1 1 0 0 1 2 0V7M7 7V2.5a1 1 0 0 1 2 0V7M9 7V3.5a1 1 0 0 1 2 0V8M11 8V5a1 1 0 0 1 2 0v6c0 2-1.5 3.5-3.5 3.5h-1c-1.6 0-2.5-.7-3.5-2L3 9c-.4-.7-.1-1.5.6-1.7.5-.2 1 0 1.4.5L5 7"
-        stroke="currentColor"
-        strokeWidth="1.1"
-        strokeLinecap="round"
-        strokeLinejoin="round"
-      />
-    </svg>
-  );
-}
-
-function MicGlyph() {
-  return (
-    <svg width="13" height="13" viewBox="0 0 16 16" fill="none">
-      <rect x="6" y="2.5" width="4" height="7" rx="2" stroke="currentColor" strokeWidth="1.2" />
-      <path d="M3.5 7.5a4.5 4.5 0 0 0 9 0M8 12v2M5.5 14h5" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" />
-    </svg>
   );
 }
 
@@ -636,14 +574,6 @@ function ResumeGlyph() {
 }
 
 function formatAge(secs: number): string {
-  const ms = secs * 1000;
-  const diff = Date.now() - ms;
-  const m = Math.floor(diff / 60000);
-  if (m < 1) return "just now";
-  if (m < 60) return `${m}m ago`;
-  const h = Math.floor(m / 60);
-  if (h < 24) return `${h}h ago`;
-  const d = Math.floor(h / 24);
-  if (d < 30) return `${d}d ago`;
-  return `${Math.floor(d / 30)}mo ago`;
+  // One ladder for the whole app — see lib/relativeTime.
+  return relativeAgeFromSecs(secs);
 }

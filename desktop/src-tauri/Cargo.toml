@@ -1,6 +1,6 @@
 [package]
 name = "aura-shell"
-version = "0.19.33"
+version = "0.19.39"
 description = "Aura desktop shell — Tauri 2 binary backed by every aura-* Rust crate."
 authors = ["Aura"]
 edition = "2021"
@@ -63,6 +63,12 @@ aura-blocks        = { path = "../../crates/aura-blocks" }
 aura-blockstore    = { path = "../../crates/aura-blockstore" }
 aura-daemon        = { path = "../../crates/aura-daemon" }
 aura-daemon-client = { path = "../../crates/aura-daemon-client" }
+# The project's declared environment — toolchains, packages, services — parsed,
+# signed and turned into an ordered plan. The app drives that plan through
+# `Place::sh`, the CLI drives the same plan through `std::process`, so a box and
+# a laptop converge on one implementation rather than two that agree for now.
+aura-env           = { path = "../../crates/aura-env" }
+aura-egress        = { path = "../../crates/aura-egress" }
 # Aura Loop — the shared dependency-graph + ready-set model. The shell's
 # native-brain loop driver (W4) and the unified chat ready_view (W3)
 # consume the same `ready_view`/`LoopGraph` the CLI runner uses.
@@ -119,6 +125,11 @@ notify = "6"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream", "multipart"] }
 futures-util = "0.3"
 dirs   = "5"
+# OpenCode keeps its whole conversation in one SQLite database rather than a
+# JSONL file per session, so `cmd_opencode_sessions` reads it directly (read-
+# only — it is another program's live store). Free to add: `aura-blockstore`
+# already links the same bundled rusqlite into this binary.
+rusqlite = { version = "0.38", features = ["bundled"] }
 
 # Brain abstraction (v0.2.30 KK.3) — async-trait powers the `Brain`
 # trait object, thiserror gives the unified `BrainError`, keyring
@@ -217,6 +228,38 @@ objc = "0.2"
 # CGWindowListCreateImage and read its average brightness to pick a light or
 # dark appearance. Pinned to the version already in the lock.
 core-graphics = "0.25"
+# Notification Center (os_notify.rs). The notification plugin's desktop path
+# posts through NSUserNotificationCenter, which macOS no longer delivers — the
+# app never even appeared in System Settings › Notifications. These are the
+# modern UserNotifications framework, which is the only way a banner arrives.
+# `exception` so a Notification Center call that raises can be caught instead
+# of aborting the app: `currentNotificationCenter` throws outright when the
+# process has no bundle identifier, which is exactly how the binary runs under
+# `cargo run` during development.
+objc2 = { version = "0.6", features = ["exception"] }
+objc2-foundation = { version = "0.3", features = [
+    "NSString",
+    "NSArray",
+    "NSSet",
+    "NSDictionary",
+    "NSError",
+    "NSValue",
+    "NSBundle",
+] }
+objc2-user-notifications = { version = "0.3", features = [
+    "block2",
+    "UNNotification",
+    "UNNotificationAction",
+    "UNNotificationCategory",
+    "UNNotificationContent",
+    "UNNotificationRequest",
+    "UNNotificationResponse",
+    "UNNotificationSettings",
+    "UNNotificationSound",
+    "UNNotificationTrigger",
+    "UNUserNotificationCenter",
+] }
+block2 = "0.6"
 
 # Linux native terminal surface (cmd_native_term::surface). The GPU child view
 # is a GtkDrawingArea realized into an X11 window whose XID we hand to wgpu's
@@ -230,13 +273,28 @@ glib   = "0.18"
 
 # v0.2.30 KK.3 — Brain abstraction feature flags. Each provider lives
 # behind one so embedded / minimal builds can drop providers they don't
-# ship. Default set is "everything we have today" — Anthropic native +
-# CLI wrapper. v0.2.31 will flip the gemini/openai stubs default-on
-# once their streaming is real.
+# ship. Default set is every provider whose streaming is real, which is
+# the condition the flags were introduced to wait on.
 [features]
-default = ["brain_anthropic_native", "brain_cli_wrapper", "brain_openai_compat", "brain_aura_pro", "brain_bedrock", "brain_vertex"]
+default = ["brain_anthropic_native", "brain_acp", "brain_pi", "brain_cli_wrapper", "brain_gemini_native", "brain_openai_compat", "brain_aura_pro", "brain_bedrock", "brain_vertex"]
 brain_anthropic_native = []
+# Agents that speak the Agent Client Protocol — a live session rather than
+# a one-shot process, and, because ACP agents ask the *client* to touch the
+# disk, the point where their edits meet Aura's snapshot and gate.
+brain_acp              = []
+# pi over `--mode rpc`. pi runs its own tools, so instead of serving its
+# file operations Aura gates them: a compiled-in extension forwards every
+# tool call for a decision before it executes.
+brain_pi               = []
 brain_cli_wrapper      = []
+# Gemini by its own API key, which is a different thing from the `gemini`
+# CLI wrapper: the wrapper shells out to the binary and reuses whatever
+# login that has, so the key never belongs to Aura and the model list is
+# whatever the CLI decides. This one streams the Generative Language API
+# directly with a key you paste into Settings → Brain & models. It was
+# written in full (663 lines of real SSE wire protocol) and then left off
+# by default pending "once their streaming is real" — it has been real
+# since it landed.
 brain_gemini_native    = []
 brain_openai_native    = []
 brain_openai_compat    = []

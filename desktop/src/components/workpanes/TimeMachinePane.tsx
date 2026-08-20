@@ -28,33 +28,32 @@ import {
   type SnapshotEntry,
   type SymbolImpact,
 } from "../../lib/api";
+import { fetchSessions } from "../../lib/sessionsCache";
+import { fetchIntentRows } from "../../lib/intentCache";
+import { fetchChangeNoteReport } from "../../lib/changeNoteCache";
 import { AgentBadge } from "../agent/AgentBadge";
+import { relativeAgeFromDelta } from "../../lib/relativeTime";
 import { Button } from "../ui/button";
 import { Input } from "../ui/input";
 import { Tooltip, TooltipTrigger, TooltipContent } from "../ui/tooltip";
 import {
   collapseAutoStubSessions,
+  provenanceLabel,
+  provenanceNote,
+  provenanceTag,
   sessionDisplayTitle,
+  titleProvenance,
   type SessionDisplayRow,
 } from "../../lib/sessionMeta";
+import { ErrorState, LoadingState } from "../ui/state";
 import { useBringBack, BringBackResult } from "./useBringBack";
 
 // ── time helpers ───────────────────────────────────────────────────────
 
 function relTime(secsAgo: number): string {
-  if (!Number.isFinite(secsAgo) || secsAgo < 0) return "just now";
-  if (secsAgo < 45) return "just now";
-  const mins = Math.floor(secsAgo / 60);
-  if (mins < 60) return `${mins}m ago`;
-  const hours = Math.floor(secsAgo / 3600);
-  if (hours < 24) return `${hours}h ago`;
-  const days = Math.floor(secsAgo / 86400);
-  if (days < 7) return `${days}d ago`;
-  const weeks = Math.floor(days / 7);
-  if (weeks < 5) return `${weeks}w ago`;
-  const months = Math.floor(days / 30);
-  if (months < 12) return `${months}mo ago`;
-  return `${Math.floor(days / 365)}y ago`;
+  // One ladder for the whole app — see lib/relativeTime.
+  // Its rungs carried the 45-to-60-second hole — the third copy of it.
+  return relativeAgeFromDelta(secsAgo);
 }
 
 function fullWhen(ts: number): string {
@@ -144,8 +143,8 @@ export function TimeMachinePane({
     setError(null);
     try {
       const [data, cs, snaps] = await Promise.all([
-        api.auraIntentRecent(repoRoot, 120),
-        api.claudeListSessions(repoRoot).catch(() => [] as ClaudeSession[]),
+        fetchIntentRows(repoRoot, 120),
+        fetchSessions(repoRoot).catch(() => [] as ClaudeSession[]),
         api.auraListSnapshots(repoRoot).catch(() => [] as SnapshotEntry[]),
       ]);
       if (!aliveRef.current) return;
@@ -205,16 +204,17 @@ export function TimeMachinePane({
 
   return (
     <div className="flex h-full min-h-0 flex-col bg-bg-content">
-      {/* Header */}
-      <div className="flex shrink-0 items-center gap-3 border-b border-line-soft px-4 py-2.5">
-        <div className="flex h-7 w-7 items-center justify-center rounded-lg" style={{ background: "color-mix(in oklab, var(--color-accent) 14%, transparent)" }}>
-          <ClockGlyph />
-        </div>
-        <div className="min-w-0">
-          <div className="text-[13px] font-semibold text-text-1">Time machine</div>
-          <div className="text-[11px] text-text-4">
-            Travel back to any moment and bring back just one piece — the rest of your work stays put.
-          </div>
+      {/* ── Header ─────────────────────────────────────────────────────
+          What this place is FOR, and nothing else. It used to lead with a
+          tinted clock tile and "Time machine" in 14px semibold — the same
+          glyph and the same two words as the tab directly above it, and as
+          the sidebar row above that. The sentence underneath was the only
+          line doing work, and on a destination this frightening ("can I undo
+          what the agent did without losing my own work?") it is the line that
+          matters, so it is now the header. */}
+      <div className="flex shrink-0 items-center gap-3 border-b border-line-soft px-4 py-2">
+        <div className="min-w-0 text-xs text-text-4">
+          Travel back to any moment and bring back just one piece. The rest of your work stays put.
         </div>
         <div className="ml-auto flex items-center gap-1">
           {onExpand && (
@@ -247,12 +247,18 @@ export function TimeMachinePane({
 
       {/* Body */}
       {error ? (
-        <div className="px-4 py-4 text-[12px] text-text-3">
-          Couldn&rsquo;t load your timeline.
-          <span className="mt-1 block font-mono text-[11px] text-text-4">{error}</span>
-        </div>
+        // Both of these were hand-rolled — a sentence with the raw error in
+        // mono beneath it and no way to try again, and a bare "Loading your
+        // timeline…" with no block loader. Every other surface in the app
+        // uses these two primitives, so a stall and a failure look the same
+        // wherever you meet them.
+        <ErrorState
+          title="Couldn’t load your timeline"
+          message={error}
+          onRetry={() => void load()}
+        />
       ) : loading && displayRows.length === 0 ? (
-        <div className="px-4 py-4 text-[12px] text-text-4">Loading your timeline…</div>
+        <LoadingState label="Reading your timeline…" />
       ) : displayRows.length === 0 ? (
         <EmptyTimeline />
       ) : (
@@ -316,13 +322,14 @@ function MomentNode({
 }) {
   const { row } = display;
   const title = sessionDisplayTitle(row, sessions);
+  const provTag = provenanceTag(titleProvenance(row, sessions));
   const signed = !!row.signed_block_id;
   return (
     <button
       type="button"
       onClick={onSelect}
       className={`group relative flex w-full items-start gap-2.5 px-3 py-2 text-left ${
-        selected ? "bg-bg-2" : "hover:bg-bg-2/60"
+        selected ? "bg-state-selected" : "hover:bg-state-hover"
       }`}
     >
       {/* spine + dot */}
@@ -340,18 +347,27 @@ function MomentNode({
 
       <span className="min-w-0 flex-1">
         <span className="flex items-center gap-1.5">
-          <span className={`text-[11px] font-medium ${selected ? "text-text-1" : "text-text-2"}`}>
+          <span className={`text-xs font-medium ${selected ? "text-text-1" : "text-text-2"}`}>
             {relTime(nowSecs - row.timestamp)}
           </span>
           {signed && (
-            <span className="text-text-4" title="Genuine record — sealed">
+            <span className="text-text-4" title="Genuine record. Sealed">
               <LockGlyph />
             </span>
           )}
         </span>
-        <span className="mt-0.5 block truncate text-[12px] leading-snug text-text-1">{title}</span>
-        <span className="mt-1 flex flex-wrap items-center gap-x-2 gap-y-0.5 text-[10.5px] text-text-4">
+        <span className="mt-0.5 block truncate text-sm leading-snug text-text-1">{title}</span>
+        <span className="mt-1 flex flex-wrap items-center gap-x-2 gap-y-0.5 text-xs text-text-4">
           <AgentBadge agentId={row.agent_id} />
+          {/* Nobody wrote a reason for this moment — the line above is Aura's
+              model reading the diff. On a timeline you scan, that's the one
+              thing about it worth a word. */}
+          {provTag ? (
+            <>
+              <span>·</span>
+              <span>{provTag}</span>
+            </>
+          ) : null}
           <span>·</span>
           <span>
             {display.files} {display.files === 1 ? "file" : "files"}
@@ -386,6 +402,8 @@ function MomentDetail({
   const { row } = display;
   const files = useMemo(() => row.changeset?.files ?? [], [row]);
   const title = sessionDisplayTitle(row, sessions);
+  const provenance = titleProvenance(row, sessions);
+  const provNote = provenanceNote(provenance);
   const signed = !!row.signed_block_id;
 
   // Lazily resolve the changed symbols for this moment by fetching the
@@ -407,7 +425,13 @@ function MomentDetail({
       return;
     }
     setResolving(true);
-    Promise.all(shas.map((sha) => api.auraChangeNote(repoRoot, sha).catch(() => null)))
+    // Through changeNoteCache — the Changes tab and the Summary tab already
+    // read these same per-commit reports, and each one shells the engine. The
+    // per-call catch stays: a report that fails is dropped from this map, not
+    // allowed to fail the whole resolve.
+    Promise.all(
+      shas.map((sha) => fetchChangeNoteReport(repoRoot, sha).catch(() => null)),
+    )
       .then((reports) => {
         if (!aliveRef.current) return;
         const map = new Map<string, ChangedSymbol[]>();
@@ -437,14 +461,14 @@ function MomentDetail({
   return (
     <div className="px-5 py-4">
       {/* "You're looking at …" header */}
-      <div className="mb-1 text-[11px] uppercase tracking-wide text-text-4">
+      <div className="section-label mb-1">
         {stepsBack === 0 ? "Most recent moment" : `${stepsBack} ${stepsBack === 1 ? "moment" : "moments"} back`}
       </div>
       <div className="flex flex-wrap items-baseline gap-x-2 gap-y-0.5">
-        <span className="text-[16px] font-semibold text-text-1">{relTime(nowSecs - row.timestamp)}</span>
-        <span className="text-[12px] text-text-4">· {fullWhen(row.timestamp)}</span>
+        <span className="text-lg font-semibold text-text-1">{relTime(nowSecs - row.timestamp)}</span>
+        <span className="text-sm text-text-4">· {fullWhen(row.timestamp)}</span>
       </div>
-      <div className="mt-2 flex flex-wrap items-center gap-2 text-[11px] text-text-3">
+      <div className="mt-2 flex flex-wrap items-center gap-2 text-xs text-text-3">
         <AgentBadge agentId={row.agent_id} />
         {signed && (
           <span className="inline-flex items-center gap-1 rounded-full border border-line-soft px-2 py-px text-text-3" title="A sealed, genuine record of this change">
@@ -453,16 +477,25 @@ function MomentDetail({
         )}
       </div>
 
-      {/* The why */}
+      {/* The why — when there is one. "Why this happened" is the strongest
+          claim any label in this app makes, and it was printed over all four
+          origins: a stated reason, your session prompt, a line Aura's model
+          wrote from the diff, and "Agent edited 3 files". It holds for the
+          first. See lib/sessionMeta. */}
       <div className="mt-3 rounded-lg border border-line-soft bg-bg-1 px-3.5 py-3">
-        <div className="text-[10.5px] uppercase tracking-wide text-text-4 mb-1">Why this happened</div>
-        <div className="text-[12.5px] leading-relaxed text-text-1">{title}</div>
+        <div className="section-label mb-1">
+          {provenanceLabel(provenance, "Why this happened")}
+        </div>
+        <div className="text-base leading-relaxed text-text-1">{title}</div>
+        {provNote ? (
+          <div className="mt-2 text-sm leading-relaxed text-text-4">{provNote}</div>
+        ) : null}
       </div>
 
       {/* Prefill hint — landed here from a symbol right-click. */}
       {prefillId && prefillFile && (
-        <div className="mt-3 rounded-lg border px-3.5 py-2.5 text-[11.5px] leading-relaxed" style={{ borderColor: "color-mix(in oklab, var(--color-accent) 40%, transparent)", background: "color-mix(in oklab, var(--color-accent) 8%, transparent)" }}>
-          Looking for <span className="font-mono text-accent">{prefillId}</span> — find it under{" "}
+        <div className="mt-3 rounded-lg border px-3.5 py-2.5 text-sm leading-relaxed" style={{ borderColor: "color-mix(in oklab, var(--color-accent) 40%, transparent)", background: "color-mix(in oklab, var(--color-accent) 8%, transparent)" }}>
+          Looking for <span className="font-mono text-accent">{prefillId}</span>. Find it under{" "}
           <span className="font-mono text-text-2">{prefillFile.split("/").pop()}</span> below and press <span className="text-text-1">Bring this back</span>.
         </div>
       )}
@@ -474,11 +507,11 @@ function MomentDetail({
 
       {/* What changed here */}
       <div className="mt-4 mb-2 flex items-center gap-2">
-        <span className="text-[11px] uppercase tracking-wide text-text-3">What changed here</span>
-        <span className="text-[11px] text-text-4">
+        <span className="section-label">What changed here</span>
+        <span className="text-xs text-text-4">
           {files.length} {files.length === 1 ? "file" : "files"}
         </span>
-        {resolving && <span className="text-[10.5px] text-text-4">· finding the pieces…</span>}
+        {resolving && <span className="text-xs text-text-4">· finding the pieces…</span>}
       </div>
 
       <div className="flex flex-col gap-2">
@@ -549,12 +582,12 @@ function SymbolDependents({
   }, [repoRoot, symbol, relFile]);
 
   if (state === "loading") {
-    return <div className="mt-1 text-[10px] text-text-4">Checking what depends on this…</div>;
+    return <div className="mt-1 text-2xs text-text-4">Checking what depends on this…</div>;
   }
   if (state === "unavailable" || !impact) {
     return (
-      <div className="mt-1 text-[10px] text-text-4">
-        Couldn’t check what depends on this — bring-back is still safe (Aura saves a copy first).
+      <div className="mt-1 text-2xs text-text-4">
+        Couldn’t check what depends on this. Bring-back is still safe (Aura saves a copy first).
       </div>
     );
   }
@@ -564,8 +597,8 @@ function SymbolDependents({
 
   if (!hasDeps) {
     return (
-      <div className="mt-1 text-[10px] text-accent-green">
-        Nothing else uses this — safe to bring back.
+      <div className="mt-1 text-2xs text-accent-green">
+        Nothing else uses this. Safe to bring back.
       </div>
     );
   }
@@ -576,18 +609,18 @@ function SymbolDependents({
 
   return (
     <div className="mt-1 flex flex-col gap-0.5">
-      <div className="text-[10px] text-amber">
-        {total} {total === 1 ? "thing depends" : "things depend"} on this — bringing it back
+      <div className="text-2xs text-amber">
+        {total} {total === 1 ? "thing depends" : "things depend"} on this. Bringing it back
         changes what they see.
       </div>
       {callerNames.length > 0 && (
-        <div className="text-[10px] text-text-4">
+        <div className="text-2xs text-text-4">
           Used by <span className="font-mono text-text-3">{callerNames.join(", ")}</span>
           {moreCallers > 0 ? ` +${moreCallers} more` : ""}
         </div>
       )}
       {featureNames.length > 0 && (
-        <div className="text-[10px] text-text-4">
+        <div className="text-2xs text-text-4">
           Affects: <span className="text-text-3">{featureNames.join(", ")}</span>
         </div>
       )}
@@ -642,17 +675,17 @@ function FileChangeBlock({
       >
         <Chevron open={open} />
         <FileGlyph />
-        <span className="min-w-0 flex-1 truncate text-[12px]">
+        <span className="min-w-0 flex-1 truncate text-sm">
           {dir && <span className="text-text-4">{dir}</span>}
           <span className="text-text-1">{name}</span>
         </span>
         {restorable.length > 0 && (
-          <span className="shrink-0 rounded-full bg-bg-3 px-2 py-px text-[10px] text-text-3">
+          <span className="shrink-0 rounded-full bg-bg-3 px-2 py-px text-2xs text-text-3">
             {restorable.length} {restorable.length === 1 ? "piece" : "pieces"}
           </span>
         )}
         {typeof file.additions === "number" || typeof file.deletions === "number" ? (
-          <span className="shrink-0 font-mono text-[10px]">
+          <span className="shrink-0 font-mono text-2xs">
             <span className="text-accent-green">+{file.additions ?? 0}</span>
             <span className="text-text-4"> / </span>
             <span className="text-text-3">−{file.deletions ?? 0}</span>
@@ -673,8 +706,8 @@ function FileChangeBlock({
                     <SymbolKindDot change={s.change} />
                   </span>
                   <span className="min-w-0 flex-1">
-                    <span className="block truncate font-mono text-[11.5px] text-text-1">{s.identifier}</span>
-                    <span className="block text-[10px] text-text-4">
+                    <span className="block truncate font-mono text-sm text-text-1">{s.identifier}</span>
+                    <span className="block text-2xs text-text-4">
                       {s.kind}
                       {s.change === "deleted" ? " · was deleted here" : " · changed here"}
                     </span>
@@ -705,23 +738,23 @@ function FileChangeBlock({
               ))}
             </div>
           ) : effectiveSymbols.length > 0 ? (
-            <div className="text-[11px] leading-relaxed text-text-4">
+            <div className="text-xs leading-relaxed text-text-4">
               The pieces here were newly added, so there's no earlier version to bring back.
             </div>
           ) : (
             <div className="flex flex-col gap-2">
-              <div className="text-[11px] leading-relaxed text-text-4">
+              <div className="text-xs leading-relaxed text-text-4">
                 Aura didn't track individual pieces for this file at this moment. If one
-                part broke — a function or section you can name — type it and Aura puts just
+                part broke, a function or section you can name, type it and Aura puts just
                 that part back to its last good version. The rest stays untouched.
               </div>
               <div className="flex items-center gap-2">
                 <Input
                   value={byName}
                   onChange={(e) => setByName(e.target.value)}
-                  placeholder="part name — e.g. handleSubmit"
+                  placeholder="part name. E.g. handleSubmit"
                   spellCheck={false}
-                  className="h-7 flex-1 font-mono text-[11.5px]"
+                  className="h-7 flex-1 font-mono text-sm"
                   onKeyDown={(e) => {
                     if (e.key === "Enter" && byName.trim()) {
                       onBringBack(byName.trim(), file.path);
@@ -746,19 +779,19 @@ function FileChangeBlock({
               selector. A bring-back lands on the newest one automatically. */}
           {points.length > 0 && (
             <div className="mt-2.5 border-t border-line-soft pt-2">
-              <div className="mb-1 text-[10px] uppercase tracking-wide text-text-4">Recent saved versions</div>
+              <div className="section-label mb-1">Recent saved versions</div>
               <div className="flex flex-wrap gap-1.5">
                 {points.slice(0, 6).map((p, i) => (
                   <span
                     key={p.id}
-                    className={`rounded px-1.5 py-px text-[10px] ${i === 0 ? "bg-accent-soft text-accent" : "bg-bg-3 text-text-4"}`}
+                    className={`rounded px-1.5 py-px text-2xs ${i === 0 ? "bg-accent-soft text-accent" : "bg-bg-3 text-text-4"}`}
                     title={new Date(p.ts).toLocaleString()}
                   >
                     {relTime(Math.floor((Date.now() - p.ts) / 1000))}
                   </span>
                 ))}
                 {points.length > 6 && (
-                  <span className="text-[10px] text-text-4">+{points.length - 6} more</span>
+                  <span className="text-2xs text-text-4">+{points.length - 6} more</span>
                 )}
               </div>
             </div>
@@ -779,9 +812,9 @@ function EmptyTimeline() {
       <div className="mb-4 flex h-12 w-12 items-center justify-center rounded-full" style={{ background: "color-mix(in oklab, var(--color-accent) 14%, transparent)" }}>
         <ClockGlyph large />
       </div>
-      <div className="text-[14px] font-semibold text-text-1">Your timeline is empty</div>
-      <p className="mt-1.5 max-w-[380px] text-[12px] leading-relaxed text-text-3">
-        Every time you or an AI changes your code, that moment shows up here — with the why and
+      <div className="text-md font-semibold text-text-1">Your timeline is empty</div>
+      <p className="mt-1.5 max-w-[380px] text-sm leading-relaxed text-text-3">
+        Every time you or an AI changes your code, that moment shows up here, with the why and
         everything that changed around it. Once you start building, you&apos;ll be able to travel
         back and bring any single piece back, cleanly.
       </p>

@@ -35,7 +35,7 @@ type Props = {
 };
 
 const MODE_LABEL: Record<ComposerMode, string> = {
-  auto: "Auto",
+  auto: "Autopilot",
   plan: "Plan",
   build: "Build",
   ask: "Ask",
@@ -86,7 +86,7 @@ export function ManagerQueueStack({
         border: "1px solid var(--color-line-soft)",
       }}
     >
-      <div className="flex items-center gap-2 px-2.5 py-1 text-[10.5px] text-text-3">
+      <div className="flex items-center gap-2 px-2.5 py-1 text-xs text-text-3">
         <span
           className="inline-block w-1.5 h-1.5 rounded-full"
           style={{ background: "var(--color-accent)" }}
@@ -111,7 +111,7 @@ export function ManagerQueueStack({
           return (
             <li
               key={m.id}
-              className="flex items-center gap-2 px-2.5 py-1.5 border-t text-[12px]"
+              className="flex items-center gap-2 px-2.5 py-1.5 border-t text-sm"
               style={{ borderColor: "var(--color-line-soft)" }}
             >
               <span className="text-text-4 tabular-nums w-4 text-right">
@@ -121,19 +121,19 @@ export function ManagerQueueStack({
               {/* Per-turn run-option badges, so a queued message shows how it
                   will run before it ever fires. */}
               {m.mode !== "build" && (
-                <span className="text-[10px] leading-none px-1.5 py-0.5 rounded bg-bg-3 text-text-3 shrink-0">{MODE_LABEL[m.mode]}</span>
+                <span className="text-2xs leading-none px-1.5 py-0.5 rounded bg-bg-3 text-text-3 shrink-0">{MODE_LABEL[m.mode]}</span>
               )}
               {m.effort && (
-                <span className="text-[10px] leading-none px-1.5 py-0.5 rounded bg-bg-3 text-text-3 shrink-0" style={{ color: "var(--color-accent)" }}>
+                <span className="text-2xs leading-none px-1.5 py-0.5 rounded bg-bg-3 text-text-3 shrink-0" style={{ color: "var(--color-accent)" }}>
                   {m.effort}
                 </span>
               )}
               {m.fast && (
-                <span className="text-[10px] leading-none px-1.5 py-0.5 rounded bg-bg-3 text-text-3 shrink-0" style={{ color: "var(--color-accent)" }}>
+                <span className="text-2xs leading-none px-1.5 py-0.5 rounded bg-bg-3 text-text-3 shrink-0" style={{ color: "var(--color-accent)" }}>
                   ⚡
                 </span>
               )}
-              {m.pipeTargetSessionId && <span className="text-[10px] leading-none px-1.5 py-0.5 rounded bg-bg-3 text-text-3 shrink-0">↪</span>}
+              {m.pipeTargetSessionId && <span className="text-2xs leading-none px-1.5 py-0.5 rounded bg-bg-3 text-text-3 shrink-0">↪</span>}
 
               {editing ? (
                 <input
@@ -224,7 +224,7 @@ function IconBtn({
       aria-label={label}
       disabled={disabled}
       onClick={onClick}
-      className="p-1 rounded hover:bg-bg-3 hover:text-text-1 transition-colors disabled:opacity-30 disabled:hover:bg-transparent"
+      className="p-1 rounded hover:bg-state-hover hover:text-text-1 transition-colors disabled:opacity-30 disabled:hover:bg-transparent"
     >
       {children}
     </button>

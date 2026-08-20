@@ -14,6 +14,9 @@
 // conversations that made the code what it is.
 
 import { api } from "./api";
+import { relativeAgeFromSecs } from "./relativeTime";
+import { agentName } from "./agentNames";
+import { sentenceCase } from "./textCase";
 
 export type AskSource = {
   /** Who recorded it (already humanized, e.g. "Claude"). */
@@ -49,24 +52,13 @@ type Corpus = { sources: AskSource[] };
 // history only grows, so a per-repo cache for the dialog's lifetime is safe.
 const corpusCache = new Map<string, Corpus>();
 
-/** Turn a raw agent_id into a friendly name. */
+/** Turn a raw agent_id into a friendly name, for a sentence.
+ *
+ *  An id nobody can name — a DID, a long key, or one of the "MCP Agent"
+ *  placeholders — reads "An agent" rather than leaking the id. One name table
+ *  for the whole app: see lib/agentNames. */
 function agentLabel(id: string | undefined): string {
-  const raw = (id ?? "").trim();
-  if (!raw) return "An agent";
-  const known: Record<string, string> = {
-    claude: "Claude",
-    "aura-manager": "Aura",
-    aura: "Aura",
-    gemini: "Gemini",
-    codex: "Codex",
-    kimi: "Kimi",
-    "mcp connected agent": "An agent",
-  };
-  const hit = known[raw.toLowerCase()];
-  if (hit) return hit;
-  // did:aura:key/... or an opaque id — don't leak it, just say "an agent".
-  if (raw.includes(":") || raw.length > 24) return "An agent";
-  return raw.charAt(0).toUpperCase() + raw.slice(1);
+  return agentName(id, { empty: "An agent", unknown: "An agent" });
 }
 
 // Leading noise we strip so the lead reads like a sentence, not a commit line.
@@ -87,7 +79,7 @@ function leadLine(intent: string): string {
   let lead = dot > 24 ? s.slice(0, dot + 1) : s;
   if (lead.length > 170) lead = lead.slice(0, 167).trimEnd() + "…";
   if (!lead) return intent.slice(0, 120);
-  return lead.charAt(0).toUpperCase() + lead.slice(1);
+  return sentenceCase(lead);
 }
 
 /** Read + parse `.aura/intent_log.jsonl` for a repo (cached per repoRoot). */
@@ -223,20 +215,13 @@ export async function ask(repoRoot: string, question: string): Promise<AskResult
   return compose(ranked);
 }
 
-/** Human "3 days ago"-style label for a unix-seconds timestamp. */
+/** Human "3d ago"-style label for a unix-seconds timestamp.
+ *
+ *  This spelled its units out — "5 min ago", "2 hrs ago", "3 days ago" — which
+ *  is a perfectly good way to write an age, and was the only place in the app
+ *  writing it that way. An Ask result sits in the same window as every other
+ *  surface, so it reads "5m ago" like the rest of them now. */
 export function relativeTime(tsSeconds: number): string {
-  if (!tsSeconds) return "";
-  const now = Date.now() / 1000;
-  const d = Math.max(0, now - tsSeconds);
-  if (d < 90) return "just now";
-  const m = Math.round(d / 60);
-  if (m < 60) return `${m} min ago`;
-  const h = Math.round(m / 60);
-  if (h < 24) return `${h} hr${h === 1 ? "" : "s"} ago`;
-  const days = Math.round(h / 24);
-  if (days < 30) return `${days} day${days === 1 ? "" : "s"} ago`;
-  const mo = Math.round(days / 30);
-  if (mo < 12) return `${mo} month${mo === 1 ? "" : "s"} ago`;
-  const y = Math.round(mo / 12);
-  return `${y} year${y === 1 ? "" : "s"} ago`;
+  // One ladder for the whole app — see lib/relativeTime.
+  return relativeAgeFromSecs(tsSeconds);
 }

@@ -118,7 +118,9 @@ pub fn disable() -> Result<(), Box<dyn std::error::Error>> {
         return Err("Not a git repository.".into());
     }
 
-    let hooks_dir = Path::new(".git").join("hooks");
+    // Same resolver `enable` installs through, so disable stays its exact
+    // inverse in a worktree (shared common dir) or under `core.hooksPath`.
+    let hooks_dir = HookInstaller::hooks_dir();
     let mut cleaned = 0usize;
     for name in HOOK_FILES {
         let path = hooks_dir.join(name);

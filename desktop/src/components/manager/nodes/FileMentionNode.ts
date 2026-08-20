@@ -16,6 +16,7 @@
 // `SlashCommandNode` — same shape, different verb glyph.
 
 import { Node, mergeAttributes } from "@tiptap/core";
+import { basename } from "../../../lib/paths";
 
 export type FileMentionAttrs = {
   /** Full repo-relative (or absolute) path the chip carries, e.g.
@@ -23,15 +24,6 @@ export type FileMentionAttrs = {
    *  the serialized `@path` carries the whole thing for the backend resolver. */
   path: string;
 };
-
-/** Last path segment for the chip's visible label — the rest lives in the
- *  `data-path` attribute and the serialized `@path`. A trailing slash (folder
- *  drop) keeps the final named segment. */
-function basenameOf(path: string): string {
-  const trimmed = path.replace(/\/+$/, "");
-  const seg = trimmed.split("/").filter(Boolean).pop();
-  return seg || path;
-}
 
 /** Build the `@file` atom node. A factory (not a bare const) so the caller
  *  site reads symmetrically with `createSlashCommandNode()` and leaves room
@@ -67,7 +59,7 @@ export function createFileMentionNode() {
           class: "composer-atom composer-atom-mention",
           title: path,
         }),
-        `@${basenameOf(path)}`,
+        `@${basename(path)}`,
       ];
     },
 

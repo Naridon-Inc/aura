@@ -809,17 +809,36 @@ pub struct VerifyPerCommit {
 }
 
 /// The whole-range verdict `aura meta verify` reports.
+///
+/// `proofs` and `proven` are DIFFERENT numbers and the difference is the
+/// whole point of this report. A proof snapshot records a verdict —
+/// "verified", "partial", "not_wired" or "unknown" — so a commit can carry a
+/// proof that says its goals were never wired up. Counting those as proven
+/// (which this did) let the desktop panel print "Verified on this clone, 12
+/// of 40 changes proven" over evidence that said the opposite.
 #[derive(Debug, Serialize)]
 pub struct VerifyReport {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub range: Option<String>,
     pub commits: usize,
     pub intent_covered: usize,
+    /// Commits carrying a proof snapshot at all, whatever it says. Not
+    /// evidence of anything on its own — it is the denominator.
+    pub proofs: usize,
+    /// Commits whose proof binds to them AND whose rolled-up verdict is
+    /// "verified". The only number that earns the word.
     pub proven: usize,
-    /// One line per binding problem found.
+    /// Commits whose proof binds and reads "partial" — some requirements met.
+    pub partial: usize,
+    /// One line per problem found: a mis-bound proof, or one this build
+    /// couldn't read. Both mean "look at this", not "nothing here".
     pub issues: Vec<String>,
-    /// True when no commit's proof note is mis-bound to its oid.
+    /// True when nothing in `issues` needs a look.
     pub ok: bool,
+    /// True when the walk stopped at VERIFY_CAP with history still to go, so
+    /// `commits` is the most recent N and not the whole clone. A roll-up that
+    /// doesn't say this reads as a claim about everything.
+    pub truncated: bool,
     pub per_commit: Vec<VerifyPerCommit>,
 }
 
@@ -829,9 +848,18 @@ const VERIFY_CAP: usize = 200;
 
 /// Walk the commits in `range` (default = HEAD, capped at VERIFY_CAP) and
 /// check, per commit: whether it carries intent, whether it carries a proof
-/// snapshot, and whether that snapshot binds back to the right oid. A proof
-/// note whose `commit` field doesn't match the commit it's attached to is an
-/// issue (it's been re-pointed or tampered) and makes the report `ok=false`.
+/// snapshot, whether that snapshot binds back to the right oid, and what the
+/// snapshot actually says.
+///
+/// Three things make a commit's proof not count:
+///   * the note's `commit` field doesn't match the commit it hangs on — it's
+///     been re-pointed or tampered with, so its verdict can't be trusted;
+///   * the note is there and this build can't parse it — an unread file is
+///     not an absent one, and silently treating it as absent is how a report
+///     comes back clean without having looked;
+///   * the verdict itself isn't "verified".
+///
+/// Any of the first two lands in `issues` and makes the report `ok=false`.
 pub fn verify_range(
     repo: &Repository,
     range: Option<&str>,
@@ -849,11 +877,17 @@ pub fn verify_range(
 
     let mut per_commit: Vec<VerifyPerCommit> = Vec::new();
     let mut intent_covered = 0usize;
+    let mut proofs = 0usize;
     let mut proven = 0usize;
+    let mut partial = 0usize;
     let mut issues: Vec<String> = Vec::new();
+    let mut truncated = false;
 
     for oid in walk {
         if per_commit.len() >= VERIFY_CAP {
+            // There is history we didn't look at. Say so rather than letting
+            // `commits` read as the size of the repo.
+            truncated = true;
             break;
         }
         let oid = oid?;
@@ -867,11 +901,36 @@ pub fn verify_range(
             intent_covered += 1;
         }
 
-        let proof = note_body(repo, PROOF_REF, oid).and_then(|b| parse_proof_note(&b));
+        // A note that is present but unparseable is its own case. `and_then`
+        // used to fold it into `None`, which is the same value we use for "no
+        // proof was ever recorded" — so a file we couldn't read counted as a
+        // commit nobody had tried to prove, and the report stayed ok.
+        let raw_proof = note_body(repo, PROOF_REF, oid);
+        let proof = raw_proof.as_deref().and_then(parse_proof_note);
+        if proof.is_none()
+            && raw_proof
+                .as_deref()
+                .map(|b| !b.trim().is_empty())
+                .unwrap_or(false)
+        {
+            issues.push(format!(
+                "{}: a proof is recorded here but this version of Aura can't read it",
+                short
+            ));
+        }
+
         let binding_ok = match &proof {
             Some(p) => {
-                proven += 1;
+                proofs += 1;
                 if p.commit == full {
+                    // Only now is the verdict worth reading. A mis-bound note
+                    // has been moved onto this commit from somewhere else, so
+                    // whatever it claims is about a different change.
+                    match p.verdict.as_str() {
+                        "verified" => proven += 1,
+                        "partial" => partial += 1,
+                        _ => {}
+                    }
                     true
                 } else {
                     issues.push(format!(
@@ -899,9 +958,12 @@ pub fn verify_range(
         range: range.map(|s| s.to_string()),
         commits: per_commit.len(),
         intent_covered,
+        proofs,
         proven,
+        partial,
         issues,
         ok,
+        truncated,
         per_commit,
     })
 }

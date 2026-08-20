@@ -21,6 +21,8 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Dialog } from "../Dialog";
+import { shortDate } from "../../lib/calendarDate";
+import { relativeAge } from "../../lib/relativeTime";
 import { Button } from "../ui/button";
 import { Input } from "../ui/input";
 import { Select } from "../ui/select";
@@ -58,11 +60,11 @@ const ALL = "__all__";
 const SECTIONS: Record<string, { label: string; blurb: string }> = {
   decisions: {
     label: "Decisions",
-    blurb: "Choices made and why — so they're never re-litigated.",
+    blurb: "Choices made and why, so they're never re-litigated.",
   },
   conventions: {
     label: "Conventions",
-    blurb: "How things are done here — the style and patterns to follow.",
+    blurb: "How things are done here. The style and patterns to follow.",
   },
   gotchas: {
     label: "Gotchas",
@@ -211,7 +213,7 @@ export function MemoryDialog({ open, repoRoot, onClose, inline = false }: Memory
         return;
       }
       if (r.total === 0) {
-        setImportResult("Claude Code's memory for this project was empty — nothing to bring in.");
+        setImportResult("Claude Code's memory for this project was empty. Nothing to bring in.");
         return;
       }
       const broughtIn = r.imported + r.updated;
@@ -312,7 +314,7 @@ export function MemoryDialog({ open, repoRoot, onClose, inline = false }: Memory
         <Masthead memory={memory} count={totalCount} />
 
         {importResult && (
-          <div className="mx-1 mt-2 flex items-start gap-2 rounded-md border border-line-soft bg-bg-1 px-3 py-2 text-[12px] text-text-2">
+          <div className="mx-1 mt-2 flex items-start gap-2 rounded-md border border-line-soft bg-bg-1 px-3 py-2 text-sm text-text-2">
             <span className="mt-0.5 text-[var(--color-accent)]">✓</span>
             <span className="flex-1 leading-relaxed">{importResult}</span>
             <button
@@ -327,13 +329,13 @@ export function MemoryDialog({ open, repoRoot, onClose, inline = false }: Memory
         )}
 
         {error ? (
-          <div role="alert" className="text-red text-[12px] px-1 py-4">{error}</div>
+          <div role="alert" className="text-red text-sm px-1 py-4">{error}</div>
         ) : !memory && loading ? (
-          <div className="text-text-4 text-[12px] py-10 text-center">
+          <div className="text-text-4 text-sm py-10 text-center">
             Reading what Aura remembers…
           </div>
         ) : !memory ? (
-          <div className="text-text-4 text-[12px] py-10 text-center">
+          <div className="text-text-4 text-sm py-10 text-center">
             Memory isn't set up for this project yet.
           </div>
         ) : (
@@ -412,12 +414,12 @@ function Masthead({ memory, count }: { memory: MemoryView | null; count: number 
   // doesn't need the same four-line explainer re-read at the top every visit.
   return (
     <div className="px-1 pb-3 border-b border-line-soft">
-      <p className="text-[12.5px] leading-relaxed text-text-2 max-w-[640px]">
-        What Aura remembers about this project — the decisions, conventions, and
+      <p className="text-base leading-relaxed text-text-2 max-w-[640px]">
+        What Aura remembers about this project. The decisions, conventions, and
         gotchas it carries into every session, so nobody repeats themselves.
       </p>
       {(identity || stack.length > 0) && (
-        <div className="mt-2 flex flex-wrap items-center gap-1.5 text-[11px] text-text-4">
+        <div className="mt-2 flex flex-wrap items-center gap-1.5 text-xs text-text-4">
           <span>Aura sees this as</span>
           {identity && (
             <span className="px-1.5 py-0.5 rounded bg-bg-2 text-text-2">{identity}</span>
@@ -497,14 +499,14 @@ function SearchResults({
 }) {
   if (hits.length === 0) {
     return (
-      <div className="text-[12px] text-text-4 py-8 text-center">
+      <div className="text-sm text-text-4 py-8 text-center">
         Nothing remembered matches “{query.trim()}”.
       </div>
     );
   }
   return (
     <div className="flex flex-col gap-2">
-      <div className="text-[11px] text-text-4">
+      <div className="text-xs text-text-4">
         {hits.length} {hits.length === 1 ? "match" : "matches"}, best first
       </div>
       {hits.map((h, i) => {
@@ -525,7 +527,7 @@ function SearchResults({
         return (
           <div key={`hit-${i}`} className="rounded-md border border-line-soft bg-bg-1 px-3 py-2">
             {h.section && <CategoryTag name={h.section} />}
-            <div className="mt-1 text-[12.5px] text-text-1 whitespace-pre-wrap break-words">
+            <div className="mt-1 text-base text-text-1 whitespace-pre-wrap break-words">
               {h.content}
             </div>
           </div>
@@ -588,10 +590,10 @@ function FilterChip({
       type="button"
       onClick={onClick}
       title={title}
-      className={`flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-[11.5px] transition-colors ${
+      className={`flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-sm transition-colors ${
         active
           ? "border-transparent bg-accent text-bg-0"
-          : "border-line-soft text-text-3 hover:text-text-1 hover:bg-bg-2"
+          : "border-line-soft text-text-3 hover:text-text-1 hover:bg-state-hover"
       }`}
     >
       <span>{label}</span>
@@ -602,7 +604,7 @@ function FilterChip({
 
 function CategoryTag({ name }: { name: string }) {
   return (
-    <span className="text-[10px] px-1.5 py-0.5 rounded bg-bg-2 text-text-3">
+    <span className="text-2xs px-1.5 py-0.5 rounded bg-bg-2 text-text-3">
       {sectionLabel(name)}
     </span>
   );
@@ -613,12 +615,12 @@ function CategoryTag({ name }: { name: string }) {
 function EmptyMemory({ onAdd }: { onAdd: () => void }) {
   return (
     <div className="py-10 px-6 text-center max-w-[520px] mx-auto">
-      <div className="text-[15px] font-medium text-text-1">
+      <div className="text-lg font-medium text-text-1">
         Aura hasn't remembered anything yet
       </div>
-      <p className="mt-2 text-[12.5px] leading-relaxed text-text-3">
+      <p className="mt-2 text-base leading-relaxed text-text-3">
         As you and your agents work, the decisions and conventions worth keeping
-        get recorded here — and travel into every future session, so the AI stops
+        get recorded here, and travel into every future session, so the AI stops
         re-asking and re-breaking the same things. You can also add a fact by hand.
       </p>
       <div className="mt-4">
@@ -660,20 +662,20 @@ function EntryCard({
   return (
     <div className="group rounded-md border border-line-soft bg-bg-1 px-3 py-2.5">
       {/* Content leads — it's the fact, not the metadata. */}
-      <div className="text-[12.5px] leading-relaxed text-text-1 whitespace-pre-wrap break-words">
+      <div className="text-base leading-relaxed text-text-1 whitespace-pre-wrap break-words">
         {entry.content}
       </div>
 
       <div className="mt-2 flex flex-wrap items-center gap-1.5">
         {section && <CategoryTag name={section} />}
         {entry.tags.map((t) => (
-          <span key={t} className="text-[10px] px-1.5 py-0.5 rounded bg-bg-2 text-text-3">
+          <span key={t} className="text-2xs px-1.5 py-0.5 rounded bg-bg-2 text-text-3">
             #{t}
           </span>
         ))}
         {entry.source_commit && (
           <span
-            className="text-[10px] px-1.5 py-0.5 rounded bg-bg-2 text-text-4 font-mono"
+            className="text-2xs px-1.5 py-0.5 rounded bg-bg-2 text-text-4 font-mono"
             title={`Learned at commit ${entry.source_commit}`}
           >
             {entry.source_commit.slice(0, 8)}
@@ -681,7 +683,7 @@ function EntryCard({
         )}
         {entry.source_symbol && (
           <span
-            className="text-[10px] px-1.5 py-0.5 rounded bg-bg-2 text-text-3 font-mono max-w-[240px] truncate"
+            className="text-2xs px-1.5 py-0.5 rounded bg-bg-2 text-text-3 font-mono max-w-[240px] truncate"
             title={`Anchored to ${entry.source_symbol}`}
           >
             {shortSymbol(entry.source_symbol)}
@@ -698,14 +700,14 @@ function EntryCard({
         )}
 
         {/* Quiet provenance line + Forget, pushed to the right. */}
-        <span className="ml-auto flex items-center gap-2 text-[10.5px] text-text-4">
+        <span className="ml-auto flex items-center gap-2 text-xs text-text-4">
           {who && <span title={`Remembered by ${who}`}>{who}</span>}
           {entry.added_at > 0 && <span>{fmtTs(entry.added_at)}</span>}
           <button
             type="button"
             onClick={onForget}
             className="opacity-0 group-hover:opacity-100 transition-opacity hover:text-red"
-            title="Forget this — Aura will stop carrying it into sessions"
+            title="Forget this. Aura will stop carrying it into sessions"
           >
             Forget
           </button>
@@ -761,29 +763,29 @@ function NewEntryForm({
 
   return (
     <div className="rounded-md border border-line-soft bg-bg-1 p-3 flex flex-col gap-2.5">
-      <div className="text-[12px] font-medium text-text-1">Add a fact to memory</div>
+      <div className="text-sm font-medium text-text-1">Add a fact to memory</div>
       <label className="flex flex-col gap-1">
-        <span className="text-[10.5px] text-text-3">Category</span>
+        <span className="text-xs text-text-3">Category</span>
         <Select
           value={section}
           onChange={setSection}
           options={sections.map(([id, meta]) => ({ value: id, label: meta.label }))}
           aria-label="Category"
         />
-        <span className="text-[10.5px] text-text-4">{SECTIONS[section]?.blurb}</span>
+        <span className="text-xs text-text-4">{SECTIONS[section]?.blurb}</span>
       </label>
       <label className="flex flex-col gap-1">
-        <span className="text-[10.5px] text-text-3">What should every future session know?</span>
+        <span className="text-xs text-text-3">What should every future session know?</span>
         <textarea
           value={content}
           onChange={(e) => setContent(e.target.value)}
           rows={4}
           placeholder="e.g. We use the arctic-blue accent for primary buttons; green is status-only."
-          className="px-2 py-1.5 rounded bg-bg-0 border border-line-soft text-text-1 text-[12px] resize-y"
+          className="px-2 py-1.5 rounded bg-bg-0 border border-line-soft text-text-1 text-sm resize-y"
         />
       </label>
       <label className="flex flex-col gap-1">
-        <span className="text-[10.5px] text-text-3">Tags (optional, comma-separated)</span>
+        <span className="text-xs text-text-3">Tags (optional, comma-separated)</span>
         <Input
           value={tagsRaw}
           onChange={(e) => setTagsRaw(e.target.value)}
@@ -824,13 +826,16 @@ function SearchGlyph() {
 }
 
 function fmtTs(unix: number): string {
+  // One ladder for the whole app — see lib/relativeTime.
+  //
+  // The hand-off past a day is this surface's own call — a memory older than
+  // that is better placed by its date than by its age. Only the rungs above
+  // it were a private copy.
   if (!unix) return "";
-  const d = new Date(unix * 1000);
-  if (Number.isNaN(d.getTime())) return "";
+  const ms = unix * 1000;
+  if (Number.isNaN(ms)) return "";
   const now = Date.now();
-  const diffMs = now - d.getTime();
-  if (diffMs < 60_000) return "just now";
-  if (diffMs < 3_600_000) return `${Math.floor(diffMs / 60_000)}m ago`;
-  if (diffMs < 86_400_000) return `${Math.floor(diffMs / 3_600_000)}h ago`;
-  return d.toLocaleDateString(undefined, { month: "short", day: "numeric", year: "2-digit" });
+  return now - ms < 86_400_000
+    ? relativeAge(ms, { now })
+    : shortDate(ms, { now });
 }

@@ -10,11 +10,12 @@
 //! so signing in once from either surface unlocks both.
 
 use serde::{Deserialize, Serialize};
-use std::fs;
-use std::path::PathBuf;
 use std::time::Duration;
 
-use crate::cloud_session_sync::{aura_dir, cloud_origin, cloud_token, read_credentials};
+use crate::cloud_org::{active_org, OrgScoped};
+use crate::cloud_session_sync::{
+    cloud_origin, cloud_token, read_credentials, write_credentials,
+};
 
 const DEFAULT_CLOUD: &str = "https://auravcs.com";
 
@@ -67,32 +68,11 @@ pub struct CloudAuthStatus {
     pub connected: bool,
     pub user: Option<String>,
     pub org_slug: Option<String>,
+    /// What the org is *called* — `"Naridon"`, not `"naridon"`. Absent until
+    /// something has read the org list, because the pairing exchange only ever
+    /// sends a slug; surfaces fall back to the slug rather than waiting.
+    pub org_name: Option<String>,
     pub cloud_url: String,
-}
-
-fn credentials_path() -> Result<PathBuf, String> {
-    let dir = aura_dir()?;
-    if !dir.exists() {
-        fs::create_dir_all(&dir).map_err(|e| format!("create {}: {e}", dir.display()))?;
-    }
-    Ok(dir.join("credentials.json"))
-}
-
-fn write_credentials(map: &serde_json::Map<String, serde_json::Value>) -> Result<(), String> {
-    let path = credentials_path()?;
-    let pretty = serde_json::to_string_pretty(map)
-        .map_err(|e| format!("serialize credentials.json: {e}"))?;
-    fs::write(&path, pretty).map_err(|e| format!("write {}: {e}", path.display()))?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        if let Ok(meta) = fs::metadata(&path) {
-            let mut perms = meta.permissions();
-            perms.set_mode(0o600);
-            let _ = fs::set_permissions(&path, perms);
-        }
-    }
-    Ok(())
 }
 
 fn http_client() -> Result<reqwest::Client, String> {
@@ -230,6 +210,14 @@ pub async fn cloud_auth_poll(
                 serde_json::Value::String(user.clone()),
             );
         }
+        // The org this sign-in landed in. Its id and display name are NOT
+        // carried by the poll response and are dropped rather than kept: the
+        // pair that was there belongs to whoever was signed in before, and a
+        // slug from this account beside an id from the last one is the one
+        // state that would have the app filtering by a stranger's org. The
+        // first `cloud_orgs` read fills both back in.
+        map.remove("cloud_org_id");
+        map.remove("cloud_org_name");
         if let Some(ref org) = parsed.org_slug {
             map.insert(
                 "cloud_org_slug".to_string(),
@@ -311,6 +299,7 @@ pub async fn cloud_pair_create(cloud_url: Option<String>) -> Result<CloudPairRes
     let approve_resp = client
         .post(&approve_url)
         .bearer_auth(&token)
+        .org_scoped()
         .send()
         .await
         .map_err(|e| format!("POST {approve_url}: {e}"))?;
@@ -344,14 +333,12 @@ pub async fn cloud_auth_status() -> Result<CloudAuthStatus, String> {
         .get("cloud_user")
         .and_then(|v| v.as_str())
         .map(str::to_string);
-    let org_slug = creds
-        .get("cloud_org_slug")
-        .and_then(|v| v.as_str())
-        .map(str::to_string);
+    let org = active_org(&creds);
     Ok(CloudAuthStatus {
         connected,
         user,
-        org_slug,
+        org_slug: org.slug,
+        org_name: org.name,
         cloud_url: cloud_origin(&creds),
     })
 }
@@ -361,8 +348,71 @@ pub async fn cloud_auth_logout() -> Result<(), String> {
     let mut map = read_credentials().unwrap_or_default();
     map.remove("cloud_api_token");
     map.remove("cloud_user");
+    // All three halves of the org, not just the slug. Leaving the id behind
+    // would have the next account's first reads filtered by the last account's
+    // org until something happened to overwrite it.
     map.remove("cloud_org_slug");
+    map.remove("cloud_org_id");
+    map.remove("cloud_org_name");
     map.insert("sync_enabled".to_string(), serde_json::Value::Bool(false));
     write_credentials(&map)?;
+    Ok(())
+}
+
+/// Invite a teammate to your Aura Cloud org by their GitHub username.
+///
+/// This is the "invite through Aura" path: a signed-in team brings someone on
+/// by handing Aura Cloud a username, not by editing git-remote permissions.
+/// It calls the org's existing invite route with YOUR bearer token; the server
+/// (`aura-cloud` `orgs::invite_member`) enforces that only an owner/admin may
+/// invite and which roles they may grant. Client-only — it targets a route
+/// that already exists and deploys nothing.
+#[tauri::command]
+pub async fn cloud_org_invite(
+    github_username: String,
+    role: Option<String>,
+) -> Result<(), String> {
+    let github_username = github_username.trim();
+    if github_username.is_empty() {
+        return Err("A GitHub username is required to invite someone.".to_string());
+    }
+    let creds = read_credentials().unwrap_or_default();
+    let token = cloud_token(&creds)
+        .ok_or_else(|| "Sign in to Aura Cloud before inviting a teammate.".to_string())?;
+    let slug = creds
+        .get("cloud_org_slug")
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| {
+            "Your Aura account isn't part of a cloud org yet, so there's nothing to invite into."
+                .to_string()
+        })?
+        .to_string();
+    let cloud = resolved_cloud_url(&creds);
+    let url = format!("{cloud}/api/v1/orgs/{slug}/invite");
+    let mut body = serde_json::json!({ "github_username": github_username });
+    if let Some(r) = role
+        .as_deref()
+        .map(str::trim)
+        .filter(|r| !r.is_empty())
+    {
+        body["role"] = serde_json::Value::String(r.to_string());
+    }
+    let resp = http_client()?
+        .post(&url)
+        .bearer_auth(&token)
+        .org_scoped()
+        .json(&body)
+        .send()
+        .await
+        .map_err(|e| format!("POST {url}: {e}"))?;
+    if !resp.status().is_success() {
+        let status = resp.status();
+        // Surface the server's own message — it explains "not found",
+        // "Forbidden", "already a member" far better than a guess would.
+        let txt = resp.text().await.unwrap_or_default();
+        return Err(format!("Couldn't invite them (HTTP {status}): {txt}"));
+    }
     Ok(())
 }

@@ -245,10 +245,10 @@ async fn api_graph() -> impl IntoResponse {
         Ok(r) => r,
         Err(e) => return Json(serde_json::json!({ "error": format!("Failed to open repository: {}", e) })),
     };
-    let checkpoints = CheckpointStore::get_all_checkpoints(&repo).unwrap_or_default();
-
-    // Use latest checkpoint for graph state
-    let latest = checkpoints.last();
+    // Use latest checkpoint for graph state. `last()` on a newest-first list
+    // is the oldest one, so this drew the graph of the repo's first capture.
+    let checkpoints = CheckpointStore::latest_checkpoints(&repo, 1).unwrap_or_default();
+    let latest = checkpoints.first();
     let ast_nodes = match latest {
         Some(cp) => &cp.ast_nodes,
         None => return Json(serde_json::json!({ "nodes": [], "edges": [] })),
@@ -332,17 +332,24 @@ async fn api_graph() -> impl IntoResponse {
 async fn api_status() -> impl IntoResponse {
     let config = ConfigManager::load();
     let repo = Repository::open(".").ok();
-    let checkpoints = repo.as_ref()
-        .map(|r| CheckpointStore::get_all_checkpoints(r).unwrap_or_default())
-        .unwrap_or_default();
+    // The newest one for the node count, and a count that never reads a note.
+    // Reading every checkpoint to answer both is 4.7 GB on a repo this old.
+    let latest = repo
+        .as_ref()
+        .and_then(|r| CheckpointStore::latest_checkpoints(r, 1).ok())
+        .and_then(|c| c.into_iter().next());
+    let total_checkpoints = repo.as_ref().map(CheckpointStore::count).unwrap_or(0);
     let session = SessionManager::get_active_session();
     let memory = MemoryManager::compact_summary();
     let snapshots = SnapshotStore::get_all_snapshots();
 
     Json(serde_json::json!({
         "data": {
-            "logic_nodes_tracked": checkpoints.last().map(|c| c.ast_nodes.len()).unwrap_or(0),
-            "total_checkpoints": checkpoints.len(),
+            // `last()` here read the *oldest* checkpoint — the list is newest
+            // first — so this reported the node count from the first capture
+            // this repo ever took.
+            "logic_nodes_tracked": latest.as_ref().map(|c| c.ast_nodes.len()).unwrap_or(0),
+            "total_checkpoints": total_checkpoints,
             "total_snapshots": snapshots.len(),
             "strict_gatekeeper_mode": config.strict_gatekeeper_mode,
             "dev_mode": config.dev_mode,

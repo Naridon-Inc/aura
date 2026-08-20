@@ -11,7 +11,12 @@
 
 import type { BrainChoice, ModelCatalog, ModelInfo } from "./api";
 
-/** Vendor family a brain belongs to — drives which model list it shows. */
+/** Vendor family a brain belongs to — drives which model list it shows.
+ *
+ *  An engine that publishes its own list is its own family, named for the
+ *  engine (`opencode`, `pi`), because it doesn't route to one vendor: its
+ *  list may span several. The rows still wear the mark of whoever makes
+ *  each model. */
 export type ModelFamily =
   | "anthropic"
   | "openai"
@@ -19,6 +24,8 @@ export type ModelFamily =
   | "xai"
   | "kimi"
   | "antigravity"
+  | "opencode"
+  | "pi"
   | "generic"
   | "custom";
 
@@ -63,11 +70,15 @@ export type SelectedModel = {
   family: ModelFamily;
 };
 
+// The 5 line leads, strongest first. Generation 5 gets ONE row each — its 1M
+// window is the default rather than a separate beta variant, so a "… 1M" row
+// would be the same model twice (see isLongContextCapable).
 const ANTHROPIC: CatalogModel[] = [
-  { key: "fable-5", id: "claude-fable-5", label: "Fable 5", isNew: true },
+  { key: "opus-5", id: "claude-opus-5", label: "Opus 5", isNew: true },
   { key: "sonnet-5", id: "claude-sonnet-5", label: "Sonnet 5", isNew: true },
-  { key: "opus-4-8-1m", id: "claude-opus-4-8", label: "Opus 4.8 1M", longContext: true, isNew: true },
-  { key: "opus-4-8", id: "claude-opus-4-8", label: "Opus 4.8", isNew: true },
+  { key: "fable-5", id: "claude-fable-5", label: "Fable 5", isNew: true },
+  { key: "opus-4-8-1m", id: "claude-opus-4-8", label: "Opus 4.8 1M", longContext: true },
+  { key: "opus-4-8", id: "claude-opus-4-8", label: "Opus 4.8" },
   { key: "opus-4-7-1m", id: "claude-opus-4-7", label: "Opus 4.7 1M", longContext: true },
   { key: "opus-4-7", id: "claude-opus-4-7", label: "Opus 4.7" },
   { key: "opus-4-6-1m", id: "claude-opus-4-6", label: "Opus 4.6 1M", longContext: true },
@@ -88,11 +99,14 @@ const OPENAI: CatalogModel[] = [
 ];
 
 // Ids verified against the installed `gemini` CLI (0.45.0 bundles the
-// gemini-3 line). Newest first; `-preview` is the CLI's own id for the
-// gemini-3 models, accepted by `gemini -m`.
+// gemini-3 line) and against `v1beta/models` on 2026-08-01 — the same API
+// the CLI and the native brain both dispatch to. Newest first; `-preview`
+// is the published id for the models Google still labels preview.
 const GEMINI: CatalogModel[] = [
-  { key: "gemini-3-pro", id: "gemini-3-pro-preview", label: "Gemini 3 Pro", isNew: true },
-  { key: "gemini-3-flash", id: "gemini-3-flash-preview", label: "Gemini 3 Flash", isNew: true },
+  { key: "gemini-3-6-flash", id: "gemini-3.6-flash", label: "Gemini 3.6 Flash", isNew: true },
+  { key: "gemini-3-5-flash", id: "gemini-3.5-flash", label: "Gemini 3.5 Flash" },
+  { key: "gemini-3-1-pro", id: "gemini-3.1-pro-preview", label: "Gemini 3.1 Pro", isNew: true },
+  { key: "gemini-3-flash", id: "gemini-3-flash-preview", label: "Gemini 3 Flash" },
   { key: "gemini-2-5-pro", id: "gemini-2.5-pro", label: "Gemini 2.5 Pro" },
   { key: "gemini-2-5-flash", id: "gemini-2.5-flash", label: "Gemini 2.5 Flash" },
 ];
@@ -143,6 +157,19 @@ const DEFAULT_ONLY: CatalogModel[] = [
  *  (`cli_wrapper:claude` → anthropic); `openai_compat:*` → custom. */
 export function familyOf(brain: BrainChoice): ModelFamily {
   switch (brain.kind) {
+    // `acp:opencode` → its own family. The backend probes the running agent
+    // for the list it publishes, so what the picker shows under this section
+    // is whatever the engine can run on THIS machine, right now.
+    case "acp": {
+      const suffix = brain.id.split(":")[1] ?? "";
+      if (suffix === "opencode") return "opencode";
+      return "generic";
+    }
+    // pi speaks its own RPC rather than ACP, so it arrives as its own kind —
+    // but the deal is the same: it publishes the list, we show what it
+    // published.
+    case "pi":
+      return "pi";
     case "anthropic_native":
     case "aura_pro":
       return "anthropic";
@@ -165,6 +192,13 @@ export function familyOf(brain: BrainChoice): ModelFamily {
       // Antigravity's registry id is `antigravity`; `agy` is the bin alias —
       // match both so its 11-model list shows instead of a bare "Default".
       if (suffix === "antigravity" || suffix === "agy") return "antigravity";
+      // The engines that publish their own list get that list here too.
+      // `cli_wrapper:opencode` and `acp:opencode` are the same engine with
+      // the same models behind them — only the transport differs — so the
+      // CLI entry must not fall through to generic and show a bare
+      // "Default" next to the ACP entry's real catalog.
+      if (suffix === "opencode") return "opencode";
+      if (suffix === "pi") return "pi";
       return "generic";
     }
     default:
@@ -278,6 +312,10 @@ function familyBrand(
       return { brand: "kimi", brandName: "Kimi" };
     case "antigravity":
       return { brand: "antigravity", brandName: "Antigravity" };
+    case "opencode":
+      return { brand: "opencode", brandName: "OpenCode" };
+    case "pi":
+      return { brand: "pi", brandName: "pi" };
     default:
       return {};
   }
@@ -310,6 +348,10 @@ export function modelBrandId(
       return "kimi";
     case "antigravity":
       return "antigravity";
+    case "opencode":
+      return "opencode";
+    case "pi":
+      return "pi";
     default:
       return brainId;
   }
@@ -334,6 +376,10 @@ export function modelBrandName(family: ModelFamily, model: CatalogModel): string
       return "Kimi";
     case "antigravity":
       return "Antigravity";
+    case "opencode":
+      return "OpenCode";
+    case "pi":
+      return "pi";
     default:
       return "";
   }

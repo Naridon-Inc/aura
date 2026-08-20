@@ -20,38 +20,36 @@ import { AlertTriangle, Sparkles } from "lucide-react";
 
 import { AsciiSpinner } from "../../ui/ascii-spinner";
 import type { ToolStatus } from "./types";
+import { formatDuration, formatLiveDuration } from "../../../lib/duration";
+import { agentName } from "../../../lib/agentNames";
 
-/** Format an in-flight turn's elapsed seconds for the working indicator —
- *  `8s` under a minute, `1m 04s` beyond. Sub-second renders nothing (the
- *  caller hides the stat until ≥1s so it never flashes `0s`). */
-function formatElapsed(sec: number): string {
-  if (sec < 60) return `${sec}s`;
-  const m = Math.floor(sec / 60);
-  const s = sec % 60;
-  return `${m}m ${s.toString().padStart(2, "0")}s`;
-}
-
-/** Self-contained 1s elapsed ticker for an in-flight status line. Anchors to
- *  `startedAt` (the turn's rising-edge stamp) so the count stays continuous
- *  even when the line swaps between Thinking ⇄ Planning mid-turn; falls back to
- *  mount time when no stamp is given.
+/** Self-contained elapsed ticker for an in-flight status line, in fractional
+ *  seconds. Anchors to `startedAt` (the turn's rising-edge stamp) so the count
+ *  stays continuous even when the line swaps between Thinking ⇄ Planning
+ *  mid-turn; falls back to mount time when no stamp is given.
+ *
+ *  Ticks at 10Hz, and the caller renders a tenth. A once-a-second counter is
+ *  frozen for ~900ms out of every 1000, and a number sitting still beside a
+ *  spinner is exactly what a hung turn looks like — the wait feels longer than
+ *  it is. Same elapsed time, shown moving.
  *
  *  The interval lives *here*, on the leaf — so the timer re-renders only this
- *  one line each second, never the whole chat view. A view-level ticker
- *  re-rendered the entire transcript every second, which collapsed any text the
- *  user was mid-selecting and made the stream visibly flicker. Keeping the
- *  ticker on the leaf is the fix for both. */
+ *  one line, never the whole chat view. A view-level ticker re-rendered the
+ *  entire transcript on every beat, which collapsed any text the user was
+ *  mid-selecting and made the stream visibly flicker; at 10Hz that would be
+ *  ten times worse. Keeping the ticker on the leaf is what makes the finer
+ *  cadence affordable. */
 function useElapsedSeconds(startedAt: number | null | undefined): number {
   const startRef = useRef<number | null>(null);
   if (startRef.current == null) startRef.current = startedAt ?? Date.now();
   const [sec, setSec] = useState(() =>
-    Math.floor((Date.now() - (startRef.current as number)) / 1000),
+    Math.max(0, (Date.now() - (startRef.current as number)) / 1000),
   );
   useEffect(() => {
     const tick = () =>
-      setSec(Math.floor((Date.now() - (startRef.current as number)) / 1000));
+      setSec(Math.max(0, (Date.now() - (startRef.current as number)) / 1000));
     tick();
-    const iv = window.setInterval(tick, 1000);
+    const iv = window.setInterval(tick, 100);
     return () => window.clearInterval(iv);
   }, []);
   return sec;
@@ -59,10 +57,10 @@ function useElapsedSeconds(startedAt: number | null | undefined): number {
 
 /** The shimmer "Thinking…" line shown while the brain works. Renders the
  *  `.aura-chat`-scoped `.thinking` family (spinner + shimmer caption) from
- *  `styles.css`. When `elapsedSec` is provided (≥1) it appends a quiet
- *  tabular-nums timer so a long turn visibly keeps working — the persistent
- *  "still going" affordance Conductor/Claude Code show, instead of a state
- *  that flashes once and vanishes. */
+ *  `styles.css`. It appends a quiet tabular-nums timer, counting in tenths,
+ *  so a long turn visibly keeps working — the persistent "still going"
+ *  affordance Conductor/Claude Code show, instead of a state that flashes
+ *  once and vanishes. */
 export function ThinkingLine({
   label = "Thinking…",
   startedAt = null,
@@ -75,8 +73,8 @@ export function ThinkingLine({
     <div className="thinking">
       <AsciiSpinner />
       <span className="shimmer">{label}</span>
-      {elapsedSec >= 1 && (
-        <span className="thinking-elapsed">{formatElapsed(elapsedSec)}</span>
+      {elapsedSec > 0 && (
+        <span className="thinking-elapsed">{formatLiveDuration(elapsedSec)}</span>
       )}
     </div>
   );
@@ -99,8 +97,8 @@ export function PlanningStatusLine({
     <div className="thinking">
       <AsciiSpinner />
       <span className="shimmer">{label}</span>
-      {elapsedSec >= 1 && (
-        <span className="thinking-elapsed">{formatElapsed(elapsedSec)}</span>
+      {elapsedSec > 0 && (
+        <span className="thinking-elapsed">{formatLiveDuration(elapsedSec)}</span>
       )}
     </div>
   );
@@ -150,7 +148,7 @@ export function StallNotice({
     <div className="aura-stall-notice" role="status">
       <AlertTriangle size={13} strokeWidth={2} className="aura-stall-icon" aria-hidden />
       <span className="aura-stall-text">
-        No response from {who} for {formatElapsed(idleSec)} — it may be stuck.
+        No response from {who} for {formatDuration(idleSec)}. It may be stuck.
       </span>
       <button type="button" className="aura-stall-stop" onClick={onStop}>
         Stop
@@ -166,31 +164,10 @@ export function StallNotice({
  *  A future native id like `gemini_native` or an `openai_compat:<slug>`
  *  endpoint resolves through the same prefix-strip + name table. */
 export function humanizeBrainId(id: string): string {
-  const raw = id.trim();
-  if (!raw) return "";
-  // Strip a family prefix (`cli:`, `cli_wrapper:`, `openai_compat:`) → stem.
-  const stem = raw.includes(":") ? raw.slice(raw.indexOf(":") + 1) : raw;
-  const key = stem.replace(/_native$/, "").toLowerCase();
-  const NAMES: Record<string, string> = {
-    anthropic: "Claude",
-    claude: "Claude",
-    gemini: "Gemini",
-    openai: "OpenAI",
-    gpt: "GPT",
-    kimi: "Kimi",
-    moonshot: "Kimi",
-    codex: "Codex",
-    opencode: "OpenCode",
-    cursor: "Cursor",
-    deepseek: "DeepSeek",
-    qwen: "Qwen",
-    ollama: "Ollama",
-    aura_pro: "Aura Pro",
-    aura: "Aura Pro",
-  };
-  if (NAMES[key]) return NAMES[key];
-  // openai_compat:<slug> or any unknown id → title-case the stem.
-  return stem.replace(/[_-]+/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
+  // The prefix-strip and the name table both live in lib/agentNames now — one
+  // table for the whole app. This one read a plain `aura` as "Aura Pro",
+  // naming a paid tier for the free built-in agent.
+  return agentName(id);
 }
 
 /** Map a persisted `ChatTurn.brain` id to a canonical agent slug that

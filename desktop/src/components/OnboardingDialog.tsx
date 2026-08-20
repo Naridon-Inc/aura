@@ -275,35 +275,41 @@ function WelcomeHero({
             />
           </svg>
         </button>
-        {/* Title block — block letters, heavy display weight, tight tracking */}
+        {/* Title block. The product's own faces, not the system's — this is
+            the first screen anyone sees, and it was set in Apple's UI font.
+            .t-display is the Display optical cut, drawn for exactly this size
+            band; .t-wordmark is the brand face, with --font-sans behind it for
+            the spaces it has no glyphs for. */}
         <div className="absolute inset-0 flex flex-col items-center justify-center text-center px-12">
           <h1
+            className="t-wordmark"
             style={{
-              fontFamily:
-                '"SF Pro Display", -apple-system, BlinkMacSystemFont, system-ui, sans-serif',
-              fontWeight: 800,
+              fontWeight: 700,
               fontSize: "48px",
-              letterSpacing: "0.04em",
               color: "#ffffff",
               textShadow: "0 2px 30px rgba(0,0,0,0.85)",
               lineHeight: 1.05,
             }}
           >
-            WELCOME TO AURA
+            Welcome to Aura
           </h1>
+          {/* Was "AGENTIC DEVELOPMENT ENVIRONMENT · SEMANTIC VERSION CONTROL
+              OVER GIT" — a whole sentence in letterspaced capitals, and three
+              abstractions that tell a first-time user nothing they can act on.
+              The people this is for are not compiler engineers; say what the
+              app does for them. */}
           <p
             style={{
-              fontFamily: '"SF Pro Text", -apple-system, system-ui, sans-serif',
-              fontSize: "14px",
+              fontSize: "15px",
+              lineHeight: 1.5,
               color: "#e5e5e5",
-              maxWidth: "460px",
+              maxWidth: "440px",
               marginTop: "14px",
-              letterSpacing: "0.03em",
-              textTransform: "uppercase",
               textShadow: "0 1px 12px rgba(0,0,0,0.8)",
             }}
           >
-            Agentic Development Environment · Semantic version control over Git
+            See exactly what your AI agents changed, in plain words, and put
+            anything back the way it was.
           </p>
         </div>
       </div>
@@ -311,7 +317,7 @@ function WelcomeHero({
         <button
           type="button"
           onClick={onContinue}
-          className="text-[13px] px-5 h-[36px] rounded-md bg-white text-black hover:bg-white/90 transition-colors font-semibold tracking-wide"
+          className="text-base px-5 h-[36px] rounded-md bg-white text-black hover:bg-white/90 transition-colors font-semibold tracking-wide"
         >
           Get started
         </button>
@@ -369,12 +375,12 @@ function ModalShell({
       {!isIntro && (
         <div className="px-5 pt-4 pb-3.5 flex items-start border-b border-line-soft">
           <div className="flex-1 min-w-0">
-            <div className="text-[13.5px] font-semibold text-text-1">{title}</div>
-            <div className="text-[11.5px] text-text-4 mt-0.5">{subtitle}</div>
+            <div className="text-md font-semibold text-text-1">{title}</div>
+            <div className="text-sm text-text-4 mt-0.5">{subtitle}</div>
           </div>
           <button
             type="button"
-            className="w-6 h-6 rounded-full flex items-center justify-center text-text-4 hover:text-text-1 hover:bg-bg-2"
+            className="w-6 h-6 rounded-full flex items-center justify-center text-text-4 hover:text-text-1 hover:bg-state-hover"
             title="Refresh"
             onClick={() => window.dispatchEvent(new CustomEvent("aura:onboarding-refresh"))}
           >
@@ -390,7 +396,7 @@ function ModalShell({
           </button>
           <button
             type="button"
-            className="w-6 h-6 rounded-full flex items-center justify-center text-text-4 hover:text-text-1 hover:bg-bg-2 ml-1"
+            className="w-6 h-6 rounded-full flex items-center justify-center text-text-4 hover:text-text-1 hover:bg-state-hover ml-1"
             onClick={onClose}
             aria-label="Skip onboarding"
           >
@@ -407,7 +413,7 @@ function ModalShell({
               type="button"
               onClick={onClose}
               aria-label="Skip onboarding"
-              className="w-6 h-6 rounded-full flex items-center justify-center text-text-4 hover:text-text-1 hover:bg-bg-2"
+              className="w-6 h-6 rounded-full flex items-center justify-center text-text-4 hover:text-text-1 hover:bg-state-hover"
             >
               <svg width="12" height="12" viewBox="0 0 16 16" fill="none">
                 <path d="M3 3L13 13M13 3L3 13" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" />
@@ -421,14 +427,14 @@ function ModalShell({
         <button
           type="button"
           onClick={onBack}
-          className="text-[12.5px] px-2 h-[30px] text-text-3 hover:text-text-1 transition-colors"
+          className="text-base px-2 h-[30px] text-text-3 hover:text-text-1 transition-colors"
         >
           Back
         </button>
         <button
           type="button"
           onClick={onNext}
-          className="text-[12.5px] px-4 h-[30px] rounded bg-white text-black hover:bg-white/90 transition-colors font-medium"
+          className="text-base px-4 h-[30px] rounded bg-white text-black hover:bg-white/90 transition-colors font-medium"
         >
           {nextLabel}
         </button>
@@ -453,7 +459,7 @@ function IntroPanel() {
       >
         Let's get you started
       </h2>
-      <p className="text-[12.5px] text-text-3 mt-3 max-w-[420px] leading-relaxed">
+      <p className="text-base text-text-3 mt-3 max-w-[420px] leading-relaxed">
         We'll port over your projects and terminal-agent CLIs, then connect an
         AI provider so Claude / Codex / Gemini run inside Aura's panes. Anything
         you skip is reachable later from Settings.
@@ -484,13 +490,13 @@ function ProjectsImportPanel() {
     <div className="px-5 py-3">
       {recents.length === 0 ? (
         <div className="py-10 text-center">
-          <div className="text-[12.5px] text-text-3 mb-3">
+          <div className="text-base text-text-3 mb-3">
             No previously-opened repos found.
           </div>
           <button
             type="button"
             onClick={pickFolder}
-            className="text-[12px] px-3 h-[30px] rounded border border-line-soft bg-bg-2 text-text-1 hover:bg-bg-3"
+            className="text-sm px-3 h-[30px] rounded border border-line-soft bg-bg-2 text-text-1 hover:bg-bg-3"
           >
             Pick a folder…
           </button>
@@ -503,7 +509,7 @@ function ProjectsImportPanel() {
             return (
               <div
                 key={root}
-                className="flex items-center gap-3 px-3 py-2.5 rounded hover:bg-bg-2/60"
+                className="flex items-center gap-3 px-3 py-2.5 rounded hover:bg-state-hover"
               >
                 <svg width="16" height="16" viewBox="0 0 16 16" fill="none" className="text-text-3">
                   <path
@@ -514,8 +520,8 @@ function ProjectsImportPanel() {
                   />
                 </svg>
                 <div className="flex-1 min-w-0">
-                  <div className="text-[12.5px] text-text-1 font-medium truncate">{name}</div>
-                  <div className="text-[10.5px] text-text-4 font-mono truncate">{root}</div>
+                  <div className="text-base text-text-1 font-medium truncate">{name}</div>
+                  <div className="text-xs text-text-4 font-mono truncate">{root}</div>
                 </div>
                 <button
                   type="button"
@@ -527,7 +533,7 @@ function ProjectsImportPanel() {
                     })
                   }
                   disabled={isImported}
-                  className={`text-[11.5px] px-3 h-[28px] rounded border transition-colors ${
+                  className={`text-sm px-3 h-[28px] rounded border transition-colors ${
                     isImported
                       ? "border-line-soft bg-transparent text-text-4 cursor-default"
                       : "border-line-soft bg-bg-2 text-text-1 hover:bg-bg-3"
@@ -628,19 +634,19 @@ function PresetsImportPanel({
           return (
             <div
               key={p.id}
-              className="flex items-center gap-3 px-3 py-2.5 rounded hover:bg-bg-2/60"
+              className="flex items-center gap-3 px-3 py-2.5 rounded hover:bg-state-hover"
             >
               <PromptGlyph />
               <div className="flex-1 min-w-0">
                 <div className="flex items-center gap-2">
-                  <span className="text-[12.5px] text-text-1 font-medium">{p.name}</span>
+                  <span className="text-base text-text-1 font-medium">{p.name}</span>
                   {here === false && (
-                    <span className="text-[9.5px] uppercase tracking-wider text-text-5">
+                    <span className="section-label">
                       Not on PATH
                     </span>
                   )}
                 </div>
-                <div className="text-[11px] text-text-4 leading-snug">{p.desc}</div>
+                <div className="text-xs text-text-4 leading-snug">{p.desc}</div>
               </div>
               <button
                 type="button"
@@ -653,7 +659,7 @@ function PresetsImportPanel({
                   setAgent(p.id);
                 }}
                 disabled={isImported || here === false}
-                className={`text-[11.5px] px-3 h-[28px] rounded border transition-colors ${
+                className={`text-sm px-3 h-[28px] rounded border transition-colors ${
                   isImported || here === false
                     ? "border-line-soft bg-transparent text-text-4 cursor-default"
                     : "border-line-soft bg-bg-2 text-text-1 hover:bg-bg-3"
@@ -667,7 +673,7 @@ function PresetsImportPanel({
         })}
       </div>
       {agent && (
-        <div className="px-3 pt-3 text-[10.5px] text-text-5">
+        <div className="px-3 pt-3 text-xs text-text-5">
           Default agent: <span className="text-text-3">{agent}</span> (change later from the rail)
         </div>
       )}
@@ -711,7 +717,7 @@ function FullscreenShell({
             <button
               type="button"
               onClick={onBack}
-              className="text-[12.5px] text-text-3 hover:text-text-1 flex items-center gap-1.5"
+              className="text-base text-text-3 hover:text-text-1 flex items-center gap-1.5"
             >
               <svg width="13" height="13" viewBox="0 0 16 16" fill="none">
                 <path d="M10 3L5 8l5 5" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round" />
@@ -727,7 +733,7 @@ function FullscreenShell({
             return (
               <div key={s.label} className="flex items-center">
                 <div
-                  className={`flex items-center gap-1.5 px-2.5 h-[26px] rounded-full text-[11.5px] ${
+                  className={`flex items-center gap-1.5 px-2.5 h-[26px] rounded-full text-sm ${
                     isActive
                       ? "bg-bg-2 text-text-1 border border-line-soft"
                       : "text-text-4"
@@ -755,7 +761,7 @@ function FullscreenShell({
           <button
             type="button"
             onClick={onClose}
-            className="w-7 h-7 rounded-full flex items-center justify-center text-text-4 hover:text-text-1 hover:bg-bg-2"
+            className="w-7 h-7 rounded-full flex items-center justify-center text-text-4 hover:text-text-1 hover:bg-state-hover"
             aria-label="Close onboarding"
           >
             <svg width="13" height="13" viewBox="0 0 16 16" fill="none">
@@ -885,13 +891,13 @@ function ProvidersPanel({
     <div className="min-h-full flex items-center justify-center py-12 px-6">
       <div className="w-[520px] max-w-full">
         <div className="text-center mb-7">
-          <div className="text-[14px] font-semibold text-text-1">Connect AI Provider</div>
-          <div className="text-[12px] text-text-3 mt-1">
+          <div className="text-md font-semibold text-text-1">Connect AI Provider</div>
+          <div className="text-sm text-text-3 mt-1">
             Connect Claude Code, Codex, or both to get started.
           </div>
         </div>
 
-        <div className="text-[10.5px] uppercase tracking-wider text-text-5 mb-2">
+        <div className="section-label mb-2">
           Claude Code
         </div>
 
@@ -949,13 +955,13 @@ function ProvidersPanel({
                   type="button"
                   onClick={connectPro}
                   disabled={stage.kind === "running"}
-                  className="w-[260px] h-[34px] rounded bg-white/95 text-black text-[12.5px] font-medium hover:bg-white disabled:opacity-60"
+                  className="w-[260px] h-[34px] rounded bg-white/95 text-black text-base font-medium hover:bg-white disabled:opacity-60"
                 >
                   {stage.kind === "running"
                     ? "Waiting for browser…"
                     : "Sign in with claude.ai"}
                 </button>
-                <p className="text-[10.5px] text-text-5 text-center max-w-[300px]">
+                <p className="text-xs text-text-5 text-center max-w-[300px]">
                   Opens the Claude Code CLI's native sign-in. A browser window
                   will pop up against claude.ai.
                 </p>
@@ -964,7 +970,7 @@ function ProvidersPanel({
 
             {choice === "claude-api" && (
               <div className="mt-6">
-                <label className="block text-[11px] text-text-3 mb-1.5">
+                <label className="block text-xs text-text-3 mb-1.5">
                   Anthropic API Key
                 </label>
                 <Input
@@ -974,7 +980,7 @@ function ProvidersPanel({
                   placeholder="sk-ant-…"
                   className="w-full"
                 />
-                <p className="text-[10.5px] text-text-5 mt-1.5">
+                <p className="text-xs text-text-5 mt-1.5">
                   Stored locally at <code>~/.aura/anthropic_api_key</code> (0600).
                   Aura injects it as <code>ANTHROPIC_API_KEY</code> on every Claude
                   Code spawn.
@@ -982,7 +988,7 @@ function ProvidersPanel({
                 <button
                   type="button"
                   onClick={() => openUrl("https://console.anthropic.com/settings/keys")}
-                  className="text-[11px] text-accent hover:underline mt-1"
+                  className="text-xs text-accent hover:underline mt-1"
                 >
                   Get a key at console.anthropic.com →
                 </button>
@@ -991,7 +997,7 @@ function ProvidersPanel({
                     type="button"
                     onClick={saveApiKey}
                     disabled={!apiKey.trim() || stage.kind === "running"}
-                    className="w-[260px] h-[34px] rounded bg-white/95 text-black text-[12.5px] font-medium hover:bg-white disabled:opacity-50"
+                    className="w-[260px] h-[34px] rounded bg-white/95 text-black text-base font-medium hover:bg-white disabled:opacity-50"
                   >
                     Save API Key
                   </button>
@@ -1002,7 +1008,7 @@ function ProvidersPanel({
             {choice === "claude-custom" && (
               <div className="mt-6 space-y-3">
                 <div>
-                  <label className="block text-[11px] text-text-3 mb-1.5">
+                  <label className="block text-xs text-text-3 mb-1.5">
                     Base URL
                   </label>
                   <Input
@@ -1014,7 +1020,7 @@ function ProvidersPanel({
                   />
                 </div>
                 <div>
-                  <label className="block text-[11px] text-text-3 mb-1.5">
+                  <label className="block text-xs text-text-3 mb-1.5">
                     Model
                   </label>
                   <Input
@@ -1030,7 +1036,7 @@ function ProvidersPanel({
                     type="button"
                     onClick={saveCustom}
                     disabled={!customBase.trim() || !customModel.trim()}
-                    className="w-[260px] h-[34px] rounded bg-white/95 text-black text-[12.5px] font-medium hover:bg-white disabled:opacity-50"
+                    className="w-[260px] h-[34px] rounded bg-white/95 text-black text-base font-medium hover:bg-white disabled:opacity-50"
                   >
                     Save Custom Provider
                   </button>
@@ -1039,7 +1045,7 @@ function ProvidersPanel({
             )}
 
             {stage.kind === "error" && (
-              <p className="text-[11px] text-red text-center mt-3">
+              <p className="text-xs text-red text-center mt-3">
                 {stage.message}
               </p>
             )}
@@ -1050,14 +1056,14 @@ function ProvidersPanel({
           <button
             type="button"
             onClick={onContinueToCodex}
-            className="text-[12px] text-text-2 hover:text-text-1"
+            className="text-sm text-text-2 hover:text-text-1"
           >
             {status?.logged_in ? "Continue to Codex" : "Set up Codex instead"}
           </button>
           <button
             type="button"
             onClick={onSkip}
-            className="text-[12px] text-text-4 hover:text-text-2"
+            className="text-sm text-text-4 hover:text-text-2"
           >
             Skip for now
           </button>
@@ -1143,13 +1149,13 @@ function ProvidersCodexPanel({
     <div className="min-h-full flex items-center justify-center py-12 px-6">
       <div className="w-[520px] max-w-full">
         <div className="text-center mb-7">
-          <div className="text-[14px] font-semibold text-text-1">Connect AI Provider</div>
-          <div className="text-[12px] text-text-3 mt-1">
+          <div className="text-md font-semibold text-text-1">Connect AI Provider</div>
+          <div className="text-sm text-text-3 mt-1">
             Add another provider or continue to the next step.
           </div>
         </div>
 
-        <div className="text-[10.5px] uppercase tracking-wider text-text-5 mb-2">
+        <div className="section-label mb-2">
           Codex
         </div>
 
@@ -1200,13 +1206,13 @@ function ProvidersCodexPanel({
                   type="button"
                   onClick={connectPro}
                   disabled={stage.kind === "running"}
-                  className="w-[260px] h-[34px] rounded bg-white/95 text-black text-[12.5px] font-medium hover:bg-white disabled:opacity-60"
+                  className="w-[260px] h-[34px] rounded bg-white/95 text-black text-base font-medium hover:bg-white disabled:opacity-60"
                 >
                   {stage.kind === "running"
                     ? "Waiting for browser…"
                     : "Sign in with chatgpt.com"}
                 </button>
-                <p className="text-[10.5px] text-text-5 text-center max-w-[300px]">
+                <p className="text-xs text-text-5 text-center max-w-[300px]">
                   Opens the Codex CLI's native sign-in.
                 </p>
               </div>
@@ -1214,7 +1220,7 @@ function ProvidersCodexPanel({
 
             {choice === "codex-api" && (
               <div className="mt-6">
-                <label className="block text-[11px] text-text-3 mb-1.5">
+                <label className="block text-xs text-text-3 mb-1.5">
                   OpenAI API Key
                 </label>
                 <Input
@@ -1224,13 +1230,13 @@ function ProvidersCodexPanel({
                   placeholder="sk-…"
                   className="w-full"
                 />
-                <p className="text-[10.5px] text-text-5 mt-1.5">
+                <p className="text-xs text-text-5 mt-1.5">
                   Piped to <code>codex login --with-api-key</code>; never logged.
                 </p>
                 <button
                   type="button"
                   onClick={() => openUrl("https://platform.openai.com/api-keys")}
-                  className="text-[11px] text-accent hover:underline mt-1"
+                  className="text-xs text-accent hover:underline mt-1"
                 >
                   Get a key at platform.openai.com →
                 </button>
@@ -1239,7 +1245,7 @@ function ProvidersCodexPanel({
                     type="button"
                     onClick={saveApiKey}
                     disabled={!apiKey.trim() || stage.kind === "running"}
-                    className="w-[260px] h-[34px] rounded bg-white/95 text-black text-[12.5px] font-medium hover:bg-white disabled:opacity-50"
+                    className="w-[260px] h-[34px] rounded bg-white/95 text-black text-base font-medium hover:bg-white disabled:opacity-50"
                   >
                     Save API Key
                   </button>
@@ -1250,7 +1256,7 @@ function ProvidersCodexPanel({
             {choice === "codex-custom" && (
               <div className="mt-6 space-y-3">
                 <div>
-                  <label className="block text-[11px] text-text-3 mb-1.5">
+                  <label className="block text-xs text-text-3 mb-1.5">
                     Base URL
                   </label>
                   <Input
@@ -1262,7 +1268,7 @@ function ProvidersCodexPanel({
                   />
                 </div>
                 <div>
-                  <label className="block text-[11px] text-text-3 mb-1.5">
+                  <label className="block text-xs text-text-3 mb-1.5">
                     Model
                   </label>
                   <Input
@@ -1278,7 +1284,7 @@ function ProvidersCodexPanel({
                     type="button"
                     onClick={saveCustom}
                     disabled={!customBase.trim() || !customModel.trim()}
-                    className="w-[260px] h-[34px] rounded bg-white/95 text-black text-[12.5px] font-medium hover:bg-white disabled:opacity-50"
+                    className="w-[260px] h-[34px] rounded bg-white/95 text-black text-base font-medium hover:bg-white disabled:opacity-50"
                   >
                     Save Custom Provider
                   </button>
@@ -1287,7 +1293,7 @@ function ProvidersCodexPanel({
             )}
 
             {stage.kind === "error" && (
-              <p className="text-[11px] text-red text-center mt-3">
+              <p className="text-xs text-red text-center mt-3">
                 {stage.message}
               </p>
             )}
@@ -1298,7 +1304,7 @@ function ProvidersCodexPanel({
           <button
             type="button"
             onClick={onSkip}
-            className="text-[12px] text-text-4 hover:text-text-2"
+            className="text-sm text-text-4 hover:text-text-2"
           >
             {status?.logged_in ? "Continue" : "Skip for now"}
           </button>
@@ -1319,7 +1325,7 @@ function ConnectedBadge({
 }) {
   return (
     <div className="w-full bg-bg-2 border border-line-soft rounded-md p-4 flex flex-col items-center gap-1.5">
-      <div className="flex items-center gap-2 text-[12.5px] text-text-1 font-medium">
+      <div className="flex items-center gap-2 text-base text-text-1 font-medium">
         <svg width="14" height="14" viewBox="0 0 16 16" fill="none">
           <path
             d="M3 8.5l3 3 7-7"
@@ -1332,13 +1338,13 @@ function ConnectedBadge({
         {primary}
       </div>
       {secondary ? (
-        <div className="text-[11px] text-text-4">{secondary}</div>
+        <div className="text-xs text-text-4">{secondary}</div>
       ) : null}
       {onLogout ? (
         <button
           type="button"
           onClick={onLogout}
-          className="text-[11px] text-text-5 hover:text-text-2 mt-1"
+          className="text-xs text-text-5 hover:text-text-2 mt-1"
         >
           Sign out
         </button>
@@ -1356,13 +1362,13 @@ function CliMissingHint({
 }) {
   return (
     <div className="w-full bg-bg-2 border border-line-soft rounded-md p-4">
-      <div className="text-[12.5px] text-text-1 font-medium">
+      <div className="text-base text-text-1 font-medium">
         {name} CLI not found on PATH
       </div>
-      <div className="text-[11px] text-text-4 mt-1">
+      <div className="text-xs text-text-4 mt-1">
         Aura uses the official CLI for auth. Install it and reopen onboarding:
       </div>
-      <code className="block mt-2 text-[11.5px] font-mono text-accent">
+      <code className="block mt-2 text-sm font-mono text-accent">
         {installHint}
       </code>
     </div>
@@ -1391,7 +1397,7 @@ function ProviderRow({
       className={`w-full flex items-center gap-3 px-3.5 py-3 rounded-md border text-left transition-colors ${
         selected
           ? "border-accent bg-accent/10"
-          : "border-line-soft bg-bg-2/60 hover:bg-bg-2"
+          : "border-line-soft bg-bg-2/60 hover:bg-state-hover"
       }`}
     >
       <div className="w-9 h-9 rounded-md bg-bg-3/70 flex items-center justify-center shrink-0">
@@ -1399,14 +1405,14 @@ function ProviderRow({
       </div>
       <div className="flex-1 min-w-0">
         <div className="flex items-center gap-2">
-          <span className="text-[12.5px] font-medium text-text-1">{title}</span>
+          <span className="text-base font-medium text-text-1">{title}</span>
           {badge && (
-            <span className="text-[10px] px-1.5 py-0.5 rounded bg-bg-3 text-text-3">
+            <span className="text-2xs px-1.5 py-0.5 rounded bg-bg-3 text-text-3">
               {badge}
             </span>
           )}
         </div>
-        <div className="text-[11px] text-text-4 mt-0.5">{subtitle}</div>
+        <div className="text-xs text-text-4 mt-0.5">{subtitle}</div>
       </div>
       {selected && (
         <div className="w-5 h-5 rounded-full bg-accent flex items-center justify-center shrink-0">
@@ -1507,14 +1513,14 @@ function GitHubPanel({
             </div>
           )}
         </div>
-        <div className="mt-4 text-[14px] font-semibold text-text-1">
+        <div className="mt-4 text-md font-semibold text-text-1">
           {state.kind === "loading"
             ? "Checking GitHub CLI…"
             : isInstalled
               ? "GitHub CLI is installed"
               : "GitHub CLI not found"}
         </div>
-        <div className="text-[12px] text-text-3 mt-1">
+        <div className="text-sm text-text-3 mt-1">
           {isInstalled
             ? "You're ready to check out PRs and manage issues from Aura."
             : "Install gh to check out PRs and manage issues from Aura."}
@@ -1522,12 +1528,12 @@ function GitHubPanel({
         {state.kind === "installed" && (
           <div className="mt-5 bg-bg-2 border border-line-soft rounded-md text-left overflow-hidden">
             <div className="flex items-center px-4 py-2.5 border-b border-line-soft">
-              <span className="text-[10.5px] uppercase tracking-wider text-text-5">Version</span>
-              <span className="flex-1 text-right text-[12px] font-mono text-text-1">{state.version}</span>
+              <span className="section-label">Version</span>
+              <span className="flex-1 text-right text-sm font-mono text-text-1">{state.version}</span>
             </div>
             <div className="flex items-center px-4 py-2.5">
-              <span className="text-[10.5px] uppercase tracking-wider text-text-5">Location</span>
-              <span className="flex-1 text-right text-[12px] font-mono text-text-2">{state.location}</span>
+              <span className="section-label">Location</span>
+              <span className="flex-1 text-right text-sm font-mono text-text-2">{state.location}</span>
             </div>
           </div>
         )}
@@ -1536,7 +1542,7 @@ function GitHubPanel({
             <button
               type="button"
               onClick={() => openUrl("https://cli.github.com")}
-              className="w-[260px] h-[34px] rounded bg-white/95 text-black text-[12.5px] font-medium hover:bg-white"
+              className="w-[260px] h-[34px] rounded bg-white/95 text-black text-base font-medium hover:bg-white"
             >
               Install GitHub CLI
             </button>
@@ -1545,7 +1551,7 @@ function GitHubPanel({
             <button
               type="button"
               onClick={onContinue}
-              className="w-[260px] h-[34px] rounded bg-white/95 text-black text-[12.5px] font-medium hover:bg-white"
+              className="w-[260px] h-[34px] rounded bg-white/95 text-black text-base font-medium hover:bg-white"
             >
               Continue
             </button>
@@ -1553,7 +1559,7 @@ function GitHubPanel({
           <button
             type="button"
             onClick={onSkip}
-            className="text-[12px] text-text-4 hover:text-text-2"
+            className="text-sm text-text-4 hover:text-text-2"
           >
             Skip for now
           </button>
@@ -1578,13 +1584,13 @@ function PermissionsPanel({
     <div className="min-h-full flex items-center justify-center py-12 px-6">
       <div className="w-[520px] max-w-full">
         <div className="text-center mb-6">
-          <div className="text-[14px] font-semibold text-text-1">Grant macOS permissions</div>
-          <div className="text-[12px] text-text-3 mt-1">
+          <div className="text-md font-semibold text-text-1">Grant macOS permissions</div>
+          <div className="text-sm text-text-3 mt-1">
             Aura needs these to read your repos and drive your terminal.
           </div>
         </div>
         <div className="bg-bg-2/60 border border-line-soft rounded-md overflow-hidden">
-          <div className="px-4 py-2 text-[10px] uppercase tracking-wider text-text-5 border-b border-line-soft">
+          <div className="section-label px-4 py-2 border-b border-line-soft">
             Required
           </div>
           <PermRow
@@ -1601,7 +1607,7 @@ function PermissionsPanel({
             desc="Drive the terminal and editor on your behalf."
             onOpen={() => openSetting("Accessibility")}
           />
-          <div className="px-4 py-2 text-[10px] uppercase tracking-wider text-text-5 border-y border-line-soft">
+          <div className="section-label px-4 py-2 border-y border-line-soft">
             Recommended
           </div>
           <PermRow
@@ -1615,14 +1621,14 @@ function PermissionsPanel({
           <button
             type="button"
             onClick={onContinue}
-            className="w-[260px] h-[34px] rounded bg-white/95 text-black text-[12.5px] font-medium hover:bg-white"
+            className="w-[260px] h-[34px] rounded bg-white/95 text-black text-base font-medium hover:bg-white"
           >
             Continue
           </button>
           <button
             type="button"
             onClick={onSkip}
-            className="text-[12px] text-text-4 hover:text-text-2"
+            className="text-sm text-text-4 hover:text-text-2"
           >
             Skip for now
           </button>
@@ -1652,17 +1658,17 @@ function PermRow({
       </div>
       <div className="flex-1 min-w-0">
         <div className="flex items-center gap-2">
-          <span className="text-[12.5px] font-medium text-text-1">{title}</span>
+          <span className="text-base font-medium text-text-1">{title}</span>
           {badge && (
-            <span className="text-[9px] tracking-wider text-text-5">{badge}</span>
+            <span className="text-2xs tracking-wider text-text-5">{badge}</span>
           )}
         </div>
-        <div className="text-[11px] text-text-4 mt-0.5">{desc}</div>
+        <div className="text-xs text-text-4 mt-0.5">{desc}</div>
       </div>
       <button
         type="button"
         onClick={onOpen}
-        className="text-[11.5px] text-text-2 hover:text-text-1 flex items-center gap-1"
+        className="text-sm text-text-2 hover:text-text-1 flex items-center gap-1"
       >
         Open Settings
         <svg width="10" height="10" viewBox="0 0 16 16" fill="none">
@@ -1717,8 +1723,8 @@ function ProjectPanel({
             <path d="M8 18l-4-3 4-3M16 6l4 3-4 3" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
           </svg>
         </div>
-        <div className="mt-4 text-[14px] font-semibold text-text-1">Select a repository</div>
-        <div className="text-[12px] text-text-3 mt-1">
+        <div className="mt-4 text-md font-semibold text-text-1">Select a repository</div>
+        <div className="text-sm text-text-3 mt-1">
           Choose a local folder to start working with
         </div>
         <div className="mt-6 flex flex-col items-center gap-2">
@@ -1726,19 +1732,19 @@ function ProjectPanel({
             type="button"
             onClick={pick}
             disabled={busy}
-            className="w-[260px] h-[34px] rounded bg-white/95 text-black text-[12.5px] font-medium hover:bg-white disabled:opacity-60"
+            className="w-[260px] h-[34px] rounded bg-white/95 text-black text-base font-medium hover:bg-white disabled:opacity-60"
           >
             {busy ? "Opening…" : "Select new repo"}
           </button>
           <button
             type="button"
             onClick={onSkip}
-            className="text-[12px] text-text-4 hover:text-text-2"
+            className="text-sm text-text-4 hover:text-text-2"
           >
             Skip for now
           </button>
           {error && (
-            <p className="text-[11px] text-red mt-2">{error}</p>
+            <p className="text-xs text-red mt-2">{error}</p>
           )}
         </div>
       </div>
@@ -1760,23 +1766,23 @@ function WorktreesPanel({ onFinish }: { onFinish: () => void }) {
             <path d="M12 14.5v1" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" />
           </svg>
         </div>
-        <div className="mt-4 text-[14px] font-semibold text-text-1">Enable parallel copies</div>
-        <div className="text-[12px] text-text-3 mt-1">
-          Run several AIs at once on the same project — each in its own
+        <div className="mt-4 text-md font-semibold text-text-1">Enable parallel copies</div>
+        <div className="text-sm text-text-3 mt-1">
+          Run several AIs at once on the same project. Each in its own
           copy, so their edits never step on each other.
         </div>
         <div className="mt-7 flex flex-col items-center gap-2">
           <button
             type="button"
             onClick={onFinish}
-            className="w-[260px] h-[34px] rounded bg-white/95 text-black text-[12.5px] font-medium hover:bg-white"
+            className="w-[260px] h-[34px] rounded bg-white/95 text-black text-base font-medium hover:bg-white"
           >
             Finish
           </button>
           <button
             type="button"
             onClick={onFinish}
-            className="text-[12px] text-text-4 hover:text-text-2"
+            className="text-sm text-text-4 hover:text-text-2"
           >
             Skip for now
           </button>

@@ -138,10 +138,17 @@ pub fn run_show(focus: Option<&str>, limit: usize, json: bool) {
         return;
     }
 
-    // Best-effort throttled pull, then the merged local+remote feed (AURA-15).
+    // Best-effort throttled pull, then the merged local+remote feed (AURA-15),
+    // scoped and windowed exactly as `api::radar` scopes and windows it. The
+    // terminal and the app read one plane; they must not disagree about what is
+    // on it. This path used to skip both filters, so `aura radar` in a shell
+    // printed other projects' files and month-old rows that the same repo's
+    // desktop radar had already ruled out.
     let _ = broadcast::pull_remote(false);
-    let all = broadcast::merged_events();
+    let all = api::plane_for_this_repo();
+    let now = live_events::now_ms();
     let mut rows: Vec<&AwarenessEvent> = relevance::filter(&all, focus);
+    rows.retain(|e| now.saturating_sub(e.ts) <= api::FEED_WINDOW_MS);
     rows.sort_by(|a, b| b.ts.cmp(&a.ts));
     rows.truncate(limit);
 
@@ -163,7 +170,7 @@ pub fn run_conflicts(as_actor: Option<&str>, all_severities: bool, json: bool) {
     }
 
     let _ = broadcast::pull_remote(false);
-    let events = broadcast::merged_events();
+    let events = api::plane_for_this_repo();
     // Ripple edges cost a full checkpoint-store read — only build them when the
     // Possible tier is actually going to be shown.
     let my_focus = conflict::focus_from_repo_opts(as_actor, all_severities);

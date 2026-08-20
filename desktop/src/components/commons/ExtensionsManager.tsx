@@ -46,14 +46,9 @@ import {
   whatYouGetLine,
 } from "../../lib/vscodeExt/supportLabels";
 import { ExtensionRailPanel } from "../rightrail/ExtensionRailPanel";
+import { compactNumber } from "../../lib/compactNumber";
 
 export type ExtensionsView = "discover" | "installed";
-
-function compactCount(n: number): string {
-  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
-  if (n >= 1_000) return `${(n / 1_000).toFixed(1)}k`;
-  return String(n);
-}
 
 export function ExtensionsManager({ view }: { view: ExtensionsView }) {
   const installed = useInstalledExtensions();
@@ -178,12 +173,12 @@ export function ExtensionsManager({ view }: { view: ExtensionsView }) {
         {(error || notice) && (
           <div className="flex flex-col gap-2">
             {error && (
-              <div className="text-[12px] text-red bg-red/10 border border-red/30 rounded px-2.5 py-1.5 leading-snug break-words">
+              <div className="text-sm text-red bg-red/10 border border-red/30 rounded px-2.5 py-1.5 leading-snug break-words">
                 {error}
               </div>
             )}
             {notice && (
-              <div className="text-[12px] text-accent-green bg-accent-green/10 border border-accent-green/20 rounded px-2.5 py-1.5 leading-snug">
+              <div className="text-sm text-accent-green bg-accent-green/10 border border-accent-green/20 rounded px-2.5 py-1.5 leading-snug">
                 {notice}
               </div>
             )}
@@ -345,8 +340,8 @@ function DiscoverView({
 
   return (
     <section className="flex flex-col gap-3">
-      <p className="text-text-3 text-[12px] leading-relaxed">
-        Bring editor add-ons — color themes, language support, and snippets —
+      <p className="text-text-3 text-sm leading-relaxed">
+        Bring editor add-ons (color themes, language support, and snippets) 
         from the open VS Code gallery into your workspace. Aura uses only the
         safe parts it can read; it never runs an extension’s own program. For
         add-ons built for Aura itself, see Commons → Plugins.
@@ -383,10 +378,10 @@ function DiscoverView({
                 key={c.id}
                 type="button"
                 onClick={() => setCatId(c.id)}
-                className={`h-[26px] px-2.5 rounded-full text-[12px] font-medium border transition-colors ${
+                className={`h-[26px] px-2.5 rounded-full text-sm font-medium border transition-colors ${
                   active
                     ? "text-white border-transparent"
-                    : "text-text-3 border-line-soft hover:bg-bg-2 hover:text-text-1"
+                    : "text-text-3 border-line-soft hover:bg-state-hover hover:text-text-1"
                 }`}
                 style={active ? { background: "var(--color-accent)" } : undefined}
               >
@@ -398,20 +393,20 @@ function DiscoverView({
       )}
 
       {loading && (
-        <div className="flex items-center gap-1.5 text-text-4 text-[12px] py-1">
+        <div className="flex items-center gap-1.5 text-text-4 text-sm py-1">
           <AsciiSpinner />
           {isSearching ? "Searching…" : "Loading…"}
         </div>
       )}
 
       {browseError && !isSearching && !loading && (
-        <div className="text-text-4 text-[12px] py-1 leading-snug">
+        <div className="text-text-4 text-sm py-1 leading-snug">
           {browseError}
         </div>
       )}
 
       {isSearching && results && !searching && results.length === 0 && (
-        <div className="text-text-4 text-[12px] py-1 leading-snug">
+        <div className="text-text-4 text-sm py-1 leading-snug">
           Nothing matched “{query.trim()}”. Try a shorter or different word.
         </div>
       )}
@@ -452,32 +447,32 @@ function ExtCard({
       <ExtIcon url={hit.iconUrl} name={hit.displayName || hit.name} />
       <div className="min-w-0 flex-1">
         <div className="flex items-baseline justify-between gap-2">
-          <span className="text-text-1 text-[13px] font-medium truncate">
+          <span className="text-text-1 text-base font-medium truncate">
             {hit.displayName || hit.name}
           </span>
-          <span className="text-text-4 text-[11px] tabular-nums flex-shrink-0">
+          <span className="text-text-4 text-xs tabular-nums flex-shrink-0">
             v{hit.version}
           </span>
         </div>
-        <div className="text-text-4 text-[11px] mt-0.5 truncate font-mono">
+        <div className="text-text-4 text-xs mt-0.5 truncate font-mono">
           {hit.namespace}
         </div>
         <CapabilityChip hit={hit} />
         {hit.description && (
-          <div className="text-text-3 text-[11.5px] mt-1 leading-snug line-clamp-2">
+          <div className="text-text-3 text-sm mt-1 leading-snug line-clamp-2">
             {hit.description}
           </div>
         )}
         <div className="flex items-center justify-between gap-2 mt-1.5">
           {hit.downloadCount > 0 ? (
-            <span className="text-text-4 text-[10.5px]">
-              {compactCount(hit.downloadCount)} installs
+            <span className="text-text-4 text-xs">
+              {compactNumber(hit.downloadCount)} installs
             </span>
           ) : (
             <span />
           )}
           {installed ? (
-            <span className="text-text-4 text-[11px]">Added</span>
+            <span className="text-text-4 text-xs">Added</span>
           ) : (
             <Button
               type="button"
@@ -529,7 +524,7 @@ function CapabilityChip({ hit }: { hit: OpenVsxHit }) {
 
   if (state === "loading") {
     return (
-      <div className="mt-1 flex items-center gap-1.5 text-text-4 text-[10.5px]">
+      <div className="mt-1 flex items-center gap-1.5 text-text-4 text-xs">
         <AsciiSpinner />
         Checking…
       </div>
@@ -546,13 +541,13 @@ function CapabilityChip({ hit }: { hit: OpenVsxHit }) {
   const active = hasActiveSupport(summary);
   return (
     <div className="mt-1 flex flex-col gap-0.5">
-      <div className={`text-[11px] leading-snug ${bandTextClass(band)}`}>
+      <div className={`text-xs leading-snug ${bandTextClass(band)}`}>
         {whatYouGetLine(summary)}
       </div>
       {/* No active contribution → spell it out before they install, so they
           aren't surprised that adding it does nothing here yet. */}
       {!active && (
-        <div className="text-text-4 text-[10.5px] leading-snug">
+        <div className="text-text-4 text-xs leading-snug">
           Adding this won’t change anything in Aura yet.
         </div>
       )}
@@ -580,7 +575,7 @@ function InstalledView({
   if (installed.length === 0) {
     return (
       <section className="flex flex-col gap-3">
-        <div className="text-text-4 text-[12px] leading-snug py-2">
+        <div className="text-text-4 text-sm leading-snug py-2">
           Nothing installed yet. Use the Discover tab to add your first theme or
           language pack.
         </div>
@@ -618,14 +613,14 @@ function InstalledView({
                 >
                   <div className="min-w-0 flex-1">
                     <div className="flex items-baseline gap-2">
-                      <span className="text-text-1 text-[13px] font-medium truncate">
+                      <span className="text-text-1 text-base font-medium truncate">
                         {ext.displayName || ext.name}
                       </span>
-                      <span className="text-text-4 text-[11px] tabular-nums flex-shrink-0">
+                      <span className="text-text-4 text-xs tabular-nums flex-shrink-0">
                         v{ext.version}
                       </span>
                       {!ext.enabled && (
-                        <span className="text-[10px] text-text-4 bg-bg-1 border border-line-soft rounded px-1.5 py-0.5">
+                        <span className="text-2xs text-text-4 bg-bg-1 border border-line-soft rounded px-1.5 py-0.5">
                           off
                         </span>
                       )}
@@ -633,7 +628,7 @@ function InstalledView({
                     {/* One honest row per kind: ✓ for what's active, "coming
                         soon"/"not yet" for the kinds Aura can't run. */}
                     {labels.length === 0 ? (
-                      <div className="text-text-4 text-[11.5px] mt-1 leading-snug">
+                      <div className="text-text-4 text-sm mt-1 leading-snug">
                         Nothing Aura can use here.
                       </div>
                     ) : (
@@ -641,7 +636,7 @@ function InstalledView({
                         {labels.map((l) => (
                           <li
                             key={l.key}
-                            className="flex items-baseline gap-1.5 text-[11.5px] leading-snug"
+                            className="flex items-baseline gap-1.5 text-sm leading-snug"
                             title={l.tech}
                           >
                             <span className={`flex-shrink-0 ${bandTextClass(l.band)}`}>
@@ -653,7 +648,7 @@ function InstalledView({
                       </ul>
                     )}
                     {active && ext.contributes.hasBrowser && ext.enabled && (
-                      <div className="text-text-4 text-[10.5px] mt-1 leading-snug">
+                      <div className="text-text-4 text-xs mt-1 leading-snug">
                         Open the Command Palette (⌘K) and search its name to run it.
                       </div>
                     )}
@@ -693,13 +688,13 @@ function InstalledView({
         </div>
       </div>
 
-      <p className="text-text-4 text-[11px] leading-relaxed mt-1 border-t border-line-soft pt-3">
+      <p className="text-text-4 text-xs leading-relaxed mt-1 border-t border-line-soft pt-3">
         Language rules and snippets apply to the editor automatically. To switch
         to a color theme you installed, open{" "}
         <span className="text-text-3">Settings → Editor Themes</span> and pick it
         under “From your extensions.” Extensions that ship a web program run
-        right here — find their commands in the Command Palette (⌘K). Ones that
-        need the full desktop VS Code app — most debuggers and language servers —
+        right here. Find their commands in the Command Palette (⌘K). Ones that
+        need the full desktop VS Code app. Most debuggers and language servers. 
         can’t run here, and Microsoft-only extensions can’t be used outside VS
         Code. Everything here comes from the open Open&nbsp;VSX gallery.
       </p>
@@ -722,7 +717,7 @@ function ExtIcon({ url, name }: { url: string | null; name: string }) {
     );
   }
   return (
-    <div className="w-9 h-9 rounded flex-shrink-0 bg-bg-1 border border-line-soft flex items-center justify-center text-text-3 text-[13px] font-semibold">
+    <div className="w-9 h-9 rounded flex-shrink-0 bg-bg-1 border border-line-soft flex items-center justify-center text-text-3 text-base font-semibold">
       {(name[0] ?? "?").toUpperCase()}
     </div>
   );

@@ -31,6 +31,7 @@ import { RadioTower, X } from "lucide-react";
 import { AsciiSpinner } from "../../ui/ascii-spinner";
 
 import { api, type LaneOutcome, type LaneStatus, type WaveOutcome } from "../../../lib/api";
+import { WORK_STATE, laneState } from "../../../lib/workState";
 
 // A lane is "still live" while it hasn't reached a terminal state — those are
 // the ones whose agent is genuinely on the node right now.
@@ -41,16 +42,6 @@ const TERMINAL: ReadonlySet<LaneStatus> = new Set<LaneStatus>([
   "conflict",
 ]);
 const isTerminal = (s: LaneStatus) => TERMINAL.has(s);
-
-// Plain-language word for the lane's machine state — no jargon on the panel.
-const STATUS_WORD: Record<LaneStatus, string> = {
-  queued: "Queued — about to start",
-  running: "Working on it now",
-  done: "Finished",
-  conflict: "Paused — another lane touched the same files",
-  cancelled: "Stopped",
-  failed: "Hit a problem",
-};
 
 // Match a lane to a node by the title the runner stamped onto the lane. The
 // runner sets `spec.label` to the node's title verbatim; older/edge dispatches
@@ -190,18 +181,18 @@ export function CrewLiveTranscript({
             )}
           </span>
           <div className="min-w-0 flex-1">
-            <div className="text-[9.5px] font-semibold uppercase tracking-[0.1em] text-text-5">
+            <div className="text-xs font-medium text-text-4">
               Watching live
             </div>
-            <div className="truncate text-[13px] font-semibold leading-tight text-text-1">
+            <div className="truncate text-base font-semibold leading-tight text-text-1">
               {title}
             </div>
             {lane ? (
-              <div className="mt-0.5 flex items-center gap-1.5 text-[11px] text-text-4">
+              <div className="mt-0.5 flex items-center gap-1.5 text-xs text-text-4">
                 {live ? (
-                  <AsciiSpinner className="text-[11px]" />
+                  <AsciiSpinner className="text-xs" />
                 ) : null}
-                <span>{STATUS_WORD[lane.status]}</span>
+                <span>{WORK_STATE[laneState(lane.status)].hint}</span>
                 {lane.provider_id ? (
                   <span className="text-text-5">· {lane.provider_id}</span>
                 ) : null}
@@ -211,7 +202,7 @@ export function CrewLiveTranscript({
           <button
             type="button"
             onClick={stopWatching}
-            className="grid h-6 w-6 shrink-0 place-items-center rounded text-text-4 hover:bg-bg-2 hover:text-text-1"
+            className="grid h-6 w-6 shrink-0 place-items-center rounded text-text-4 hover:bg-state-hover hover:text-text-1"
             title="Close"
             aria-label="Close"
           >
@@ -240,7 +231,7 @@ export function CrewLiveTranscript({
           ) : transcript ? (
             <pre
               ref={scrollRef}
-              className="h-full overflow-auto whitespace-pre-wrap break-words px-4 py-3 text-[11.5px] leading-relaxed text-text-2"
+              className="h-full overflow-auto whitespace-pre-wrap break-words px-4 py-3 text-sm leading-relaxed text-text-2"
               style={{ fontFamily: "var(--font-mono)" }}
             >
               {transcript}
@@ -263,7 +254,7 @@ export function CrewLiveTranscript({
             orchestrator surface uses, so it kills the real brain session. */}
         {lane && live ? (
           <div className="flex items-center justify-between gap-2 border-t border-line-soft px-4 py-2.5">
-            <span className="text-[10.5px] text-text-5">
+            <span className="text-xs text-text-5">
               Streaming the agent's own output, live.
             </span>
             <StopLaneButton laneId={lane.lane_id} />
@@ -295,10 +286,10 @@ function StopLaneButton({ laneId }: { laneId: string }) {
       type="button"
       onClick={stop}
       disabled={stopping}
-      className="inline-flex items-center gap-1 rounded-full border border-line-soft px-2.5 py-1 text-[10.5px] font-medium text-text-3 hover:border-text-3 hover:text-text-1 disabled:opacity-60"
-      title="Stop this agent — ends its session and frees the files it was editing"
+      className="inline-flex items-center gap-1 rounded-full border border-line-soft px-2.5 py-1 text-xs font-medium text-text-3 hover:border-text-3 hover:text-text-1 disabled:opacity-60"
+      title="Stop this agent. Ends its session and frees the files it was editing"
     >
-      {stopping ? <AsciiSpinner className="text-[11px]" /> : null}
+      {stopping ? <AsciiSpinner className="text-xs" /> : null}
       {stopping ? "Stopping…" : "Stop this agent"}
     </button>
   );
@@ -318,8 +309,8 @@ function CenteredNote({
       {loading ? (
         <AsciiSpinner className="text-base" />
       ) : null}
-      <div className="text-[12.5px] font-medium text-text-2">{title}</div>
-      <div className="max-w-[280px] text-[11.5px] leading-snug text-text-4">
+      <div className="text-base font-medium text-text-2">{title}</div>
+      <div className="max-w-[280px] text-sm leading-snug text-text-4">
         {body}
       </div>
     </div>

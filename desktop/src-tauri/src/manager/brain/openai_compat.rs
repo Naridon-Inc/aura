@@ -159,7 +159,10 @@ impl Brain for OpenAICompatBrain {
             messages.push(json!({ "role": "system", "content": sys }));
         }
         for m in &request.messages {
-            messages.push(json!({ "role": m.role, "content": m.content }));
+            messages.push(json!({
+                "role": m.role,
+                "content": super::types::content_to_openai(&m.content),
+            }));
         }
 
         let mut body = json!({
@@ -264,6 +267,7 @@ impl Brain for OpenAICompatBrain {
                             tool_use_id: buf.id,
                             name: buf.name,
                             input,
+                            signature: None,
                         };
                     }
                     if let Some((input_tokens, output_tokens)) = last_usage.take() {
@@ -385,6 +389,7 @@ impl Brain for OpenAICompatBrain {
                             tool_use_id: buf.id,
                             name: buf.name,
                             input,
+                            signature: None,
                         };
                     }
                 }

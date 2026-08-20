@@ -38,7 +38,7 @@ export const MANAGER_COMMANDS: ManagerCommand[] = [
   {
     name: "doctor",
     aliases: ["health"],
-    summary: "Check this project's health — stuck sessions, missing hooks, orphaned snapshots.",
+    summary: "Check this project's health. Stuck sessions, missing hooks, orphaned snapshots.",
   },
   {
     name: "resume",
@@ -112,7 +112,7 @@ export const MANAGER_COMMANDS: ManagerCommand[] = [
   {
     name: "pr",
     args: "describe|review|address|ship [#N]",
-    summary: "Ask Aura to handle the PR — draft, review, address feedback, or ship.",
+    summary: "Ask Aura to handle the PR. Draft, review, address feedback, or ship.",
   },
   {
     name: "launch",
@@ -137,7 +137,7 @@ export function matchManagerCommands(prefix: string): ManagerCommand[] {
 export function managerCommandHelp(): string {
   const lines = MANAGER_COMMANDS.map((c) => {
     const sig = `/${c.name}${c.args ? " " + c.args : ""}`;
-    return `- \`${sig}\` — ${c.summary}`;
+    return `- \`${sig}\` · ${c.summary}`;
   });
   return [
     "**Slash commands**",
@@ -150,12 +150,12 @@ export function managerCommandHelp(): string {
     "",
     "Your project's and personal Claude commands (`.claude/commands/*.md`) show",
     "up in the `/` menu tagged **Claude**. Pick one and it runs on Claude's CLI",
-    "and replies right here — whichever brain is currently selected.",
+    "and replies right here. Whichever brain is currently selected.",
     "",
     "**Send a command straight to one assistant**",
     "",
     "Start a message with `@<assistant> /<command>` to run it on that tool's",
-    "own CLI — e.g. `@cc /resume` continues your last Claude Code session,",
+    "own CLI. E.g. `@cc /resume` continues your last Claude Code session,",
     "`@claude /continue` does the same. The reply lands right here in the chat.",
     "",
     "_Everything else you type goes straight to Aura as a normal message._",

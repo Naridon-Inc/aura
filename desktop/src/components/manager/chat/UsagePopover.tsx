@@ -22,9 +22,12 @@ import {
   type IdentityRow,
   type UsageWindow,
 } from "./UsageProviderSection";
+import { UsageSpendSection } from "./UsageSpendSection";
 import { useClaudeUsage } from "./ClaudeUsageRing";
-import { formatTokens, providerBrand, providerLabel } from "./usageAtoms";
-import type { TokenUsage } from "./types";
+import { providerBrand, providerLabel } from "./usageAtoms";
+import type { TokenUsage, TurnSpend } from "./types";
+import { compactNumber } from "../../../lib/compactNumber";
+import { formatCost } from "../../../lib/money";
 
 /** Conservative Anthropic Sonnet/Opus window — the fallback the meter reads
  *  against when the active model's real window isn't known. A model spec, not
@@ -53,6 +56,7 @@ export type UsageAccount = {
  *  card. Renders nothing when there is no usage to report. */
 export function UsagePopover({
   usage,
+  spend = null,
   contextWindow = DEFAULT_CONTEXT_WINDOW,
   cachedInput,
   reasoningOutput,
@@ -61,6 +65,9 @@ export function UsagePopover({
   account,
 }: {
   usage: TokenUsage | null;
+  /** What the last turn cost and what the key has spent since it was added.
+   *  Null off API mode — no per-token bill, so no dollar figure anywhere. */
+  spend?: TurnSpend | null;
   contextWindow?: number;
   /** Cached-prompt tokens, when a brain reports them (omitted otherwise). */
   cachedInput?: number | null;
@@ -135,11 +142,24 @@ export function UsagePopover({
         aria-expanded={open}
         onClick={() => setOpen((v) => !v)}
       >
+        {/* What this response cost, shown flat out rather than on hover —
+            the whole point of the meter is that you don't have to go looking
+            to find out you're spending money. */}
+        {spend && (
+          <span
+            className="tabular-nums text-xs"
+            style={{ fontFamily: "var(--font-mono)", color: "var(--color-text-3)" }}
+            title={`This response · ${spend.estimated ? "estimated rate" : "list rate"}`}
+          >
+            {spend.estimated ? "~" : ""}
+            {formatCost(spend.costUsd)}
+          </span>
+        )}
         <span
-          className="tabular-nums text-[11px]"
+          className="tabular-nums text-xs"
           style={{ fontFamily: "var(--font-mono)", color: "var(--color-text-3)" }}
         >
-          {formatTokens(total)}
+          {compactNumber(total)}
         </span>
         <span
           className="relative overflow-hidden rounded-full"
@@ -184,6 +204,7 @@ export function UsagePopover({
             cachedInput={cachedInput}
             reasoningOutput={reasoningOutput}
           />
+          <UsageSpendSection spend={spend} />
           <UsageProviderSection
             title={title}
             windows={windows}

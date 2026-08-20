@@ -82,10 +82,10 @@ export function PrFeatureRollup({
   return (
     <section className="rounded-lg border border-line-soft bg-bg-1 px-4 py-3.5">
       <div className="mb-2.5 flex items-baseline gap-2">
-        <h3 className="text-[11px] font-medium uppercase tracking-wider text-text-3">
+        <h3 className="section-label">
           Is this PR&apos;s feature finished?
         </h3>
-        <span className="text-[10.5px] text-text-4">
+        <span className="text-xs text-text-4">
           {agg.goalsReached}/{agg.goalsTotal} goal{agg.goalsTotal === 1 ? "" : "s"} reached · across
           the commits on this PR
         </span>

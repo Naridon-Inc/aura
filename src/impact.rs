@@ -23,7 +23,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
-use std::time::{Instant, SystemTime, UNIX_EPOCH};
+use std::time::Instant;
 
 use crate::callgraph::{CallerEdge, EdgeConfidence, ReverseGraph};
 use crate::checkpoint::CheckpointStore;
@@ -271,13 +271,11 @@ const SKIP_DIRS: &[&str] = &["node_modules", "target", ".git", "dist", ".aura"];
 fn load_graph_nodes(repo_root: &Path, file: &str) -> (Vec<AstNode>, GraphSource, Option<u64>) {
     // --- Attempt 1: newest checkpoint ---
     if let Ok(repo) = git2::Repository::open(repo_root) {
-        if let Ok(checkpoints) = CheckpointStore::get_all_checkpoints(&repo) {
-            if let Some(newest) = checkpoints.into_iter().next() {
-                let staleness = now_secs().saturating_sub(newest.timestamp);
-                let mut nodes = newest.ast_nodes;
-                merge_current_file(&mut nodes, repo_root, file);
-                return (nodes, GraphSource::Checkpoint, Some(staleness));
-            }
+        if let Ok(Some(newest)) = CheckpointStore::latest_checkpoint(&repo) {
+            let staleness = newest.age_secs();
+            let mut nodes = newest.ast_nodes;
+            merge_current_file(&mut nodes, repo_root, file);
+            return (nodes, GraphSource::Checkpoint, Some(staleness));
         }
     }
 
@@ -300,15 +298,13 @@ fn load_graph_nodes_multi(
 ) -> (Vec<AstNode>, GraphSource, Option<u64>) {
     // --- Attempt 1: newest checkpoint, with each seed file re-parsed ---
     if let Ok(repo) = git2::Repository::open(repo_root) {
-        if let Ok(checkpoints) = CheckpointStore::get_all_checkpoints(&repo) {
-            if let Some(newest) = checkpoints.into_iter().next() {
-                let staleness = now_secs().saturating_sub(newest.timestamp);
-                let mut nodes = newest.ast_nodes;
-                for file in files {
-                    merge_current_file(&mut nodes, repo_root, file);
-                }
-                return (nodes, GraphSource::Checkpoint, Some(staleness));
+        if let Ok(Some(newest)) = CheckpointStore::latest_checkpoint(&repo) {
+            let staleness = newest.age_secs();
+            let mut nodes = newest.ast_nodes;
+            for file in files {
+                merge_current_file(&mut nodes, repo_root, file);
             }
+            return (nodes, GraphSource::Checkpoint, Some(staleness));
         }
     }
 
@@ -909,14 +905,6 @@ fn conf_rank(c: Confidence) -> u8 {
         Confidence::Medium => 1,
         Confidence::High => 2,
     }
-}
-
-/// Current UNIX time in seconds, saturating to 0 if the clock is before epoch.
-fn now_secs() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0)
 }
 
 /// True if `path` (possibly relative, possibly normalized) refers to `file`.

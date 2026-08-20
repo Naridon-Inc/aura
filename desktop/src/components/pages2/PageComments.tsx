@@ -16,6 +16,7 @@ import {
   pageCommentsResolve,
   type PageComment,
 } from "./pagesApi";
+import { relativeAgeFromIso } from "../../lib/relativeTime";
 
 type PageCommentsProps = {
   repoRoot: string;
@@ -30,20 +31,8 @@ type PageCommentsProps = {
  *  days / months / years for an aging thread, matching the TaskDetailPane
  *  style. Bad/empty timestamps degrade to an empty string rather than NaN. */
 function relativeTime(iso: string, now: number): string {
-  const ts = Date.parse(iso);
-  if (Number.isNaN(ts)) return "";
-  const secs = Math.max(0, Math.floor((now - ts) / 1000));
-  if (secs < 5) return "just now";
-  if (secs < 60) return `${secs}s ago`;
-  const mins = Math.floor(secs / 60);
-  if (mins < 60) return `${mins}m ago`;
-  const hrs = Math.floor(mins / 60);
-  if (hrs < 24) return `${hrs}h ago`;
-  const days = Math.floor(hrs / 24);
-  if (days < 30) return `${days}d ago`;
-  const months = Math.floor(days / 30);
-  if (months < 12) return `${months}mo ago`;
-  return `${Math.floor(months / 12)}y ago`;
+  // One ladder for the whole app — see lib/relativeTime.
+  return relativeAgeFromIso(iso, { now });
 }
 
 export function PageComments(props: PageCommentsProps) {
@@ -179,7 +168,7 @@ export function PageComments(props: PageCommentsProps) {
 
       {loaded && count === 0 && (
         <p className="mb-3 text-xs text-text-3">
-          No comments yet — start the conversation.
+          No comments yet. Start the conversation.
         </p>
       )}
 
@@ -196,21 +185,21 @@ export function PageComments(props: PageCommentsProps) {
                     {c.author}
                   </span>
                   {stamp && (
-                    <span className="text-[11px] text-text-3">{stamp}</span>
+                    <span className="text-xs text-text-3">{stamp}</span>
                   )}
                   {resolved && (
-                    <span className="text-[11px] text-text-3">· resolved</span>
+                    <span className="text-xs text-text-3">· resolved</span>
                   )}
                   <button
                     type="button"
                     onClick={() => void toggleResolve(c)}
-                    className="ml-auto text-[11px] text-text-3 hover:text-text-1 transition-colors"
+                    className="ml-auto text-xs text-text-3 hover:text-text-1 transition-colors"
                   >
                     {resolved ? "Reopen" : "Resolve"}
                   </button>
                 </div>
                 <p
-                  className={`mt-0.5 whitespace-pre-wrap break-words text-[13px] leading-relaxed ${
+                  className={`mt-0.5 whitespace-pre-wrap break-words text-base leading-relaxed ${
                     resolved ? "text-text-3 line-through" : "text-text-2"
                   }`}
                 >
@@ -229,10 +218,10 @@ export function PageComments(props: PageCommentsProps) {
           onKeyDown={onKeyDown}
           rows={2}
           placeholder="Add a comment…"
-          className="w-full resize-y rounded-md border border-line-soft bg-bg-2 px-2.5 py-2 text-[13px] text-text-1 placeholder:text-text-4 focus:outline-none focus:ring-1 focus:ring-ring"
+          className="w-full resize-y rounded-md border border-line-soft bg-bg-2 px-2.5 py-2 text-base text-text-1 placeholder:text-text-4 focus:outline-none focus:ring-1 focus:ring-ring"
         />
         <div className="flex items-center justify-between">
-          <span className="text-[11px] text-text-4">⌘↵ to comment</span>
+          <span className="text-xs text-text-4">⌘↵ to comment</span>
           <Button
             size="sm"
             onClick={() => void submit()}

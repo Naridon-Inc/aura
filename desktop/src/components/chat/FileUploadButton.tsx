@@ -28,6 +28,7 @@ import { AsciiSpinner } from "../ui/ascii-spinner";
 
 import type { ChatAttachment } from "./FileAttachment";
 import { api } from "../../lib/api";
+import { percentOf } from "../../lib/percent";
 import {
   OS_FILE_DRAG,
   OS_FILE_DROP_COMPOSER,
@@ -327,7 +328,7 @@ export function FileUploadButton({
         ref={buttonRef}
         type="button"
         onClick={openPicker}
-        className={hideTrigger ? "hidden" : "text-text-3 hover:text-text-1 p-1 rounded hover:bg-bg-2 transition-colors"}
+        className={hideTrigger ? "hidden" : "text-text-3 hover:text-text-1 p-1 rounded hover:bg-state-hover transition-colors"}
         title={title}
         aria-label={title}
         aria-describedby={dragging ? overlayId : undefined}
@@ -349,7 +350,7 @@ export function FileUploadButton({
           id={overlayId}
           className="absolute inset-0 z-40 pointer-events-none flex items-center justify-center rounded-[10px] border border-dashed border-accent/40 bg-bg-1/90 backdrop-blur-sm"
         >
-          <div className="rounded-md bg-bg-2 px-4 py-2 text-text-1 text-[12px] font-medium shadow-lg">
+          <div className="rounded-md bg-bg-2 px-4 py-2 text-text-1 text-sm font-medium shadow-lg">
             Drop files to attach
           </div>
         </div>
@@ -389,12 +390,12 @@ function UploadChip({
 }) {
   const pct = useMemo(() => {
     if (pending.progress === undefined) return null;
-    return Math.round(pending.progress * 100);
+    return percentOf(pending.progress);
   }, [pending.progress]);
 
   return (
     <div
-      className={`h-7 px-2 rounded-md flex items-center gap-1.5 border text-[11.5px] ${
+      className={`h-7 px-2 rounded-md flex items-center gap-1.5 border text-sm ${
         pending.failed
           ? "bg-bg-2 border-red/40 text-red"
           : "bg-bg-2 border-line-soft text-text-2"

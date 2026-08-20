@@ -39,7 +39,7 @@ export function classifyGhError(raw: unknown): GhErrorInfo {
       kind: "rate_limit",
       title: "GitHub API rate limit hit",
       detail:
-        "Too many requests in a short window — your sign-in is fine. Wait a minute, then Refresh.",
+        "Too many requests in a short window. Your sign-in is fine. Wait a minute, then Refresh.",
       retryable: true,
     };
   }

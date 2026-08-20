@@ -18,6 +18,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import type { IntentRow } from "../../lib/api";
 import { agentDisplayLabel, canonicalAgentId } from "../../lib/agentIdentity";
 import { colorForName } from "../../lib/identityColors";
+import { intentTypeChip } from "../../lib/intentTypeLabels";
 import { providerAccent, providerForModel } from "./usageProviders";
 
 const KNOWN_AGENTS = new Set([
@@ -307,25 +308,41 @@ export function ContributionsScatter({ rows }: { rows: IntentRow[] }) {
   const ttTop = cursor != null ? Math.min(Math.max(6, cursor.y - 12), H - 96) : 0;
 
   return (
-    <div className="rounded-lg border border-line-soft bg-bg-1 p-3">
+    // No frame. A chart is a figure, not a container: it holds one plot, and
+    // that plot already draws its own bounds in gridlines and axis labels. The
+    // rounded, filled box around it was a second, weaker set of bounds sitting
+    // 12px outside the first — and it made this figure look like a sibling of
+    // the stat boxes and the cost box, when it is the page's centrepiece.
+    <div>
       <div className="mb-0.5 flex items-baseline justify-between">
-        <span className="text-[11px] uppercase tracking-wide text-text-4">
-          Contributions · over time
+        {/* "Runs", not "Contributions". The card's own legend says "each dot =
+            one run" and its counter says "178 runs", so the title was the only
+            place on the card using a different noun for the thing it plots —
+            and "contributions" is GitHub's word, which means nothing to
+            someone who has never used GitHub. */}
+        <span className="section-label">
+          Runs · over time
         </span>
-        <span className="font-mono text-[11px] text-text-4">
+        <span className="font-mono text-xs text-text-4">
           {rawPoints.length} {rawPoints.length === 1 ? "run" : "runs"}
         </span>
       </div>
-      {/* Self-explanatory encoding key — what the punchcard actually encodes. */}
-      <div className="mb-2 flex flex-wrap items-center gap-x-3 gap-y-0.5 text-[10px] text-text-5">
+      {/* Self-explanatory encoding key — what the punchcard actually encodes.
+          The size key appears only when size MEANS something: line counts are
+          optional on an intent row, and when no run recorded any, `rOf` draws
+          every dot at the same radius. Explaining an encoding that isn't there
+          sends the reader hunting for a size difference they cannot find. */}
+      <div className="mb-2 flex flex-wrap items-center gap-x-3 gap-y-0.5 text-2xs text-text-5">
         <span>each dot = one run</span>
-        <span className="flex items-center gap-1">
-          <span className="inline-flex items-end gap-px" aria-hidden>
-            <span className="inline-block h-1 w-1 rounded-full bg-text-4" />
-            <span className="inline-block h-2 w-2 rounded-full bg-text-4" />
+        {maxChurn > 0 ? (
+          <span className="flex items-center gap-1">
+            <span className="inline-flex items-end gap-px" aria-hidden>
+              <span className="inline-block h-1 w-1 rounded-full bg-text-4" />
+              <span className="inline-block h-2 w-2 rounded-full bg-text-4" />
+            </span>
+            size = lines changed
           </span>
-          size = lines changed
-        </span>
+        ) : null}
         <span>height = time of day</span>
         <span>color = agent</span>
       </div>
@@ -337,7 +354,7 @@ export function ContributionsScatter({ rows }: { rows: IntentRow[] }) {
             height={H}
             viewBox={`0 0 ${w} ${H}`}
             role="img"
-            aria-label="Contributions over time, colored by agent. Hover a run for details."
+            aria-label="Runs over time, colored by agent. Hover a run for details."
             onMouseMove={onMove}
             onMouseLeave={onLeave}
           >
@@ -448,39 +465,45 @@ export function ContributionsScatter({ rows }: { rows: IntentRow[] }) {
                 className="inline-block h-2.5 w-2.5 shrink-0 rounded-full"
                 style={{ background: hovered.color }}
               />
-              <span className="truncate text-[12px] font-medium text-text-1">
+              <span className="truncate text-sm font-medium text-text-1">
                 {hovered.agentLabel}
               </span>
               {hovered.signed ? (
                 <span
                   className="ml-auto shrink-0 text-text-4"
-                  title="Sealed — a genuine, tamper-proof record of this change"
-                  aria-label="Sealed — a genuine, tamper-proof record of this change"
+                  title="Sealed. A genuine, tamper-proof record of this change"
+                  aria-label="Sealed. A genuine, tamper-proof record of this change"
                 >
                   <MiniLock />
                 </span>
               ) : null}
             </div>
-            <div className="mt-1 text-[11px] tabular-nums text-text-4">
+            <div className="mt-1 text-xs tabular-nums text-text-4">
               {longStamp(hovered.date)}
             </div>
-            <div className="mt-1.5 flex items-center gap-2 font-mono text-[11px]">
-              <span className="text-accent-green">+{hovered.adds}</span>
-              <span className="text-text-3">−{hovered.dels}</span>
-              <span className="text-text-5">
-                {hovered.adds + hovered.dels}{" "}
-                {hovered.adds + hovered.dels === 1 ? "line" : "lines"}
-              </span>
-            </div>
+            {/* Churn, only when the run actually recorded it. "+0 −0 · 0
+                lines" on a run that simply never wrote line counts reads as
+                "this run changed nothing", which is a different and wrong
+                claim — so the row is omitted rather than zeroed. */}
+            {hovered.adds + hovered.dels > 0 ? (
+              <div className="mt-1.5 flex items-center gap-2 font-mono text-xs">
+                <span className="text-accent-green">+{hovered.adds}</span>
+                <span className="text-text-3">−{hovered.dels}</span>
+                <span className="text-text-5">
+                  {hovered.adds + hovered.dels}{" "}
+                  {hovered.adds + hovered.dels === 1 ? "line" : "lines"}
+                </span>
+              </div>
+            ) : null}
             {hovered.intentType ? (
               <div className="mt-1.5">
-                <span className="rounded border border-line-soft px-1.5 py-px text-[10px] text-text-3">
-                  {hovered.intentType}
+                <span className="rounded border border-line-soft px-1.5 py-px text-2xs text-text-3">
+                  {intentTypeChip(hovered.intentType)}
                 </span>
               </div>
             ) : null}
             {hovered.intent ? (
-              <div className="mt-1.5 line-clamp-2 text-[11px] leading-snug text-text-3">
+              <div className="mt-1.5 line-clamp-2 text-xs leading-snug text-text-3">
                 {hovered.intent}
               </div>
             ) : null}
@@ -507,13 +530,13 @@ export function ContributionsScatter({ rows }: { rows: IntentRow[] }) {
               }
               title={
                 active
-                  ? `Showing ${l.label} only — click to clear`
+                  ? `Showing ${l.label} only. Click to clear`
                   : `Spotlight ${l.label}`
               }
-              className={`flex items-center gap-1.5 rounded px-1.5 py-0.5 text-[11px] transition-colors ${
+              className={`flex items-center gap-1.5 rounded px-1.5 py-0.5 text-xs transition-colors ${
                 active
                   ? "bg-bg-2 text-text-1"
-                  : "text-text-2 hover:bg-bg-2"
+                  : "text-text-2 hover:bg-state-hover"
               } ${dim ? "opacity-45" : ""}`}
             >
               <span
@@ -526,7 +549,7 @@ export function ContributionsScatter({ rows }: { rows: IntentRow[] }) {
           );
         })}
         {overflow > 0 ? (
-          <span className="px-1 text-[11px] text-text-4">+{overflow} more</span>
+          <span className="px-1 text-xs text-text-4">+{overflow} more</span>
         ) : null}
       </div>
     </div>

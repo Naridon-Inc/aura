@@ -4,18 +4,27 @@
 // the brain, but they are NEVER human-facing: not in the chat bubble, not in
 // the session title. Strip them at every display site.
 //
-// The mode block is a single bracketed line: `[AUTO MODE — …]` (em/en/hyphen
-// dash), followed by a blank line. The pipe marker is `[↪ PIPED …]`. Neither
-// nests a `]`, so a lazy match to the first `]` is exact. We only strip blocks
-// we recognise, so a user message that legitimately opens with `[` survives.
-const MODE_DIRECTIVE_RE = /^\s*\[(?:AUTO|PLAN|BUILD|ASK)\s+MODE\s+[—\-–][\s\S]*?\]\s*/i;
-const PIPE_MARKER_RE = /^\s*\[↪\s+PIPED[\s\S]*?\]\s*/i;
+// The mode block is a single bracketed line opening with the mode's name —
+// `[AUTO MODE. …]` as `buildSteeringText` writes it today — followed by a
+// blank line. The pipe marker is `[↪ PIPED …]`. Neither nests a `]`, so a
+// match to the first `]` is exact. We only strip blocks we recognise, so a
+// user message that legitimately opens with `[` survives.
+//
+// Nothing is assumed about what separates the marker from the sentence after
+// it. An earlier version required a dash there; the directive the composer
+// actually sends uses a full stop, so every bubble printed the whole
+// autopilot instruction back at the user. The marker plus `\b` is the only
+// thing worth matching on — `\b` also keeps `[AUTO MODEL …]` out of it — and
+// it lines up with the backend's `strip_steering_prefix`, which has always
+// been a plain marker test.
+const MODE_DIRECTIVE_RE = /^\s*\[(?:AUTO|PLAN|BUILD|ASK)\s+MODE\b[^\]]*\]\s*/i;
+const PIPE_MARKER_RE = /^\s*\[↪\s+PIPED[^\]]*\]\s*/i;
 // The goal marker tags a user turn the user chose to "send as a goal" (the
 // composer's Goal toggle). Like the mode directive it's model-facing steering —
 // the brain reads it to treat the turn as a standing outcome to plan through the
 // crew work-loop and prove — and NEVER human-facing. The chat bubble strips it
 // and shows a "Sent as goal" badge instead; `hasGoalDirective` drives that badge.
-const GOAL_DIRECTIVE_RE = /^\s*\[GOAL\b[\s\S]*?\]\s*/i;
+const GOAL_DIRECTIVE_RE = /^\s*\[GOAL\b[^\]]*\]\s*/i;
 
 /** The exact steering block a "send as goal" turn is prefixed with. Kept as a
  *  builder (not a bare const) to mirror `buildSteeringText`; the brain honours
@@ -23,7 +32,7 @@ const GOAL_DIRECTIVE_RE = /^\s*\[GOAL\b[\s\S]*?\]\s*/i;
  *  for display. Contains no nested `]` so the lazy strip is exact. */
 export function buildGoalDirective(): string {
   return (
-    "[GOAL — Treat the message below as a standing goal to deliver, not a " +
+    "[GOAL. Treat the message below as a standing goal to deliver, not a " +
     "one-off reply. Break it into connected tasks on the crew work-loop, drive " +
     "it to completion, and prove the outcome; surface your planning and each " +
     "step as tool calls the user can watch. Keep the goal in view until it is " +

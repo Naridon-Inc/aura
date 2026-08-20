@@ -187,11 +187,13 @@ export function MessageStream({
 function DateSeparator({ ts }: { ts: number }) {
   const label = humanDateLabel(ts);
   return (
-    <div className="flex items-center my-3 select-none">
+    // A bordered, filled, ALL-CAPS 10px pill on a hairline that was already
+    // doing the separating. Three devices for one job. The rule separates;
+    // the label names the day, in the same 11px sentence case every other
+    // piece of metadata in the app is set in.
+    <div className="flex items-center gap-2 my-4 select-none">
       <div className="flex-1 h-px bg-line-soft" />
-      <span className="mx-2 text-[10px] uppercase tracking-wider text-text-5 bg-bg-1 px-2 py-0.5 rounded-full border border-line-soft">
-        {label}
-      </span>
+      <span className="text-xs text-text-4">{label}</span>
       <div className="flex-1 h-px bg-line-soft" />
     </div>
   );
@@ -199,11 +201,9 @@ function DateSeparator({ ts }: { ts: number }) {
 
 export function NewDivider() {
   return (
-    <div className="flex items-center my-2 select-none">
+    <div className="flex items-center gap-2 my-2 select-none">
       <div className="flex-1 h-px bg-accent" />
-      <span className="ml-2 text-[10px] uppercase tracking-wider text-accent font-semibold">
-        New
-      </span>
+      <span className="text-xs font-medium text-accent">New</span>
     </div>
   );
 }
@@ -224,8 +224,8 @@ export function EmptyNoSelection() {
           />
         </svg>
       </div>
-      <div className="text-text-1 text-[13px] font-medium mb-1">Pick a channel or start a DM</div>
-      <div className="text-text-4 text-[11px] max-w-[260px] leading-snug">
+      <div className="text-text-1 text-base font-medium mb-1">Pick a channel or start a DM</div>
+      <div className="text-text-4 text-xs max-w-[260px] leading-snug">
         Channels are per-repo and shared with anyone who has cloned the same
         git origin. No signup required.
       </div>
@@ -251,28 +251,29 @@ function EmptyChannel({
         >
           {animalForName(conv.name)}
         </span>
-        <div className="text-text-1 text-[13px] font-medium mb-1">
-          @{conv.name}
-        </div>
-        <div className="text-text-4 text-[11px] max-w-[280px] leading-snug">
+        {/* Name first, handle in the sentence. `@` in front of a person's name
+            read as a handle that doesn't exist, and this pane was the one place
+            you could no longer see which seat you were writing to. */}
+        <div className="text-text-1 text-base font-medium mb-1">{conv.name}</div>
+        <div className="text-text-4 text-xs max-w-[280px] leading-snug">
           This is the start of your direct message with{" "}
-          <span className="text-text-2">@{conv.name}</span>. Messages here are
-          private to the two of you.
+          <span className="text-text-2">@{conv.handle ?? conv.name}</span>.
+          Messages here are private to the two of you.
         </div>
       </div>
     );
   }
   if (conv.kind === "system") {
     return (
-      <div className="h-full flex flex-col items-center justify-center text-center px-8 text-text-4 text-[11.5px]">
-        no events yet — local activity will appear here
+      <div className="h-full flex flex-col items-center justify-center text-center px-8 text-text-4 text-sm">
+        no events yet. Local activity will appear here
       </div>
     );
   }
   if (conv.kind === "project") {
     return (
-      <div className="h-full flex flex-col items-center justify-center text-center px-8 text-text-4 text-[11.5px]">
-        no project activity yet — intents, snapshots and commits will appear
+      <div className="h-full flex flex-col items-center justify-center text-center px-8 text-text-4 text-sm">
+        no project activity yet. Intents, snapshots and commits will appear
         here as you work.
       </div>
     );

@@ -15,10 +15,11 @@
 use serde::{Deserialize, Serialize};
 
 use crate::manager::brain::{
-    keychain,
+    AgentSurface, keychain,
     registry::{self, BrainDescriptor},
     settings::{self, BrainSettings, ProviderConfig},
 };
+use crate::cloud_org::OrgScoped;
 
 /// Provider-id prefix for user-registered OpenAI-compatible endpoints.
 /// Mirrors `manager::brain::openai_compat::PROVIDER_PREFIX`, redeclared
@@ -114,6 +115,45 @@ pub async fn brain_get_settings() -> Result<BrainSettings, String> {
     Ok(settings::load())
 }
 
+/// What the agent behind `provider_id` is offering in `cwd` right now:
+/// the slash commands it publishes, the modes it can work in, the plan it
+/// is working to.
+///
+/// Empty rather than an error when nothing is running. A composer asking
+/// "what can this agent do here" before the first message has been sent is
+/// asking a reasonable question with a boring answer, not making a mistake.
+///
+/// This reads the *live* brain — `registry::build` hands back the running
+/// instance for a hosted agent — so the answer is the session's own state,
+/// not a guess reconstructed from settings.
+#[tauri::command]
+pub async fn brain_session_surface(
+    provider_id: String,
+    cwd: String,
+) -> Result<AgentSurface, String> {
+    let brain = registry::build(&provider_id).map_err(|e| e.to_string())?;
+    Ok(brain.session_surface(&cwd).await.unwrap_or_default())
+}
+
+/// Put the live agent in `cwd` into one of the modes its surface offered.
+///
+/// Errors propagate to the caller as text: this control is worth nothing
+/// unless a failure to switch is visible. Plan mode refuses every edit
+/// tool, so "we asked and it didn't take" and "it is in plan mode" must
+/// never look the same on screen.
+#[tauri::command]
+pub async fn brain_set_session_mode(
+    provider_id: String,
+    cwd: String,
+    mode: String,
+) -> Result<(), String> {
+    let brain = registry::build(&provider_id).map_err(|e| e.to_string())?;
+    brain
+        .set_session_mode(&cwd, &mode)
+        .await
+        .map_err(|e| e.to_string())
+}
+
 #[derive(Debug, Deserialize)]
 pub struct BrainSetActiveInput {
     pub provider_id: String,
@@ -150,7 +190,14 @@ pub struct BrainKeychainSetInput {
 
 #[tauri::command]
 pub async fn brain_keychain_set(input: BrainKeychainSetInput) -> Result<(), String> {
-    keychain::set_api_key(&input.provider_id, &input.api_key).map_err(|e| e.to_string())
+    // Trim: a key pasted from a browser or a password manager routinely
+    // arrives with a trailing newline, and the provider answers a key with
+    // whitespace on it with the same "API key not valid" it gives a wrong
+    // key — so the user reads "my key is bad" when the key is fine.
+    keychain::set_api_key(&input.provider_id, input.api_key.trim())
+        .map_err(|e| e.to_string())?;
+    crate::cmd_models::invalidate_cache();
+    Ok(())
 }
 
 #[derive(Debug, Deserialize)]
@@ -160,7 +207,9 @@ pub struct BrainKeychainDeleteInput {
 
 #[tauri::command]
 pub async fn brain_keychain_delete(input: BrainKeychainDeleteInput) -> Result<(), String> {
-    keychain::delete_api_key(&input.provider_id).map_err(|e| e.to_string())
+    keychain::delete_api_key(&input.provider_id).map_err(|e| e.to_string())?;
+    crate::cmd_models::invalidate_cache();
+    Ok(())
 }
 
 #[derive(Debug, Deserialize)]
@@ -304,12 +353,13 @@ pub async fn brain_upsert_provider(
     // Key goes to the keychain, never to settings.json. An explicit
     // empty string clears the entry (local endpoints with no auth).
     if let Some(key) = input.api_key {
-        if key.is_empty() {
+        if key.trim().is_empty() {
             // delete_api_key is a no-op when nothing is stored.
             keychain::delete_api_key(&provider_id).map_err(|e| e.to_string())?;
         } else {
-            keychain::set_api_key(&provider_id, &key).map_err(|e| e.to_string())?;
+            keychain::set_api_key(&provider_id, key.trim()).map_err(|e| e.to_string())?;
         }
+        crate::cmd_models::invalidate_cache();
     }
 
     Ok(BrainUpsertProviderOut { provider_id })
@@ -337,6 +387,7 @@ pub async fn brain_remove_provider(input: BrainRemoveProviderInput) -> Result<()
     }
     settings::save(&s).map_err(|e| e.to_string())?;
     keychain::delete_api_key(&input.provider_id).map_err(|e| e.to_string())?;
+    crate::cmd_models::invalidate_cache();
     Ok(())
 }
 
@@ -427,6 +478,7 @@ pub async fn brain_configure_cloud(input: BrainConfigureCloudInput) -> Result<()
         } else {
             keychain::set_api_key(provider_id, secret.trim()).map_err(|e| e.to_string())?;
         }
+        crate::cmd_models::invalidate_cache();
     }
     Ok(())
 }
@@ -511,15 +563,47 @@ pub struct AuraProQuota {
     pub period_started_at: String,
 }
 
+/// Why a quota read failed, in the shape the panel needs to decide what to
+/// offer the user.
+///
+/// It used to fail as a bare string, and the one case that matters got lost in
+/// it. [`aura_pro_is_signed_in`] proves only that a token *string* is on disk —
+/// never that the cloud still honours it — so an expired session left the panel
+/// saying "Signed in as <email>" beside a Refresh button whose every press
+/// repeats the same 401. The user is told nothing is wrong with their account
+/// and handed the one control that cannot fix it.
+///
+/// `kind` is the machine-readable half; `message` keeps the detail for the
+/// small print. Naming the auth case is what lets the UI offer signing in
+/// again, which is the only thing that helps.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AuraProQuotaError {
+    /// `unauthorized` — the cloud rejected this token, or there isn't one.
+    /// `offline` — the request never reached the cloud.
+    /// `server` — it arrived and the answer wasn't usable.
+    /// `unsupported` — this build has no Aura Pro brain compiled in.
+    pub kind: String,
+    pub message: String,
+}
+
+impl AuraProQuotaError {
+    fn new(kind: &str, message: impl Into<String>) -> Self {
+        Self {
+            kind: kind.to_string(),
+            message: message.into(),
+        }
+    }
+}
+
 #[tauri::command]
-pub async fn aura_pro_quota() -> Result<AuraProQuota, String> {
+pub async fn aura_pro_quota() -> Result<AuraProQuota, AuraProQuotaError> {
     #[cfg(feature = "brain_aura_pro")]
     {
         use crate::manager::brain::aura_pro::read_credentials;
         let creds = read_credentials();
-        let token = creds
-            .cloud_token
-            .ok_or_else(|| "Not signed in to Aura Pro".to_string())?;
+        let token = creds.cloud_token.ok_or_else(|| {
+            AuraProQuotaError::new("unauthorized", "Not signed in to Aura Pro")
+        })?;
         let origin = creds
             .cloud_origin
             .unwrap_or_else(|| crate::manager::brain::aura_pro::DEFAULT_CLOUD_ORIGIN.to_string());
@@ -528,24 +612,38 @@ pub async fn aura_pro_quota() -> Result<AuraProQuota, String> {
         let client = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(15))
             .build()
-            .map_err(|e| format!("http client: {e}"))?;
+            .map_err(|e| AuraProQuotaError::new("offline", format!("http client: {e}")))?;
         let resp = client
             .get(&url)
             .bearer_auth(&token)
+            .org_scoped()
             .send()
             .await
-            .map_err(|e| format!("GET {url}: {e}"))?;
+            .map_err(|e| AuraProQuotaError::new("offline", format!("GET {url}: {e}")))?;
         let status = resp.status();
         if !status.is_success() {
             let txt = resp.text().await.unwrap_or_default();
-            return Err(format!("quota HTTP {status}: {txt}"));
+            // A 401 body is empty, so the status is the whole story — which is
+            // why this case has to be named rather than pasted into a sentence.
+            let kind = if status.as_u16() == 401 || status.as_u16() == 403 {
+                "unauthorized"
+            } else {
+                "server"
+            };
+            return Err(AuraProQuotaError::new(
+                kind,
+                format!("quota HTTP {status}: {txt}"),
+            ));
         }
         let quota: AuraProQuota = resp
             .json()
             .await
-            .map_err(|e| format!("parse quota: {e}"))?;
+            .map_err(|e| AuraProQuotaError::new("server", format!("parse quota: {e}")))?;
         return Ok(quota);
     }
     #[cfg(not(feature = "brain_aura_pro"))]
-    Err("aura_pro brain is not compiled into this build".into())
+    Err(AuraProQuotaError::new(
+        "unsupported",
+        "aura_pro brain is not compiled into this build",
+    ))
 }

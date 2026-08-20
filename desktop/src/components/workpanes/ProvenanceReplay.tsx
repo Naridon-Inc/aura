@@ -17,6 +17,7 @@
 
 import { useEffect, useMemo, useState } from "react";
 import { api, type CommitEntry } from "../../lib/api";
+import { shortDateFromSecs } from "../../lib/calendarDate";
 import { Button } from "../ui/button";
 import { IntentMatchChip } from "../IntentMatchChip";
 
@@ -175,13 +176,13 @@ export function ProvenanceReplay({ repoRoot, onClose }: Props) {
   return (
     <div className="h-full w-full flex flex-col bg-bg-content">
       <header className="h-9 flex items-center px-4 border-b border-line-soft flex-shrink-0 gap-3">
-        <span className="text-text-2 text-[12px] font-medium uppercase tracking-wider">
+        <span className="section-label">
           Proof trail
         </span>
-        <span className="text-text-4 text-[11px]">
+        <span className="text-text-4 text-xs">
           every change, with proof it's genuine
         </span>
-        <span className="text-text-4 text-[10.5px] tabular-nums ml-3">
+        <span className="text-text-4 text-xs tabular-nums ml-3">
           {summary.signed}/{summary.total} signed
           {summary.verified > 0 && ` · ${summary.verified} verified`}
           {summary.failed > 0 && (
@@ -206,26 +207,26 @@ export function ProvenanceReplay({ repoRoot, onClose }: Props) {
       </header>
 
       {error && (
-        <div className="text-red-400 text-[11px] font-mono px-4 py-2 border-b border-line-soft">
+        <div className="text-red-400 text-xs font-mono px-4 py-2 border-b border-line-soft">
           {error}
         </div>
       )}
 
       <div className="flex-shrink-0 border-b border-line-soft px-3 py-2 overflow-x-auto">
         <div className="flex items-center gap-2 px-2 pb-1">
-          <span className="text-[10.5px] uppercase tracking-wider text-text-4">
+          <span className="section-label">
             Commit timeline
           </span>
-          <span className="text-[10.5px] text-text-5">
+          <span className="text-xs text-text-5">
             select a commit to review its diff and trust evidence
           </span>
         </div>
         {loadingList ? (
-          <div className="text-text-4 text-[11.5px] px-2 py-2">
+          <div className="text-text-4 text-sm px-2 py-2">
             loading commits…
           </div>
         ) : commits.length === 0 ? (
-          <div className="text-text-4 text-[11.5px] px-2 py-2">
+          <div className="text-text-4 text-sm px-2 py-2">
             No commits found.
           </div>
         ) : (
@@ -292,7 +293,7 @@ function Scrubber({
               onClick={() => onSelect(c.sha)}
               title={`${c.sha.slice(0, 8)} · ${c.subject}${cid ? ` · change ${cid}` : ""}`}
               className={`flex flex-col items-center gap-1 px-2 py-1.5 rounded transition-colors ${
-                active ? "bg-bg-2" : "hover:bg-bg-2"
+                active ? "bg-state-selected" : "hover:bg-state-hover"
               }`}
               style={{ width: 64 }}
             >
@@ -305,12 +306,12 @@ function Scrubber({
                   border: `2px solid ${tone.fg}`,
                 }}
               />
-              <span className="text-[10px] font-mono text-text-3 flex items-center gap-1">
+              <span className="text-2xs font-mono text-text-3 flex items-center gap-1">
                 <IntentMatchChip repoRoot={repoRoot} sha={c.sha} />
                 {c.sha.slice(0, 7)}
               </span>
-              <span className="text-[9.5px] text-text-4 truncate w-full text-center">
-                {hhmm(c.timestamp)}
+              <span className="text-2xs text-text-4 truncate w-full text-center">
+                {shortDateFromSecs(c.timestamp, { empty: "—" })}
               </span>
               <span
                 className="block w-full h-[3px] rounded-full"
@@ -336,7 +337,7 @@ function CommitDetail({
 }) {
   if (!commit) {
     return (
-      <div className="flex-1 min-w-0 px-4 py-4 text-text-4 text-[12px]">
+      <div className="flex-1 min-w-0 px-4 py-4 text-text-4 text-sm">
         Pick a commit to review.
       </div>
     );
@@ -344,21 +345,21 @@ function CommitDetail({
   return (
     <div className="flex-1 min-w-0 flex flex-col">
       <div className="flex-shrink-0 px-4 py-3 border-b border-line-soft">
-        <div className="text-[10.5px] uppercase tracking-wider text-text-4 mb-1">
+        <div className="section-label mb-1">
           Selected commit
         </div>
-        <div className="text-[12.5px] text-text-1 font-medium leading-snug">
+        <div className="text-base text-text-1 font-medium leading-snug">
           {commit.subject}
         </div>
-        <div className="text-[10.5px] text-text-4 font-mono mt-1 truncate">
+        <div className="text-xs text-text-4 font-mono mt-1 truncate">
           {commit.sha} · {commit.author}
         </div>
       </div>
       <div className="flex-1 min-h-0 overflow-auto px-4 py-2">
         {loading ? (
-          <div className="text-text-4 text-[11.5px]">loading diff…</div>
+          <div className="text-text-4 text-sm">loading diff…</div>
         ) : (
-          <pre className="text-[10.5px] font-mono text-text-2 whitespace-pre">
+          <pre className="text-xs font-mono text-text-2 whitespace-pre">
             {colorizeDiff(diff)}
           </pre>
         )}
@@ -381,12 +382,12 @@ function SignaturePanel({
       className="w-[320px] border-l border-line-soft flex-shrink-0 flex flex-col"
       style={{ background: "var(--color-bg-1)" }}
     >
-      <div className="h-7 flex items-center px-3 text-[10.5px] uppercase tracking-wider text-text-4 border-b border-line-soft flex-shrink-0">
+      <div className="section-label h-7 flex items-center px-3 border-b border-line-soft flex-shrink-0">
         Trust evidence
       </div>
       <div className="flex-1 min-h-0 overflow-auto px-3 py-3 flex flex-col gap-2">
         <div
-          className="flex items-center gap-2 text-[11.5px] font-medium"
+          className="flex items-center gap-2 text-sm font-medium"
           style={{ color: tone.fg }}
         >
           <span
@@ -410,7 +411,7 @@ function SignaturePanel({
             <KV label="Task hash" value={record.intent_hash ?? "—"} mono />
             <KV label="Code hash" value={record.ast_hash ?? "—"} mono />
             {record.detail && (
-              <div className="text-[10.5px] text-text-3 font-mono whitespace-pre-wrap break-words">
+              <div className="text-xs text-text-3 font-mono whitespace-pre-wrap break-words">
                 {record.detail}
               </div>
             )}
@@ -427,7 +428,7 @@ function SignaturePanel({
             </Button>
           </>
         ) : (
-          <div className="text-[11px] text-text-3">
+          <div className="text-xs text-text-3">
             No signed evidence found for this commit. You can still review the
             diff, but Aura cannot verify who produced this change yet.
           </div>
@@ -448,11 +449,11 @@ function KV({
 }) {
   return (
     <div className="flex flex-col">
-      <span className="text-[10px] uppercase tracking-wide text-text-4">
+      <span className="section-label">
         {label}
       </span>
       <span
-        className={`text-[11px] truncate ${mono ? "font-mono text-text-2" : "text-text-1"}`}
+        className={`text-xs truncate ${mono ? "font-mono text-text-2" : "text-text-1"}`}
         title={value}
       >
         {value}
@@ -522,12 +523,6 @@ function colorizeDiff(diff: string) {
   });
 }
 
-function hhmm(ts: number): string {
-  if (!ts) return "—";
-  const d = new Date(ts * 1000);
-  if (Number.isNaN(d.getTime())) return "—";
-  return d.toLocaleDateString(undefined, { month: "short", day: "numeric" });
-}
 
 // Probe `.aura/manifest/<sha>.json` first, then `manifests/`, then
 // `.aura/blocks/<sha>.json`. All three layouts are tolerated since

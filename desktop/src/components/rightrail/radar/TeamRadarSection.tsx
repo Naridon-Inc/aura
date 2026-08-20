@@ -73,11 +73,11 @@ export function TeamRadarSection({
   return (
     <div className="border-b border-line-soft">
       <div className="flex items-center gap-2 h-7 px-3 bg-bg-1/40">
-        <span className="text-[10.5px] font-medium uppercase tracking-wider text-text-3">
+        <span className="section-label">
           Team Radar
         </span>
         {radar.conflicts.length > 0 && (
-          <span className="text-[10px] text-text-4 tabular-nums">
+          <span className="text-2xs text-text-4 tabular-nums">
             {radar.conflicts.length} clash
             {radar.conflicts.length === 1 ? "" : "es"}
           </span>
@@ -85,17 +85,17 @@ export function TeamRadarSection({
         <button
           type="button"
           onClick={() => setClaimOpen((v) => !v)}
-          className={`ml-auto h-5 px-1.5 rounded text-[10px] transition-colors ${
+          className={`ml-auto h-5 px-1.5 rounded text-2xs transition-colors ${
             claimOpen
               ? "text-text-1 bg-bg-2"
-              : "text-text-4 hover:text-text-1 hover:bg-bg-hover"
+              : "text-text-4 hover:text-text-1 hover:bg-state-hover"
           }`}
-          title="Claim a zone — announce (or lock) the files you're working in"
+          title="Claim a zone. Announce (or lock) the files you're working in"
         >
           + zone
         </button>
         <label
-          className="flex items-center gap-1 text-[10px] text-text-4 cursor-pointer select-none"
+          className="flex items-center gap-1 text-2xs text-text-4 cursor-pointer select-none"
           title="Also show which other files a teammate's edit could touch"
         >
           <input
@@ -154,22 +154,22 @@ function QuietRadarRow({ onClaimZone }: { onClaimZone: () => void }) {
     <div className="shrink-0 border-t border-line-soft">
       <div className="flex items-center gap-2 h-7 px-3 bg-bg-1/40">
         <span
-          className="text-[10.5px] font-medium uppercase tracking-wider text-text-3"
-          title="Shows who else is working in this project right now — the last day of activity, this project only."
+          className="section-label"
+          title="Shows who else is working in this project right now. The last day of activity, this project only."
         >
           Team Radar
         </span>
         <button
           type="button"
           onClick={onClaimZone}
-          className="ml-auto h-5 px-1.5 rounded text-[10px] text-text-4 hover:text-text-1 hover:bg-bg-hover transition-colors"
-          title="Claim a zone — announce (or lock) the files you're working in"
+          className="ml-auto h-5 px-1.5 rounded text-2xs text-text-4 hover:text-text-1 hover:bg-state-hover transition-colors"
+          title="Claim a zone. Announce (or lock) the files you're working in"
         >
           + zone
         </button>
       </div>
-      <div className="px-3 pb-1.5 text-[11px] leading-snug text-text-4">
-        Quiet — nobody has touched this project in the last day.
+      <div className="px-3 pb-1.5 text-xs leading-snug text-text-4">
+        Quiet. Nobody has touched this project in the last day.
       </div>
     </div>
   );

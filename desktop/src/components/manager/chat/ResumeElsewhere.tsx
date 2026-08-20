@@ -175,7 +175,7 @@ function Body({
       <>
         <p className="text-xs text-text-2 leading-relaxed">
           This chat ran entirely on <strong className="text-text-1">{t.label}</strong>.
-          {" "}Move it into {t.label}'s own CLI — it'll show up in {t.label}'s
+          {" "}Move it into {t.label}'s own CLI. It'll show up in {t.label}'s
           resume list and reopen as that session.
         </p>
         <TargetRow
@@ -199,12 +199,12 @@ function Body({
           <strong className="text-text-1">
             {port.used.map((t) => t.label).join(", ")}
           </strong>
-          . I can make it resumable in each — the whole conversation lands in
+          . I can make it resumable in each. The whole conversation lands in
           every agent's resume list.
         </p>
-        <p className="text-[11px] text-text-3 leading-relaxed rounded border border-line-soft bg-bg-3 px-2.5 py-2">
+        <p className="text-xs text-text-3 leading-relaxed rounded border border-line-soft bg-bg-3 px-2.5 py-2">
           Heads-up: each agent reopens it as an{" "}
-          <strong className="text-text-2">imported transcript</strong> — the
+          <strong className="text-text-2">imported transcript</strong>. The
           full conversation as its starting context, not that vendor's private
           session internals. Faithful to read; it just won't be that agent's own
           native session.
@@ -241,11 +241,11 @@ function Body({
     <>
       <p className="text-xs text-text-2 leading-relaxed">
         {single
-          ? `${single.label} is built into Aura — it has no separate CLI to resume in. Send a copy to an installed agent instead:`
-          : "Couldn't tell which agent produced this chat. Send a copy to any installed agent — the full conversation lands in its resume list:"}
+          ? `${single.label} is built into Aura. It has no separate CLI to resume in. Send a copy to an installed agent instead:`
+          : "Couldn't tell which agent produced this chat. Send a copy to any installed agent. The full conversation lands in its resume list:"}
       </p>
       {port.resumableInstalled.length === 0 ? (
-        <p className="text-[11px] text-text-3 leading-relaxed rounded border border-line-soft bg-bg-3 px-2.5 py-2">
+        <p className="text-xs text-text-3 leading-relaxed rounded border border-line-soft bg-bg-3 px-2.5 py-2">
           No agent CLI that can receive a resumable copy is installed. Install
           Claude Code, Gemini, or Codex CLI to keep this chat resumable outside
           Aura.
@@ -296,7 +296,7 @@ function TargetRow({
             {target.label}
           </div>
           {target.turns > 0 && (
-            <div className="text-[10.5px] text-text-3">
+            <div className="text-xs text-text-3">
               {target.turns} turn{target.turns === 1 ? "" : "s"} in this chat
             </div>
           )}
@@ -305,7 +305,7 @@ function TargetRow({
       </div>
 
       {state.state === "error" && (
-        <div className="mt-1.5 text-[11px] text-red break-words">
+        <div className="mt-1.5 text-xs text-red break-words">
           {state.error}
         </div>
       )}
@@ -314,13 +314,13 @@ function TargetRow({
         <div className="mt-2 space-y-1.5">
           {cmd && <CopyableCommand cmd={cmd} />}
           {state.result.transcript_path && (
-            <div className="text-[10.5px] text-text-3 break-all">
+            <div className="text-xs text-text-3 break-all">
               Saved to {state.result.transcript_path}
             </div>
           )}
           <button
             type="button"
-            className="text-[11px] text-accent hover:underline"
+            className="text-xs text-accent hover:underline"
             onClick={onOpen}
           >
             Open in a terminal now →
@@ -346,21 +346,21 @@ function RowAction({
 }) {
   if (!target.available) {
     return (
-      <span className="text-[10.5px] text-text-3 flex-shrink-0">
+      <span className="text-xs text-text-3 flex-shrink-0">
         CLI not installed
       </span>
     );
   }
   if (!target.canResume) {
     return (
-      <span className="text-[10.5px] text-text-3 flex-shrink-0">
+      <span className="text-xs text-text-3 flex-shrink-0">
         no resume format
       </span>
     );
   }
   if (state.state === "saving") {
     return (
-      <span className="flex flex-shrink-0 items-center gap-1.5 text-[10.5px] text-text-3">
+      <span className="flex flex-shrink-0 items-center gap-1.5 text-xs text-text-3">
         <AsciiSpinner />
         Saving…
       </span>
@@ -368,7 +368,7 @@ function RowAction({
   }
   if (state.state === "done") {
     return (
-      <span className="text-[10.5px] text-accent-green flex-shrink-0">
+      <span className="text-xs text-accent-green flex-shrink-0">
         ✓ In resume list
       </span>
     );
@@ -392,12 +392,12 @@ function CopyableCommand({ cmd }: { cmd: string }) {
   const [copied, setCopied] = useState(false);
   return (
     <div className="flex items-center gap-2">
-      <code className="flex-1 text-[10.5px] text-text-2 bg-bg-3 rounded px-2 py-1 break-all">
+      <code className="flex-1 text-xs text-text-2 bg-bg-3 rounded px-2 py-1 break-all">
         {cmd}
       </code>
       <button
         type="button"
-        className="text-[10.5px] text-text-3 hover:text-text-1 flex-shrink-0"
+        className="text-xs text-text-3 hover:text-text-1 flex-shrink-0"
         onClick={() => {
           void navigator.clipboard?.writeText(cmd);
           setCopied(true);

@@ -62,7 +62,7 @@ export function IntentVerificationDialog({
               size="xs"
               disabled={!!busy}
               onClick={() => primary && onApproveRemoval(primary.symbol)}
-              className="text-amber border-amber/40 hover:bg-bg-2"
+              className="text-amber border-amber/40 hover:bg-state-hover"
             >
               Allow the removal
             </Button>
@@ -82,7 +82,7 @@ export function IntentVerificationDialog({
         )
       }
     >
-      <div className="space-y-4 text-[12.5px] leading-relaxed">
+      <div className="space-y-4 text-base leading-relaxed">
         <Field label="You asked for">
           <span className="text-text-1">{verdict.goal}</span>
         </Field>
@@ -97,7 +97,7 @@ export function IntentVerificationDialog({
               </div>
               <div className="mt-1 space-y-0.5">
                 {blocking.map((v) => (
-                  <div key={v.symbol} className="font-mono text-[12px] text-amber">
+                  <div key={v.symbol} className="font-mono text-sm text-amber">
                     {v.symbol}()
                     <span className="ml-2 text-text-3">{v.file}</span>
                   </div>
@@ -111,7 +111,7 @@ export function IntentVerificationDialog({
               const unsure = chain.filter((d) => !d.certain).length;
               return (
                 <Field key={v.symbol} label="What stops working">
-                  <div className="space-y-0.5 font-mono text-[12px]">
+                  <div className="space-y-0.5 font-mono text-sm">
                     {chain.map((d) => (
                       <div
                         key={`${d.symbol}-${d.depth}`}
@@ -124,8 +124,8 @@ export function IntentVerificationDialog({
                     ))}
                   </div>
                   {unsure > 0 && (
-                    <div className="mt-1 text-[11.5px] text-text-3">
-                      {unsure} of these matched on name alone — worth checking by
+                    <div className="mt-1 text-sm text-text-3">
+                      {unsure} of these matched on name alone. Worth checking by
                       hand.
                     </div>
                   )}
@@ -141,7 +141,7 @@ export function IntentVerificationDialog({
           </Field>
         )}
 
-        <div className="flex flex-wrap gap-x-6 gap-y-1 border-t border-ui-border-base pt-3 text-[11.5px] text-text-3">
+        <div className="flex flex-wrap gap-x-6 gap-y-1 border-t border-line-soft pt-3 text-sm text-text-3">
           <Meta label="Agent" value={verdict.agent} />
           {verdict.worktree && <Meta label="Worktree" value={verdict.worktree} />}
           {tests && <Meta label="Tests" value={tests} />}
@@ -150,7 +150,7 @@ export function IntentVerificationDialog({
         {failed && (
           // Said plainly, because it is the whole argument. The tests passing
           // is not a rebuttal — it is the reason this screen has to exist.
-          <p className="text-[11.5px] text-text-3">
+          <p className="text-sm text-text-3">
             Git recorded the text change and the tests passed. Neither of them
             knows which behaviour the agent was allowed to change.
           </p>
@@ -163,7 +163,7 @@ export function IntentVerificationDialog({
 function Field({ label, children }: { label: string; children: React.ReactNode }) {
   return (
     <div>
-      <div className="mb-1 text-[11px] uppercase tracking-wide text-text-3">
+      <div className="section-label mb-1">
         {label}
       </div>
       {children}

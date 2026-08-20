@@ -28,9 +28,9 @@ use serde_json::{Value, json};
 
 use super::{
     Brain,
-    aws_sigv4::{self, AwsCredentials},
     types::{BrainCapabilities, BrainError, ChatChunk, ChatRequest, cap_keys},
 };
+use crate::aws_sigv4::{self, AwsCredentials};
 
 const PROVIDER_ID: &str = "bedrock";
 const SERVICE: &str = "bedrock";
@@ -219,6 +219,7 @@ impl Brain for BedrockBrain {
                                 .unwrap_or("")
                                 .to_string(),
                             input: block.get("input").cloned().unwrap_or(json!({})),
+                            signature: None,
                         });
                     }
                     _ => {}

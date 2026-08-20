@@ -1,0 +1,42 @@
+#cloud-config
+# Aura Runner — remote compute in one paste.
+#
+# Drop this into a fresh cloud VM's user-data (AWS EC2 "User data", a DigitalOcean
+# / Hetzner / GCP cloud-init field, etc.) and the box will boot, install Docker,
+# build the runner, and start draining your crew loop — with your laptop off.
+#
+# Fill in the three values marked FILL-ME before launching. AURA_SRC must point at
+# a clone-able Aura source the box can read (a deploy token, or your fork). Once
+# you publish a prebuilt runner image, this collapses to a single `docker run`.
+
+package_update: true
+packages:
+  - git
+  - docker.io
+
+write_files:
+  - path: /opt/aura-runner/runner.env
+    permissions: "0600"
+    content: |
+      # The repo the crew runs on — include a push credential.
+      AURA_RUNNER_REPO=https://USER:TOKEN@github.com/you/your-repo.git   # FILL-ME
+      AURA_RUNNER_BRANCH=
+      AURA_RUNNER_AGENT=claude
+      # Agent key — keys only on infra you control (AURA-89).
+      ANTHROPIC_API_KEY=                                                  # FILL-ME
+      AURA_RUNNER_LEASE_SECS=1800
+      AURA_RUNNER_POLL_SECS=30
+      AURA_RUNNER_PUSH=1
+      AURA_RUNNER_GIT_NAME=Aura Runner
+      AURA_RUNNER_GIT_EMAIL=runner@auravcs.com
+
+runcmd:
+  - systemctl enable --now docker
+  # Build the runner from Aura source (replace with your image once published).
+  - git clone https://USER:TOKEN@github.com/you/aura.git /opt/aura/src         # FILL-ME (AURA_SRC)
+  - docker build -f /opt/aura/src/aura-runner/Dockerfile -t aura-runner /opt/aura/src
+  - >
+    docker run -d --name aura-runner --restart unless-stopped
+    --env-file /opt/aura-runner/runner.env
+    -v aura-runner-workspace:/workspace
+    aura-runner

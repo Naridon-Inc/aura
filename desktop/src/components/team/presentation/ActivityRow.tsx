@@ -105,23 +105,23 @@ export function ActivityRow({
 
   return (
     <div
-      className="group my-0.5 mx-1 rounded px-2 py-1 cursor-pointer hover:bg-bg-2"
+      className="group my-0.5 mx-1 rounded px-2 py-1 cursor-pointer hover:bg-state-hover"
       onClick={() => setOpen((x) => !x)}
       onContextMenu={canShare ? openShare : undefined}
       title={open ? "Collapse" : canShare ? "Click to expand · right-click to share" : "Expand"}
     >
       <div className="flex items-baseline gap-1.5 leading-snug">
-        <span className="text-[11px] text-text-3 font-medium truncate">
+        <span className="text-xs text-text-3 font-medium truncate">
           {msg.sender}
         </span>
-        <span className="text-[9.5px] uppercase tracking-wider font-medium text-text-4">
+        <span className="section-label">
           {meta.label}
         </span>
-        <span className="text-[10px] text-text-5 ml-auto tabular-nums flex-shrink-0">
+        <span className="text-2xs text-text-5 ml-auto tabular-nums flex-shrink-0">
           {hhmm(msg.ts)}
         </span>
       </div>
-      <div className={`text-[12px] text-text-2 ${open ? "" : "truncate"}`}>
+      <div className={`text-sm text-text-2 ${open ? "" : "truncate"}`}>
         {activity.title || "(no title)"}
       </div>
 
@@ -133,7 +133,7 @@ export function ActivityRow({
               // Only a failed/rejected badge earns colour — it's the one that
               // needs the reader. "ok"/"applied" is settled history, so it
               // reads on the neutral ramp like every other informational chip.
-              className={`px-1.5 py-[1px] rounded text-[9.5px] font-mono border ${
+              className={`px-1.5 py-[1px] rounded text-2xs font-mono border ${
                 b.tone === "warn"
                   ? "border-red/30 bg-red/10 text-red"
                   : "border-line-soft bg-bg-2 text-text-4"
@@ -148,20 +148,20 @@ export function ActivityRow({
       {open && (
         <div className="mt-2 space-y-2">
           {hasDetail ? (
-            <div className="whitespace-pre-wrap break-words text-[11.5px] text-text-2 leading-snug bg-bg-1 border border-line-soft rounded px-2 py-1.5">
+            <div className="whitespace-pre-wrap break-words text-sm text-text-2 leading-snug bg-bg-1 border border-line-soft rounded px-2 py-1.5">
               {activity.detail}
             </div>
           ) : (
             // Single-line activity: show the full title in the same styled
             // block so expand always reveals SOMETHING.
-            <div className="whitespace-pre-wrap break-words text-[11.5px] text-text-2 leading-snug bg-bg-1 border border-line-soft rounded px-2 py-1.5">
+            <div className="whitespace-pre-wrap break-words text-sm text-text-2 leading-snug bg-bg-1 border border-line-soft rounded px-2 py-1.5">
               {activity.title}
             </div>
           )}
 
           {hasFiles && (
             <div className="border border-line-soft rounded overflow-hidden">
-              <div className="px-2 py-1 bg-bg-1 border-b border-line-soft text-[9.5px] uppercase tracking-wider text-text-5">
+              <div className="section-label px-2 py-1 bg-bg-1 border-b border-line-soft">
                 {activity.files!.length} file
                 {activity.files!.length === 1 ? "" : "s"}
               </div>
@@ -169,18 +169,18 @@ export function ActivityRow({
                 {activity.files!.map((f) => (
                   <li
                     key={f.path}
-                    className="px-2 py-1 flex items-center gap-2 hover:bg-bg-2"
+                    className="px-2 py-1 flex items-center gap-2 hover:bg-state-hover"
                   >
                     <button
                       type="button"
                       onClick={(e) => openFile(e, f.path)}
-                      className="font-mono text-[11px] text-text-3 hover:text-accent hover:underline truncate flex-1 text-left"
+                      className="font-mono text-xs text-text-3 hover:text-accent hover:underline truncate flex-1 text-left"
                       title={f.path}
                     >
                       {f.path}
                     </button>
                     {f.status && (
-                      <span className="text-[9.5px] uppercase tracking-wider text-text-5 flex-shrink-0">
+                      <span className="section-label flex-shrink-0">
                         {f.status}
                       </span>
                     )}
@@ -188,7 +188,7 @@ export function ActivityRow({
                         on the neutral ramp. Green/red is reserved for the
                         worktree the user is actually standing in. */}
                     {(f.additions != null || f.deletions != null) && (
-                      <span className="text-[10px] font-mono tabular-nums text-text-3 flex-shrink-0">
+                      <span className="text-2xs font-mono tabular-nums text-text-3 flex-shrink-0">
                         {f.additions != null && <span>+{f.additions}</span>}
                         {f.additions != null && f.deletions != null && " "}
                         {f.deletions != null && <span>−{f.deletions}</span>}
@@ -206,7 +206,7 @@ export function ActivityRow({
                 variant="secondary"
                 size="sm"
                 onClick={openDiff}
-                className="text-[11px]"
+                className="text-xs"
               >
                 Show diff
               </Button>
@@ -215,7 +215,7 @@ export function ActivityRow({
                   variant="secondary"
                   size="sm"
                   onClick={openShare}
-                  className="text-[11px]"
+                  className="text-xs"
                   title="Share this commit to a chat channel as a rich card"
                 >
                   Share to channel…
@@ -229,7 +229,7 @@ export function ActivityRow({
                 variant="secondary"
                 size="sm"
                 onClick={openShare}
-                className="text-[11px]"
+                className="text-xs"
                 title="Share this entry to a chat channel as a rich card"
               >
                 Share to channel…

@@ -5,9 +5,12 @@
 // the deterministic data layer behind both — it never invents a datum. Every
 // diff/PR/agent/time is real (or omitted).
 
-import { isMachineLeaf } from "../../lib/workspaceLabel";
-import type { WorktreeRef } from "../WorkspaceRail";
+import { humanizeCopyTitle } from "../../lib/workspaceLabel";
+import type { WorktreeRef } from "../../lib/workspaceRef";
+import type { CloudPlacement } from "../../lib/api";
 import type { WorktreeBadge } from "../../lib/useWorktreeBadges";
+import { relativeAgeFromDelta } from "../../lib/relativeTime";
+import { shortDateFromSecs } from "../../lib/calendarDate";
 
 // One agent parked on a copy — normalised across live tabs + the persisted
 // per-repo roster upstream (the surface unions them). `attention` = the agent
@@ -45,6 +48,11 @@ export type WorkspaceCopy = {
   changedFiles: number;
   pr?: { number: number; state: string };
   agents: CopyAgent[];
+  // Set when this copy's branch is in flight on a machine that isn't this one.
+  // Every other field here describes this disk, which is why the fleet views
+  // could show a copy as resting while a runner was mid-turn on it — the local
+  // checkout genuinely is idle, and nothing else on the row disagrees.
+  cloud?: CloudPlacement;
   status: CopyStatus;
 };
 
@@ -66,30 +74,24 @@ export type BuildCopiesInput = {
   activePath: string;
 };
 
-// "feat/s1-manifest-signing-prep" → "manifest signing prep". Mirrors the
-// roster's humaniser so a copy reads the same in the sidebar and the view.
-// A machine worktree branch carries no human meaning — call it a parallel copy.
-export function humanizeCopyTitle(branch: string, isMain: boolean): string {
-  if (isMain && !branch) return "main copy";
-  const seg = branch.split("/").pop() ?? branch;
-  if (!seg) return isMain ? "main copy" : "detached copy";
-  if (isMachineLeaf(seg)) return "parallel copy";
-  const cleaned = seg
-    .replace(/^(feat|fix|chore|refactor|docs|test|perf)[-_/]?/i, "")
-    .replace(/^\d+[-_]/, "")
-    .replace(/[-_]/g, " ")
-    .trim();
-  return cleaned || seg;
+// An agent running on a runner is an agent running. `submitted` is not: the
+// job is queued and no machine has claimed it, so calling that lane "Agent on
+// it" would promise something nobody has started. A queued copy keeps whatever
+// its local state says and carries the still cloud mark, which is the honest
+// picture — waiting, somewhere else.
+function cloudIsRunning(cloud?: CloudPlacement): boolean {
+  return !!cloud && cloud.status !== "submitted";
 }
 
 function deriveStatus(
   isActive: boolean,
   agents: CopyAgent[],
   hasDiff: boolean,
+  cloud?: CloudPlacement,
 ): CopyStatus {
   if (agents.some((a) => a.attention)) return "attn";
   if (isActive) return "active";
-  if (agents.length > 0) return "working";
+  if (agents.length > 0 || cloudIsRunning(cloud)) return "working";
   if (hasDiff) return "dirty";
   return "idle";
 }
@@ -129,7 +131,7 @@ export function buildCopies(input: BuildCopiesInput): WorkspaceCopy[] {
         projectLetter: proj.letter,
         projectAccent: proj.accent,
         branch: w.branch,
-        title: humanizeCopyTitle(w.branch, w.is_main),
+        title: humanizeCopyTitle(w.branch, w.is_main, w.path),
         isMain: w.is_main,
         isActive,
         committedAt: w.head_committed_at ?? null,
@@ -138,7 +140,8 @@ export function buildCopies(input: BuildCopiesInput): WorkspaceCopy[] {
         changedFiles: badge?.changedFiles ?? 0,
         pr: badge?.pr,
         agents,
-        status: deriveStatus(isActive, agents, hasDiff),
+        cloud: badge?.cloud,
+        status: deriveStatus(isActive, agents, hasDiff, badge?.cloud),
       });
     }
   }
@@ -216,7 +219,13 @@ export type StatusColumn = {
 
 const COLUMN_ORDER: { status: CopyStatus; label: string; hint: string }[] = [
   { status: "attn", label: "Needs you", hint: "An agent is waiting on input" },
-  { status: "working", label: "Agent on it", hint: "An agent is running here" },
+  // Not "running here" any more: the lane now also holds copies whose work is
+  // on a runner, and the cloud mark on the card says which is which.
+  {
+    status: "working",
+    label: "Agent on it",
+    hint: "An agent is running on it. On this Mac or on a machine",
+  },
   { status: "active", label: "Open now", hint: "The copy you're in" },
   { status: "dirty", label: "Unsaved changes", hint: "Edited, not committed" },
   { status: "idle", label: "Resting", hint: "Nothing in flight" },
@@ -234,27 +243,47 @@ export function groupByStatus(copies: WorkspaceCopy[]): StatusColumn[] {
 // ── formatting helpers ────────────────────────────────────────────────────
 
 // "just now" / "3h ago" / "2d ago" / "Apr 12" — plain, no clock jargon.
+//
+// Past a month it stops counting and names the day. "5w ago" is a distance you
+// have to do arithmetic on; "Apr 12" is the thing you were actually asking.
 export function relTime(committedAt: number | null, nowMs: number): string {
   if (committedAt == null) return "";
   const secs = Math.max(0, Math.floor(nowMs / 1000) - committedAt);
-  if (secs < 90) return "just now";
-  const mins = Math.round(secs / 60);
-  if (mins < 60) return `${mins}m ago`;
-  const hrs = Math.round(mins / 60);
-  if (hrs < 24) return `${hrs}h ago`;
-  const days = Math.round(hrs / 24);
-  if (days < 7) return `${days}d ago`;
-  const weeks = Math.round(days / 7);
-  if (days < 30) return `${weeks}w ago`;
-  const d = new Date(committedAt * 1000);
-  return d.toLocaleDateString(undefined, { month: "short", day: "numeric" });
+  if (secs >= 30 * 86400) return calendarDay(committedAt);
+  // One ladder for the whole app — see lib/relativeTime.
+  return relativeAgeFromDelta(secs);
 }
 
-// 207 → "207", 1432 → "1.4k". Keeps diff pills from overrunning a row.
-export function compactCount(n: number): string {
-  if (n < 1000) return String(n);
-  const k = n / 1000;
-  return `${k >= 10 ? Math.round(k) : k.toFixed(1)}k`;
+// The same instant as `relTime`, with the "ago" left off: "now" / "3h" / "2d".
+// A time-grouped list already says *when* in its section header, so the row
+// only has to say how far into that bucket it sits — and at the right edge of a
+// dense row, "4w" reads at a glance where "4w ago" has to be parsed.
+export function relTimeShort(committedAt: number | null, nowMs: number): string {
+  if (committedAt == null) return "";
+  const secs = Math.max(0, Math.floor(nowMs / 1000) - committedAt);
+  if (secs >= 30 * 86400) return calendarDay(committedAt);
+  // One ladder for the whole app — see lib/relativeTime.
+  return relativeAgeFromDelta(secs, { style: "compact" });
+}
+
+// The far end of both ladders — see lib/calendarDate.
+function calendarDay(unixSecs: number): string {
+  return shortDateFromSecs(unixSecs);
+}
+
+// PR state → its ink. merged = landed (the accent, the one PR state you can
+// still navigate to), closed = went nowhere (red), open = live (mint). Shared
+// so the boxed pill on the board and the bare number in the list can never
+// drift into disagreeing about what a colour means.
+export function prTint(state: string): string {
+  switch (state.toLowerCase()) {
+    case "merged":
+      return "var(--color-accent)";
+    case "closed":
+      return "var(--color-red)";
+    default:
+      return "var(--color-accent-green)";
+  }
 }
 
 // Status → the calm swatch + plain label used on chips.

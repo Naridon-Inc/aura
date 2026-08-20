@@ -38,13 +38,13 @@ import {
   FileSpreadsheet,
   FileText,
   FileVideo,
-  MoreVertical,
   Pause,
   Play,
   X,
 } from "lucide-react";
 import { languageSlugForPath } from "../../lib/monacoLanguage";
 import { AsciiSpinner } from "../ui/ascii-spinner";
+import { formatBytes } from "../../lib/bytes";
 
 // ───────────────────────────────────────────────────────────────────────
 // Types + wire format
@@ -191,14 +191,6 @@ function isPreviewable(mime: string, filename: string): boolean {
   const ext = extOf(filename);
   return PREVIEWABLE_EXTS.has(ext);
 }
-
-function formatBytes(n: number): string {
-  if (!Number.isFinite(n) || n < 0) return "—";
-  if (n < 1024) return `${n} B`;
-  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
-  return `${(n / (1024 * 1024)).toFixed(1)} MB`;
-}
-
 // File-type → icon + label. Drives the icon badge on the file card. The
 // icon shape and the extension label carry the type; the badge itself stays
 // neutral so a list of attachments doesn't read as a pile of status colours.
@@ -362,13 +354,23 @@ function VoiceNoteAttachment({ attachment }: { attachment: ChatAttachment }) {
             <i key={index} className={index / bars.length <= progress ? "is-played" : ""} style={{ height }} />
           ))}
         </button>
-        <span className="slack-voice-time">{formatDuration(total > 0 ? total - current : attachment.duration ?? 0)}</span>
+        <span className="slack-voice-time">{mediaTimestamp(total > 0 ? total - current : attachment.duration ?? 0)}</span>
         <button type="button" className="slack-voice-mini" aria-label="Show transcript" onClick={() => setShowTranscript((value) => !value)}>
           <AlignLeft size={15} />
         </button>
         <button type="button" className="slack-voice-speed" onClick={cycleSpeed}>{speed}×</button>
-        <button type="button" className="slack-voice-mini" aria-label="More voice-note actions">
-          <MoreVertical size={15} />
+        {/* The player replaces FileCard entirely, so without this a voice note
+            is the one attachment you can't save — and the control that used to
+            sit here ("More voice-note actions") had no handler at all. Same
+            download the file card offers, same place. */}
+        <button
+          type="button"
+          className="slack-voice-mini"
+          onClick={() => openExternal(attachment.url)}
+          aria-label={`Download ${attachment.filename}`}
+          title="Download"
+        >
+          <Download size={15} />
         </button>
       </div>
       {showTranscript && (
@@ -395,7 +397,9 @@ function waveformFor(seed: string, count: number): number[] {
   });
 }
 
-function formatDuration(seconds: number): string {
+/** A position or length inside a clip, as a player writes it — "3:07".
+ *  Not an elapsed duration; that ladder is lib/duration. */
+function mediaTimestamp(seconds: number): string {
   if (!Number.isFinite(seconds) || seconds <= 0) return "0:00";
   const rounded = Math.max(0, Math.round(seconds));
   return `${Math.floor(rounded / 60)}:${String(rounded % 60).padStart(2, "0")}`;
@@ -445,7 +449,7 @@ function ImageAttachment({
         />
         {/* filename veil on hover (single only — grid stays clean) */}
         {variant === "single" && (
-          <span className="pointer-events-none absolute inset-x-0 bottom-0 flex items-center gap-1.5 bg-gradient-to-t from-black/55 to-transparent px-2 pb-1 pt-4 text-[10px] text-white/90 opacity-0 transition-opacity group-hover/img:opacity-100">
+          <span className="pointer-events-none absolute inset-x-0 bottom-0 flex items-center gap-1.5 bg-gradient-to-t from-black/55 to-transparent px-2 pb-1 pt-4 text-2xs text-white/90 opacity-0 transition-opacity group-hover/img:opacity-100">
             <span className="truncate">{attachment.filename}</span>
             <span className="ml-auto shrink-0 tabular-nums text-white/70">
               {formatBytes(attachment.size)}
@@ -506,8 +510,8 @@ function Lightbox({
         className="flex items-center gap-2 px-4 py-2.5 text-white/80"
         onClick={(e) => e.stopPropagation()}
       >
-        <span className="truncate text-[12.5px] font-medium text-white/90">{alt}</span>
-        <span className="shrink-0 text-[11px] text-white/50 tabular-nums">
+        <span className="truncate text-base font-medium text-white/90">{alt}</span>
+        <span className="shrink-0 text-xs text-white/50 tabular-nums">
           {formatBytes(size)}
         </span>
         <div className="ml-auto flex items-center gap-1">
@@ -568,19 +572,19 @@ function FileCard({ attachment }: { attachment: ChatAttachment }) {
       </span>
       <div className="min-w-0 flex-1">
         <div
-          className="truncate text-[12px] font-medium text-text-1"
+          className="truncate text-sm font-medium text-text-1"
           title={attachment.filename}
         >
           {attachment.filename}
         </div>
-        <div className="text-[10.5px] text-text-4">
+        <div className="text-xs text-text-4">
           {label} · {formatBytes(attachment.size)}
         </div>
       </div>
       <button
         type="button"
         onClick={() => openExternal(attachment.url)}
-        className="flex h-7 w-7 shrink-0 items-center justify-center rounded-md text-text-3 transition-colors hover:bg-bg-3 hover:text-text-1"
+        className="flex h-7 w-7 shrink-0 items-center justify-center rounded-md text-text-3 transition-colors hover:bg-state-hover hover:text-text-1"
         title="Download"
         aria-label={`Download ${attachment.filename}`}
       >
@@ -660,19 +664,19 @@ function CodePreviewAttachment({ attachment }: { attachment: ChatAttachment }) {
         </span>
         <div className="min-w-0 flex-1">
           <div
-            className="truncate text-[12px] font-medium text-text-1"
+            className="truncate text-sm font-medium text-text-1"
             title={attachment.filename}
           >
             {attachment.filename}
           </div>
-          <div className="text-[10.5px] text-text-4">
+          <div className="text-xs text-text-4">
             {lang} · {formatBytes(attachment.size)}
           </div>
         </div>
         <button
           type="button"
           onClick={() => openExternal(attachment.url)}
-          className="flex h-7 w-7 shrink-0 items-center justify-center rounded-md text-text-3 transition-colors hover:bg-bg-3 hover:text-text-1"
+          className="flex h-7 w-7 shrink-0 items-center justify-center rounded-md text-text-3 transition-colors hover:bg-state-hover hover:text-text-1"
           title="Open"
           aria-label={`Open ${attachment.filename}`}
         >
@@ -685,15 +689,15 @@ function CodePreviewAttachment({ attachment }: { attachment: ChatAttachment }) {
         style={{ background: "color-mix(in srgb, var(--color-bg-1) 75%, transparent)", borderTop: "1px solid color-mix(in srgb, var(--color-line) 60%, transparent)" }}
       >
         {loading ? (
-          <div className="flex items-center gap-1.5 text-[11px] text-text-3">
+          <div className="flex items-center gap-1.5 text-xs text-text-3">
             <AsciiSpinner />
             <span>Loading preview…</span>
           </div>
         ) : error ? (
-          <div className="text-[11px] text-text-3">Preview unavailable · {error}</div>
+          <div className="text-xs text-text-3">Preview unavailable · {error}</div>
         ) : (
           <pre
-            className="overflow-x-auto whitespace-pre font-mono text-[11px] leading-snug text-text-1"
+            className="overflow-x-auto whitespace-pre font-mono text-xs leading-snug text-text-1"
             data-language={lang}
           >
             {preview}

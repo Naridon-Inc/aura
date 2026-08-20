@@ -10,11 +10,11 @@
 // run's logs. No new gh call shape — same rollup `pr_list` reads.
 
 import { useCallback, useEffect, useMemo, useState } from "react";
+import type { ReactNode } from "react";
 import { AsciiSpinner } from "../ui/ascii-spinner";
 import {
   CheckCircle2,
   XCircle,
-  Loader2,
   SquareArrowOutUpRight,
   Wand2,
   RefreshCw,
@@ -35,9 +35,21 @@ type Bucket = "failure" | "pending" | "success";
 
 const BUCKET_ORDER: Bucket[] = ["failure", "pending", "success"];
 
+/** A glyph that can sit in a status slot: a lucide icon, or our own spinner
+ *  for the one bucket that is still running. Both take a px `size` and a
+ *  class, which is the whole reason `AsciiSpinner` grew a `size` — a check
+ *  that is in progress should say so with the same amber braille frames as
+ *  everything else in the app that is working, not a second spinner that
+ *  only this tab draws. */
+type StatusGlyph = (props: {
+  size?: number;
+  className?: string;
+  "aria-hidden"?: boolean;
+}) => ReactNode;
+
 const BUCKET_META: Record<
   Bucket,
-  { label: string; Icon: typeof CheckCircle2; tone: string; ring: string }
+  { label: string; Icon: StatusGlyph; tone: string; ring: string }
 > = {
   failure: {
     label: "Failing",
@@ -47,7 +59,7 @@ const BUCKET_META: Record<
   },
   pending: {
     label: "In progress",
-    Icon: Loader2,
+    Icon: AsciiSpinner,
     tone: "text-amber",
     ring: "border-amber/25 bg-amber/[0.05]",
   },
@@ -148,7 +160,7 @@ export function PrChecksTab({ repoRoot, prNumber }: Props) {
 
   if (loading && !rows) {
     return (
-      <div className="flex-1 flex items-center justify-center text-text-4 text-[12px] gap-2">
+      <div className="flex-1 flex items-center justify-center text-text-4 text-sm gap-2">
         <AsciiSpinner />
         Loading checks…
       </div>
@@ -171,9 +183,9 @@ export function PrChecksTab({ repoRoot, prNumber }: Props) {
           </div>
         )}
         <CheckCircle2 className="text-text-4" size={22} aria-hidden />
-        <div className="text-text-2 text-[13px]">No checks on this PR.</div>
-        <div className="text-text-4 text-[11.5px] max-w-[320px]">
-          Nothing is configured to run against this branch on GitHub yet — no CI,
+        <div className="text-text-2 text-base">No checks on this PR.</div>
+        <div className="text-text-4 text-sm max-w-[320px]">
+          Nothing is configured to run against this branch on GitHub yet. No CI,
           no required status checks.
         </div>
       </div>
@@ -188,10 +200,10 @@ export function PrChecksTab({ repoRoot, prNumber }: Props) {
     <div className="flex-1 min-h-0 flex flex-col">
       {/* Summary header */}
       <div className="flex items-center gap-3 px-4 py-3 border-b border-line-soft">
-        <div className="flex items-center gap-3 text-[12px]">
+        <div className="flex items-center gap-3 text-sm">
           <Summary Icon={CheckCircle2} tone="text-accent-green" n={passCount} word="passing" />
           <Summary Icon={XCircle} tone="text-red" n={failCount} word="failing" />
-          <Summary Icon={Loader2} tone="text-amber" n={pendCount} word="in progress" />
+          <Summary Icon={AsciiSpinner} tone="text-amber" n={pendCount} word="in progress" />
         </div>
         <div className="ml-auto flex items-center gap-2">
           {failCount > 0 && (
@@ -203,7 +215,7 @@ export function PrChecksTab({ repoRoot, prNumber }: Props) {
               title="Hand the failing checks to the Aura brain to fix in this branch"
             >
               {dispatching ? (
-                <AsciiSpinner className="text-[11px]" />
+                <AsciiSpinner className="text-xs" />
               ) : (
                 <Wand2 strokeWidth={1.75} size={13} aria-hidden />
               )}
@@ -242,10 +254,10 @@ export function PrChecksTab({ repoRoot, prNumber }: Props) {
             <section key={b}>
               <div className="flex items-center gap-1.5 mb-1.5">
                 <meta.Icon size={13} className={meta.tone} aria-hidden />
-                <span className="text-[11px] uppercase tracking-wider text-text-3">
+                <span className="section-label">
                   {meta.label}
                 </span>
-                <span className="text-[11px] text-text-4">· {items.length}</span>
+                <span className="text-xs text-text-4">· {items.length}</span>
               </div>
               <div className="space-y-1.5">
                 {items.map((c, i) => (
@@ -266,7 +278,7 @@ function Summary({
   n,
   word,
 }: {
-  Icon: typeof CheckCircle2;
+  Icon: StatusGlyph;
   tone: string;
   n: number;
   word: string;
@@ -290,17 +302,17 @@ function CheckRow({ check, bucket }: { check: PrCheck; bucket: Bucket }) {
       <meta.Icon size={15} className={`${meta.tone} shrink-0`} aria-hidden />
       <div className="min-w-0 flex-1">
         <div className="flex items-center gap-2">
-          <span className="text-[12.5px] text-text-1 truncate">{check.name}</span>
+          <span className="text-base text-text-1 truncate">{check.name}</span>
           {check.workflow && check.workflow !== check.name && (
-            <span className="text-[10.5px] text-text-4 truncate">{check.workflow}</span>
+            <span className="text-xs text-text-4 truncate">{check.workflow}</span>
           )}
         </div>
         {check.description && (
-          <div className="text-[11px] text-text-4 truncate mt-0.5">{check.description}</div>
+          <div className="text-xs text-text-4 truncate mt-0.5">{check.description}</div>
         )}
       </div>
       <span
-        className="text-[10.5px] uppercase tracking-wide text-text-4 tabular-nums shrink-0"
+        className="section-label tabular-nums shrink-0"
         title={`GitHub status: ${check.raw}`}
       >
         {check.raw}
@@ -384,21 +396,21 @@ function VercelDeployCard({ deploy }: { deploy: VercelDeployment }) {
       />
       <div className="min-w-0 flex-1">
         <div className="flex items-center gap-2">
-          <span className="text-[12.5px] text-text-1">Vercel</span>
-          <span className={`text-[11px] ${meta.tone}`}>{meta.label}</span>
-          <span className="text-[10px] uppercase tracking-wide text-text-4 border border-line-soft rounded px-1 py-px">
+          <span className="text-base text-text-1">Vercel</span>
+          <span className={`text-xs ${meta.tone}`}>{meta.label}</span>
+          <span className="meta-tag">
             {envLabel}
           </span>
         </div>
         {previewUrl && (
-          <div className="text-[11px] text-text-4 truncate mt-0.5">{deploy.url}</div>
+          <div className="text-xs text-text-4 truncate mt-0.5">{deploy.url}</div>
         )}
       </div>
       {previewUrl && (
         <button
           type="button"
           onClick={() => void openExternal(previewUrl)}
-          className="text-[11px] text-accent hover:underline shrink-0"
+          className="text-xs text-accent hover:underline shrink-0"
           title="Open the deployed preview"
         >
           Open
