@@ -5696,6 +5696,23 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 ));
             }
 
+            // What this commit is answerable for.
+            //
+            // `staged_nodes` is the whole repository: the checkpoint stores
+            // every parseable file, and the loop above rebuilt all of them,
+            // reusing the unchanged ones. That is right for a checkpoint and
+            // wrong for a gate. A gate that reads it judges code the author
+            // did not write in a commit that did not touch it — and on a
+            // repository of any age that means blocking every commit over
+            // somebody else's file. The gates below get the commit instead.
+            let touched: std::collections::BTreeSet<String> =
+                commit_writes::staged(&repo, &index).into_iter().collect();
+            let commit_nodes: Vec<crate::models::AstNode> = staged_nodes
+                .iter()
+                .filter(|n| n.file_path.as_deref().is_some_and(|f| touched.contains(f)))
+                .cloned()
+                .collect();
+
             thread::sleep(Duration::from_millis(200));
             spinner.set_message(format!("{}", "Scanning for deleted logic nodes...".bold()));
 
@@ -6296,7 +6313,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 // nodes between the last checkpoint and the staged tree;
                 // removed edges must be named in the intent prose.
                 if let Some(ref latest) = latest_checkpoint {
-                    let delta = edge_delta::diff_edges(&latest.ast_nodes, &staged_nodes);
+                    // Both sides are whole-repository snapshots, so the diff has
+                    // to be narrowed to what this commit actually writes before
+                    // anything is asked of its author. See `within_files`.
+                    let delta = edge_delta::diff_edges(&latest.ast_nodes, &staged_nodes)
+                        .within_files(&touched);
                     let unexplained = edge_delta::unexplained_removals(&delta, &intent_lower);
                     if !unexplained.is_empty() {
                         let has_sensitive = unexplained.iter().any(|e| e.sensitive);
@@ -6507,7 +6528,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             // commit". A gate that lies about having gated is worse than no
             // gate, so those failures now halt the commit for real.
             if let Some(root) = repo.workdir() {
-                let runs = ci::run_pre_commit_additive(&repo, root, &staged_nodes);
+                let runs = ci::run_pre_commit_additive(&repo, root, &commit_nodes);
                 let blockers = ci::unenforced_blockers(&runs);
                 if !blockers.is_empty() && !*force {
                     spinner.finish_and_clear();

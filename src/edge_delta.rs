@@ -15,7 +15,7 @@
 //! while both endpoints survive.
 
 use crate::models::AstNode;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 /// What kind of relation the edge is.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -91,6 +91,31 @@ impl EdgeChange {
 pub struct EdgeDelta {
     pub removed: Vec<EdgeChange>,
     pub added: Vec<EdgeChange>,
+}
+
+impl EdgeDelta {
+    /// Narrow the diff to the files this commit writes.
+    ///
+    /// The two sides of the diff are whole-repository snapshots, because that
+    /// is what a checkpoint holds. The last checkpoint is not always the
+    /// commit before this one — a pull, a rebase, or a stretch of
+    /// `--no-verify` each leave it further back — and every file that changed
+    /// in between then reads here as an edge this commit removed. It did not.
+    /// Asking its author to account for those is asking them to explain
+    /// somebody else's work before they are allowed to save their own, which
+    /// is how a gate nobody can satisfy becomes a gate everybody turns off.
+    ///
+    /// A change carrying no file is dropped along with the rest. The gate has
+    /// to be able to say which file it is stopping the commit over; one it
+    /// cannot name is one nobody can act on, and a block nobody can act on is
+    /// the kind people route around.
+    pub fn within_files(self, files: &BTreeSet<String>) -> EdgeDelta {
+        let mine = |c: &EdgeChange| c.file.as_deref().is_some_and(|f| files.contains(f));
+        EdgeDelta {
+            removed: self.removed.into_iter().filter(|c| mine(c)).collect(),
+            added: self.added.into_iter().filter(|c| mine(c)).collect(),
+        }
+    }
 }
 
 /// Tokens that mark a dependency target as part of the auth/security surface.
@@ -367,6 +392,36 @@ mod tests {
             "moved the check_auth call into the router middleware so handlers stop re-checking",
         );
         assert!(explained.is_empty());
+    }
+
+    /// A commit is answerable for the files it writes, and for no others. The
+    /// last checkpoint is routinely several commits back — after a pull, a
+    /// rebase, or a run of `--no-verify` — and everything that moved in the
+    /// meantime turns up in this diff as a removal the author never made.
+    #[test]
+    fn a_file_this_commit_never_touched_is_not_its_removal() {
+        let old = vec![
+            mk("1", "handler", "src/api.rs", &["check_auth"]),
+            mk("2", "worker", "src/jobs.rs", &["verify_token"]),
+        ];
+        let new = vec![
+            mk("1", "handler", "src/api.rs", &[]),
+            mk("2", "worker", "src/jobs.rs", &[]),
+        ];
+        let touched: BTreeSet<String> = ["src/api.rs".to_string()].into_iter().collect();
+        let delta = diff_edges(&old, &new).within_files(&touched);
+        assert_eq!(delta.removed.len(), 1, "only the touched file answers for its edges");
+        assert_eq!(delta.removed[0].target, "check_auth");
+    }
+
+    /// The gate has to be able to name the file it is stopping the commit over.
+    #[test]
+    fn a_change_with_no_file_is_not_something_the_gate_can_ask_about() {
+        let old = vec![mk("1", "handler", "src/api.rs", &["check_auth"])];
+        let mut gone = mk("1", "handler", "src/api.rs", &[]);
+        gone.file_path = None;
+        let delta = diff_edges(&old, &[gone]).within_files(&BTreeSet::new());
+        assert!(delta.removed.is_empty());
     }
 
     #[test]
