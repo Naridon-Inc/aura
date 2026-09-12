@@ -3,7 +3,7 @@
 //   bun test ./tests/hookCaptureFilter.test.ts
 //
 // Trace showed a session called "running Bash on bash /private/tmp/claude-501/
-// -Users-muhammed--aura-worktrees-…/9e7c366c…" — a shell command wearing the
+// -Users-dev--aura-worktrees-…/9e7c366c…" — a shell command wearing the
 // name of a piece of work. Every agent tool call is written to the intent log
 // by a hook, and those rows were meant to be dropped at the data boundary. The
 // filter that drops them tested `agent_id`, and the desktop's event listener

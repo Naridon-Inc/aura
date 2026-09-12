@@ -209,14 +209,14 @@ mod tests {
 
     #[test]
     fn the_same_person_maps_to_the_same_file_however_they_were_typed() {
-        let a = cache_path("Mo@TouchStage.com ").unwrap();
-        let b = cache_path("mo@touchstage.com").unwrap();
+        let a = cache_path("Mo@TouchStage.example ").unwrap();
+        let b = cache_path("mo@touchstage.example").unwrap();
         assert_eq!(a, b);
     }
 
     #[test]
     fn two_people_never_share_a_file() {
-        let a = cache_path("mo@touchstage.com").unwrap();
+        let a = cache_path("mo@touchstage.example").unwrap();
         let b = cache_path("ashiq@touchstage.example").unwrap();
         assert_ne!(a, b);
     }
@@ -264,7 +264,7 @@ mod tests {
     fn the_cache_buster_says_nothing_about_who_it_is_for() {
         // It must never become a stable per-person id shipped to a third party.
         // Two calls for the same person differ, so there is nothing to correlate.
-        let email = "mo@touchstage.com";
+        let email = "mo@touchstage.example";
         let first = cache_buster();
         let second = cache_buster();
         assert_ne!(first, second);

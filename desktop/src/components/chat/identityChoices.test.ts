@@ -101,7 +101,7 @@ const inheritedRoster = manifest([
     github_login: "ashiqwayanad007",
   }),
   member({
-    email: "mck@naridon.com",
+    email: "mck@naridon.example",
     name: "Mubasheer",
     handle: "mck",
     claimed: true,
@@ -188,7 +188,7 @@ describe("a real teammate whose git email is an alias", () => {
       git_name: "Mubasheer CK",
       handle: "mubasheer.ck",
       canonical_handle: "mck",
-      canonical_email: "mck@naridon.com",
+      canonical_email: "mck@naridon.example",
       alias_emails: ["mubasheer.ck@example.com"],
     }),
     manifest: inheritedRoster,
@@ -199,7 +199,7 @@ describe("a real teammate whose git email is an alias", () => {
     const choices = buildIdentityChoices(ctx);
     const canonical = choices.find((c) => c.handle === "mck");
     expect(canonical).toBeDefined();
-    expect(canonical?.email).toBe("mck@naridon.com");
+    expect(canonical?.email).toBe("mck@naridon.example");
     expect(canonical?.evidence).toBe("git-email");
     expect(canonical?.isLocalGit).toBe(false);
   });
@@ -345,7 +345,7 @@ describe("the banner stays quiet when there is nothing to do", () => {
     expect(
       identityBannerKind({
         report: report({
-          git_email: "mck@naridon.com",
+          git_email: "mck@naridon.example",
           handle: "mck",
           roster_email_match: true,
         }),
@@ -386,10 +386,10 @@ describe("deduping", () => {
         git_email: "mubasheer.ck@example.com",
         handle: "mubasheer.ck",
         canonical_handle: "mck",
-        canonical_email: "mck@naridon.com",
+        canonical_email: "mck@naridon.example",
         github_login: "mck",
         github_member_handle: "mck",
-        github_member_email: "mck@naridon.com",
+        github_member_email: "mck@naridon.example",
         github_member_name: "Mubasheer",
       }),
       manifest: inheritedRoster,

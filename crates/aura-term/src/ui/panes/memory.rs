@@ -131,7 +131,7 @@ fn resolve_memory_path() -> Option<PathBuf> {
 
 fn encode_project_dir(path: &Path) -> String {
     // Claude Code encodes project dirs by folding every character that isn't
-    // ASCII-alphanumeric to a single `-`, so `/Users/ashiq/Dev` →
+    // ASCII-alphanumeric to a single `-`, so `/Users/dev/Dev` →
     // `-Users-ashiq-Dev`. The dot is why this is a rule and not a table of two
     // characters: a worktree path (`…/.claude/worktrees/x`, `~/.aura/…`) that
     // keeps its dot names a directory Claude never writes, so the pane shows an
@@ -295,10 +295,10 @@ mod tests {
 
     #[test]
     fn encodes_project_dir_like_claude() {
-        let p = Path::new("/Users/muhammed/Documents/New Git");
+        let p = Path::new("/Users/dev/Documents/New Git");
         assert_eq!(
             encode_project_dir(p),
-            "-Users-muhammed-Documents-New-Git".to_string()
+            "-Users-dev-Documents-New-Git".to_string()
         );
     }
 

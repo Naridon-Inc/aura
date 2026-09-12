@@ -162,7 +162,7 @@ pub struct TeamMember {
     #[serde(default)]
     pub source: TeamMemberSource,
     /// Additional git emails that resolve to this member. Lets one person
-    /// be enrolled as `mck@naridon.com` while their local git uses
+    /// be enrolled as `mck@naridon.example` while their local git uses
     /// `mubasheer.ck@example.com` (or any number of work/personal addresses).
     /// Read-only for non-admins; an admin populates this via the
     /// `team_alias_add` command. The `email` field stays the canonical
@@ -1335,7 +1335,7 @@ fn account_login(repo_root: &str) -> Option<String> {
 /// When signed out (`account_login` is `None`) we fall back to the historic
 /// email behaviour so single-identity and CI setups keep working untouched.
 /// A user may also have multiple gits on one machine
-/// (`mubasheer.ck@example.com` locally but enrolled as `mck@naridon.com`):
+/// (`mubasheer.ck@example.com` locally but enrolled as `mck@naridon.example`):
 /// the admin adds the hotmail address to `mck`'s `also_emails`, or the user
 /// pins a per-repo override.
 fn resolve_handle(
@@ -1578,7 +1578,7 @@ fn sync_with_git(repo_root: &str) -> Result<TeamManifest, String> {
     manifest.members = by_email.into_values().collect();
     manifest.members.sort_by(|a, b| b.last_seen.cmp(&a.last_seen));
 
-    // Owner-promotion: any OWNER_EMAILS member becomes admin + claimed
+    // Owner-promotion: any member on the owner list becomes admin + claimed
     // automatically on every load. Idempotent — only escalates, never
     // demotes other admins.
     for m in manifest.members.iter_mut() {
@@ -2714,8 +2714,8 @@ pub async fn canonical_handle_for_email(
 // `collapse_duplicate_members` fuses rows automatically, but ONLY on a
 // globally-unique link (same GitHub login, parsed noreply login, explicit
 // alias). That deliberately misses the common real-world case: one human who
-// committed under `yasar@naridon.com` AND was added as the GitHub collaborator
-// `yasar-naridon`, or who commits as both `mck@naridon.com` and
+// committed under `yasar@naridon.example` AND was added as the GitHub collaborator
+// `yasar-naridon`, or who commits as both `mck@naridon.example` and
 // `mubasheer.ck@example.com`. Those share only a *name* or an *email stem* —
 // signals strong enough to SUGGEST but far too weak to merge on automatically
 // (two people named "John" would fuse). So this layer proposes candidate groups
@@ -2743,7 +2743,7 @@ fn ident_core(s: &str) -> String {
 }
 
 /// The identity core of an email's local-part (before `@`), alphanumerics only.
-/// "yasar@naridon.com" → "yasar"; "mubasheer.ck@example.com" → "mubasheerck".
+/// "yasar@naridon.example" → "yasar"; "mubasheer.ck@example.com" → "mubasheerck".
 /// Returns "" for a synthetic noreply seat (its identity lives in the login,
 /// compared separately) or an empty local-part.
 fn email_core(email: &str) -> String {
@@ -5391,14 +5391,14 @@ mod tests {
         }
     }
 
-    // The headline bug: mck@naridon.com is the primary, the user's local
+    // The headline bug: mck@naridon.example is the primary, the user's local
     // git is mubasheer.ck@example.com listed as an alias — the resolver
     // must return @mck so messages reach mentions.
     #[test]
     fn canonical_member_resolves_via_alias() {
         let members = vec![mk_member(
             "mck",
-            "mck@naridon.com",
+            "mck@naridon.example",
             &["mubasheer.ck@example.com"],
         )];
         let m = canonical_member_for_email(&members, "mubasheer.ck@example.com")
@@ -5413,14 +5413,14 @@ mod tests {
     fn canonical_member_is_case_insensitive() {
         let members = vec![mk_member(
             "mck",
-            "mck@naridon.com",
+            "mck@naridon.example",
             &["Mubasheer.CK@Example.com"],
         )];
         let m = canonical_member_for_email(&members, "MUBASHEER.ck@example.com")
             .expect("alias lookup should ignore case");
         assert_eq!(m.handle, "mck");
         // Primary email should also match irrespective of case.
-        let p = canonical_member_for_email(&members, "MCK@NARIDON.COM")
+        let p = canonical_member_for_email(&members, "MCK@NARIDON.EXAMPLE")
             .expect("primary lookup should ignore case");
         assert_eq!(p.handle, "mck");
     }
@@ -5468,7 +5468,7 @@ mod tests {
             IdentityOverride {
                 handle: "mck".to_string(),
                 name: "Mubasheer CK".to_string(),
-                email: "mck@naridon.com".to_string(),
+                email: "mck@naridon.example".to_string(),
                 set_at: 1700000000,
             },
         );
@@ -5478,7 +5478,7 @@ mod tests {
         assert_eq!(parsed.len(), 1);
         let entry = parsed.get("/repo/a").expect("repo key survives");
         assert_eq!(entry.handle, "mck");
-        assert_eq!(entry.email, "mck@naridon.com");
+        assert_eq!(entry.email, "mck@naridon.example");
     }
 
     // The per-repo override is the highest-priority layer. Even when the
@@ -5489,7 +5489,7 @@ mod tests {
     #[test]
     fn resolve_handle_uses_override_over_alias() {
         let members = vec![
-            mk_member("mck", "mck@naridon.com", &["mubasheer.ck@example.com"]),
+            mk_member("mck", "mck@naridon.example", &["mubasheer.ck@example.com"]),
             mk_member("mubasheer-ck", "mubasheer.ck@example.com", &[]),
         ];
         // No override path — we'd hit the alias (mck@naridon entry owns
@@ -5580,7 +5580,7 @@ mod tests {
     // emptied. Reading it must resolve BOTH addresses.
     #[test]
     fn conversation_channels_include_the_address_before_a_rename() {
-        let mut peer = mk_member("shahabas", "shahabas@aikolumi.com", &[]);
+        let mut peer = mk_member("shahabas", "shahabas@aikolumi.example", &[]);
         peer.github_login = Some("shahabas".to_string());
         let members = vec![peer];
         let self_aliases = vec!["ashiqwayanad007".to_string(), "mhask".to_string()];
@@ -5606,7 +5606,7 @@ mod tests {
     // every poll would fan out into redundant reads.
     #[test]
     fn conversation_channels_stay_single_when_nothing_was_renamed() {
-        let members = vec![mk_member("shahabas", "shahabas@aikolumi.com", &[])];
+        let members = vec![mk_member("shahabas", "shahabas@aikolumi.example", &[])];
         let self_aliases = vec!["mhask".to_string()];
         assert_eq!(
             conversation_channels("general", &members, &self_aliases),
@@ -5646,7 +5646,7 @@ mod tests {
 
     #[test]
     fn member_handle_aliases_cover_login_handle_and_every_email() {
-        let mut m = mk_member("mck", "mck@naridon.com", &["mubasheer.ck@example.com"]);
+        let mut m = mk_member("mck", "mck@naridon.example", &["mubasheer.ck@example.com"]);
         m.github_login = Some("MubasheerCK".to_string());
         let got = member_handle_aliases(&m);
         for expected in ["mck", "mubasheer.ck", "mubasheerck"] {
@@ -5809,7 +5809,7 @@ mod tests {
     // person") collapses the rows even with no GitHub login in play.
     #[test]
     fn collapse_merges_on_explicit_alias() {
-        let a = mk_member("mck", "mck@naridon.com", &["mubasheer.ck@example.com"]);
+        let a = mk_member("mck", "mck@naridon.example", &["mubasheer.ck@example.com"]);
         let b = mk_member("mubasheer", "mubasheer.ck@example.com", &[]);
         let mut manifest = mk_manifest(vec![a, b]);
         collapse_duplicate_members(&mut manifest);
@@ -5984,10 +5984,10 @@ mod tests {
     }
 
     // An email stem that prefixes a collaborator login links a committer to their
-    // GitHub seat (Yasar: yasar@naridon.com ↔ @yasar-naridon).
+    // GitHub seat (Yasar: yasar@naridon.example ↔ @yasar-naridon).
     #[test]
     fn suggest_matches_email_stem_prefixes_login() {
-        let committer = sug_member("Yasar", "yasar@naridon.com", None, 245, TeamMemberSource::Direct);
+        let committer = sug_member("Yasar", "yasar@naridon.example", None, 245, TeamMemberSource::Direct);
         let seat = sug_member(
             "yasar-naridon",
             "yasar-naridon@users.noreply.github.com",
@@ -5996,17 +5996,17 @@ mod tests {
             TeamMemberSource::Collaborator,
         );
         let out = compute_duplicate_suggestions(&[committer, seat], &[]);
-        let g = has_group_with(&out, &["yasar@naridon.com", "yasar-naridon@users.noreply.github.com"])
+        let g = has_group_with(&out, &["yasar@naridon.example", "yasar-naridon@users.noreply.github.com"])
             .expect("Yasar group should be suggested");
         assert_eq!(g.confidence, "high");
-        assert_eq!(g.survivor_email, "yasar@naridon.com");
+        assert_eq!(g.survivor_email, "yasar@naridon.example");
     }
 
     // Three identities for one human collapse into a single suggested group
-    // (Mubasheer: mck@naridon.com, mubasheer.ck@example.com, collab seat).
+    // (Mubasheer: mck@naridon.example, mubasheer.ck@example.com, collab seat).
     #[test]
     fn suggest_groups_three_identities_transitively() {
-        let a = sug_member("Mubasheer CK", "mck@naridon.com", None, 48, TeamMemberSource::Direct);
+        let a = sug_member("Mubasheer CK", "mck@naridon.example", None, 48, TeamMemberSource::Direct);
         let b = sug_member("mubasheerck", "mubasheer.ck@example.com", None, 105, TeamMemberSource::Direct);
         let c = sug_member(
             "MubasheerNaridon",
@@ -6018,7 +6018,7 @@ mod tests {
         let out = compute_duplicate_suggestions(&[a, b, c], &[]);
         let g = has_group_with(
             &out,
-            &["mck@naridon.com", "mubasheer.ck@example.com", "mubasheernaridon@users.noreply.github.com"],
+            &["mck@naridon.example", "mubasheer.ck@example.com", "mubasheernaridon@users.noreply.github.com"],
         )
         .expect("all three Mubasheer identities should form one group");
         assert_eq!(g.emails.len(), 3);
@@ -6047,7 +6047,7 @@ mod tests {
     #[test]
     fn suggest_leaves_distinct_and_singletons_alone() {
         let anantha = sug_member("Anantha Krishnan", "ananthakrrishnan7@example.com", None, 120, TeamMemberSource::Direct);
-        let dev = sug_member("Touchstage Dev", "dev@touchstage.com", None, 91, TeamMemberSource::Direct);
+        let dev = sug_member("Touchstage Dev", "dev@touchstage.example", None, 91, TeamMemberSource::Direct);
         let out = compute_duplicate_suggestions(&[anantha, dev], &[]);
         assert!(out.is_empty(), "unrelated members must not be suggested: {out:?}");
     }
@@ -6065,7 +6065,7 @@ mod tests {
     // A confirmed split (rejection) suppresses the pair on the next computation.
     #[test]
     fn suggest_honours_reject_tombstone() {
-        let committer = sug_member("Yasar", "yasar@naridon.com", None, 245, TeamMemberSource::Direct);
+        let committer = sug_member("Yasar", "yasar@naridon.example", None, 245, TeamMemberSource::Direct);
         let seat = sug_member(
             "yasar-naridon",
             "yasar-naridon@users.noreply.github.com",
@@ -6075,7 +6075,7 @@ mod tests {
         );
         let splits = vec![IdentitySplit {
             a: "yasar-naridon@users.noreply.github.com".to_string(),
-            b: "yasar@naridon.com".to_string(),
+            b: "yasar@naridon.example".to_string(),
         }];
         let out = compute_duplicate_suggestions(&[committer, seat], &splits);
         assert!(out.is_empty(), "a rejected pair must never be re-suggested: {out:?}");

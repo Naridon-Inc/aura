@@ -1654,7 +1654,7 @@ mod tests {
         let ident = team_keys::SelfIdentity {
             human_id: Some("did:aura:human/ashiq".into()),
             display_name: Some("Ashiq".into()),
-            email: Some("ashiq@naridon.com".into()),
+            email: Some("ashiq@naridon.example".into()),
             github_login: Some("MHASK".into()),
             agent_id: Some("MCP Agent".into()),
         };
@@ -1681,7 +1681,7 @@ mod tests {
         // The resolved identity is what the surface shows next to the seal.
         let entry = team_keys::entry_for(&reg, &claimed).unwrap();
         assert_eq!(entry.display_name.as_deref(), Some("Ashiq"));
-        assert_eq!(entry.email.as_deref(), Some("ashiq@naridon.com"));
+        assert_eq!(entry.email.as_deref(), Some("ashiq@naridon.example"));
     }
 
     #[test]

@@ -22,9 +22,9 @@ import {
 } from "../src/components/dialogs/opLog/describe";
 import type { OpEntry } from "../src/lib/api";
 
-const ROOT = "/Users/muhammed/Documents/snubes/snubes-platform";
-const SCRATCH = "/private/tmp/claude-501/-Users-muhammed-Documents-snubes-snubes-platform/96fec09e/scratchpad";
-const NOTES = "/Users/muhammed/.claude/projects/-Users-muhammed-Documents-snubes-snubes-platform/memory";
+const ROOT = "/Users/dev/Documents/work/web-platform";
+const SCRATCH = "/private/tmp/claude-501/-Users-dev-Documents-work-web-platform/96fec09e/scratchpad";
+const NOTES = "/Users/dev/.claude/projects/-Users-dev-Documents-work-web-platform/memory";
 
 let seq = 0;
 function op(over: Partial<OpEntry> = {}): OpEntry {

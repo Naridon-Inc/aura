@@ -3,8 +3,8 @@
 //! Claude Code stores each conversation as a JSONL file under
 //! `~/.claude/projects/<encoded-cwd>/<session-uuid>.jsonl`. The encoded
 //! cwd is the absolute path with `/` replaced by `-` (so
-//! `/Users/muhammed/Documents/New Git/aura-shell/src-tauri` becomes
-//! `-Users-muhammed-Documents-New-Git-aura-shell-src-tauri`).
+//! `/Users/dev/Documents/New Git/aura-shell/src-tauri` becomes
+//! `-Users-dev-Documents-New-Git-aura-shell-src-tauri`).
 //!
 //! For each file we surface enough metadata for a picker UI:
 //!   - session id (the stem)
@@ -1434,16 +1434,16 @@ mod tests {
         // the ones the old `/`-and-space-only table got wrong, which is every
         // worktree there is.
         assert_eq!(
-            encode_path("/Users/muhammed/Documents/New Git"),
-            "-Users-muhammed-Documents-New-Git"
+            encode_path("/Users/dev/Documents/New Git"),
+            "-Users-dev-Documents-New-Git"
         );
         assert_eq!(
-            encode_path("/Users/muhammed/.aura/worktrees/p-806b69db6ce45eb6/marrakesh"),
-            "-Users-muhammed--aura-worktrees-p-806b69db6ce45eb6-marrakesh"
+            encode_path("/Users/dev/.aura/worktrees/p-806b69db6ce45eb6/marrakesh"),
+            "-Users-dev--aura-worktrees-p-806b69db6ce45eb6-marrakesh"
         );
         assert_eq!(
-            encode_path("/Users/muhammed/Documents/Shopify/.claude/worktrees/photo-generator"),
-            "-Users-muhammed-Documents-Shopify--claude-worktrees-photo-generator"
+            encode_path("/Users/dev/Documents/Acme/.claude/worktrees/photo-generator"),
+            "-Users-dev-Documents-Acme--claude-worktrees-photo-generator"
         );
         // A branch name with a `+` in it folds too — same rule, no special case.
         assert_eq!(

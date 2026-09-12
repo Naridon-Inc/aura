@@ -16,7 +16,7 @@ export function agoShort(unixSecs: number | null | undefined): string {
 /** Two-letter initials from an agent/session id or a display name. */
 export function initials(name: string): string {
   // One monogram for the whole app — see lib/monogram. This one replaced every symbol with a
-  // space before splitting, so "mo@touchstage.com" read "MC" — M from "mo",
+  // space before splitting, so "mo@touchstage.example" read "MC" — M from "mo",
   // C from "com".
   return monogram(name, { empty: "··" });
 }

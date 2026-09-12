@@ -255,8 +255,8 @@ mod tests {
         // This is the whole reason a Kimi session can be scoped to a repo at
         // all. Pinned against the value observed in a live tree.
         assert_eq!(
-            cwd_digest("/Users/muhammed/Documents/New Git"),
-            "95b1c2033c22ae952ca537d06e9cb9b2"
+            cwd_digest("/Users/dev/Documents/New Git"),
+            "b3c5c49d29680ad5a697a3c82f7ec342"
         );
     }
 

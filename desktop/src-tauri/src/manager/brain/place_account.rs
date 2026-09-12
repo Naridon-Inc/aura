@@ -160,7 +160,7 @@ pub struct AccountPlan {
 /// ends up owning an account they cannot recognise as theirs, and answering it
 /// silently is worse.
 pub fn member_login(raw: &str) -> Result<String, String> {
-    // An email is a handle with a domain glued on. `mo@naridon.com` is `mo`.
+    // An email is a handle with a domain glued on. `mo@naridon.example` is `mo`.
     let head = raw.trim().split('@').next().unwrap_or("").trim();
     if head.is_empty() {
         return Err("Sign in to Aura first — a per-member account needs a member.".into());
@@ -640,7 +640,7 @@ mod tests {
     /// not part of who they are on one box.
     #[test]
     fn an_email_is_a_handle_with_a_domain_glued_on() {
-        assert_eq!(member_login("mo@naridon.com").unwrap(), "mo");
+        assert_eq!(member_login("mo@naridon.example").unwrap(), "mo");
     }
 
     /// `useradd 3things` and `chown -mo` are two different kinds of wrong. A

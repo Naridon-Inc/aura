@@ -1474,15 +1474,15 @@ mod tests {
         // store file, and inventing a path for it would be a lie.
         let f = PlaceGitFacts {
             place: "this laptop".into(),
-            you: "muhammed".into(),
+            you: "dev".into(),
             member_present: true,
             member_store: StoreFile::default(),
             helper: "osxkeychain".into(),
-            helper_origin: "file:/Users/muhammed/.gitconfig".into(),
+            helper_origin: "file:/Users/dev/.gitconfig".into(),
             default_store: StoreFile::default(),
             agent: AgentFacts::default(),
         };
-        let cred = PlaceDefault.offer(&ask("muhammed"), &f).expect("the keychain");
+        let cred = PlaceDefault.offer(&ask("dev"), &f).expect("the keychain");
         assert_eq!(cred.helper, "osxkeychain");
         assert!(!cred.shared, "one person's login is not a shared box");
         assert!(cred.last_resort, "it is still what the place happened to have");

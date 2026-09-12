@@ -74,8 +74,8 @@ beforeEach(() => {
 
 describe("which identity a face is filed under", () => {
   test("the same person typed differently is one person", () => {
-    expect(normalizeAvatarKey("  Mo@TouchStage.com ")).toBe("mo@touchstage.com");
-    expect(normalizeAvatarKey("mo@touchstage.com")).toBe("mo@touchstage.com");
+    expect(normalizeAvatarKey("  Mo@TouchStage.example ")).toBe("mo@touchstage.example");
+    expect(normalizeAvatarKey("mo@touchstage.example")).toBe("mo@touchstage.example");
   });
 
   test("an absent identity is not an identity", () => {
@@ -119,28 +119,28 @@ describe("the same person keeps the same face", () => {
     const { transport, counts } = makeTransport();
     setFallbackAvatarTransport(transport);
 
-    requestFallbackAvatar("mo@touchstage.com");
+    requestFallbackAvatar("mo@touchstage.example");
     await settle();
-    const first = fallbackAvatarFor("mo@touchstage.com");
+    const first = fallbackAvatarFor("mo@touchstage.example");
     expect(first).toBe("data:image/webp;base64,PORTRAIT-1");
 
     // Re-render: the row asks again, as every mount does.
-    requestFallbackAvatar("mo@touchstage.com");
+    requestFallbackAvatar("mo@touchstage.example");
     await settle();
-    expect(fallbackAvatarFor("mo@touchstage.com")).toBe(first);
+    expect(fallbackAvatarFor("mo@touchstage.example")).toBe(first);
     expect(counts.fetched).toBe(1);
   });
 
   test("a second launch draws the stored face with no fetch at all", async () => {
     // What the previous run left behind on disk.
     const stored = "data:image/webp;base64,FROM-DISK";
-    const { transport, counts } = makeTransport({ "mo@touchstage.com": stored });
+    const { transport, counts } = makeTransport({ "mo@touchstage.example": stored });
     setFallbackAvatarTransport(transport);
 
-    requestFallbackAvatar("mo@touchstage.com");
+    requestFallbackAvatar("mo@touchstage.example");
     await settle();
 
-    expect(fallbackAvatarFor("mo@touchstage.com")).toBe(stored);
+    expect(fallbackAvatarFor("mo@touchstage.example")).toBe(stored);
     expect(counts.fetched).toBe(0);
   });
 
@@ -179,34 +179,34 @@ describe("a fetch that fails changes nothing", () => {
     const { transport } = makeFailingTransport();
     setFallbackAvatarTransport(transport);
 
-    requestFallbackAvatar("mo@touchstage.com");
+    requestFallbackAvatar("mo@touchstage.example");
     await settle();
 
     // Null is exactly what the component saw before this feature existed, so
     // it draws exactly what it drew before: the deterministic animal.
-    expect(fallbackAvatarFor("mo@touchstage.com")).toBeNull();
-    expect(fallbackAvatarMissed("mo@touchstage.com")).toBe(true);
+    expect(fallbackAvatarFor("mo@touchstage.example")).toBeNull();
+    expect(fallbackAvatarMissed("mo@touchstage.example")).toBe(true);
   });
 
   test("a person we could not get is never asked for twice", async () => {
     const { transport, counts } = makeFailingTransport();
     setFallbackAvatarTransport(transport);
 
-    requestFallbackAvatar("mo@touchstage.com");
+    requestFallbackAvatar("mo@touchstage.example");
     await settle();
     // Every subsequent mount of every row for this person.
-    for (let i = 0; i < 20; i += 1) requestFallbackAvatar("mo@touchstage.com");
+    for (let i = 0; i < 20; i += 1) requestFallbackAvatar("mo@touchstage.example");
     await settle();
 
     expect(counts.fetched).toBe(1);
   });
 
   test("with no backend wired, asking is a no-op rather than a throw", async () => {
-    requestFallbackAvatar("mo@touchstage.com");
-    await warmFallbackAvatars(["mo@touchstage.com"]);
+    requestFallbackAvatar("mo@touchstage.example");
+    await warmFallbackAvatars(["mo@touchstage.example"]);
     await settle();
-    expect(fallbackAvatarFor("mo@touchstage.com")).toBeNull();
-    expect(fallbackAvatarMissed("mo@touchstage.com")).toBe(false);
+    expect(fallbackAvatarFor("mo@touchstage.example")).toBeNull();
+    expect(fallbackAvatarMissed("mo@touchstage.example")).toBe(false);
   });
 });
 
@@ -215,12 +215,12 @@ describe("a list of the same person costs one request", () => {
     const { transport, counts } = makeTransport();
     setFallbackAvatarTransport(transport);
 
-    for (let i = 0; i < 40; i += 1) requestFallbackAvatar("mo@touchstage.com");
+    for (let i = 0; i < 40; i += 1) requestFallbackAvatar("mo@touchstage.example");
     await settle();
 
     expect(counts.fetched).toBe(1);
     expect(counts.cached).toBe(1);
-    expect(fallbackAvatarFor("mo@touchstage.com")).toBe("data:image/webp;base64,PORTRAIT-1");
+    expect(fallbackAvatarFor("mo@touchstage.example")).toBe("data:image/webp;base64,PORTRAIT-1");
   });
 
   test("forty different people fetch forty times, not more", async () => {
@@ -260,7 +260,7 @@ describe("a list of the same person costs one request", () => {
       beats += 1;
     });
 
-    requestFallbackAvatar("mo@touchstage.com");
+    requestFallbackAvatar("mo@touchstage.example");
     await settle();
     stop();
 

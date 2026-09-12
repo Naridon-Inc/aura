@@ -90,11 +90,11 @@ describe("what a connected row says about itself", () => {
           kind: "linear",
           connected: true,
           configured: true,
-          identity: { display_name: null, email: "mo@touchstage.com" },
+          identity: { display_name: null, email: "mo@touchstage.example" },
         },
       ],
     });
-    expect(connected[0]!.detail).toBe("mo@touchstage.com");
+    expect(connected[0]!.detail).toBe("mo@touchstage.example");
   });
 
   it("marks the one provider the app is actually asking", () => {

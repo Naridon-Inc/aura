@@ -10013,7 +10013,7 @@ export type TeamMember = {
   // hold edit rights on the GitHub repo (populated by teamSyncCollaborators).
   source?: TeamMemberSource;
   /** Additional git emails that resolve to this member. Lets one person
-   *  be enrolled as `mck@naridon.com` while their local git uses
+   *  be enrolled as `mck@naridon.example` while their local git uses
    *  `mubasheer.ck@example.com`. Populated via `teamAliasAdd` (admin or
    *  self-owner). Empty / undefined when no aliases are configured. */
   also_emails?: string[];
