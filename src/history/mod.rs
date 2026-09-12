@@ -480,6 +480,13 @@ pub(crate) fn is_injected_text(text: &str) -> bool {
         "<system-reminder",
         "<task-notification",
         "<function_results",
+        // A command the user ran in the harness's own terminal, and what it
+        // printed. The output in particular is the worst thing to quote back:
+        // it is long, it is machine text, and it carries local absolute paths
+        // that were never part of anyone's request.
+        "<bash-input",
+        "<bash-stdout",
+        "<bash-stderr",
         "Caveat: The messages below",
     ];
     if INJECTED.iter().any(|p| t.starts_with(p)) {
@@ -488,19 +495,37 @@ pub(crate) fn is_injected_text(text: &str) -> bool {
     is_whole_xml_block(t)
 }
 
-/// Is this text exactly one XML-ish element and nothing else?
+/// Is this text nothing but XML-ish elements, one after another?
+///
+/// One element was the original rule, and it missed the shape that actually
+/// shows up: a harness that reports a shell command emits the command and its
+/// output as two sibling blocks in one message, so the text opens with one tag
+/// name and closes with a different one. Matching a run of elements catches
+/// that without loosening the rule that matters — a message with prose outside
+/// the tags still reads as a prompt, which is why `write a <command> parser`
+/// stays one.
 fn is_whole_xml_block(t: &str) -> bool {
-    let Some(rest) = t.strip_prefix('<') else {
-        return false;
-    };
-    let name: String = rest
-        .chars()
-        .take_while(|c| c.is_ascii_alphanumeric() || *c == '_' || *c == '-')
-        .collect();
-    if name.is_empty() {
-        return false;
+    let mut rest = t.trim();
+    let mut seen = false;
+    while let Some(after) = rest.strip_prefix('<') {
+        let name: String = after
+            .chars()
+            .take_while(|c| c.is_ascii_alphanumeric() || *c == '_' || *c == '-')
+            .collect();
+        if name.is_empty() {
+            return false;
+        }
+        // First close tag wins. Same-name nesting would end an element early
+        // and leave a remainder that parses as prose, so the answer is "this
+        // is a prompt" — the safe way to be wrong about machine text.
+        let close = format!("</{name}>");
+        let Some(end) = rest.find(&close) else {
+            return false;
+        };
+        rest = rest[end + close.len()..].trim_start();
+        seen = true;
     }
-    t.ends_with(&format!("</{name}>"))
+    seen && rest.is_empty()
 }
 
 /// Flatten the several shapes a chat message body takes into plain text.

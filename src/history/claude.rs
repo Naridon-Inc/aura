@@ -410,6 +410,26 @@ mod tests {
     }
 
     #[test]
+    fn a_shell_command_and_its_output_are_not_a_request() {
+        // The harness files a command the user ran in its own terminal as a
+        // user turn, carrying the command and what it printed as two sibling
+        // blocks. `aura why` quoted the whole thing under "Asked" — machine
+        // text, local absolute paths and all — as if someone had typed it.
+        assert!(is_injected_text(
+            "<bash-input>git status</bash-input>\n<bash-stdout>nothing to commit</bash-stdout>"
+        ));
+        // The output alone, which is the half that leaks paths.
+        assert!(is_injected_text("<bash-stdout>  M src/lib.rs</bash-stdout>"));
+        // Two blocks that close in a different order than they opened are
+        // still two blocks, not prose.
+        assert!(is_injected_text(
+            "<bash-stdout>ok</bash-stdout><bash-stderr></bash-stderr>"
+        ));
+        // And a person asking about the feature is still asking.
+        assert!(!is_injected_text("why does <bash-stdout> show up in why?"));
+    }
+
+    #[test]
     fn the_prefilter_keeps_every_row_type_the_scan_reads() {
         // If this drifts, the scan silently stops counting — the failure mode
         // is a session that reports zero steps, not an error.
