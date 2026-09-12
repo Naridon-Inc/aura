@@ -1,0 +1,60 @@
+# Aura
+
+> An audit trail for what AI agents changed in your codebase, and why. Aura is a
+> semantic layer over Git, written in Rust. It parses every commit into an AST
+> Merkle-graph of functions and classes, records the intent behind each change and
+> the agent that made it, signs both, and stores the result in the repository
+> itself. No server is required.
+
+Aura answers a question Git cannot: not which lines moved, but which agent moved
+them, what it was trying to do, and whether it did what it said it would. It ships
+as a command-line tool, a desktop Agentic Development Environment, and a VS Code
+extension, all reading and writing the same `.aura/` meaning plane.
+
+Install: `curl -fsSL https://auravcs.com/install.sh | bash`, then `aura init` in
+any git repository. Building from source: `cargo build --release` from the root.
+Licence: Apache 2.0. Languages parsed: Rust, Python, TypeScript, JavaScript, Go,
+Java, C#, C++, C, Ruby, PHP, Swift and Kotlin, via Tree-sitter.
+
+## What it does
+
+- Provenance: who or what changed each symbol, the stated reason, and a signature
+  over both. `aura why <file>` prints the commit, the prompt that asked for it and
+  the intent that was logged while it was written.
+- Intent gatekeeper: a pre-commit hook compares the stated intent against the AST
+  changes actually made, and blocks a commit whose description does not match the
+  code it touches.
+- Function-level rewind: `aura rewind` reverts a single function to its last good
+  state without unwinding the commit around it. It operates on AST nodes, so there
+  are no text merge conflicts.
+- Semantic review: `aura pr-review` diffs the graph rather than the text, catching
+  layer violations, silent deletions and architectural drift.
+- AI usage and cost tracking: `aura usage` reads local agent transcripts to report
+  token spend by project, with no API calls.
+- Crew: an autonomous work loop that plans a dependency graph of tasks and lets
+  multiple agents work it in parallel without colliding on the same symbols.
+
+## Agent integration
+
+- MCP server: `{"mcpServers": {"aura-vcs": {"command": "aura", "args": ["mcp"]}}}`
+  exposes 30+ tools, including `aura_log_intent`, `aura_snapshot`, `aura_rewind`,
+  `aura_pr_review`, `aura_prove` and `aura_usage`.
+- Sessions are detected and tracked from Claude Code, Gemini CLI, Codex CLI, Kimi,
+  Cursor and OpenCode. The git-hook capture path works with any tool that commits.
+
+## Docs
+
+- [README](https://github.com/Naridon-Inc/aura/blob/main/README.md): what it is,
+  quick start, how the two planes work.
+- [Full guide](https://github.com/Naridon-Inc/aura/blob/main/docs/guide.md): the
+  desktop app, every capability, the complete command reference, the Claude Code
+  status line and troubleshooting.
+- [Cursor integration](https://github.com/Naridon-Inc/aura/blob/main/integrations/cursor.md)
+- [OpenCode integration](https://github.com/Naridon-Inc/aura/blob/main/integrations/opencode.md)
+- [Security policy](https://github.com/Naridon-Inc/aura/blob/main/SECURITY.md)
+
+## Privacy
+
+All data is stored locally in `.aura/` and git notes. Nothing leaves the machine
+unless cloud sync is configured. Telemetry is opt-out via `AURA_TELEMETRY_OPTOUT=1`
+or `DO_NOT_TRACK=1`. Usage tracking reads local transcripts only.
