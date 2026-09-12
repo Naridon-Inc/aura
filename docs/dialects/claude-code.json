@@ -1,0 +1,33 @@
+{
+  "id": "claude-code-manifest",
+  "display": "Claude Code (via manifest)",
+  "root": "~/.claude",
+
+  "sessions": {
+    "glob": "projects/*/*.jsonl",
+    "id_from": "file_stem"
+  },
+
+  "fields": {
+    "cwd": "cwd",
+    "branch": "gitBranch",
+    "timestamp": "timestamp"
+  },
+
+  "prompt": {
+    "when": { "type": "user" },
+    "unless": {
+      "isMeta": true,
+      "isSidechain": true,
+      "isCompactSummary": true,
+      "isVisibleInTranscriptOnly": true
+    },
+    "absent": ["toolUseResult"],
+    "text": "message.content",
+    "reject_injected_text": true
+  },
+
+  "step": {
+    "when": { "type": "assistant" }
+  }
+}

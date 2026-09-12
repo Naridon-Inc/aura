@@ -811,11 +811,17 @@ mod tests {
         // prompt rule and the compiled dialect's own predicate over the row
         // shapes that actually appear in a Claude transcript, and requires
         // them to agree on every one.
-        let path = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("..")
-            .join("docs")
-            .join("dialects")
-            .join("claude-code.json");
+        // Two checkouts, one file. Here the crate sits under `aura-cli/`, so
+        // the docs tree is one level up; in the published repository the crate
+        // is the root and the same tree is right beside it. Hard-coding either
+        // shape makes the test pass in one checkout and fail in the other on a
+        // file that did not move, so look in both.
+        let crate_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let relative = Path::new("docs").join("dialects").join("claude-code.json");
+        let path = [crate_dir.join("..").join(&relative), crate_dir.join(&relative)]
+            .into_iter()
+            .find(|candidate| candidate.exists())
+            .expect("the shipped example must be somewhere in this checkout");
         let m = Manifest::load(&path).expect("the shipped example must load");
         assert_eq!(m.id, "claude-code-manifest");
 
