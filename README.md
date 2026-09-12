@@ -27,7 +27,7 @@ cd your-repo && aura init                          # installs the git hooks
 
 That is the whole setup. From here every commit is parsed into logic nodes,
 diffed at the AST level, and recorded with the intent that produced it. Ask
-the repository about any file, months later:
+the repository about any file, or any line in one, months later:
 
 ```bash
 aura why src/billing.rs
