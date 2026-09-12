@@ -12,8 +12,12 @@
 //!   • tool_call  — shallow-merge keyed by `callId`: a later update (the result)
 //!                  overlays status/content/output onto the original request,
 //!                  keeping fields it doesn't carry (title, input).
-//!   • everything else — same id replaces wholesale (todo/plan/question_set are
-//!                  full-array/full-object snapshots by contract).
+//!   • question_set / plan — shallow-merge: an engine reports the ANSWER (or
+//!                  the approve/reject decision) as a same-id update that
+//!                  carries only what it learned, so the questions and the
+//!                  plan body must survive it.
+//!   • everything else — same id replaces wholesale (a todo list is a
+//!                  full-array snapshot by contract).
 
 import type {
   NormalizedEvent,
@@ -22,6 +26,7 @@ import type {
   QuestionSetEvent,
   TodoEvent,
   ToolCallEvent,
+  ToolCallStatus,
 } from "./events";
 
 export type ReducedTimeline = {
@@ -63,6 +68,26 @@ function merge(prev: NormalizedEvent, next: NormalizedEvent): NormalizedEvent {
       locations: next.locations ?? prev.locations,
     };
   }
+  if (prev.kind === "question_set" && next.kind === "question_set") {
+    // The settle update knows the answer and nothing else — it must not blank
+    // the questions the original carried.
+    return {
+      ...prev,
+      ...next,
+      questions: next.questions.length ? next.questions : prev.questions,
+      answer: next.answer ?? prev.answer,
+    };
+  }
+  if (prev.kind === "plan" && next.kind === "plan") {
+    // Same shape: the decision arrives without the plan body.
+    return {
+      ...prev,
+      ...next,
+      entries: next.entries.length ? next.entries : prev.entries,
+      markdown: next.markdown ?? prev.markdown,
+      decision: next.decision ?? prev.decision,
+    };
+  }
   if (prev.kind === "text" && next.kind === "text") {
     // `delta` accretes; a full `text` (no delta) is a replacement.
     if (next.delta != null) {
@@ -70,8 +95,8 @@ function merge(prev: NormalizedEvent, next: NormalizedEvent): NormalizedEvent {
     }
     return next;
   }
-  // todo / plan / question_set / permission / result / status / session_init /
-  // reasoning / error — the latest same-id event wins wholesale.
+  // todo / permission / result / status / session_init / reasoning / error —
+  // the latest same-id event wins wholesale.
   return next;
 }
 
@@ -100,21 +125,35 @@ export function reduceEvents(events: NormalizedEvent[]): ReducedTimeline {
   let pendingPermission: PermissionRequestEvent | null = null;
   const activeToolCalls: ToolCallEvent[] = [];
 
+  // Tool-call status by callId, so a permission prompt can be judged against
+  // the call it gates: once that call runs or settles, the human answered the
+  // prompt (in this surface or in the terminal) and it is no longer pending.
+  const callStatus = new Map<string, ToolCallStatus>();
+  for (const ev of merged) {
+    if (ev.kind === "tool_call") callStatus.set(ev.callId, ev.status);
+  }
+
   for (const ev of merged) {
     switch (ev.kind) {
       case "todo":
         todos = ev;
         break;
       case "question_set":
-        // `partial` marks it still open / unanswered; latest wins.
-        pendingQuestions = ev;
+        // Latest wins, and an ANSWERED set clears the handle rather than
+        // leaving the newest question looking open for the rest of the
+        // session. An engine that never reports answers leaves `answer`
+        // absent, and its newest set stays pending until the next one.
+        pendingQuestions = ev.answer == null ? ev : null;
         break;
       case "plan":
-        if (ev.awaitingApproval) pendingPlan = ev;
+        pendingPlan = ev.awaitingApproval ? ev : null;
         break;
-      case "permission_request":
-        pendingPermission = ev;
+      case "permission_request": {
+        const st = ev.callId ? callStatus.get(ev.callId) : undefined;
+        const settled = st != null && st !== "pending";
+        pendingPermission = settled ? null : ev;
         break;
+      }
       case "tool_call":
         if (ev.status === "pending" || ev.status === "running") {
           activeToolCalls.push(ev);

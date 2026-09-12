@@ -2463,27 +2463,54 @@ pub async fn agent_pty_close(
     state: State<'_, AgentPtyRegistry>,
     session_id: String,
 ) -> Result<(), String> {
-    // Free the per-session history ring (up to PTY_HISTORY_CAP bytes).
-    // The read loops fill this map for both in-process and daemon-backed
-    // sessions but nothing here pruned it, so every closed agent session
-    // leaked its full scrollback for the life of the process. Drop it on
-    // the explicit teardown, before either branch returns.
-    state.history.lock().unwrap().remove(&session_id);
-
-    // Daemon-backed first: drop subscribe loop, ask daemon to kill
-    // the child, purge our bookkeeping. Best-effort — errors here
-    // shouldn't fail close (the user just wants the session gone).
+    // Daemon-backed first. This branch used to be written as best-effort —
+    // `let _ = close_session(...)` — on the reasoning that the user just wants
+    // the session gone and an error here is nothing they can act on. Both
+    // halves of that are wrong, and together they are how a stopped agent
+    // keeps working.
+    //
+    // The daemon exists precisely so a PTY child OUTLIVES this app. So a close
+    // the daemon never applied does not leave a process that dies with us: it
+    // leaves one running forever. And because we removed the proxy from
+    // `daemon_sessions` before asking, the session id stops resolving here too
+    // — nothing left in the app can address that child, and nothing left in the
+    // system will reap it. The agent goes on working, goes on writing to its
+    // rollout file, and the next tab opened on that repo tails the same file
+    // and shows its output. Which is exactly what "I stopped it and it kept
+    // going" looks like from the outside.
+    //
+    // So: ask first, and keep the handle until the answer is yes.
     let daemon_proxy = state
         .daemon_sessions
         .lock()
         .unwrap()
         .remove(&session_id);
     if let Some(proxy) = daemon_proxy {
+        if let Err(e) = crate::pty_daemon::client::close_session(&session_id).await {
+            // Put it back. A session we can still address is a session the
+            // user can still stop; dropping the handle is what makes the
+            // orphan permanent.
+            state
+                .daemon_sessions
+                .lock()
+                .unwrap()
+                .insert(session_id.clone(), proxy);
+            return Err(format!(
+                "the agent is still running — the PTY daemon did not stop it: {e}"
+            ));
+        }
         proxy.subscribe_handle.abort();
-        let _ = crate::pty_daemon::client::close_session(&session_id).await;
+        state.history.lock().unwrap().remove(&session_id);
         state.by_key.lock().unwrap().remove(&proxy.key);
         return Ok(());
     }
+
+    // Free the per-session history ring (up to PTY_HISTORY_CAP bytes). The
+    // read loops fill this map for both kinds of session but nothing here
+    // pruned it, so every closed agent session leaked its full scrollback for
+    // the life of the process.
+    state.history.lock().unwrap().remove(&session_id);
+
     // Remove under the lock, kill after — kill(2) on a wedged child
     // must not hold the map while other commands need it, and the old
     // shape nested by_key inside the sessions guard (a lock-order
@@ -2493,10 +2520,54 @@ pub async fn agent_pty_close(
         // See `pty_reap` — closing an agent tab has to stop the tools that
         // agent launched, not just the CLI process holding the PTY.
         crate::pty_reap::hangup_and_reap(&mut **sess.child.lock().unwrap());
+        // And then make sure. The reap hangs the group up now and SIGKILLs it
+        // shortly after, on a detached thread, so "we sent the signals" is not
+        // the same claim as "the process is gone" — and the caller closes the
+        // tab on our Ok, which is the last moment anyone would notice.
+        if !confirm_exited(&sess.child).await {
+            // Keep it addressable. A session still in the registry is a
+            // session the user can ask us to stop again; dropping the row for
+            // a process that outlived the reap is what turns a stubborn child
+            // into a permanent orphan.
+            let key = sess.key.clone();
+            state.sessions.lock().unwrap().insert(session_id.clone(), sess);
+            state.by_key.lock().unwrap().insert(key, session_id);
+            return Err(
+                "the agent did not exit — it may still be running in the background"
+                    .to_string(),
+            );
+        }
         state.by_key.lock().unwrap().remove(&sess.key);
     }
     Ok(())
 }
+
+/// Wait, briefly, for a child we have just hung up to actually be gone.
+///
+/// `pty_reap` sends SIGHUP now and SIGKILL after a short grace on a detached
+/// thread, so the process is normally still alive the instant `hangup_and_reap`
+/// returns. This spans that grace and a little past it. It is the difference
+/// between reporting what we SENT and reporting what HAPPENED, and the caller
+/// tears the tab down on the answer.
+async fn confirm_exited(child: &Mutex<Box<dyn portable_pty::Child + Send + Sync>>) -> bool {
+    for _ in 0..CLOSE_CONFIRM_TRIES {
+        // A `try_wait` error means we cannot observe this child at all
+        // (already reaped elsewhere, pid reused) — not a reason to tell the
+        // user their agent is still running.
+        match child.lock().unwrap().try_wait() {
+            Ok(Some(_)) | Err(_) => return true,
+            Ok(None) => {}
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(CLOSE_CONFIRM_STEP_MS)).await;
+    }
+    matches!(child.lock().unwrap().try_wait(), Ok(Some(_)) | Err(_))
+}
+
+/// How long `agent_pty_close` will wait for a hung-up child to go. Has to
+/// outlast `pty_reap`'s SIGKILL grace, or we would report a process still
+/// running that was about to be killed a moment later.
+const CLOSE_CONFIRM_TRIES: u32 = 9;
+const CLOSE_CONFIRM_STEP_MS: u64 = 100;
 
 /// Live PTY session row — combines in-process and daemon-backed
 /// sessions into one resumable listing the frontend can show after
@@ -3388,4 +3459,117 @@ mod transcript_tests {
         assert_eq!(text, "Explain this codebase\nWorking(9s)");
     }
 
+}
+
+/// Stopping actually stops.
+///
+/// `agent_pty_close` used to report success on having SENT the signals.
+#[cfg(test)]
+mod close_tests {
+    use super::*;
+
+    // `pty_reap` hangs the process group up now and SIGKILLs it after a short
+    // grace on a detached thread, so at the moment it returns the child is
+    // normally still alive — and the frontend closed the tab on that Ok,
+    // throwing away the last handle anything had on the session. These cover
+    // the confirmation that turns "we asked" into "it's gone".
+
+    #[derive(Debug)]
+    struct NoopKiller;
+
+    impl portable_pty::ChildKiller for NoopKiller {
+        fn kill(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+        fn clone_killer(&self) -> Box<dyn portable_pty::ChildKiller + Send + Sync> {
+            Box::new(NoopKiller)
+        }
+    }
+
+    /// A child that reports itself alive for a fixed number of polls, then
+    /// exits — or that cannot be observed at all.
+    #[derive(Debug)]
+    struct FakeChild {
+        alive_polls: usize,
+        unobservable: bool,
+    }
+
+    impl portable_pty::ChildKiller for FakeChild {
+        fn kill(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+        fn clone_killer(&self) -> Box<dyn portable_pty::ChildKiller + Send + Sync> {
+            Box::new(NoopKiller)
+        }
+    }
+
+    impl portable_pty::Child for FakeChild {
+        fn try_wait(&mut self) -> std::io::Result<Option<portable_pty::ExitStatus>> {
+            if self.unobservable {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::Other,
+                    "no child processes",
+                ));
+            }
+            if self.alive_polls > 0 {
+                self.alive_polls -= 1;
+                return Ok(None);
+            }
+            Ok(Some(portable_pty::ExitStatus::with_exit_code(0)))
+        }
+        fn wait(&mut self) -> std::io::Result<portable_pty::ExitStatus> {
+            Ok(portable_pty::ExitStatus::with_exit_code(0))
+        }
+        fn process_id(&self) -> Option<u32> {
+            None
+        }
+    }
+
+    fn fake(alive_polls: usize, unobservable: bool) -> Mutex<Box<dyn portable_pty::Child + Send + Sync>> {
+        Mutex::new(Box::new(FakeChild {
+            alive_polls,
+            unobservable,
+        }))
+    }
+
+    #[tokio::test]
+    async fn a_child_already_gone_is_confirmed_without_waiting() {
+        let started = std::time::Instant::now();
+        assert!(confirm_exited(&fake(0, false)).await);
+        // The first poll answers. Anything slower would put a visible stall on
+        // every Stop click for the common case.
+        assert!(started.elapsed() < std::time::Duration::from_millis(50));
+    }
+
+    #[tokio::test]
+    async fn a_child_that_dies_inside_the_reap_grace_is_confirmed_gone() {
+        // pty_reap SIGKILLs at GRACE_MS (400); five polls is ~500ms, i.e. a
+        // child that goes exactly the way the reaper intends.
+        assert!(confirm_exited(&fake(5, false)).await);
+    }
+
+    #[tokio::test]
+    async fn a_child_that_outlives_the_whole_window_is_reported_still_running() {
+        // This is the case the user hit: the signals went out, the process
+        // ignored them, and nothing in the app noticed. It must come back
+        // false so the command can return an error and the tab can stay.
+        assert!(!confirm_exited(&fake(usize::MAX, false)).await);
+    }
+
+    #[tokio::test]
+    async fn a_child_we_can_no_longer_observe_counts_as_gone() {
+        // try_wait erroring means the pid is not ours to wait on any more
+        // (reaped elsewhere, or already collected) — that is not evidence the
+        // agent survived, and telling the user it did would be its own lie.
+        assert!(confirm_exited(&fake(usize::MAX, true)).await);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_confirmation_window_outlasts_the_reaper_grace() {
+        // If it did not, Stop would report "still running" for a process the
+        // reaper was about to SIGKILL a moment later.
+        let window = CLOSE_CONFIRM_TRIES as u64 * CLOSE_CONFIRM_STEP_MS;
+        assert!(window > crate::pty_reap::GRACE_MS);
+    }
 }

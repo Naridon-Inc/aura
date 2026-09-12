@@ -180,6 +180,12 @@ export type QuestionSetEvent = EventEnvelope & {
   kind: "question_set";
   requestId: string;
   questions: NormalizedQuestion[];
+  /** What the human chose, once the engine reports the answer back. Present
+   *  means the set is SETTLED: the renderer shows the choice instead of a
+   *  live prompt, and the reducer stops counting it as something the agent is
+   *  blocked on. Absent means still open. An engine that never reports the
+   *  answer leaves this absent and its sets settle by supersession instead. */
+  answer?: string;
 };
 
 /** One line of a proposed/streaming plan. 3 statuses only (no `failed`) —
@@ -197,6 +203,9 @@ export type PlanEvent = EventEnvelope & {
   entries: PlanEntry[];
   markdown?: string;
   awaitingApproval?: boolean;
+  /** What the human decided, once the engine reports it. `awaitingApproval`
+   *  says the card may still be acted on; this says how it ended. */
+  decision?: "approved" | "rejected";
   /** When awaiting approval, reply through this permission request id. */
   requestId?: string;
 };

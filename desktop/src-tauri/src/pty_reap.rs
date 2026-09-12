@@ -35,7 +35,7 @@ use portable_pty::Child;
 /// outright. Long enough for a shell to signal its jobs and for those to
 /// run an exit handler; short enough that nothing observable lingers.
 #[cfg(unix)]
-const GRACE_MS: u64 = 400;
+pub(crate) const GRACE_MS: u64 = 400;
 
 /// Hang up a PTY child and everything it started, then make sure.
 ///

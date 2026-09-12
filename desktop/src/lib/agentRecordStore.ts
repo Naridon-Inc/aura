@@ -82,7 +82,35 @@ type Entry = {
   /** A read is in flight — never overlap them, or two chunks race to advance
    *  the same offset and one of them is dropped. */
   reading: boolean;
+  /** Records are landing right now — the agent is mid-turn. This is the only
+   *  "is it working?" signal these four engines give us: they stream nothing
+   *  over the wire, so the file growing IS the turn. */
+  streaming: boolean;
+  /** Consecutive reads that found nothing. Guards the flag against the pauses
+   *  inside a turn (a tool running, a model thinking) so Stop doesn't blink. */
+  quietReads: number;
 };
+
+/** Reads with nothing in them before a turn counts as finished. The cadence
+ *  after a quiet read is IDLE_MS, so this is ~3s of silence — longer than any
+ *  gap inside a turn, shorter than a person's patience with a Stop button that
+ *  lingers after the agent is done. */
+const QUIET_READS_TO_SETTLE = 3;
+
+/** Advance the busy flag by what a read found. Pure so the settle rule can be
+ *  tested without a backend: one record restarts the turn immediately, and it
+ *  takes QUIET_READS_TO_SETTLE empty reads in a row to end it. */
+export function settleStreaming(
+  prev: { streaming: boolean; quietReads: number },
+  freshCount: number,
+): { streaming: boolean; quietReads: number } {
+  if (freshCount > 0) return { streaming: true, quietReads: 0 };
+  const quietReads = prev.quietReads + 1;
+  return {
+    streaming: quietReads >= QUIET_READS_TO_SETTLE ? false : prev.streaming,
+    quietReads,
+  };
+}
 
 const entries = new Map<string, Entry>();
 
@@ -109,6 +137,8 @@ function ensure(agentId: string, repoRoot: string): Entry {
     subs: new Set(),
     timer: null,
     reading: false,
+    streaming: false,
+    quietReads: QUIET_READS_TO_SETTLE,
   };
   entries.set(key, entry);
   return entry;
@@ -132,6 +162,44 @@ function parse(lines: string[]): unknown[] {
   return out;
 }
 
+// Hard cap on retained records per (agent, repo). The stream store already
+// caps what it keeps from a live PTY; this side had no cap at all, so a long
+// Codex / Kimi / OpenCode / Pi session grew one array forever — and because the
+// transcript re-normalizes the WHOLE array on every poll, a session that ran
+// for an hour spent longer re-parsing its own history than it did rendering.
+// Pi is the sharp case: it streams per-token updates, so records arrive in the
+// thousands. Keep the newest RECORD_RETENTION; the transcript above them still
+// draws every group they produce.
+const RECORD_RETENTION = 4000;
+
+// The handshake every one of these engines writes FIRST — Codex's
+// `session_meta` + `turn_context`, pi's session header, OpenCode's session row
+// — is what the adapters read the model, the cwd and the session id out of. A
+// cap that trims purely from the front therefore deletes the one part of the
+// record that has no second copy anywhere: pass 4000 records and the transcript
+// quietly loses its session card and stops being able to name the model that
+// ran. So the front of the file is pinned and the trimming happens just behind
+// it. Well past anything an engine writes before the conversation starts.
+const RECORD_PREAMBLE = 32;
+
+/** Keep `records` within the cap: the opening handshake, then the newest tail.
+ *  The hole is in the middle, where the oldest exchanges are — never at the
+ *  ends, which carry the session's identity and the part you are reading. */
+export function capRecords(records: unknown[]): unknown[] {
+  if (records.length <= RECORD_RETENTION) return records;
+  const head = records.slice(0, RECORD_PREAMBLE);
+  const tail = records.slice(records.length - (RECORD_RETENTION - RECORD_PREAMBLE));
+  return head.concat(tail);
+}
+
+/** Append `fresh`, keeping the result within the cap. Returns the same array
+ *  identity only when nothing was added, so downstream `useMemo` still re-runs
+ *  exactly when it should. */
+function retain(prev: unknown[], fresh: unknown[]): unknown[] {
+  if (fresh.length === 0) return prev;
+  return capRecords(prev.concat(fresh));
+}
+
 async function read(entry: Entry): Promise<number> {
   const reader = READERS[entry.agentId];
   if (!reader) return ABSENT_MS;
@@ -146,12 +214,19 @@ async function read(entry: Entry): Promise<number> {
   // `reset` means the record rotated (a new session) or was truncated
   // underneath us — what we accumulated belongs to a conversation that is no
   // longer the one on screen.
-  entry.records = chunk.reset ? fresh : entry.records.concat(fresh);
+  entry.records = chunk.reset ? capRecords(fresh) : retain(entry.records, fresh);
   entry.path = chunk.path;
   entry.offset = chunk.offset;
   entry.sessionId = chunk.session_id;
 
-  if (chunk.reset || fresh.length > 0) emit(entry);
+  const wasStreaming = entry.streaming;
+  const settled = settleStreaming(entry, fresh.length);
+  entry.streaming = settled.streaming;
+  entry.quietReads = settled.quietReads;
+
+  if (chunk.reset || fresh.length > 0 || entry.streaming !== wasStreaming) {
+    emit(entry);
+  }
   return fresh.length > 0 ? STREAMING_MS : IDLE_MS;
 }
 
@@ -185,7 +260,12 @@ async function pump(entry: Entry) {
 export function useAgentRecord(
   agentId: string,
   repoRoot: string | null,
-): { records: unknown[]; sessionId: string | null; supported: boolean } {
+): {
+  records: unknown[];
+  sessionId: string | null;
+  supported: boolean;
+  streaming: boolean;
+} {
   const [, force] = useState(0);
   const supported = hasAgentRecord(agentId);
   const watching = supported ? repoRoot : null;
@@ -200,19 +280,27 @@ export function useAgentRecord(
     if (!entry.timer && !entry.reading) void pump(entry);
     return () => {
       entry.subs.delete(fn);
-      if (entry.subs.size === 0 && entry.timer) {
-        clearTimeout(entry.timer);
+      if (entry.subs.size === 0) {
+        if (entry.timer) clearTimeout(entry.timer);
         entry.timer = null;
+        // Nobody is reading, so nobody is learning that the turn ended. Leaving
+        // the flag hot would hand the next subscriber a Stop button for a turn
+        // that finished while the tab was closed.
+        entry.streaming = false;
+        entry.quietReads = QUIET_READS_TO_SETTLE;
       }
     };
   }, [agentId, watching]);
 
-  if (!watching) return { records: [], sessionId: null, supported };
+  if (!watching) {
+    return { records: [], sessionId: null, supported, streaming: false };
+  }
   const entry = entries.get(keyOf(agentId, watching));
   return {
     records: entry?.records ?? [],
     sessionId: entry?.sessionId ?? null,
     supported,
+    streaming: entry?.streaming ?? false,
   };
 }
 

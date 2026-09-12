@@ -242,10 +242,20 @@ function corpus(): Source[] {
  * repo's parallel work happens in worktrees under `.claude` — walking those
  * would read four other branches' code and report their side doors as this
  * one's.
+ *
+ * `release-<version>/` is the same mistake in a different shape: cutting a
+ * release stages the shipped artifacts and their deploy script into the
+ * worktree, and that script legitimately drives ssh — it runs on a laptop
+ * against the production box, which is not what this guard is about. Walking
+ * one turned the suite red for whoever had most recently shipped, on code this
+ * repo does not build.
  */
+const RELEASE_STAGING = /^release-\d+\.\d+\.\d+/;
+
 function skipped(name: string): boolean {
   return (
     name.startsWith(".") ||
+    RELEASE_STAGING.test(name) ||
     ["target", "node_modules", "dist", "build", "vendor", "Pods"].includes(name)
   );
 }

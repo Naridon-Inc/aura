@@ -37,10 +37,14 @@ export type GroupUsage = { context: number; output: number };
 export type TranscriptGroup =
   | { kind: "user"; id: string; text: string }
   | { kind: "stream"; id: string; blocks: StreamBlock[]; usage?: GroupUsage }
-  | { kind: "question"; id: string; ev: QuestionSetEvent }
-  | { kind: "plan"; id: string; ev: PlanEvent }
+  /** `live` = this prompt is still the one the agent is waiting on. A settled
+   *  one stays in the transcript as a record of what was asked and answered,
+   *  but must not offer controls that would fire a stray answer into a
+   *  conversation that moved on twenty minutes ago. */
+  | { kind: "question"; id: string; ev: QuestionSetEvent; live: boolean }
+  | { kind: "plan"; id: string; ev: PlanEvent; live: boolean }
   | { kind: "todo"; id: string; ev: TodoEvent }
-  | { kind: "permission"; id: string; ev: PermissionRequestEvent }
+  | { kind: "permission"; id: string; ev: PermissionRequestEvent; live: boolean }
   | { kind: "result"; id: string; ev: ResultEvent }
   | { kind: "error"; id: string; ev: ErrorEvent }
   | { kind: "image"; id: string; ev: ImageEvent }
@@ -73,8 +77,16 @@ function toToolBlock(
  *  accreting consecutive assistant blocks into one `stream` run and breaking
  *  the run wherever a user message or a structured event interrupts. */
 export function toTranscriptGroups(events: NormalizedEvent[]): TranscriptGroup[] {
-  const { events: timeline } = reduceEvents(events);
+  const reduced = reduceEvents(events);
+  const timeline = reduced.events;
   const groups: TranscriptGroup[] = [];
+
+  // A checklist is ONE surface that changes, not a scrapbook. Every TodoWrite
+  // call carries its own id, so the reducer keeps each snapshot as a separate
+  // event — rendering them all stacked a dozen stale copies of the same list
+  // through the transcript and chopped the prose into fragments between them.
+  // Draw the newest and drop the rest; `reduced.todos` is already that one.
+  const liveTodo = reduced.todos;
 
   // The open assistant run we're accreting into, plus its block counter and
   // the per-call token usage folded across the response (max context, summed
@@ -145,19 +157,35 @@ export function toTranscriptGroups(events: NormalizedEvent[]): TranscriptGroup[]
         break;
       case "question_set":
         flush();
-        groups.push({ kind: "question", id: ev.id, ev });
+        groups.push({
+          kind: "question",
+          id: ev.id,
+          ev,
+          live: ev === reduced.pendingQuestions,
+        });
         break;
       case "plan":
         flush();
-        groups.push({ kind: "plan", id: ev.id, ev });
+        groups.push({
+          kind: "plan",
+          id: ev.id,
+          ev,
+          live: ev === reduced.pendingPlan,
+        });
         break;
       case "todo":
+        if (ev !== liveTodo) break;
         flush();
         groups.push({ kind: "todo", id: ev.id, ev });
         break;
       case "permission_request":
         flush();
-        groups.push({ kind: "permission", id: ev.id, ev });
+        groups.push({
+          kind: "permission",
+          id: ev.id,
+          ev,
+          live: ev === reduced.pendingPermission,
+        });
         break;
       case "result":
         flush();

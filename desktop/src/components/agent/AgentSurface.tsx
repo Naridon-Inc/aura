@@ -21,6 +21,8 @@ import type { AgentTab, WorkSplitDirection } from "../../lib/editorStore";
 import { treeLeaves, treePaneCount, useEditorStore } from "../../lib/editorStore";
 import { forgetAgentSession } from "../../lib/agentSessionStore";
 import { forgetAgentEvent } from "../../lib/agentEventStore";
+import { forgetAgentRecord } from "../../lib/agentRecordStore";
+import { toast } from "../../lib/toast";
 import {
   isOwnWorktreeSession,
   releaseResume,
@@ -208,6 +210,7 @@ function PtySurface({ tab, onClosePane }: AgentSurfaceProps) {
   // (it owns its own exit listener), so the surface no longer mirrors that
   // state here — it only tracks an in-flight Restart to debounce double-fires.
   const [restarting, setRestarting] = useState(false);
+  const [stopping, setStopping] = useState(false);
   const [splitting, setSplitting] = useState<WorkSplitDirection | null>(null);
   // Optional raw event drawer. Product context lives in the right-rail
   // Story tab and concrete git review lives in Source Control, so the
@@ -623,12 +626,42 @@ function PtySurface({ tab, onClosePane }: AgentSurfaceProps) {
     return () => window.removeEventListener("aura:rerun-prompt", onRerun);
   }, [tab.sessionId]);
 
-  function stop() {
-    api.agentPtyClose(tab.sessionId).catch(() => {});
+  // Stop the agent. Not "close the tab" — the tab is the last handle the app
+  // has on this session, so it only goes away once the backend confirms the
+  // child is gone.
+  //
+  // This used to fire agent_pty_close, swallow whatever came back, and tear
+  // the tab down regardless. Two ways that lied. A daemon-backed session (the
+  // PTY daemon deliberately outlives the app) whose close never applied left a
+  // child running with nothing able to address it; and an in-process child
+  // that ignored SIGHUP was reported as stopped. Either way the agent kept
+  // working, kept writing its record, and the next tab on this repo tailed
+  // that same record and showed its output — "I stopped it and it kept
+  // going". The backend now verifies the exit and returns an error when it
+  // can't, so the only thing left to do here is believe it.
+  async function stop() {
+    if (stopping) return;
+    setStopping(true);
+    try {
+      await api.agentPtyClose(tab.sessionId);
+    } catch (e) {
+      setStopping(false);
+      toast.danger(
+        "The agent is still running",
+        `${String(e)} — this tab stays open so you can try again.`,
+      );
+      return;
+    }
     api.claudeSessionUnwatch(tab.sessionId).catch(() => {});
     forgetAgentSession(tab.sessionId);
     forgetAgentEvent(tab.sessionId);
     forgetAgentStream(channel);
+    // The file-backed engines keep their conversation in a record beside the
+    // session, and that tail is keyed by (agent, repo) rather than session id.
+    // Left in place, the next Codex/Kimi/OpenCode/Pi tab opened on this repo
+    // re-rendered the session just stopped, which reads as the agent still
+    // talking after it was killed.
+    forgetAgentRecord(tab.agentId, tab.repoRoot);
     store.closeAgent(tab.sessionId);
   }
 
@@ -644,6 +677,7 @@ function PtySurface({ tab, onClosePane }: AgentSurfaceProps) {
       forgetAgentSession(tab.sessionId);
       forgetAgentEvent(tab.sessionId);
       forgetAgentStream(channel);
+      forgetAgentRecord(tab.agentId, tab.repoRoot);
       const handle = await api.agentPtyOpen(
         tab.agentId,
         tab.repoRoot,
@@ -667,6 +701,10 @@ function PtySurface({ tab, onClosePane }: AgentSurfaceProps) {
     } catch (e) {
       console.warn("[pty] restart failed:", e);
       setRestarting(false);
+      // A restart that can't close the old child must not look like a no-op:
+      // the previous agent is still out there, and starting a second one on
+      // the same workspace would have them writing over each other.
+      toast.danger("Couldn't restart the agent", String(e));
     }
   }
 
@@ -696,6 +734,7 @@ function PtySurface({ tab, onClosePane }: AgentSurfaceProps) {
       forgetAgentEvent(t.sessionId);
       const tabChannel = streamChannel(t.agentId, t.repoRoot);
       forgetAgentStream(tabChannel);
+      forgetAgentRecord(t.agentId, t.repoRoot);
       let resumeId: string | undefined;
       // The directory the CLI is launched in. A resumed conversation decides
       // it — `claude --resume` resolves the id against the launch cwd, so a
@@ -896,7 +935,7 @@ function PtySurface({ tab, onClosePane }: AgentSurfaceProps) {
           if (!restarting) restart();
           break;
         case "stop":
-          stop();
+          if (!stopping) void stop();
           break;
       }
     }
@@ -906,7 +945,15 @@ function PtySurface({ tab, onClosePane }: AgentSurfaceProps) {
     // fresh values (split membership, restarting flag, the close-pane
     // callback). splitAgent/stop/restart/detach read tab.sessionId, which
     // is in the dep list.
-  }, [tab.sessionId, tab.dormant, inSplit, restarting, onClosePane, store.splitLayout]);
+  }, [
+    tab.sessionId,
+    tab.dormant,
+    inSplit,
+    restarting,
+    stopping,
+    onClosePane,
+    store.splitLayout,
+  ]);
 
   return (
     <div className="h-full w-full flex flex-col bg-bg-content">

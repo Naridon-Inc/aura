@@ -42,6 +42,7 @@ const composer = await readSrc("components/agent/chat/AgentChatComposer.tsx");
 const blocks = await readSrc("components/agent/chat/AgentBlockTranscript.tsx");
 const tiptap = await readSrc("components/manager/TiptapComposer.tsx");
 const manager = await readSrc("components/manager/ManagerComposer.tsx");
+const store = await readSrc("lib/editorStore.ts");
 
 function block(kind: BlockEnvelope["kind"], id: string, text: string, exit?: number): BlockEnvelope {
   return {
@@ -282,6 +283,24 @@ describe("one composer, not two", () => {
     expect(composer).not.toContain("0x03");
   });
 
+  it("checks that Escape actually stopped the agent instead of assuming", () => {
+    // The whole defect: writing the byte was reported as stopping the agent.
+    // A write landing in the PTY says the byte was delivered — nothing more.
+    expect(composer).toContain("if (await wentQuiet()) return;");
+    expect(composer).toContain("const INTERRUPT_ATTEMPTS");
+  });
+
+  it("says so when the CLI ignored it, rather than leaving a dead button", () => {
+    expect(composer).toContain("The agent ignored Escape and is still working");
+    // And hands over a control that does work.
+    expect(composer).toContain("Open the terminal");
+  });
+
+  it("won't stack a second interrupt on top of the first", () => {
+    expect(composer).toContain("if (interruptingRef.current) return;");
+    expect(composer).toContain("disabled={interrupting}");
+  });
+
   it("stays typable mid-turn, because the CLI's own input queue is the queue", () => {
     expect(composer).toContain("busy={false}");
   });
@@ -308,5 +327,65 @@ describe("nothing in the chat pushes the pane sideways", () => {
     // scroll itself, and its summaries have to truncate rather than widen it.
     expect(composer).toContain("max-h-[340px] overflow-y-auto");
     expect(composer).toContain("flex-1 min-w-0 truncate");
+  });
+});
+
+// ── Stop means stopped ──────────────────────────────────────────────────────
+//
+// Two different controls are called "stop" here and they mean different
+// things: the composer's button interrupts the current turn and leaves the
+// session alive, while the tab menu's "Stop session" ends the agent. Both used
+// to report success on having ASKED. The tab one was the worse of the pair —
+// it fired agent_pty_close, discarded whatever came back, and tore the tab
+// down regardless, so a close the backend never applied left an agent running
+// with nothing left in the app able to address it.
+
+describe("ending a session", () => {
+  it("waits for the backend's answer before tearing the tab down", () => {
+    expect(surface).toContain("async function stop()");
+    expect(surface).toContain("await api.agentPtyClose(tab.sessionId);");
+    // The old shape, which is what made the bug invisible.
+    expect(surface).not.toContain("api.agentPtyClose(tab.sessionId).catch(() => {});");
+  });
+
+  it("keeps the tab when the agent did not die", () => {
+    // The tab is the last handle anything has on that session. Closing it on a
+    // failed kill is what makes an orphan permanent.
+    expect(surface).toContain("The agent is still running");
+    expect(surface).toContain("this tab stays open so you can try again");
+  });
+
+  it("drops the record tail, which is keyed by repo and not by session", () => {
+    // Codex, Kimi, OpenCode and Pi keep their conversation in a file beside the
+    // session and the chat tails it per (agent, repo). Left in place, the next
+    // tab opened on this repo re-renders the session that was just stopped —
+    // which reads exactly like the agent still talking after it was killed.
+    expect(surface).toContain("forgetAgentRecord(tab.agentId, tab.repoRoot);");
+    expect(surface).toContain('import { forgetAgentRecord }');
+  });
+
+  it("reports an agent that survived the close, with a way to try again", () => {
+    // ⌘W and the tab's X are how an agent is stopped most of the time, and
+    // both used to discard the backend's answer entirely. The tab still goes
+    // immediately — closing a tab should feel instant — but a kill that failed
+    // now surfaces, and the backend keeps the session addressable so the retry
+    // is not a no-op.
+    expect(store).toContain("function reportSurvivingAgent");
+    expect(store).toContain("That agent is still running");
+    expect(store).toContain('label: "Try again"');
+    expect(store).not.toContain("api.agentPtyClose(sessionId).catch(() => {})");
+  });
+
+  it("drops the record tail from every close path, not just the menu", () => {
+    expect(store).toContain("forgetAgentRecord(tab.agentId, tab.repoRoot);");
+    expect(store).toContain("forgetAgentRecord(agentTab.agentId, agentTab.repoRoot);");
+  });
+
+  it("shows a working agent's Stop button for file-backed engines too", () => {
+    // `running` only ever goes true on the stream-json wire, which is Claude.
+    // For the four engines that write a record instead, the composer's Stop
+    // button did not exist at all — there was nothing to click.
+    expect(transcript).toContain("record.supported && record.streaming");
+    expect(transcript).toContain("running={busy}");
   });
 });

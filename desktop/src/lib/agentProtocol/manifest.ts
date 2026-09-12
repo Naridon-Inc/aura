@@ -95,41 +95,65 @@ export const AGENT_MANIFESTS: Record<string, AgentManifest> = {
     id: "codex",
     label: "Codex",
     ingress: "json-events",
-    // Codex emits agent_message/agent_reasoning + exec_command + patch_apply +
-    // exec_approval_request. No multi-question primitive; single approval is a
-    // permission round-trip. (Adapter pending protocol-research wave.)
+    // Measured against the adapter, not the protocol. Codex's rollout JSONL
+    // does carry `exec_approval_request` and a plan tool, and this entry used
+    // to claim both — but `normalizeCodex` emits exactly seven kinds
+    // (session_init, text, reasoning, tool_call, usage, result, error) and
+    // none of them is a plan, a permission gate, a question or a checklist.
+    // The flags are what the RENDERER may offer, so claiming an affordance the
+    // adapter never produces is how you get a control with nothing behind it.
+    // Turn one on in the same commit that teaches the adapter to emit it.
     interactions: {
-      ...FULL_INTERACTIONS,
+      reasoning: true,
+      toolCalls: true,
+      todo: false,
+      questions: false,
       questionSets: false,
-      plan: true,
+      plan: false,
+      permission: false,
     },
   },
   gemini: {
     id: "gemini",
     label: "Gemini CLI",
     ingress: "acp",
-    // Gemini speaks ACP (`--experimental-acp`) or stream-json: thoughts, tool
-    // calls + confirmations, plan. (Adapter pending protocol-research wave.)
-    interactions: {
-      ...FULL_INTERACTIONS,
-      questionSets: false,
-    },
+    // Gemini speaks ACP (`--experimental-acp`) — thoughts, tool calls with
+    // confirmations, a plan — and every one of those would map. But no ACP
+    // normalizer is registered (`NORMALIZERS` has no "acp" entry), so
+    // `normalizeStream` returns null for this id and a Gemini session renders
+    // through the PTY block fallback. Nothing here can be surfaced until that
+    // adapter lands, so nothing here is claimed.
+    interactions: NO_INTERACTIONS,
   },
   cursor: {
     id: "cursor",
     label: "Cursor Agent",
     ingress: "acp",
-    interactions: {
-      ...FULL_INTERACTIONS,
-      questionSets: false,
-    },
+    // Same as Gemini: ACP is declared, no ACP adapter is wired yet.
+    interactions: NO_INTERACTIONS,
   },
   kimi: {
     id: "kimi",
     label: "Kimi",
-    ingress: "pty",
-    // No structured stream wired yet — terminal-only until an adapter exists.
-    interactions: NO_INTERACTIONS,
+    ingress: "json-events",
+    // Kimi paints a TUI, but it also writes the real conversation to
+    // `wire.jsonl`, and that file is what the adapter reads: prose, thinking,
+    // tool calls with their results, a todo checklist, per-turn usage and the
+    // turn result. This entry used to say `pty` + nothing, which was true
+    // before the adapter landed and wrong after — it made `canNormalize`
+    // answer false for an engine whose adapter is wired and tested, so any
+    // caller trusting the manifest was told to fall back to raw terminal
+    // bytes. Questions, plans and permission gates stay off because Kimi's
+    // wire has no record of them.
+    interactions: {
+      reasoning: true,
+      toolCalls: true,
+      todo: true,
+      questions: false,
+      questionSets: false,
+      plan: false,
+      permission: false,
+    },
   },
   opencode: {
     id: "opencode",

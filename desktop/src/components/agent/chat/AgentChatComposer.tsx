@@ -72,9 +72,28 @@ import {
 const DRAFT_PREFIX = "aura.agentchat.draft:";
 const HISTORY_PREFIX = "aura.agentchat.history:";
 
-/** ESC. Every agent TUI we ship treats it as "interrupt the current turn" and
- *  leaves the session alive — which is what a Stop button must mean. */
+/** ESC. Most agent TUIs treat it as "interrupt the current turn" and leave the
+ *  session alive — which is what a Stop button must mean. "Most" is the
+ *  problem: every one of these CLIs binds its own keys, several let the user
+ *  rebind them, and a TUI that isn't listening for ESC swallows it in silence.
+ *  So the button sends ESC and then checks. */
 const ESC_BYTE = 0x1b;
+
+/** How many times the button presses Escape before it gives up. Two, for the
+ *  same reason a person presses it twice: several of these TUIs only act on the
+ *  second one (the first closes a popup, dismisses a hint, leaves a mode), and
+ *  a repeated Escape is safe in every one of them. What the button will NOT do
+ *  is escalate to Ctrl-C on its own — that byte quits some of these CLIs
+ *  outright, and a Stop button that sometimes ends the whole conversation is a
+ *  worse bug than the one it fixes. When Escape is ignored, say so. */
+const INTERRUPT_ATTEMPTS = 2;
+
+/** How long to wait for the agent to actually go quiet after an interrupt
+ *  before deciding it was ignored. A file-backed engine's busy flag settles on
+ *  its own poll cadence (~3s of silence), so the window has to clear that or a
+ *  stopped agent would be reported as still running. */
+const INTERRUPT_SETTLE_MS = 4500;
+const INTERRUPT_POLL_MS = 150;
 
 export function AgentChatComposer({
   agentId,
@@ -106,10 +125,41 @@ export function AgentChatComposer({
   const historyRef = useRef<string[]>([]);
   const historyPosRef = useRef(0);
   const liveDraftRef = useRef("");
+  // WHETHER there is anything to recall is rendered (the editor only claims
+  // ArrowUp when we say there is), so it cannot live in the ref. Reading
+  // `historyRef.current.length` during render meant the load below — which
+  // mutates a ref and schedules no re-render — never reached the editor: a
+  // freshly opened session had recall switched off, and it only came on after
+  // some unrelated state change, i.e. after you typed. Which is exactly when
+  // you no longer want it.
+  const [hasHistory, setHasHistory] = useState(false);
   useEffect(() => {
     historyRef.current = readHistory(histKey);
     historyPosRef.current = 0;
+    setHasHistory(historyRef.current.length > 0);
   }, [histKey]);
+
+  // An interrupt is in flight. Rendered (the button says so and refuses to
+  // stack a second attempt on the first) and read from inside the wait loop,
+  // which is why it is both.
+  const [interrupting, setInterrupting] = useState(false);
+  const interruptingRef = useRef(false);
+
+  // `running` as the wait loop needs it: the current value, not the one the
+  // closure captured when Stop was clicked.
+  const runningRef = useRef(running);
+  runningRef.current = running;
+
+  // The wait loop outlives the component if the tab closes mid-interrupt.
+  // Resolving "quiet" on unmount is the honest answer: this surface can no
+  // longer observe the agent, so it must not claim the agent ignored us.
+  const mountedRef = useRef(true);
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+    };
+  }, []);
 
   // Persist the draft as it is typed, debounced so a fast typist isn't writing
   // to localStorage on every keystroke. Same 400ms the brain's composer uses.
@@ -141,6 +191,7 @@ export function AgentChatComposer({
     historyRef.current = pushHistory(historyRef.current, body);
     historyPosRef.current = 0;
     writeHistory(histKey, historyRef.current);
+    setHasHistory(true);
     writeDraft(draftKey, "");
     const ok = await sendLine(body);
     if (!ok) {
@@ -150,10 +201,58 @@ export function AgentChatComposer({
     composerRef.current?.focus();
   }
 
-  /** Interrupt the running turn. */
-  function stop() {
-    api.agentPtyWrite(ptySessionId, [ESC_BYTE]).catch((e) => {
+  /** Interrupt the running turn, and confirm it actually stopped.
+   *
+   *  The old version wrote one Escape and treated the write landing in the PTY
+   *  as success — which says the byte was delivered, not that the agent obeyed
+   *  it. Every one of these CLIs binds its own keys and several let the user
+   *  rebind them, so a TUI that isn't listening swallows Escape in silence: the
+   *  button looked like it worked while the agent kept going. That is exactly
+   *  what "I clicked stop and it didn't stop" means.
+   *
+   *  So press Escape, watch whether the agent actually goes quiet, press once
+   *  more, watch again — and if it is still producing output after that, say so
+   *  and hand over the two controls that genuinely end it. Reporting the
+   *  failure is the fix; pretending is the bug. */
+  async function stop() {
+    if (interruptingRef.current) return;
+    interruptingRef.current = true;
+    setInterrupting(true);
+    try {
+      for (let i = 0; i < INTERRUPT_ATTEMPTS; i++) {
+        await api.agentPtyWrite(ptySessionId, [ESC_BYTE]);
+        if (await wentQuiet()) return;
+      }
+      toast.danger(
+        "The agent ignored Escape and is still working",
+        "This CLI isn’t taking Escape as an interrupt. Its own terminal will have a key that works — or end the agent outright with “Stop session” on the tab.",
+        {
+          actions: onSwitchToTerminal
+            ? [{ label: "Open the terminal", onClick: onSwitchToTerminal }]
+            : undefined,
+        },
+      );
+    } catch (e) {
       toast.danger("Couldn't interrupt the agent", String(e));
+    } finally {
+      interruptingRef.current = false;
+      setInterrupting(false);
+    }
+  }
+
+  /** Resolve true once the agent stops producing — false if it is still going
+   *  when the window runs out. Reads the busy flag through a ref because the
+   *  prop this closure captured is from the render that started the wait. */
+  function wentQuiet(): Promise<boolean> {
+    const deadline = Date.now() + INTERRUPT_SETTLE_MS;
+    return new Promise((resolve) => {
+      const tick = () => {
+        if (!mountedRef.current) return resolve(true);
+        if (!runningRef.current) return resolve(true);
+        if (Date.now() >= deadline) return resolve(false);
+        setTimeout(tick, INTERRUPT_POLL_MS);
+      };
+      tick();
     });
   }
 
@@ -214,7 +313,7 @@ export function AgentChatComposer({
           if (e.key === "Escape" && running) {
             e.preventDefault();
             e.stopPropagation();
-            stop();
+            void stop();
           }
         }}
       >
@@ -234,7 +333,7 @@ export function AgentChatComposer({
           }
           onChange={setText}
           onSubmit={() => void send()}
-          onEscapeWhileBusy={stop}
+          onEscapeWhileBusy={() => void stop()}
           onImageFiles={() => {
             // A PTY has no attachment channel — this agent reads pictures off
             // disk. Say so rather than swallow the paste.
@@ -243,7 +342,7 @@ export function AgentChatComposer({
               "A terminal agent reads pictures from disk, so it needs a path rather than pasted bytes.",
             );
           }}
-          canRecallHistory={historyRef.current.length > 0}
+          canRecallHistory={hasHistory}
           slashRows={slashRows}
         />
 
@@ -275,13 +374,18 @@ export function AgentChatComposer({
                 variant="destructive"
                 size="sm"
                 className="font-mono"
-                onClick={stop}
-                title="Interrupt the running turn (Esc)"
+                disabled={interrupting}
+                onClick={() => void stop()}
+                title={
+                  interrupting
+                    ? "Waiting for the agent to stop"
+                    : "Interrupt the running turn (Esc)"
+                }
               >
                 <svg width="10" height="10" viewBox="0 0 10 10" aria-hidden>
                   <rect width="10" height="10" rx="2" fill="currentColor" />
                 </svg>
-                <span className="send-kbd">Esc</span>
+                <span className="send-kbd">{interrupting ? "…" : "Esc"}</span>
               </Button>
             ) : null}
             <Button

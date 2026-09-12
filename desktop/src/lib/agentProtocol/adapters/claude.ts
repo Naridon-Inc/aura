@@ -293,17 +293,46 @@ export function normalizeClaude(
           content: ev.content,
         };
         // TodoWrite / AskUserQuestion / ExitPlanMode already rendered as their
-        // own event; their results are noise. Skip emitting a tool_call update
-        // for them.
+        // own event, so none of them emits a tool_call update. But the results
+        // of the two INTERACTIVE ones are not noise — they are the only signal
+        // that the human answered, and what they picked. Dropping them left
+        // every question in the session rendered as a live, clickable prompt
+        // forever, and every plan stuck at "awaiting your go-ahead" long after
+        // it was approved. Re-emit the SAME id so the reducer settles the
+        // original in place rather than appending a second card.
         const n = norm(name);
-        if (
-          n === "todowrite" ||
-          n === "todos" ||
-          n === "askuserquestion" ||
-          n === "askuser" ||
-          n === "exitplanmode" ||
-          n === "exitplan"
-        ) {
+        if (n === "askuserquestion" || n === "askuser" || n === "ask") {
+          out.push({
+            kind: "question_set",
+            id: ev.tool_use_id,
+            sessionId,
+            ts,
+            source: "user",
+            requestId: ev.tool_use_id,
+            // The questions stay on the event the reducer already holds; this
+            // update carries only what it learned.
+            questions: [],
+            answer: ev.content,
+          });
+          break;
+        }
+        if (n === "exitplanmode" || n === "exitplan") {
+          out.push({
+            kind: "plan",
+            id: ev.tool_use_id,
+            sessionId,
+            ts,
+            source: "user",
+            entries: [],
+            awaitingApproval: false,
+            // Claude reports a declined plan as an error result; an accepted
+            // one comes back clean.
+            decision: ev.is_error ? "rejected" : "approved",
+            requestId: ev.tool_use_id,
+          });
+          break;
+        }
+        if (n === "todowrite" || n === "todos") {
           break;
         }
         out.push({

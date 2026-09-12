@@ -28,6 +28,7 @@ import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { onExternalAnchorClick } from "../../../lib/openExternal";
 
 import { api } from "../../../lib/api";
+import { toast } from "../../../lib/toast";
 import { useAgentStream } from "../../../lib/agentStreamStore";
 import { useAgentSession } from "../../../lib/agentSessionStore";
 import { useAgentRecord } from "../../../lib/agentRecordStore";
@@ -89,6 +90,15 @@ export function NormalizedTranscript({
   const record = useAgentRecord(agentId, repoRoot);
   const raw: unknown = record.supported ? record.records : events;
   const rawSid = record.supported ? (record.sessionId ?? sid) : sid;
+
+  // "The agent is working" has two sources, because the two halves of the
+  // chat have two data planes. A streamed engine says so on the wire
+  // (`running`, flipped off by its `result`). A file-backed engine says
+  // nothing at all — its record growing is the only evidence there is. Using
+  // only the first meant Codex, Kimi, OpenCode and Pi never showed a typing
+  // cursor and, worse, never showed the Stop button: the control the user
+  // reached for to interrupt those agents did not exist.
+  const busy = running || (record.supported && record.streaming);
 
   // `normalizeStream` returns null — not [] — when this engine has no adapter,
   // which is the difference between "structured, nothing yet" and "we do not
@@ -230,7 +240,7 @@ export function NormalizedTranscript({
           <AgentBlockTranscript
             blocks={blocks}
             repoRoot={repoRoot}
-            running={running}
+            running={busy}
           />
         ) : (
           <div className="mx-auto w-full max-w-[760px] px-5 py-4 flex flex-col gap-3">
@@ -246,7 +256,7 @@ export function NormalizedTranscript({
                     <div key={g.id} className="flex flex-col gap-1">
                       <StreamingBubble
                         blocks={g.blocks}
-                        streaming={running && isLast}
+                        streaming={busy && isLast}
                       />
                       {g.usage && <UsageFooter usage={g.usage} />}
                     </div>
@@ -256,6 +266,7 @@ export function NormalizedTranscript({
                     <QuestionSetCard
                       key={g.id}
                       ev={g.ev}
+                      live={g.live}
                       ptySessionId={ptySessionId}
                       onRespondInTerminal={onRespondInTerminal}
                     />
@@ -265,6 +276,7 @@ export function NormalizedTranscript({
                     <PlanCard
                       key={g.id}
                       ev={g.ev}
+                      live={g.live}
                       onRespondInTerminal={onRespondInTerminal}
                     />
                   );
@@ -275,6 +287,7 @@ export function NormalizedTranscript({
                     <PermissionCard
                       key={g.id}
                       ev={g.ev}
+                      live={g.live}
                       onRespondInTerminal={onRespondInTerminal}
                     />
                   );
@@ -302,7 +315,7 @@ export function NormalizedTranscript({
         agentId={agentId}
         ptySessionId={ptySessionId}
         repoRoot={repoRoot}
-        running={running}
+        running={busy}
         onSwitchToTerminal={onRespondInTerminal}
       />
     </div>
@@ -355,24 +368,32 @@ function PromptCard({
   label,
   children,
   onRespondInTerminal,
+  live = true,
 }: {
   label: string;
   children: ReactNode;
   onRespondInTerminal?: () => void;
+  /** A settled prompt is history: it keeps its place in the transcript but
+   *  drops the accent edge that means "this one is waiting for you". */
+  live?: boolean;
 }) {
   return (
     <div
       className="rounded-lg overflow-hidden"
       style={{
         background: "var(--color-bg-1)",
-        border: "1px solid color-mix(in srgb, var(--color-accent) 30%, var(--color-line-soft))",
+        border: live
+          ? "1px solid color-mix(in srgb, var(--color-accent) 30%, var(--color-line-soft))"
+          : "1px solid var(--color-line-soft)",
       }}
     >
       <div
         className="section-label flex items-center gap-2 px-3 py-1.5"
         style={{
-          color: "var(--color-accent)",
-          background: "color-mix(in srgb, var(--color-accent) 8%, transparent)",
+          color: live ? "var(--color-accent)" : "var(--color-text-3)",
+          background: live
+            ? "color-mix(in srgb, var(--color-accent) 8%, transparent)"
+            : "transparent",
         }}
       >
         {label}
@@ -400,32 +421,63 @@ function QuestionSetCard({
   ev,
   ptySessionId,
   onRespondInTerminal,
+  live,
 }: {
   ev: QuestionSetEvent;
   ptySessionId: string;
   onRespondInTerminal?: () => void;
+  /** False once the agent has moved on. A settled question keeps its place in
+   *  the transcript as a record of what was asked, but its options stop being
+   *  buttons: clicking one used to fire that text into the LIVE agent, so
+   *  scrolling back through an hour-old conversation and brushing an option
+   *  injected a stray prompt into whatever the agent was doing now. */
+  live: boolean;
 }) {
-  // The option the user clicked, keyed by `${questionId}:${optionId}`. Clicking
-  // sends the option's text straight into the live agent over the SAME PTY
-  // transport the composer uses (`agent_pty_send_prompt`) — so picking an
-  // answer here lands in the agent exactly as if the user had typed it, no
-  // flip to the terminal. We mark it optimistically so the card reads as
-  // answered the instant it's clicked.
+  // The option the user clicked, keyed by question id. Clicking sends the
+  // option's text straight into the live agent over the SAME PTY transport the
+  // composer uses (`agent_pty_send_prompt`) — so picking an answer here lands
+  // in the agent exactly as if the user had typed it, no flip to the terminal.
+  // We mark it optimistically so the card reads as answered the instant it's
+  // clicked.
   const [picked, setPicked] = useState<Record<string, string>>({});
 
   async function pick(questionId: string, optionId: string, answer: string) {
+    if (!live) return;
     setPicked((p) => ({ ...p, [questionId]: optionId }));
     try {
       await api.agentPtySendPrompt(ptySessionId, answer);
     } catch (e) {
-      console.warn("[agent-chat] answer failed:", e);
+      // The optimistic tick said "Sent to the agent." — if the write never
+      // reached the child, leaving it there tells the user they answered a
+      // question the agent is still blocked on. Take the mark back and say so,
+      // the same way the composer reports a send that didn't land.
+      setPicked((p) => {
+        const next = { ...p };
+        delete next[questionId];
+        return next;
+      });
+      toast.danger("That answer didn't reach the agent", String(e));
     }
   }
 
+  // What the engine says was chosen, when it reports answers at all. Matched
+  // against the option labels so the settled card can mark the pick the same
+  // way a live one marks a click.
+  const reported = ev.answer ?? null;
+
   return (
     <PromptCard
-      label={ev.questions.length > 1 ? `${ev.questions.length} questions` : "Question"}
-      onRespondInTerminal={onRespondInTerminal}
+      live={live}
+      label={
+        live
+          ? ev.questions.length > 1
+            ? `${ev.questions.length} questions`
+            : "Question"
+          : reported
+            ? "Question · answered"
+            : "Question · closed"
+      }
+      onRespondInTerminal={live ? onRespondInTerminal : undefined}
     >
       <div className="flex flex-col gap-3">
         {ev.questions.map((q) => {
@@ -433,25 +485,45 @@ function QuestionSetCard({
           return (
             <div key={q.id}>
               <div className="text-base font-medium text-text-1">{q.prompt}</div>
+              {/* No options means the agent wants prose, not a pick. Without
+                  this the card drew the question and stopped — a prompt with
+                  no controls, no hint, and no sign that the composer below is
+                  where the answer goes. */}
+              {(!q.options || q.options.length === 0) && (
+                <div className="mt-1.5 text-sm text-text-3">
+                  {live
+                    ? "Type your answer in the box below — it goes straight to the agent."
+                    : "Answered."}
+                </div>
+              )}
               {q.options && q.options.length > 0 && (
                 <div className="mt-1.5 flex flex-col gap-1">
                   {q.options.map((o) => {
-                    const isPicked = answered === o.optionId;
+                    // A settled card marks whatever the engine reported back,
+                    // which is also how an answer typed in the terminal shows
+                    // up here — the click state only ever knew about clicks.
+                    const isPicked =
+                      answered === o.optionId ||
+                      (!live && reported != null && reported.includes(o.label));
                     return (
                       <button
                         key={o.optionId}
                         type="button"
+                        disabled={!live}
                         onClick={() => void pick(q.id, o.optionId, o.label)}
                         className="flex items-start gap-2 px-2 py-1.5 rounded text-base text-left transition-colors"
                         style={{
                           background: isPicked
                             ? "color-mix(in srgb, var(--color-accent) 16%, transparent)"
-                            : "var(--color-bg-2)",
+                            : live
+                              ? "var(--color-bg-2)"
+                              : "transparent",
                           color: "var(--color-text-2)",
                           border: isPicked
                             ? "1px solid color-mix(in srgb, var(--color-accent) 45%, transparent)"
                             : "1px solid transparent",
-                          cursor: "pointer",
+                          cursor: live ? "pointer" : "default",
+                          opacity: live || isPicked ? 1 : 0.6,
                         }}
                       >
                         <span
@@ -468,11 +540,13 @@ function QuestionSetCard({
                     );
                   })}
                   <div className="text-xs text-text-3 mt-0.5">
-                    {answered
-                      ? "Sent to the agent."
-                      : q.multiSelect
-                        ? "Pick the closest. It goes straight to the agent."
-                        : "Click an answer. It goes straight to the agent."}
+                    {!live
+                      ? "Answered. The agent has moved on."
+                      : answered
+                        ? "Sent to the agent."
+                        : q.multiSelect
+                          ? "Pick the closest. It goes straight to the agent."
+                          : "Click an answer. It goes straight to the agent."}
                   </div>
                 </div>
               )}
@@ -487,23 +561,41 @@ function QuestionSetCard({
 function PlanCard({
   ev,
   onRespondInTerminal,
+  live,
 }: {
   ev: PlanEvent;
   onRespondInTerminal?: () => void;
+  /** False once the plan has been decided, here or in the terminal. */
+  live: boolean;
 }) {
+  const label = live
+    ? "Plan. Awaiting your go-ahead"
+    : ev.decision === "approved"
+      ? "Plan · approved"
+      : ev.decision === "rejected"
+        ? "Plan · not approved"
+        : "Plan";
   return (
     <PromptCard
-      label={ev.awaitingApproval ? "Plan. Awaiting your go-ahead" : "Plan"}
-      onRespondInTerminal={ev.awaitingApproval ? onRespondInTerminal : undefined}
+      live={live}
+      label={label}
+      onRespondInTerminal={live ? onRespondInTerminal : undefined}
     >
       {ev.markdown ? (
         <MarkdownBody source={ev.markdown} />
-      ) : (
+      ) : ev.entries.length > 0 ? (
         <ol className="list-decimal pl-4 flex flex-col gap-1 text-base text-text-1">
           {ev.entries.map((e, i) => (
             <li key={i}>{e.content}</li>
           ))}
         </ol>
+      ) : (
+        // Resuming a session whose history starts mid-turn gives us the
+        // decision without the proposal that earned it. Say that, rather than
+        // draw a card with a heading and nothing under it.
+        <div className="text-sm text-text-3">
+          The plan itself isn't in this session's record — only what was decided.
+        </div>
       )}
     </PromptCard>
   );
@@ -570,12 +662,20 @@ function TodoMark({ status }: { status: "pending" | "in_progress" | "completed" 
 function PermissionCard({
   ev,
   onRespondInTerminal,
+  live,
 }: {
   ev: PermissionRequestEvent;
   onRespondInTerminal?: () => void;
+  /** False once the tool call this gated has run or settled — the answer was
+   *  given, in the terminal or here, and the card is a record of it. */
+  live: boolean;
 }) {
   return (
-    <PromptCard label="Asking permission" onRespondInTerminal={onRespondInTerminal}>
+    <PromptCard
+      live={live}
+      label={live ? "Asking permission" : "Permission · answered"}
+      onRespondInTerminal={live ? onRespondInTerminal : undefined}
+    >
       <div className="text-base font-medium text-text-1">{ev.title}</div>
       <div className="mt-1 text-sm text-text-3 font-mono break-all">
         {ev.toolName}
@@ -586,11 +686,13 @@ function PermissionCard({
           exact keystroke differs per agent. The honest cure is the Approvals
           control — set it to Full autonomy and the agent just runs, like a
           normal Claude Code session. Until then, answer in the terminal. */}
-      <div className="mt-2 text-sm leading-relaxed text-text-3">
-        It's pausing because it isn't running on full autonomy. Set{" "}
-        <span className="font-medium text-text-2">Approvals → Full autonomy</span>{" "}
-        in the composer to let it run without asking.
-      </div>
+      {live && (
+        <div className="mt-2 text-sm leading-relaxed text-text-3">
+          It's pausing because it isn't running on full autonomy. Set{" "}
+          <span className="font-medium text-text-2">Approvals → Full autonomy</span>{" "}
+          in the composer to let it run without asking.
+        </div>
+      )}
     </PromptCard>
   );
 }

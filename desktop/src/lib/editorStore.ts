@@ -17,6 +17,8 @@ import { useEffect, useState } from "react";
 import { api, type FileContent } from "./api";
 import { readFile as readFileWherever, writeFile as writeFileWherever } from "./place/workApi";
 import { clearAgentTerminalTitle } from "./agentTerminalTitles";
+import { forgetAgentRecord } from "./agentRecordStore";
+import { toast } from "./toast";
 import { languageSlugForPath } from "./monacoLanguage";
 import {
   AURA_MANAGER_ENABLED,
@@ -3324,8 +3326,40 @@ function replaceAgent(
 // live inside closeAgent. It lives here, at the explicit-close call sites, so a
 // closed Claude Code (or any agent CLI) never lingers as an orphan process.
 function stopAndCloseAgent(sessionId: string): void {
-  void api.agentPtyClose(sessionId).catch(() => {});
+  const tab = state.agentTabs.find((t) => t.sessionId === sessionId);
   closeAgent(sessionId);
+  // Codex, Kimi, OpenCode and Pi keep their conversation in a file beside the
+  // session, and the chat tails that file per (agent, repo) rather than per
+  // session. Left behind, the next tab opened on this workspace re-renders the
+  // conversation just closed — which reads as the agent still talking after it
+  // was stopped.
+  if (tab) forgetAgentRecord(tab.agentId, tab.repoRoot);
+  // The tab goes now (closing a tab should feel instant), but the kill is
+  // still checked. The backend confirms the child actually exited and errors
+  // when it did not, and this used to swallow that — so an agent that ignored
+  // the hangup kept running, kept writing, with nothing on screen to say so.
+  void api.agentPtyClose(sessionId).catch((e) => reportSurvivingAgent(sessionId, e));
+}
+
+/** An agent we asked to stop is still alive. Say it, and keep a way to try
+ *  again: the backend leaves a session it could not kill in its registry
+ *  precisely so this retry can address it. */
+function reportSurvivingAgent(sessionId: string, err: unknown): void {
+  toast.danger("That agent is still running", String(err), {
+    id: `agent-stop-failed:${sessionId}`,
+    actions: [
+      {
+        label: "Try again",
+        variant: "primary",
+        onClick: () => {
+          void api
+            .agentPtyClose(sessionId)
+            .then(() => toast.success("The agent stopped"))
+            .catch((e) => reportSurvivingAgent(sessionId, e));
+        },
+      },
+    ],
+  });
 }
 
 function closeAgent(sessionId: string) {
@@ -4447,7 +4481,11 @@ function closeTabInPane(paneId: string, index: number): void {
     // needn't know whether this pane was xterm- or native-GPU-backed.
     releaseTerminalSession(ref.id);
     releaseNativeTerminalSession(ref.id);
-  } else if (ref.kind === "agent") void api.agentPtyClose(ref.id).catch(() => {});
+  } else if (ref.kind === "agent") {
+    const agentTab = state.agentTabs.find((t) => t.sessionId === ref.id);
+    if (agentTab) forgetAgentRecord(agentTab.agentId, agentTab.repoRoot);
+    void api.agentPtyClose(ref.id).catch((e) => reportSurvivingAgent(ref.id, e));
+  }
   // Roster reconciliation: dropping a ref from the split tree must also
   // drop its underlying roster entry (mirroring closeAgent/closeTerminal/
   // closeManager) so closed tabs don't leak into agentTabs/terminalTabs/
